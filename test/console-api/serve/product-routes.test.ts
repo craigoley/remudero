@@ -308,7 +308,7 @@ test("W1-T10615: the served product build operation matches the authenticated AP
     assert.equal(claimed.status, 409);
     assert.equal(claimed.body.error, "task_claimed");
     assert.ok(!existsSync(join(daemonState, "KICK_REQUESTED-wreckterra:W9-T1")), "a refused start writes no marker");
-    // Free the claim: the real default target and kick now start the build, queued then observed running.
+    // Free the claim: the real default target and kick now start the build, recorded as queued.
     shim.addRoute({ when: "matching-refs/rmd-dispatch/W9-T1", stdout: JSON.stringify([]) });
     const started = await send("alice", { ...build, requestId: "route-build-000002" });
     assert.equal(started.status, 200);
@@ -317,7 +317,11 @@ test("W1-T10615: the served product build operation matches the authenticated AP
     assert.ok(existsSync(join(daemonState, "KICK_REQUESTED-wreckterra:W9-T1")), "the repo-scoped kick marker sits under Wreckterra's own daemon root");
     assert.ok(!existsSync(join(root, "state", "KICK_REQUESTED-wreckterra:W9-T1")), "the core root, which no Wreckterra daemon reads, gets none");
     assert.ok(!shim.calls().some((call) => call.includes("-X POST")), "starting a build makes no provider write");
-    assert.equal((await send("alice", { ...build, requestId: "route-build-000002" })).body.replayed, true);
+    // A worker's fresh claim and run branch appear, but Wreckterra's own daemon ledger shows no run: admitted, never running.
+    shim.addRoute({ when: "matching-refs/rmd-dispatch/W9-T1", stdout: JSON.stringify([{ ref: "refs/rmd-dispatch/W9-T1", object: { sha: "1".repeat(40) } }]) });
+    const replayed = await send("alice", { ...build, requestId: "route-build-000002" });
+    assert.equal(replayed.body.replayed, true);
+    assert.equal(replayed.body.receipt?.outcome, "admitted");
   } finally { await new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve())); }
 });
 

@@ -3,15 +3,17 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import { daemonInstanceRegistryPath } from "./deployer.js";
-import { CLAIM_SILENCE_FLOOR_MS, claimLastSignOfLife, dispatchClaimRef, parseClaimAnchorMessage, type RunBranchCommit } from "./dispatch-claim.js";
+import { dispatchClaimRef } from "./dispatch-claim.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { isPaused, isSafeTaskId, isStopped, requestKick } from "./fleet-control.js";
 import { ghTextAsync } from "./github-transport.js";
 import { CORE_INSTANCE, DEFAULT_INSTANCE_STATE_BASE, instanceStateRoot } from "./instance-gateway.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
+import { ledgerRunBelongsToTask, readLedgerUnionRecordsSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { loadManagedRepos } from "./managed-repos.js";
+import { DEFAULT_LIVENESS_BOUND_MS } from "./non-worker-verdict.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import {
   productIdSchema, productRequestIdSchema, type ProductStoreCode, type StoredProduct,
@@ -30,6 +32,8 @@ export const BOOTSTRAP_CHECKS = ["test", "typecheck", "build", "security"] as co
 export const productPlanOrigin = (productId: string, planEvidenceId: string) => `product-plan#${productId}/${planEvidenceId}`;
 /** The trusted bootstrap-receipt evidence id: bound to the exact head so a moved head never inherits it. */
 export const bootstrapEvidenceId = (head: string, check: (typeof BOOTSTRAP_CHECKS)[number]) => `bootstrap:${head}:${check}`;
+/** The kick origin names THIS build request, so the target daemon's own dispatch row correlates to it, not to the product. */
+export const productBuildKickOrigin = (productId: string, operationId: string) => `product:${productId}/${operationId}`;
 
 export const productBuildCommandSchema = z.object({
   version: z.literal(PRODUCT_BUILD_VERSION), requestId: productRequestIdSchema, productId: productIdSchema,
@@ -60,7 +64,11 @@ export interface BuildRepository { id: number; owner: string; name: string; defa
 export interface TargetInspection { enrolled: boolean | undefined; head: string | undefined; readmeOnly: boolean | undefined }
 export interface BuildTask { id: string; origin: string | undefined; status: string; budgetUsd: number | undefined; claimed: boolean; merged: boolean }
 export type TaskRead = { state: "found"; task: BuildTask } | { state: "absent" } | { state: "unreadable" };
-export type BuildObservation = { state: "none" | "unknown" } | { state: "admitted" | "running"; url?: string };
+/**
+ * What the target's GitHub refs show. A held claim proves admission only, and the exact `run-<taskId>-<epochMs>`
+ * branches are only links: neither can express `running`, which only the target daemon's own ledger evidences.
+ */
+export type BuildObservation = { state: "none" | "admitted"; branches: readonly string[] } | { state: "unknown" };
 /** Everything the operation must verify about the target immediately before it acts. */
 export interface ProductBuildTarget {
   inspect(repository: BuildRepository): Promise<TargetInspection>;
@@ -68,6 +76,48 @@ export interface ProductBuildTarget {
   runnerRegistered(repository: BuildRepository): boolean;
   task(repository: BuildRepository, taskId: string): Promise<TaskRead>;
   observe(repository: BuildRepository, taskId: string): Promise<BuildObservation>;
+}
+
+/** One build request, as the target daemon's ledger must name it before its run can read as this build's. */
+export interface ExecutionQuery { taskId: string; origin: string; repo: string; requestedAt: string; nowMs: number }
+/**
+ * Native execution evidence for ONE build request. `dispatched`: the daemon's admission consumed this request's kick;
+ * `running`: the run that dispatch started has no terminal row and wrote inside the liveness bound; `ended`: it wrote a
+ * terminal row; `silent`: it wrote none, and nothing inside the bound either. `unknown`: the ledger could not be read.
+ */
+export type ExecutionRead = { state: "unknown" | "none" | "refused" | "dispatched" } | { state: "running" | "ended" | "silent"; runId: string };
+
+/** The daemon's kick steps (daemon.ts runDaemon) and a task run's own steps (run-task-verb.ts) this reader trusts. */
+const KICK_DISPATCHED_STEP = "console.kick_dispatched";
+const KICK_REFUSED_STEP = "console.kick_refused";
+const RUN_START_STEP = "run.start";
+/** Every run writes exactly one `verdict` (run-task-verb.ts endRunOnce, refusals included); a thrown run `run.error` first. */
+const RUN_TERMINAL_STEPS: ReadonlySet<string> = new Set(["verdict", "run.error"]);
+
+/**
+ * Reads the TARGET daemon's own ledger (`stateDir`, every rotation) for this request's execution. Correlation, never
+ * freshness: the kick row must name this request's origin, task and repository at or after its recorded time; the
+ * run is the first `run.start` of this task at or after that dispatch; it is live only with no terminal row and an
+ * own row inside the board's liveness bound (W1-T179), which only bounds a run that died without a verdict.
+ */
+export function readTargetExecution(stateDir: string, query: ExecutionQuery, fsDeps: LedgerGrepFsDeps = realLedgerFs): ExecutionRead {
+  const read = readLedgerUnionRecordsSync(stateDir, { sinceTs: query.requestedAt, refuseIncomplete: true, keep: (line) => line.includes(query.taskId) }, fsDeps);
+  // An unlisted or unreadable file, or no ledger at all, is a daemon this process cannot see: never "nothing ran".
+  if (!read.ok || (!read.liveFileRead && read.archiveCount === 0)) return { state: "unknown" };
+  const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
+  const rows = read.rows.filter((row) => Number.isFinite(at(row))).sort((a, b) => at(a) - at(b));
+  const kick = rows.find((row) => (row.step === KICK_DISPATCHED_STEP || row.step === KICK_REFUSED_STEP) && row.task === query.taskId &&
+    row.origin === query.origin && typeof row.repo === "string" && row.repo.toLowerCase() === query.repo.toLowerCase());
+  if (!kick) return { state: "none" };
+  if (kick.step === KICK_REFUSED_STEP) return { state: "refused" };
+  const start = rows.find((row) => row.step === RUN_START_STEP && row.task_id === query.taskId &&
+    ledgerRunBelongsToTask(query.taskId, row.run_id) && at(row) >= at(kick));
+  if (!start) return { state: "dispatched" };
+  const runId = start.run_id as string;
+  const own = rows.filter((row) => row.run_id === runId);
+  if (own.some((row) => typeof row.step === "string" && RUN_TERMINAL_STEPS.has(row.step))) return { state: "ended", runId };
+  if (!(query.nowMs - Math.max(...own.map(at)) <= DEFAULT_LIVENESS_BOUND_MS)) return { state: "silent", runId };
+  return { state: "running", runId };
 }
 
 /** Which daemon drives the target: its config root, the root that daemon's own kick port reads. */
@@ -137,9 +187,8 @@ type GhText = (args: string[], opts?: { maxBuffer?: number; timeout?: number }) 
 const sha = /^[a-f0-9]{40}$/;
 
 /** The production target port: the existing bounded `gh` transport, the reviewed managed set and the closed suite registry. */
-export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText; clock?: Clock } = {}): ProductBuildTarget {
+export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText } = {}): ProductBuildTarget {
   const text = options.text ?? ghTextAsync;
-  const clock = options.clock ?? systemClock;
   const limits = { maxBuffer: 1024 * 1024, timeout: 20_000 };
   const api = async (path: string, raw = false): Promise<string> =>
     text(["api", ...(raw ? ["-H", "Accept: application/vnd.github.raw"] : []), path], limits);
@@ -151,18 +200,12 @@ export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText
   // `matching-refs` is a PREFIX match (W9-T1 also lists W9-T10's claim), so only the exact ref is this task's claim.
   const claimOf = async (repo: BuildRepository, taskId: string) =>
     refs.parse(JSON.parse(await api(`${slug(repo)}/git/matching-refs/rmd-dispatch/${taskId}`))).find((entry) => entry.ref === dispatchClaimRef(taskId));
-  const commitOf = async (repo: BuildRepository, commit: string) =>
-    z.object({ message: z.string(), committer: z.object({ date: z.string() }) }).passthrough().parse(JSON.parse(await api(`${slug(repo)}/git/commits/${commit}`)));
-  /** The newest commit on any exact `run-<taskId>-<epochMs>` branch: the worker's own published progress. */
-  const newestRunBranch = async (repo: BuildRepository, taskId: string): Promise<RunBranchCommit | undefined> => {
-    const prefix = `refs/heads/run-${taskId}-`;
-    let newest: RunBranchCommit | undefined;
-    for (const branch of refs.parse(JSON.parse(await api(`${slug(repo)}/git/matching-refs/heads/run-${taskId}-`)))) {
-      if (!branch.ref.startsWith(prefix) || !/^\d+$/.test(branch.ref.slice(prefix.length)) || !branch.object) continue;
-      const atMs = Date.parse((await commitOf(repo, branch.object.sha)).committer.date);
-      if (Number.isFinite(atMs) && (newest === undefined || atMs > newest.atMs)) newest = { atMs, atIso: fixedClock(atMs).iso(), ref: branch.ref };
-    }
-    return newest;
+  /** The exact published `run-<taskId>-<epochMs>` branches (run-task-verb.ts names a run's branch `run-<runId>`). */
+  const runBranches = async (repo: BuildRepository, taskId: string): Promise<string[]> => {
+    const prefix = `run-${taskId}-`;
+    return refs.parse(JSON.parse(await api(`${slug(repo)}/git/matching-refs/heads/${prefix}`)))
+      .map((branch) => branch.ref.replace(/^refs\/heads\//, ""))
+      .filter((name) => name.startsWith(prefix) && /^\d+$/.test(name.slice(prefix.length)));
   };
   return {
     async inspect(repo) {
@@ -207,20 +250,10 @@ export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText
     },
     async observe(repo, taskId) {
       try {
+        // A held claim proves a lane admitted the task (it is taken before any spend). Neither it nor a fresh branch
+        // proves THIS build is executing: a claim can precede the worker, and an ended or refused run leaves both behind.
         const claim = await claimOf(repo, taskId);
-        if (!claim) return { state: "none" };
-        // A held claim proves a lane admitted the task (it is taken before any spend). It never proves the lane is
-        // still executing: a finished, crashed or recycled run leaves its claim and its branch behind.
-        if (!claim.object) return { state: "admitted" };
-        const tip = await commitOf(repo, claim.object.sha);
-        const anchor = parseClaimAnchorMessage(tip.message);
-        if (!anchor) return { state: "admitted" };
-        const branch = await newestRunBranch(repo, taskId);
-        // Running needs execution evidence: the holder's mint, its renewal or its newest run-branch commit inside the
-        // two-renewal floor a live holder is never silent past, plus a published branch to link.
-        const silentMs = Math.max(0, clock.now() - claimLastSignOfLife(anchor, tip.message, branch).atMs);
-        if (branch === undefined || !(silentMs < CLAIM_SILENCE_FLOOR_MS)) return { state: "admitted" };
-        return { state: "running", url: `https://github.com/${repo.owner}/${repo.name}/tree/${branch.ref.replace(/^refs\/heads\//, "")}` };
+        return { state: claim ? "admitted" : "none", branches: await runBranches(repo, taskId) };
       } catch (error) {
         // Not observed is not "running": the caller records nothing beyond what it did itself.
         void error; return { state: "unknown" };
@@ -232,7 +265,8 @@ export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText
 /**
  * Starts ONE guarded target-repository task for an approved product plan. It never launches a worker:
  * it verifies everything immediately before acting, writes the existing repo-scoped kick marker the
- * daemon's own admission consumes, and records `queued` — never `running` — until real evidence says so.
+ * daemon's own admission consumes, and records `queued` — never `running` — until the target daemon's
+ * own ledger shows the run this request's kick started ({@link readTargetExecution}).
  */
 export class ProductBuildService {
   private readonly provider: Pick<ProductRepositoryProvider, "read">;
@@ -246,7 +280,7 @@ export class ProductBuildService {
   constructor(private readonly options: ProductBuildOptions) {
     this.provider = options.provider ?? ghProductRepositoryProvider();
     this.clock = options.clock ?? systemClock;
-    this.target = options.target ?? ghProductBuildTarget({ repoRoot: options.repoRoot, clock: this.clock });
+    this.target = options.target ?? ghProductBuildTarget({ repoRoot: options.repoRoot });
     this.store = options.store ?? new ProductIntentStore({ root: options.root });
     this.kick = options.kick ?? ((root, taskId, origin, repo) => { requestKick(root, taskId, origin, repo); });
     this.daemonRoot = options.daemonRoot ?? registryDaemonRoot(options.root, { ...options.instances, repoRoot: options.repoRoot });
@@ -291,6 +325,8 @@ export class ProductBuildService {
     }
     if (!repository) throw new Fault("repository_missing");
     const subject: BuildRepository = { id: repository.id, owner: repository.owner, name: repository.name, defaultBranch: repository.defaultBranch };
+    const origin = productBuildKickOrigin(product.id, operationId);
+    let daemon: DaemonRootRead | undefined;
 
     if (prior === undefined) {
       const root = this.options.root;
@@ -311,7 +347,7 @@ export class ProductBuildService {
       if (!inspected.enrolled) throw new Fault("target_not_enrolled");
       if (!this.target.runnerRegistered(subject)) throw new Fault("runner_missing");
       // The marker goes where the target's OWN daemon reads it, and that daemon must not be halted either.
-      const daemon = this.daemonRoot(subject);
+      daemon = this.daemonRoot(subject);
       if (daemon.state === "unreadable") throw new Fault("target_unreadable");
       if (daemon.state === "absent") throw new Fault("target_daemon_missing");
       if (!isAbsolute(daemon.root)) throw new Fault("unavailable");
@@ -329,23 +365,35 @@ export class ProductBuildService {
       const budget = product.brief.resourceEnvelope?.budgetUsd;
       if (budget === undefined || task.budgetUsd === undefined || task.budgetUsd > budget) throw new Fault("budget_exceeded");
 
-      try { this.kick(daemon.root, input.taskId, `product:${product.id}`, subject.name); }
+      // The request's own time is taken BEFORE the marker exists, so the daemon's dispatch row is never earlier.
+      const requestedAt = this.clock.iso();
+      try { this.kick(daemon.root, input.taskId, origin, subject.name); }
       catch (error) { throw Object.assign(new Fault("kick_failed"), { cause: error }); }
-      const queued = this.append(actor, product, requestKey, { id: operationId, outcome: "queued", url: `https://github.com/${subject.owner}/${subject.name}` });
+      const queued = this.append(actor, product, requestKey, { id: operationId, outcome: "queued", url: `https://github.com/${subject.owner}/${subject.name}` }, requestedAt);
       product = queued;
     }
     const queuedEvidence = product.stageEvidence.find((item) => item.id === operationId);
     if (!queuedEvidence) throw new Fault("recovery_required");
 
-    // Observation may add admitted/running evidence, each with its own record; absence adds nothing.
+    // Observation may add admitted/running evidence, each with its own record; absence adds nothing. Admission is a
+    // held claim or the daemon's dispatch of this request; running is ONLY the target daemon's native evidence.
     const seen = await this.target.observe(subject, input.taskId);
+    daemon ??= this.daemonRoot(subject);
+    // A daemon whose state this process cannot reach (a remote or unmounted instance) has no readable evidence.
+    const execution: ExecutionRead = daemon.state !== "found" || !isAbsolute(daemon.root) ? { state: "unknown" }
+      : readTargetExecution(join(daemon.root, "state"), { taskId: input.taskId, origin, repo: subject.name, requestedAt: queuedEvidence.observedAt, nowMs: this.clock.now() });
+    const repositoryUrl = `https://github.com/${subject.owner}/${subject.name}`;
+    const branch = execution.state === "running" ? `run-${execution.runId}` : undefined;
+    const runUrl = branch !== undefined && seen.state !== "unknown" && seen.branches.includes(branch) ? `${repositoryUrl}/tree/${branch}` : repositoryUrl;
+    // The daemon refusing THIS request's kick outranks a claim some other dispatch holds: that claim is not this admission.
+    const wanted = {
+      admitted: execution.state !== "refused" && (seen.state === "admitted" || ["dispatched", "running", "ended", "silent"].includes(execution.state)),
+      running: execution.state === "running",
+    };
     for (const outcome of ["admitted", "running"] as const) {
-      const wanted = seen.state === "running" || (seen.state === "admitted" && outcome === "admitted");
       const id = `${operationId}:${outcome}`;
-      if (!wanted || product.stageEvidence.some((item) => item.id === id)) continue;
-      if (outcome === "running" && !(seen.state === "running" && seen.url)) continue;
-      const url = (seen.state === "running" || seen.state === "admitted" ? seen.url : undefined) ?? `https://github.com/${subject.owner}/${subject.name}`;
-      product = this.append(actor, product, `pbuild_${digest(id).slice(0, 48)}`, { id, outcome, url });
+      if (!wanted[outcome] || product.stageEvidence.some((item) => item.id === id)) continue;
+      product = this.append(actor, product, `pbuild_${digest(id).slice(0, 48)}`, { id, outcome, url: outcome === "running" ? runUrl : repositoryUrl });
     }
     const evidence = product.stageEvidence.filter((item) => item.id === operationId || item.id.startsWith(`${operationId}:`))
       .map((item) => ({ outcome: item.outcome as ProductBuildOutcome, observedAt: item.observedAt }));
@@ -358,11 +406,11 @@ export class ProductBuildService {
     };
   }
 
-  private append(actor: string, product: StoredProduct, requestId: string, item: { id: string; outcome: ProductBuildOutcome; url: string }): StoredProduct {
+  private append(actor: string, product: StoredProduct, requestId: string, item: { id: string; outcome: ProductBuildOutcome; url: string }, observedAt = this.clock.iso()): StoredProduct {
     const saved = this.store.transition(actor, {
       version: "product-intent-v1", requestId, id: product.id, expectedRevision: product.revision, expectedObjectiveRevision: product.objectiveRevision,
       stageEvidence: [{ id: item.id, stage: "build", outcome: item.outcome, objectiveRevision: product.objectiveRevision,
-        observedAt: this.clock.iso(), references: [{ label: "Target repository", url: item.url }] }],
+        observedAt, references: [{ label: "Target repository", url: item.url }] }],
     });
     if (!saved.ok) throw new Fault(saved.code);
     return this.readProduct(actor, product.id);

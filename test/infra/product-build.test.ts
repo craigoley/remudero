@@ -3,14 +3,16 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
-  BOOTSTRAP_CHECKS, bootstrapConfirmed, bootstrapEvidenceId, ghProductBuildTarget, productPlanOrigin, ProductBuildService, registryDaemonRoot,
-  type BuildObservation, type BuildTask, type ProductBuildOptions, type ProductBuildTarget, type TargetInspection, type TaskRead,
+  BOOTSTRAP_CHECKS, bootstrapConfirmed, bootstrapEvidenceId, ghProductBuildTarget, productBuildKickOrigin, productPlanOrigin, ProductBuildService,
+  readTargetExecution, registryDaemonRoot,
+  type BuildObservation, type BuildTask, type ExecutionQuery, type ProductBuildOptions, type ProductBuildTarget, type TargetInspection, type TaskRead,
 } from "#src/lib/product-build.js";
 import { daemonKickPort } from "#src/cli/commands/daemon.js";
-import { fixedClock } from "#src/lib/clock.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import { runDaemon } from "#src/lib/daemon.js";
-import { CLAIM_SILENCE_FLOOR_MS } from "#src/lib/dispatch-claim.js";
 import { requestKick } from "#src/lib/fleet-control.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { DEFAULT_LIVENESS_BOUND_MS } from "#src/lib/non-worker-verdict.js";
 import { loadPlan } from "#src/lib/plan.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
@@ -30,7 +32,7 @@ class FakeTarget implements ProductBuildTarget {
   inspection: TargetInspection = { enrolled: true, head: HEAD, readmeOnly: false };
   runner = true;
   taskRead: TaskRead | undefined;
-  observation: BuildObservation = { state: "none" };
+  observation: BuildObservation = { state: "none", branches: [] };
   calls: string[] = [];
   productId = "";
   constructor() { this.taskRead = undefined; }
@@ -78,6 +80,24 @@ function fixture(t: TestContext, over: { target?: FakeTarget; envelope?: boolean
   return { root, daemonRoot, registryPath, stateBase, store, productId, target, provider, kicks, service, command, options };
 }
 const refused = async (promise: ReturnType<ProductBuildService["execute"]>) => { const result = await promise; assert.equal(result.ok, false); return result.code; };
+const REQUESTED_MS = Date.parse("2026-10-26T01:00:00.000Z");
+const RUN_ID = "W9-T1-1793034698650";
+
+/** The TARGET daemon's own ledger, through the real writer: daemon rows shaped as daemonCommand's `log`, run rows as runTask's. */
+function targetLedger(daemonRoot: string) {
+  const path = join(daemonRoot, "state", "ledger.ndjson");
+  const append = (atMs: number, line: LedgerLine) => appendLedger(path, line, { clock: fixedClock(atMs) });
+  return {
+    path,
+    daemon: (atMs: number, step: string, extra: Record<string, unknown> = {}) => append(atMs, { run_id: "DAEMON-1", task_id: "DAEMON", step, lane: "daemon", ...extra }),
+    run: (atMs: number, runId: string, step: string, extra: Record<string, unknown> = {}) => append(atMs, { run_id: runId, task_id: "W9-T1", step, lane: "run-task", ...extra }),
+  };
+}
+const buildRows = async (f: ReturnType<typeof fixture>, operationId: string) => {
+  const read = f.store.read(actor, f.productId);
+  assert.ok(read.ok);
+  return read.value.stageEvidence.filter((item) => item.id.startsWith(operationId));
+};
 
 test("W1-T10615: product build refuses missing runner claims and stale task ownership", async (t) => {
   const { service, command, kicks, target, store, productId } = fixture(t);
@@ -126,7 +146,9 @@ test("W1-T10615: a product build starts through the admitted target repository p
   assert.ok(started.ok);
   assert.equal(started.value.replayed, false);
   assert.equal(started.value.receipt.outcome, "queued");
-  assert.deepEqual(f.kicks, [["W9-T1", `product:${f.productId}`, "wreckterra"]], "exactly one repo-scoped kick through the injected guarded seam");
+  const origin = productBuildKickOrigin(f.productId, started.value.receipt.operationId);
+  assert.deepEqual(f.kicks, [["W9-T1", origin, "wreckterra"]], "exactly one repo-scoped kick, naming this request, through the injected guarded seam");
+  assert.equal(started.value.receipt.queuedAt, "2026-10-26T01:00:00.000Z", "the request's own time is recorded with its queue entry");
   const read = f.store.read(actor, f.productId);
   assert.ok(read.ok);
   const queued = read.value.stageEvidence.find((item) => item.id === started.value.receipt.operationId);
@@ -142,15 +164,20 @@ test("W1-T10615: a product build starts through the admitted target repository p
   assert.equal(await refused(f.service.execute(actor, f.command({ taskId: "W9-T2" }))), "idempotency_conflict");
   assert.equal(f.kicks.length, 1);
   // Independent evidence: admitted, then running with a real link, each its own record.
-  f.target.observation = { state: "admitted" };
+  f.target.observation = { state: "admitted", branches: [`run-${RUN_ID}`] };
   const admitted = await f.service.execute(actor, f.command());
   assert.ok(admitted.ok);
-  assert.equal(admitted.value.receipt.outcome, "admitted");
-  f.target.observation = { state: "running", url: "https://github.com/craigoley/wreckterra/tree/run-W9-T1-1" };
+  assert.equal(admitted.value.receipt.outcome, "admitted", "a held claim and a published branch are admission, never running");
+  // Running is the target daemon's own evidence: it dispatched THIS request's kick and the run it started has not ended.
+  const ledger = targetLedger(f.daemonRoot);
+  ledger.daemon(REQUESTED_MS, "console.kick_dispatched", { task: "W9-T1", origin, repo: "wreckterra" });
+  ledger.run(REQUESTED_MS, RUN_ID, "run.start", { repo: "wreckterra", type: "implement" });
   const running = await f.service.execute(actor, f.command());
   assert.ok(running.ok);
   assert.equal(running.value.receipt.outcome, "running");
   assert.deepEqual(running.value.receipt.evidence.map((item) => item.outcome), ["queued", "admitted", "running"]);
+  const linked = (await buildRows(f, running.value.receipt.operationId)).find((item) => item.outcome === "running");
+  assert.equal(linked?.references[0]?.url, `https://github.com/craigoley/wreckterra/tree/run-${RUN_ID}`, "the run's own published branch is its link");
   assert.equal(f.kicks.length, 1);
 });
 
@@ -204,7 +231,9 @@ const targetPlan = (productId: string) => `
 test("W1-T10615: a product build kick reaches only the target daemon's own admission, consumed once", async (t) => {
   const f = fixture(t);
   const service = new ProductBuildService({ ...f.options, kick: undefined });
-  assert.ok((await service.execute(actor, f.command())).ok);
+  const started = await service.execute(actor, f.command());
+  assert.ok(started.ok);
+  const origin = productBuildKickOrigin(f.productId, started.value.receipt.operationId);
   const planDir = ownedFixtureDir(t, "product-build-target-plan").dir;
   writeFileSync(join(planDir, "tasks.yaml"), targetPlan(f.productId));
   const plan = loadPlan(join(planDir, "tasks.yaml"));
@@ -230,19 +259,28 @@ test("W1-T10615: a product build kick reaches only the target daemon's own admis
   }
   // The target daemon picks the task from its OWN plan, and its admission (assertRunnable) admits it.
   const own = daemonKickPort(f.daemonRoot, { repo: "wreckterra", isSelf: false });
-  assert.deepEqual(own.pendingKicks().map((kick) => [kick.taskId, kick.repo, kick.origin]), [["W9-T1", "wreckterra", `product:${f.productId}`]]);
+  assert.deepEqual(own.pendingKicks().map((kick) => [kick.taskId, kick.repo, kick.origin]), [["W9-T1", "wreckterra", origin]]);
   const dispatched = await drive(own);
   assert.deepEqual(dispatched.spawned, ["W9-T1"], "the kicked task ran ahead of the plan's natural pick, W9-T0");
-  assert.deepEqual(dispatched.kicks, [{ step: "console.kick_dispatched", extra: { task: "W9-T1", origin: `product:${f.productId}`, repo: "wreckterra" } }]);
+  assert.deepEqual(dispatched.kicks, [{ step: "console.kick_dispatched", extra: { task: "W9-T1", origin, repo: "wreckterra" } }]);
   assert.ok(!existsSync(marker), "the exact marker was consumed");
   assert.deepEqual((await drive(own)).kicks, [], "consumed once: the next pass finds no kick");
+  // The daemon's own dispatch row, written as daemonCommand's `log` writes it, is what the execution reader correlates.
+  const ledger = targetLedger(f.daemonRoot);
+  const state = join(f.daemonRoot, "state");
+  for (const line of dispatched.kicks) ledger.daemon(REQUESTED_MS, line.step, line.extra);
+  const query = { taskId: "W9-T1", origin, repo: "wreckterra", requestedAt: started.value.receipt.queuedAt, nowMs: REQUESTED_MS };
+  assert.deepEqual(readTargetExecution(state, query), { state: "dispatched" });
   // A refused kick clears exactly its own marker; the unscoped and another repository's marker for the same id remain.
-  assert.ok((await service.execute(actor, f.command({ requestId: "build-request-0002", taskId: "W9-T2", expectedRevision: 3 }))).ok);
+  const second = await service.execute(actor, f.command({ requestId: "build-request-0002", taskId: "W9-T2", expectedRevision: 3 }));
+  assert.ok(second.ok);
   requestKick(f.daemonRoot, "W9-T2", "console-run");
   requestKick(f.daemonRoot, "W9-T2", "escalation-triage", "remudero-site");
   const refusal = await drive(own);
   assert.deepEqual(refusal.kicks.map((line) => [line.step, line.extra.task, line.extra.repo]), [["console.kick_refused", "W9-T2", "wreckterra"]]);
   assert.match(String(refusal.kicks[0]!.extra.reason), /verify:human/, "the daemon's own admission named the refusal");
+  for (const line of refusal.kicks) ledger.daemon(REQUESTED_MS, line.step, line.extra);
+  assert.deepEqual(readTargetExecution(state, { ...query, taskId: "W9-T2", origin: productBuildKickOrigin(f.productId, second.value.receipt.operationId) }), { state: "refused" });
   assert.ok(!refusal.spawned.includes("W9-T2"), "a refused kick never dispatches");
   assert.ok(!existsSync(kickMarker(f.daemonRoot, "wreckterra", "W9-T2")), "the refused marker was cleared");
   assert.ok(existsSync(join(f.daemonRoot, "state", "KICK_REQUESTED-W9-T2")), "the unscoped marker is not this daemon's to clear");
@@ -289,11 +327,11 @@ test("W1-T10615: a product build refuses a target no live daemon instance drives
 
 test("W1-T10615: queued and refused product work never reads as running", async (t) => {
   const f = fixture(t);
-  // `running` without a real link is recorded no further than admitted; running needs evidence.
-  f.target.observation = { state: "running" };
+  // A fresh claim and a fresh run branch with no execution evidence from the target daemon are recorded as admitted.
+  f.target.observation = { state: "admitted", branches: [`run-${RUN_ID}`] };
   const unlinked = await f.service.execute(actor, f.command());
   assert.ok(unlinked.ok);
-  assert.equal(unlinked.value.receipt.outcome, "admitted", "running without real evidence is never reported as running");
+  assert.equal(unlinked.value.receipt.outcome, "admitted", "GitHub refs without the target daemon's evidence are never reported as running");
   const read = f.store.read(actor, f.productId);
   assert.ok(read.ok);
   assert.ok(read.value.stageEvidence.every((item) => item.outcome !== "running"));
@@ -339,6 +377,116 @@ test("W1-T10615: queued and refused product work never reads as running", async 
   assert.equal(await refused(bare.service.execute(actor, bare.command({ productId: fresh.value.receipt.productId, expectedRevision: 1 }))), "repository_missing");
 });
 
+/** One started build whose later observations run at `observe(atMs)`, against the target daemon's real ledger. */
+async function observedBuild(t: TestContext, observation: BuildObservation = { state: "admitted", branches: [`run-${RUN_ID}`] }) {
+  const f = fixture(t);
+  let now = REQUESTED_MS;
+  const service = new ProductBuildService({ ...f.options, clock: clockFromMillisFn(() => now) });
+  const started = await service.execute(actor, f.command());
+  assert.ok(started.ok);
+  assert.equal(started.value.receipt.outcome, "queued", "no claim and no target ledger yet");
+  f.target.observation = observation;
+  const origin = productBuildKickOrigin(f.productId, started.value.receipt.operationId);
+  const observe = async (atMs: number) => {
+    now = atMs;
+    const result = await service.execute(actor, f.command());
+    assert.ok(result.ok);
+    return result.value.receipt.outcome;
+  };
+  return { f, origin, ledger: targetLedger(f.daemonRoot), observe };
+}
+
+test("W1-T10615: only the target daemon's evidence of this request's own run reads as running", async (t) => {
+  // Fresh admission without execution: a fresh claim and branch, a live daemon, and an EARLIER request's run of the same
+  // task that started before this request and is still writing after it.
+  const fresh = await observedBuild(t);
+  fresh.ledger.daemon(REQUESTED_MS - 60_000, "daemon.start", { repo: "wreckterra" });
+  fresh.ledger.run(REQUESTED_MS - 30_000, "W9-T1-1793034000000", "run.start", { type: "implement" });
+  fresh.ledger.run(REQUESTED_MS + 60_000, "W9-T1-1793034000000", "worker.activity", { event_kind: "tool" });
+  assert.equal(await fresh.observe(REQUESTED_MS + 120_000), "admitted", "an earlier request's run is never this build running");
+  // The daemon's admission consumed THIS request's kick, but no run has started from it yet.
+  fresh.ledger.daemon(REQUESTED_MS + 130_000, "console.kick_dispatched", { task: "W9-T1", origin: fresh.origin, repo: "wreckterra" });
+  assert.equal(await fresh.observe(REQUESTED_MS + 140_000), "admitted", "a consumed kick is admission until its run starts");
+  fresh.ledger.run(REQUESTED_MS + 150_000, RUN_ID, "run.start", { type: "implement" });
+  assert.equal(await fresh.observe(REQUESTED_MS + 160_000), "running", "the run this request's dispatch started, with no terminal row");
+
+  // Leftover refs after a terminal run: the claim and branch remain, and the run wrote its own verdict.
+  const ended = await observedBuild(t);
+  ended.ledger.daemon(REQUESTED_MS + 1_000, "console.kick_dispatched", { task: "W9-T1", origin: ended.origin, repo: "wreckterra" });
+  ended.ledger.run(REQUESTED_MS + 2_000, RUN_ID, "run.start", { type: "implement" });
+  ended.ledger.run(REQUESTED_MS + 3_000, RUN_ID, "verdict", { verdict: "failed", stage: "run.error" });
+  assert.equal(await ended.observe(REQUESTED_MS + 4_000), "admitted", "fresh refs left after a terminal run never read as running");
+
+  // A refused kick: another dispatch's claim is not this request's admission, and nothing runs.
+  const refusal = await observedBuild(t);
+  refusal.ledger.daemon(REQUESTED_MS + 1_000, "console.kick_refused", { task: "W9-T1", origin: refusal.origin, reason: "task is verify:human", repo: "wreckterra" });
+  assert.equal(await refusal.observe(REQUESTED_MS + 2_000), "queued", "a refused request is neither admitted nor running");
+
+  // A run that wrote no terminal row and nothing inside the liveness bound died silently.
+  const silent = await observedBuild(t);
+  silent.ledger.daemon(REQUESTED_MS + 1_000, "console.kick_dispatched", { task: "W9-T1", origin: silent.origin, repo: "wreckterra" });
+  silent.ledger.run(REQUESTED_MS + 2_000, RUN_ID, "run.start", { type: "implement" });
+  assert.equal(await silent.observe(REQUESTED_MS + 2_000 + DEFAULT_LIVENESS_BOUND_MS + 1), "admitted");
+
+  // An unreadable target ledger is unknown: even an archive that shows this request's live run is not read past it.
+  const blind = await observedBuild(t, { state: "none", branches: [] });
+  writeFileSync(join(blind.f.daemonRoot, "state", "ledger.2026-10-26T01-00-05-000Z.ndjson"), [
+    { ts: "2026-10-26T01:00:01.000Z", run_id: "DAEMON-1", task_id: "DAEMON", step: "console.kick_dispatched", task: "W9-T1", origin: blind.origin, repo: "wreckterra" },
+    { ts: "2026-10-26T01:00:02.000Z", run_id: RUN_ID, task_id: "W9-T1", step: "run.start" },
+  ].map((row) => JSON.stringify(row)).join("\n") + "\n");
+  mkdirSync(join(blind.f.daemonRoot, "state", "ledger.ndjson"));
+  assert.equal(await blind.observe(REQUESTED_MS + 3_000), "queued", "an unreadable live file is never a complete corpus");
+
+  // A daemon whose state this process cannot reach answers unknown, never running; reachable again, its run reads.
+  const remote = await observedBuild(t);
+  remote.ledger.daemon(REQUESTED_MS + 1_000, "console.kick_dispatched", { task: "W9-T1", origin: remote.origin, repo: "wreckterra" });
+  remote.ledger.run(REQUESTED_MS + 2_000, RUN_ID, "run.start", { type: "implement" });
+  writeFileSync(remote.f.registryPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n  wreckterra:\n    github_repo: craigoley/wreckterra\n    retired: true\n");
+  assert.equal(await remote.observe(REQUESTED_MS + 3_000), "admitted", "an unreachable target daemon is not evidence");
+  writeFileSync(remote.f.registryPath, REGISTRY);
+  assert.equal(await remote.observe(REQUESTED_MS + 4_000), "running");
+});
+
+test("W1-T10615: the target execution reader correlates this request, never freshness", (t) => {
+  const dir = ownedFixtureDir(t, "product-build-execution").dir;
+  const state = join(dir, "state");
+  const query: ExecutionQuery = { taskId: "W9-T1", origin: "product:prd_x/pbuild_1", repo: "wreckterra", requestedAt: "2026-10-26T01:00:00.000Z", nowMs: REQUESTED_MS + 60_000 };
+  assert.deepEqual(readTargetExecution(state, query), { state: "unknown" }, "a state directory that cannot be listed");
+  mkdirSync(state);
+  assert.deepEqual(readTargetExecution(state, query), { state: "unknown" }, "no ledger at all is a daemon this process cannot see");
+  const ledger = targetLedger(dir);
+  const kick = { task: "W9-T1", origin: query.origin, repo: "wreckterra" };
+  ledger.daemon(REQUESTED_MS - 1, "console.kick_dispatched", kick);
+  ledger.daemon(REQUESTED_MS + 1, "console.kick_dispatched", { ...kick, task: "W9-T10" });
+  ledger.daemon(REQUESTED_MS + 1, "console.kick_dispatched", { ...kick, origin: "product:prd_x/pbuild_0" });
+  ledger.daemon(REQUESTED_MS + 1, "console.kick_dispatched", { ...kick, repo: "remudero-site" });
+  ledger.daemon(REQUESTED_MS + 1, "console.kick_dispatched", { task: "W9-T1", origin: query.origin });
+  writeFileSync(ledger.path, `${JSON.stringify({ ts: "garbled", step: "console.kick_refused", ...kick })}\n`, { flag: "a" });
+  assert.deepEqual(readTargetExecution(state, query), { state: "none" }, "an earlier, sibling, other-request, other-repo or unscoped kick is not this one");
+  ledger.daemon(REQUESTED_MS + 2, "console.kick_dispatched", { ...kick, repo: "Wreckterra" });
+  assert.deepEqual(readTargetExecution(state, query), { state: "dispatched" });
+  appendLedger(ledger.path, { run_id: "W9-T10-1", task_id: "W9-T10", step: "run.start" }, { clock: fixedClock(REQUESTED_MS + 3) });
+  ledger.run(REQUESTED_MS + 3, "elsewhere-1", "run.start");
+  ledger.run(REQUESTED_MS + 1, "W9-T1-1", "run.start");
+  assert.deepEqual(readTargetExecution(state, query), { state: "dispatched" }, "a sibling's run, a foreign run id, or a run before the dispatch");
+  ledger.run(REQUESTED_MS + 4, RUN_ID, "run.start");
+  ledger.run(REQUESTED_MS + 9, "W9-T1-2", "run.start");
+  assert.deepEqual(readTargetExecution(state, query), { state: "running", runId: RUN_ID }, "the first run at or after the dispatch is its run");
+  assert.deepEqual(readTargetExecution(state, { ...query, nowMs: REQUESTED_MS + 4 + DEFAULT_LIVENESS_BOUND_MS }), { state: "running", runId: RUN_ID });
+  assert.deepEqual(readTargetExecution(state, { ...query, nowMs: REQUESTED_MS + 5 + DEFAULT_LIVENESS_BOUND_MS }), { state: "silent", runId: RUN_ID });
+  ledger.run(REQUESTED_MS + 10, RUN_ID, "worker.activity");
+  assert.deepEqual(readTargetExecution(state, { ...query, nowMs: REQUESTED_MS + 5 + DEFAULT_LIVENESS_BOUND_MS }), { state: "running", runId: RUN_ID });
+  ledger.run(REQUESTED_MS + 11, RUN_ID, "run.error", { error: "boom" });
+  assert.deepEqual(readTargetExecution(state, query), { state: "ended", runId: RUN_ID }, "a thrown run's own terminal row");
+  assert.deepEqual(readTargetExecution(state, { ...query, origin: "product:prd_x/pbuild_0" }), { state: "running", runId: "W9-T1-1" },
+    "the other request's dispatch has its own run, which was never this request's");
+  ledger.daemon(REQUESTED_MS + 1, "console.kick_refused", { ...kick, origin: "product:prd_x/pbuild_r", reason: "unknown task id" });
+  assert.deepEqual(readTargetExecution(state, { ...query, origin: "product:prd_x/pbuild_r" }), { state: "refused" });
+  // A rotation this process cannot read is unknown, never a corpus with nothing in it.
+  writeFileSync(join(state, "ledger.2026-10-26T01-00-05-000Z.ndjson.gz"), "not gzip");
+  assert.deepEqual(readTargetExecution(state, query), { state: "unknown" });
+});
+
 test("W1-T10615: a README-only product verifies bootstrap before filing source tasks", async (t) => {
   const target = new FakeTarget();
   target.inspection = { enrolled: true, head: HEAD, readmeOnly: true };
@@ -375,17 +523,10 @@ test("W1-T10615: the default target reads the real managed set, runner registry 
   writeFileSync(join(repoRoot, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
   const repo = { id: ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main" };
   const shard = "- id: W9-T1\n  origin: product-plan#prd_x/plan-approved-1\n  status: queued\n  budget_usd: 10\n";
-  const NOW = Date.parse("2026-10-26T12:00:00.000Z");
   const ANCHOR = "1".repeat(40);
   const TIP = "2".repeat(40);
-  const iso = (ms: number) => new Date(ms).toISOString();
-  const anchorAt = (mintedMs: number, renewedMs?: number) =>
-    `rmd-dispatch claim 4242@fleet-host ${iso(mintedMs)}${renewedMs === undefined ? "" : `\nrenewed 4242@fleet-host ${iso(renewedMs)}`}`;
-  const commit = (message: string, dateMs: number) => JSON.stringify({ sha: "c".repeat(40), message, committer: { date: iso(dateMs) } });
   const claimRef = JSON.stringify([{ ref: "refs/rmd-dispatch/W9-T1", object: { sha: ANCHOR } }]);
   const routes: { when: string; stdout: string }[] = [
-    { when: `git/commits/${ANCHOR}`, stdout: commit(anchorAt(NOW - 60_000), NOW - 60_000) },
-    { when: `git/commits/${TIP}`, stdout: commit("wip", NOW - 30_000) },
     { when: "commits/main", stdout: JSON.stringify({ sha: HEAD }) },
     { when: `contents?ref=${HEAD}`, stdout: JSON.stringify([{ name: "README.md" }, { name: "LICENSE" }]) },
     { when: "contents/plan/tasks.d/W9-T1-first.yaml", stdout: shard },
@@ -401,7 +542,7 @@ test("W1-T10615: the default target reads the real managed set, runner registry 
     return route.stdout;
   };
   const override = (when: string, stdout: string) => { routes.unshift({ when, stdout }); };
-  const target = ghProductBuildTarget({ repoRoot, text: answer, clock: fixedClock(NOW) });
+  const target = ghProductBuildTarget({ repoRoot, text: answer });
   // One call over the real default transport proves the production seam is not only ever faked.
   const shim = ghShim([{ when: "commits/main", stdout: JSON.stringify({ sha: HEAD }) }, { when: "contents?ref=", stdout: JSON.stringify([{ name: "src" }]) }]);
   const original = process.env.PATH;
@@ -414,43 +555,27 @@ test("W1-T10615: the default target reads the real managed set, runner registry 
   assert.equal(target.runnerRegistered({ ...repo, name: "not-registered" }), false, "an unknown repository has no runner claim");
   assert.deepEqual(await target.task(repo, "W9-T1"), { state: "found", task: { id: "W9-T1", origin: "product-plan#prd_x/plan-approved-1", status: "queued", budgetUsd: 10, claimed: false, merged: false } });
   assert.deepEqual(await target.task(repo, "W9-T2"), { state: "absent" });
-  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "none" });
+  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "none", branches: ["run-W9-T1-17"] });
   // `matching-refs` is a prefix match: a sibling task's claim is neither this task's claim nor its admission.
   override("matching-refs/rmd-dispatch/W9-T1", JSON.stringify([{ ref: "refs/rmd-dispatch/W9-T10", object: { sha: ANCHOR } }]));
-  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "none" });
+  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "none", branches: ["run-W9-T1-17"] });
   const sibling = await target.task(repo, "W9-T1");
   assert.ok(sibling.state === "found" && !sibling.task.claimed, "W9-T10's claim never reads as W9-T1's");
-  // A claim minted a minute ago with its run branch published is running.
+  // A claim taken a minute ago with its run branch freshly published is ADMISSION: GitHub refs cannot express running,
+  // because a claim can precede the worker and an ended or refused run leaves both behind. The branch is only a link.
   override("matching-refs/rmd-dispatch/W9-T1", claimRef);
-  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "running", url: "https://github.com/craigoley/wreckterra/tree/run-W9-T1-17" });
+  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted", branches: ["run-W9-T1-17"] });
   const claimed = await target.task(repo, "W9-T1");
   assert.ok(claimed.state === "found" && claimed.task.claimed, "a held dispatch claim is read as claimed");
   override("search/issues", JSON.stringify({ total_count: 1 }));
   const merged = await target.task(repo, "W9-T1");
   assert.ok(merged.state === "found" && merged.task.merged, "merged credit is read from the trailer search");
-  // The run ended and its refs remain: an old mint and renewal and an old branch commit are admission, not execution.
-  override(`git/commits/${ANCHOR}`, commit(anchorAt(NOW - 3 * 3_600_000, NOW - 2 * 3_600_000), NOW - 2 * 3_600_000));
-  override(`git/commits/${TIP}`, commit("last worker commit", NOW - 2 * 3_600_000));
-  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" }, "leftover refs after the run ended never read as running");
-  // Silence of exactly the two-renewal floor is already past what a live holder allows.
-  override(`git/commits/${TIP}`, commit("last worker commit", NOW - CLAIM_SILENCE_FLOOR_MS));
-  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" });
-  // A fresh run-branch commit, or a fresh renewal on an old claim, is a live holder's sign of life.
-  override(`git/commits/${TIP}`, commit("fresh worker commit", NOW - CLAIM_SILENCE_FLOOR_MS + 1));
-  assert.equal((await target.observe(repo, "W9-T1")).state, "running");
-  override(`git/commits/${TIP}`, commit("last worker commit", NOW - 2 * 3_600_000));
-  override(`git/commits/${ANCHOR}`, commit(anchorAt(NOW - 3 * 3_600_000, NOW - 60_000), NOW - 60_000));
-  assert.equal((await target.observe(repo, "W9-T1")).state, "running");
-  // Alive but no exact published run branch to link: admitted, never running.
+  // Only an exact `run-<taskId>-<epochMs>` branch is a link; a claim with no object still proves only admission.
   override("matching-refs/heads/run-W9-T1-", JSON.stringify([{ ref: "refs/heads/run-W9-T1-17-retry", object: { sha: TIP } }, { ref: "refs/heads/run-W9-T1-18" }]));
-  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" });
+  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted", branches: ["run-W9-T1-18"] });
   override("matching-refs/heads/run-W9-T1-", JSON.stringify([]));
-  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" });
-  // A claim whose anchor carries no decodable identity, or no object, still proves only admission.
-  override(`git/commits/${ANCHOR}`, commit("not a claim anchor", NOW));
-  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" });
   override("matching-refs/rmd-dispatch/W9-T1", JSON.stringify([{ ref: "refs/rmd-dispatch/W9-T1" }]));
-  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted" });
+  assert.deepEqual(await target.observe(repo, "W9-T1"), { state: "admitted", branches: [] });
   // A shard that holds no such task is absent, never a guess.
   override("contents/plan/tasks.d/W9-T1-first.yaml", "- id: W9-T7\n  status: queued\n");
   assert.deepEqual(await target.task(repo, "W9-T1"), { state: "absent" });
