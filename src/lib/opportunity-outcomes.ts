@@ -544,7 +544,7 @@ export async function reconcileManagedImprovementEffects(input: {
   // PRIMARY CONTROLS: four repository/instance projections and 24 new GitHub reads per pass.
   // Deferred scopes retain their own old clocks and sort ahead of recently published ones.
   let reads = 24, publishedScopes = 0;
-  const cache = new Map<string, unknown>(), fetch = input.fetch ?? ghJson;
+  const cache = new Map<string, unknown>(), fetch = input.fetch ?? ghJsonAsync;
   const boundedFetch = async (args: string[]): Promise<unknown> => {
     const key = JSON.stringify(args);
     if (cache.has(key)) return cache.get(key);
