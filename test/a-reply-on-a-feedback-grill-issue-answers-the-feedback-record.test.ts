@@ -159,7 +159,13 @@ async function continueCanonical(f: ReturnType<typeof canonicalContinuationFixtu
 test("W1-T10789: canonical grilling advances an unchanged older capture exactly once", async t => {
   for (const queue of [false, true]) await t.test(queue ? "unchanged older queued capture" : "ordinary canonical positive control", async t => {
     const f = canonicalContinuationFixture(t, queue);
-    assert.deepEqual(await continueCanonical(f), { accepted: 1, ignored: 0, unreadable: 0 });
+    if (queue) {
+      assert.deepEqual(await readEscalationAnswers(f.root, "W10789-ALREADY-RECORDED",
+        gatewayFor(issueFor(1078901, f.id), [ownerComment(901, "site-intake")]), { ledgerPath: f.ledgerPath }),
+      { accepted: 1, ignored: 0, unreadable: 0 });
+      assert.equal(appliedRows(f.ledgerPath).length, 0, "a question-store acknowledgment is not a feedback continuation");
+    }
+    assert.deepEqual(await continueCanonical(f), { accepted: queue ? 0 : 1, ignored: 0, unreadable: 0 });
     const queued = readQueuedFeedbackRecords(f.stateRoot), replies = [...queued.values()].filter(r => r.reply_to === f.id);
     assert.equal(replies.length, 1); assert.equal(replies[0].submission_key, "issue#1078901:comment:901");
     assert.deepEqual(queued.get(f.rel), { ...f.canonical, status: "answered", answered_by: replies[0].id });
