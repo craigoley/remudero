@@ -17,6 +17,7 @@ import { loadPlan } from "#src/lib/plan.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { writeLedger, type LedgerFixture } from "#test/helpers/ledger-fixture.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const actor = "clerk:alice";
@@ -83,12 +84,17 @@ const refused = async (promise: ReturnType<ProductBuildService["execute"]>) => {
 const REQUESTED_MS = Date.parse("2026-10-26T01:00:00.000Z");
 const RUN_ID = "W9-T1-1793034698650";
 
-/** The TARGET daemon's own ledger, through the real writer: daemon rows shaped as daemonCommand's `log`, run rows as runTask's. */
-function targetLedger(daemonRoot: string) {
-  const path = join(daemonRoot, "state", "ledger.ndjson");
-  const append = (atMs: number, line: LedgerLine) => appendLedger(path, line, { clock: fixedClock(atMs) });
+/** The TARGET daemon's own ledger, seeded by test/helpers/ledger-fixture.ts on its first row (no file before it):
+ *  daemon rows shaped as daemonCommand's `log`, run rows as runTask's, each `ts` stamped as appendLedger stamps it. */
+function targetDaemonRows(daemonRoot: string) {
+  const dir = join(daemonRoot, "state");
+  let fixture: LedgerFixture | undefined;
+  const append = (atMs: number, line: LedgerLine) => {
+    fixture ??= writeLedger([], { dir });
+    fixture.append([{ ts: fixedClock(atMs).iso(), ...line }]);
+  };
   return {
-    path,
+    path: join(dir, "ledger.ndjson"),
     daemon: (atMs: number, step: string, extra: Record<string, unknown> = {}) => append(atMs, { run_id: "DAEMON-1", task_id: "DAEMON", step, lane: "daemon", ...extra }),
     run: (atMs: number, runId: string, step: string, extra: Record<string, unknown> = {}) => append(atMs, { run_id: runId, task_id: "W9-T1", step, lane: "run-task", ...extra }),
   };
@@ -169,7 +175,7 @@ test("W1-T10615: a product build starts through the admitted target repository p
   assert.ok(admitted.ok);
   assert.equal(admitted.value.receipt.outcome, "admitted", "a held claim and a published branch are admission, never running");
   // Running is the target daemon's own evidence: it dispatched THIS request's kick and the run it started has not ended.
-  const ledger = targetLedger(f.daemonRoot);
+  const ledger = targetDaemonRows(f.daemonRoot);
   ledger.daemon(REQUESTED_MS, "console.kick_dispatched", { task: "W9-T1", origin, repo: "wreckterra" });
   ledger.run(REQUESTED_MS, RUN_ID, "run.start", { repo: "wreckterra", type: "implement" });
   const running = await f.service.execute(actor, f.command());
@@ -266,7 +272,7 @@ test("W1-T10615: a product build kick reaches only the target daemon's own admis
   assert.ok(!existsSync(marker), "the exact marker was consumed");
   assert.deepEqual((await drive(own)).kicks, [], "consumed once: the next pass finds no kick");
   // The daemon's own dispatch row, written as daemonCommand's `log` writes it, is what the execution reader correlates.
-  const ledger = targetLedger(f.daemonRoot);
+  const ledger = targetDaemonRows(f.daemonRoot);
   const state = join(f.daemonRoot, "state");
   for (const line of dispatched.kicks) ledger.daemon(REQUESTED_MS, line.step, line.extra);
   const query = { taskId: "W9-T1", origin, repo: "wreckterra", requestedAt: started.value.receipt.queuedAt, nowMs: REQUESTED_MS };
@@ -393,7 +399,7 @@ async function observedBuild(t: TestContext, observation: BuildObservation = { s
     assert.ok(result.ok);
     return result.value.receipt.outcome;
   };
-  return { f, origin, ledger: targetLedger(f.daemonRoot), observe };
+  return { f, origin, ledger: targetDaemonRows(f.daemonRoot), observe };
 }
 
 test("W1-T10615: only the target daemon's evidence of this request's own run reads as running", async (t) => {
@@ -454,7 +460,7 @@ test("W1-T10615: the target execution reader correlates this request, never fres
   assert.deepEqual(readTargetExecution(state, query), { state: "unknown" }, "a state directory that cannot be listed");
   mkdirSync(state);
   assert.deepEqual(readTargetExecution(state, query), { state: "unknown" }, "no ledger at all is a daemon this process cannot see");
-  const ledger = targetLedger(dir);
+  const ledger = targetDaemonRows(dir);
   const kick = { task: "W9-T1", origin: query.origin, repo: "wreckterra" };
   ledger.daemon(REQUESTED_MS - 1, "console.kick_dispatched", kick);
   ledger.daemon(REQUESTED_MS + 1, "console.kick_dispatched", { ...kick, task: "W9-T10" });
