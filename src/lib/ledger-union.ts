@@ -1018,7 +1018,8 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
       filesRead += 1;
       buf = await nodeReadFile(livePath);
     } catch {
-      // deliberate: an unreadable live file is not an unread rotation, exactly as in the sync read.
+      // Strict authority readers must not accept archived grants when newer live evidence is unreadable.
+      if (opts.refuseIncomplete) unread.push(livePath);
       return;
     }
     await scanInSlices(buf);

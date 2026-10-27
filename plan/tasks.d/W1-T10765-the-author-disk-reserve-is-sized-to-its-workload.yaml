@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 10.00
   risk: high  # Rule 19: one concern, three files — a gate's reserve sizing; high because it changes when the local author gate admits a run
@@ -45,3 +45,14 @@
       proof: 'grep: test("W1-T10765: a full or unmeasured selection still requires 20 GiB" in test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts'
   falsifier: |
     Return `MAC_AUTHOR_FREE_RESERVE_BYTES` for every selection. The plan-only test is then refused NOT_RUN.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The description shows a disk-free threshold change in the author preflight scripts, with no touching of secrets, auth, deletion, merge or deploy policy."
+      - "Acceptance criterion 3 states that full or unmeasured selections still require 20 GiB, so the loosening is bounded and fails closed."
+      - "The declared files match the stated scope (admission lib, disk profile, preflight script, new test), and the family track record is favorable."
+      - "The change must relax the `validProfile` floor invariant. That is a mild concern, but a disk-space failure is reversible and the PR still passes CI and review."
+    judged_at: "2026-10-27T00:49:37.166Z"
+    pin: "42bd7d0337f48fa09ad00e2f6284a54a64f56a9179c727439e5cb8a2faaee50a"

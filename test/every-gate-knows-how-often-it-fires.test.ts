@@ -91,8 +91,9 @@ test("W1-T4115: each gate's fire and repair rate is ledgered", async () => {
   assert.deepEqual(summary.never_fired, ["quiet"]);
   assert.deepEqual(summary.always_fired, ["noisy"]);
   // The same measurement is kept whole for the gate gardener (W1-T4116) to read.
-  const snapshot = JSON.parse(readFileSync(gateFireRatesPath(join(root, "state")), "utf8")) as { gates: Array<{ gate: string }> };
+  const snapshot = JSON.parse(readFileSync(gateFireRatesPath(join(root, "state")), "utf8")) as { gates: Array<{ gate: string; redPrNumbers?: number[] }> };
   assert.equal(snapshot.gates.length, 5);
+  assert.deepEqual(snapshot.gates.find((g) => g.gate === "noisy")?.redPrNumbers, [1, 2], "the persisted report names each gate's red pull requests");
 });
 
 test("W1-T4115: a window it could not read is never reported as gates that never fire", () => {

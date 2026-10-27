@@ -10,6 +10,7 @@ import { main, runCensusSuitesViaChild } from "../scripts/census-precheck.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MEMBER = { testFile: "test/population.test.ts", script: "census:population", walks: ["lib/"] };
+const SKILL = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 
 function fixture(baseCount = 1) {
   const repo = gitRepo({ kind: "census-private-base" });
@@ -26,6 +27,8 @@ function fixture(baseCount = 1) {
     '  assert.ok(JSON.parse(readFileSync("lib/population.json", "utf8")).length <= 1);',
     '});',
   ].join("\n"));
+  // The always-on skill census joins every nonempty diff, so the base carries a healthy stand-in for it.
+  write(SKILL, 'import { test } from "node:test";\ntest("skill census stand-in", () => undefined);\n');
   write("lib/population.json", JSON.stringify(Array(baseCount).fill("item")));
   write(".gitattributes", "lib/ignored.bin export-ignore\nlib/subst.txt export-subst\n");
   write("lib/ignored.bin", Buffer.from([0, 255, 10, 128]));
@@ -102,8 +105,12 @@ test("W1-T9740: the base tree equals a worktree checkout of the merge base", () 
       admitted: () => [MEMBER],
       runSuites: ({ root, files }: { root: string; files: string[] }) => {
         runs++;
+        if (root === repo.dir) {
+          // The head run is the member plus the always-on skill census; only the member is red.
+          assert.deepEqual([...files].sort(), [MEMBER.testFile, SKILL].sort());
+          return [MEMBER.testFile];
+        }
         assert.deepEqual(files, [MEMBER.testFile]);
-        if (root === repo.dir) return files;
         measuredRoot = root;
         assert.deepEqual(tree(root), tree(expectedRoot));
         assert.equal(readlinkSync(join(root, "node_modules")), join(ROOT, "node_modules"));
