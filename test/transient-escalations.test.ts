@@ -253,7 +253,7 @@ test("the escalation MINTS a PR referent for an untrailered PR, and keeps a real
   assert.match(escalationTaskIdFor({ prNumber: 1038 }), /^PR-\d+$/);
 });
 
-test("the real escalate closure stamps the PR referent on the issue it opens", () => {
+test("the real escalate closure stamps the PR referent on the issue it opens", async () => {
   // THE WIRING, not just the helper. The three tests above prove the mint and the resolve; this
   // proves the escalate closure actually CALLS the mint — the line diff-coverage flagged, and the
   // one that would silently revert to "UNKNOWN" if someone edited the closure. Driven through the
@@ -284,7 +284,7 @@ test("the real escalate closure stamps the PR referent on the issue it opens", (
     issuesImpl: issuesImpl,
   });
 
-  effects.escalate!(
+  await effects.escalate!(
     pr({ prNumber: 1038, taskId: undefined }),
     "not positively mergeable — checks pending, review none — escalating",
     { question: "Which resolution applies?", resolutions: [{ label: "wait", detail: "let checks finish" }, { label: "close", detail: "abandon" }] } as never,

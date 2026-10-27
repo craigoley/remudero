@@ -7,6 +7,7 @@ import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, r
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
 import { fixRoundBaseHead } from "../../lib/fix-round-base.js";
 import { admittedFixTestPaths } from "../../lib/fix-test-scope.js";
+import { readFixScopeHistory } from "../../lib/fix-scope-history.js";
 import { CONFLICT_REPAIR_HANDOFF_REASON, fixRungInputFields, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, requeuedCheckKeysFromLedger, type JobRequeueOutcome } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
 import { createHash } from "node:crypto";
@@ -2277,8 +2278,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // for this PR by answering its scope question (unfiledScopeGrant, #14217). Read per round: an answer can land mid-rung.
   const branchTaskId = taskIdFromRunBranch(opts.branch);
   const unfiledScope = opts.taskId === `PR-${prNumber}` && (branchTaskId === undefined || branchTaskId === UNFILED_RUN_SENTINEL);
-  const unfiledGrantNow = () => unfiledScope && prNumber !== undefined
-    ? unfiledScopeGrant((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), { prNumber }) : undefined;
+  const unfiledGrantNow = async () => unfiledScope && prNumber !== undefined
+    ? unfiledScopeGrant(deps.ledgerLines ? deps.ledgerLines() : await readFixScopeHistory(deps.ledgerPath, prNumber), { prNumber }) : undefined;
   const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false): Promise<ScopeAmendmentOutcome> => {
     let outcome: ScopeAmendmentOutcome;
     try {
@@ -3125,7 +3126,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       ...offeredCensusBaselines().map((path) => ({ path, job: "census-precheck" })),
       ...namedReachablePaths,
     ];
-    const unfiledGrant = unfiledGrantNow();
+    let unfiledGrant: Awaited<ReturnType<typeof unfiledGrantNow>>;
+    try { unfiledGrant = await unfiledGrantNow(); }
+    catch (error) {
+      const reason = `scope authority UNKNOWN: ${String(error)}`;
+      deps.log("fix.stood_down", { site: "rung.scope_authority_unreadable", strike: strikes + 1, reason });
+      deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
+      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+    }
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
       try {
@@ -3942,6 +3950,19 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // The unpublished local merge is the commit base; the push still leases the PR's original tip.
     const roundPushBaseSha = scopeMergeStartSha ?? roundBase.baseSha;
     if (roundBase.advanced) deps.log("fix.round_head_advanced", { head_sha: priorHeadSha, round_base_sha: roundBase.baseSha, reason: roundBase.reason });
+    if (roundBase.advanced && scopeMergeStartSha === undefined) {
+      let publishedHead: string | undefined;
+      try { publishedHead = await (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch); }
+      catch { deps.log("fix.evidence_head_unread", { head_sha: priorHeadSha, worktree_head_sha: roundBase.baseSha,
+        reason: "remote branch head read failed; no published advance was established" }); }
+      // A retained unpublished commit is still this round's existing recovery input, not proof the PR moved.
+      if (publishedHead !== undefined && publishedHead !== priorHeadSha) {
+        const reason = `published branch advanced from ${priorHeadSha} to ${publishedHead} before the worker started; the ordinary sweep must read fresh exact-head failure evidence`;
+        deps.log("fix.evidence_head_superseded", { head_sha: priorHeadSha, current_head_sha: publishedHead, worktree_head_sha: roundBase.baseSha, reason });
+        deps.log("fix.stood_down", { head_sha: priorHeadSha, current_head_sha: publishedHead, site: "rung.evidence_head", reason });
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+      }
+    }
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt + retriggers}:${fixRoundStartedAtMs}`;
     const fixReceipt = host.fixWorkerReceipt(deps.spawn, deps.log, host.fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),

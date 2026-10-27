@@ -39,6 +39,9 @@ export interface GateFireRate {
    *  fired. A report persisted before these existed carries neither, and ci-friction then prices nothing. */
   redMinutes?: number;
   redPrs?: number;
+  /** Those red pull requests by number, ascending: a manual change on one already carries this measured cost, so
+   *  ci-friction charges it no second, proxy cost (#14530). A report persisted before this counts but cannot name them. */
+  redPrNumbers?: number[];
 }
 
 export interface GateFireRateReport {
@@ -104,7 +107,8 @@ export function measureGateFireRates(input: CiFailureCorpusInput): GateFireRateR
   }
   const gates = [...byGate.values()]
     .map(({ prSet, redPrSet, ...r }) => ({ ...r, prs: prSet.size, minutes: Math.round(r.minutes * 10) / 10,
-      redMinutes: Math.round(r.redMinutes * 10) / 10, redPrs: redPrSet.size }))
+      redMinutes: Math.round(r.redMinutes * 10) / 10, redPrs: redPrSet.size,
+      redPrNumbers: [...redPrSet].sort((a, b) => a - b) }))
     .sort((a, b) => a.gate.localeCompare(b.gate));
   const status = input.windowComplete === false || (input.unreadablePrs?.length ?? 0) > 0 ? "partial" : read > 0 ? "measured" : commits > 0 ? "unreadable" : "empty";
   const patterned = status === "measured" ? gates.filter((g) => g.prs >= PATTERN_PRS && g.runs > 0) : [];

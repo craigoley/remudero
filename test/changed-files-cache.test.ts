@@ -9,6 +9,7 @@ import { makeTempDir } from "../src/lib/tmp.js";
 import type { Clock } from "../src/lib/clock.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import type { GitHub } from "#src/lib/status.js";
 
 const url = (n: number): string => `https://github.com/o/r/pull/${n}`;
 const pr = (n: number, state: string): BatchedPr => ({ number: n, url: url(n), state, headRefName: `b${n}`, body: "" });
@@ -232,4 +233,130 @@ test("changed-files cache: the default read really shells out to gh asynchronous
   assert.deepEqual(cache.lookup(url(11), "MERGED"), ["src/one.ts", "src/two.ts"]);
   assert.equal(cache.lookup(url(12), "MERGED"), undefined, "an empty read is unreadable, never 'no files'");
   assert.ok(shim.calls().includes("api --paginate repos/o/r/pulls/11/files --jq .[].filename"));
+});
+
+const evidenceHead = "a".repeat(40);
+type EvidenceGateway = GitHub & { changedFileEvidence?: (url: string) => { status: string; reason?: string; repository?: string; prNumber?: number; headRefOid?: string; prState?: string; source?: string; files?: readonly string[] } };
+type EvidenceDocument = { schema: number; repository: string; entries: Array<{ files: string[]; at: number; evidence: Record<string, unknown> }> };
+function readEvidence(gh: GitHub, number = 31) {
+  const read = (gh as EvidenceGateway).changedFileEvidence;
+  assert.equal(typeof read, "function", "the real gateway must expose qualified evidence");
+  return read!(url(number));
+}
+
+test("changed file evidence binds repository pull request merged state and immutable head", async () => {
+  const root = makeTempDir("changed-file-evidence");
+  const cache = createChangedFilesCache(root, "o", "r", { fetch: async () => ["src/fix.ts"] });
+  const rows = [{ ...pr(31, "MERGED"), headRefOid: evidenceHead }];
+  const gh = boardGateway(rows, cache, []);
+  gh.changedFiles!(url(31));
+  await cache.settle();
+  const evidence = readEvidence(gh);
+  assert.equal(evidence.status, "complete");
+  const wire = JSON.parse(readFileSync(changedFilesCachePath(root, "o", "r"), "utf8"));
+  assert.equal(wire.schema, 1, "additive evidence must remain readable by existing schema-1 changedFiles consumers");
+  assert.deepEqual(wire.entries.map((entry: { files: string[] }) => entry.files), [["src/fix.ts"]]);
+  assert.deepEqual([evidence.repository, evidence.prNumber, evidence.headRefOid, evidence.prState, evidence.source, evidence.files],
+    ["o/r", 31, evidenceHead, "MERGED", "github_rest_pull_files_paginated", ["src/fix.ts"]]);
+  const restarted = boardGateway(rows, createChangedFilesCache(root, "o", "r", { fetch: async () => assert.fail("durable evidence must not refetch") }), []);
+  assert.deepEqual(readEvidence(restarted), evidence);
+  (evidence.files as string[]).push("tainted.ts");
+  gh.changedFiles!(url(31))!.push("legacy-taint.ts");
+  const reread = readEvidence(gh);
+  assert.equal(reread.status, "complete");
+  assert.deepEqual(reread.files, ["src/fix.ts"], "callers cannot mutate cached evidence");
+});
+
+test("changed file evidence refuses stale foreign incomplete and reopened heads", async () => {
+  const root = makeTempDir("changed-file-evidence");
+  const path = changedFilesCachePath(root, "o", "r");
+  const producer = createChangedFilesCache(root, "o", "r", { fetch: async () => ["src/fix.ts"] });
+  const rows = [{ ...pr(31, "MERGED"), headRefOid: evidenceHead }];
+  boardGateway(rows, producer, []).changedFiles!(url(31));
+  await producer.settle();
+  const body = readFileSync(path, "utf8");
+  const read = (state = "MERGED", headRefOid: string | undefined = evidenceHead) => readEvidence(boardGateway(
+    [{ ...pr(31, state), headRefOid }], createChangedFilesCache(root, "o", "r", { fetch: async () => assert.fail("evidence reads never schedule") }), []));
+  assert.equal(read().status, "complete", "positive control reads the actual producer format");
+  for (const [state, head] of [["OPEN", evidenceHead], ["CLOSED", evidenceHead], ["MERGED", "b".repeat(40)], ["MERGED", "abbrev"]]) {
+    const evidence = read(state, head);
+    assert.equal(evidence.status, "unknown", `${state}/${head} cannot reuse merged evidence`);
+    assert.ok(evidence.reason);
+  }
+  for (const change of [
+    (d: EvidenceDocument) => { d.schema = 1; d.entries[0].evidence = {}; },
+    (d: EvidenceDocument) => { d.repository = "foreign/repo"; },
+    (d: EvidenceDocument) => { d.entries[0].evidence.complete = false; },
+    (d: EvidenceDocument) => { d.entries[0].evidence.headRefOid = "b".repeat(40); },
+    (d: EvidenceDocument) => { d.entries[0].evidence.repository = "foreign/repo"; },
+    (d: EvidenceDocument) => { d.entries[0].evidence.prNumber = 32; },
+    (d: EvidenceDocument) => { d.entries[0].evidence.source = "ledger_marker"; },
+    (d: EvidenceDocument) => { d.entries[0].files = Array.from({ length: 3000 }, (_, i) => `src/${i}.ts`); },
+    (d: EvidenceDocument) => { d.entries[0].files = ["src/one.ts", "src/one.ts"]; },
+    (d: EvidenceDocument) => { d.entries[0].files = ["src/invalid\0path.ts"]; },
+    (d: EvidenceDocument) => { d.entries[0].files = ["/absolute.ts"]; },
+    (d: EvidenceDocument) => { d.entries[0].files = ["../outside.ts"]; },
+    (d: EvidenceDocument) => { d.entries[0].files = ["src//ambiguous.ts"]; },
+    (d: EvidenceDocument) => { d.entries[0].at = -1; },
+    (d: EvidenceDocument) => { d.entries.push({ ...d.entries[0] }); },
+  ]) {
+    const doc = JSON.parse(body); change(doc); writeFileSync(path, JSON.stringify(doc));
+    const evidence = read(); assert.equal(evidence.status, "unknown"); assert.ok(evidence.reason);
+  }
+  for (const invalid of ["{", body.slice(0, -10)]) {
+    writeFileSync(path, invalid); assert.equal(read().status, "unknown");
+  }
+  for (const malformed of [{ files: [] }, { files: null }, { files: "src/invalid.ts" }, { files: undefined }, { at: "invalid" }, { at: undefined }]) {
+    for (const reverse of [false, true]) {
+      const doc = JSON.parse(body);
+      doc.entries.push({ ...doc.entries[0], ...malformed });
+      if (reverse) doc.entries.reverse();
+      writeFileSync(path, JSON.stringify(doc));
+      const cache = createChangedFilesCache(root, "o", "r", { readOnly: true, fetch: async () => assert.fail("read-only evidence cannot fetch") });
+      assert.deepEqual(readEvidence(boardGateway(rows, cache, [])), { status: "unknown", reason: "ambiguous_cache_entries" },
+        `malformed duplicate cannot qualify in either order: ${JSON.stringify(malformed)}, reverse=${reverse}`);
+      assert.deepEqual(cache.lookup(url(31), "MERGED"), ["src/fix.ts"], "legacy callers retain the valid list");
+    }
+  }
+  writeFileSync(path, body);
+  const foreign = boardGateway(rows, createChangedFilesCache(root, "o", "r"), []);
+  const evidence = (foreign as EvidenceGateway).changedFileEvidence!("https://github.com/other/r/pull/31");
+  assert.equal(evidence.status, "unknown"); assert.ok(evidence.reason);
+});
+
+test("changed file evidence preserves JSON encoded filenames on the real asynchronous reader", async () => {
+  const root = makeTempDir("changed-file-evidence");
+  const files = ["src/line\nbreak.ts", " leading and trailing "];
+  const shim = ghShim([{ when: "pulls/31/files", stdout: files.map(f => JSON.stringify(f)).join("\n") }]);
+  const cache = createChangedFilesCache(root, "o", "r", { ghBin: join(shim.dir, "gh") });
+  const gh = boardGateway([{ ...pr(31, "MERGED"), headRefOid: evidenceHead }], cache, []);
+  gh.changedFiles!(url(31)); await cache.settle();
+  const evidence = readEvidence(gh);
+  assert.equal(evidence.status, "complete");
+  assert.deepEqual(evidence.files, files);
+  assert.ok(shim.calls().some(call => call.endsWith("--jq .[].filename | @json")));
+});
+
+test("changed file evidence keeps duplicate ambiguity across unrelated durable writes", async () => {
+  const root = makeTempDir("changed-file-evidence"), path = changedFilesCachePath(root, "o", "r");
+  const cache = createChangedFilesCache(root, "o", "r", { fetch: async () => ["src/fix.ts"] });
+  cache.lookup(url(31), "MERGED", evidenceHead); await cache.settle();
+  const body = readFileSync(path, "utf8");
+  for (const duplicate of [{ files: ["src/conflicting.ts"] }, { files: [] }, { files: null }, { files: undefined }, { at: "invalid" }, { at: undefined }]) {
+    for (const reverse of [false, true]) {
+      const original = JSON.parse(body);
+      original.entries.push({ ...original.entries[0], ...duplicate });
+      if (reverse) original.entries.reverse();
+      writeFileSync(path, JSON.stringify(original));
+      const loaded = createChangedFilesCache(root, "o", "r", { fetch: async () => ["src/unrelated.ts"] });
+      assert.deepEqual(loaded.evidence!(url(31), "MERGED", evidenceHead), { status: "unknown", reason: "ambiguous_cache_entries" });
+      const legacyFiles = loaded.lookup(url(31), "MERGED");
+      loaded.lookup(url(32), "MERGED", evidenceHead); await loaded.settle();
+      assert.equal(loaded.evidence!(url(32), "MERGED", evidenceHead).status, "complete", "unrelated valid entry remains qualified");
+      const restarted = createChangedFilesCache(root, "o", "r", { readOnly: true, fetch: async () => assert.fail("read-only reload cannot fetch") });
+      assert.deepEqual(restarted.evidence!(url(31), "MERGED", evidenceHead), { status: "unknown", reason: "ambiguous_cache_entries" });
+      assert.deepEqual(restarted.lookup(url(31), "MERGED"), legacyFiles, "legacy file access retains its contract");
+      assert.equal(restarted.evidence!(url(32), "MERGED", evidenceHead).status, "complete");
+    }
+  }
 });

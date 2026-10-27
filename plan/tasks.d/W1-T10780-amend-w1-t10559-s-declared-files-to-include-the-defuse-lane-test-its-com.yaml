@@ -1,0 +1,22 @@
+- id: W1-T10780
+  title: Amend W1-T10559's declared files to include the defuse-lane test its comment compression must touch
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T10559-durable-daily-progress.yaml
+  acceptance:
+    - claim: W1-T10559's files list names test/the-defuse-lane-sees-a-wire-name-stamp.test.ts, so a comment-compression edit to that test is inside the task's declared scope
+      proof: "grep: test/the-defuse-lane-sees-a-wire-name-stamp.test.ts in plan/tasks.d/W1-T10559-durable-daily-progress.yaml"
+  origin: follow-up harvest from W1-T10559 (run DAEMON-1793040751223, PR 14176)
+  rationale: >-
+    From the 2026-10-26 follow-up on https://github.com/craigoley/remudero/pull/14176, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: Amend scope for defuse-test comment compression; the final
+    allowed-file list excludes it. — from W1-T10559 (run DAEMON-1793040751223,
+    https://github.com/craigoley/remudero/pull/14176)

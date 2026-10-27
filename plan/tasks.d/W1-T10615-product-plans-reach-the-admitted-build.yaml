@@ -31,6 +31,8 @@
     - test/route-wiring.test.ts
     - test/console-api/serve/product-routes.test.ts
     - test/infra/product-build.test.ts
+    - "src/cli/commands/daemon.ts"
+    - "src/lib/daemon.ts"
   status: queued
   attempts: 0
   rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required. Hosted PR14208 proved every new served product operation also needs its public contract and actual route-wiring evidence. W1-T10572 shares only the contract and generated client files for an unrelated gardener description; this task adds the named product operation, and does not supersede that Analytics work.

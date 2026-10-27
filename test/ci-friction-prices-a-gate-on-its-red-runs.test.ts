@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ciFrictionLadder, priceCiFrictionCauses } from "../src/lib/ci-friction-gardener.js";
+import { ciFrictionGatePricedPrs, ciFrictionLadder, priceCiFrictionCauses } from "../src/lib/ci-friction-gardener.js";
 import type { CiFrictionCausePrice } from "../src/lib/ci-friction-gardener.js";
 import type { CiFrictionRemedyTask, OwnerSearch } from "../src/lib/ci-friction-remedy.js";
 import { measureGateFireRates, type GateFireRate, type GateWindowPr } from "../src/lib/gate-fire-rate.js";
@@ -29,6 +29,22 @@ test("a gate's red runs carry their own minutes and pull requests beside its tot
   const two = gates.find(g => g.gate === "coverage-shard (2/8)")!;
   assert.deepEqual([one.minutes, one.redMinutes, one.redPrs], [33, 0, 0], "a gate that never fired cost no friction");
   assert.deepEqual([two.minutes, two.redMinutes, two.redRuns, two.redPrs, two.prs], [22, 4, 1, 1, 2]);
+  assert.deepEqual([one.redPrNumbers, two.redPrNumbers], [[], [1]], "the red pull requests are named, not only counted");
+  const later = measureGateFireRates({ prs: [5, 3].map(number => ({ number, commits: [{ sha: `s${number}`, rollup: [run("lint", "FAILURE", 1)] }] })) } as never);
+  assert.deepEqual(later.gates[0]?.redPrNumbers, [3, 5], "ascending, whatever order the window held them in");
+});
+
+test("a measured gate report names the PRs it prices, and a count it cannot name is never guessed", () => {
+  const report = (gates: GateFireRate[], status: "measured" | "partial" = "measured") => ({ status, prsScanned: 9, neverFired: [], alwaysFired: [], gates });
+  const named = leg(1, { redRuns: 2, redMinutes: 6, redPrs: 2, redPrNumbers: [4, 7] });
+  const legacy = leg(2, { redRuns: 1, redMinutes: 3, redPrs: 1 }); // persisted before `redPrNumbers`: a count, no names
+  const seen = (r: ReturnType<typeof report> | undefined) => { const out = ciFrictionGatePricedPrs(r); return [[...out.prs], out.unnamed]; };
+  assert.deepEqual(seen(report([named, legacy])), [[4, 7], ["coverage-shard (2/8)"]]);
+  assert.deepEqual(seen(report([leg(3, { redRuns: 1, redMinutes: 3, redPrs: 2, redPrNumbers: [4] })])), [[], ["coverage-shard (3/8)"]],
+    "a list that disagrees with its own count names nothing");
+  assert.deepEqual(seen(report([leg(4, { redRuns: 1, redMinutes: 0, redPrs: 1, redPrNumbers: [4] })])), [[], []], "an unpriced gate charges no PR");
+  assert.deepEqual(seen(report([named], "partial")), [[], []], "a partial report prices nothing, so it charges no PR");
+  assert.deepEqual(seen(undefined), [[], []]);
 });
 
 test("eight coverage-shard gate legs price as one check family on red-run minutes only", () => {
