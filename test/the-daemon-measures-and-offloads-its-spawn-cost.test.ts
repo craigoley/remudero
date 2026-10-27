@@ -5,7 +5,9 @@ import test from "node:test";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { daemonBoot, reportLoopLag, SPAWN_HELPER_SWITCH, takeSyncSpawn } from "#src/lib/daemon.js";
 import { startReadPlaneTelemetry, type SyncSpawnCallerTotal } from "#src/lib/read-plane.js";
-import { installedSpawnHelper, installSpawnHelper, runDirect, runRouted, startSpawnHelper, type SpawnHelper,
+import { LoopBoundedChildTimeout } from "#src/lib/loop-bounded-child.js";
+import { defaultMergeProbeGit } from "#src/lib/merge-probe.js";
+import { execFileRouted, installedSpawnHelper, installSpawnHelper, runDirect, runRouted, startSpawnHelper, type SpawnHelper,
   type SpawnRequest, type SpawnResult } from "#src/lib/spawn-helper.js";
 
 type Row = { step: string } & Record<string, unknown>;
@@ -186,6 +188,53 @@ test("W1-T9754: the boot starts and installs the helper only when the switch is 
   }
 });
 
+const routedRows = (rows: Row[]): Row[] => rows.filter((row) => row.step === "spawn.routed");
+
+test("W1-T9754: a production caller's awaited child routes through the helper and keeps execFile's results", async () => {
+  installSpawnHelper(undefined);
+  const gitHere = defaultMergeProbeGit(process.cwd());
+  const unrouted = await gitHere(["--version"]);
+  assert.equal(unrouted.status, 0, "with nothing installed the caller runs exactly as before");
+  const { rows, log } = capture();
+  const helper = startSpawnHelper({ log });
+  installSpawnHelper(helper);
+  try {
+    assert.equal(routedRows(rows).length, 0, "no row from the unrouted call");
+    // The landing's merge probe: its own git leaf, unchanged, now answered by the helper.
+    const version = await gitHere(["--version"]);
+    assert.equal(version.status, 0);
+    assert.match(version.stdout, /^git version /);
+    const missing = await gitHere(["rev-parse", "--verify", "--quiet", "refs/heads/w1-t9754-no-such-branch"]);
+    assert.equal(missing.status, 1, "a non-zero exit reaches the caller as its status");
+    const viaHelper = routedRows(rows);
+    assert.deepEqual(viaHelper.map((row) => [row.via, row.command]), [["helper", "git"], ["helper", "git"]]);
+    assert.ok(viaHelper.every((row) => typeof row.sync_ms === "number"), "each row carries its loop ms");
+
+    const shaped = await execFileRouted("sh", ["-c", "echo out; echo err >&2; exit 3"], { encoding: "utf8" })
+      .then(() => undefined, (error: { code?: unknown; stdout?: unknown; stderr?: unknown }) => error);
+    assert.deepEqual([shaped?.code, shaped?.stdout, shaped?.stderr], [3, "out\n", "err\n"], "rejects as execFile does");
+    const ok = await execFileRouted("git", ["--version"], { encoding: "utf8", cwd: "/", env: { PATH: process.env.PATH } });
+    assert.match(ok.stdout, /^git version /);
+    const stopped = await execFileRouted("sleep", ["5"], { encoding: "utf8", timeout: 100 }).then(() => undefined, (e: unknown) => e);
+    assert.ok(stopped instanceof LoopBoundedChildTimeout, "a child stopped at its budget rejects with the named timeout");
+
+    const option = await execFileRouted("true", [], { encoding: "utf8", shell: false, uid: undefined, windowsHide: true });
+    assert.equal(option.stdout, "");
+    assert.deepEqual(routedRows(rows).at(-1), { step: "spawn.routed", via: "direct", sync_ms: routedRows(rows).at(-1)?.sync_ms,
+      command: "true", reason: "unsupported_option: shell,windowsHide" }, "an option the pipe cannot carry runs direct, named");
+
+    process.kill(helper.pid as number, "SIGKILL");
+    await until(() => helper.unhealthy() !== undefined);
+    const after = await gitHere(["--version"]);
+    assert.equal(after.status, 0, "the caller still gets its answer when the helper is gone");
+    const fallback = routedRows(rows).at(-1);
+    assert.deepEqual([fallback?.via, fallback?.reason], ["direct", "helper_exited: SIGKILL"]);
+  } finally {
+    helper.stop();
+    installSpawnHelper(undefined);
+  }
+});
+
 const median = (values: number[]): number => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? NaN;
 
 test("W1-T9754: a large parent spawns through the helper for less loop time", async () => {
@@ -213,7 +262,17 @@ test("W1-T9754: a large parent spawns through the helper for less loop time", as
       `helper p50 ${median(routed).toFixed(3)} ms must be under direct p50 ${median(direct).toFixed(3)} ms`);
     assert.ok(routedMeter < directMeter,
       `the meter saw ${routedMeter} ms of forks through the helper against ${directMeter} ms direct`);
+    // The same comparison through the seam production callers use: no helper installed, then the helper installed.
+    installSpawnHelper(undefined);
+    for (let i = 0; i < 5; i++) await execFileRouted("true", [], { encoding: "utf8" });
+    const seamDirect = telemetry.sample().async_spawn_sync_ms;
+    installSpawnHelper(helper);
+    for (let i = 0; i < 5; i++) await execFileRouted("true", [], { encoding: "utf8" });
+    const seamRouted = telemetry.sample().async_spawn_sync_ms;
+    assert.ok(seamRouted < seamDirect,
+      `the production seam cost ${seamRouted} ms through the helper against ${seamDirect} ms direct`);
   } finally {
+    installSpawnHelper(undefined);
     telemetry.stop();
     helper.stop();
     ballast.length = 0;
