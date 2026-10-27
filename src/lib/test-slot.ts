@@ -1775,7 +1775,7 @@ export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryB
     }
     if (waited() >= waitBoundMs) {
       log(JSON.stringify({ step: "test_slot.static_wait_bound_exceeded", label, waitedMs: waited(), holders: seen.holders }));
-      return admit("wait_bound_exceeded", `static admission WAIT BOUND EXCEEDED after ${Math.round(waited() / 1000)}s (headroom ${mib(headroom)} MiB < ${mib(need)} MiB beside ${seen.holders.join("; ")}); ran anyway`);
+      return admit("wait_bound_exceeded", `static admission WAIT BOUND EXCEEDED after ${Math.round(waited() / 1000)}s headroom ${mib(headroom)} MiB < ${mib(need)} MiB beside ${seen.holders.join("; ")}; ran anyway`);
     }
     if (!announced) {
       announced = true;
