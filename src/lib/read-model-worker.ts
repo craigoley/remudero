@@ -1963,7 +1963,7 @@ export function readModelLaneViews(
     { name: NAV_BADGE_VIEW_NAME, create: () => createNavBadgeReadModelView(ledgerSource) },
     { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource, selectedRegistryObserver) },
     { name: CODE_HEALTH_VIEW_NAME, demand: true, create: () => createCodeHealthView({
-      ...(data.stateDir ? { stateDir: data.stateDir } : {}), keys: () => demand.keys(CODE_HEALTH_VIEW_NAME),
+      keys: () => demand.keys(CODE_HEALTH_VIEW_NAME),
     }) },
     { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView({ modelApprovalConfig: data.modelApprovalConfig }) },
     { name: DAILY_PROGRESS_VIEW_NAME, demand: true, create: () => createDailyProgressView({
