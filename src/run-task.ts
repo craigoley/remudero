@@ -27452,12 +27452,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       return async () => {
         try {
           const pass = runGardenerOverseer(productionGardenerOverseerPorts({ stateDir, repoRoot, owner, repo, fetch: ghJson, log, escalate: raiseDuplicate }));
-          if (pass.ran) {
-            try { log("improvement_effects.pass", await reconcileManagedImprovementEffects({ stateDir, repoRoot, repository: `${owner}/${repo}`, log })); }
-            catch (error) {
-              log("improvement_effects.pass_failed", { reason: "Independent improvement follow-up could not be completed.", error: String(error) });
-            }
-          }
+
         } catch (e) {
           log("gardener_overseer.overseer_failed", { error: String((e as Error)?.message ?? e) });
         }
