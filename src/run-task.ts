@@ -10710,7 +10710,8 @@ function* fixCensusSnapshotSteps(
     .filter(([key]) => !/^(?:GIT_|NODE_TEST_CONTEXT$|RMD_SELF_SYNC_DONE$)/.test(key)));
   env[CENSUS_SNAPSHOT_ENV] = path;
   const scriptsRoot = repoRoot;
-  const childTimeBoundMs = 60_000;
+  // Pinned to scripts/census-precheck.mjs's CENSUS_SUITE_CHILD_TIME_BOUND_MS: a budget reporting any other value refuses.
+  const childTimeBoundMs = 120_000;
   // The trusted controller reports its own fixed stage inventory; no worker code/table is loaded here.
   const budgetRead = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--snapshot-budget"],
     { cwd: scriptsRoot, env, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
