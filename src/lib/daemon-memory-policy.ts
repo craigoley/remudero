@@ -22,14 +22,18 @@
  */
 
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { getHeapStatistics, setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import { parse as parseYaml } from "yaml";
 
 import { systemClock, type Clock } from "./clock.js";
+import { configPath } from "./config.js";
 import { FOOTPRINT_MAX_SAMPLES, FOOTPRINT_RETAIN_MS } from "./daemon-footprint.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { loadRunChildMode, type RunChildMode } from "./policy.js";
+import { readRunChildModeUnion, runChildModeEvidence, runChildModeFor, runChildModeWindow } from "./run-child-mode.js";
 
 /** `plan/policy.yaml`'s optional `daemonMemory:` section, resolved. */
 export interface DaemonMemoryPolicy {
@@ -139,6 +143,8 @@ export interface DaemonMemoryEntryIo {
   setFlags?: (flags: string) => void;
   /** The environment children inherit. Production: `process.env`. */
   env?: NodeJS.ProcessEnv;
+  /** W1-T9106: the learned-ceiling file the launcher read. Production (no `env`): this instance's, from its config root. */
+  heapCeiling?: HeapCeilingLocation;
 }
 
 export interface DaemonMemoryEntryResult {
@@ -151,6 +157,10 @@ export interface DaemonMemoryEntryResult {
   glibc_tunables?: string;
   /** The node flags a run child and an automated retro child start with: {@link childHeapPolicyArgs}. */
   child_node_args?: string[];
+  /** W1-T9106: `learned` when this process started under the learned ceiling, else `inherited` with the reason. */
+  ceiling_source?: "learned" | "inherited";
+  ceiling_unapplied?: string;
+  learned_ceiling_mib?: number;
 }
 
 /** The growth percent this process's run and retro children start with; set by {@link applyDaemonMemoryPolicy}. */
@@ -176,7 +186,10 @@ export function applyDaemonMemoryPolicy(policy: DaemonMemoryPolicy, io: DaemonMe
   if (after === undefined) delete env.NODE_OPTIONS;
   else env.NODE_OPTIONS = after;
   childHeapGrowingPercent = policy.heapGrowingPercent;
+  // An injected env is not this process's own launch, so it names no ceiling source unless a file is injected with it.
+  const location = io.heapCeiling ?? (io.env === undefined ? defaultHeapCeilingLocation() : undefined);
   return {
+    ...(location === undefined ? {} : heapCeilingSource(before, location)),
     heap_growing_percent: Math.round(policy.heapGrowingPercent),
     child_node_args: childHeapPolicyArgs(),
     ...(before !== undefined ? { node_options_before: before } : {}),
@@ -753,6 +766,10 @@ export interface HeapCeilingProposal {
   live_max_bytes?: number;
   headroom_factor: number;
   floor_bytes?: number;
+  /** W1-T9106: what the learned-ceiling file now says, when this shadow writes one. */
+  learned_ceiling_mode?: HeapCeilingMode;
+  learned_ceiling_reason?: string;
+  learned_ceiling_mib?: number;
 }
 
 /** Pure: p99.9 of the post-collection live set × the headroom V8 allows above it before collecting (1 + the growth
@@ -776,6 +793,251 @@ export function proposeHeapCeiling(
     ...base, live_p999_bytes: p999, live_max_bytes: max, floor_bytes: floor,
     proposed_ceiling_bytes: Math.round(Math.max(p999 * headroom, floor)),
   };
+}
+
+// ── W1-T9106: the learned ceiling, applied at boot (ADR 0007 decision C, offset 2) ────────────────────────────────────
+// MEASURED 2026-10-13: every boot's daemon.memory_policy row shows `--max-old-space-size=8192` and a heap_size_limit of
+// 8.79 GB against a live heap p50 of 910 MiB, so V8 keeps garbage up to RSS p90 2,539 MiB. A tighter ceiling risks a
+// heap-limit exit, which costs only a boot once build runs are adopted children. So the shadow writes its proposal to
+// `<state>/daemon-heap-ceiling.json`, and bin/rmd starts the next daemon under it when the file is applied and current.
+
+/** The learned-ceiling file, beside the samples it was learned from. bin/rmd reads it before it starts a daemon. */
+export const LEARNED_HEAP_FILE = "daemon-heap-ceiling.json";
+/** PRIMARY CONTROL, mirrored: the share of V8's limit at which the daemon leaves with a `v8_limit` heap-pressure exit,
+ *  daemon.ts's HEAP_PRESSURE_RESTART_FRACTION (that module imports this one, so the value is repeated, not imported). */
+export const HEAP_LIMIT_EXIT_FRACTION = 0.75;
+/** BACKSTOP: a raise after a heap-limit exit adds at least this to the live set at exit when the samples show less
+ *  spread (a flat series would otherwise raise by nothing). */
+export const HEAP_LIMIT_RAISE_MIN_BYTES = 64 * 1024 * 1024;
+/** BACKSTOP: a file is current for this long after it was written. The daemon rewrites it at every boot and hourly, so
+ *  this fires only once that has stopped. */
+export const HEAP_CEILING_CURRENT_MS = 24 * 60 * 60_000;
+/** BACKSTOP: the launcher never applies a ceiling below this; a smaller value is read as damaged. */
+export const LEARNED_CEILING_MIN_MIB = 256;
+const MIB = 1024 * 1024;
+
+/** `applied`: the launcher starts the daemon under it. `shadow`: report-only, as W1-T8883. */
+export type HeapCeilingMode = "applied" | "shadow";
+
+/** Whether a learned ceiling may be applied, and why. */
+export interface HeapCeilingGate {
+  applies: boolean;
+  reason: string;
+}
+
+/** A boot that ended at its heap limit: a `v8_limit` heap-pressure exit seen live, or a heap out-of-memory exit read
+ *  at the next boot from the previous boot's last sample (the process died before it could say so). */
+export interface HeapLimitExit {
+  basis: "v8_limit" | "heap_oom";
+  at: number;
+  used_bytes: number;
+  heap_size_limit_bytes: number;
+}
+
+/** The file's contents. */
+export interface LearnedHeapCeiling {
+  version: 1;
+  /** The state directory it was written for: a copy found under another instance is not current there. */
+  state_dir: string;
+  mode: HeapCeilingMode;
+  mode_reason: string;
+  written_at: number;
+  valid_until: number;
+  /** The learning window opened here; the ceiling is not lowered before `learned_since + window_ms`. */
+  learned_since: number;
+  window_ms: number;
+  ceiling_bytes?: number;
+  ceiling_mib?: number;
+  /** `restartShare` of the container's memory budget: the ceiling never exceeds it. */
+  cap_bytes?: number;
+  capped?: true;
+  basis: {
+    samples: number; after_gc_samples: number; boots_sampled: number;
+    live_p999_bytes?: number; live_max_bytes?: number; live_spread_bytes?: number;
+    proposed_ceiling_bytes?: number; proposed_unlearned?: string;
+  };
+  raised_by?: HeapLimitExit & { raised_to_bytes: number };
+}
+
+export interface HeapCeilingLocation {
+  stateDir: string;
+  read?: (path: string) => string;
+  now?: () => number;
+}
+
+export function heapCeilingPath(stateDir: string): string {
+  return join(stateDir, LEARNED_HEAP_FILE);
+}
+
+/** This instance's state directory as bin/rmd finds it: `<config root>/state`, the root defaulting as loadConfig's. */
+export function defaultHeapCeilingLocation(read: (path: string) => string = (path) => readFileSync(path, "utf8")): HeapCeilingLocation {
+  let root: unknown;
+  try {
+    root = (JSON.parse(read(configPath())) as { root?: unknown } | null)?.root;
+  } catch (error) {
+    void error; // No config yet: loadConfig's own default root, exactly as bin/rmd falls back.
+  }
+  return { stateDir: join(typeof root === "string" && root !== "" ? root : join(homedir(), "Remudero"), "state") };
+}
+
+/** The live set's spread: the median change between successive post-collection readings (else all readings). */
+export function liveSpreadOf(samples: readonly HeapSample[]): number | undefined {
+  const collected = samples.filter((s) => s.after_gc);
+  return successiveSpread((collected.length > 1 ? collected : samples).map((s) => s.used_bytes));
+}
+
+/** The file, or why it cannot be read. Only a record carrying the fields the learner needs is a prior. */
+export function parseLearnedHeapCeiling(text: string): LearnedHeapCeiling | { unread: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    void error; // A torn or foreign file: named, never read as a ceiling.
+    return { unread: "unparseable" };
+  }
+  const r = parsed as Partial<LearnedHeapCeiling> | null;
+  if (r === null || typeof r !== "object" || r.version !== 1) return { unread: "not a version 1 record" };
+  const numeric = [r.written_at, r.valid_until, r.learned_since].every((n) => typeof n === "number" && Number.isFinite(n));
+  if (!numeric || typeof r.state_dir !== "string" || (r.mode !== "applied" && r.mode !== "shadow")) return { unread: "missing fields" };
+  if (r.ceiling_bytes !== undefined && !(typeof r.ceiling_bytes === "number" && r.ceiling_bytes > 0)) return { unread: "bad ceiling_bytes" };
+  return r as LearnedHeapCeiling;
+}
+
+export interface NextHeapCeilingInput {
+  stateDir: string;
+  nowMs: number;
+  proposal: HeapCeilingProposal;
+  spreadBytes?: number;
+  /** The container's memory budget (memory.high, else memory.max); absent, nothing bounds the ceiling. */
+  budgetBytes?: number;
+  restartShare: number;
+  gate: HeapCeilingGate;
+  prior?: LearnedHeapCeiling;
+  exit?: HeapLimitExit;
+}
+
+/** Pure: the next file. Inside the prior's window the ceiling is never lowered; a heap-limit exit raises it to hold
+ *  the live set at exit plus its spread below the exit fraction; it never exceeds `restartShare` of the budget. It is
+ *  `applied` only when the gate allows, a budget bounds it, and a capped raise still clears the limit that exited. */
+export function nextLearnedHeapCeiling(i: NextHeapCeilingInput): LearnedHeapCeiling {
+  const { prior, proposal, nowMs } = i;
+  const inWindow = prior?.ceiling_bytes !== undefined && prior.learned_since <= nowMs && nowMs - prior.learned_since < HEAP_SAMPLE_RETAIN_MS;
+  let ceiling = proposal.proposed_ceiling_bytes;
+  if (inWindow) ceiling = Math.max(ceiling ?? 0, prior.ceiling_bytes as number);
+  let raised = inWindow ? prior.raised_by : undefined;
+  if (i.exit !== undefined) {
+    const to = Math.ceil((i.exit.used_bytes + Math.max(i.spreadBytes ?? 0, HEAP_LIMIT_RAISE_MIN_BYTES)) / HEAP_LIMIT_EXIT_FRACTION);
+    ceiling = Math.max(ceiling ?? 0, to);
+    raised = { ...i.exit, raised_to_bytes: to };
+  }
+  const cap = i.budgetBytes === undefined ? undefined : Math.floor(i.restartShare * i.budgetBytes);
+  const capped = ceiling !== undefined && cap !== undefined && ceiling > cap;
+  if (capped) ceiling = cap;
+  const mib = ceiling === undefined ? undefined : Math.floor(ceiling / MIB);
+  const unapplied = !i.gate.applies ? i.gate.reason
+    : mib === undefined ? `no ceiling learned yet: ${proposal.proposed_unlearned ?? "no proposal"}`
+    : cap === undefined ? "no memory budget to bound the ceiling by restartShare"
+    : mib < LEARNED_CEILING_MIN_MIB ? `below the ${LEARNED_CEILING_MIN_MIB} MiB floor`
+    : capped && i.exit !== undefined && (ceiling as number) <= i.exit.heap_size_limit_bytes ? "a raise capped by restartShare would repeat the exit"
+    : undefined;
+  return {
+    version: 1, state_dir: i.stateDir, mode: unapplied === undefined ? "applied" : "shadow", mode_reason: unapplied ?? i.gate.reason,
+    written_at: nowMs, valid_until: nowMs + HEAP_CEILING_CURRENT_MS,
+    learned_since: inWindow ? prior.learned_since : nowMs, window_ms: HEAP_SAMPLE_RETAIN_MS,
+    ...(ceiling === undefined ? {} : { ceiling_bytes: ceiling, ceiling_mib: mib }),
+    ...(cap === undefined ? {} : { cap_bytes: cap }), ...(capped ? { capped: true as const } : {}),
+    basis: {
+      samples: proposal.live_samples, after_gc_samples: proposal.after_gc_samples, boots_sampled: proposal.boots_sampled,
+      live_p999_bytes: proposal.live_p999_bytes, live_max_bytes: proposal.live_max_bytes, live_spread_bytes: i.spreadBytes,
+      proposed_ceiling_bytes: proposal.proposed_ceiling_bytes, proposed_unlearned: proposal.proposed_unlearned,
+    },
+    ...(raised === undefined ? {} : { raised_by: raised }),
+  };
+}
+
+/** The heap out-of-memory exit a boot cannot ledger: the previous boot, under an applied ceiling, last sampled its heap
+ *  at the exit fraction of it, and no raise has yet been taken from that sample. */
+export function priorBootAtLimit(samples: readonly HeapSample[], prior: LearnedHeapCeiling | undefined, pid: number): HeapLimitExit | undefined {
+  if (prior?.mode !== "applied" || prior.ceiling_bytes === undefined) return undefined;
+  const last = samples.filter((s) => s.pid !== pid).at(-1);
+  if (last === undefined || last.used_bytes < HEAP_LIMIT_EXIT_FRACTION * prior.ceiling_bytes || (prior.raised_by?.at ?? -Infinity) >= last.at) return undefined;
+  return { basis: "heap_oom", at: last.at, used_bytes: last.used_bytes, heap_size_limit_bytes: prior.ceiling_bytes };
+}
+
+/** The ceiling applies only while run children are on with adoption live: a heap-limit exit then costs one boot and
+ *  no run. `on` adopts at every boot; `auto` applies only once its own evidence decides `on`. Anything else (or an
+ *  unreadable policy or evidence) runs builds in-process, where an exit would cost the run, so it stays report-only. */
+export function runChildrenAdoptedGate(
+  stateDir: string, readMode: () => RunChildMode = loadRunChildMode, readUnion: typeof readRunChildModeUnion = readRunChildModeUnion,
+): HeapCeilingGate {
+  try {
+    const mode = readMode();
+    if (mode === "on") return { applies: true, reason: "sweep.runChild.mode on: runs are adopted children" };
+    if (mode !== "auto") return { applies: false, reason: `sweep.runChild.mode ${mode}: runs are in-process` };
+    const union = readUnion(stateDir);
+    if (union.unread.length > 0) return { applies: false, reason: `auto's evidence is unreadable (${union.unread.join(", ")})` };
+    const decided = runChildModeFor("auto", runChildModeEvidence(runChildModeWindow(union.rows))).mode;
+    return decided === "on"
+      ? { applies: true, reason: "sweep.runChild.mode auto decided on: runs are adopted children" }
+      : { applies: false, reason: `sweep.runChild.mode auto decided ${decided}: runs are in-process` };
+  } catch (error) {
+    return { applies: false, reason: `run-child mode unreadable: ${errnoOrReason(error)}` };
+  }
+}
+
+/** What the launcher does with the file: the learned ceiling in place of every inherited `--max-old-space-size`, or the
+ *  inherited value and why. bin/rmd runs this same rule in plain node before it starts a daemon (no tsx at launch). */
+export function launchHeapCeiling(
+  text: string | undefined, nodeOptions: string | undefined, stateDir: string, nowMs: number,
+): { ceiling_source: "learned"; ceiling_mib: number; node_options: string } | { ceiling_source: "inherited"; reason: string } {
+  if (text === undefined) return { ceiling_source: "inherited", reason: "absent" };
+  let r: Partial<LearnedHeapCeiling> | null;
+  try {
+    r = JSON.parse(text) as Partial<LearnedHeapCeiling> | null;
+  } catch (error) {
+    void error; // A torn file keeps the inherited ceiling, and says so.
+    return { ceiling_source: "inherited", reason: "unreadable" };
+  }
+  const mib = r?.ceiling_mib;
+  const why = r === null || typeof r !== "object" || r.version !== 1 ? "unreadable"
+    : r.state_dir !== stateDir ? "written for another instance"
+    : !(nowMs < (r.valid_until as number)) ? "stale"
+    : r.mode !== "applied" ? `shadow: ${String(r.mode_reason)}`
+    : !Number.isInteger(mib) || (mib as number) < LEARNED_CEILING_MIN_MIB ? "unreadable ceiling_mib"
+    : undefined;
+  if (why !== undefined) return { ceiling_source: "inherited", reason: why };
+  const kept = withoutHeapCeiling(nodeOptions);
+  return { ceiling_source: "learned", ceiling_mib: mib as number, node_options: `${kept === undefined ? "" : `${kept} `}--max-old-space-size=${mib}` };
+}
+
+/** The last `--max-old-space-size` NODE_OPTIONS sets, in MiB. */
+function heapCeilingMibOf(nodeOptions: string | undefined): number | undefined {
+  const words = (nodeOptions ?? "").split(/\s+/).filter(Boolean);
+  let mib: number | undefined;
+  for (let i = 0; i < words.length; i++) {
+    const m = HEAP_CEILING_FLAG.exec(words[i]);
+    if (m) mib = Number(m[1] === undefined ? words[i + 1] : m[1].slice(1));
+  }
+  return mib;
+}
+
+/** The daemon.memory_policy row's `ceiling_source`: the launcher's own rule over the same file, and whether this
+ *  process's NODE_OPTIONS carries its answer (a daemon started without bin/rmd inherits even when the file applies). */
+export function heapCeilingSource(nodeOptions: string | undefined, location: HeapCeilingLocation): Pick<DaemonMemoryEntryResult, "ceiling_source" | "ceiling_unapplied" | "learned_ceiling_mib"> {
+  let text: string | undefined;
+  try {
+    text = (location.read ?? ((path: string) => readFileSync(path, "utf8")))(heapCeilingPath(location.stateDir));
+  } catch (error) {
+    // No file is `absent` (the launcher's own reading); any other failure is named.
+    const code = errnoOrReason(error);
+    if (code !== "ENOENT") return { ceiling_source: "inherited", ceiling_unapplied: `unreadable: ${code}` };
+  }
+  const launch = launchHeapCeiling(text, nodeOptions, location.stateDir, (location.now ?? Date.now)());
+  if (launch.ceiling_source === "inherited") return { ceiling_source: "inherited", ceiling_unapplied: launch.reason };
+  if (heapCeilingMibOf(nodeOptions) !== launch.ceiling_mib) {
+    return { ceiling_source: "inherited", ceiling_unapplied: "the launcher did not apply it", learned_ceiling_mib: launch.ceiling_mib };
+  }
+  return { ceiling_source: "learned", learned_ceiling_mib: launch.ceiling_mib };
 }
 
 export interface HeapShadow {
@@ -803,6 +1065,12 @@ export interface HeapShadowOptions {
   onPersistError?: (reason: string) => void;
   /** Called with a proposal at most once per {@link HEAP_PROPOSAL_EVERY_MS}, from the reading that finds it due. */
   onProposal?: (proposal: HeapCeilingProposal) => void;
+  /** W1-T9106: the learned-ceiling file's store. Default: the real one, unless `io` is injected (then none is written). */
+  ceilingIo?: HeapSampleIo;
+  /** Whether the learned ceiling may apply. Default: {@link runChildrenAdoptedGate}, read once per shadow. */
+  ceilingGate?: () => HeapCeilingGate;
+  /** The container's memory budget. Default: {@link readDaemonMemory}'s. */
+  budgetBytes?: () => number | undefined;
 }
 
 function errnoOrReason(error: unknown): string {
@@ -833,9 +1101,46 @@ export function createHeapShadow(opts: HeapShadowOptions): HeapShadow {
   let lastPersistAt = -Infinity;
   let lastProposalAt = clock.now();
   let dirty = false;
-  const propose = () => {
+  const ceilingIo = opts.ceilingIo ?? (opts.io === undefined ? realHeapSampleIo : undefined);
+  const ceilingStateDir = dirname(opts.path);
+  let gate: HeapCeilingGate | undefined;
+  let priorBootRead = false;
+  let raisedThisBoot = false;
+  // W1-T9106: every proposal also rewrites the learned-ceiling file the next launch reads. Never in the path: a failure
+  // is reported to `onPersistError` and the file keeps what it said.
+  const writeCeiling = (proposal: HeapCeilingProposal, exit?: HeapLimitExit): LearnedHeapCeiling | undefined => {
+    if (ceilingIo === undefined) return undefined;
+    try {
+      let prior: LearnedHeapCeiling | undefined;
+      try {
+        const read = parseLearnedHeapCeiling(ceilingIo.readFile(heapCeilingPath(ceilingStateDir)));
+        prior = "unread" in read ? undefined : read;
+      } catch (error) {
+        void error; // No file yet (a first learned ceiling) or an unreadable one: learned afresh, never a crash.
+      }
+      gate ??= (opts.ceilingGate ?? (() => runChildrenAdoptedGate(ceilingStateDir)))();
+      if (!priorBootRead) exit ??= priorBootAtLimit(held, prior, pid);
+      priorBootRead = true;
+      const record = nextLearnedHeapCeiling({
+        stateDir: ceilingStateDir, nowMs: clock.now(), proposal, spreadBytes: liveSpreadOf(held),
+        budgetBytes: (opts.budgetBytes ?? (() => readDaemonMemory().budget_bytes))(), restartShare: policy.restartShare, gate, prior, exit,
+      });
+      ceilingIo.writeFile(heapCeilingPath(ceilingStateDir), `${JSON.stringify(record)}\n`);
+      return record;
+    } catch (error) {
+      const reason = `heap ceiling: ${errnoOrReason(error)}`;
+      opts.onPersistError?.(reason);
+      return undefined;
+    }
+  };
+  const propose = (): HeapCeilingProposal => {
     ceilingInForce = snapshot().heap_size_limit_bytes;
-    return proposeHeapCeiling(held, policy.heapGrowingPercent, ceilingInForce);
+    const proposal = proposeHeapCeiling(held, policy.heapGrowingPercent, ceilingInForce);
+    const learned = writeCeiling(proposal);
+    return learned === undefined ? proposal : {
+      ...proposal, learned_ceiling_mode: learned.mode, learned_ceiling_reason: learned.mode_reason,
+      ...(learned.ceiling_mib === undefined ? {} : { learned_ceiling_mib: learned.ceiling_mib }),
+    };
   };
   const flush = (): { persisted: true } | { persisted: false; reason: string } => {
     try {
@@ -872,6 +1177,13 @@ export function createHeapShadow(opts: HeapShadowOptions): HeapShadow {
       lastHeartbeatAt = at;
       const now = snapshot();
       observe({ used_bytes: now.heap_used_bytes, size_bytes: now.heap_physical_bytes, after_gc: false });
+      // The `v8_limit` heap-pressure exit leaves at this tick's boundary: raise the next boot's ceiling before it goes.
+      const limit = now.heap_size_limit_bytes;
+      if (!raisedThisBoot && ceilingIo !== undefined && limit > 0 && now.heap_used_bytes >= HEAP_LIMIT_EXIT_FRACTION * limit) {
+        raisedThisBoot = true;
+        writeCeiling(proposeHeapCeiling(held, policy.heapGrowingPercent, limit),
+          { basis: "v8_limit", at, used_bytes: now.heap_used_bytes, heap_size_limit_bytes: limit });
+      }
     },
     flush: () => (dirty ? flush() : { persisted: true }),
     samples: () => held,
