@@ -1,0 +1,38 @@
+- id: W1-T10887
+  title: "A CODEQL MAIN-RUN GAP IS CLOSED BY ITS REPAIR OR NAMED UNREPAIRABLE — the reconciler's ci row for codeql.yml dispatches workflow_dispatch on ref main, yet many incidents (96a35e0d5e5e, 80e52ac535ce, 64f2306e1dca, 5e0679aec91d and others) report 'gap persists after its repair attempt' for codeql.yml, so the repair does not satisfy the observe() it is judged by and each commit pages a human"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high
+  band_meaning: span
+  origin: feedback#incident-96a35e0d5e5e75cb
+  files:
+    - src/lib/state-reconciler.ts
+    - src/lib/main-run-gaps.ts
+    - test/a-codeql-main-run-gap-is-closed-by-its-repair-or-named-unrepairable.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Incident 96a35e0d5e5e (invariant reconcile.ci, count 1): 'codeql.yml run covering main commit a1c4aff4: gap persists
+    after its repair attempt'. The same sample repeats across at least a dozen incidents, each for a different commit and
+    always codeql.yml. mainWorkflowStateRows (src/lib/state-reconciler.ts) judges a repair by countWorkflowRuns(commit,
+    workflow) or, via the recorded repaired head, countWorkflowRuns(repairedHead, workflow). A workflow_dispatch run on
+    main covers the dispatch-time head, so for CodeQL (slow, or whose runs are recorded under another sha or event) the
+    row stays false on the next pass and escalates. No existing task covers this.
+    Sizing rationale (#588 merits test): one test asserts a single cross-file invariant (reconciler ci row and
+    main-run-gaps run-state must agree), unsatisfiable piecewise, so risk:high with band_meaning: span.
+  design: |
+    Reproduce with a reader whose dispatch creates a run for the head sha only. Then make the ci row either (a) count a
+    dispatched run for the repaired head that is queued or in progress as in flight, so it is not escalated while it runs,
+    or (b) escalate once with an explicit reason naming the repaired head and its run state. Do not change the
+    one-repair-per-gap bound.
+  acceptance:
+    - claim: "a dispatched codeql.yml run that is in flight or covers the repaired head does not escalate the gap, and a truly missing one escalates once with the repaired head named"
+      proof: "unit test: test/a-codeql-main-run-gap-is-closed-by-its-repair-or-named-unrepairable.test.ts"
+  falsifier: |
+    At origin/main the new test fails: a reader whose dispatch yields only a head-sha run escalates with the bare reason
+    'gap persists after its repair attempt'.
