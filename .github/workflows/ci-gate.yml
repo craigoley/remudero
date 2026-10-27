@@ -288,7 +288,7 @@ jobs:
             # (`--slurp` can't combine with `-q`, so flatten the page array with a separate jq.)
             local raw attempt=1
             while [ "${attempt}" -le "${RETRY_ATTEMPTS}" ]; do
-              if raw="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" --paginate --slurp)"; then
+              if raw="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100&filter=all" --paginate --slurp)"; then
                 jq -c '[ .[].check_runs[] | {id, name, status, conclusion, started_at, external_id}
                           | .producer = (if ((.external_id // "")
                                              | test("^(run:[0-9]+:[0-9]+:)?job:[0-9]+$"))
