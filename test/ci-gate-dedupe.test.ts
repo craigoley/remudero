@@ -150,10 +150,12 @@ test("the real CI inventory query and jq retain posted results across attempts",
   assert.ok(filter, "the actual producer-aware jq filter must be identifiable");
   const clonedJob = { id: 30, name: "light-gates", status: "completed", conclusion: "success",
     started_at: "2026-10-27T01:44:04Z", external_id: "copied-job-attempt-three" };
-  for (const conclusion of ["success", "failure", "absent"] as const) {
-    const oldPost = { id: 10, name: "rule-checks", status: "completed", conclusion: "failure",
+  for (const conclusion of ["success", "failure", "absent", "pending"] as const) {
+    const oldPost = { id: 10, name: "rule-checks", status: "completed", conclusion: conclusion === "pending" ? "success" : "failure",
       started_at: "2026-10-27T01:55:32Z", external_id: "run:40434301641:1:job:121959187138" };
-    const latestPost = { ...oldPost, id: 20, conclusion, started_at: "2026-10-27T03:22:57Z" };
+    const latestPost = { ...oldPost, id: 20, conclusion: conclusion === "pending" ? null : conclusion,
+      status: conclusion === "pending" ? "queued" : "completed",
+      started_at: conclusion === "pending" ? null : "2026-10-27T03:22:57Z" };
     const sameNameJob = { ...clonedJob, name: "rule-checks", started_at: "2026-10-27T04:00:00Z" };
     const pages = conclusion === "absent" ? [{ check_runs: [clonedJob] }]
       : [{ check_runs: [clonedJob, oldPost, sameNameJob] }, { check_runs: [latestPost] }];
@@ -167,9 +169,11 @@ test("the real CI inventory query and jq retain posted results across attempts",
       assert.equal(read.status, 0, read.stderr);
       const projected: SpawnSyncReturns<string> = spawnSync("jq", ["-c", filter[1]], { input: read.stdout, encoding: "utf8" });
       assert.equal(projected.status, 0, projected.stderr);
-      const runs = JSON.parse(projected.stdout) as Array<{ name: string; producer: string; conclusion: string }>;
+      const runs = JSON.parse(projected.stdout) as Array<{ name: string; producer: string; conclusion: string | null; status: string }>;
       const posted = runs.filter(run => run.name === "rule-checks" && run.producer === "posted");
-      assert.deepEqual(posted.map(run => run.conclusion), conclusion === "absent" ? [] : [conclusion]);
+      assert.deepEqual(posted.map(run => run.conclusion), conclusion === "absent" ? [] : [conclusion === "pending" ? null : conclusion]);
+      if (conclusion === "pending") assert.deepEqual(posted.map(run => run.status), ["queued"],
+        "an old timestamped success cannot hide a newer attempt that has not started");
       if (conclusion === "failure") assert.ok(runs.some(run => run.name === "rule-checks" && run.conclusion === "failure"),
         "a later same-name job success cannot erase the posted failure");
       assert.ok(shim.calls().every(call => call.includes("filter=all") && call.includes("--paginate") && call.includes("--slurp")));

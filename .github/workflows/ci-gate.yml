@@ -294,7 +294,9 @@ jobs:
                                              | test("^(run:[0-9]+:[0-9]+:)?job:[0-9]+$"))
                                          then "posted" else "job" end) ]
                         | group_by([.name, .producer])
-                        | map(max_by([.started_at, (.id // 0)]))' <<< "${raw}"
+                        | map(. as $all | max_by([.started_at, (.id // 0)]) as $dated
+                              | [$all[] | select(.started_at == null and (.id // 0) > ($dated.id // 0))]
+                              | if length > 0 then max_by(.id) else $dated end)' <<< "${raw}"
                 return 0
               fi
               echo "ci-gate: check-runs read FAILED (attempt ${attempt}/${RETRY_ATTEMPTS}) -- retrying in ${RETRY_BACKOFF_SECONDS}s" >&2
