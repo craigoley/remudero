@@ -11,7 +11,8 @@
  *
  * LEGACY tiered fallback (private v1 coordination instead requires an admitted lease):
  *   free slot        → run at {@link testRunConcurrency}, niced;
- *   all slots live   → wait (and say so), re-checking every poll;
+ *   all slots live   → wait (and say so), re-checking every poll; unless RMD_TEST_SLOTS fixes the pool, a slot is
+ *                      open only while the live holders' granted CPU and the non-test load leave one worker (W1-T9952);
  *   memory short     → a run that names its peak waits while the host's memory headroom cannot hold it plus the live
  *                      holders' named peaks — the CPU-derived count is the most slots, memory decides how many of them
  *                      are open, and a run with no other holder always goes;
@@ -28,6 +29,7 @@ import { setTimeout as sleepAsync } from "node:timers/promises";
 
 import { systemClock, type Clock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { sameHost } from "./host-identity.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
@@ -69,11 +71,18 @@ const BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
 
 /**
  * Bytes this host can still hand a new process tree before it thrashes: the host's `MemAvailable`, and under a bounded
- * cgroup v2 (a daemon container) its `memory.high`/`memory.max` less what it cannot drop — the smaller one. Undefined
- * where neither reads (macOS): memory then closes no slot.
+ * cgroup v2 (a daemon container) its `memory.high`/`memory.max` less what it cannot drop — the smaller one; on darwin,
+ * the handed-in `vm_stat` reading. Undefined where none reads: memory then closes no slot.
  */
-export function readMemoryHeadroom(read: (path: string) => string = (path) => readFileSync(path, "utf8")): number | undefined {
+export function readMemoryHeadroom(read: (path: string) => string = (path) => readFileSync(path, "utf8"),
+  darwin: { platform?: NodeJS.Platform; vmStat?: () => string | undefined } = {}): number | undefined {
   const readings: number[] = [];
+  // W1-T9952: macOS has neither file; its reading is vm_stat's reclaimable pages, read only on darwin and only through
+  // a reader the caller hands in, so no daemon-loop caller of this default ever spawns (test-slot admission does).
+  if ((darwin.platform ?? process.platform) === "darwin" && darwin.vmStat !== undefined) {
+    const pages = parseVmStatHeadroom(darwin.vmStat());
+    if (pages !== undefined) readings.push(pages);
+  }
   try {
     const kb = /^MemAvailable:\s*(\d+)\s*kB\s*$/m.exec(read("/proc/meminfo"))?.[1];
     if (kb !== undefined) readings.push(Number(kb) * 1024);
@@ -88,6 +97,40 @@ export function readMemoryHeadroom(read: (path: string) => string = (path) => re
     // No cgroup v2 here (a host process, macOS): the host reading alone stands.
   }
   return readings.length === 0 ? undefined : Math.min(...readings);
+}
+
+/** The darwin `vm_stat` report, or undefined when it cannot be read (bounded spawn; memory then closes no slot). */
+export function readVmStat(file = "/usr/bin/vm_stat"): string | undefined {
+  try {
+    return execFileSync(file, [], { encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    // Absent or failed vm_stat is today's darwin behaviour: no memory reading, and the lease note says "unread".
+    return undefined;
+  }
+}
+
+/** {@link readVmStat} without blocking the event loop: the async acquisition's darwin reading. */
+export async function readVmStatAsync(file = "/usr/bin/vm_stat"): Promise<string | undefined> {
+  try {
+    return (await execFileLoopBounded(file, [], { encoding: "utf8", timeout: 5_000 })).stdout;
+  } catch {
+    // Absent, failed or over its loop-time budget: no reading, exactly as the sync reader's catch.
+    return undefined;
+  }
+}
+
+/** Free + inactive + purgeable + speculative pages times the page size; undefined without a page size or free count. */
+export function parseVmStatHeadroom(report: string | undefined): number | undefined {
+  if (report === undefined) return undefined;
+  const pageSize = Number(/page size of (\d+) bytes/.exec(report)?.[1]);
+  const pages = (name: string): number | undefined => {
+    const n = /^Pages (\w+):\s+(\d+)\.?\s*$/gm;
+    for (let m = n.exec(report); m !== null; m = n.exec(report)) if (m[1] === name) return Number(m[2]);
+    return undefined;
+  };
+  const free = pages("free");
+  if (!Number.isSafeInteger(pageSize) || pageSize <= 0 || free === undefined) return undefined;
+  return (free + (pages("inactive") ?? 0) + (pages("purgeable") ?? 0) + (pages("speculative") ?? 0)) * pageSize;
 }
 
 /** Clean, non-shmem page cache the kernel drops before it would OOM; none counted without a readable breakdown. */
@@ -141,11 +184,44 @@ export function readHostLoad(): HostLoad {
   return { cores: availableParallelism(), load1: loadavg()[0] ?? 0 };
 }
 
-/** The default slot count: one per four cores, at least one (two on the 8-core fleet host). */
+/** An UNSLOTTED caller's share divisor: `RMD_TEST_SLOTS`, else one per four cores, at least one. The slot pool itself
+ *  is measured ({@link cpuAdmission}) unless `RMD_TEST_SLOTS` fixes it. */
 export function defaultTestSlots(cores: number, env: NodeJS.ProcessEnv = process.env): number {
+  return configuredTestSlots(env) ?? Math.max(1, Math.floor(cores / 4));
+}
+
+/** The pool an operator fixed with `RMD_TEST_SLOTS`, or undefined: the pool is then sized by measured capacity. */
+export function configuredTestSlots(env: NodeJS.ProcessEnv = process.env): number | undefined {
   const configured = Number(env[TEST_SLOTS_ENV]);
-  if (Number.isSafeInteger(configured) && configured >= 1) return configured;
-  return Math.max(1, Math.floor(cores / 4));
+  return Number.isSafeInteger(configured) && configured >= 1 ? configured : undefined;
+}
+
+/** The most slot indexes a measured pool walks: the cores left after headroom, at least one (each run takes a worker). */
+export function testSlotCeiling(cores: number): number {
+  return Math.max(1, (Number.isFinite(cores) && cores >= 1 ? Math.floor(cores) : 1) - TEST_RUN_HEADROOM_CORES);
+}
+
+/** The CPU inputs that admit (or hold) one more run in a measured pool, named in its lease note (W1-T9952). */
+export interface CpuAdmission {
+  cores: number;
+  headroomCores: number;
+  /** Worker counts the live holders were granted. */
+  granted: number;
+  /** load1 less the holders' grants, floored at 0, so a test run is never counted twice. */
+  nonTestLoad: number;
+  /** Usable cores left after the grants and the non-test load; a run is admitted while this is at least 1. */
+  left: number;
+  /** This run's grant: {@link testRunConcurrency} over what is left, shared with `contenders` waiting runs. */
+  concurrency: number;
+}
+
+export function cpuAdmission(load: HostLoad, granted: number, contenders = 1): CpuAdmission {
+  const cores = Number.isFinite(load.cores) && load.cores >= 1 ? Math.floor(load.cores) : 1;
+  const busy = Number.isFinite(load.load1) && load.load1 > 0 ? Math.floor(load.load1) : 0;
+  const nonTestLoad = Math.max(0, busy - granted);
+  const left = cores - TEST_RUN_HEADROOM_CORES - granted - nonTestLoad;
+  const concurrency = testRunConcurrency({ cores: left + TEST_RUN_HEADROOM_CORES, load1: 0 }, contenders);
+  return { cores, headroomCores: TEST_RUN_HEADROOM_CORES, granted, nonTestLoad, left, concurrency: Math.max(1, Math.min(concurrency, cores - 1)) };
 }
 
 /**
@@ -904,8 +980,11 @@ export interface TestSlotOptions {
   perFileBytes?: number;
   /** Learned sizes of the selection; a concurrent wave reserves its largest file peaks. */
   filePeaks?: readonly TestFileSize[];
-  /** The host's memory headroom in bytes; default {@link readMemoryHeadroom}. */
+  /** The host's memory headroom in bytes; default {@link readMemoryHeadroom}, with the driver's vm_stat report on darwin. */
   memoryHeadroom?: () => number | undefined;
+  /** The darwin `vm_stat` report the driver reads once per poll when no `memoryHeadroom` is injected (W1-T9952);
+   *  default {@link readVmStat} (sync driver) or {@link readVmStatAsync} (async driver). */
+  vmStat?: () => string | undefined;
   /** Exact-tree evidence for a cadence-bearing holder whose owner pid is gone; default {@link probeReservedTree}. */
   treeProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
   /** Whether any process holds a mutation guard open; default {@link defaultGuardHolderProbe}. */
@@ -964,11 +1043,17 @@ function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<P
  * callers must honor executionAllowed before starting work or recording admission.
  */
 export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): TestSlotLease {
-  const acquisition = testSlotAcquisition(label, opts);
+  const darwin = darwinHeadroom(opts);
+  const read = opts.vmStat ?? readVmStat;
+  // A report is taken lazily, at most once per poll, and only when admission asks for memory.
+  let report: string | undefined, taken = false;
+  darwin.feed(() => taken ? report : (taken = true, report = read()));
+  const acquisition = testSlotAcquisition(label, darwin.opts);
   let next = acquisition.next();
   while (!next.done) {
     try {
       (opts.sleep ?? sleepSync)(next.value);
+      taken = false;
       next = acquisition.next();
     } catch (error) {
       next = acquisition.throw(error);
@@ -978,13 +1063,31 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
 }
 
 export async function acquireTestSlotAsync(label: string, opts: Omit<TestSlotOptions, "sleep"> = {}): Promise<TestSlotLease> {
-  const acquisition = testSlotAcquisition(label, opts);
+  const darwin = darwinHeadroom(opts);
+  // The event loop keeps turning: the report is awaited before each poll, never spawned synchronously inside one.
+  const refresh = async (): Promise<void> => {
+    if (!darwin.active) return;
+    const report = opts.vmStat ? opts.vmStat() : await readVmStatAsync();
+    darwin.feed(() => report);
+  };
+  const acquisition = testSlotAcquisition(label, darwin.opts);
+  await refresh();
   let next = acquisition.next();
   while (!next.done) {
     await sleepAsync(next.value);
+    await refresh();
     next = acquisition.next();
   }
   return next.value;
+}
+
+/** W1-T9952: on darwin, with no injected `memoryHeadroom`, admission's memory reading is the driver's vm_stat report. */
+function darwinHeadroom(opts: TestSlotOptions): { active: boolean; opts: TestSlotOptions; feed(report: () => string | undefined): void } {
+  const platform = opts.platform ?? process.platform;
+  if (opts.memoryHeadroom !== undefined || platform !== "darwin") return { active: false, opts, feed: () => {} };
+  let report: () => string | undefined = () => undefined;
+  return { active: true, feed: next => { report = next; },
+    opts: { ...opts, memoryHeadroom: () => readMemoryHeadroom(undefined, { platform, vmStat: () => report() }) } };
 }
 
 /** A suite ticket taken ahead of its admission (W1-T9951): it holds its arrival place while other work runs. */
@@ -1147,19 +1250,30 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
   const load = opts.load ?? readHostLoad;
   // An opted-in policy must not reach the test resolver's mkdir side effect before inspection.
   const { dir, scope } = opts.dir !== undefined || parentPolicy ? { dir: opts.dir ?? "", scope: "configured" as const } : resolveTestSlotDir();
-  const slots = opts.slots ?? defaultTestSlots(load().cores);
+  // W1-T9952: an explicit `slots` or RMD_TEST_SLOTS fixes the pool; otherwise indexes run to the CPU-derived ceiling
+  // and the measured CPU and memory decide how many of them are open.
+  const fixedSlots = opts.slots ?? configuredTestSlots();
+  const measured = fixedSlots === undefined;
+  const slots = fixedSlots ?? testSlotCeiling(load().cores);
+  const pool = measured ? "measured pool" : opts.slots !== undefined ? `fixed pool of ${fixedSlots}` : `${TEST_SLOTS_ENV}=${fixedSlots} pool`;
+  /** Live tickets behind this waiter: the runs a measured grant is shared with. */
+  let behind = 0;
+  /** The last memory reading this acquisition took, so the note names it without another read. */
+  let lastHeadroom: number | undefined, headroomRead = false;
   const waitBoundMs = opts.waitBoundMs ?? TEST_SLOT_WAIT_BOUND_MS;
   const pollMs = opts.pollMs ?? TEST_SLOT_POLL_MS;
   const startedAt = clock.now();
   const startedIso = clock.iso();
-  const headroomOf = opts.memoryHeadroom ?? readMemoryHeadroom;
+  const readHeadroom = opts.memoryHeadroom ?? readMemoryHeadroom;
+  const headroomOf = (): number | undefined => { headroomRead = true; return lastHeadroom = readHeadroom(); };
   const files = opts.filePeaks?.length ? opts.filePeaks : undefined;
   const peaks = files && files[0]?.path !== "<selection>" ? files.map((f) => f.bytes).sort((a, b) => b - a) : undefined;
   const perFile = peaks ?? files?.[0]?.bytes ?? opts.perFileBytes;
   const basisNote = files ? `; file peaks ${[...new Set(files.map((f) => f.basis))].join(", ")}` : "";
   /** The CPU-derived concurrency, lowered to what the headroom less `reservedBytes` holds when the run names a per-file peak. */
-  const sized = (reservedBytes = 0): number => {
-    const cpu = Math.min(maximum, testRunConcurrency(load(), slots));
+  // An UNSLOTTED run (no coordination) keeps today's share; only a slotted grant reads the holders' CPU.
+  const unslottedShare = measured ? defaultTestSlots(load().cores) : slots;
+  const sized = (reservedBytes = 0, cpu = Math.min(maximum, testRunConcurrency(load(), unslottedShare))): number => {
     if (perFile === undefined) return cpu;
     const headroom = headroomOf();
     return Math.min(cpu, peaks?.length ?? cpu, memoryTestConcurrency(headroom === undefined ? undefined : headroom - reservedBytes, perFile) ?? cpu);
@@ -1221,8 +1335,8 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     return true;
   };
   /** The other slots' records (slot `slot`'s own never counted). */
-  const othersThan = (slot: number): { memoryBytes?: number; unknown?: boolean }[] => {
-    const others: { memoryBytes?: number; unknown?: boolean }[] = [];
+  const othersThan = (slot: number): { memoryBytes?: number; concurrency?: number; unknown?: boolean }[] => {
+    const others: { memoryBytes?: number; concurrency?: number; unknown?: boolean }[] = [];
     for (let j = 1; j <= slots; j += 1) {
       if (j === slot) continue;
       try {
@@ -1242,6 +1356,35 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     return others;
   };
   const namedPeaks = (others: { memoryBytes?: number }[]): number => others.reduce((sum, held) => sum + (held.memoryBytes ?? 0), 0);
+  /** Workers the other holders were granted; a record naming none (or unreadable) counts the one worker every run takes. */
+  const grantedTo = (others: { concurrency?: number }[]): number =>
+    others.reduce((sum, held) => sum + (Number.isSafeInteger(held.concurrency) && held.concurrency! >= 1 ? held.concurrency! : 1), 0);
+  /** W1-T9952: slot `slot`'s CPU inputs (its own record not counted, so reclaiming a dead holder there can open it). */
+  const cpuFor = (slot: number): { holders: number; cpu: CpuAdmission } => {
+    const others = othersThan(slot);
+    return { holders: others.length, cpu: cpuAdmission(load(), grantedTo(others), 1 + behind) };
+  };
+  /** Why a measured pool stays closed to this run on CPU, or undefined: no other holder, or one worker still left. */
+  const cpuShort = (slot: number): string | undefined => {
+    if (!measured) return undefined;
+    const { holders, cpu } = cpuFor(slot);
+    if (holders === 0 || cpu.left >= 1) return undefined;
+    return `CPU full: ${cpu.granted} worker(s) granted to ${holders} live holder(s) and non-test load ${cpu.nonTestLoad} leave ` +
+      `${Math.max(0, cpu.left)} of ${cpu.cores - cpu.headroomCores} usable core(s)`;
+  };
+  /** The inputs that admitted slot `slot`, for its note and its `test_slot.acquired` row. */
+  const admissionOf = (slot: number): Record<string, unknown> => {
+    const others = othersThan(slot), cpu = cpuAdmission(load(), grantedTo(others), 1 + behind);
+    return { pool, ceiling: slots, cores: cpu.cores, headroomCores: cpu.headroomCores, holders: others.length, grantedToHolders: cpu.granted,
+      nonTestLoad: cpu.nonTestLoad, memoryHeadroomBytes: headroomRead ? lastHeadroom ?? null : null, namedPeaksBytes: namedPeaks(others) };
+  };
+  const describeAdmission = (a: Record<string, unknown>): string => {
+    const memory = !headroomRead ? "memory not consulted (no peak named)"
+      : typeof a.memoryHeadroomBytes === "number" ? `memory headroom ${mib(a.memoryHeadroomBytes)} MiB` : "memory headroom unread";
+    return `admitted by ${String(a.pool)}: ${String(a.cores)} cores less ${String(a.headroomCores)} headroom, ` +
+      `${String(a.grantedToHolders)} worker(s) granted to ${String(a.holders)} holder(s), non-test load ${String(a.nonTestLoad)}, ` +
+      `${memory}, named peaks ${mib(Number(a.namedPeaksBytes))} MiB`;
+  };
   /** Why slot `slot` stays closed to this run on memory (its own record not counted), or undefined when it may take it. */
   const memoryShort = (slot: number): string | undefined => {
     const others = othersThan(slot);
@@ -1292,6 +1435,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
       const live = readTestSlotQueue(dir, judge, row => log(JSON.stringify({ ...row, by: label })), ticket?.name);
       if (!ticket && live.length > 0) joinQueue();
       const own = ticket?.name;
+      behind = own === undefined ? 0 : live.filter(t => t.name > own).length;
       return own === undefined ? live : live.filter(t => t.name < own);
     } catch (error) {
       // Nobody ahead is NOT claimed: queueFailed logs queue_unavailable and stops queueing for this waiter.
@@ -1302,22 +1446,26 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
   /** Read-only view of each slot's holder: never creates, reclaims or guards a slot file. */
   const slotView = (judgeOpen: boolean): { open: number; holders: QueueHolderView[]; privateSeen: boolean; unproven: boolean } => {
     const view = { open: 0, holders: [] as QueueHolderView[], privateSeen: false, unproven: false };
+    let granted = 0;
     for (let i = 1; i <= slots; i += 1) {
       const path = join(dir, `slot-${i}.json`);
       try {
         const st = lstatSync(path);
-        if (st.isFile() && (st.mode & 0o077) === 0) { view.privateSeen = true; view.holders.push({ slot: i }); continue; }
+        if (st.isFile() && (st.mode & 0o077) === 0) { view.privateSeen = true; view.holders.push({ slot: i }); granted += 1; continue; }
         const held = st.isFile() ? readTestSlotHolder(path, st) : null;
         if (held?.heartbeatIntervalMs !== undefined || held?.workIdentity !== undefined) view.unproven = true;
         view.holders.push({ slot: i, label: held?.label, pid: held?.pid, elapsedMs: held ? clock.now() - Date.parse(held.startedAt) : undefined });
         // Only a cadence-less dead holder counts as open here; anything needing exact-tree evidence waits for the head.
         if (judgeOpen && held && !view.unproven && testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace })) view.open += 1;
+        else granted += grantedTo([held ?? {}]);
       } catch (error) {
         // Absent is open; any other failure is a holder we cannot read, reported by name and never counted open.
         if ((error as NodeJS.ErrnoException).code === "ENOENT") view.open += 1;
-        else view.holders.push({ slot: i, label: `unreadable: ${(error as NodeJS.ErrnoException).code ?? String(error)}` });
+        else { view.holders.push({ slot: i, label: `unreadable: ${(error as NodeJS.ErrnoException).code ?? String(error)}` }); granted += 1; }
       }
     }
+    // W1-T9952: a measured pool is open only as far as CPU still holds one-worker runs (one when nobody holds a slot).
+    if (measured && judgeOpen) view.open = Math.min(view.open, granted === 0 ? Math.max(1, cpuAdmission(load(), 0).left) : Math.max(0, cpuAdmission(load(), granted).left));
     return view;
   };
   /** Where this waiter stands, only when its position or the holder set changed since its last report. */
@@ -1330,7 +1478,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
     let eta: QueueEta, history: HoldRecord[] = [];
     try {
       history = readHoldHistory(dir);
-      eta = estimateQueueEta({ slots, holders: holding, ahead: ahead.map(t => ({ label: t.ticket.label })), history });
+      eta = estimateQueueEta({ slots: measured ? Math.max(1, holding.length) : slots, holders: holding, ahead: ahead.map(t => ({ label: t.ticket.label })), history });
     } catch (error) {
       // An unreadable history is an unknown ETA that names why, never a guessed number.
       eta = { basis: `ETA unknown: hold history unreadable (${String(error)})` };
@@ -1370,6 +1518,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
       } else {
       privateRequired = basePrivate || cleanupIncomplete;
       reservedWorkUnproven = false;
+      headroomRead = false;
       // Recover only our own, privately inspected dead holders BEFORE calculating memory.
       // Otherwise a dead peer closes the free slot beside it, or its old projection collides
       // with the replacement. Public metadata alone never authorizes foreign recovery.
@@ -1403,7 +1552,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
           try {
           // Memory first, with no existence check: a slot's own record never counts against it, so whenever reclaiming
           // a dead holder there could open a slot, this passes and the reclaim below runs.
-          const short = memoryShort(i);
+          const short = cpuShort(i) ?? memoryShort(i);
           if (short !== undefined) {
             if (!holders.includes(short)) holders.push(short);
             break;
@@ -1413,7 +1562,9 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
           let createdRecord: TestSlotHolder | undefined;
           let writeOwnedRecord: ((body: string) => void) | undefined;
           try {
-            concurrency = perFile === undefined ? Math.min(maximum, testRunConcurrency(load(), slots)) : sized(namedPeaks(othersThan(i)));
+            const cpuGrant = Math.min(maximum, measured ? cpuFor(i).cpu.concurrency : testRunConcurrency(load(), slots));
+            concurrency = perFile === undefined ? cpuGrant : sized(namedPeaks(othersThan(i)), cpuGrant);
+            const admission = admissionOf(i);
             const ownedRecord = structuredClone(record()), body = JSON.stringify(ownedRecord);
             if (privateWriter && (Buffer.byteLength(body) > 1024 * 1024 ||
               [concurrency, ownPeak() ?? 0].some(n => !Number.isSafeInteger(n) || n < 0))) throw new Error("private slot record or capacity exceeds its bound");
@@ -1436,7 +1587,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
             writeRecord(body);
             removeCapacity = privateWriter ? publishSlotCapacity(path, fd, i, ownedRecord) : undefined;
             const waitedMs = clock.now() - startedAt;
-            if (announced || ticket) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir, ticketed: ticket !== undefined, aheadAtAcquire: ahead.length }));
+            if (announced || ticket) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir, ticketed: ticket !== undefined, aheadAtAcquire: ahead.length, concurrency, admission }));
             const acquiredAt = clock.now();
             let held = true;
             let closed = false;
@@ -1464,7 +1615,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
                   intervalMs: TEST_SLOT_HEARTBEAT_MS, coverageEnvironment: { [TEST_SLOT_RUN_ENV]: parentClaim } } }),
               } : {}),
               note: `host-wide test slot ${i}/${slots} (${scope}: ${dir})` +
-                `${announced ? `, after waiting ${Math.round(waitedMs / 1000)}s` : ""}; --test-concurrency=${concurrency}, niced${basisNote}`,
+                `${announced ? `, after waiting ${Math.round(waitedMs / 1000)}s` : ""}; --test-concurrency=${concurrency}, niced${basisNote}; ${describeAdmission(admission)}`,
               refresh: () => {
                 if (!held) return;
                 const refreshMutation = acquireSlotMutation(path);
