@@ -267,7 +267,10 @@ export function authorPublicationIdentity({ headRef, headSha, baseSha, publicati
     return refuse(`publication head ${publicationSha} is not the committed author HEAD ${headSha}; validate the tree that will be published`);
   }
   if (headRef === undefined) {
-    return { ...scope, state: 'unknown-target', message: 'publication target unknown; pass --head-ref <destination branch> before publication; identity NOT verified' };
+    let current = '';
+    try { current = git(['rev-parse', '--abbrev-ref', 'HEAD']).trim(); } catch { /* the hint is advisory; the state stays unknown-target */ }
+    const hint = current && current !== 'HEAD' ? `--head-ref ${current} --head-sha ${headSha}` : '--head-ref <destination branch>';
+    return { ...scope, state: 'unknown-target', message: `publication target unknown; rerun with ${hint} before publication so a head-identity refusal is caught here, not by a hosted round; identity NOT verified` };
   }
   const branch = headRef.replace(/^refs\/heads\//, '');
   if (!branch || branch === 'HEAD' || (headRef.startsWith('refs/') && !headRef.startsWith('refs/heads/'))) {
