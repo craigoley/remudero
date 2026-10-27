@@ -1,0 +1,51 @@
+id: console-gardener-cutoff-race-20261027
+ts: 2026-10-27T12:27:15.051Z
+raw: "Agent technical finding under the current human-approved Console
+  follow-ups, not a new human business decision or a risk ruling. Investigate
+  and repair the existing native gardener capture window without weakening
+  source evidence. Live12:07 UTC cached gardener-spend:core is failed/stale with
+  reason incomplete current window; the signed-in gardener page correctly keeps
+  money and call coverage unknown. A naturally completed current-generation
+  queue-judge parent has one exact assignment/attempt and canonical produced API
+  receipt0.01619175 USD; no model/pass was induced. Separate controlled
+  physical-file diagnostic of unchanged gardener-spend.ts
+  SHA256050c0edc7b97b216e849e4e43359d3f06ff7229eb7a60bc6c52af685a3e8445c
+  reproduces the same failure class: healthy parent+price snapshot measures2;
+  queueing a valid new parent append after the declared cutoff but before the
+  advanced read clock changes corpusComplete fromtrue tofalse, totalnull,
+  subtotal2. Truly future-dated and malformed-row controls still refuse. This is
+  a deterministic capture-boundary defect, not proof that every live
+  incomplete-window failure has that cause. Native capture currently sets
+  observedAt before its asynchronous union scan, admits rows from a growing live
+  file, and flags every parent/producer timestamp later than the start as
+  incomplete; usage accumulation independently invalidates those later calls.
+  Ground against existing tasks and all open PR heads before reserving or filing
+  any new task; preserve any existing owner. Qualify a narrow bounded-window
+  repair with real default filesystem/union capture and current clock, excluding
+  ordinary post-cutoff arrivals consistently from both money and call coverage
+  while preserving genuine
+  future/invalid/foreign/unreadable/cancelled/changed-generation refusals, exact
+  replay dedupe, source/generation boundaries, unknown prices, finite resource
+  and64KiB budgets. Do not count out-of-window later rows as incomplete inside
+  the earlier declared window or silently move source clocks. Prove positive
+  priced and joined-call controls, concurrent parent/price/assignment/attempt
+  appends, true future/malformed/generation-change negatives and
+  source-removal/restoration discrimination. Keep all normal
+  author/proof/coverage/governed review/hosted/protectedmerge gates. No new
+  provider/model calls to manufacture evidence, new permissions, spending
+  settings, CI or Azure-memory policy change, service restart, deployment,
+  claim/slot takeover, automatic approval or history deletion is authorized.
+  This is separate from the original117/9 Inbox obligations and original queued
+  reply; do not replay, renumber or close those from this finding. Scope should
+  be grounded in existing capture/consumer files and computed test placement,
+  with a fresh native ruling if required."
+attachments:
+  - plan/feedback/attachments/console-gardener-cutoff-race-20261027/cases.json
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: console-followup:gardener-cutoff-race:20261027
+thread_id: null

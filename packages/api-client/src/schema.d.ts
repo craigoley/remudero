@@ -5,6 +5,98 @@
 
 export interface components {
   schemas: {
+    DailyProgressCount: ({
+      precision: "unavailable";
+      value: null;
+    }) | ({
+      precision: "exact" | "at_least";
+      value: number;
+    });
+    ExpectedDailyProgressSource: {
+      id: string;
+      repository: string;
+      kind: "pull_requests" | "ledger_activity" | "deployments";
+      instanceId: string | null;
+      required: boolean;
+    };
+    DailyProgressSource: {
+      id: string;
+      repository: string;
+      kind: "pull_requests" | "ledger_activity" | "deployments";
+      instanceId: string | null;
+      required: boolean;
+      state: "complete" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized";
+      lastAttemptAt: string | null;
+      lastSuccessAt: string | null;
+      coverageStart: string | null;
+      coverageThrough: string | null;
+      nextDueAt: string | null;
+      reason: string | null;
+    };
+    DailyProgressEvent: {
+      id: string;
+      repository: string;
+      kind: "merged" | "activity" | "deployment";
+      sourceId: string;
+      occurredAt: string;
+      observedAt: string;
+      fleetAttribution: "confirmed" | "unknown" | "non_fleet";
+      taskIds: (string)[];
+      title: string;
+      url: string | null;
+    };
+    /** daily-progress-v1. Counts use the retained population, independently of this bounded evidence page. Missing evidence is unavailable, not a measured zero. Merges, observed activity, independent deployment evidence and present open work retain separate meanings and clocks. */
+    DailyProgressReport: {
+      version: "daily-progress-v1";
+      scope: ({
+        kind: "all";
+      }) | ({
+        kind: "repository";
+        repository: string;
+      });
+      reportDate: string;
+      timeZone: string;
+      windowStart: string;
+      windowEnd: string;
+      revision: number;
+      correctionReason: string | null;
+      generatedAt: string;
+      phase: "provisional" | "finalizing" | "complete" | "corrected";
+      coverage: {
+        state: "complete" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized";
+        expectedRepositories: (string)[];
+        includedRepositories: (string)[];
+        expectedSources: (ExpectedDailyProgressSource)[];
+        sources: (DailyProgressSource)[];
+      };
+      totals: {
+        mergedChanges: DailyProgressCount;
+        completedTasks: DailyProgressCount;
+      };
+      events: (DailyProgressEvent)[];
+      page: {
+        totalEvents: number;
+        nextCursor: string | null;
+      };
+      currentWork: {
+        asOf: string;
+        items: ({
+          repository: string;
+          id: string;
+          title: string;
+          url: string | null;
+        })[];
+      } | null;
+    };
+    DailyProgressView: {
+      view: "daily-progress";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: DailyProgressReport;
+    };
     ImprovementThreadRequest: {
       repository: string;
       opportunityId: string;
@@ -428,6 +520,182 @@ export interface components {
     ProductDeploymentError: {
       version: "product-deployment-v1";
       error: "invalid_identity" | "invalid_input" | "not_found" | "project_not_found" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_conflict" | "idempotency_conflict" | "stale_revision" | "capacity" | "creation_denied" | "not_configured" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "recovery_required" | "request_too_large";
+    };
+    ProductEvaluationVersions: {
+      objectiveVersion: string;
+      evaluatorVersion: string;
+    };
+    /** One held-out cell. A null score is a missing measurement and stays unknown; it is never read as zero or as a pass. */
+    ProductEvaluationHoldout: {
+      kind: "geography" | "device";
+      id: string;
+      baseline: number | null;
+      candidate: number | null;
+    };
+    ProductEvaluationEvidence: {
+      channel: "replay" | "bot" | "device";
+      reference: string;
+    };
+    ProductEvaluationProposalCommand: {
+      summary: string;
+      pullRequests: number;
+      costUsd: number;
+    };
+    /** At most 16384 raw request bytes. objective names the held-out objective and evaluator version once; baseline and candidate must both have been measured against exactly it, or the comparison is refused as objective_changed. Every holdout cell is judged separately; a candidate below its baseline refuses the comparison as holdout_failed. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. The proposal can request no authority: spend above the product's own resource envelope is refused. */
+    ProductEvaluationCommand: {
+      version: "product-evaluation-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+      objective: ProductEvaluationVersions;
+      baseline: ProductEvaluationVersions;
+      candidate: ProductEvaluationVersions;
+      holdouts: (ProductEvaluationHoldout)[];
+      evidence: (ProductEvaluationEvidence)[];
+      proposal: ProductEvaluationProposalCommand;
+    };
+    ProductEvaluationHoldoutResult: {
+      kind: "geography" | "device";
+      id: string;
+      baseline: number | null;
+      candidate: number | null;
+      outcome: "held" | "regressed" | "unknown";
+    };
+    ProductEvaluationCoverage: {
+      geography: "held" | "regressed" | "unknown";
+      device: "held" | "regressed" | "unknown";
+    };
+    ProductEvaluationProposal: {
+      summary: string;
+      pullRequests: number;
+      costUsd: number;
+      state: "proposed";
+    };
+    /** Bots and replays prove geometry and rule invariants only; each human or physical judgement stays its own unverified field. */
+    ProductEvaluationAcceptance: {
+      humanFun: "unverified";
+      recognizableGeography: "unverified";
+      originality: "unverified";
+      physicalDevice: "unverified";
+    };
+    ProductEvaluationReceipt: {
+      operationId: string;
+      productId: ProductId;
+      objectiveRevision: number;
+      objective: ProductEvaluationVersions;
+      baseline: ProductEvaluationVersions;
+      candidate: ProductEvaluationVersions;
+      holdouts: (ProductEvaluationHoldoutResult)[];
+      coverage: ProductEvaluationCoverage;
+      /** The fraction of held-out cells that were actually measured. */
+      confidence: number;
+      verdict: "reviewable" | "unknown" | "refused";
+      refusal?: "objective_changed" | "holdout_failed";
+      evidence: (ProductEvaluationEvidence)[];
+      proposal: ProductEvaluationProposal;
+      acceptance: ProductEvaluationAcceptance;
+      executionAuthority: "none";
+      autoDeploy: false;
+      deployed: false;
+      recordedAt: string;
+      payloadDigest: string;
+    };
+    ProductEvaluationResponse: {
+      version: "product-evaluation-v1";
+      receipt: ProductEvaluationReceipt;
+      replayed: boolean;
+    };
+    ProductEvaluationError: {
+      version: "product-evaluation-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "objective_changed" | "holdout_failed" | "budget_exceeded" | "request_too_large";
+    };
+    ProductCaseImport: {
+      version: "product-intent-v1";
+      requestId: ProductRequestId;
+      expectedRevision: 0;
+      brief: ProductBrief;
+    };
+    ProductCaseAdopt: {
+      version: "product-repository-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      action: "adopt";
+      owner: string;
+      name: string;
+      visibility: "public" | "private";
+      repositoryId: number;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+    };
+    ProductCasePlan: {
+      requestId: ProductRequestId;
+      productId: ProductId;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+      planEvidenceId: string;
+      taskId: string;
+      pullRequest: number;
+    };
+    /** At most 65536 raw bytes. Import an approved brief, adopt its existing repository, verify a merged reviewed plan, or request one guarded build. Client evidence and verification fields are rejected. */
+    ProductCaseCommand: ({
+      version: "product-case-v1";
+      action: "import";
+      command: ProductCaseImport;
+    }) | ({
+      version: "product-case-v1";
+      action: "adopt";
+      command: ProductCaseAdopt;
+    }) | ({
+      version: "product-case-v1";
+      action: "plan";
+      command: ProductCasePlan;
+    }) | ({
+      version: "product-case-v1";
+      action: "build";
+      command: ProductBuildCommand;
+    });
+    ProductCaseResponse: {
+      version: "product-case-v1";
+      productId: ProductId;
+      revision: number;
+      objectiveRevision: number;
+      replayed: boolean;
+      evidence: {
+        source: ({
+          id: string;
+          reference: string;
+        })[];
+        local: ({
+          id: string;
+          reference: string;
+        })[];
+        hosted: ({
+          id: string;
+          reference: string;
+        })[];
+        review: ({
+          id: string;
+          reference: string;
+        })[];
+        merge: ({
+          id: string;
+          reference: string;
+        })[];
+        deploy: ({
+          id: string;
+          reference: string;
+        })[];
+        mobile: ({
+          id: string;
+          reference: string;
+        })[];
+      };
+      build?: ProductBuildReceipt;
+    };
+    ProductCaseError: {
+      version: "product-case-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "fleet_halted" | "kick_failed" | "creation_denied";
     };
     /** At most 4096 raw request bytes. Names one task the target repository's own plan filed for the product's approved plan evidence. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
     ProductBuildCommand: {
@@ -6484,6 +6752,34 @@ export interface paths {
         };
     };
   };
+  "/v1/products/evaluation": {
+    post: {
+      responses: {
+          "200": ProductEvaluationResponse;
+          "400": ProductEvaluationError;
+          "401": ProductAccessError;
+          "403": (ProductEvaluationError) | (ProductAccessError);
+          "404": ProductEvaluationError;
+          "409": ProductEvaluationError;
+          "413": ProductEvaluationError;
+          "503": ProductEvaluationError;
+        };
+    };
+  };
+  "/v1/products/case": {
+    post: {
+      responses: {
+          "200": ProductCaseResponse;
+          "400": ProductCaseError;
+          "401": ProductBuildAccessError;
+          "403": (ProductCaseError) | (ProductBuildAccessError);
+          "404": ProductCaseError;
+          "409": ProductCaseError;
+          "413": ProductCaseError;
+          "503": ProductCaseError;
+        };
+    };
+  };
   "/v1/products/build": {
     post: {
       responses: {
@@ -7658,6 +7954,19 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+        };
+    };
+  };
+  "/v1/views/daily-progress": {
+    get: {
+      responses: {
+          "200": DailyProgressView;
+          "304": undefined;
+          "400": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+          "503": undefined;
         };
     };
   };

@@ -669,6 +669,8 @@ export interface ReviewVerdict {
    *  NEITHER `state` NOR `floorState`, and rides on every review row as `instrument_entangled`. See
    *  MASTER-PLAN.md §12 rule 25 for why the refusal was withdrawn. */
   instrumentEntangled?: boolean;
+  /** Current producer policy; absent historical verdicts retain their recorded refusal semantics. */
+  instrumentEntanglementPolicy?: "advisory";
   /** The observed evidence behind a `true` {@link instrumentEntangled} — the instrument paths found and the `src/`
    *  product paths beside them (W1-T186 emitter discipline). `undefined` when `instrumentEntangled` is false/absent. */
   instrumentEntanglementPaths?: { instrumentPaths: string[]; srcPaths: string[] };
@@ -5887,6 +5889,7 @@ export function judgeReview(
     changesetClaimsRecognised: changesetRecognition?.recognisedCount,
     changesetFenceUnbalancedAtEof: changesetRecognition?.fenceUnbalancedAtEof,
     instrumentEntangled,
+    instrumentEntanglementPolicy: instrumentEntangled ? "advisory" : undefined,
     instrumentEntanglementPaths: instrumentEntangled
       ? { instrumentPaths: instrumentEntanglement.instrumentPaths, srcPaths: instrumentEntanglement.srcPaths }
       : undefined,
@@ -7004,14 +7007,14 @@ export function keywordOnlyAnnotation(): string {
  * SAME facts off the SAME verdict. TRAP: `review.posted` carried `state: "failure"` with `reasons: []` whenever the
  * failing path was not an unmet named criterion, so a ledger grep for that class returned ZERO (#1193). */
 export function reviewFailureClass(
-  verdict: Pick<ReviewVerdict, "criteriaTampered" | "changesetContradictions" | "instrumentEntangled"> & {
+  verdict: Pick<ReviewVerdict, "criteriaTampered" | "changesetContradictions" | "instrumentEntangled" | "instrumentEntanglementPolicy"> & {
     criteria: ReadonlyArray<Pick<CriterionVerdict, "met" | "holdout">>;
   },
 ): "no_criteria" | "criteria_tampered" | "changeset_contradiction" | "instrument_entangled" | "holdout_unmet" | "test_theater" | "unmet_criteria" {
   if (verdict.criteria.length === 0) return "no_criteria";
   if (verdict.criteriaTampered) return "criteria_tampered";
   if ((verdict.changesetContradictions?.length ?? 0) > 0) return "changeset_contradiction";
-  if (verdict.instrumentEntangled) return "instrument_entangled";
+  if (verdict.instrumentEntangled && verdict.instrumentEntanglementPolicy !== "advisory") return "instrument_entangled";
   const unmet = verdict.criteria.filter((c) => !c.met);
   const visibleUnmet = visibleCriteria(unmet);
   if (visibleUnmet.length > 0) return "unmet_criteria";
@@ -7040,6 +7043,7 @@ export function reviewLedgerLegibilityFields(
         | "criteriaTampered"
         | "changesetContradictions"
         | "instrumentEntangled"
+        | "instrumentEntanglementPolicy"
         | "unexecutableCount"
         | "unexecutableProofs"
         | "partiallyExecuted"
@@ -7103,6 +7107,7 @@ export function reviewLedgerLegibilityFields(
             criteriaTampered: verdict.criteriaTampered,
             changesetContradictions: verdict.changesetContradictions,
             instrumentEntangled: verdict.instrumentEntangled,
+            instrumentEntanglementPolicy: verdict.instrumentEntanglementPolicy,
           }),
           failure_reason: verdict.summary!,
         }

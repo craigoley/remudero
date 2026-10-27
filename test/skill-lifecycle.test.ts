@@ -219,7 +219,7 @@ test("W1-T3413 refreshes lifecycle evidence", () => {
   const refreshed = stageSkillLifecycleProposal(
     registryPath,
     skillsDir,
-    report([...Array(9).fill("merged"), "failed"], Array(10).fill("blocked_ci")),
+    report([...Array(5).fill("merged"), ...Array(5).fill("failed")], Array(10).fill("blocked_ci")),
   );
 
   assert.equal(refreshed.refreshed, true);
@@ -330,6 +330,12 @@ test("W1-T3413 approve opens a reviewed lifecycle PR that deletes only the appro
     execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
 
     mkdirSync(join(root, "state"), { recursive: true });
+    // Approval re-judges the evidence: zero selection at the horizon still supports the retirement.
+    writeFileSync(
+      join(root, "state", "ledger.ndjson"),
+      rows([], Array(10).fill("blocked_ci")).map((row) => JSON.stringify(row)).join("\n") + "\n",
+      "utf8",
+    );
     writeFileSync(
       join(root, "state", "inbox-proposals.json"),
       JSON.stringify(

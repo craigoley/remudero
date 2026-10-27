@@ -19,10 +19,11 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { systemClock, type Clock } from "./clock.js";
-import { SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
+import { loadProposalRegistry, SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { TASK_TYPES, type Task } from "./plan.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import {
   mineTranscriptWorkflows,
   renderTranscriptWorkflowSteps,
@@ -828,8 +829,12 @@ export const SKILL_EFFECTIVENESS_TASK_TYPE = "implement";
 export const SKILL_FIX_TASK_TYPE = "fix";
 /** Predeclared before observing any result, so the report cannot lower it after the fact. */
 export const SKILL_EFFECTIVENESS_HORIZON = 10;
-/** A terminal worker failure is the named harm signal for this descriptive pilot. */
+/** A terminal worker failure is the named harm outcome; harm decides only through {@link harmExcessPValue}. */
 export const SKILL_EFFECTIVENESS_HARM_OUTCOMES = ["failed"] as const;
+/** Predeclared, as the horizon is: harm alone makes a skill a retire candidate only when the selected arm's harm
+ *  rate exceeds the control's at this one-sided significance. Any failed selected run used to suffice, which made
+ *  a skill whose selected runs failed LESS often than its controls a retire candidate. */
+export const SKILL_EFFECTIVENESS_HARM_ALPHA = 0.05;
 /** The steps {@link buildSkillEffectivenessReport} reads; every caller passes exactly this as its union read's
  *  step filter. W1-T10764: a filter without the merge rows hands the report no merge, so both arms read
  *  `merged_runs=0` by construction and only the harm signal can ever decide. Both merge-row steps
@@ -845,6 +850,30 @@ export interface SkillEffectivenessCohort {
   merged_runs: number;
   harmful_terminal_runs: number;
   outcomes: Record<string, number>;
+}
+
+/** One-sided Fisher exact p-value that the selected arm's harm rate exceeds the control's: with each arm's terminal
+ *  runs and the total harm fixed, the chance that the selected arm holds at least the harm it shows. 1 when either
+ *  arm has no terminal run, since nothing is compared. */
+export function harmExcessPValue(selected: SkillEffectivenessCohort, control: SkillEffectivenessCohort): number {
+  const runs = selected.terminal_runs, total = runs + control.terminal_runs;
+  if (runs === 0 || control.terminal_runs === 0) return 1;
+  const harm = selected.harmful_terminal_runs + control.harmful_terminal_runs;
+  const lnFactorial = [0];
+  for (let i = 1; i <= total; i++) lnFactorial.push(lnFactorial[i - 1]! + Math.log(i));
+  const lnChoose = (n: number, k: number): number => lnFactorial[n]! - lnFactorial[k]! - lnFactorial[n - k]!;
+  let p = 0;
+  for (let x = selected.harmful_terminal_runs; x <= Math.min(harm, runs); x++) {
+    p += Math.exp(lnChoose(harm, x) + lnChoose(total - harm, runs - x) - lnChoose(total, runs));
+  }
+  return Math.min(1, p);
+}
+
+/** The harm comparison a report's reader and a retirement proposal both show, so a verdict names its evidence. */
+function renderHarmComparison(report: SkillEffectivenessReport): string {
+  return `selected ${report.selected.harmful_terminal_runs}/${report.selected.terminal_runs}, ` +
+    `control ${report.control.harmful_terminal_runs}/${report.control.terminal_runs}; one-sided exact ` +
+    `p=${harmExcessPValue(report.selected, report.control).toFixed(3)}; harm alone retires below p=${SKILL_EFFECTIVENESS_HARM_ALPHA}`;
 }
 
 export type SkillEffectivenessStatus = "INSUFFICIENT EVIDENCE" | "RETIRE-CANDIDATE" | "REVIEW-CANDIDATE";
@@ -975,7 +1004,7 @@ export function buildSkillEffectivenessReport(
   } else if (belowComparisonHorizon) {
     status = "INSUFFICIENT EVIDENCE";
     basis = "below-horizon";
-  } else if (selected.harmful_terminal_runs > 0) {
+  } else if (harmExcessPValue(selected, control) < SKILL_EFFECTIVENESS_HARM_ALPHA) {
     status = "RETIRE-CANDIDATE";
     basis = "named-harm-signal";
   } else if (selectedMergeUpper <= controlMergeRate) {
@@ -1022,6 +1051,7 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
     renderCohort("selected", report.selected),
     renderCohort("control", report.control),
     `named harm outcomes: ${report.harm_outcomes.join(", ")}`,
+    `harm comparison: ${renderHarmComparison(report)}`,
     "shipment comparison: best/worst-case bounds over handed_off and blocked_ci runs; overlapping possibilities are insufficient evidence. These are not confidence intervals or deployment/live-benefit claims.",
     report.assignment === "randomized"
       ? `assignment: randomized — control is eligible runs that withheld the skill (share ${SKILL_WITHHOLDING_SHARE}); ` +
@@ -1044,6 +1074,8 @@ export interface StageSkillLifecycleProposalResult {
   staged: boolean;
   refreshed: boolean;
   alreadyStaged: boolean;
+  /** A refused report removed this skill's staged retirement: the evidence it was staged on no longer qualifies. */
+  withdrawn: boolean;
   proposalId?: string;
   evidenceFingerprint?: string;
   reason?: string;
@@ -1077,6 +1109,12 @@ function skillLifecycleRefusal(report: SkillEffectivenessReport, approvedSkillsD
   if (!approved) {
     return `skill '${report.skill_name}' is not approved and opted in under ${approvedSkillsDir}`;
   }
+  return skillLifecycleEvidenceRefusal(report);
+}
+
+/** Why a report's evidence does not support a retirement, or undefined when it does. Staging and approval both
+ *  judge with this one rule, so approval never accepts evidence staging would refuse. */
+function skillLifecycleEvidenceRefusal(report: SkillEffectivenessReport): string | undefined {
   if (report.status === "INSUFFICIENT EVIDENCE") {
     if (report.basis === "pending-shipment") {
       return `pending shipment: selected=${report.selected.pending_merge_runs}, control=${report.control.pending_merge_runs}; merge-rate bounds overlap`;
@@ -1099,6 +1137,7 @@ function renderSkillLifecycleSummary(report: SkillEffectivenessReport, action: S
     `Evidence fingerprint: ${action.evidenceFingerprint}`,
     `Status: ${report.status}`,
     `Basis: ${report.basis}`,
+    `Harm: ${renderHarmComparison(report)}`,
     `Selected: observed=${report.selected.observed_eligible_runs}; terminal=${report.selected.terminal_runs}; ` +
       `merged=${report.selected.merged_runs}; harmful=${report.selected.harmful_terminal_runs}; ` +
       `outcomes=${renderOutcomes(report.selected.outcomes)}`,
@@ -1140,7 +1179,10 @@ export function stageSkillLifecycleProposal(
   opts: UpdateProposalRegistryOpts = {},
 ): StageSkillLifecycleProposalResult {
   const built = skillLifecycleProposalForReport(report, approvedSkillsDir);
-  if (!built.ok) return { refused: true, staged: false, refreshed: false, alreadyStaged: false, reason: built.reason };
+  if (!built.ok) {
+    const withdrawn = withdrawSkillLifecycleProposal(registryPath, skillLifecycleProposalId(report.skill_name), opts);
+    return { refused: true, staged: false, refreshed: false, alreadyStaged: false, withdrawn, reason: built.reason };
+  }
   const proposal = built.proposal;
   let staged = false;
   let refreshed = false;
@@ -1172,10 +1214,59 @@ export function stageSkillLifecycleProposal(
     staged,
     refreshed,
     alreadyStaged,
+    withdrawn: false,
     proposalId: proposal.id,
     evidenceFingerprint: proposal.lifecycleAction?.evidenceFingerprint,
     reason: alreadyStaged ? "already staged with identical evidence" : undefined,
   };
+}
+
+/** Remove a staged retirement the evidence no longer supports. Approval deletes a skill on the staged proposal, so
+ *  one the ledger has turned against must not stay READY in the inbox. Reads before it locks, so a registry with
+ *  nothing to withdraw is never written. True when a proposal was removed. */
+export function withdrawSkillLifecycleProposal(registryPath: string, proposalId: string, opts: UpdateProposalRegistryOpts = {}): boolean {
+  const staged = (p: Proposal): boolean => p.id === proposalId && p.lifecycleAction !== undefined;
+  if (!loadProposalRegistry(registryPath).some(staged)) return false;
+  let withdrawn = false;
+  updateProposalRegistry(
+    registryPath,
+    (current) => {
+      const next = current.filter((p) => !staged(p));
+      withdrawn = next.length !== current.length;
+      return withdrawn ? next : null;
+    },
+    opts,
+  );
+  return withdrawn;
+}
+
+/** Approval re-judges a staged retirement: `stale` names evidence that no longer qualifies, and `unverifiable` a
+ *  ledger that could not be read whole. Neither is a pass, and only `stale` is grounds to withdraw the proposal. */
+export type SkillRetirementRecheck =
+  | { verdict: "qualifies" }
+  | { verdict: "stale"; reason: string }
+  | { verdict: "unverifiable"; reason: string };
+
+/** A retirement is staged on the ledger as it stood then; more runs, or a corrected reducer, can since have turned
+ *  the evidence. Re-judge with the reducer and rule staging used, over a COMPLETE union read. */
+export function recheckSkillRetirement(
+  stateDir: string,
+  action: SkillLifecycleAction,
+  read: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+): SkillRetirementRecheck {
+  let union: ReturnType<typeof readLedgerUnionRecordsSync>;
+  try {
+    union = read(stateDir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS, refuseIncomplete: true });
+  } catch (error) {
+    return { verdict: "unverifiable", reason: `unreadable ledger union under ${stateDir}: ${String(error)}` };
+  }
+  if (!union.ok) {
+    return { verdict: "unverifiable", reason: `incomplete ledger union under ${stateDir}: ${union.unread.length} unread rotation(s)` };
+  }
+  const report = buildSkillEffectivenessReport(union.rows, action.skillName);
+  const refusal = skillLifecycleEvidenceRefusal(report);
+  if (refusal === undefined) return { verdict: "qualifies" };
+  return { verdict: "stale", reason: `the evidence no longer supports retiring '${action.skillName}': ${report.status} (${report.basis}); ${refusal}` };
 }
 
 /**

@@ -487,8 +487,11 @@ export function evaluateInstrumentSurface(input) {
 const SCRIPT_REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TMP_HYGIENE_URL = pathToFileURL(join(SCRIPT_REPO, "test", "setup", "tmp-hygiene.ts")).href;
 const ADMISSION_TABLE = "src/lib/ci-parity.ts";
-// BACKSTOP only: the seven admitted suites take 6-10 s together on an 8-core host; this ends a hung child as not measured.
-const CENSUS_SUITE_CHILD_TIME_BOUND_MS = 60_000;
+// BACKSTOP only: this ends a hung child as not measured. The seven admitted suites take 6-10 s together on an 8-core
+// host, but a structural whole-tree suite runs alone: the literal masker took 61-62 s at load 1.1-1.8 on a 4-core host
+// (2026-10-27), so the old 60 s fired on a healthy tree. Raised to 120 s by the operator (W1-T9919 named the decision).
+// src/run-task.ts's fix-lane controller pins the same value and refuses a budget that reports another.
+const CENSUS_SUITE_CHILD_TIME_BOUND_MS = 120_000;
 /** W1-T9919: the label of a census whose ONLY unmeasured cause is a suite child stopped on the backstop above.
  *  scripts/preflight-author.mjs reads this exact line and goes on (CI runs the suites); every other label refuses. */
 export const CENSUS_TIME_BOUND_LABEL = "census suites NOT MEASURED (time bound)";

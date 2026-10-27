@@ -1,0 +1,46 @@
+- id: W1-T10819
+  title: "Quoted feedback text preserves historical task names without granting task identity"
+  repo: remudero
+  depends_on: []
+  plan_refs: [W1-T1048, W1-T4212, W1-T10789]
+  type: implement
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  verify: human
+  dispatch_hold: true
+  risk: high
+  band_meaning: blast-radius
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "operator-approved task-id-existence quoted-feedback boundary, 2026-10-27"
+  files:
+    - scripts/task-id-existence-check.mjs
+    - test/task-id-existence-check.test.ts
+  acceptance:
+    - claim: "Only the actual top-level raw scalar value of a strictly validated single canonical plan/feedback/<matching-id>.yaml record is quoted non-authoritative input. Retain all bytes and physical locations, and scan all other text identically. Plain, quoted and block raw scalars work through the real CLI without changing or restoring an ID."
+      proof: "unit test: task-id-existence: canonical feedback raw text is quoted data"
+    - claim: "An unresolved task name outside that exact raw scalar still fails, including the same name in source/deploy, a task declaration/dependency, feedback metadata, a nested raw field or a trailing comment. A valid raw field is not a whole-record or whole-directory exemption."
+      proof: "unit test: task-id-existence: authoritative references remain checked beside raw text"
+    - claim: "Malformed, duplicate-key, aliased, tagged, multi-document, missing-required-field, unsupported-origin/status, non-string-raw or filename/id-mismatched records retain the strict scan and a concrete refusal. Parse or range ambiguity must not hide a reference."
+      proof: "unit test: task-id-existence: ambiguous feedback retains the strict scan"
+    - claim: "The reservation-only positive, remote-unreachable UNKNOWN, written-baseline validation, added declaration collision, current reservation-holder and open-PR collision checks retain their existing behavior. No baseline edits, placeholder/history rewrite, new reservation authority or preflight bypass is introduced."
+      proof: "unit test: task-id-existence: feedback data classification preserves existence guards"
+    - claim: "Actual committed-tree CLI fixtures prove preservation of canonical feedback bytes and strict outside-scalar boundaries. Removing only the data classifier or its strict-validation/outside-boundary guards causes named failures; exact restoration passes the full maintained affected tests and ordinary gates. No live reply replay, queue flush, forced gardener, direct acceptance or service change is used to demonstrate benefit."
+      proof: "unit test: task-id-existence: quoted feedback regression controls are load bearing"
+  note: "One test-first gate concern. Human-approved scanner boundary only; verify:human remains unjudged and dispatch_hold:true remains independent. A filing or focused test result is not a passed author gate, hosted qualification, semantic review, normal merge, loaded-source adoption or a completed canonical feedback landing. Do not reuse the released historic reservation. This is the gate-repair task only. It must not claim the captured reply as already implemented/filed: the original feedback and submission key remain eligible for their own ordinary landing, fresh downstream reservation and task-producing triage."
+  rationale: |
+    The already captured operator continuation on issue #14638/comment 6430660829 contains a formerly reserved task name in immutable quoted reply text. The ordinary feedback landing preflight refuses the entire landing because that historical name is no longer currently reserved or declared. Preserve the original public reply and captured record; an old name in quoted input is not a new task reservation, declaration, dependency or dispatch grant.
+    At captured main ab1bf69140e730321977a3083ebe19548ced45c4, scanCitedIds walks every physical text line under src/deploy/plan and evaluateIds accepts a current reservation OR a declaration. The captured 473 advertised heads have 10 gate blob versions with byte-identical scanner and existence decision functions. The source/subject scan retained all 291 plan trees and 417 matching record blobs; existing related tasks concern general existence, plan coverage, holder/collision checks or asynchronous landing, not this raw-data boundary. Fresh subject, open-head, claim and merged-source checks still apply before filing or building.
+    Craig explicitly approved only the narrow feedback-text boundary on 2026-10-27: ignore task IDs only inside the raw text scalar of a strictly validated canonical feedback record. Every other field, source file, plan declaration, reservation and collision check stays checked; malformed records remain strict. No original answer bytes, reservation refs, claims, business rulings or production state are changed.
+    The repair must not add a baseline entry, omit plan/feedback as a directory, normalize or escape the historic ID, restore a released reservation, treat arbitrary string-bearing YAML as valid feedback, or turn a read failure into an empty reference set. The existing active-ref, collision and holder adjudication rules remain authoritative.
+    Filing is independent of publication and implementation qualification. Preserve strict TDD, discriminating guard removals, exact-head restoration, maintained author checks, full CI, coverage, security, semantic review and ordinary merge. No first-push exception or new hosted-author attempt is granted by the scanner-boundary approval. Keep serve running and W7740 held at 90 minutes; Foundation, Janitor and resource owners stay independent.
+    Attribution is separate from transport repair: this gate task does not use the captured reply feedback ID as its origin and is not implementing credit for that original requested source change. Preserve the original reply for normal downstream filing after the gate is qualified and adopted.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it deletes data, branches, archives or ledgers (\"Removing only the data\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-27T14:38:47.243Z"
+    pin: "6fd436a56fe7d3da02fc1c469c8daa5c6dbc001138b4e70c694d4f2e6626c98c"

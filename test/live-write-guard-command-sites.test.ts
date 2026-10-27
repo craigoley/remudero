@@ -4,7 +4,8 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFi
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { after, afterEach, before, beforeEach, test } from "node:test";
+import { gitPushRunBranch } from "#src/lib/git-push.js";
 import {
   approveCommand,
   armAutoMergeAtOpen,
@@ -21,6 +22,46 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 /** ghPrMergeSquash requires the closing-reference guard; these tests are about the merge call itself. */
 const CLEAN_GUARD = () => ({ state: "clean" as const, defused: [] });
+
+// These tiny real-Git fixtures own their hook instead of running the install's author
+// recipe. Only explicitly registered fixture origins are accepted; an ambient refusing
+// hook catches a drive that escapes its private selection.
+const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+const hookRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cmdsite-hooks-`));
+const fixtureHooks = join(hookRoot, "fixture");
+const ambientHooks = join(hookRoot, "ambient");
+const allowedOrigins = join(hookRoot, "origins");
+const gateCalls = join(hookRoot, "calls");
+const gateRefusal = join(hookRoot, "refuse");
+const ambientCalls = join(hookRoot, "ambient-calls");
+const inheritedHooks = process.env.RMD_HARNESS_HOOKS_DIR;
+mkdirSync(fixtureHooks);
+mkdirSync(ambientHooks);
+writeFileSync(allowedOrigins, "");
+writeFileSync(gateCalls, "");
+writeFileSync(join(fixtureHooks, "pre-push"), [
+  "#!/bin/sh", "set -eu",
+  '[ "$1" = origin ] || exit 76',
+  `grep -Fx -- "$2" ${shellQuote(allowedOrigins)} >/dev/null || exit 77`,
+  `printf '%s\\n' "$2" >> ${shellQuote(gateCalls)}`,
+  `cat >> ${shellQuote(gateCalls)}`,
+  `[ ! -f ${shellQuote(gateRefusal)} ] || exit 73`,
+  "",
+].join("\n"), { mode: 0o755 });
+writeFileSync(join(ambientHooks, "pre-push"),
+  `#!/bin/sh\nprintf ambient >> ${shellQuote(ambientCalls)}\nexit 91\n`, { mode: 0o755 });
+before(() => { process.env.RMD_HARNESS_HOOKS_DIR = ambientHooks; });
+beforeEach(() => { process.env.RMD_HARNESS_HOOKS_DIR = fixtureHooks; });
+afterEach(() => { process.env.RMD_HARNESS_HOOKS_DIR = ambientHooks; });
+after(() => {
+  try {
+    assert.equal(existsSync(ambientCalls), false, "no push may escape to its caller's hook");
+  } finally {
+    if (inheritedHooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR;
+    else process.env.RMD_HARNESS_HOOKS_DIR = inheritedHooks;
+    rmSync(hookRoot, { recursive: true, force: true });
+  }
+});
 
 // ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────────────────
 // PR #954's guard call sites inside `triageCommand` and `planCommand` sat after a
@@ -89,6 +130,7 @@ function fakeWorker(text: string): WorkerResult {
 function makeOrigin(feedbackId?: string): string {
   const bare = mkdtempSync(join(tmpdir(), "cmdsite-origin-"));
   execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
+  appendFileSync(allowedOrigins, `${bare}\n`);
   const seed = mkdtempSync(join(tmpdir(), "cmdsite-seed-"));
   execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
   mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
@@ -412,11 +454,12 @@ test("GUARDED SITE plan push: the run reaches planCommand's gitPushRunBranch", a
 // + reserveTaskIdBlock, run-task.ts's createRatificationBranch) actually executes rather than
 // short-circuiting as a no-op — the ONLY way to cover those closures without injecting a fake
 // gateway (every other approve test does inject one, which replaces this code entirely).
-test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reaches both guarded lines", async () => {
+test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reaches both guarded lines through its private hook", async () => {
   const bare = makeOrigin(undefined);
   const home = mkdtempSync(join(tmpdir(), "cmdsite-apphome-"));
   const root = mkdtempSync(join(tmpdir(), "cmdsite-approot-"));
   const shimDir = mkdtempSync(join(tmpdir(), "cmdsite-appshim-"));
+  const owned = [bare, home, root, shimDir];
   const savedHome = process.env.HOME;
   const savedPath = process.env.PATH;
   try {
@@ -474,17 +517,32 @@ test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reac
     // The placeholder was really minted+reserved (not left as-is) — the pushed branch's plan
     // carries a concrete W1-Tnnn id, never the NEW-1 placeholder it started from.
     const clone = mkdtempSync(join(tmpdir(), "cmdsite-appverify-"));
+    owned.push(clone);
     execFileSync("git", ["clone", "--quiet", bare, clone], { encoding: "utf8", env: GIT_ENV });
     const branch = refs.split("\n").find((l) => l.startsWith("run-"));
     assert.ok(branch, "expected a run- branch on the throwaway origin");
     const plan = execFileSync("git", ["-C", clone, "show", `origin/${branch}:plan/tasks.yaml`], { encoding: "utf8" });
     assert.match(plan, /^- id: W1-T\d+$/m, `expected a minted concrete id in the pushed plan; got:\n${plan}`);
     assert.doesNotMatch(plan, /NEW-1/, "the NEW-1 placeholder must never survive to the pushed plan");
-    rmSync(clone, { recursive: true, force: true });
+    assert.ok(readFileSync(gateCalls, "utf8").includes(`${bare}\n`), "the gateway used this origin's private hook");
+    // A real hook refusal must still stop a new branch from reaching the fixture origin.
+    const refusedBranch = "run-GATE-CONTROL-1785100000000";
+    git(clone, "checkout", "--quiet", "-b", refusedBranch);
+    git(clone, "config", "core.hooksPath", "hooks");
+    writeFileSync(join(clone, "refusal-control.txt"), "fixture-only\n");
+    git(clone, "add", "refusal-control.txt");
+    git(clone, "commit", "--quiet", "-m", "test: refusal control");
+    writeFileSync(gateRefusal, "refuse\n");
+    try {
+      assert.throws(() => withLiveWritesAllowed(() => gitPushRunBranch(clone)), /pre-push gate.*refused this push \(exit 73\)/s);
+      assert.equal(git(bare, "for-each-ref", "--format=%(refname)", `refs/heads/${refusedBranch}`), "");
+    } finally {
+      rmSync(gateRefusal, { force: true });
+    }
   } finally {
     process.env.HOME = savedHome;
     process.env.PATH = savedPath;
-    for (const d of [bare, home, root, shimDir]) rmSync(d, { recursive: true, force: true });
+    for (const d of owned) rmSync(d, { recursive: true, force: true });
   }
 });
 
@@ -953,6 +1011,7 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
   const branch = `run-${TASK}-1785100000003`;
   const bare = mkdtempSync(join(tmpdir(), "sweepfix-origin-"));
   execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GIT_ENV });
+  appendFileSync(allowedOrigins, `${bare}\n`);
   const seed = mkdtempSync(join(tmpdir(), "sweepfix-seed-"));
   execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GIT_ENV });
   writeFileSync(join(seed, "README.md"), "seed\n");

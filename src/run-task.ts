@@ -1526,6 +1526,7 @@ import {
   describeSkillInjectionReachability,
   loadInjectableSkills,
   observeSkillSelection,
+  recheckSkillRetirement,
   renderSkillEffectivenessReport,
   renderSkillsPart,
   SKILL_EFFECTIVENESS_LEDGER_STEPS,
@@ -1534,6 +1535,7 @@ import {
   skillWithheldForRun,
   stageSkillDrafts,
   stageSkillLifecycleProposal,
+  withdrawSkillLifecycleProposal,
   workerAllowlistFromCapabilityContext,
   skillDraftConsumerLanes,
   type WorkerAllowlist,
@@ -1566,7 +1568,7 @@ import { doctrineCitationFactsAt } from "./lib/doctrine-citation-facts.js";
 import type { DoctrineCitationFacts } from "./lib/doctrine-citations.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { certainStaleProofs, grepOnlyBaseTargets, isDialectGrepProof, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./lib/proof-base-stale.js";
-import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
+import { loadOperatorNotesForTask, loadOperatorNoteRows, operatorNoteStore, renderOperatorNotes, appendOperatorNote, type OperatorNoteStore } from "./lib/operator-notes.js";
 import {
   applyOperatorMergeHold,
   authorizeMergeHoldWrite,
@@ -10710,7 +10712,8 @@ function* fixCensusSnapshotSteps(
     .filter(([key]) => !/^(?:GIT_|NODE_TEST_CONTEXT$|RMD_SELF_SYNC_DONE$)/.test(key)));
   env[CENSUS_SNAPSHOT_ENV] = path;
   const scriptsRoot = repoRoot;
-  const childTimeBoundMs = 60_000;
+  // Pinned to scripts/census-precheck.mjs's CENSUS_SUITE_CHILD_TIME_BOUND_MS: a budget reporting any other value refuses.
+  const childTimeBoundMs = 120_000;
   // The trusted controller reports its own fixed stage inventory; no worker code/table is loaded here.
   const budgetRead = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--snapshot-budget"],
     { cwd: scriptsRoot, env, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
@@ -21849,6 +21852,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
         appendLedger(ledgerPath, { run_id: runId, task_id: "INTAKE", step, lane: "intake", rung, ...extra });
       const result = (deps.feedbackDocket ?? runFeedbackDocketRung)(config, ledgerPath, runId, log, {
         root: repoRoot,
+        noteStore: configuredOperatorNoteStore(config, `${owner}/${repo}`),
         now: () => at,
       });
       return { rung, status: "ok", fired: result.fired };
@@ -29085,6 +29089,7 @@ export async function serveCommand(
     productResearchBudgetUsd: productResearchProvider ? DEFAULT_BUDGET_USD : undefined,
     assistantRepository: `${self.owner}/${self.repo}`,
     questionsRoot: repoRoot,
+    operatorNoteStore: operatorNoteStore({ stateDir: join(config.root, "state"), repository: `${self.owner}/${self.repo}`, legacyRoot: repoRoot }),
     tokens,
     // W1-T371/W1-T398: additive tailnet-identity auth, opt-in via config.serve.identityCapability
     // and resolved (with serve.trustedProxy) above, side by side with host/port -- undefined on
@@ -31753,30 +31758,6 @@ export function orphanWorkerKillLedger(ledgerPath: string): OrphanSweepDeps["led
 }
 
 /**
- * `plan/operator-notes.ndjson`, read fresh ACROSS ALL TASKS — the feedback docket's fifth
- * capture surface (W1-T164). `loadOperatorNotesForTask` (lib/operator-notes.ts) is scoped to
- * one task id by design (the cross-task-leakage falsifier); the docket needs every stamped note
- * in the window regardless of which task it guides, so this reads the store directly. Mirrors
- * `readQuestionsNdjson`'s tolerance of an absent/malformed file: a torn line is skipped, never
- * taking out the whole read.
- */
-function readOperatorNotesNdjson(root: string): Array<Record<string, unknown>> {
-  const path = join(root, "plan", "operator-notes.ndjson");
-  if (!existsSync(path)) return [];
-  const out: Array<Record<string, unknown>> = [];
-  for (const raw of readFileSync(path, "utf8").split("\n")) {
-    const line = raw.trim();
-    if (!line) continue;
-    try {
-      out.push(JSON.parse(line) as Record<string, unknown>);
-    } catch {
-      // torn/malformed line — skip it, same discipline as readQuestionsNdjson.
-    }
-  }
-  return out;
-}
-
-/**
  * W1-T436 — the weekly feedback docket's rung. Gathers the five human-feedback capture
  * surfaces (reframes, operator verdicts/steering notes, rejected-feedback reasons, question
  * answers, operator notes) over a rolling 7-day lookback via {@link buildFeedbackDocket} (the
@@ -31877,7 +31858,7 @@ export function runFeedbackDocketRung(
   ledgerPath: string,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: { root?: string; now?: () => Date; synthesize?: typeof synthesizeFeedbackDocketProposal } = {},
+  deps: { root?: string; noteStore?: OperatorNoteStore; repository?: string; now?: () => Date; synthesize?: typeof synthesizeFeedbackDocketProposal } = {},
 ): { fired: boolean } {
   const root = deps.root ?? repoRoot;
   const synthesize = deps.synthesize ?? synthesizeFeedbackDocketProposal;
@@ -31893,7 +31874,9 @@ export function runFeedbackDocketRung(
     const ledgerLines = readDocketLedgerCorpus(ledgerPath, log);
     const rejectedFeedback = listFeedback(root, { status: "rejected" }).map((e) => ({ id: e.id, ts: e.ts, raw: e.raw }));
     const questionLines = readQuestionsNdjson(root);
-    const operatorNotes = readOperatorNotesNdjson(root)
+    const noteStore = Object.hasOwn(deps, "noteStore") ? deps.noteStore :
+      deps.root && !deps.repository ? root : configuredOperatorNoteStore(config, deps.repository, root);
+    const operatorNotes = loadOperatorNoteRows(noteStore)
       .filter((n) => typeof n.note === "string" && typeof n.taskId === "string" && typeof n.ts === "string")
       .map((n) => ({ ts: n.ts as string, taskId: n.taskId as string, note: n.note as string }));
 
@@ -36347,7 +36330,8 @@ export function productionMachineFilingJudgePorts(opts: {
       // ledger-read-intent: live — `dispatch.breaker_released` is in the retention set, and `rmd approve` is durable in operator-releases.json.
       const ledgered = operatorRulingTimes(readLedgerLines(join(opts.stateDir, LEDGER_FILENAME)) as unknown as Record<string, unknown>[]);
       return (taskId) => {
-        const times = [ledgered.get(taskId), loadOperatorNotesForTask(opts.repoRoot, taskId).at(-1)?.ts].filter((t): t is string => t !== undefined);
+        const store = operatorNoteStore({ stateDir: opts.stateDir, repository: `${opts.owner}/${opts.repo}`, legacyRoot: opts.repoRoot });
+        const times = [ledgered.get(taskId), loadOperatorNotesForTask(store, taskId).at(-1)?.ts].filter((t): t is string => t !== undefined);
         return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1);
       };
     },
@@ -37520,6 +37504,22 @@ export async function approveCommand(
         console.error(`rmd approve: ${refusal}`);
         return 1;
       }
+      // The proposal carries the evidence as it stood at staging. Re-judged now, a stale one is withdrawn rather
+      // than allowed to delete a skill the ledger no longer condemns; an unreadable ledger refuses and keeps it.
+      const recheck = recheckSkillRetirement(dirname(ledgerPathFor(config)), classification.lifecycleAction);
+      if (recheck.verdict !== "qualifies") {
+        const withdrawn = recheck.verdict === "stale" && withdrawSkillLifecycleProposal(registryPath, proposalId);
+        appendLedger(ledgerPath, {
+          run_id: runId,
+          task_id: proposalId,
+          step: "ratify.approve_refused",
+          state: `evidence_${recheck.verdict}`,
+          reason: recheck.reason,
+          withdrawn,
+        });
+        console.error(`rmd approve: ${recheck.reason}${withdrawn ? `; withdrew ${proposalId} from the inbox` : ""}`);
+        return 1;
+      }
       const branch = createSkillLifecycleBranch(classification.lifecycleAction);
       const prUrl = openSkillLifecyclePr(branch, classification.lifecycleAction);
       const prNumber = Number(prUrl.match(/\/pull\/(\d+)/)?.[1]);
@@ -37975,6 +37975,15 @@ async function approveBatchCommand(
  *  ledger step (`operator_note.added` for the CLI, `panel.operator_note_added` for the console). */
 const CLI_OPERATOR_NOTE_AUTHOR = "operator";
 
+export function configuredOperatorNoteStore(config: Config, repository?: string, legacyRoot = repoRoot): OperatorNoteStore | undefined {
+  let target = repository;
+  if (target === undefined) {
+    const self = resolveOwnerRepo();
+    target = `${self.owner}/${self.repo}`;
+  }
+  return operatorNoteStore({ stateDir: join(config.root, "state"), repository: target, legacyRoot });
+}
+
 /**
  * W1-T3351 — write ONE stamped operator note, from the CLI, to the docket's fifth capture surface.
  *
@@ -37987,7 +37996,7 @@ const CLI_OPERATOR_NOTE_AUTHOR = "operator";
  * as legacy-shape growth, and this is new code with no legacy caller to stay compatible with.
  */
 export function recordCliOperatorNote(
-  root: string,
+  root: string | OperatorNoteStore | undefined,
   taskId: string,
   text: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -38020,7 +38029,7 @@ function approveNoteChain(
     deps.log ??
     ((step: string, extra: Record<string, unknown> = {}) =>
       appendLedger(ledgerPathFor(config), { run_id: `APPROVE-${scopeId}`, task_id: scopeId, step, ...extra }));
-  const written = recordCliOperatorNote(deps.root ?? repoRoot, scopeId, text, log, deps.clock ?? systemClock);
+  const written = recordCliOperatorNote(deps.root ?? configuredOperatorNoteStore(config), scopeId, text, log, deps.clock ?? systemClock);
   console.log(
     written
       ? `rmd approve: note recorded for ${scopeId} — it enters the next weekly feedback docket.`
@@ -38040,7 +38049,7 @@ function approveNoteChain(
  */
 export async function noteCommand(
   rest: string[],
-  deps: { root?: string; clock?: Clock; log?: (step: string, extra?: Record<string, unknown>) => void; config?: Config } = {},
+  deps: { root?: string; noteStore?: OperatorNoteStore; repository?: string; clock?: Clock; log?: (step: string, extra?: Record<string, unknown>) => void; config?: Config } = {},
 ): Promise<number> {
   const taskId = rest[0];
   const text = rest.slice(1).join(" ");
@@ -38054,7 +38063,9 @@ export async function noteCommand(
   const log =
     deps.log ??
     ((step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPathFor(deps.config ?? loadConfig()), { run_id: `NOTE-${taskId}`, task_id: taskId, step, ...extra }));
-  const written = recordCliOperatorNote(root, taskId, text, log, deps.clock ?? systemClock);
+  const store = Object.hasOwn(deps, "noteStore") ? deps.noteStore :
+    deps.root ? root : configuredOperatorNoteStore(deps.config ?? loadConfig(), deps.repository);
+  const written = recordCliOperatorNote(store, taskId, text, log, deps.clock ?? systemClock);
   if (!written) {
     console.error(`rmd note: the note store refused this entry (unwritable ${join(root, "plan", "operator-notes.ndjson")}?) — nothing was recorded`);
     return 1;
@@ -40117,7 +40128,8 @@ export function skillLifecycleCommand(
   if (staged.refused) {
     (deps.error ?? console.error)(
       `rmd skill lifecycle: REFUSED ${staged.reason}; selected terminal_runs=${report.selected.terminal_runs}, ` +
-      `control terminal_runs=${report.control.terminal_runs}`,
+      `control terminal_runs=${report.control.terminal_runs}` +
+      (staged.withdrawn ? "; withdrew the stale staged retirement from the inbox" : ""),
     );
     return report.status === "REVIEW-CANDIDATE" ? 0 : 1;
   }
