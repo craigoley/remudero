@@ -691,7 +691,7 @@ async function maintainedReadMarkFixture(t: { after(fn: () => void): void }): Pr
   writeFileSync(f.ledgerPath, "");
   f.deps.inboxSourceIdentity = { instance: "console", repository: "fixture/console", root: f.root,
     inboxRoot: f.root, planPath: f.deps.planPath, ledgerPath: f.ledgerPath };
-  f.deps.inboxAuditScope = { instance: "console", repository: "fixture/console", root: f.root };
+  f.deps.inboxAuditScope = { instance: "console", repository: "fixture/console" };
   const store = { threadStorePath: inboxThreadStorePath(f.root) };
   appendThreadMessage(inboxThreadIdentity(RULING), "reply", "First private fixture message", store);
   appendThreadMessage(inboxThreadIdentity(RULING), "reply", "Second private fixture message", store);
@@ -806,7 +806,7 @@ test("read marks refuse unavailable maintained evidence and preserve legacy safe
     await withReadMarkHttp(f, async post => {
       if (replacement !== undefined) f.deps.readPlanSource = () => {
         writeFileSync(path, replacement!);
-        return { state: "fresh", generation: 1, identity: "fixture-plan", observedAt: new Date().toISOString() };
+        return { state: "loaded", generation: 1, identity: "fixture-plan", observedAt: new Date().toISOString() };
       };
       const calls = forbidReadMarkClassification(f);
       assert.equal((await post(body, token)).status, status, kind);
