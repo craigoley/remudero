@@ -20,7 +20,7 @@
  *   wait past bound  → `wait_bound_exceeded`: run UNSLOTTED at concurrency 1 — slow, never deadlocked;
  *   slot dir unusable → `slot_unavailable`: run unslotted at the load-derived concurrency.
  */
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeSync, type Stats } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
@@ -70,15 +70,16 @@ const BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
 
 /**
  * Bytes this host can still hand a new process tree before it thrashes: the host's `MemAvailable`, and under a bounded
- * cgroup v2 (a daemon container) its `memory.high`/`memory.max` less what it cannot drop — the smaller one. Undefined
- * where neither reads (macOS): memory then closes no slot.
+ * cgroup v2 (a daemon container) its `memory.high`/`memory.max` less what it cannot drop — the smaller one; on darwin,
+ * the handed-in `vm_stat` reading. Undefined where none reads: memory then closes no slot.
  */
 export function readMemoryHeadroom(read: (path: string) => string = (path) => readFileSync(path, "utf8"),
   darwin: { platform?: NodeJS.Platform; vmStat?: () => string | undefined } = {}): number | undefined {
   const readings: number[] = [];
-  // W1-T9952: macOS has neither file; its reading is vm_stat's reclaimable pages, read only on darwin.
-  if ((darwin.platform ?? process.platform) === "darwin") {
-    const pages = parseVmStatHeadroom((darwin.vmStat ?? readVmStat)());
+  // W1-T9952: macOS has neither file; its reading is vm_stat's reclaimable pages, read only on darwin and only through
+  // a reader the caller hands in, so no daemon-loop caller of this default ever spawns (test-slot admission does).
+  if ((darwin.platform ?? process.platform) === "darwin" && darwin.vmStat !== undefined) {
+    const pages = parseVmStatHeadroom(darwin.vmStat());
     if (pages !== undefined) readings.push(pages);
   }
   try {
@@ -105,6 +106,14 @@ export function readVmStat(file = "/usr/bin/vm_stat"): string | undefined {
     // Absent or failed vm_stat is today's darwin behaviour: no memory reading, and the lease note says "unread".
     return undefined;
   }
+}
+
+/** {@link readVmStat} without blocking the event loop: the async acquisition's darwin reading. */
+export function readVmStatAsync(file = "/usr/bin/vm_stat"): Promise<string | undefined> {
+  return new Promise(resolve => {
+    // A failed or timed-out vm_stat is no reading (undefined), exactly as the sync reader's catch.
+    execFile(file, [], { encoding: "utf8", timeout: 5_000 }, (error, stdout) => resolve(error ? undefined : stdout));
+  });
 }
 
 /** Free + inactive + purgeable + speculative pages times the page size; undefined without a page size or free count. */
@@ -968,8 +977,11 @@ export interface TestSlotOptions {
   perFileBytes?: number;
   /** Learned sizes of the selection; a concurrent wave reserves its largest file peaks. */
   filePeaks?: readonly TestFileSize[];
-  /** The host's memory headroom in bytes; default {@link readMemoryHeadroom}. */
+  /** The host's memory headroom in bytes; default {@link readMemoryHeadroom}, with the driver's vm_stat report on darwin. */
   memoryHeadroom?: () => number | undefined;
+  /** The darwin `vm_stat` report the driver reads once per poll when no `memoryHeadroom` is injected (W1-T9952);
+   *  default {@link readVmStat} (sync driver) or {@link readVmStatAsync} (async driver). */
+  vmStat?: () => string | undefined;
   /** Exact-tree evidence for a cadence-bearing holder whose owner pid is gone; default {@link probeReservedTree}. */
   treeProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
   /** Whether any process holds a mutation guard open; default {@link defaultGuardHolderProbe}. */
@@ -1028,11 +1040,17 @@ function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<P
  * callers must honor executionAllowed before starting work or recording admission.
  */
 export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): TestSlotLease {
-  const acquisition = testSlotAcquisition(label, opts);
+  const darwin = darwinHeadroom(opts);
+  const read = opts.vmStat ?? readVmStat;
+  // A report is taken lazily, at most once per poll, and only when admission asks for memory.
+  let report: string | undefined, taken = false;
+  darwin.feed(() => taken ? report : (taken = true, report = read()));
+  const acquisition = testSlotAcquisition(label, darwin.opts);
   let next = acquisition.next();
   while (!next.done) {
     try {
       (opts.sleep ?? sleepSync)(next.value);
+      taken = false;
       next = acquisition.next();
     } catch (error) {
       next = acquisition.throw(error);
@@ -1042,13 +1060,31 @@ export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): Test
 }
 
 export async function acquireTestSlotAsync(label: string, opts: Omit<TestSlotOptions, "sleep"> = {}): Promise<TestSlotLease> {
-  const acquisition = testSlotAcquisition(label, opts);
+  const darwin = darwinHeadroom(opts);
+  // The event loop keeps turning: the report is awaited before each poll, never spawned synchronously inside one.
+  const refresh = async (): Promise<void> => {
+    if (!darwin.active) return;
+    const report = opts.vmStat ? opts.vmStat() : await readVmStatAsync();
+    darwin.feed(() => report);
+  };
+  const acquisition = testSlotAcquisition(label, darwin.opts);
+  await refresh();
   let next = acquisition.next();
   while (!next.done) {
     await sleepAsync(next.value);
+    await refresh();
     next = acquisition.next();
   }
   return next.value;
+}
+
+/** W1-T9952: on darwin, with no injected `memoryHeadroom`, admission's memory reading is the driver's vm_stat report. */
+function darwinHeadroom(opts: TestSlotOptions): { active: boolean; opts: TestSlotOptions; feed(report: () => string | undefined): void } {
+  const platform = opts.platform ?? process.platform;
+  if (opts.memoryHeadroom !== undefined || platform !== "darwin") return { active: false, opts, feed: () => {} };
+  let report: () => string | undefined = () => undefined;
+  return { active: true, feed: next => { report = next; },
+    opts: { ...opts, memoryHeadroom: () => readMemoryHeadroom(undefined, { platform, vmStat: () => report() }) } };
 }
 
 /** A suite ticket taken ahead of its admission (W1-T9951): it holds its arrival place while other work runs. */

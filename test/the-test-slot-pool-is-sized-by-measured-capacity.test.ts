@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
-  acquireTestSlot, configuredTestSlots, cpuAdmission, defaultTestSlots, parseVmStatHeadroom, readMemoryHeadroom, readVmStat,
+  acquireTestSlot, acquireTestSlotAsync, configuredTestSlots, cpuAdmission, defaultTestSlots, parseVmStatHeadroom, readMemoryHeadroom, readVmStat, readVmStatAsync,
   testSlotAcquisition, testSlotCeiling, TEST_SLOTS_ENV, type HostLoad, type TestSlotLease, type TestSlotOptions,
 } from "#src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -119,41 +119,65 @@ test("W1-T9952: the pool admits by granted CPU, not one slot per four cores", (t
   });
 });
 
-test("W1-T9952: darwin memory headroom gates admission", (t) => {
+test("W1-T9952: darwin memory headroom gates admission", async (t) => {
   const noProc = (path: string): string => { throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" }); };
   assert.equal(parseVmStatHeadroom(VM_STAT), VM_STAT_BYTES);
   assert.equal(parseVmStatHeadroom("Pages free: 10."), undefined, "no page size: no reading");
   assert.equal(parseVmStatHeadroom(undefined), undefined);
   assert.equal(readMemoryHeadroom(noProc, { platform: "darwin", vmStat: () => VM_STAT }), VM_STAT_BYTES, "darwin reads vm_stat");
   assert.equal(readMemoryHeadroom(noProc, { platform: "darwin", vmStat: () => undefined }), undefined, "an unreadable vm_stat stays undefined");
+  assert.equal(readMemoryHeadroom(noProc, { platform: "darwin" }), undefined, "no reader handed in: the default never spawns");
   let spawned = 0;
   assert.equal(readMemoryHeadroom(noProc, { platform: "linux", vmStat: () => { spawned += 1; return VM_STAT; } }), undefined);
   assert.equal(spawned, 0, "Linux never spawns vm_stat");
 
-  withSlotsEnv(undefined, () => {
-    // A 10-core Mac whose vm_stat leaves ~0.99 GiB: a holder naming 0.75 GiB leaves no room for a 0.5 GiB run beside it.
-    const lines: string[] = [];
-    const darwinHeadroom = () => readMemoryHeadroom(noProc, { platform: "darwin", vmStat: () => VM_STAT });
-    const opts = { ...host(slotDir(t), { cores: 10, load1: 0 }, lines), memoryHeadroom: darwinHeadroom };
-    const held = acquireTestSlot("typecheck", { ...opts, maxConcurrency: 1, memoryBytes: 0.75 * GiB });
-    const waits = acquireTestSlot("suite", { ...opts, memoryBytes: 0.5 * GiB, waitBoundMs: 0 });
-    assert.equal(waits.outcome, "wait_bound_exceeded", "CPU has room; memory read from vm_stat closes the slot");
-    assert.match(waits.note, /memory headroom 1016 MiB < 1280 MiB for this run and the live holders' peaks/);
-    const fits = acquireTestSlot("small", { ...opts, memoryBytes: 0.2 * GiB, waitBoundMs: 0 });
-    assert.equal(fits.outcome, "acquired", "a peak the headroom holds beside the holder's is admitted");
-    assert.match(fits.note, /memory headroom 1016 MiB, named peaks 768 MiB/);
-    fits.release(); held.release();
-  });
+  const saved = process.env[TEST_SLOTS_ENV];
+  delete process.env[TEST_SLOTS_ENV];
+  t.after(() => { if (saved !== undefined) process.env[TEST_SLOTS_ENV] = saved; });
+  // A 10-core Mac whose vm_stat leaves ~0.99 GiB: a holder naming 0.75 GiB leaves no room for a 0.5 GiB run beside it.
+  // No `memoryHeadroom` is injected: the driver itself reads the (fake) vm_stat, at most once per poll.
+  let reports = 0;
+  const vmStat = (): string => { reports += 1; return VM_STAT; };
+  const opts = { ...host(slotDir(t), { cores: 10, load1: 0 }), memoryHeadroom: undefined, platform: "darwin" as const, vmStat };
+  const held = acquireTestSlot("typecheck", { ...opts, maxConcurrency: 1, memoryBytes: 0.75 * GiB });
+  assert.equal(reports, 0, "a run with no other holder never asks for memory, so nothing spawns");
+  const waits = acquireTestSlot("suite", { ...opts, memoryBytes: 0.5 * GiB, waitBoundMs: 0 });
+  assert.equal(waits.outcome, "wait_bound_exceeded", "CPU has room; memory read from vm_stat closes the slot");
+  assert.match(waits.note, /memory headroom 1016 MiB < 1280 MiB for this run and the live holders' peaks/);
+  assert.equal(reports, 1, "one report served every slot of that poll");
+  const waitsAsync = await acquireTestSlotAsync("suite-async", { ...opts, memoryBytes: 0.5 * GiB, waitBoundMs: 0 });
+  assert.equal(waitsAsync.outcome, "wait_bound_exceeded", "the async driver reads the same darwin headroom");
+  const fits = acquireTestSlot("small", { ...opts, memoryBytes: 0.2 * GiB, waitBoundMs: 0 });
+  assert.equal(fits.outcome, "acquired", "a peak the headroom holds beside the holder's is admitted");
+  assert.match(fits.note, /memory headroom 1016 MiB, named peaks 768 MiB$/);
+  fits.release();
+  const linux = acquireTestSlot("linux", { ...opts, platform: "linux", memoryHeadroom: () => undefined, memoryBytes: 0.5 * GiB, waitBoundMs: 0 });
+  assert.equal(linux.outcome, "acquired", "the same pair with no darwin reading is admitted on count, as before");
+  assert.match(linux.note, /memory headroom unread/);
+  linux.release();
+
+  // The drivers' own default readers: on this host (vm_stat on darwin; absent elsewhere) the note names the reading.
+  const real = { ...opts, vmStat: undefined, maxConcurrency: 1, memoryBytes: 1024 ** 2, waitBoundMs: 0 };
+  const named = acquireTestSlot("named", real);
+  const namedAsync = await acquireTestSlotAsync("named-async", real);
+  for (const lease of [named, namedAsync]) {
+    assert.match(lease.note, /; admitted by measured pool: .*, (memory headroom \d+ MiB|memory headroom unread), named peaks 76[89] MiB$/);
+    lease.release();
+  }
+  held.release();
 });
 
-test("W1-T9952: the default vm_stat reader returns undefined when vm_stat cannot run", (t) => {
-  assert.equal(readVmStat(join(slotDir(t), "no-such-vm_stat")), undefined);
+test("W1-T9952: the default vm_stat readers return undefined when vm_stat cannot run", async (t) => {
+  const missing = join(slotDir(t), "no-such-vm_stat");
+  assert.equal(readVmStat(missing), undefined);
+  assert.equal(await readVmStatAsync(missing), undefined);
 });
 
 test("W1-T9952: the real default vm_stat reader reads this darwin host",
-  { skip: process.platform === "darwin" ? false : "not a darwin host: the real vm_stat reader runs only on macOS" }, () => {
-    const headroom = readMemoryHeadroom();
+  { skip: process.platform === "darwin" ? false : "not a darwin host: the real vm_stat reader runs only on macOS" }, async () => {
+    const headroom = readMemoryHeadroom(undefined, { vmStat: readVmStat });
     assert.ok(headroom !== undefined && headroom > 0, `vm_stat gave a positive headroom (${String(headroom)})`);
+    assert.equal(parseVmStatHeadroom(await readVmStatAsync()) !== undefined, true, "the async reader reads it too");
   });
 
 test("W1-T9952: RMD_TEST_SLOTS still overrides the measured pool", (t) => {
