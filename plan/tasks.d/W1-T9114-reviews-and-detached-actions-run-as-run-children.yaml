@@ -16,6 +16,7 @@
     - src/lib/run-child.ts
     - src/run-task.ts
     - test/reviews-and-detached-actions-run-as-run-children.test.ts
+    - "src/run-child-main.ts"
   status: queued
   priority: 1.5  # operator ruling 2026-10-13 (a); review drain is the largest restart-idle phase W1-T9086 leaves behind
   attempts: 0

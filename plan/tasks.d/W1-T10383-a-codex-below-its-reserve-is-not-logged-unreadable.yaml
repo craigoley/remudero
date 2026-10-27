@@ -17,7 +17,8 @@
   #   worker evidence: W1-T10383: a filed proof already passes at the merge base, so branch run-W1-T10383-1792641636921 cannot open a PR
   #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
-  priority: 1.5  # cheap, and W1-T10382 waits on it
+  # queue judge: priority=2 evidence=75a26f0628df550f
+  priority: 2  # queue-judge-2026-10-27: Task has an open dependent and is low priority, causing unnecessary delay for its dependent task
   attempts: 0
   rationale: |
     OPERATOR RULING 2026-10-22: the reason must say what the probe saw.
