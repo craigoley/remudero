@@ -386,10 +386,13 @@ test("a current advisory review reaches cold repair for its real unmet criterion
   const fields = reviewLedgerLegibilityFields(verdict);
   assert.equal(fields.failure_class, "unmet_criteria");
   const { view, cleanup } = boardView([reviewRow({ ...fields, decision_verdict: verdict,
-    unmet_criteria: verdict.criteria.filter(c => !c.met), reasons: verdict.criteria.filter(c => !c.met).map(c => c.reason) })]);
+    unmet_criteria: verdict.criteria.filter(c => !c.met).map(c => c.claim), reasons: verdict.criteria.filter(c => !c.met).map(c => c.reason) })]);
   try {
     assert.equal(view.instrumentEntangled, undefined);
     assert.equal(view.unmetCriteria.length, 1);
+    assert.equal(view.unmetCriteria[0]!.claim, verdict.criteria[0]!.claim);
+    assert.equal(view.unmetCriteria[0]!.proof, verdict.criteria[0]!.proof);
+    assert.equal(view.unmetCriteria[0]!.reason, verdict.criteria[0]!.reason);
     const disposition = deriveDisposition(view, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);
     assert.equal(disposition.disposition, "blocked-fixable");
     assert.doesNotMatch(disposition.reason, /prerequisite|W1-T2436/);
@@ -397,5 +400,6 @@ test("a current advisory review reaches cold repair for its real unmet criterion
     assert.equal(args.initialReview.instrumentEntangled, undefined);
     assert.equal(args.initialReview.criteria.length, 1);
     assert.equal(args.initialReview.criteria[0]!.met, false);
+    assert.deepEqual(args.initialReview.criteria, view.unmetCriteria);
   } finally { cleanup(); }
 });
