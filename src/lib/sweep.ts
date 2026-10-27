@@ -101,7 +101,7 @@ import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflight
 import { reclaimStaleLock } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger, isRealStrike, type LedgerLine } from "./ledger.js";
-import { appendOperatorNote, loadOperatorNotesForTask, type OperatorNoteEntry } from "./operator-notes.js";
+import { appendOperatorNote, loadOperatorNoteRows, loadOperatorNotesForTask, operatorNoteStore, type OperatorNoteEntry } from "./operator-notes.js";
 import {
   capStrikeLadderNote, decideStrikeLadderRung, firstFailingTestTitle, hasUnspentLadderRefresh,
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
@@ -2573,6 +2573,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     });
   const repoRoot = entrypointRepoRoot;
+  // W1-T10772: resolved per call (the store verifies its state directory's identity), never cached.
+  const ladderNoteStore = () => operatorNoteStore({ stateDir: join(config.root, "state"), repository: `${owner}/${repo}`, legacyRoot: repoRoot });
   // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
   // Never the fix-worker spawn seam: a judge must not run through a writer's spawn (a fixture's fake commits).
   const effectsProgressJudge = deps.productionProgressJudge ? productionFixProgressJudge({ cwd: repoRoot,
@@ -3549,6 +3551,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // candidate resolutions as its options — never a generic needs-human.
     strikeLadder: {
       readNotes: (taskId) => {
+        // W1-T10772: guidance lives in the instance's durable repository-scoped store (the legacy
+        // `plan/operator-notes.ndjson` stays readable through `legacyRoot`); a missing state
+        // directory falls back to the legacy file alone. Strict reads refuse an unstamped note.
+        const store = ladderNoteStore();
+        if (store) {
+          loadOperatorNoteRows(store, true);
+          return loadOperatorNotesForTask(store, taskId);
+        }
         let raw: string;
         try {
           raw = readFileSync(join(repoRoot, "plan", "operator-notes.ndjson"), "utf8");
@@ -3565,7 +3575,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         return loadOperatorNotesForTask(repoRoot, taskId);
       },
-      appendNote: (entry) => appendOperatorNote(repoRoot, entry),
+      appendNote: (entry) => appendOperatorNote(ladderNoteStore() ?? repoRoot, entry),
       readAuthor: async (pr) => {
         const row = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { user?: { login?: string } } | undefined;
         return row?.user?.login;
