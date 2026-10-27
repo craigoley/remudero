@@ -372,6 +372,89 @@ components:
         error: { type: string, enum: [unauthorized, forbidden, confirm_nonce_required] }
         required_scope: { type: string, enum: [write] }
         required_tier: { type: string, enum: [high] }
+    ProductDeploymentRepository:
+      type: object
+      additionalProperties: false
+      required: [id, owner, name]
+      properties:
+        id: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+        name: { type: string, minLength: 1, maxLength: 100, pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$' }
+    ProductDeploymentCommand:
+      type: object
+      additionalProperties: false
+      description: >
+        At most 4096 raw request bytes. action adopt requires the exact provider projectId and never
+        creates; action create must not carry projectId. repository must be the GitHub repository the
+        product is verified to be bound to, and teamId the server-configured Vercel team. Reusing
+        requestId with the same command replays its receipt; a changed command conflicts. Ownership
+        comes only from verifiedActor. Credentials are server-held and never accepted here.
+      required: [version, requestId, productId, action, teamId, projectName, repository, expectedRevision, expectedObjectiveRevision]
+      properties:
+        version: { type: string, enum: [product-deployment-v1] }
+        requestId: { $ref: "#/components/schemas/ProductRequestId" }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        action: { type: string, enum: [adopt, create] }
+        teamId: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
+        projectName: { type: string, minLength: 1, maxLength: 100, pattern: '^[a-z0-9][a-z0-9._-]*$' }
+        projectId: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
+        repository: { $ref: "#/components/schemas/ProductDeploymentRepository" }
+        expectedRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        expectedObjectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+    ProductDeploymentProject:
+      type: object
+      additionalProperties: false
+      required: [provider, id, name, teamId, repository, verifiedAt]
+      properties:
+        provider: { type: string, enum: [vercel] }
+        id: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
+        name: { type: string, minLength: 1, maxLength: 100, pattern: '^[a-z0-9][a-z0-9._-]*$' }
+        teamId: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
+        repository: { $ref: "#/components/schemas/ProductDeploymentRepository" }
+        verifiedAt: { type: string, format: date-time }
+    ProductDeploymentEvidence:
+      type: object
+      additionalProperties: false
+      description: Binding a project proves none of these; each stays its own independent evidence field.
+      required: [sourceSha, deployment, servedRoute, physicalDevice]
+      properties:
+        sourceSha: { type: "null" }
+        deployment: { type: string, enum: [none] }
+        servedRoute: { type: string, enum: [unverified] }
+        physicalDevice: { type: string, enum: [unverified] }
+    ProductDeploymentReceipt:
+      type: object
+      additionalProperties: false
+      required: [operationId, productId, action, outcome, project, deployed, playable, evidence, completedAt, payloadDigest, objectiveRevision]
+      properties:
+        operationId: { type: string, minLength: 72, maxLength: 72, pattern: '^pdeploy_[a-f0-9]{64}$' }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        action: { type: string, enum: [adopt, create] }
+        outcome: { type: string, enum: [adopted, created] }
+        project: { $ref: "#/components/schemas/ProductDeploymentProject" }
+        deployed: { type: boolean, enum: [false] }
+        playable: { type: boolean, enum: [false] }
+        evidence: { $ref: "#/components/schemas/ProductDeploymentEvidence" }
+        completedAt: { type: string, format: date-time }
+        objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        payloadDigest: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$' }
+    ProductDeploymentResponse:
+      type: object
+      additionalProperties: false
+      required: [version, receipt, replayed]
+      properties:
+        version: { type: string, enum: [product-deployment-v1] }
+        receipt: { $ref: "#/components/schemas/ProductDeploymentReceipt" }
+        replayed: { type: boolean }
+    ProductDeploymentError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-deployment-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, not_found, project_not_found, repository_required, repository_mismatch, team_mismatch, project_conflict, idempotency_conflict, stale_revision, capacity, creation_denied, not_configured, busy, corrupt, unavailable, provider_unreadable, outcome_unknown, recovery_required, request_too_large]
     ProductBuildCommand:
       type: object
       additionalProperties: false
@@ -7250,7 +7333,7 @@ components:
           type: [integer, "null"]
         reason:
           type: [string, "null"]
-          enum: [inputs-unchanged, process-completed, process-failed, signal-or-cancelled, spawn-failed, memory-budget-shortfall, null]
+          enum: [inputs-unchanged, process-completed, process-failed, signal-or-cancelled, spawn-failed, memory-budget-shortfall, admission-rank, null]
         attempts:
           type: integer
           minimum: 0
@@ -14720,6 +14803,77 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+  /v1/products/deployment:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+    post:
+      summary: Bind a product to its existing Vercel project and team, with GitHub identity read back.
+      description: >
+        Requires the verified operator, the write scope and the middle tier. The repository in the
+        command must be the product's verified GitHub repository and the team the server-configured
+        one; a different repository or team writes nothing. The operation intent is journaled durably
+        before the single provider create call, and the project is read back with its team and GitHub
+        repository identity verified before any receipt is recorded; a lost creation response resumes
+        the same provider project by reading it and never by a second create. Adoption performs zero
+        create calls. The receipt never marks the product deployed or playable: source SHA, deployment
+        status, served route and physical-device evidence stay separate and unverified. No domain is
+        purchased, no DNS changed and no project deleted. outcome_unknown is reconciled by retrying the
+        identical command. Responses use Cache-Control private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductDeploymentCommand" }
+      responses:
+        "200":
+          description: The verified project identity and durable receipt, or the same original receipt on an identical retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductDeploymentResponse" }
+        "400":
+          description: Malformed JSON, an invalid command, or adopt/create fields that do not match the action.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAccessError" }
+        "403":
+          description: The verified operator identity or write grant is missing, or project creation is denied by the provider.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductDeploymentError"
+                  - $ref: "#/components/schemas/ProductAccessError"
+        "404":
+          description: The product does not exist for this operator, or the project to adopt does not exist.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+        "409":
+          description: repository_required, repository_mismatch, team_mismatch, project_conflict, idempotency_conflict, stale_revision or the journal capacity is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+        "413":
+          description: The raw request exceeds 4096 bytes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+        "503":
+          description: not_configured, busy, corrupt, unavailable, provider_unreadable, outcome_unknown or recovery_required; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductDeploymentError" }
   /v1/products/build:
     parameters:
       - name: x-rmd-operator-session

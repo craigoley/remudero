@@ -1,0 +1,74 @@
+- id: W1-T10745
+  title: Preserve Code health readiness across view lane startup
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span
+  origin: "Approved cockpit delivery; authenticated runtime readiness and isolated production-lane reproduction 2026-10-26"
+  status: queued
+  attempts: 0
+  priority: 2
+  budget_usd: 16
+  depends_on:
+    - W1-T10559
+    - W1-T10560
+    - W1-T10683
+  files:
+    - src/lib/read-model-worker.ts
+    - test/console-api/views/code-health-demand-lanes.test.ts
+  rationale: >-
+    Authenticated repository and consolidated Code health reads returned 503 while the configured
+    durable inventory was readable and production view counters reported successful builds. The
+    live versions route had six other views including the read-model positive control, but no Code
+    health body. An admitted isolated reproduction at 5df609886872b58ad47d6e9b3aafe18aa43bc05e
+    ran one physical file and two tests, both failing at the intended production seams. The first
+    real ticker built a valid roster and selected body; the second lane's startup sweep dropped
+    default, __code_health_scope and repository=all keys. The first lane's unchanged rebuild did not
+    restore them. Separately, the real factory ignored its configured stateDir and threw before a
+    sourceStore attached. These are reproduced failure mechanisms, not proof that every live 503
+    has this cause. Complete authenticated intended-repository and all-repository reads after adoption.
+  design: >-
+    Preserve Code health scope and selected-body readiness when fast and heavy view lanes start
+    in either order, restart independently or transfer a view. Bind the production Code health
+    factory to the configured durable stateDir so scope construction does not require an attached
+    projector database. Keep legacy callers compatible without inventing a state directory.
+
+    Make demand eviction respect actual view and key ownership. A lane that does not own a view
+    or an instance key must not delete the peer's fresh body, reading or persistent record. Retain
+    normal startup invalidation of old persisted keys, ten-minute unread-key expiry, the existing
+    key cap and bounded scheduling. Cover mixed instance ownership, lane transfer and genuine
+    expiry rather than merely skipping every sweep or pinning all keys. Do not add general retries,
+    global write authority, new worker lanes or independent caches. Reuse the current consumer's
+    source-clock judgment and keep the exact source-age, nonfuture, roster and request checks.
+
+    W1-T10559 owns the shared worker until its actual protected merge. Build this task only after
+    that dependency merges and fresh ownership and merged-credit checks allow it. Adopt its actual
+    implementation rather than restoring an older worker. Exercise real production ticker, demand
+    book, temporary database and factory paths with positive controls before each refusal. The
+    existing private two-test diagnostic is a starting regression, not implementation qualification.
+    Add no scanner exemption, exclusion, baseline change, freshness extension or admission bypass.
+    Do not collect scans, change daily cadence, reset claims or strikes, raise spending, kill workers,
+    restart services or release either console consumer hold as part of this source repair.
+  falsifier: >-
+    Remove the owner-aware eviction fix and rerun the verified physical regression: the selected
+    Code health read must become unavailable after peer startup. Independently remove the durable
+    state binding: the no-sourceStore factory case must throw again. Restore each change and rerun
+    both cases plus expiry, caps and lane ownership controls under normal admission on the exact head.
+  acceptance:
+    - claim: a ready repository roster and selected Code health report survive peer lane startup
+      proof: "unit test: code health remains readable after the second production view lane starts"
+    - claim: the production factory reads configured durable state before the projector database attaches
+      proof: "unit test: code health production factory reads configured durable state before the projector store attaches"
+    - claim: demand cleanup respects lane and instance ownership while retaining expiry and key limits
+      proof: "unit test: demand lane ownership preserves expiry and key limits"
+  note: >-
+    Reserved on origin from the operator checkout. Before filing, main and all twenty observed
+    open PR heads were swept over twenty-one controlled trees with positive source and plan
+    populations. Every observed sweepDemand body and Code health factory registration was identical;
+    no competing repair was found. The original clock repair W1-T10683 is already merged and must
+    remain intact. Private regression placement was computed by rmd test-place as console-api/views.
+    Exact normal scoped failure receipt: code-health-demand-lanes-reproduction-1.txt, tests2 fail2,
+    complete physical-file reporting; full author and hosted qualification are not claimed.

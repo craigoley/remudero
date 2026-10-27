@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import type { GardenCheckout, GardenerDeps } from "#src/lib/gardener.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { taskRulingPin } from "#src/lib/task-linter.js";
 import { scoutGardenSpec, scoutShard } from "#src/lib/scout-gardener.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -169,4 +170,65 @@ test("W1-T10261: queued test-only scout drafts gain their writer and return to t
   repo.git("remote", "set-url", "origin", "https://github.com/fixture/scout.git");
   shim.addRoute({ when: "pulls?state=open", stderr: "cannot read open runs", exit: 7 });
   await assert.rejects(defaultSpec.inventoryAsync!(), /cannot read open runs/);
+});
+
+
+test("the scout preserves an operator-ratified test-only contract", t => {
+  const repo = gitRepo({ scope: t, kind: "scout-ratified-contract" });
+  mkdirSync(join(repo.dir, "src/lib"), { recursive: true });
+  writeFileSync(join(repo.dir, "src/lib/inbox.ts"), 'log("inbox.draft_error");');
+  repo.git("add", "src");
+  for (const verdict of ["operator", "low"]) {
+    const base = scoutShard(symptom, "W1-T99051", [5]).text.replace("  verify: human", "  verify: auto");
+    const pin = taskRulingPin(loadPlanFromYaml(base, "operator-base.yaml").tasks[0]!);
+    const original = base + `  risk_ruling:\n    verdict: ${verdict}\n    action: proceed\n    confidence: 1\n    reasons: ["explicit existing operator decision"]\n    judged_at: "${new Date().toISOString()}"\n    pin: "${pin}"\n`;
+    const released = verdict === "low" ? original + `    operator_release_pin: "${pin}"\n` : original;
+    const path = "plan/tasks.d/W1-T99051.yaml";
+    mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true });
+    writeFileSync(join(repo.dir, path), released);
+    const task = loadPlanFromYaml(released, path).tasks[0]!;
+    const spec = scoutGardenSpec({ repoRoot: repo.dir, stateDir: repo.dir, clock: fixedClock(Date.now()), log: () => {},
+      openWorkspace: () => { throw new Error("unused"); } }, {
+      mintTaskId: () => { throw new Error("no new task requested"); },
+      plan: () => ({ all: [task], open: [task], shards: new Map([[task.id, path]]) }),
+      ledger: () => [], mergedTasks: () => new Map(), mergedLastDay: () => 0, openRunTasks: () => new Set(),
+    });
+    assert.deepEqual(spec.candidates(spec.inventory(), () => 0), [], "operator scope is not an unratified draft to rederive");
+    assert.equal(readFileSync(join(repo.dir, path), "utf8"), released);
+  }
+});
+
+test("an inadmissible scout rescope leaves its contract intact and does not poison an independent filing", t => {
+  const repo = gitRepo({ scope: t, kind: "scout-independent-admission" });
+  const step = "verify_human.release_escalated";
+  mkdirSync(join(repo.dir, "src/lib"), { recursive: true });
+  for (const file of ["verify-human-judge", "verify-human-release"]) {
+    writeFileSync(join(repo.dir, `src/lib/${file}.ts`), `log(${JSON.stringify(step)});`);
+  }
+  writeFileSync(join(repo.dir, "src/lib/inbox.ts"), 'log("inbox.draft_error");');
+  repo.git("add", "src");
+  const original = scoutShard({ ...symptom, step }, "W1-T99052", [5]).text.replace("  risk: high", "  risk: low");
+  const path = "plan/tasks.d/W1-T99052.yaml";
+  mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true });
+  writeFileSync(join(repo.dir, path), original);
+  const task = loadPlanFromYaml(original, path).tasks[0]!;
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const spec = scoutGardenSpec({ repoRoot: repo.dir, stateDir: repo.dir, clock: fixedClock(Date.now()),
+    log: (step, fields = {}) => rows.push({ step, fields }), openWorkspace: () => { throw new Error("unused"); } }, {
+    mintTaskId: () => { throw new Error("the filing uses its reserved id"); },
+    plan: () => ({ all: [task], open: [task], shards: new Map([[task.id, path]]) }),
+    ledger: () => [], mergedTasks: () => new Map(), mergedLastDay: () => 0, openRunTasks: () => new Set(),
+  });
+  const rederived = spec.candidates(spec.inventory(), () => 0);
+  assert.equal(rederived.length, 1);
+  const fresh = { class: "file-uncovered-symptom" as const, target: symptom.step, origin: "scout:inbox.draft_error",
+    symptom: { ...symptom, files: ["src/lib/inbox.ts"] }, reason: "independent fixture symptom" };
+  const landing = spec.apply({ root: repo.dir, branch: "scout-independent" } as GardenCheckout,
+    { actions: [...rederived, fresh], acting: ["file-uncovered-symptom"] }, {}, ["W1-T99053"]);
+  assert.ok(landing);
+  assert.equal(readFileSync(join(repo.dir, path), "utf8"), original, "the refused rescope never overwrites its prior contract");
+  assert.equal(landing.paths.length, 1, "only the independent admissible record may reach landing");
+  assert.ok(!landing.paths.includes(path));
+  assert.equal(spec.landingRefusal!(repo.dir, landing.paths), undefined, "the real unchanged final filing gate admits exactly the retained record");
+  assert.ok(rows.some(r => r.step === "scout.record_refused" && r.fields.task_id === task.id && /sizing/.test(String(r.fields.reason))));
 });

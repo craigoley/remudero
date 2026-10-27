@@ -1,0 +1,137 @@
+- id: W1-T10736
+  title: "A STAGE-STALL CLOCK EXCLUDES PAUSED, HELD AND DOWN TIME — fleetWithheldStageMs reads only a PR's own sweep.disposed prose, which stopped matching the review-only pause pass text W1-T9569 introduced, and it never sees an interval in which the instance was not running or booted held; so on 2026-10-26 three healthy PRs were escalated as MANUAL stage stalls (#14475/#14476/#14477) with held_ms 0 after a fleet PAUSE and a VM resize"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern, how much of a stage's age the stalled-stage backstop counts; the backstop bounds, the stage keys and the escalation route are unchanged
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: read-only host ledger evidence of three false stage-stall escalations raised during and just after a fleet PAUSE and a VM deallocation"
+  plan_refs: [W1-T8167, W1-T9433, W1-T9569, W1-T9971, W1-T5343, W1-T4194, W1-T10735, W1-T10737, "PR #12837 (W1-T9433)", "PR #13645 (W1-T9569)"]
+  files:
+    - src/lib/sweep.ts
+    - src/lib/ledger.ts
+    - test/sweep/a-stage-stall-clock-excludes-paused-held-and-down-time.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main 1e7188db5, and read-only on `ssh remudero`
+    (~/rmd-state2/state/ledger.ndjson, niced, bounded greps of the live ledger).
+
+    THE CLOCK.
+    - src/lib/sweep.ts:17418 `reportStuckStage`. :17433-17435 return early while `blocker_age_ms` is within the
+      blocker's bound. :17448 reads `stageRows`: THIS PR's rows since `blocker_since`. :17451
+      `heldMs = fleetWithheldStageMs(stageRows, now)`. :17452 reports only when `blocker_age_ms - heldMs`
+      passes the bound. :17630 escalates with `cause: "stage-stall"`.
+    - The bounds are DEFAULT_SWEEP_POLICY.stageBackstops (:6751-6758): awaiting-review 30 min, own-red 45 min,
+      named BACKSTOP. This task does not change them.
+    - :13704-13722 `fleetWithheldStageMs` counts an interval only from an un-acted `sweep.disposed` row of the
+      PR whose prose matches FLEET_WITHHELD_STAND_DOWN (:13699-13700):
+      `fleet (PAUSE|STOP) hold|live host capacity|host worker budget|deferred to full sweep (light pass)`.
+
+    DEFECT A: SINCE W1-T9569 A PAUSE-HELD PASS IS COUNTED AS OWNER TIME.
+    - W1-T9433 (#12837, 702b4c534, 2026-10-18) relied on the light pass's "deferred to full sweep (light pass)".
+    - W1-T9569 (#13645, ce1030b44, 2026-10-22) made every review-only light pass write
+      `reviewOnlyStandDownReason(scope)` (:13897-13899): "review-only <scope> pass: repair lanes closed until …".
+      It also writes the structured `light_pass_scope` field (:14208-14209, written at :19056 and :22964).
+    - The regex matches none of the five scopes (pause, drain, boot, idle, interphase-review). So since 10-22
+      a pass the fleet's own PAUSE stood down adds to the stall.
+    - #14465 (W1-T10135): `pr.stuck` 16:35:20.798Z, own-red since 15:48:28.593Z, blocker_age_ms 2,812,205
+      (46.9 min, bound 45), held_ms 0. Its diagnosis is
+      `repeat: "… NOT DISPATCHED this pass: review-only pause pass: repair lanes closed until the PAUSE lifts" x2`.
+      So the stage's own rows said PAUSE twice, and none of it was excluded. Escalated as #14477 at 16:35:28Z.
+
+    DEFECT B: AN INSTANCE THAT IS DOWN OR BOOTED HELD LEAVES NO PR ROW, SO ITS TIME COUNTS.
+    - #14442 (W1-T10409) and #14428 (W1-T10662): awaiting-review since 15:48:27.599Z / 15:48:27.684Z. Their
+      reviews were admitted at 15:48:40Z by DAEMON-1793029554246 (started 15:45:54Z). That run's last row in
+      the live ledger is 15:50:59.991Z. The next `daemon.start` rows are DAEMON-1793031816575 at
+      16:24:49.943Z and DAEMON-1793031930844 at 16:26:31.853Z.
+    - DAEMON-1793031930844 was the 8c1ad448e kickstart (deploy.kickstart 16:25:26.844Z). The fleet was
+      paused, and its boot was held: `deploy.unhealthy_rollback` at 16:28:31.035Z lists observed_rows
+      [daemon.paths, daemon.boot_held]. This held run ran review-only light passes (`sweep.pass`
+      surface light, 16:28:24Z).
+    - That held run also wrote both `pr.stuck` rows at 16:28:20.082Z / .182Z: blocker_age_ms 2,392,483 and
+      2,392,498 (39.9 min, bound 30), held_ms 0. It escalated #14475 (16:28:32Z) and #14476 (16:28:36Z).
+    - Operator account of the window: fleet paused about 15:15Z, VM deallocated 16:10-16:24Z, resumed about
+      16:30Z. The first unheld `daemon.boot` is 16:31:13.328Z (DAEMON-1793032203546).
+    - The outage plus the held boot alone (at least 16:10Z to 16:26:31Z, 16.5 min) leaves at most 23.4 min,
+      under the 30-minute bound.
+    - None of the three was stalled. #14442 got a full PASS (`automerge.armed` 16:41:36Z) and merged as
+      09f9663f8 at 16:41:34Z. #14428 was dispatched to fix round 2 (16:55:03Z). #14465 was queued for its
+      own-red fix (16:35:29Z boot-pass and 16:45:27Z capacity stand-downs).
+    - Caveat: ledger compaction fired at 15:26:10Z and 16:42:42Z, so the empty live-ledger stretch from 15:50Z
+      to 16:24Z is not by itself evidence that the daemon was down; the VM record is. The union was not read,
+      because the house rules forbid a ledger-union probe in the core container.
+
+    RETENTION. The clock's inputs must survive a stage's life.
+    - src/lib/ledger.ts keeps `daemon.start` (:1080) in a retained list.
+    - It keeps `daemon.boot` (:846) only for the health window (`isHealthOrDeployStep`, :1044-1045).
+    - It names none of `daemon.boot_held`, `daemon.admission_held` or `daemon.sweep_light.held`.
+
+    SEPARATE (filed alongside): a MANUAL false alarm cannot be recorded as one (W1-T10735), and the deploy
+    health check rolled back the held build (W1-T10737).
+  design: |
+    1. PR STAND-DOWNS ARE READ FROM STRUCTURE, NOT PROSE. A `sweep.disposed` row with `acted: false` and any
+       `light_pass_scope` is fleet-withheld. That restores what "deferred to full sweep (light pass)" meant
+       before W1-T9569. Keep the existing FLEET_WITHHELD_STAND_DOWN arms (PAUSE/STOP hold, host capacity,
+       worker budget, and the legacy light-pass text for rows written before 10-22). An acted row is never
+       withheld.
+    2. INSTANCE INTERVALS, BY EVIDENCE. From the same ledger read, derive the instance's own intervals over
+       [blocker_since, now]:
+       a. NOT RUNNING: from the last row of one daemon run (`run_id` DAEMON-*) to the next `daemon.start` of a
+          different run. One daemon holds an instance's lock, so the earlier run had ended by then.
+       b. HELD: from a `daemon.boot_held` row, or a `daemon.admission_held` / `daemon.sweep_light.held` row
+          whose control or detail is a fleet PAUSE or STOP, to that run's next unheld evidence. Unheld evidence
+          is a `daemon.boot`, a non-light `sweep.pass`, or the run's end, which a NOT RUNNING interval then
+          covers.
+       No interval is inferred from a gap length or a timeout. There are no fixed thresholds.
+    3. THE STALL CLOCK SUBTRACTS THE UNION. Subtract the union of the PR's withheld intervals and the
+       instance's NOT RUNNING and HELD intervals, clipped to the stage, so an overlap is counted once. That
+       union replaces `heldMs` at :17452. The bounds, stage keys, dedup, the W1-T9971 in-flight check and the
+       W1-T8167 review-overrun deferral are unchanged.
+    4. THE ROW SAYS WHAT WAS EXCLUDED. `pr.stuck` keeps `held_ms` (now the union total) and adds
+       `excluded_ms: { pr_withheld, instance_down, instance_held }`. The escalation sentence names the
+       excluded minutes by kind. A stage with nothing excluded reads as today.
+    5. RETENTION. Every step the clock reads survives at least the life of an open stage. Add
+       `daemon.boot_held`, PAUSE/STOP `daemon.admission_held` and `daemon.sweep_light.held` to the retained set
+       in src/lib/ledger.ts with this consumer named, as that file's doctrine requires. Otherwise read them
+       through the existing union reader. Do not widen retention for any other step.
+  prompt: |
+    Write test/sweep/a-stage-stall-clock-excludes-paused-held-and-down-time.test.ts first (the folder
+    `rmd test-place` computes for a sweep suite; keep this exact path, the proofs grep it). Import through
+    `#src/*`, and watch each new test fail at base: restore the base code with
+    `git show origin/main:src/lib/sweep.ts`, never stash. Every new test title starts with `W1-T10736: `
+    exactly as in the acceptance proofs.
+    Drive it through `runSweep`, as test/a-red-held-by-a-fleet-pause-does-not-trip-the-stage-backstop.test.ts
+    does, with a fixture ledger shaped like the 2026-10-26 rows in the rationale:
+    - an own-red stage whose passes carry `light_pass_scope: "pause"` and the W1-T9569 stand-down text;
+    - an awaiting-review stage whose run ends, followed by a gap, a `daemon.start` of a new run, and a
+      `daemon.boot_held` row, with no PR row in between.
+    Each "not escalated" case must also assert that the same fixture minus its pause/outage rows DOES
+    escalate. That way a fixture that never reaches the backstop fails loudly.
+    Keep the existing W1-T9433 suite green unchanged, including its "deferred to full sweep (light pass)"
+    legacy row. Run the targeted suites and `rmd preflight --fast` on the committed tree before the first
+    push.
+  acceptance:
+    - claim: "an own-red stage whose un-acted passes are review-only light passes (light_pass_scope pause) is not escalated at its backstop, while the same stage without those passes is"
+      proof: 'grep: test("W1-T10736: an own-red held by review-only pause passes is not escalated at its backstop" in test/sweep/a-stage-stall-clock-excludes-paused-held-and-down-time.test.ts'
+    - claim: "an awaiting-review stage whose age is mostly an interval with no running daemon and a held boot is not escalated, while the same stage with the daemon running unheld throughout is"
+      proof: 'grep: test("W1-T10736: a stage whose age is mostly an instance outage or a held boot is not escalated" in test/sweep/a-stage-stall-clock-excludes-paused-held-and-down-time.test.ts'
+    - claim: "pr.stuck records the excluded time by kind (pr_withheld, instance_down, instance_held), counting an overlap once, and the escalation sentence names it"
+      proof: 'grep: test("W1-T10736: the stuck row names the paused, held and down time it excluded" in test/sweep/a-stage-stall-clock-excludes-paused-held-and-down-time.test.ts'
+  falsifier: |
+    - Restore the prose-only FLEET_WITHHELD_STAND_DOWN read: the pause-pass case must fail.
+    - Drop the instance intervals: the outage case must fail.
+    - Sum the kinds instead of taking their union: the excluded-time case must fail on its overlap.
+    GUARDS that held at base and must still hold:
+    - a stage that stalls while the instance runs unheld still escalates at its bound
+      (test/a-red-held-by-a-fleet-pause-does-not-trip-the-stage-backstop.test.ts:54);
+    - an acted pass and an unrelated stand-down are not withheld time, and the legacy light-pass text still
+      is (:83);
+    - pr.stuck still names `held_ms` (:72);
+    - the backstop minutes are unchanged;
+    - a held review-only pass still admits reviews (W1-T5343).
+    Remove each guard's production branch in turn: its case must fail. Restore, and require zero failures.

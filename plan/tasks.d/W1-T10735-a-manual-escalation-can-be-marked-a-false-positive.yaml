@@ -1,0 +1,110 @@
+- id: W1-T10735
+  title: "A MANUAL ESCALATION CAN BE MARKED A FALSE POSITIVE — now-decisions.ts gives a class-MANUAL escalation ONLY a `manual_approval` decision (POST /v1/manual/approve, input none), which ledgers a bare `panel.manual_approved` check-off, so the operator cannot say a MANUAL alarm was noise and escalation-precision never learns it; offer the existing class-agnostic mark-handled answer (with its disposition choice) beside Approve"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 6.00
+  risk: medium  # Rule 19: one concern, which answers the now view offers for a MANUAL escalation; no route, tier, validator or precision rule changes
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: issues #14475/#14476/#14477 (W1-T10409/W1-T10662/W1-T10135) were stage-stall false alarms filed as class MANUAL, and the only in-place answer the now queue offered was Approve"
+  plan_refs: [W1-T182, W1-T404, W1-T4677, "P4-T08 (now decisions)", W1-T10736, W1-T10738, CONSOLE-T127]
+  files:
+    - src/lib/now-decisions.ts
+    - test/now-decisions.test.ts
+    - test/console-api/a-manual-escalation-can-be-marked-a-false-positive.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main 1e7188db5, and the console at craigoley/remudero-console 967b112.
+
+    THE DEFECT (core).
+    - src/lib/now-decisions.ts:138-154 `escalationDecisions`. For `cls === "MANUAL"` (:146-149) it returns ONE
+      decision, kind `manual_approval`, whose answer is `POST /v1/manual/approve`, tier high, `input: "none"`.
+      Every other class (:150-152) gets kind `escalation`, `options: [...ESCALATION_DISPOSITIONS]`, answered by
+      `POST /v1/escalation/mark-handled` with fields {taskId, issueUrl, class} and `input: "choice"`.
+    - src/lib/panel-actions.ts:729-743 `buildApproveManualRoute` closes the issue and ledgers
+      `panel.manual_approved` with only `issue_url` (:739). No disposition is recorded.
+    - src/lib/panel-actions.ts:758-780 `validateMarkEscalationHandled` and :787-816
+      `buildEscalationMarkHandledRoute` already accept ANY class. They require only a non-empty `class` and a
+      `disposition` in ESCALATION_DISPOSITIONS (src/lib/escalation-precision.ts:29:
+      acted | false_positive | duplicate | snoozed_until). The route closes the issue and ledgers
+      `panel.escalation_marked_handled` with class and disposition (:797-802), the row
+      `escalationClassPrecision` counts (escalation-precision.ts:87-96).
+    - So the server side already supports recording a MANUAL false positive. Only the now view never offers it.
+
+    THE INCIDENT (ledger, read-only on the host, ~/rmd-state2/state/ledger.ndjson).
+    - 2026-10-26 `escalation.issue_opened` class MANUAL, triage_subject.cause "stage-stall":
+      16:28:32Z #14475 (W1-T10409, PR #14442), 16:28:36Z #14476 (W1-T10662, PR #14428), 16:35:28Z #14477
+      (W1-T10135, PR #14465). None of the three PRs was stalled: #14442 got a full PASS (automerge.armed
+      16:41:36Z) and merged as 09f9663f8 at 16:41:34Z; #14428 went to fix round 2 at 16:55:03Z; #14465 was
+      queued for its own-red fix. W1-T10736 files the clock defect that raised them.
+    - The only answer the now decision queue offered for each was Approve. At 17:12Z all three were still
+      OPEN. The operator then marked them `false_positive` through POST /v1/escalation/mark-handled directly,
+      outside the queue, and they closed at 17:16:26Z-17:16:42Z. Through the queue alone, no disposition
+      could have been recorded. W1-T10738 files the separate defect that a MANUAL Approve is never counted
+      as an acted sample.
+
+    THE CONSOLE ALREADY RENDERS THE FIX (no CONSOLE-T needed for this task).
+    - remudero-console lib/core-views.ts:567-598 `nowDecision` accepts kind `escalation` with
+      `input: "choice"` and its `options`. lib/rmd-control.ts:5151-5156 pins
+      `/v1/escalation/mark-handled` with fields [taskId, issueUrl, class] and inputField `disposition`, and
+      :5177-5184 accepts the per-instance `/v1/i/<instance>/` form. app/decision-queue.tsx:658-662 labels it
+      "Escalation: … Choose how it was handled, here".
+    - So a second, `escalation`-kind decision for the same MANUAL issue is answered in place with no console
+      change.
+    - Counts do not double. src/lib/human-gate.ts:635-639 `projectHumanGates` folds `manual_approval` into
+      `escalation` on the same (instance, subject), so `humanGates` and `needsYou` still count the issue once.
+
+    THE OTHER CONSOLE PATH (reported, not this task). /needs-you's own "mark handled" form
+    (remudero-console app/now/operator-actions.tsx:98-126, lib/rmd-control.ts:5018-5027) posts only
+    {taskId, issueUrl}. Core 400s it for every class ("class is required", panel-actions.ts:762).
+    CONSOLE-T127 (queued since 2026-10-13) already names this defect, and its design removes that form by
+    redirecting /needs-you to /now. Once it lands, the now decision queue is the operator's only in-place
+    answer, which makes this task the only way to dispose of a MANUAL false alarm there.
+
+    WHAT THIS DOES NOT CHANGE. MANUAL stays in NEVER_DEMOTE_CLASSES (escalation-precision.ts:36, :120), so
+    recorded MANUAL false positives are measured but never demote the class. A per-cause signal (for example
+    stage-stall) is a separate decision for the operator.
+  design: |
+    1. In `escalationDecisions`, a MANUAL escalation with an issue yields TWO decisions, in this order:
+       a. the existing `manual_approval` decision, byte-for-byte unchanged: id `manual:<task>:<issue>`,
+          POST /v1/manual/approve, tier high, `input: "none"`. Approve stays the answer for a real manual act;
+       b. an `escalation` decision with id `escalation:<task>:<issue>`, `options: [...ESCALATION_DISPOSITIONS]`,
+          answer POST /v1/escalation/mark-handled (instanceAnswerPath for a non-core instance), tier
+          `ESCALATION_OPTION_ROUTES["/v1/escalation/mark-handled"]`, fields {taskId, issueUrl, class: "MANUAL"},
+          `input: "choice"`. It carries the same title, prompt and askedAt as (a).
+       Every non-MANUAL class is unchanged.
+    2. Update the module doc table (now-decisions.ts:5-10) to say a MANUAL escalation is offered both.
+    3. Nothing else. No route, tier, validator, precision rule, NEVER_DEMOTE set or console fixture changes.
+       The human-gate fold at human-gate.ts:635-639 keeps counts at one per issue.
+  prompt: |
+    Write test/console-api/a-manual-escalation-can-be-marked-a-false-positive.test.ts first (the folder
+    `rmd test-place` computes for a now-decisions suite; keep this exact path, the proofs grep it), import
+    through `#src/*`, and watch it fail at base:
+    restore the base code with `git show origin/main:src/lib/now-decisions.ts`, never stash. Every new test
+    title starts with `W1-T10735: ` exactly as in the acceptance proofs. Drive it through the exported
+    `escalationDecisions` and `escalationClasses`, and for the count claim through the same projection the
+    now view uses (`projectHumanGates` over the decisions mapped as now-view.ts `decisionGate` maps them).
+    Assert the exact second decision object, not just its kind, so a decision with no class or no options
+    fails. The gate case first asserts that the MANUAL issue produced two decisions, then that they project
+    to one gate, so it cannot pass on a single decision. Amend the first test in test/now-decisions.test.ts (it destructures exactly
+    `[manual, other, ...rest]` at :43) to expect the MANUAL pair before the BLOCKED decision. Run both suites
+    and `rmd preflight --fast` on the committed tree before the first push.
+  acceptance:
+    - claim: "a MANUAL escalation with an issue is offered both Approve (POST /v1/manual/approve, high, no input) and mark-handled (POST /v1/escalation/mark-handled with class MANUAL and the four dispositions as a choice), on its own instance's route"
+      proof: 'grep: test("W1-T10735: a manual escalation is offered approve and mark-handled with a disposition" in test/console-api/a-manual-escalation-can-be-marked-a-false-positive.test.ts'
+    - claim: "the two answers for one MANUAL issue still project as ONE human gate, so the needs-you count does not double"
+      proof: 'grep: test("W1-T10735: a manual escalation offered two answers is still one human gate" in test/console-api/a-manual-escalation-can-be-marked-a-false-positive.test.ts'
+  falsifier: |
+    Restore the single `manual_approval` return for MANUAL: the first case must fail. Emit the second decision
+    without `class` or with `input: "none"`: the first case must fail on its exact object. Give the second
+    decision a different subject (for example its id) instead of the task id: the gate case must fail at two
+    gates. GUARDS that held at base and must still hold: the manual_approval decision itself is unchanged
+    (id, route, tier high, input none); a non-MANUAL escalation still yields exactly one `escalation`
+    decision with its own class; an escalation with no issue URL, or a task that is not needsHuman, yields
+    nothing; an unseen class still reads "UNKNOWN" (test/now-decisions.test.ts:29-57, amended only for the
+    MANUAL pair). Remove each guard's production branch in turn: its case must fail. Restore and require zero
+    failures.

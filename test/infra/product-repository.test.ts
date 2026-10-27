@@ -390,3 +390,31 @@ test("repository adoption reconciles a competing trusted stage without repeating
   assert.deepEqual(provider.calls, calls);
   assert.deepEqual(provider.creates(), []);
 });
+
+test("W1-T10732: a bound product refuses a fresh create before provider work", async (t) => {
+  const f = fixture(t), provider = new FakeProvider();
+  provider.repos.set("craigoley/wreckterra", { id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" });
+  const adopt = f.command({ action: "adopt", repositoryId: WRECKTERRA_ID });
+  const adopted = await f.service(provider).execute(actor, adopt);
+  assert.ok(adopted.ok);
+  const journalDir = join(f.root, "state/products/v1/repositories");
+  const snapshot = () => ({
+    product: readFileSync(productStatePaths(f.root, actor).state, "utf8"),
+    journal: f.journalFiles().map((file) => [file, readFileSync(join(journalDir, file), "utf8")]),
+  });
+  const before = snapshot();
+  provider.repos.delete("craigoley/wreckterra");
+  provider.calls.length = 0;
+  const fresh = f.command({ requestId: "repo-request-0000002", action: "create" });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.deepEqual(await f.service(provider).execute(actor, fresh), { ok: false, code: "repository_conflict" });
+    assert.deepEqual(provider.calls, [], "no provider call of any kind precedes the refusal");
+    assert.deepEqual(snapshot(), before, "product and journal bytes are unchanged");
+  }
+  const replay = await f.service(provider).execute(actor, adopt);
+  assert.ok(replay.ok);
+  assert.equal(replay.value.replayed, true);
+  assert.equal(replay.value.receipt.repository.id, WRECKTERRA_ID);
+  assert.deepEqual(provider.calls, []);
+  assert.deepEqual(provider.creates(), []);
+});

@@ -1,0 +1,211 @@
+- id: W1-T10752
+  title: "A RESTORED CHECKPOINT IS RECONCILED WITH MAIN OR ABANDONED, NEVER BUILT ON A STALE BASE — when main conflicts, restoreBoundaryCheckpoint resets the run onto the checkpoint's own 12-day-old base, the worker is never told, and the dependency tree linked for main's lockfile stays under a checkout pinning another; CONSOLE-T127 restored f537386 (114 commits behind, vitest 5.0.3 against main's 5.0.5) twice on 2026-10-26 and its PR open died on 'installed Vitest does not match the checkout lockfile pin'"
+  repo: remudero
+  depends_on: []  # W1-T9815 and W1-T10749 (queued) keep the newest head on thrown exits; this task's design 4 covers the returned-verdict exits through the same kept row, and whichever lands second shares the first one's helper
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern, the state a restored boundary checkpoint leaves a run in (its base, its install, its abandonment and its kept head); no breaker bound, proof verdict, push path or receipt fold changes
+  band_meaning: span
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: CONSOLE-T127-1793040579425 failed at pr_open.refused 74 min after the operator released its breaker, on a checkpoint restored onto its own 10-14 base"
+  plan_refs: [W1-T7806, W1-T7747, W1-T7837, W1-T8503, W1-T8535, W1-T8676, W1-T9786, W1-T9815, W1-T10742, W1-T10749, W1-T9482, CONSOLE-T127]
+  files:
+    - src/cli/commands/run-task-verb.ts
+    - src/run-task.ts
+    - src/lib/worker.ts
+    - test/review/a-restored-checkpoint-is-reconciled-with-main-or-abandoned.test.ts
+    - test/a-live-handoff-receipt-keeps-its-run-branch.test.ts
+    - test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main 5e401e616 and remudero-console origin/main 5c12bf2. Ledger reads were
+    read-only, niced and bounded on the host: the console instance's
+    /mnt/rmd/remudero-console-state/state/ledger.ndjson.
+
+    THE INCIDENT. CONSOLE-T127; the operator released its breaker at 17:50:32Z (dispatch.breaker_released).
+    - Run -1793037108107 (17:51:52Z to 18:17:19Z):
+      - worktree.add on console main 2200b28, then deps.reused hash 270a4361…, then implement.checkpoint_restored
+        {source_branch run-CONSOLE-T127-1792019257010, source_head_sha f537386, base "checkpoint",
+        main_conflicts [lib/core-views.ts]}.
+      - It built 01c7de6 ($4.26). The push was refused "Repository not found" (W1-T10749's case), and
+        implement.checkpoint_kept named the RESTORED f537386, not 01c7de6. 01c7de6 is not on origin
+        ("not our ref").
+    - Run -1793040579425 (18:49:43Z to 19:04:07Z):
+      - worktree.add on console main 7202ea4, deps.reused the same hash 270a4361…, then the same
+        checkpoint_restored row: base "checkpoint", main_conflicts [lib/core-views.ts].
+      - implement.finished_on_harness_tip {head_moved: false}; the run pushed run-CONSOLE-T127-1793040579425 at
+        f537386 unchanged.
+      - pr.open_refused, refusal_class branch-gap: the proof's head run ended `exec_error — proof cache
+        unavailable: installed Vitest does not match the checkout lockfile pin`. verdict failed, stage
+        pr_open.refused, cause base-proof-refused ($1.74).
+    - The checkpoint f537386 is a single harness commit "chore(checkpoint): yield at daemon restart" from
+      2026-10-14T23:42Z on merge base 415faa0. Console main is 114 commits past it.
+    - THE INSTALL WAS MAIN'S, MEASURED. sha256(package.json \0 package-lock.json), the `hashInstallInputs`
+      formula, is 270a4361… at console 2200b28, 7202ea4 and 5c12bf2 (all vitest 5.0.5). At f537386 it is
+      c1a59260… (vitest 5.0.3). Both runs reused the main-keyed tree, then reset the checkout onto f537386's
+      lockfile.
+    - THE CHECKPOINT IS NOT SUPERSEDED. Its proof test ("CONSOLE-T127: needs-you without a filter redirects to now
+      with its repository scope") exists only at f537386 (tests/unit/needs-you-reads-status-once.test.tsx and
+      now-is-the-one-needs-you-list.test.tsx). No file on console main carries it. f537386 does not touch
+      package-lock.json, so a merge with main would have carried main's 5.0.5 pin.
+
+    THE DEFECTS (core, origin/main 5e401e616).
+    1. A CONFLICTING MAIN LEAVES THE RUN ON THE STALE BASE.
+       - run-task-verb.ts `restoreBoundaryCheckpoint` (:1827): when `probeMerge` is not clean, it runs
+         `git reset --hard <checkpoint>` (:1880) and returns base "checkpoint" with the conflicted paths. Its doc in
+         src/run-task.ts says the conflict "reaches the PR, whose merge-conflict repair rounds resolve it". But a
+         stale base can fail before any PR exists, as here.
+       - The worker is never told. `mainConflicts` is read only by the ledger row (:5910). No prompt line names
+         the conflict or the base, so the -1793040579425 worker ended with head_moved false.
+       - Two tests pin the stale-base behaviour: test/a-live-handoff-receipt-keeps-its-run-branch.test.ts
+         `W1-T8503: a recreated checkpoint keeps its own base when main conflicts`, and
+         test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts `a restored checkpoint main conflicts with
+         resumes on its own base instead of ending the run`.
+    2. THE INSTALL IS KEYED BEFORE THE RESTORE.
+       - `worktreeAddAsync(... "origin/main" ...)` (:5807) provisions node_modules through `provisionDependencyTree`
+         (worker.ts:5100), keyed by `hashInstallInputs(worktreePath)` while the tree is still main.
+       - The restore (:5904) then moves HEAD with `reset --hard`. Nothing re-keys or re-links the install.
+       - proof-cache.ts:26 refuses the mismatch as exec_error. W1-T10742 (open, #14506) stops counting such an
+         exec_error as a strike, but the run still cannot prove anything on that checkout.
+    3. NOTHING ABANDONS A SUPERSEDED CHECKPOINT. The restore drops a checkpoint only when its object is gone from
+       origin (:1844-1853) or main already contains its head (:1864). A checkpoint whose changes main already
+       carries in other commits (a squash merge, a sibling task) is merged or reset onto as if it were live work.
+    4. A RETURNED FAILED VERDICT CONSUMES THE RECEIPT SILENTLY.
+       - The pr_open.refused arm (:7243-7266) says "branch … kept on origin" but writes no implement.checkpoint_kept.
+       - Its `verdict` row deletes the pending receipt (daemon.ts `pendingWorkerBoundaryHandoffs`). Replayed over
+         CONSOLE-T127's rows, the receipt is pending before 19:04:07.300Z and gone after.
+       - So the pushed ref run-CONSOLE-T127-1793040579425 blocks dispatch as run-branch-already-pushed until its
+         24 h orphan grace (drain.ts:150) ends at 2026-10-27T18:49:39Z. The next run then builds from main and
+         drops f537386, which nothing ledgers as abandoned.
+       - W1-T9815 (queued) covers the thrown exits and `failOnWorkerError`. W1-T10749 (queued) covers the
+         push-auth throw. Neither covers the returned-verdict exits.
+
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d for restoreBoundaryCheckpoint, checkpoint_restored, restored
+    checkpoint and checkpoint plus lockfile. Read the 20 open PRs' titles and the run-W1-T9815-*, -T8535-*,
+    -T10749-* and -T10742-* refs (none exist). The neighbours:
+    - W1-T8535 (queued) resolves a receipt whose branch head MOVED.
+    - W1-T9482 (queued) releases a SPENT checkpoint branch on a requeue.
+    - W1-T9815 and W1-T10749 keep the newest head on thrown exits.
+    - W1-T10742 classes an inconclusive proof.
+    None reconciles a conflicting checkpoint with main, re-keys the install after a restore, or abandons a
+    superseded checkpoint.
+    NOT IN SCOPE, reported separately: there is no sanctioned operator command that drops a pending checkpoint
+    receipt. `implement.checkpoint_dropped` has one writer, the restore itself.
+  design: |
+    MEASURE FIRST, read-only, and put the findings in the PR body:
+    - Replay design 1-2's classifier against console's f537386 and current console main. Expected: not superseded,
+      conflict on lib/core-views.ts, so reconcile. Say if it is not.
+    - Count implement.checkpoint_restored rows with base "checkpoint" in the core and console ledger union since
+      2026-10-01. For each, record whether the run reached a PR, and whether the restored lockfile hash differed
+      from the deps hash.
+    No number from this changes the design. It is the effect baseline.
+
+    1. A CONFLICTING CHECKPOINT IS MERGED WITH MAIN, AND THE WORKER RESOLVES IT.
+       - When `probeMerge` reports a conflict or an unreadable merge, the restore checks out the checkpoint and
+         runs a real `git merge --no-ff --no-commit <main>`. The conflict markers stay in the worktree and
+         MERGE_HEAD is set. The checkpoint stays the first parent, so its shas are kept, as today.
+       - The restore returns base "main" with `mainConflicts` naming the conflicted paths. The ledger row keeps
+         `main_conflicts`, adds `reconciled: "merge"`, and never again writes base "checkpoint".
+       - The implement prompt gains one line naming the merged main sha and every conflicted path. It says that
+         resolving them is part of this task.
+       - The harness commit (and a worker commit) completes the merge with both parents.
+       - The pre-open gate refuses a tree that still has unmerged index entries or conflict markers in a named
+         path. That refusal is an ordinary pre-open repair round, not a new verdict.
+       - Lockfile or toolchain drift is reconciled the same way. If the merge leaves package.json or
+         package-lock.json conflicted, the worker resolves them. Design 3 then provisions whatever lockfile the
+         resolved tree carries.
+    2. A SUPERSEDED CHECKPOINT IS ABANDONED WITH A LEDGERED REASON, BY EVIDENCE.
+       Before any merge, the restore abandons the checkpoint and the run starts from main when either:
+       - the checkpoint's own diff (merge-base to head) adds nothing main lacks: merge-tree's result tree equals
+         main's tree, or every changed path's checkpoint blob already equals main's blob;
+       - or main already carries this task's merge credit (`Remudero-Task: <id>` on a main commit dated after the
+         checkpoint's head).
+       - It writes `implement.checkpoint_dropped` {task_id, source_branch, head_sha, reason: "superseded",
+         evidence: "tree-equal" | "blobs-equal" | "task-credited", main_sha}. That row is the one the receipt
+         fold and the retained set already read, so rotation cannot revive it.
+       - There is no age or commit-count gate. A conflicted checkpoint that is not provably superseded is
+         reconciled (design 1), never abandoned.
+    3. THE INSTALL ALWAYS MATCHES THE CHECKOUT'S OWN LOCKFILE.
+       - Export from worker.ts one entry that re-reads `hashInstallInputs(worktreePath)` and relinks (or
+         provisions) node_modules for that hash, using the same `provisionDependencyTree` path and lock.
+       - Call it after the restore whenever HEAD moved, and again before the pre-open gate and the PR-open
+         proofs whenever package.json or package-lock.json differ from the tree they were last provisioned for.
+       - Ledger `deps.reprovisioned` {from_hash, to_hash, reason}.
+       - A provisioning failure falls back exactly as `failDeps` does today and is ledgered. It never silently
+         leaves the old link in place.
+    4. A FAILED RUN THAT BUILT A NEWER HEAD KEEPS THE NEWER HEAD.
+       - The returned failed-verdict exits after a restore (pr_open.refused and any other returned `failed`)
+         write `implement.checkpoint_kept` right after their verdict.
+       - The kept head is this run's own pushed tip when it is on origin and differs from the restored head.
+         Otherwise it is the restored checkpoint. Read it while the worktree stands.
+       - Use W1-T9815's keep helper if it has landed, or introduce that one helper here for W1-T9815 to reuse.
+         Do not write a second predicate.
+       - W1-T10749 owns the push-auth throw (an unpushed head). Leave that arm to it.
+       - A run that opened a PR keeps nothing, and `blocked_budget` keeps nothing, as today.
+       - The next run restores the kept head under designs 1-3, so a kept stale head is reconciled or
+         abandoned, not rebuilt on its old base.
+    Nothing else. No breaker bound, receipt fold, proof verdict, push path or orphan grace changes.
+  prompt: |
+    Do the MEASURE FIRST step and put its findings in the PR body. Then write
+    test/review/a-restored-checkpoint-is-reconciled-with-main-or-abandoned.test.ts. That is the folder
+    `rmd test-place` computes for these imports; keep this exact path, because the proofs grep it. Import through
+    `#src/*`.
+    - Every new test title starts with `W1-T10752: ` exactly as in the acceptance proofs.
+    - Use the repo's gitRepo fixture helpers with a local git identity and a bare origin, never a raw `git init`
+      (the fixture-copy census).
+    - The reconcile case drives `restoreBoundaryCheckpoint` and then a real `runTask` dispatch, as
+      test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts does. Commit a conflicting change to the same
+      file on main after the checkpoint. Assert:
+      - the restored base is "main", MERGE_HEAD is main's sha, and the conflicted path is named;
+      - the worker's prompt names main's sha and that path;
+      - a worker that resolves and commits produces a merge with parents [checkpoint, main];
+      - a worker that leaves a marker is refused by the pre-open gate.
+    - The supersede case runs once with main carrying the checkpoint's change in an unrelated commit and once with
+      a main commit trailered `Remudero-Task: <id>`. Assert an implement.checkpoint_dropped row with reason
+      superseded and the evidence named, a worktree on main, and `pendingWorkerBoundaryHandoffs` empty. Add a
+      third, conflicting, not-superseded variant and assert it is reconciled, not dropped.
+    - The install case gives the checkpoint a package-lock.json pinning a different vitest version from main's.
+      Inject the deps installer seam. Assert that after the restore the linked node_modules tree is the one keyed
+      by `hashInstallInputs` of the restored checkout, `vitestCacheCapability` reports supported, and a
+      deps.reprovisioned row names both hashes.
+    - The kept-head case ends a restored run at pr_open.refused once after the worker pushed a new head and once
+      with the head unmoved. Assert implement.checkpoint_kept names the new pushed head, then the restored head,
+      and `pendingWorkerBoundaryHandoffs` returns each.
+    - Change the two existing stale-base tests named in the rationale to the new rule, in this same PR.
+    Restore base code with `git show origin/main:<path>`, never stash, and watch every new case fail. Run the
+    suite, `npm run -s lint-plan:fast` and `rmd preflight --fast` on the committed tree before the first push.
+  acceptance:
+    - claim: "a restored checkpoint that conflicts with main is merged with main, the conflicted paths reach the worker's prompt, and the run cannot open a PR until the worker resolves them"
+      proof: 'grep: test("W1-T10752: a conflicting checkpoint is merged with main and the worker resolves the conflict" in test/review/a-restored-checkpoint-is-reconciled-with-main-or-abandoned.test.ts'
+    - claim: "a checkpoint whose diff main already carries, or whose task main already credits, is abandoned with a ledgered superseded reason and the run starts from main"
+      proof: 'grep: test("W1-T10752: a superseded checkpoint is abandoned with its evidence and the run starts from main" in test/review/a-restored-checkpoint-is-reconciled-with-main-or-abandoned.test.ts'
+    - claim: "after a restore the linked dependency tree is the one keyed by the restored checkout's own lockfile"
+      proof: 'grep: test("W1-T10752: the dependency install matches the restored checkout lockfile" in test/review/a-restored-checkpoint-is-reconciled-with-main-or-abandoned.test.ts'
+    - claim: "a restored run that fails at PR open keeps its own newer pushed head as the checkpoint, or the restored one when it built nothing"
+      proof: 'grep: test("W1-T10752: a failed restored run keeps the newest head it can prove" in test/review/a-restored-checkpoint-is-reconciled-with-main-or-abandoned.test.ts'
+  falsifier: |
+    - Restore the `reset --hard <checkpoint>` arm at run-task-verb.ts:1880: the reconcile case must fail on base and
+      MERGE_HEAD.
+    - Drop the prompt line: the reconcile case must fail on the prompt assertion.
+    - Let the pre-open gate ignore unmerged paths: the marker half must fail.
+    - Remove the supersede check: the supersede case must fail on the missing dropped row.
+    - Make it drop every conflicted checkpoint: the not-superseded variant must fail.
+    - Skip the relink after the restore: the install case must fail on the tree hash and on
+      `vitestCacheCapability`.
+    - Write no kept row on the pr_open.refused arm: the kept-head case must fail.
+    GUARDS that held at base and must still hold:
+    - a moved checkpoint head is still refused (W1-T8535's surface);
+    - an absent checkpoint object is still dropped;
+    - a clean merge still merges with the checkpoint as first parent;
+    - a run that opened a PR keeps nothing.
+    Each guard's existing case in test/a-dispatch-phase-is-not-held-by-its-slowest-lane.test.ts and
+    test/a-live-handoff-receipt-keeps-its-run-branch.test.ts must fail when its production branch is removed, and
+    pass again with zero failures once it is restored.
+  note: |
+    EFFECT, measured after merge from the core and console ledgers with no numeric pass mark: no
+    implement.checkpoint_restored row with base "checkpoint"; every restore whose lockfile differs from main's is
+    followed by deps.reprovisioned; and no pr.open_refused reading "installed Vitest does not match the checkout
+    lockfile pin".

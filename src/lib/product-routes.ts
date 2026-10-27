@@ -6,6 +6,10 @@ import {
   type ProductRepositoryCode, type ProductRepositoryProvider,
 } from "./product-repository.js";
 import {
+  PRODUCT_DEPLOYMENT_LIMITS, PRODUCT_DEPLOYMENT_VERSION, ProductDeploymentService,
+  type ProductDeploymentCode, type ProductDeploymentProvider,
+} from "./product-deployment.js";
+import {
   PRODUCT_BUILD_LIMITS, PRODUCT_BUILD_VERSION, ProductBuildService,
   type ProductBuildCode, type ProductBuildOptions,
 } from "./product-build.js";
@@ -86,6 +90,36 @@ export function buildProductRepositoryRoutes(options: { root?: string; provider?
       }
       const result = await service.execute(actor, command);
       if (!result.ok) { reply(repositoryStatus[result.code], { error: result.code }); return; }
+      reply(200, result.value);
+    } },
+  ];
+}
+
+const deploymentStatus: Record<ProductDeploymentCode, number> = {
+  invalid_identity: 403, invalid_input: 400, not_found: 404, project_not_found: 404, repository_required: 409,
+  repository_mismatch: 409, team_mismatch: 409, project_conflict: 409, idempotency_conflict: 409, stale_revision: 409,
+  capacity: 409, creation_denied: 403, not_configured: 503, busy: 503, corrupt: 503, unavailable: 503,
+  provider_unreadable: 503, outcome_unknown: 503, recovery_required: 503,
+};
+
+/** Bind the product to its existing Vercel scope. It records a project binding only: never a deployment. */
+export function buildProductDeploymentRoutes(options: { root?: string; provider?: ProductDeploymentProvider; env?: NodeJS.ProcessEnv }): Route[] {
+  const service = new ProductDeploymentService(options);
+  return [
+    { method: "POST", path: "/v1/products/deployment", scope: "write", tier: "middle", async handler(req, res) {
+      res.setHeader("Cache-Control", "private, no-store");
+      const reply = (code: number, body: Record<string, unknown>) => sendJson(res, code, { version: PRODUCT_DEPLOYMENT_VERSION, ...body });
+      const actor = verifiedActor(req);
+      if (!actor) { reply(403, { error: "invalid_identity" }); return; }
+      let command: unknown;
+      try { command = JSON.parse(await readBoundedRawBody(req, PRODUCT_DEPLOYMENT_LIMITS.requestBytes)); }
+      catch (error) {
+        const tooLarge = error instanceof RawBodyTooLargeError;
+        reply(tooLarge ? 413 : 400, { error: tooLarge ? "request_too_large" : "invalid_input" });
+        return;
+      }
+      const result = await service.execute(actor, command);
+      if (!result.ok) { reply(deploymentStatus[result.code], { error: result.code }); return; }
       reply(200, result.value);
     } },
   ];

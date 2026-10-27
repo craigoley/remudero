@@ -121,6 +121,50 @@ export function toolStepsForRun(records: readonly TranscriptLedgerRow[], runId: 
   return steps;
 }
 
+/** A file-tool signature's path when it names no file to coarsen. */
+const VERBATIM_PATHS: ReadonlySet<string> = new Set(["<outside>", "."]);
+
+/** How many directory segments a nested path keeps. */
+const KEPT_DIRECTORIES = 2;
+
+/**
+ * One tool-call signature as a census step. Bash signatures and bare tool names pass through. A file-tool signature
+ * keeps a top-level path, `<outside>` and `.` verbatim; a nested path keeps its first two directories and the file's
+ * full extension (from the basename's first `.`), with the basename replaced by `*`:
+ * `Read:src/lib/review.ts` → `Read:src/lib/*.ts`, `Edit:test/ci/x.test.ts` → `Edit:test/ci/*.test.ts`.
+ */
+export function normalizeProcedureStep(raw: string): string {
+  const colon = raw.indexOf(":");
+  if (colon < 0 || raw.startsWith("Bash:")) return raw;
+  const tool = raw.slice(0, colon);
+  const path = raw.slice(colon + 1);
+  const segments = path.split("/");
+  if (VERBATIM_PATHS.has(path) || segments.length === 1) return raw;
+  const base = segments[segments.length - 1]!;
+  const dot = base.indexOf(".");
+  const extension = dot < 0 ? "" : base.slice(dot);
+  return `${tool}:${segments.slice(0, Math.min(KEPT_DIRECTORIES, segments.length - 1)).join("/")}/*${extension}`;
+}
+
+/**
+ * The ordered census steps of ONE run: each `tool-executing` `worker.activity` row of `runId`, in ledger order, as
+ * {@link normalizeProcedureStep} of its `tool_signature`, or its bare `tool_name` when the row carries no signature
+ * (every row before 2026-10-13). Each step's first occurrence only.
+ */
+export function procedureStepsForRun(records: readonly TranscriptLedgerRow[], runId: string): string[] {
+  const steps: string[] = [];
+  const seen = new Set<string>();
+  for (const r of records) {
+    if (r.run_id !== runId || r.step !== WORKER_ACTIVITY_STEP || r.event_kind !== "tool-executing") continue;
+    const signature = typeof r.tool_signature === "string" && r.tool_signature.length > 0 ? r.tool_signature : undefined;
+    const step = signature !== undefined ? normalizeProcedureStep(signature) : typeof r.tool_name === "string" ? r.tool_name : "";
+    if (step === "" || seen.has(step)) continue;
+    seen.add(step);
+    steps.push(step);
+  }
+  return steps;
+}
+
 /**
  * MINE merged runs for a per-task-shape workflow: the tool-call steps shared by every
  * first-attempt-success run (zero `fix.dispatch` lines) of that `type`, minus whatever a
