@@ -1557,10 +1557,11 @@ export function makeGitAbsentBin(pathValue = process.env.PATH ?? "") {
   return { bin, cleanup: () => rmSync(parent, { recursive: true, force: true }) };
 }
 
-function runSnapshotReach(snapshot, files) {
-  const run = (snapshotPath) => runCensusSuitesViaChild({ root: SCRIPT_REPO, files, snapshotPath,
+function runSnapshotReach(snapshot, files, root) {
+  if (!existsSync(join(root, "node_modules"))) throw new Error(`${root} has no node_modules, so ${files.join(", ")} cannot run from it`);
+  const run = (cwd, snapshotPath) => runCensusSuitesViaChild({ root: cwd, files, snapshotPath,
     priority: { wrap: (file, args) => ({ file, args }) } });
-  const failing = run();
+  const failing = run(root);
   if (failing.length === 0) return [];
   const temporary = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-base-"));
   try {
@@ -1569,9 +1570,14 @@ function runSnapshotReach(snapshot, files) {
       mkdirSync(dirname(join(temporary, path)), { recursive: true });
       writeFileSync(join(temporary, path), snapshot.baseBlobs[path]);
     }
+    // Execute the frozen base suite and selector together, with only the existing dependency donor shared.
+    symlinkSync(join(root, "node_modules"), join(temporary, "node_modules"));
+    for (const file of failing) {
+      if (!existsSync(join(temporary, file))) throw new Error(`merge-base suite ${file} is absent`);
+    }
     const path = join(temporary, "snapshot.json");
     writeFileSync(path, JSON.stringify({ ...snapshot, root: temporary, headPaths: snapshot.basePaths }), { mode: 0o444 });
-    const baseFailing = new Set(run(path));
+    const baseFailing = new Set(run(temporary, path));
     return failing.filter((file) => !baseFailing.has(file));
   } finally {
     rmSync(temporary, { recursive: true, force: true });
@@ -1625,7 +1631,7 @@ function runSnapshotSuites(snapshot, files, root) {
   const gitFree = new Set(gitFreeCensusSuites());
   const free = files.filter((file) => file !== SNAPSHOT_REACH && gitFree.has(file));
   const needGit = files.filter((file) => file !== SNAPSHOT_REACH && !gitFree.has(file));
-  const failing = files.includes(SNAPSHOT_REACH) ? runSnapshotReach(snapshot, [SNAPSHOT_REACH]) : [];
+  const failing = files.includes(SNAPSHOT_REACH) ? runSnapshotReach(snapshot, [SNAPSHOT_REACH], root) : [];
   const notMeasured = needGit.length === 0 ? [] : [`git-free snapshot reader unavailable for ${needGit.join(", ")}`];
   if (free.length > 0) {
     try {
