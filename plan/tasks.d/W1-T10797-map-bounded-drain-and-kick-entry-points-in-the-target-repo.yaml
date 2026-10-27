@@ -6,7 +6,10 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=bcbfc4660d8a16fd
+  # backlog gardener: placed=2026-10-27T09:32:13.549Z
   attempts: 0
   rationale: >-
     From the 2026-10-26 follow-up on W1-T10615-1793034698650, ratified via rmd approve:
