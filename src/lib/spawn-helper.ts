@@ -1,6 +1,10 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { createInterface } from "node:readline";
+import { clockFromMillisFn, type Clock } from "./clock.js";
+
+/** The sub-millisecond reading a spawn's loop time is measured with, through the Clock port. */
+const monotonicClock = (): Clock => clockFromMillisFn(() => performance.now());
 
 /**
  * W1-T9754 — A SMALL LONG-LIVED PROCESS THAT FORKS ON THE DAEMON'S BEHALF.
@@ -56,7 +60,8 @@ export interface SpawnHelperOptions {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** The helper's old-space ceiling, in MB. Its resident size is what it touches, not this bound. */
   heapMb?: number;
-  now?: () => number;
+  /** The monotonic reading `sync_ms` is measured with; absent, `performance.now()`. */
+  clock?: Clock;
   /** The helper's program; absent, {@link HELPER_SOURCE}. A test seam for a helper that dies or garbles. */
   source?: string;
 }
@@ -100,8 +105,9 @@ function settled(code: unknown, signal: unknown, stdout: string, stderr: string)
 }
 
 /** The direct path, the one every fallback takes: a spawn from this process, its fork on this loop. */
-export function runDirect(request: SpawnRequest, now: () => number = () => performance.now(), reason?: string):
+export function runDirect(request: SpawnRequest, clock: Clock = monotonicClock(), reason?: string):
   Promise<SpawnResult> {
+  const now = clock.now;
   const began = now();
   let syncMs = 0;
   return new Promise((resolve) => {
@@ -129,7 +135,8 @@ type Pending = { resolve: (result: SpawnResult) => void; syncMs: number };
 
 /** Start the helper once; every `run` after that writes one line and awaits one answer. */
 export function startSpawnHelper(options: SpawnHelperOptions = {}): SpawnHelper {
-  const now = options.now ?? (() => performance.now());
+  const clock = options.clock ?? monotonicClock();
+  const now = clock.now;
   const pending = new Map<number, Pending>();
   let nextId = 1;
   let dead: string | undefined;
@@ -193,7 +200,7 @@ export function startSpawnHelper(options: SpawnHelperOptions = {}): SpawnHelper 
     run(request) {
       const began = now();
       const why = unhealthy();
-      if (why !== undefined) return routed(runDirect(request, now, why), request.file);
+      if (why !== undefined) return routed(runDirect(request, clock, why), request.file);
       const id = nextId++;
       const line = JSON.stringify({ id, file: request.file, args: request.args ?? [], cwd: request.cwd,
         env: request.env ?? process.env, timeoutMs: request.timeoutMs, killSignal: request.killSignal,
