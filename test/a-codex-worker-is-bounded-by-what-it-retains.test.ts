@@ -111,6 +111,7 @@ test("W1-T4595: an oversized unfinished line spills and fails on exit, and the s
 test("W1-T4595: the stream backstop refuses runaway ordinary events after they are discarded", async () => {
   const codex = fakeCodex();
   try {
+    await codex.spawned;
     const event = `${JSON.stringify({
       type: "item.completed",
       item: { type: "command_execution", command: "npm test", aggregated_output: "x".repeat(256 * 1024) },
