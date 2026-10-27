@@ -33,7 +33,10 @@
   origin: feedback#fb-1793088336384-533ec6
   plan_refs: ["§7B"]
   files: [src/lib/panel-graph.ts, test/an-inbox-item-is-a-conversation.test.ts]
+  priority: 3
   status: queued
+  # backlog gardener: band=3 evidence=04cb5fbfdf51f85b
+  # backlog gardener: placed=2026-10-27T22:59:28.067Z
   attempts: 0
   note: "Filed from console-inbox-read-mark-snapshot-20261026 / fb-1793052066234-d58154 / this entry. Owner coordination
     (Codex Console follow-ups chat) is factual only; W1-T10782 and other foreign reservations are untouched."
