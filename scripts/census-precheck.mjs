@@ -1169,10 +1169,11 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
-  // W1-T10820: the alias suite's real-tree check reddens when the resolver or the imports map it reads moves.
+  // W1-T10820: the alias suite's real-tree check reddens when the imports map it reads, or coverage-narrow, moves.
+  // A change to src/lib/affected-suites.ts starts the reach ratchet alone (W1-T5702); CI still runs this suite.
   { testFile: "test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts",
     trigger: ({ changed }) => changed.some((p) => [
-      "src/lib/affected-suites.ts", "src/lib/coverage-narrow.ts", "package.json",
+      "src/lib/coverage-narrow.ts", "package.json",
       "test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts",
     ].includes(p)),
     remedy: "resolve every #src/run-task.js importer to src/run-task.ts through package.json imports (src/lib/affected-suites.ts)" },
