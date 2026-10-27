@@ -32,6 +32,9 @@
     - packages/api-client/src/schema.d.ts
     - test/route-wiring.test.ts
     - test/console-api/serve/product-routes.test.ts
+  # refusal-amendment (W1-T10618, run DAEMON-1793088011402@50628d6f807f0a075388c51fb3b98acd6cfdd967, 2026-10-27T09:07:13.189Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: No shipped daemon serves Wreckterra; verified delivery requires an approved execution binding and deployment outside this round’s authority.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required. Hosted PR14208 proved every new served product operation also needs its public contract and actual route-wiring evidence. W1-T10572 shares only the contract and generated client files for an unrelated gardener description; this task adds the named product operation, and does not supersede that Analytics work.
