@@ -3696,18 +3696,20 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         let reason = `${String(error)}\n${String((error as { stdout?: unknown }).stdout ?? "")}\n${String((error as { stderr?: unknown }).stderr ?? "")}`;
         // W1-T10787: the conflict is read while the merge is still pending; an unreadable one is a named gap, never evidence.
         let conflict: MergeConflictEvidence | undefined;
+        let abortFailed = false;
         if (mergeAttempted && mergeSha === undefined) {
           try {
             conflict = await capturedScopeMergeConflict(git);
           } catch (captureError) {
-            reason += `; conflict evidence: ${String(captureError)}`;
+            const error = String(captureError);
+            reason += `; conflict evidence: ${error}`;
           }
           try {
             await git(["merge", "--abort"]);
           } catch (abortError) {
             const error = String(abortError);
             reason += `; merge abort: ${error}`;
-            conflict = undefined;
+            abortFailed = true;
           }
         }
         let update: { ok: boolean; error?: string };
@@ -3726,7 +3728,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         // W1-T10787: only a refused remote update, a real captured local conflict, a clean aborted worktree and the
         // amended contract proved on main re-enter the bounded conflict repair; a successful update keeps its stand-down.
         let admitted: string | undefined;
-        if (!update.ok && conflict !== undefined) try {
+        if (!update.ok && conflict !== undefined && !abortFailed) try {
           if ((await git(["status", "--porcelain", "-z", host.GIT_UNTRACKED_FILES_ALL])).trim()) {
             throw new Error("the worktree is not clean after the aborted scope merge");
           }
