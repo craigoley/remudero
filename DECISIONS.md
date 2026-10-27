@@ -3616,3 +3616,72 @@ while building their tasks, not by the operator. This entry makes them the opera
 **Rollback:** each value is one constant. Lowering the $15 cap or the 500-row budget is a reviewed
 change to that constant. Reopening Guides or Governance is a reviewed site build with the flag set
 to exactly "true".
+
+## 2026-10-27 — OPERATOR RULINGS: GPT-6.1 Terra placement, field trials go live, and the open-weight cash arms
+
+Status: accepted
+
+*Operator-authored direction, given in chat on 2026-10-27 in answers to the operator session's
+questions and as "go with all of your recommendations". The operator session recorded it; it did
+not originate it.*
+
+**Why this exists.** GPT-6.1 Terra shipped on 2026-10-26 at $1 in / $5 out per 1M tokens, about
+3x faster than Sol 6.1 and roughly half its per-task cost. OpenAI still positions Sol and Astra for
+the hardest coding. The operator wants Terra used where it is cheap and fast, but measured before it
+leads a Codex row. The field-trials pipeline had waited since September with enough data to publish.
+
+**Ruled:**
+1. **Terra runs on a second Foundry account.** `synthwatch-foundry-eus` (eastus, AIServices S0)
+   serves `gpt-6.1-terra` version 2026-10-26, GlobalStandard capacity 1000. eastus2, where
+   `synthwatch-foundry` lives, does not list the model. The cash lane gains per-deployment endpoints
+   and keys, because it supported only one endpoint (W1-T10837/W1-T10838, filed in #14838). The
+   operator writes the new key to the host's secret store.
+2. **Cash routing.**
+   - Balanced: Terra 6.1 goes ahead of Sol 6.1.
+   - Frontier: Terra 6.1 replaces 5.6 Terra.
+   - inbox_draft: Terra joins the bake-off.
+   - Economy is unchanged.
+   - The Codex frontier stays Sol 6.1, per the 2026-10-08 "Sol 6.1 everywhere" ruling.
+3. **Codex balanced is the FIRST CONTROLLED field trial.** A randomized Terra 6.1 vs Sol 6.1 A/B on
+   the balanced low/medium rows. It runs only after a prospective A/A, inside the paid pilot's
+   $100 ceiling (#7418, `PAID_PILOT_CASH_CEILING_USD`). Sol leads until the trial's pre-registered
+   result says otherwise. A Codex row is re-led only on a controlled result, never on observational
+   rows.
+4. **Field trials go live now, observational.** `SITE_FIELD_TRIALS_ENABLED` is on in remudero-site's
+   production and preview environments (2026-10-27). Field notes publish as the exporter lands. Each
+   is labelled "observational, not a ranking" and shows every gap. Controlled charts replace them
+   when the A/B reports. This supersedes the 2026-10-13 chat ruling that kept the site fleet idle
+   and field trials for later, for field-trials work only.
+5. **Consent, and who reviews.** Consent is `aggregate-opt-in` for craigoley/remudero,
+   remudero-console and remudero-site, with receipt `owner-2026-10-27-craig-oley`, in a
+   `field-trials-consent-v1` file the operator places in the host's state directory. The site fleet
+   is un-idled for field-trials imports and page work ONLY. Core opens or updates ONE site import
+   PR per refresh. The operator's merge of that PR is the review (PORTAL-T41's stage mode,
+   W1-T10832). Core never stamps `reviewedBy`, `reviewedAt` or `publishedAt`, and public data never
+   auto-merges.
+6. **The affected-suite graph resolves package import aliases** (`#src/*`, `#scripts/*`,
+   `#test/*`), and the reach ratchet is re-baselined ONCE to the alias-aware values (W1-T10820,
+   filed in #14805). Today's graph resolves only `.`-relative specifiers, so alias importers are
+   invisible to it.
+7. **Open-weight cash arms are bake-off arms only.** DeepSeek-V4-Flash (2026-04-23, already
+   deployed, zero traffic in 30 days), DeepSeek-V4.1-Flash (2026-09-10, preview) and Kimi-K2.6
+   (2026-04-20, preview) sit on `synthwatch-foundry` at GlobalStandard capacity 20, all pinned to
+   `NoAutoUpgrade`. Each answered a tool-call smoke test. None leads a row until it wins the
+   bake-off AND one day of metered tokens × list price reconciles with the Azure cost export. A
+   ~25K-token request to a capacity-20 (20K TPM) deployment returned 429 at once: TPM caps a single
+   request for partner models too. The operator files the quota raises; until then the arms cannot
+   take real prompts.
+8. **Fireworks on Foundry stays unregistered for now.** Registering it is a subscription-level
+   opt-in: data is shared with Fireworks AI, and pay-per-token models get a 15-day retirement
+   notice. Revisit it if the DeepSeek quota request is refused or slow.
+
+**Not ruled here:** the builds of the filed tasks go to the fleet. Numeric routing promotions still
+follow the bake-off and the controlled trial, not this entry.
+
+**Rollback:**
+- Terra: move each cash row's lead back through a reviewed `.remudero/mounts.yaml` change, and
+  delete the eastus deployment.
+- Field trials: set `SITE_FIELD_TRIALS_ENABLED` to anything but "true" and redeploy the site.
+- Consent: set `revoked: true` on a repository's entry in the consent file.
+- Open-weight arms: delete the deployments.
+- Prior ledger rows and experiment epochs are never rewritten.
