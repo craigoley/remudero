@@ -51,6 +51,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { parse as parseYaml } from "yaml";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghTextAsync } from "./github-transport.js";
 import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
@@ -59,9 +61,9 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { contributionOriginFromRest, feedbackContentDigest, observeFeedbackSource, readAdmissionRestAsync,
   type AdmissionRead, type AdmissionSettings, type FeedbackAdmissionSubject } from "./contributor-admission.js";
 import { openLedgerUnion } from "./ledger-union.js";
-import { captureFeedbackReply, replyRefusalFor, type PanelGraphDeps } from "./panel-graph.js";
-import { feedbackEntryRepoPath, findFeedbackBySubmissionKey } from "./feedback.js";
-import { readQueuedFeedbackRecords } from "./feedback-landing.js";
+import { captureFeedbackReply, replyRefusalFor, type FeedbackReplyInput, type PanelGraphDeps } from "./panel-graph.js";
+import { feedbackEntryRepoPath, findFeedbackBySubmissionKey, type FeedbackEntry } from "./feedback.js";
+import { queuedFeedbackDir, readQueuedFeedbackRecords } from "./feedback-landing.js";
 import {
   ASK_TYPE_LABEL,
   escalationTaskId,
@@ -383,7 +385,8 @@ export function pickFeedbackAnswer<T extends { namesOption: boolean }>(answers: 
 
 /**
  * W1-T8511: apply the picked operator answer to the grilled feedback record through the console's own reply writer
- * ({@link captureFeedbackReply}). Only a record still `grilling` is touched (design step 7): a queued record is read
+ * ({@link captureFeedbackReply}). Only a target still `grilling` is touched; an unchanged older queued capture
+ * may use that canonical target (W1-T10789). A queued record is read
  * first, then the route's own {@link replyRefusalFor} status read over an async origin/main read, both BEFORE any write — so an answered, rejected or
  * otherwise moved record gets no write at all. The answer's origin is the reply's `submission_key`, so a second pass
  * finds it and writes nothing (design step 3). Returns the ledger row to write: `feedback_applied` on a write,
@@ -402,17 +405,41 @@ async function applyGrilledFeedbackAnswer(
   try {
     const queued = readQueuedFeedbackRecords(feedback.inboxRoot);
     const queuedRecord = queued.get(feedbackEntryRepoPath(feedbackId));
-    if (queuedRecord !== undefined && queuedRecord.status !== "grilling") return undefined;
+    const olderCapture = queuedRecord?.status === "new";
+    if (queuedRecord !== undefined && queuedRecord.status !== "grilling" && !olderCapture) return undefined;
+    const pendingBytes = olderCapture ? readFileSync(join(queuedFeedbackDir(feedback.inboxRoot), `${feedbackId}.yaml`), "utf8") : undefined;
     // The route's own status read, fed origin/main's blob read off the loop (a rejection reads as unreadable).
     const mainBlob = await hostWorktreeGitAsync(feedback.root, ["show", `origin/main:${feedbackEntryRepoPath(feedbackId)}`])
       .catch((error: unknown) => ({ unreadable: error }));
-    if (replyRefusalFor(feedback.root, feedbackId, queued, () => {
+    let qualifiedTarget: FeedbackReplyInput["qualifiedTarget"];
+    if (olderCapture && queuedRecord !== undefined) {
+      if (typeof mainBlob !== "string") throw mainBlob.unreadable;
+      const canonical = parseYaml(mainBlob) as FeedbackEntry | null;
+      if (!canonical || canonical.id !== feedbackId || canonical.status !== "grilling" || canonical.answered_by != null) {
+        throw new Error("canonical feedback is not an unanswered grilling target");
+      }
+      const { status: _pendingStatus, proposal_pr, summary, answered_by, ...capture } = queuedRecord;
+      const { status: _mainStatus, proposal_pr: _proposal, summary: _summary, answered_by: _answer, ...mainCapture } = canonical;
+      if (proposal_pr != null || summary != null || answered_by != null ||
+          typeof capture.ts !== "string" || typeof capture.raw !== "string" || typeof capture.origin !== "string" ||
+          !Array.isArray(capture.attachments) || !capture.attachments.every(value => typeof value === "string") ||
+          !isDeepStrictEqual(capture, mainCapture) ||
+          !isDeepStrictEqual(parseYaml(pendingBytes!), queuedRecord)) {
+        throw new Error("pending feedback is not the unchanged older canonical capture");
+      }
+      qualifiedTarget = { entry: canonical, pendingBytes: pendingBytes! };
+    }
+    const refusal = replyRefusalFor(feedback.root, feedbackId, queued, () => {
       if (typeof mainBlob !== "string") throw mainBlob.unreadable;
       return mainBlob;
-    })) return undefined;
+    });
+    if (refusal) {
+      if (olderCapture) throw new Error(refusal.refused);
+      return undefined;
+    }
     if (findFeedbackBySubmissionKey(feedback.root, picked.origin, feedback.inboxRoot)) return undefined;
     const { entry, landingError } = captureFeedbackReply(feedback, {
-      text: picked.text, replyTo: feedbackId, submissionKey: picked.origin, origin: "issue",
+      text: picked.text, replyTo: feedbackId, submissionKey: picked.origin, origin: "issue", qualifiedTarget,
     });
     return { ...base, step: "escalation_answer.feedback_applied", reply_id: entry.id, answer: picked.text,
       ...(landingError === undefined ? { landing: "queued" } : { landing_error: landingError }) };

@@ -1042,6 +1042,7 @@ export function setFeedbackStatus(
      * `buildSubmitFeedbackRoute` in the same call that moves a `grilling` target to
      * `status: "answered"`. `undefined` leaves whatever this entry already had. */
     answeredBy?: string | null;
+    canonicalEntry?: FeedbackEntry;
   } = {},
 ): FeedbackEntry {
   if (!(FEEDBACK_STATUSES as readonly string[]).includes(status)) {
@@ -1049,7 +1050,7 @@ export function setFeedbackStatus(
   }
   // W1-T5628: a queued record is newer than the checkout, and a console capture exists only there.
   const queued = opts.land?.stateRoot === undefined ? undefined : readQueuedFeedbackRecords(opts.land.stateRoot).get(feedbackEntryRepoPath(id));
-  const entry = (queued as unknown as FeedbackEntry | undefined) ?? readFeedbackEntry(root, id);
+  const entry = opts.canonicalEntry ?? (queued as unknown as FeedbackEntry | undefined) ?? readFeedbackEntry(root, id);
   const updated: FeedbackEntry = {
     ...entry,
     status,

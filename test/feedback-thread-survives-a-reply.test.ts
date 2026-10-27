@@ -12,6 +12,9 @@ import { captureFeedback, listFeedback, readFeedbackEntry, setFeedbackStatus, ty
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { GitHub } from "../src/lib/status.js";
 import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
+import { captureFeedbackReply } from "#src/lib/panel-graph.js";
+import { landFeedbackStatusContent, queuedFeedbackDir, readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
+import { stringify as stringifyYaml } from "yaml";
 
 // ── W1-T2278: a reply is a new item, and the link back to what it answers must be a durable ────
 // field, not only prose inside the reply's own text ─────────────────────────────────────────
@@ -275,4 +278,53 @@ test("the reply-handling branch of buildSubmitFeedbackRoute names no merge, no P
   // The only status this route ever writes explicitly is the reply-close state itself.
   const statusWrites = [...body.matchAll(/setFeedbackStatus\([^,]+,\s*[^,]+,\s*"([a-z]+)"/g)].map((m) => m[1]);
   assert.deepEqual(new Set(statusWrites), new Set(["answered"]));
+});
+
+test("W1-T10789: current queued decisions and legacy reply callers keep their guards", async (t) => {
+  for (const status of ["grilling", "proposed", "accepted", "rejected", "answered"]) await t.test(status, () => {
+    const root = tmpRoot();
+    const target = captureFeedback(root, { raw: "which lane?", origin: "cli" });
+    const rel = `plan/feedback/${target.id}.yaml`;
+    const pendingBytes = stringifyYaml(target);
+    const entry = { ...target, status: "grilling" as const, proposal_pr: "https://example.test/proposal" };
+    landFeedbackStatusContent(root, rel, stringifyYaml({ ...target, status }), { stateRoot: root });
+    const pendingPath = join(queuedFeedbackDir(root), `${target.id}.yaml`);
+    const before = readFileSync(pendingPath, "utf8");
+    assert.throws(() => captureFeedbackReply({ root, inboxRoot: root, feedbackLand: {} }, {
+      text: "the site lane", origin: "issue", replyTo: target.id, submissionKey: "issue#1:comment:2",
+      qualifiedTarget: { entry, pendingBytes },
+    }), /pending feedback changed/);
+    assert.equal(readFileSync(pendingPath, "utf8"), before);
+    assert.deepEqual(listFeedback(root), [target], "drift refuses before creating a reply");
+    assert.equal(readQueuedFeedbackRecords(root).size, 1);
+  });
+  await t.test("byte fingerprint and competing reply", () => {
+    const root = tmpRoot();
+    const target = captureFeedback(root, { raw: "which lane?", origin: "cli" });
+    const rel = `plan/feedback/${target.id}.yaml`;
+    const pendingBytes = stringifyYaml(target);
+    const deps = { root, inboxRoot: root, feedbackLand: {} };
+    const input = { text: "site", origin: "issue" as const, replyTo: target.id, submissionKey: "issue#1:comment:2",
+      qualifiedTarget: { entry: { ...target, status: "grilling" as const }, pendingBytes } };
+    landFeedbackStatusContent(root, rel, pendingBytes + "\n", { stateRoot: root });
+    assert.throws(() => captureFeedbackReply(deps, input), /pending feedback changed/);
+    landFeedbackStatusContent(root, rel, pendingBytes, { stateRoot: root });
+    const competing = captureFeedback(root, { raw: "already answered", origin: "cli", replyTo: target.id });
+    assert.throws(() => captureFeedbackReply(deps, input), /already holds/);
+    assert.deepEqual(listFeedback(root).map(e => e.id).sort(), [target.id, competing.id].sort());
+    assert.equal(readQueuedFeedbackRecords(root).get(rel)?.status, "new");
+  });
+  await t.test("legacy caller", async () => {
+    const root = tmpRoot();
+    const planPath = emptyPlanPath(root);
+    const target = grillingEntry(root, "legacy question");
+    await withService(depsFor(root, planPath), async base => {
+      const response = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "legacy answer", replyTo: target.id });
+      assert.equal(response.status, 200);
+      assert.equal((await post(base, "/v1/feedback", WRITE_TOKEN, { text: "second", replyTo: target.id })).status, 400);
+    });
+    landQueuedFeedback(root, root);
+    assert.equal(readFeedbackEntry(root, target.id).status, "answered");
+    assert.equal(listFeedback(root).filter(e => e.reply_to === target.id).length, 1);
+  });
 });

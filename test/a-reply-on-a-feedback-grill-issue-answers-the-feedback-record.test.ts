@@ -28,6 +28,8 @@ import { feedbackHasAnswer } from "../src/lib/human-gate.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { queuedFeedbackDir, readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
 
 const FB_ID = "fb-1789382125003-abdb87";
 
@@ -338,4 +340,138 @@ test("W1-T8511: a stored question answer reaches the record's answered status en
   assert.equal(answered.status, "answered");
   assert.equal(repliesTo(f)[0].raw, `[answer to feedback#${FB_ID}] site-intake`, "the option answer, not the earlier prose");
   assert.ok(feedbackHasAnswer(answered, records(f)));
+});
+
+function canonicalFixture() {
+  const repo = gitRepo({ kind: "queued-grill" });
+  const stateRoot = tmpDir("queued-grill");
+  const root = repo.dir;
+  const capture: FeedbackEntry = {
+    id: FB_ID, ts: "2026-10-27T00:00:00.000Z", raw: "which lane owns the copy?",
+    attachments: ["https://example.test/copy"], origin: "cli", status: "new",
+    reply_to: null, answered_by: null, proposal_pr: null, summary: null,
+    submission_key: "original-capture", thread_id: "source-thread",
+    contribution: { kind: "issue", source_ref: "owner/repo#42", url: null, actor: null,
+      association: null, observed_at: "2026-10-27T00:00:00Z", relayed_by: [], derived_from: null,
+      admission: { outcome: "unknown", reason: "unresolved", receipt_key: "receipt", policy_version: null } },
+  };
+  const canonical = { ...capture, status: "grilling" as const,
+    proposal_pr: "https://github.com/owner/repo/pull/43",
+    summary: { headline: "choose the owner", what_happened: "copy needs a home", decision: "choose a lane",
+      options: [{ label: "site", consequence: "site owns it" }, { label: "core", consequence: "core owns it" }] },
+  };
+  const rel = `plan/feedback/${FB_ID}.yaml`;
+  const path = join(root, rel);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(path, stringifyYaml(canonical));
+  repo.git("add", rel);
+  repo.git("commit", "-qm", "canonical grilling");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  // The boot checkout and pending queue both predate canonical triage.
+  writeFileSync(path, stringifyYaml(capture));
+  mkdirSync(queuedFeedbackDir(stateRoot), { recursive: true });
+  const pendingPath = join(queuedFeedbackDir(stateRoot), `${FB_ID}.yaml`);
+  writeFileSync(pendingPath, stringifyYaml(capture));
+  const ledgerPath = join(stateRoot, "ledger.ndjson");
+  const feedback = { root, inboxRoot: stateRoot, feedbackLand: {} };
+  const gateway = { ...gatewayFor(issueFor(14638), [ownerComment(91, "site-intake")]), operatorLogins: ["craigoley"] };
+  writeFileSync(join(root, "plan", "questions.ndjson"), JSON.stringify({
+    ts: capture.ts, task: `TRIAGE-${FB_ID}`, answer: "site-intake", origin: "issue#14638:comment:91",
+  }) + "\n");
+  const pass = () => readEscalationAnswers(root, "queued-grill", gateway, { ledgerPath, feedback });
+  const queuedTarget = () => readQueuedFeedbackRecords(stateRoot).get(rel)!;
+  const history = () => repo.git("show", `origin/main:${rel}`);
+  return { root, stateRoot, ledgerPath, feedback, repo, capture, canonical, path, rel, pendingPath,
+    gateway, pass, queuedTarget, history };
+}
+
+test("W1-T10789: canonical grilling advances an unchanged older capture exactly once", async () => {
+  const f = canonicalFixture();
+  const history = f.history();
+  const checkout = readFileSync(f.path, "utf8");
+  const questions = readFileSync(join(f.root, "plan", "questions.ndjson"), "utf8");
+  assert.equal((await f.pass()).accepted, 0, "consume the already recorded answer");
+  assert.equal(f.queuedTarget().status, "answered");
+  const replies = repliesTo(f);
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].submission_key, "issue#14638:comment:91");
+  assert.equal(replies[0].raw, `[answer to feedback#${FB_ID}] site-intake`);
+  assert.equal(f.queuedTarget().answered_by, replies[0].id);
+  const after = snapshot(f);
+  await f.pass();
+  assert.deepEqual(snapshot(f), after);
+  assert.equal(appliedRows(f.ledgerPath).length, 1);
+  assert.equal(f.history(), history);
+  assert.equal(readFileSync(f.path, "utf8"), checkout);
+  assert.equal(readFileSync(join(f.root, "plan", "questions.ndjson"), "utf8"), questions);
+  const ordinary = canonicalFixture();
+  writeFileSync(ordinary.pendingPath, stringifyYaml(ordinary.canonical));
+  await ordinary.pass();
+  assert.equal(ordinary.queuedTarget().status, "answered", "ordinary canonical grilling still advances");
+  assert.equal(repliesTo(ordinary).length, 1);
+});
+
+test("W1-T10789: stale or contradictory reply evidence preserves the pending record", async (t) => {
+  const cases: Record<string, (f: ReturnType<typeof canonicalFixture>) => void> = {
+    raw: f => { f.capture.raw += " changed"; },
+    attachments: f => { f.capture.attachments = []; },
+    lineage: f => { f.capture.contribution = { ...f.capture.contribution!, source_ref: "foreign/repo#99" }; },
+    identity: f => { f.capture.submission_key = "another-submission"; },
+    timestamp: f => { f.capture.ts = "2026-10-26T00:00:00.000Z"; },
+    id: f => { f.capture.id = "foreign-feedback"; },
+    origin: f => { f.capture.origin = "ui"; },
+    thread: f => { f.capture.thread_id = "another-thread"; },
+    expansion: f => { Object.assign(f.capture, { expansion: { claim: "changed expansion" } }); },
+    unknownMetadata: f => { Object.assign(f.capture, { unknown_history: "newer local evidence" }); },
+    proposal: f => { f.capture.proposal_pr = "https://example.test/new-decision"; },
+    summary: f => { f.capture.summary = f.canonical.summary; },
+    answered: f => { f.capture.answered_by = "another-answer"; },
+    missingMain: f => { f.repo.git("update-ref", "-d", "refs/remotes/origin/main"); },
+    malformedMain: f => {
+      writeFileSync(f.path, "status: [broken yaml\n");
+      f.repo.git("add", f.rel); f.repo.git("commit", "-qm", "malformed canonical");
+      f.repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    },
+    competingReply: f => {
+      writeFileSync(join(queuedFeedbackDir(f.stateRoot), "competing.yaml"), stringifyYaml({
+        ...f.capture, id: "competing", reply_to: FB_ID,
+      }));
+    },
+  };
+  for (const status of ["new", "proposed", "accepted", "answered", "rejected"]) {
+    cases[`canonical-${status}`] = f => {
+      writeFileSync(f.path, stringifyYaml({ ...f.canonical, status }));
+      f.repo.git("add", f.rel); f.repo.git("commit", "-qm", "advanced canonical");
+      f.repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    };
+  }
+  for (const [name, mutate] of Object.entries(cases)) await t.test(name, async () => {
+    const f = canonicalFixture();
+    mutate(f);
+    writeFileSync(f.pendingPath, stringifyYaml(f.capture));
+    const before = snapshot(f);
+    const head = f.repo.git("rev-parse", "HEAD");
+    await f.pass();
+    assert.deepEqual(snapshot(f), before, "no capture or queue bytes rewritten");
+    assert.equal(appliedRows(f.ledgerPath).length, 0);
+    assert.equal(f.repo.git("rev-parse", "HEAD"), head);
+    const diagnostic = readLedgerLines(f.ledgerPath).find(row => row.step === "escalation_answer.feedback_unreadable");
+    assert.ok(diagnostic?.reason, "refusal carries an existing diagnostic outcome");
+  });
+});
+
+test("W1-T10789: continuation retains the canonical proposal and source metadata", async () => {
+  const f = canonicalFixture();
+  await f.pass();
+  const target = f.queuedTarget();
+  assert.equal(target.status, "answered");
+  assert.ok(target.answered_by);
+  assert.deepEqual(target, { ...f.canonical, status: "answered", answered_by: target.answered_by });
+  assert.deepEqual(target.contribution, f.canonical.contribution);
+  const noBridge = canonicalFixture();
+  await readEscalationAnswers(noBridge.root, "queued-grill", noBridge.gateway, {
+    ledgerPath: noBridge.ledgerPath, feedback: { root: noBridge.root, inboxRoot: noBridge.stateRoot },
+  });
+  assert.equal(noBridge.queuedTarget().status, "answered");
+  assert.equal(noBridge.queuedTarget().proposal_pr, noBridge.canonical.proposal_pr);
 });
