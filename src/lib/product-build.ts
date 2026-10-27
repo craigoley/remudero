@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { daemonInstanceRegistryPath } from "./deployer.js";
 import { CLAIM_SILENCE_FLOOR_MS, claimLastSignOfLife, dispatchClaimRef, parseClaimAnchorMessage, type RunBranchCommit } from "./dispatch-claim.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -160,7 +160,7 @@ export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText
     for (const branch of refs.parse(JSON.parse(await api(`${slug(repo)}/git/matching-refs/heads/run-${taskId}-`)))) {
       if (!branch.ref.startsWith(prefix) || !/^\d+$/.test(branch.ref.slice(prefix.length)) || !branch.object) continue;
       const atMs = Date.parse((await commitOf(repo, branch.object.sha)).committer.date);
-      if (Number.isFinite(atMs) && (newest === undefined || atMs > newest.atMs)) newest = { atMs, atIso: new Date(atMs).toISOString(), ref: branch.ref };
+      if (Number.isFinite(atMs) && (newest === undefined || atMs > newest.atMs)) newest = { atMs, atIso: fixedClock(atMs).iso(), ref: branch.ref };
     }
     return newest;
   };
