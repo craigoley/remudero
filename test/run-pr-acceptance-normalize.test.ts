@@ -228,3 +228,16 @@ test("the DEFAULT leaves really shell out to gh — argv, JSON parse and the edi
     rmSync(gh.dir, { recursive: true, force: true });
   }
 });
+
+test("the acceptance normalize writes nothing when its pre-write re-read finds the body changed", () => {
+  // The interleaving: the harness reads the body at T, a person edits it at T+1, the harness would PATCH at T+2.
+  const r = recorder();
+  const reads = [DIVERGING_BODY, `${DIVERGING_BODY}\nA note the operator added after the read.\n`];
+  const outcome = normalizeRunPrAcceptanceFromPlan(PR, TASK_ID, PLAN_CRITERIA, r.log, {
+    fetchBody: () => reads.shift() ?? reads.at(-1)!,
+    editBody: r.editBody,
+  });
+  assert.equal(outcome, "raced");
+  assert.deepEqual(r.edits, [], "the concurrent edit survives: nothing was PATCHed over it");
+  assert.equal(r.logged.at(-1)?.step, "pr.body_normalize.raced");
+});

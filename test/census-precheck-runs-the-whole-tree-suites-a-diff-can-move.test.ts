@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
 
+const SKILL = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 const CYCLE = "test/cycle-ratchet.test.ts";
 const SIZE = "test/source-size-baseline-is-enforced.test.ts";
 const CITATION = "test/citation-anchor-census.test.ts";
@@ -24,7 +25,10 @@ function evaluate(changed: string[], head: Files = {}, base: Files = {}, behave:
     loadMembers: () => [],
     runSuites: (files: string[]) => { runs.push(files); return behave(files); },
   });
-  return { result, runs };
+  assert.equal(runs.flat().filter((file) => file === SKILL).length, changed.length > 0 ? 1 : 0,
+    "the mandatory skill census runs exactly once for a nonempty diff");
+  const subjectRuns = runs.map((files) => files.filter((file) => file !== SKILL)).filter((files) => files.length > 0);
+  return { result, runs: subjectRuns };
 }
 
 test("a clock fixture edit asks its measured cross-clock regression before push", () => {

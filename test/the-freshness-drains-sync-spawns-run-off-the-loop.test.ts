@@ -37,6 +37,11 @@ test("the census precheck can report its serial child backstops before the paren
   const events: string[] = [];
   const run: CensusChildRunner<Promise<CensusChildResult>> = async (_file, args, options) => {
     calls.push(args);
+    if (args.includes("--snapshot-budget")) {
+      const budget = { version: 1, childTimeBoundMs: 60_000,
+        stages: { setup: 1, admission: 1, reach: 2, joinedGitFree: 2, structuralGitFree: 4 }, timeoutMs: 600_000 };
+      return { status: 0, signal: null, stdout: JSON.stringify(budget), stderr: "" };
+    }
     if (args[0]?.endsWith("census-precheck.mjs")) {
       const serialChildElapsedMs = 3 * 60_000;
       if ((options.timeout ?? 0) <= serialChildElapsedMs) {
@@ -52,7 +57,7 @@ test("the census precheck can report its serial child backstops before the paren
   }, run);
   assert.equal(result?.refusal, undefined);
   assert.match(result?.unmeasured ?? "", /NOT MEASURED \(time bound\)/);
-  assert.equal(calls.length, 2, "an unmeasured precheck still runs the standalone reach suite");
+  assert.equal(calls.length, 3, "the budget read, then the unmeasured precheck, still runs the standalone reach suite");
   assert.deepEqual(events, ["partially-measured"]);
 });
 

@@ -27,6 +27,7 @@ import * as precheck from "../scripts/census-precheck.mjs";
 
 const { PRECHECK_EXTRA_CI_CENSUSES, PRECHECK_PARITY, ciCensusPopulation, precheckParityVerdict } = precheck;
 const PRECHECK_PARITY_BASELINE = "scripts/census-precheck-parity-baseline.json";
+const SKILL_CONFORMANCE_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -196,15 +197,15 @@ test("W1-T9872: recursive test censuses refuse nested fixture defects before pus
     assert.equal(found.violations.length, 1);
     assert.ok(found.violations[0].startsWith(`census-suite: ${suite} fails — run node --test`));
     assert.deepEqual(evaluate("test/nested/new.test.ts", snippet, "", []).violations, []);
-    assert.deepEqual(evaluate("docs/example.md", snippet, "", [suite]).ran, []);
+    assert.deepEqual(evaluate("docs/example.md", snippet, "", [suite]).ran, [SKILL_CONFORMANCE_CENSUS]);
   }
   const removedLock = evaluate("test/nested/stray.test.ts", "", "withRealSweep" + "Lock();", [orphan]);
-  assert.deepEqual(removedLock.ran, [orphan]);
+  assert.deepEqual([...removedLock.ran].sort(), [orphan, SKILL_CONFORMANCE_CENSUS].sort());
   assert.equal(removedLock.violations.length, 1);
   for (const suite of [architecture, orphan, loader]) {
     assert.ok(evaluate(suite, "", "", [suite]).ran.includes(suite), "editing the census itself must ask it");
   }
-  assert.deepEqual(evaluate("test/nested/plain.test.ts", "const n = 2;", "const n = 1;", []).ran, []);
+  assert.deepEqual(evaluate("test/nested/plain.test.ts", "const n = 2;", "const n = 1;", []).ran, [SKILL_CONFORMANCE_CENSUS]);
   assert.ok(!precheck.gitFreeCensusSuites().includes("test/host-capability-fixtures.test.ts"),
     "tracked-test enumeration needs git even when every audit input is fixture data");
 });
@@ -232,5 +233,23 @@ test("a new CI rule suite reaches the birth parity check before push", () => {
   assert.equal(missing.violations.length, 1, "unregistered CI suites refuse before publication");
   assert.ok(missing.violations[0].startsWith(`census-suite: ${gate} fails`));
   assert.deepEqual(evaluate(true).violations, [], "a registered suite passes the same question");
-  assert.deepEqual(evaluate(false, "docs/example.md").ran, [], "unrelated documentation starts no child");
+  assert.deepEqual(evaluate(false, "docs/example.md").ran, [SKILL_CONFORMANCE_CENSUS], "every tracked-path change asks skill conformance; the unrelated birth gate stays quiet");
+});
+
+test("skill conformance is executed before push on every nonempty diff", () => {
+  const run = (changed: string[], fail = false) => {
+    const ran: string[] = [];
+    const result = precheck.evaluateAdmittedCensusSuites({ changed, loadMembers: () => [], readHead: () => "", readBase: () => null,
+      runSuites: (files: string[]) => { ran.push(...files); return fail ? files.filter(file => file === SKILL_CONFORMANCE_CENSUS) : []; },
+    });
+    assert.equal(result.unmeasured, null); return { ran, violations: result.violations as string[] };
+  };
+  assert.deepEqual(run([]), { ran: [], violations: [] }, "empty diffs start no child");
+  for (const path of ["docs/example.md", "src/example.ts", ".claude/skills/proof-preflight/SKILL.md"]) {
+    assert.ok(run([path]).ran.includes(SKILL_CONFORMANCE_CENSUS), path);
+    assert.deepEqual(run([path]).violations, []);
+  }
+  const red = run(["docs/example.md"], true);
+  assert.equal(red.violations.length, 1);
+  assert.ok(red.violations[0].startsWith("census-suite: " + SKILL_CONFORMANCE_CENSUS + " fails"));
 });

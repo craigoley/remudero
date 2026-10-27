@@ -150,6 +150,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     },
   },
   refusedForPredicate(
+    "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts",
+    "a",
+    "W1-T10135's approved-skill conformance census. git ls-files supplies the MATCH DOMAIN for when-paths globs; " +
+      "each assertion is about an opted-in approved skill, never a property every enumerated src/ file must hold. " +
+      "The test remains an ordinary test/rules suite and runs in normal full CI.",
+  ),
+  refusedForPredicate(
     "test/node-24-runtime-compatibility.test.ts",
     "c",
     "W1-T5882's Node 24 suite. It walks tracked src/, scripts/ and bin/ via git ls-files and asserts every nested `node --test` " +

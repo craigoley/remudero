@@ -1,0 +1,91 @@
+- id: W1-T10778
+  title: "A FAILED BACKUP RECEIPT NAMES ITS CAUSE — the nightly snapshot receipt's reason is only host-update's headline, `… the snapshot of <root> exited 1:`, so the beat's backup_verdict and gardener issue #12064 never show the ENOENT that failed the night; the reason carries the child's error class and message, bounded to one line"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, the text of a failed snapshot's receipt reason; no snapshot, alarm, cadence or escalation-routing change
+  band_meaning: span
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: read-only on the Azure host (state-snapshot.receipt, reclaim.log, core ledger rotations); reproduced by reading host-update.sh on origin/main 4e339a938"
+  plan_refs: [W1-T5681, W1-T3677, W1-T5545, W1-T10766, W1-T10756]
+  files:
+    - deploy/host-update.sh
+    - test/daemon/a-failed-backup-receipt-names-its-cause.test.ts
+  rationale: |
+    READ 2026-10-26 on origin/main 4e339a938, and read-only on the Azure host at 23:40-23:50Z.
+
+    WHAT THE OPERATOR SEES. The host's receipt (~/.local/state/remudero/state-snapshot.receipt) reads:
+      result=failed
+      ts=2026-10-26T04:25:32Z
+      offhost=ok
+      reason=host-update: STATE SNAPSHOT FAILED — the snapshot of /home/craigoleyagent/rmd-state2/state exited 1:
+    The reason ends at the colon. Every `host_resource.state_backup_failed` row in the core ledger
+    (10-15T04:18:59Z, 10-23T05:18:25Z, 10-26T04:25:32Z) carries that same text as its verdict, and so
+    does #12064's body: `FAILED: host-update: STATE SNAPSHOT FAILED — … exited 1:`. The cause is in
+    ~/reclaim.log only. For 10-26 (line ~3006) it is `StateBackupError: state backup: snapshot of
+    /rmd-snapshot/state failed: ENOENT: no such file or directory, lstat
+    '/rmd-snapshot/state/engines/a1b89b5a…/node_modules'`. Every investigation so far (W1-T10086,
+    W1-T10766, #12064's comments) had to read the host log by hand to learn it.
+
+    WHERE IT IS LOST. It is not a first-line truncation of the output: the output never reaches the
+    reason at all.
+    - deploy/host-update.sh `state_snapshot_fail` (:992-996) keeps its FIRST argument as
+      `state_snapshot_reason` (the first failure of the night wins, which W1-T5681 tests on purpose).
+    - On a non-zero exit (:1081-1084) the call passes only the headline,
+      `the snapshot of ${snap_state} exited ${snap_rc}:`. `snap_out` goes to stderr through
+      `sed 's/^/  /'`, which is the log, never the reason.
+    - :1703-1704 folds newlines in the reason. fleet-heartbeat.sh (:1360-1390) copies `reason=` into
+      `backup_verdict=FAILED: <reason>`. host-resource-gardener.ts (:1050-1066) puts that verdict into
+      the escalation's detail and the ledger row.
+    The other headlines (docker ps unanswered, no ledger, cannot create the backup dir, exited 0 with
+    no archive) are self-describing and stay as they are.
+
+    THE SECRET SURFACE. The child runs `docker run --rm --network none … node --import tsx -e
+    "${SNAP_JS}"` with state mounted read-only. Its output is node's uncaught-error report: a source
+    excerpt, `<Name>: <message>`, the stack, a `[cause]` block and `Node.js vX`. The image ref, argv and
+    environment are not in it. The reason carries one extracted line, not the output.
+
+    NOT COVERED ELSEWHERE. W1-T10766's shard names this exact item as out of its scope. W1-T5681
+    (merged, #9335) built the receipt and alarm. Swept plan/tasks.d for `receipt`, `backup_verdict` and
+    `state_snapshot_reason`. Open PR heads read at 23:53Z: none touches deploy/host-update.sh or
+    scripts/fleet-heartbeat.sh.
+  design: |
+    1. On a non-zero snapshot exit, the reason is the existing headline followed by the child's error
+       line. That is the first line of `snap_out`, leading whitespace stripped, of node's uncaught
+       form `<Identifier ending in Error or Exception>[ [CODE]]: <message>`. For 10-26 that is the
+       StateBackupError line, which already embeds the ENOENT cause. The other failure branches keep
+       their headlines unchanged.
+    2. When no such line exists (a docker error such as `image unavailable`, exit 125), the reason
+       carries the last non-empty output line that is not a stack frame (`at …`), a `^` caret or the
+       `Node.js v…` banner. When the output is empty, it says so in words. A failed run never yields an
+       empty cause.
+    3. Bounded: one physical line, cut to the length the heartbeat's own one-line fields already use
+       (fleet-heartbeat.sh mem_one_line, `cut -c1-400`). Reuse that bound, do not invent another.
+       Never the stack, the docker argv, the image ref or the environment.
+    4. The first failure of the night still wins: the extracted cause rides the same
+       `state_snapshot_fail` first-argument rule. The receipt format, the beat's parse, the gardener and
+       the escalation routing are unchanged.
+    5. Test through the real host-update.sh --reclaim-only, with fake `docker`/`az` on PATH the way
+       test/a-failed-nightly-backup-alarms-the-fleet.test.ts does. The fake child prints the 10-26 report
+       verbatim (paths shortened) and exits 1. Read the published receipt and the beat it feeds. Put the
+       suite where `rmd test-place` computed (test/daemon/, confidence medium, runner-up deploy-host).
+  acceptance:
+    - claim: "a snapshot child that dies on an uncaught error leaves a receipt reason, and a beat backup_verdict, that carry its error class and message on one bounded line, with no stack frame, image ref or argv"
+      proof: 'grep: test("W1-T10778: a failed snapshot receipt names the error class and message" in test/daemon/a-failed-backup-receipt-names-its-cause.test.ts'
+    - claim: "a snapshot failure with no error-shaped line still carries the last meaningful output line, an empty output says so in words, and an oversized line is cut to the heartbeat's one-line bound"
+      proof: 'grep: test("W1-T10778: a failure with no error line still names what the child printed" in test/daemon/a-failed-backup-receipt-names-its-cause.test.ts'
+  falsifier: |
+    At base both cases fail: the reason is the headline ending in `exited 1:`.
+    - Append the whole `snap_out` instead of one line: the first case finds a stack frame.
+    - Extract only lines starting with `Error:`: the StateBackupError line is missed, and the first
+      case fails.
+    - Drop the bound: the oversized-line arm of the second case fails.
+    GUARDS that held at base and must still hold: W1-T5681's eleven cases in
+    test/a-failed-nightly-backup-alarms-the-fleet.test.ts. These include "the first failure headline
+    survives a later off-host failure", "every local snapshot failure records its own headline" and
+    the receipt-write-failure case.

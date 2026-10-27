@@ -156,6 +156,7 @@ const BASELINE_COMMAND_NAMES = [
   "verdict-calibration",
   "verify-human-sweep", "wipe-test",
   "reply", "archive", "snooze", "keep",
+  "worktree",
 ].sort();
 
 // W1-T2580: `bundle` — the day-one knowledge bundle export verb — joins the registry.
@@ -185,6 +186,7 @@ const BASELINE_COMMAND_NAMES = [
 // 2026-10-11: `live-edits` — one rung of the live-checkout edit ladder, run by the host watchdog — joins the registry.
 // 2026-10-11: `host-alert` — the host watchdog's own alarms, tiered and spooled for the daemon — joins the registry.
 // W1-T5533: `hand-worktree` — a hand build's run-<taskId>-<epochMs> worktree in one command — joins the registry.
+// W1-T10257: `worktree` — `rmd worktree add`, a disposable worktree cloned copy-on-write from the operator checkout — joins the registry.
 // W1-T3083: `pr-checks` — a PR head's deduped check-run and commit-status rollup, exit code is the answer — joins the registry.
 // `skill-eval` — a staged skill draft attempted with and without it on held-out merged tasks — joins the registry.
 // `inspect` — explicit, allowlisted state reads before CLI housekeeping — joins the registry.

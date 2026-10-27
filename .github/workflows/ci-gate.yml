@@ -285,16 +285,20 @@ jobs:
             # never the full external_id, so a rerun of the posting job still supersedes its own
             # earlier post, while a later same-name job success can no longer hide a failed post
             # (#8905). A name is not ready while ANY of its groups is incomplete (steps 1 and 3).
+            # A newer check can lack started_at before its attempt begins. Its newer id must
+            # remain visible rather than borrowing an old timestamped success.
             # (`--slurp` can't combine with `-q`, so flatten the page array with a separate jq.)
             local raw attempt=1
             while [ "${attempt}" -le "${RETRY_ATTEMPTS}" ]; do
-              if raw="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" --paginate --slurp)"; then
+              if raw="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100&filter=all" --paginate --slurp)"; then
                 jq -c '[ .[].check_runs[] | {id, name, status, conclusion, started_at, external_id}
                           | .producer = (if ((.external_id // "")
                                              | test("^(run:[0-9]+:[0-9]+:)?job:[0-9]+$"))
                                          then "posted" else "job" end) ]
                         | group_by([.name, .producer])
-                        | map(max_by([.started_at, (.id // 0)]))' <<< "${raw}"
+                        | map(. as $all | max_by([.started_at, (.id // 0)]) as $dated
+                              | [$all[] | select(.started_at == null and (.id // 0) > ($dated.id // 0))]
+                              | if length > 0 then max_by(.id) else $dated end)' <<< "${raw}"
                 return 0
               fi
               echo "ci-gate: check-runs read FAILED (attempt ${attempt}/${RETRY_ATTEMPTS}) -- retrying in ${RETRY_BACKOFF_SECONDS}s" >&2

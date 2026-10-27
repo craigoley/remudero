@@ -33,7 +33,7 @@ import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { ghIssueGateway, ghIssueGatewayAsync, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
-import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isScannerBlockerCandidate, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, type PlanFilingFileCache, type PlanFilingFileObservation } from "./open-prs-rest.js";
+import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, type PlanFilingFileCache, type PlanFilingFileObservation } from "./open-prs-rest.js";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
 import { planFilesIdentity } from "./thread-plan.js";
 import { isInPlanScope } from "./plan-architect.js";
@@ -2335,21 +2335,30 @@ export function* openPrViewSteps(
       });
     },
   );
+  // An unarmed plan PR is never armed (W1-T5615), so its human hold is read here or never: the same
+  // facts the view below stamps (`isPlanFiling`, the complete file list) decide it.
+  const holdCandidateFacts = (pr: RawOpenPr) => {
+    const files = planFilingFiles.get(pr.number);
+    return {
+      autoMergeArmed: pr.autoMergeRequest != null,
+      isDraft: pr.isDraft,
+      checksState: checksStateFromRollup(pr.statusCheckRollup, requiredContexts),
+      reviewState: reviewStateFromRollup(pr.statusCheckRollup),
+      mergeable: mergeStateObservations.get(pr.number)?.mergeable,
+      mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
+      isPlanFiling: planFilingClassifications.get(pr.number)?.isPlanFiling ?? false,
+      changedFiles: files?.state === "complete" ? files.paths : undefined,
+    };
+  };
   const scannerBlockers = yield* hydrateScannerBlockerObservationsSteps(
     owner,
     repo,
     raw
-      .filter((pr) =>
-        isScannerBlockerCandidate({
-          autoMergeArmed: pr.autoMergeRequest != null,
-          isDraft: pr.isDraft,
-          checksState: checksStateFromRollup(pr.statusCheckRollup, requiredContexts),
-          reviewState: reviewStateFromRollup(pr.statusCheckRollup),
-          mergeable: mergeStateObservations.get(pr.number)?.mergeable,
-          mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
-        }),
-      )
-      .map((pr) => ({ number: pr.number, headSha: pr.headRefOid, merge: mergeStateObservations.get(pr.number) })),
+      .filter((pr) => isHumanHoldCandidate(holdCandidateFacts(pr)))
+      .map((pr) => ({
+        number: pr.number, headSha: pr.headRefOid, merge: mergeStateObservations.get(pr.number),
+        ...(isScannerBlockerCandidate(holdCandidateFacts(pr)) ? {} : { holdOnly: true as const }),
+      })),
     fetch,
   );
 

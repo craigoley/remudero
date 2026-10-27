@@ -83,6 +83,7 @@ import {
 import { handRunCensus, type HandRunCensusCadenceOpts, type HandRunCensusCadenceResult } from "./hand-run-census.js";
 import { lintTask } from "./task-linter.js";
 import { machineShardHeaderLines } from "./machine-filing.js";
+import { mechanicalRulingRow, type MechanicalDecision } from "./mechanical-rulings.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import {
   judgeVerifyHumanShard,
@@ -1619,6 +1620,9 @@ export interface VerifyHumanCadenceResult {
   /** Released to the fleet this cycle: the judge said automate AND the risk judge said proceed.
    *  Optional so every existing result literal stays valid; absent reads as none. */
   released?: string[];
+  /** W1-T10371: shards one of the operator's four mechanical rulings decides, which this cadence neither judges,
+   *  releases nor stages an ask for; the machine-filing judge's landing owns the write. Absent reads as none. */
+  deferredToRules?: string[];
   /** W1-T4083: the release judge's running audit; absent when the audit did not run. */
   releaseAudit?: { releases: number; escalations: number; merged: number; failed: number; alerts: string[] };
   status: "clear" | "judged" | "refused";
@@ -1641,6 +1645,11 @@ export interface VerifyHumanCadenceOpts {
   releasedIds?: ReadonlySet<string>;
   /** Observed states whose release the risk judge already escalated — asked once, not per tick. */
   releaseEscalatedKeys?: ReadonlySet<string>;
+  /** W1-T10371: the decision one of the operator's mechanical rulings makes for a shard, or undefined when the rules
+   *  cannot decide it (an escalation included: a privileged record whose two judges disagree is still staged). */
+  decidedByRules?: (shard: ShardUnderJudgement) => MechanicalDecision | undefined;
+  /** W1-T10371: `<id>:<rule>:<verdict>` of every deferral already ledgered, so one is recorded once. */
+  priorMechanicalKeys?: ReadonlySet<string>;
 }
 
 function verifyHumanAgeBand(ageDays: number): number | undefined {
@@ -1685,8 +1694,18 @@ function verifyHumanDueReason(
 export async function verifyHumanCadence(opts: VerifyHumanCadenceOpts): Promise<VerifyHumanCadenceResult> {
   const priorAgeBandKeys = opts.priorAgeBandKeys ?? new Set<string>();
   const releasedIds = opts.releasedIds ?? new Set<string>();
+  // W1-T10371: a shard a rule decides is neither judged nor released here, and no inbox ask is staged for it.
+  const ruled = new Map<string, MechanicalDecision>();
+  for (const shard of opts.shards) {
+    const decision = releasedIds.has(shard.id) ? undefined : opts.decidedByRules?.(shard);
+    if (decision !== undefined) ruled.set(shard.id, decision);
+  }
+  for (const [id, decision] of ruled) {
+    if (opts.priorMechanicalKeys?.has(`${id}:${decision.rule}:${decision.verdict}`)) continue;
+    opts.appendRow({ run_id: opts.runId, step: "verify_human.mechanical_ruling", task_id: id, ...mechanicalRulingRow(decision) });
+  }
   const due = opts.shards
-    .filter((shard) => !releasedIds.has(shard.id))
+    .filter((shard) => !releasedIds.has(shard.id) && !ruled.has(shard.id))
     .map((shard) => ({ shard, reason: verifyHumanDueReason(shard, opts.priorVerdicts, priorAgeBandKeys) }))
     .filter((entry): entry is { shard: ShardUnderJudgement; reason: VerifyHumanCadenceDueReason } => entry.reason !== undefined);
   const dueIds = new Set(due.map((entry) => entry.shard.id));
@@ -1701,6 +1720,7 @@ export async function verifyHumanCadence(opts: VerifyHumanCadenceOpts): Promise<
     stateChanged: due.filter((entry) => entry.reason === "state_changed").map((entry) => entry.shard.id),
     ageBandReasks: due.filter((entry) => entry.reason === "age_band").map((entry) => entry.shard.id),
     released: [],
+    ...(ruled.size > 0 ? { deferredToRules: [...ruled.keys()] } : {}),
     status: due.length === 0 ? "clear" : "judged",
   };
 
@@ -1711,7 +1731,7 @@ export async function verifyHumanCadence(opts: VerifyHumanCadenceOpts): Promise<
   // THE BACKFILL: shards judged automate before the release arm existed are never due again, so
   // without this they would wait in the inbox forever. Only runs when a release hook is wired.
   if (opts.release) {
-    for (const shard of awaitingRelease(opts.shards, opts.priorVerdicts, releasedIds, opts.releaseEscalatedKeys ?? new Set())) {
+    for (const shard of awaitingRelease(opts.shards.filter((s) => !ruled.has(s.id)), opts.priorVerdicts, releasedIds, opts.releaseEscalatedKeys ?? new Set())) {
       const prior = opts.priorVerdicts.get(observedStateKey(shard));
       if (!prior) continue;
       bucketOf(await applyAutomateVerdict(shard, prior, automateHooks)).push(shard.id);

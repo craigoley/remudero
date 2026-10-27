@@ -6,12 +6,13 @@
   verify: auto
   risk: low
   priority: 4
+  retirement: retired # declared template .github/pull_template.md and test path tests/pull_template_cleanup do not exist; mirrors the retired W1-T9341 (W1-T9772)
   # refusal-amendment (W1-T9342, run W1-T9342-1792581156597, 2026-10-21T11:43:50.578Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: The task’s declared file `.github/pull_template.md` is absent at this checkout and `origin/main`, and no tracked history for it or `docs/forensics/cash-actuals.md` is available to remove or point to.
   # refusal-amendment (W1-T9342, run W1-T9342-1792581156597, 2026-10-21T11:43:50.578Z): the worker refused criterion 2 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
   #   worker evidence: The acceptance proof `unit test: tests/pull_template_cleanup` has no matching test under `test/`, so it cannot verify the task at this head.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
   # backlog gardener: band=4 evidence=c67af15006b748bc
   attempts: 0
   files:

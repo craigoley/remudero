@@ -9,6 +9,7 @@ import { listRuleSuites } from "../src/lib/ci-parity.js";
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
 
+const SKILL = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 const PRICED = "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts";
 const HOST = "test/host-capability-fixtures.test.ts";
 const SOURCE = "src/lib/example.ts";
@@ -24,7 +25,10 @@ function evaluate(path: string, head: string | null, base: string | null = "", f
     loadMembers: () => [],
     runSuites: (files: string[]) => { runs.push(files); return failing; },
   });
-  return { result, runs, started: runs.flat() };
+  assert.equal(runs.flat().filter((file) => file === SKILL).length, [path].length > 0 ? 1 : 0,
+    "the mandatory skill census runs exactly once for a nonempty diff");
+  const subjectRuns = runs.map((files) => files.filter((file) => file !== SKILL)).filter((files) => files.length > 0);
+  return { result, runs: subjectRuns, started: subjectRuns.flat() };
 }
 
 test("test/the-precheck-asks-the-census-suites-a-test-or-priced-step-moves.test.ts: priced writes and host tokens start their censuses; neither starts no child", () => {
@@ -94,14 +98,17 @@ test("both censuses share the existing child, propagate failures, and keep unrea
     runSuites: (files: string[]) => { runs.push(files); return [PRICED, HOST]; },
   };
   const found = precheck.evaluateAdmittedCensusSuites(input);
-  assert.deepEqual(runs, [[PRICED, HOST]]);
+  assert.deepEqual(runs, [[PRICED, HOST, SKILL]]);
   assert.equal(found.violations.length, 2);
   assert.equal(found.unmeasured, null);
   assert.deepEqual(precheck.evaluateAdmittedCensusSuites({ ...input, readHead: () => { throw new Error("cannot read head"); } }),
     { violations: [], unmeasured: "cannot read head" });
   assert.deepEqual(precheck.evaluateAdmittedCensusSuites({ ...input, runSuites: () => { throw new Error("child timed out"); } }),
     { violations: [], unmeasured: "child timed out" });
-  assert.deepEqual(precheck.evaluateAdmittedCensusSuites({ changed: [FIXTURE], loadMembers: () => [], runSuites: () => { throw new Error("must not spawn"); } }),
+  assert.deepEqual(precheck.evaluateAdmittedCensusSuites({ changed: [FIXTURE], loadMembers: () => [], runSuites: (files: string[]) => {
+    assert.deepEqual(files, [SKILL], "an otherwise untouched diff runs only the mandatory census");
+    return [];
+  } }),
     { violations: [], unmeasured: null });
 });
 

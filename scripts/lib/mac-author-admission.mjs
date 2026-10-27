@@ -14,11 +14,44 @@ export function macPressureState(text) {
   return value === '1' ? 'normal' : value === '2' ? 'warning' : value === '4' ? 'critical' : 'unknown';
 }
 
+// W1-T10765: what macOS itself needs free while an author run is in flight. Swap grows in 1 GiB files on the
+// same APFS container (6 GiB, 83% used, on the 16 GiB Mac mini on 2026-10-26), so this leaves room for it to double.
+export const MAC_AUTHOR_OS_FLOOR_BYTES = 10 * 1024 ** 3;
+export const MAC_AUTHOR_PEAK_SAFETY_FACTOR = 2;
+// Measured, not estimated: the full author preflight's own disk growth (its TMPDIR, coverage/ and the tree
+// outside node_modules, .git included), sampled every 5 s on 2026-10-26. Whole-run peaks: a plan-only run
+// 150.7 MiB; an affected-narrow run of 280 suites on one worker 184.2 MiB. Each phase takes the larger
+// whole-run peak, rounded up, so no phase is priced below a run that contains it. A phase or selection with
+// no row here is unmeasured and keeps MAC_AUTHOR_FREE_RESERVE_BYTES.
+export const MAC_AUTHOR_MEASURED_PEAK_BYTES = Object.freeze({
+  entry: 256 * 1024 ** 2,
+  'static-preflight': 256 * 1024 ** 2,
+  'affected-tests-per-worker': 256 * 1024 ** 2,
+});
+const SIZED_SELECTIONS = new Set(['plan-only', 'affected-narrow', 'affected-floor']);
+
+/** The disk reserve one author phase needs: the OS floor plus a safety factor over that phase's measured peak,
+ * never above the 20 GiB full-run reserve. A full fallback, an unknown selection or an unmeasured phase keeps
+ * the full reserve, so the bound only ever relaxes where a measurement backs it. */
+export function macAuthorReserveBytes({stage, selection, workers} = {}) {
+  const full = {bytes: MAC_AUTHOR_FREE_RESERVE_BYTES, basis: 'existing-20GiB'};
+  const peak = MAC_AUTHOR_MEASURED_PEAK_BYTES;
+  let measured;
+  if (stage === 'entry') measured = peak.entry;
+  else if (!SIZED_SELECTIONS.has(selection)) return full;
+  else if (stage === 'static-preflight') measured = peak['static-preflight'];
+  else if (stage === 'affected-tests' && Number.isSafeInteger(workers) && workers >= 1)
+    measured = peak['affected-tests-per-worker'] * workers;
+  if (!Number.isSafeInteger(measured) || measured <= 0) return full;
+  const bytes = MAC_AUTHOR_OS_FLOOR_BYTES + MAC_AUTHOR_PEAK_SAFETY_FACTOR * measured;
+  return bytes >= full.bytes ? full : {bytes, basis: `measured-${stage}`};
+}
+
 export function readMacAuthorAdmission(root, {platform = process.platform, scratch = tmpdir(),
-  statfs = statfsSync, spawn = spawnSync, minimumFreeBytes = MAC_AUTHOR_FREE_RESERVE_BYTES} = {}) {
+  statfs = statfsSync, spawn = spawnSync, minimumFreeBytes = MAC_AUTHOR_FREE_RESERVE_BYTES, reserveBasis} = {}) {
   if (platform !== 'darwin') return {state: 'not-applicable', platform, reasons: []};
   if (!Number.isSafeInteger(minimumFreeBytes) || minimumFreeBytes <= 0) throw new Error('invalid author disk reserve');
-  const result = {state: 'not-run', platform, minimumFreeBytes,
+  const result = {state: 'not-run', platform, minimumFreeBytes, ...(reserveBasis ? {reserveBasis} : {}),
     workspaceFreeBytes: null, scratchFreeBytes: null, pressure: 'unknown', reasons: []};
   for (const [key, path] of [['workspaceFreeBytes', root], ['scratchFreeBytes', scratch]]) {
     try {
@@ -26,7 +59,7 @@ export function readMacAuthorAdmission(root, {platform = process.platform, scrat
       if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error('invalid filesystem capacity');
       result[key] = bytes;
       if (bytes < minimumFreeBytes) result.reasons.push(`${key}:${minimumFreeBytes === MAC_AUTHOR_FREE_RESERVE_BYTES
-        ? 'below-existing-20GiB-reserve' : 'below-bounded-job-reserve'}`);
+        ? 'below-existing-20GiB-reserve' : reserveBasis ? `below-${reserveBasis}-reserve` : 'below-bounded-job-reserve'}`);
     } catch (error) {
       result.reasons.push(`${key}:unavailable:${error.code ?? error.message}`);
     }
@@ -53,21 +86,26 @@ export class MacAuthorCapacityRefusal extends Error {
   }
 }
 
-export function requireMacAuthorCapacity(root, stage, readAdmission = readMacAuthorAdmission) {
-  const admission = readAdmission(root);
+/** `workload` ({selection, workers}) sizes the reserve (W1-T10765); without one a phase keeps the full reserve. */
+export function requireMacAuthorCapacity(root, stage, readAdmission = readMacAuthorAdmission, workload = undefined) {
+  const reserve = macAuthorReserveBytes({stage, ...workload});
+  const admission = readAdmission(root, {minimumFreeBytes: reserve.bytes, reserveBasis: reserve.basis});
   if (admission.state !== 'admitted' && admission.state !== 'not-applicable')
     throw new MacAuthorCapacityRefusal(stage, admission);
   return {stage, ...admission};
 }
 
 /** The CLI boundary is guarded; direct main() fixtures remain explicit algorithm tests.
- * --help/--dry-run are read-only and never acquire a slot or start static/test work. */
+ * --help/--dry-run are read-only and never acquire a slot or start static/test work.
+ * The entry check reserves only what selection and the census need; each heavy phase is
+ * admitted again, against the reserve its own selection requires, once that selection is known. */
 export function guardedAuthorEntry(argv, {root, readAdmission = readMacAuthorAdmission,
   runAuthor, reportRefusal = reportMacAuthorRefusal} = {}) {
   if (argv.some(arg => ['--help', '-h', '--dry-run'].includes(arg))) return runAuthor(argv);
-  const admission = readAdmission(root);
+  const entry = macAuthorReserveBytes({stage: 'entry'});
+  const admission = readAdmission(root, {minimumFreeBytes: entry.bytes, reserveBasis: entry.basis});
   if (admission.state === 'admitted' || admission.state === 'not-applicable')
-    return runAuthor(argv, {admitHost: stage => requireMacAuthorCapacity(root, stage, readAdmission)});
+    return runAuthor(argv, {admitHost: (stage, workload) => requireMacAuthorCapacity(root, stage, readAdmission, workload)});
   reportRefusal(root, admission);
   return 3;
 }

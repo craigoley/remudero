@@ -9,7 +9,7 @@ import { gitRepo } from "./helpers/git-repo.js";
 import * as harness from "../src/run-task.js";
 import { hostWorktreeGitAsync } from "../src/lib/worktree-git.js";
 // @ts-ignore executable census module has no declaration file.
-import { readCensusSnapshot } from "../scripts/census-precheck.mjs";
+import { readCensusSnapshot, main as censusMain } from "#scripts/census-precheck.mjs";
 
 function fixture(t: { after: (fn: () => void) => void }) {
   const repo = gitRepo({ kind: "async-daemon-inputs" });
@@ -123,5 +123,73 @@ test("W1-T9550: a slow git during the census snapshot does not delay a concurren
     clearInterval(timer);
     if (savedPath === undefined) delete process.env.PATH;
     else process.env.PATH = savedPath;
+  }
+});
+
+
+test("the snapshot controller reports its nested deadline budget without running a census", (t) => {
+  const lines: string[] = [];
+  t.mock.method(console, "log", (line: unknown) => { lines.push(String(line)); });
+  t.mock.method(console, "error", () => {});
+  const code = censusMain(["--snapshot-budget"], {
+    measure: () => assert.fail("budget inspection must not measure a tree"),
+    admitted: () => assert.fail("budget inspection must not load a worker's admission table"),
+    runSuites: () => assert.fail("budget inspection must not run suites"),
+  });
+  assert.equal(code, 0);
+  assert.equal(lines.length, 1);
+  const budget = JSON.parse(lines[0]!);
+  assert.equal(budget.version, 1);
+  assert.equal(budget.childTimeBoundMs, 60_000);
+  assert.ok(budget.timeoutMs > budget.childTimeBoundMs);
+  assert.equal(budget.timeoutMs, Object.values(budget.stages).reduce((sum: number, value) => sum + Number(value), 0) * budget.childTimeBoundMs);
+});
+
+const nestedBudget = { version: 1, childTimeBoundMs: 60_000,
+  stages: { setup: 1, admission: 1, reach: 2, joinedGitFree: 2, structuralGitFree: 4 }, timeoutMs: 600_000 };
+
+test("the native snapshot controller can collect bounded child outcomes without inheriting their single-child deadline", async () => {
+  const calls: Array<{ args: string[]; timeout: number | undefined }> = [];
+  const checked = await harness.checkFixCensusSnapshotAsync("/fixture/worker", "/fixture/snapshot", () => {}, async (_file, args, opts) => {
+    calls.push({ args, timeout: opts.timeout });
+    if (args.includes("--snapshot-budget")) return { status: 0, signal: null, stdout: JSON.stringify(nestedBudget), stderr: "" };
+    if (args[0]!.endsWith("census-precheck.mjs")) {
+      if ((opts.timeout ?? 0) <= 61_000) return { status: null, signal: "SIGTERM" as NodeJS.Signals, stdout: "partial child progress", stderr: "" };
+      return { status: 2, signal: null, stdout: "census-precheck: retained source-reader capability UNKNOWN", stderr: "" };
+    }
+    return { status: 0, signal: null, stdout: "# tests 1\n# pass 1\n# fail 0\n", stderr: "" };
+  });
+  assert.equal(checked?.refusal, undefined);
+  assert.match(checked?.unmeasured ?? "", /capability UNKNOWN/);
+  assert.equal(calls.length, 3);
+  assert.ok(calls[0]!.args.includes("--snapshot-budget"));
+  assert.equal(calls[0]!.timeout, 60_000);
+  assert.equal(calls[1]!.timeout, nestedBudget.timeoutMs);
+  assert.equal(calls[2]!.timeout, 60_000, "the independent reach child retains its original bound");
+});
+
+test("an unreadable snapshot deadline budget refuses before running the controller", async () => {
+  for (const stdout of ["not-json", "{}", JSON.stringify({ ...nestedBudget, version: 2 }),
+    JSON.stringify({ ...nestedBudget, timeoutMs: 0 }), JSON.stringify({ ...nestedBudget, timeoutMs: 600_001 }),
+    JSON.stringify({ ...nestedBudget, stages: { ...nestedBudget.stages, structuralGitFree: -1 } }),
+    JSON.stringify({ ...nestedBudget, stages: { ...nestedBudget.stages, extra: 1 } })]) {
+    let calls = 0;
+    const checked = await harness.checkFixCensusSnapshotAsync("/fixture/worker", "/fixture/snapshot", () => {}, async () => {
+      calls++; return { status: 0, signal: null, stdout, stderr: "" };
+    });
+    assert.match(checked?.refusal?.text ?? "", /controller budget.*UNKNOWN/i);
+    assert.equal(calls, 1, "no guessed deadline or controller execution follows malformed policy");
+  }
+});
+
+
+test("a failed or interrupted budget inspector cannot certify a controller deadline", async () => {
+  for (const native of [{ status: 1, signal: null }, { status: null, signal: "SIGTERM" as NodeJS.Signals }]) {
+    let calls = 0;
+    const checked = await harness.checkFixCensusSnapshotAsync("/fixture/worker", "/fixture/snapshot", () => {}, async () => {
+      calls++; return { ...native, stdout: JSON.stringify(nestedBudget), stderr: "" };
+    });
+    assert.match(checked?.refusal?.text ?? "", /controller budget.*UNKNOWN/i);
+    assert.equal(calls, 1, "a complete-looking payload cannot erase the inspector's native failure");
   }
 });

@@ -95,6 +95,15 @@ changes Janitor retention, deletes swap or dependencies, or weakens hosted gates
 Older author receipts are not proof of a refused invocation. Existing running
 jobs and older checkouts are not modified; use the updated checkout for new runs.
 
+Mac worktrees are made with `rmd worktree add <dir> -b <branch> <base>` rather
+than a bare `git worktree add`. A fresh checkout writes ~128 MB of tracked files
+the operator checkout already holds; on APFS the command clones the donor's
+unchanged files copy-on-write (`cp -c`), lets git write only the changed paths,
+asserts a clean status, and falls back to a normal checkout where the volume
+cannot clone. The free-space delta it prints is a shared-volume observation, not
+a per-job attribution or proof of reclaimable bytes, and it changes no capacity
+threshold or gate.
+
 Apple's public XNU source maps its internal pressure enum to userspace dispatch
 flags for `kern.memorystatus_vm_pressure_level`: 1 is normal, 2 warning and 4
 critical. Do not confuse these with the internal 0-through-4 enum:
