@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -103,7 +103,9 @@ export interface ProductBuildOptions {
  * The config root the target repository's OWN daemon reads kick markers from. The registry names one
  * live instance per repository: core's root is this process's fleet root, and every other instance's is
  * its state root under `stateBase`, the convention instance-gateway.ts reads that instance's ledger and
- * control flags through. A repository no live instance drives has no daemon to deliver to.
+ * control flags through. A repository no live instance drives has no daemon to deliver to, and a root
+ * whose `state/` directory this process cannot reach is unknown: writing there would mint a directory
+ * no daemon reads.
  */
 export function registryDaemonRoot(coreRoot: string | undefined, options: ProductBuildInstances & { repoRoot?: string }): (repository: BuildRepository) => DaemonRootRead {
   return (repository) => {
@@ -121,7 +123,8 @@ export function registryDaemonRoot(coreRoot: string | undefined, options: Produc
     if (!instance) return { state: "absent" };
     const root = instance.name === (options.coreInstance ?? CORE_INSTANCE) ? coreRoot
       : instanceStateRoot(instance, options.stateBase ?? DEFAULT_INSTANCE_STATE_BASE).root;
-    return root === undefined ? { state: "unreadable" } : { state: "found", root, instance: instance.name };
+    if (root === undefined || !existsSync(join(root, "state"))) return { state: "unreadable" };
+    return { state: "found", root, instance: instance.name };
   };
 }
 

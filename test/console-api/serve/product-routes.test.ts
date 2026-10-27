@@ -206,6 +206,7 @@ test("W1-T10615: the served product build operation matches the authenticated AP
   // The repo-tracked instance registry names Wreckterra's own daemon; its config root is mounted under the state base.
   const registry = join(root, ".remudero", "daemon-instances.yaml");
   const daemonState = join(root, "instances", "wreckterra", "state");
+  mkdirSync(daemonState, { recursive: true });
   writeFileSync(registry, "instances:\n  core:\n    github_repo: craigoley/remudero\n");
   const store = new ProductIntentStore({ root });
   const saved = store.write("clerk:alice", command);

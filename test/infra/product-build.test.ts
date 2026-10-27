@@ -68,6 +68,7 @@ function fixture(t: TestContext, over: { target?: FakeTarget; envelope?: boolean
   writeFileSync(registryPath, REGISTRY);
   const stateBase = join(root, "instances");
   const daemonRoot = join(stateBase, "wreckterra");
+  mkdirSync(join(daemonRoot, "state"), { recursive: true });
   const options: ProductBuildOptions = { root, store, target, provider, clock: fixedClock(Date.parse("2026-10-26T01:00:00.000Z")),
     instances: { registryPath, stateBase },
     kick: (kickRoot, taskId, origin, repo) => { kicks.push([taskId, origin, repo]); assert.equal(kickRoot, daemonRoot, "the marker goes to the target's own daemon root"); } };
@@ -272,8 +273,13 @@ test("W1-T10615: a product build refuses a target no live daemon instance drives
     { state: "found", root: f.root, instance: "core" });
   assert.deepEqual(registryDaemonRoot(undefined, { registryPath: f.registryPath })({ ...repo, name: "remudero" }), { state: "unreadable" });
   assert.deepEqual(registryDaemonRoot(f.root, { registryPath: f.registryPath })({ ...repo, name: "elsewhere" }), { state: "absent" });
-  assert.equal((registryDaemonRoot(f.root, { registryPath: f.registryPath })(repo) as { root: string }).root, "/home/node/rmd-instances/wreckterra",
-    "the default state base is the instance gateway's own");
+  // An instance whose state directory is not mounted here (the gateway's default base, in a test) is unknown, never written to.
+  assert.deepEqual(registryDaemonRoot(f.root, { registryPath: f.registryPath })(repo), { state: "unreadable" },
+    "the default state base is the instance gateway's own, and it is not reachable from this fixture");
+  const unmounted = fixture(t);
+  assert.equal(await refused(new ProductBuildService({ ...unmounted.options, instances: { registryPath: unmounted.registryPath, stateBase: join(unmounted.root, "absent") } })
+    .execute(actor, unmounted.command())), "target_unreadable");
+  assert.ok(!existsSync(join(unmounted.root, "absent")), "an unreachable daemon root is never created");
   // With only a checkout, the registry is the repo-tracked one under it.
   const checkout = ownedFixtureDir(t, "product-build-registry").dir;
   mkdirSync(join(checkout, ".remudero"), { recursive: true });
