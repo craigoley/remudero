@@ -19045,7 +19045,7 @@ export async function runSweep(
         priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES);
     const blockerRow = {
       ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable,
-        blocker.startsWith("security-") ? securityText : policyCause),
+        blocker.startsWith("security-") ? securityText : policyCause, pr.headSha),
       ...(blockerReadFailure ? { blocker_read_error: blockerReadFailure.reason } : {}),
     };
     if (armOutcome !== "armed" && armOutcome !== "direct-merged" && !gardenRecordRefusals.has(pr.prNumber)) {
@@ -19472,7 +19472,7 @@ export async function runSweep(
       selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeJudgedExhausted;
     // W1-T5690: a blocked-ambiguous PR whose blocker is older than its SLO and still has an untaken
     // rung takes it, even when the strike rule did not match (owner NONE, awaiting-ci, conflict ...).
-    const sloBlocker = blockerFields(derived.blocker, priorBlockerByPr.get(pr.prNumber), now);
+    const sloBlocker = blockerFields(derived.blocker, priorBlockerByPr.get(pr.prNumber), now, false, undefined, pr.headSha);
     const sloContext: SloContext = {
       blocker: derived.blocker, owner: sloBlocker.blocker_owner, ageMs: sloBlocker.blocker_age_ms,
       noOp: derived.blocker === "strikes-exhausted" && pr.repeatedFixRefusal !== undefined,
