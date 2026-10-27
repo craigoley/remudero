@@ -219,7 +219,7 @@ test("W1-T3413 refreshes lifecycle evidence", () => {
   const refreshed = stageSkillLifecycleProposal(
     registryPath,
     skillsDir,
-    report([...Array(9).fill("merged"), "failed"], Array(10).fill("blocked_ci")),
+    report([...Array(5).fill("merged"), ...Array(5).fill("failed")], Array(10).fill("blocked_ci")),
   );
 
   assert.equal(refreshed.refreshed, true);

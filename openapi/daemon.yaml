@@ -1265,6 +1265,289 @@ components:
         error:
           type: string
           enum: [invalid_identity, invalid_input, not_found, project_not_found, repository_required, repository_mismatch, team_mismatch, project_conflict, idempotency_conflict, stale_revision, capacity, creation_denied, not_configured, busy, corrupt, unavailable, provider_unreadable, outcome_unknown, recovery_required, request_too_large]
+    ProductCaseImport:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - requestId
+        - expectedRevision
+        - brief
+      properties:
+        version:
+          type: string
+          enum:
+            - product-intent-v1
+        requestId:
+          $ref: "#/components/schemas/ProductRequestId"
+        expectedRevision:
+          type: integer
+          enum:
+            - 0
+        brief:
+          $ref: "#/components/schemas/ProductBrief"
+    ProductCaseAdopt:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - requestId
+        - productId
+        - action
+        - owner
+        - name
+        - visibility
+        - expectedRevision
+        - expectedObjectiveRevision
+        - repositoryId
+      properties:
+        version:
+          type: string
+          enum:
+            - product-repository-v1
+        requestId:
+          $ref: "#/components/schemas/ProductRequestId"
+        productId:
+          $ref: "#/components/schemas/ProductId"
+        action:
+          type: string
+          enum:
+            - adopt
+        owner:
+          type: string
+          minLength: 1
+          maxLength: 39
+          pattern: ^[A-Za-z0-9][A-Za-z0-9-]*$
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          pattern: ^(?!\.{1,2}$)[A-Za-z0-9_.-]+$
+        visibility:
+          type: string
+          enum:
+            - public
+            - private
+        repositoryId:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        expectedRevision:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        expectedObjectiveRevision:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+    ProductCasePlan:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - productId
+        - expectedRevision
+        - expectedObjectiveRevision
+        - planEvidenceId
+        - taskId
+        - pullRequest
+      properties:
+        requestId:
+          $ref: "#/components/schemas/ProductRequestId"
+        productId:
+          $ref: "#/components/schemas/ProductId"
+        expectedRevision: &a1
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        expectedObjectiveRevision: *a1
+        planEvidenceId:
+          type: string
+          minLength: 1
+          maxLength: 80
+          pattern: ^[A-Za-z0-9_-]+$
+        taskId:
+          type: string
+          minLength: 1
+          maxLength: 64
+        pullRequest: *a1
+    ProductCaseCommand:
+      description: At most 65536 raw bytes. Import an approved brief, adopt its existing repository,
+        verify a merged reviewed plan, or request one guarded build. Client evidence and verification
+        fields are rejected.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required:
+            - version
+            - action
+            - command
+          properties:
+            version:
+              type: string
+              enum:
+                - product-case-v1
+            action:
+              type: string
+              enum:
+                - import
+            command:
+              $ref: "#/components/schemas/ProductCaseImport"
+        - type: object
+          additionalProperties: false
+          required:
+            - version
+            - action
+            - command
+          properties:
+            version:
+              type: string
+              enum:
+                - product-case-v1
+            action:
+              type: string
+              enum:
+                - adopt
+            command:
+              $ref: "#/components/schemas/ProductCaseAdopt"
+        - type: object
+          additionalProperties: false
+          required:
+            - version
+            - action
+            - command
+          properties:
+            version:
+              type: string
+              enum:
+                - product-case-v1
+            action:
+              type: string
+              enum:
+                - plan
+            command:
+              $ref: "#/components/schemas/ProductCasePlan"
+        - type: object
+          additionalProperties: false
+          required:
+            - version
+            - action
+            - command
+          properties:
+            version:
+              type: string
+              enum:
+                - product-case-v1
+            action:
+              type: string
+              enum:
+                - build
+            command:
+              $ref: "#/components/schemas/ProductBuildCommand"
+    ProductCaseResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - productId
+        - revision
+        - objectiveRevision
+        - replayed
+        - evidence
+      properties:
+        version:
+          type: string
+          enum:
+            - product-case-v1
+        productId:
+          $ref: "#/components/schemas/ProductId"
+        revision: *a1
+        objectiveRevision: *a1
+        replayed:
+          type: boolean
+        evidence:
+          type: object
+          additionalProperties: false
+          required:
+            - source
+            - local
+            - hosted
+            - review
+            - merge
+            - deploy
+            - mobile
+          properties:
+            source: &a2
+              type: array
+              maxItems: 128
+              items:
+                type: object
+                additionalProperties: false
+                required:
+                  - id
+                  - reference
+                properties:
+                  id:
+                    type: string
+                    minLength: 1
+                    maxLength: 128
+                  reference:
+                    type: string
+                    minLength: 1
+                    maxLength: 2048
+            local: *a2
+            hosted: *a2
+            review: *a2
+            merge: *a2
+            deploy: *a2
+            mobile: *a2
+        build:
+          $ref: "#/components/schemas/ProductBuildReceipt"
+    ProductCaseError:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - error
+      properties:
+        version:
+          type: string
+          enum:
+            - product-case-v1
+        error:
+          type: string
+          enum:
+            - invalid_identity
+            - invalid_input
+            - not_found
+            - stale_revision
+            - idempotency_conflict
+            - capacity
+            - busy
+            - corrupt
+            - unavailable
+            - outcome_unknown
+            - recovery_required
+            - request_too_large
+            - repository_missing
+            - repository_not_found
+            - repository_conflict
+            - provider_unreadable
+            - plan_not_approved
+            - target_not_enrolled
+            - target_unreadable
+            - target_daemon_missing
+            - runner_missing
+            - bootstrap_unverified
+            - task_not_found
+            - task_unreadable
+            - task_stale
+            - task_claimed
+            - task_merged
+            - budget_exceeded
+            - fleet_halted
+            - kick_failed
+            - creation_denied
     ProductBuildCommand:
       type: object
       additionalProperties: false
@@ -16141,6 +16424,94 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+  /v1/products/case:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema:
+          type: string
+          minLength: 1
+      - name: x-confirm-nonce
+        in: header
+        required: true
+        description: Server-issued HIGH-tier confirmation bound to this exact method, path and body.
+        schema:
+          type: string
+          minLength: 1
+    post:
+      security:
+        - bearerWrite: []
+      summary: Resume an imported product through adoption, verified planning and a guarded build request.
+      description: The verified operator, write scope, high tier and exact confirmation are required.
+        Import saves the approved brief with provenance. Adoption never creates a repository. Planning
+        verifies enrollment, runner and bootstrap, then reads the complete approved brief in a
+        reviewed merged target task at both its merge and current head. Build rechecks that plan and
+        delegates to the existing guarded builder. Evidence channels stay separate; empty channels
+        mean not observed. A queued receipt never proves execution, deployment or mobile playability.
+        Responses use private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductCaseCommand"
+      responses:
+        "200":
+          description: The durable receipt, or the same original receipt on an identical retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCaseResponse"
+        "400":
+          description: Malformed JSON or an invalid command.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCaseError"
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductBuildAccessError"
+        "403":
+          description: The verified operator identity, write grant, high tier or confirmation is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductCaseError"
+                  - $ref: "#/components/schemas/ProductBuildAccessError"
+        "404":
+          description: The product, repository or task does not exist for this operator.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCaseError"
+        "409":
+          description: A refused precondition - stale revision or ownership, unapproved plan, missing runner,
+            target daemon or bootstrap, claimed or merged task, budget, or halted fleet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCaseError"
+        "413":
+          description: The raw request exceeds 65536 bytes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCaseError"
+        "503":
+          description: busy, corrupt, unavailable or an unreadable provider, target or task; no success is
+            fabricated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCaseError"
   /v1/products/build:
     parameters:
       - name: x-rmd-operator-session

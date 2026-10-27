@@ -1,10 +1,11 @@
 - **A ZERO IS NOT A MEASUREMENT until a positive control proves the query saw its corpus — run one on
-  every sweep you will act on. A control proves only that: name the question the query really
+  every sweep you act on. It proves only that: name the question the query really
   answers, check the corpus's newest ts covers the window, and re-run a surprise in another ENVIRONMENT.**
   The four W1-T3323 bullets below are the measurements behind each clause, in order: the control
   itself, (d) the wrong question, (e) the wrong corpus or environment, (i) the uncovered window.
   The lettered items still in the index — (a), (b), (f)-(h) — are further traps of the same family;
   (c) and (j) now carry their instruction as headlines of their own.
+  *(Headline folded 2026-10-27: "you will act on. A control proves only that" became "you act on. It proves only that"; the clauses are unchanged.)*
 
   *(Index line retired 2026-10-11: (k), the last bullet below, is this rule applied to a function
   call — `[]` from a dead call and from a real zero look alike, and its control is a deliberately

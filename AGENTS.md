@@ -52,7 +52,8 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   `run-<taskId>-*` branch, and a PR's merge state from the API — never ledger verdict lines, a
   shard's `status:` or main's log.**
 - **Before building a filed task, check `git ls-remote origin 'refs/rmd-dispatch/<id>' 'refs/heads/run-<id>-*'`
-  (claimed or in flight?) and merged PRs for an exact `^Remudero-Task: <id>$` trailer (shipped?), never commit subjects.**
+  (claimed?), merged PRs for an exact `^Remudero-Task: <id>$` trailer, never commit subjects, and
+  `git log origin/main --since=<filing> -- <its files:>`: a `PR-<n>` hand fix leaves the task uncredited.**
 - **Before filing, sweep the task's SUBJECT over every open PR head's tree (`git ls-remote --heads
   origin`), not only `origin/main`, counting per head against main.**
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.**
@@ -73,11 +74,11 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   its retro ledger; `rule15-*` names an artifact, not a rule.**
 - **Take the cheap candidate beside a costly one, and name what the costly one now waits for.**
 - **Never fan out update-branch after a main fix: protection is non-strict, and each refresh re-runs
-  ~16 min of CI and voids the review.**
+  CI and voids the review.**
 - **Leave a red fleet PR to the fix lane while a round is due or in flight — hand pushes out-race it
   and hide its defects.**
 - **Read GitHub through `rmd gh -- <gh args>` while a broker is live (the hook says so), never poll;
-  the 180 s floor applies only with no live broker; `gh pr create` may die, git push won't.**
+  the 180 s floor applies only without one; `gh pr create` may die, git push won't.**
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.**
 - **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close
@@ -94,7 +95,7 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   every shard red is held.**
 - **Grep the ledger with `rmd ledger-grep <pat>`; by hand, `zgrep` THREE globs —
   `state/ledger.*.ndjson.gz state/ledger.*.ndjson state/ledger.ndjson` — with a file count PER
-  FORM as the control, and never delete an archive: each holds history no other file has.**
+  FORM as the control, and never delete an archive.**
 - **A ledger line must carry the reason from the DECISION THAT PRODUCED ITS OUTCOME.**
 - **On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —
   exclude the wrapper by the RELATIVE path, never the absolute one.**
@@ -103,11 +104,11 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 - **When a gate reads the ledger for a record the SAME function writes, check the WRITE ORDER before
   believing the gate's stated reason.**
 - **Prove a dispatch change in-process with `assertLintClean`, never `rmd drain --dry-run` — it writes
-  the LIVE ledger and reads origin/main's plan, not your branch.**
+  the LIVE ledger and reads origin/main's plan.**
 - **A bound that fires on a HEALTHY condition is this repo's recurring defect — before tuning the
   number, check the population it is meant to separate has ever been observed.**
 - **A ZERO IS NOT A MEASUREMENT until a positive control proves the query saw its corpus — run one on
-  every sweep you will act on. A control proves only that: name the question the query really
+  every sweep you act on. It proves only that: name the question the query really
   answers, check the corpus's newest ts covers the window, and re-run a surprise in another ENVIRONMENT.**
 - **(a) A POSIX REGEX ENGINE HERE SILENTLY DROPS `\s`/`\b` INSTEAD OF ERRORING, AND TWO DIFFERENT
   TOOLS DO IT.**
