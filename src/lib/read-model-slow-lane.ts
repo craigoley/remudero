@@ -190,7 +190,8 @@ function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, l
         const outcomes = proposeHandRouteFeedback(deps.root, deps.statusGithub, config.repository, { ...deps.feedbackLand, stateRoot: deps.feedbackLand?.stateRoot ?? config.inboxRoot });
         const proposed = outcomes.filter(outcome => outcome.outcome === "proposed");
         const unknown = outcomes.filter(outcome => outcome.outcome === "unknown");
-        if (proposed.length || unknown.length) log("feedback.hand_route_reconciled", { proposed, unknown: unknown.length, reasons: [...new Set(unknown.map(outcome => outcome.reason))] });
+        const refused = outcomes.filter(outcome => outcome.outcome === "refused");
+        if (proposed.length || unknown.length || refused.length) log("feedback.hand_route_reconciled", { proposed, unknown: unknown.length, refused: refused.length, reasons: [...new Set([...unknown, ...refused].map(outcome => outcome.reason))] });
       }
       return { views: [{ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: withSource(materializeFeedbackView({ root: deps.root, planPath: deps.planPath, stateRoot: deps.inboxRoot }, deps.statusGithub, clock), github) }] };
     },
