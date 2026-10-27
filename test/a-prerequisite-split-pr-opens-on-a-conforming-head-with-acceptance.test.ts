@@ -336,7 +336,7 @@ test("a completed no-PR prerequisite attempt is not repeated until its repair in
   assert.equal(marker?.read_body_sha256, "body-a");
   for (const changed of [{ reviewHead: "new-head" }, { bodySha256: "body-b" },
     { taskPatch: { files: ["src/qualified-new-companion.ts"] } }, { taskPatch: { design: "operator-qualified revised design" } }]) {
-    const before = spawns;
+    const before: number = spawns;
     await drive({ ...input, priorRows: first.lines, ...changed });
     assert.equal(spawns, before + 1, "a positively changed repair input returns to existing qualification");
   }
@@ -351,11 +351,11 @@ test("an unbound or foreign no-PR record cannot replace an observed prerequisite
   const marker = first.lines.find(row => row.step === "fix.prerequisite_dispatch_failed")!;
   for (const row of [{ ...marker, read_head_sha: undefined }, { ...marker, read_contract_revision: undefined },
     { ...marker, prerequisite_outcome: undefined }, { ...marker, pr_url: "https://github.com/acme/foreign/pull/4242" }]) {
-    const before = spawns;
+    const before: number = spawns;
     await drive({ ...input, priorRows: [row] });
     assert.equal(spawns, before + 1, "historical/unbound/foreign evidence cannot suppress a first qualified attempt");
   }
-  const before = spawns;
+  const before: number = spawns;
   const existing = await drive({ ...input, priorRows: [...first.lines, { step: "fix.prerequisite_opened", pr_url: opts().prUrl, prerequisite_pr: 9206 }] });
   assert.equal(spawns, before, "a real prerequisite already opened retains the existing owned route");
   assert.equal(existing.outcome.outcome, "parked");
