@@ -156,13 +156,13 @@
     src/lib/product-case.ts while reconciling the trusted durable snapshot. Neither entry launches qualification.
   acceptance:
     - claim: "replaying the product build through the served case route records a local and a hosted receipt bound to the actor, product, objective, repository, task, operation, native run and exact head, reading only that run's ledger rows and that head's required checks and reviews"
-      proof: "unit test: W1-T10865: served build reconciliation records its own local and hosted outcomes at the exact head"
+      proof: "unit test: W1-T10865: served reconciliation binds real local and hosted receipts"
     - claim: "failed, cancelled, pending, stale-head, foreign-repository, foreign-run, rotated-but-incomplete and unreadable inputs record an explicit failed, running or unknown outcome, never succeeded, and an earlier failed receipt stays stored beside a later success"
-      proof: "unit test: W1-T10865: failed incomplete foreign and stale run evidence never becomes succeeded"
+      proof: "unit test: W1-T10865: failed incomplete foreign and stale evidence cannot pass"
     - claim: "replay after response loss, a second service instance, a process restart and a concurrent product revision change converge on one receipt per run and head without overwriting the concurrent edit"
-      proof: "unit test: W1-T10865: replay restart and concurrent revisions retain one receipt per run and head"
+      proof: "unit test: W1-T10865: replay restart and concurrent edits retain one receipt"
     - claim: "the served case reply and its regenerated contract show the outcome of each local and hosted item, while the HTTP command union still accepts no evidence writer"
-      proof: "unit test: W1-T10865: served local and hosted receipts preserve typed outcomes without an HTTP evidence writer"
+      proof: "unit test: W1-T10865: served receipts keep typed outcomes without an HTTP writer"
     - claim: "the maintained final-source run path calls the real local qualification capture helper before retiring its owned worktree"
       proof: "grep: captureLocalQualificationReceipt( in src/cli/commands/run-task-verb.ts"
     - claim: "the product case producer calls the real local qualification receipt reader when reconciling its correlated run"
