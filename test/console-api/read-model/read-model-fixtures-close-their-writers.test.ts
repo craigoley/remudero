@@ -69,12 +69,14 @@ async function verifyFailedClosure() {
 test("read-model fixture cleanup retains evidence and still closes other writers after a closure failure", verifyFailedClosure);
 
 
-test("the four observed read-model fixtures wire owned scratch and writer closure to the verified cleanup", async () => {
+test("the four observed read-model fixtures wire owned scratch and writer closure to the verified cleanup (plus inbox and now-view callers)", async () => {
   for (const file of [
     "test/read-model-oracle-never-blocks-projection.test.ts",
     "test/a-read-model-upgrade-never-re-reads-the-corpus.test.ts",
     "test/a-view-body-is-behind-only-by-the-rows-it-reads.test.ts",
     "test/a-view-unit-s-measured-cost-survives-a-restart.test.ts",
+    "test/inbox-thread-evidence.test.ts",
+    "test/now-view-bounded-steps.test.ts",
   ]) {
     const source = readFileSync(join(REPO_ROOT, file), "utf8");
     assert.match(source, /from "#test\/helpers\/read-model-fixture\.js"/, file);
