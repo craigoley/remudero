@@ -1398,35 +1398,20 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   const demandViews = views.filter((view) => view.demand === true).map((view) => view.name);
-  const demandSwept = new Set<ViewUnit>();
-
-  function demandKeyBelongsTo(unit: ViewUnit, key: string): boolean {
-    const instances = new URLSearchParams(key).getAll("instance");
-    if (unit.slot) return instances.length === 1 && instances[0] === unit.slot.instance.name;
-    return instances.length === 0 || (instances.length === 1 && slots.some(slot => slot.instance.name === instances[0]));
-  }
+  let demandSwept = false;
 
   /**
    * Evicts the demand keys unread for ten minutes. The first sweep after a start also drops the keys an
-   * earlier run persisted, only for units this lane owns. A transferred unit gets its own first sweep.
+   * earlier run persisted: this run's book has no read of them, so serve must not keep serving them stale.
    */
   function sweepDemand(): void {
     const book = opts.demand;
     if (!book || demandViews.length === 0) return;
-    const owned = units.filter(unit => unit.view.demand === true && owns(unit));
-    const ownedSet = new Set(owned);
-    for (const unit of demandSwept) if (!ownedSet.has(unit)) demandSwept.delete(unit);
     try {
-      for (const { view, key } of book.expire()) {
-        if (owned.some(unit => unit.view.name === view && demandKeyBelongsTo(unit, key))) drop(view, key);
-      }
-      const starting = owned.filter(unit => !demandSwept.has(unit));
-      for (const unit of starting) demandSwept.add(unit);
-      for (const view of new Set(starting.map(unit => unit.view.name))) {
-        for (const key of knownKeys(view)) {
-          if (!book.has(view, key) && starting.some(unit => unit.view.name === view && demandKeyBelongsTo(unit, key))) drop(view, key);
-        }
-      }
+      for (const { view, key } of book.expire()) drop(view, key);
+      if (demandSwept) return;
+      demandSwept = true;
+      for (const view of demandViews) for (const key of knownKeys(view)) if (!book.has(view, key)) drop(view, key);
     } catch (error) {
       log("read_model.demand_sweep_failed", { error: (error as Error).message });
     }
