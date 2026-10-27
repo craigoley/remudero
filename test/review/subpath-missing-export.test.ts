@@ -196,7 +196,7 @@ test("an aliased proof root attributes real Node output only inside its canonica
   const baseAlias = join(f.dir, "base-alias"), headAlias = join(f.dir, "head-alias");
   symlinkSync(f.base, baseAlias, "dir"); symlinkSync(f.head, headAlias, "dir");
   const env: NodeJS.ProcessEnv = { ...process.env, TSX_DISABLE_CACHE: "1" };
-  delete env.NODE_TEST_CONTEXT; delete env.NODE_V8_COVERAGE;
+  delete env.NODE_TEST_CONTEXT;
   const run = (cwd: string) => spawnSync(process.execPath, ["--import", join(process.cwd(), "node_modules/tsx/dist/loader.mjs"),
     "--test", "--test-reporter=tap", "test/probe.test.ts"], { cwd, env, encoding: "utf8", timeout: 10000, maxBuffer: 1024 ** 2 });
   const head = run(headAlias), base = run(baseAlias);
