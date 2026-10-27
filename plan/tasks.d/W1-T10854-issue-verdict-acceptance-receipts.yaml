@@ -1,0 +1,50 @@
+- id: W1-T10854
+  title: "Link an issue-revalidation verdict to the exact judge attempt it consumed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: span
+  priority: 3
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "operator-approved cash/retro follow-through; exact issue-verdict acceptance attribution"
+  principles: { tdd: strict }
+  budget_usd: 5.00
+  plan_refs: [W1-T10287, W1-T8864]
+  files:
+    - src/lib/issue-revalidation-garden.ts
+    - src/run-task.ts
+    - test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts
+  acceptance:
+    - claim: "Default composition records the exact final consumed attempt and actual parser state after one model call and one parse"
+      proof: "unit test: issue revalidation verdict receipts identify the final consumed judge attempt without another call or parse"
+    - claim: "Fallback and unknown provenance cannot manufacture a consumed-attempt acceptance"
+      proof: "unit test: issue revalidation verdict receipts refuse missing foreign conflicting and superseded identities"
+    - claim: "Legacy deterministic cached and unjudged cases retain their behavior and remain separate from paid model judgments"
+      proof: "unit test: issue revalidation verdict receipts preserve legacy deterministic cached and unjudged outcomes"
+    - claim: "Receipt construction preserves verdict actions original failures and canonical monetary receipts"
+      proof: "unit test: issue revalidation verdict receipts preserve decisions failures and monetary accounting"
+  rationale: |
+    The existing judge composition retains immutable selection-assignment identity in its monetary attempt receipt before returning text. The issue verdict producer records the issue and final verdict but not that consumed-attempt identity or an original parser-state receipt. A bounded passive sample positively contains both producer shapes; it does not prove model failure, semantic quality, a representative rate or invoice savings. Exact accepted-output attribution stays unknown. Existing monetary-receipt work concerns money before parsing and must not be rebuilt or reinterpreted.
+    Current source and every captured open advertised head tree were inspected for the subject.
+    Existing issue-revalidation monetary receipts and outer-fallback receipt work have distinct scope.
+    Missing exact acceptance provenance is unknown, not a measured model failure or semantic-quality rate.
+  note: |
+    The ID was atomically reserved by the filing branch through the maintained next-task-id command.
+    This machine-authored record starts at verify: human pending native filing-risk adjudication.
+    No risk ruling or operator release is fabricated. Normal author, review, hosted and merge gates remain required.
+    The later build must not change these acceptance criteria; any amendment is a separate plan-only PR.
+    Do not place private receipt paths, topology, live identities, observed prices or raw logs in public artifacts.
+    This record grants no production intervention, paid probe, retry or routing/cap change.
+  design: |
+    Carry an optional validated final-consumed-attempt receipt through the existing default judge/consumer composition and extend its existing verdict metadata. Use the actual single parser decision, normalized verdict and exact final worker identity; do not run another parser merely to manufacture a receipt, choose identity from task/time proximity, or substitute the initial selection for a fallback result.
+    Keep the existing plain-text/injected judge seam behavior. Missing legacy, malformed, foreign, conflicting or unobserved final identity remains explicitly unavailable. Preserve deterministic/cached/unjudged verdicts as distinct from actual model judgments. Old rows and current quality-learning interpretation remain unchanged.
+    Record only validated immutable IDs and closed parser/evidence states on the existing producer surface. No raw output, prompt, reasoning, reason strings, provider error, credentials or new monetary producer. Existing monetary rows retain every actual fallback attempt, but only the final consumed attempt can own a verdict receipt.
+    Keep the original output, normalization, issue action/guard and error/cancellation/logging contracts. Add no model call, fallback, retry, timer, projection, supervisor, routing/model/tool/environment, price/reservation/cap, service, deployment or admission change. Optional receipt-construction failure must not convert an existing failure to success or suppress existing decision-log failures.
+    Exercise real default composition with only external provider work faked, including final/fallback, malformed output, legacy plain text, deterministic or cached results, missing/foreign/ambiguous IDs, and optional metadata failures. Count actual spawn/parser invocations; preserve canonical monetary identities and collector behavior.
+    Use complete physical suite summaries, caller/census membership and committed-tree instrumented coverage. Prove literal deletion controls fail and restoration passes, verify stored executable proof text, then require full hosted/native review and protected merge. Source merge, natural source adoption and real exact-attempt verdict efficacy are separate. No paid/manual production trial.
+  falsifier: |
+    Delete the final-consumed identity propagation while preserving assertions: the exact join test must fail. Delete the invalid/legacy provenance refusal: the corresponding controls must fail. Delete parser reuse and call it again: the single-parse control must fail. Restore the whole fixed tree and show complete zero-failure physical suite summaries. Collection/admission refusals are not deletion controls.
