@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK = join(REPO_ROOT, "hooks", "pre-push");
 const ZERO = "0".repeat(40);
 const SHA = "1".repeat(40);
@@ -107,4 +106,91 @@ test("W1-T8000: an empty stdin still runs every gate", () => {
 
   for (const gate of GATES) assert.ok(names(ran).includes(gate), `${gate} must still run (ran: ${names(ran)})`);
   assert.equal(status, 1, "the recording gates refuse, so the hook refuses as before");
+});
+
+test("a real dispatch-claim push runs no source-content gate", () => {
+  const { dir, log } = fixture();
+  const remote = gitRepo({ kind: "dispatch-claim-remote", bare: true }).dir;
+  ownHook(dir);
+  execFileSync("git", ["config", "core.hooksPath", "hooks"], { cwd: dir });
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+  const result = spawnSync("git", ["push", remote, `${head}:refs/rmd-dispatch/W1-T10760`], {
+    cwd: dir, encoding: "utf8",
+    env: { PATH: process.env.PATH ?? "", HOME: dir, RMD_PREPUSH_GATES: "1", GATE_LOG: log },
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(log), false, "claim renewal publishes no source branch for a content gate to judge");
+  assert.match(result.stderr, /dispatch-claim-only.*skipped.*NOT a pass/);
+  assert.equal(execFileSync("git", ["--git-dir", remote, "rev-parse", "refs/rmd-dispatch/W1-T10760"],
+    { encoding: "utf8" }).trim(), head, "positive control: Git actually published the exact claim anchor");
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "renew"], { cwd: dir });
+  const renewed = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+  const leasedPush = (value: string) => spawnSync("git", ["push",
+    `--force-with-lease=refs/rmd-dispatch/W1-T10760:${head}`, remote, `${value}:refs/rmd-dispatch/W1-T10760`], {
+    cwd: dir, encoding: "utf8",
+    env: { PATH: process.env.PATH ?? "", HOME: dir, RMD_PREPUSH_GATES: "1", GATE_LOG: log },
+  });
+  const renewal = leasedPush(renewed);
+  assert.equal(renewal.error, undefined);
+  assert.equal(renewal.status, 0, renewal.stderr);
+  assert.match(renewal.stderr, /dispatch-claim-only/);
+  assert.equal(existsSync(log), false);
+  // Git omits an already-refused stale ref from hook stdin. Let the recording gates
+  // pass in this fixture so Git's own lease refusal, rather than a gate, decides it.
+  for (const gate of GATES) {
+    const path = join(dir, "scripts", gate);
+    writeFileSync(path, readFileSync(path, "utf8").replace("process.exit(1);", "process.exit(0);"));
+  }
+  const stale = leasedPush(head);
+  assert.equal(stale.error, undefined);
+  assert.notEqual(stale.status, 0, "skipping content gates cannot relax Git's exact lease");
+  assert.match(stale.stderr, /stale info/);
+  assert.equal(execFileSync("git", ["--git-dir", remote, "rev-parse", "refs/rmd-dispatch/W1-T10760"],
+    { encoding: "utf8" }).trim(), renewed, "a stale keeper cannot overwrite the current claim anchor");
+  const staleGates = readFileSync(log, "utf8").split("\n").filter(Boolean);
+  for (const gate of GATES) assert.ok(names(staleGates).includes(gate), `unknown stdin retains ${gate}`);
+});
+
+test("dispatch claims and deletions together have no source content to judge", () => {
+  const { dir, log } = fixture();
+  const result = push(dir, log,
+    `HEAD ${SHA} refs/rmd-dispatch/PR-14635 ${ZERO}\n(delete) ${ZERO} refs/heads/old ${SHA}\n`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.ran, []);
+  assert.match(result.stderr, /dispatch-claim-only/);
+  assert.match(result.stderr, /NOT a pass/);
+});
+
+test("a mixed claim and source push still judges the actual source ref", () => {
+  const { dir, log } = fixture();
+  const result = push(dir, log,
+    `HEAD ${SHA} refs/rmd-dispatch/W1-T10760 ${ZERO}\nHEAD ${"2".repeat(40)} refs/heads/run-unfiled-1793058500000 ${ZERO}\n`);
+  assert.equal(result.status, 1, "the refusing content gates still refuse the source push");
+  for (const gate of GATES) assert.ok(names(result.ran).includes(gate), gate);
+  const judged = result.ran.filter(line => /head-identity-gate|worker-branch-shape|proof-resolve-precheck/.test(line));
+  assert.equal(judged.length, 3);
+  for (const line of judged) {
+    assert.doesNotMatch(line, /rmd-dispatch|W1-T10760/);
+    assert.match(line, /run-unfiled-1793058500000|2{40}/);
+  }
+});
+
+test("a similar ref name or malformed claim update never gains the metadata exclusion", () => {
+  for (const input of [
+    `HEAD ${SHA} refs/heads/rmd-dispatch/W1-T10760 ${ZERO}\n`,
+    `HEAD ${SHA} refs/rmd-dispatch-other/W1-T10760 ${ZERO}\n`,
+    `HEAD ${SHA} refs/rmd-dispatch/ ${ZERO}\n`,
+    `HEAD not-a-sha refs/rmd-dispatch/W1-T10760 ${ZERO}\n`,
+    `HEAD ${SHA} refs/rmd-dispatch/W1-T10760 bad-remote-sha\n`,
+    `HEAD ${"a".repeat(64)} refs/rmd-dispatch/W1-T10760 ${ZERO}\n`,
+    `HEAD ${SHA} refs/rmd-dispatch/W1-T10760 ${ZERO}\nnot-a-ref-update\n`,
+    `HEAD ${SHA} refs/rmd-dispatch/W1-T10760 ${ZERO}\n(delete) ${ZERO}\n`,
+  ]) {
+    const { dir, log } = fixture();
+    const result = push(dir, log, input);
+    assert.equal(result.status, 1, input);
+    for (const gate of GATES) assert.ok(names(result.ran).includes(gate), `${gate}: ${input}`);
+    assert.doesNotMatch(result.stderr, /dispatch-claim-only/);
+  }
 });

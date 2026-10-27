@@ -1,0 +1,73 @@
+- id: W1-T10786
+  title: "A RECOVERED REGISTRY LOGIN CLOSES ITS OWN ESCALATION — the host-resource gardener logs acr_login_recovered when a host's registry refresh succeeds after a failure, but never closes the MANUAL issue it opened for it, so a healed login leaves its issue open until a person closes it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, the ACR-login alarm's issue closing on recovery; no refresh, verdict, cadence, backup-alarm or revalidation-garden change
+  band_meaning: span
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: found beside W1-T10779 (#14634), which names this gap as out of its scope; read-only on the Azure host's core ledger"
+  plan_refs: [W1-T8866, W1-T8864, W1-T130, W1-T10779]
+  files:
+    - src/lib/host-resource-gardener.ts
+    - src/run-task.ts
+    - test/gardeners/a-recovered-registry-login-closes-its-own-escalation.test.ts
+  rationale: |
+    READ 2026-10-27 on origin/main. The ledger read was read-only on the Azure host: core's
+    /mnt/rmd/state2/state, every rotation from 10-01 plus the live file.
+
+    THE DEFECT. host-resource-gardener.ts:1016-1039 has the same shape as the backup arm W1-T10779
+    fixes:
+    - A failed `acr_login_result` escalates once per episode: MANUAL, task `host-acr-login-<host>`,
+      `escalate` returns the issue URL, and the URL goes onto the `host_resource.acr_login_failed`
+      ledger row.
+    - A later `ok` refresh only ledgers `host_resource.acr_login_recovered` and resets the episode
+      (:1018-1020). HostResourcePorts (:801-816) has no close port, and the episode keeps
+      `escalatedAt` but no URL.
+    - The issue-revalidation garden never closes a MANUAL issue (issue-revalidation-garden.ts:18-23,
+      :218). Its header assigns closing-on-recovery to each producer (W1-T8866), which never reached
+      this gardener.
+
+    MEASURED. No `host_resource.acr_login_*` row exists in core's ledger since 10-01. The control: the
+    same loop over the same files returned the five `host_resource.state_backup_*` rows W1-T10779
+    cites. So this arm has not fired this month, and the gap is latent. Today a registry-login failure
+    blocks baked deploys, and its issue would stay open after `az login` heals it.
+
+    NOT COVERED ELSEWHERE. W1-T10779 (#14634, open) closes only the backup escalation, and its rationale
+    names this arm as out of scope. Swept plan/tasks.d for acr_login_recovered and host-acr-login: no
+    task owns it.
+  design: |
+    1. Mirror W1-T10779. When an `ok` refresh is newer than an escalated ACR-login episode for a host,
+       close the issue that episode escalated to. The comment cites the host, the successful refresh's
+       `acr_login_ts` and the registry. Ledger `host_resource.acr_login_cleared` with the URL, and only
+       then reset the episode.
+    2. Take the URL from durable evidence: the episode records the URL its escalate call returned, and
+       an older episode falls back to its `acr_login_failed` ledger row. If no URL is readable, nothing
+       closes.
+    3. CANNOT-OBSERVE MEANS WAIT (W1-T130). An absent close port, a close that throws or an unreadable
+       ledger closes nothing, ledgers `host_resource.acr_login_clear_failed` and keeps the episode for
+       the next pass. A later failure escalates exactly as today.
+    4. ONE CLOSE PORT. W1-T10779 and this task share host-resource-gardener.ts and the run-task.ts
+       wiring. Whichever lands second reuses the close port and the URL-recovery helper the first one
+       added, and adds no second copy.
+    5. Test runHostResourcePassAsync with recording ports and parsed beats, the way
+       test/a-failed-nightly-backup-alarms-the-fleet.test.ts drives it, in the suite `rmd test-place`
+       computes (test/gardeners/, as for W1-T10779).
+  acceptance:
+    - claim: "an ok registry refresh newer than an escalated ACR-login failure closes that escalation's issue once, citing the refresh, ledgers acr_login_cleared with the URL, and an older episode with no stored URL is closed by the URL on its ledger row"
+      proof: 'grep: test("W1-T10786: a recovered registry login closes the issue its failure escalated to" in test/gardeners/a-recovered-registry-login-closes-its-own-escalation.test.ts'
+    - claim: "a close that cannot be delivered or a URL that cannot be read closes nothing, ledgers acr_login_clear_failed, and is retried on the next pass, and a later failure escalates again"
+      proof: 'grep: test("W1-T10786: an undelivered registry-login close waits and a later failure escalates again" in test/gardeners/a-recovered-registry-login-closes-its-own-escalation.test.ts'
+  falsifier: |
+    At base both cases fail: recovery only ledgers acr_login_recovered and has no close port.
+    - Read the URL only from the episode: the older-episode arm of the first case closes nothing.
+    - Reset the episode before the close is delivered: the retry arm never closes.
+    - Close on every ok refresh: the once-only assertion fails.
+    GUARDS that held at base and must still hold: the gardener cases in
+    test/a-failed-nightly-backup-alarms-the-fleet.test.ts, and the ACR-login escalation cases in
+    test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts.

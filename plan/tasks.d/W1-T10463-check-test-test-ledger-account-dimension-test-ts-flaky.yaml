@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.39
+  # refusal-amendment (W1-T10463, run W1-T10463-1793034692020, 2026-10-26T18:08:22.712Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: The cited failing expression is absent from HEAD and main; HEAD uses destructuring at `src/run-task.ts:36772`, and the cited test passes.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

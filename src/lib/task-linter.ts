@@ -1529,6 +1529,7 @@ export function proofBaseDiscriminationViolations(task: Task, opts: LintOpts = {
   const violations: LintViolation[] = [];
   (task.acceptance ?? []).forEach((c, i) => {
     if (c.satisfied_by) return; // Architect-only; no proof text to parse
+    if ((c as { kind?: unknown }).kind === "guard") return;
     const whitelisted = parseWhitelistedProof(c.proof ?? "");
     if (!whitelisted) return; // does not parse — proof-dialect's concern, not this one
     // ONLY the pure-path test form. A name-filtered proof's discrimination turns on whether the
@@ -1549,7 +1550,9 @@ export function proofBaseDiscriminationViolations(task: Task, opts: LintOpts = {
         "check names it and the PR can merge on prose. This is a WARN, not a refusal, because file " +
         "presence at base is only a HEURISTIC for passing there: a task REPAIRING a currently-failing " +
         `test legitimately names an existing file. If this criterion is proving NEW behaviour in ` +
-        `"${path}", prove it with a \`grep:\` on the changed line instead, which can miss at base.`,
+        `"${path}", prove it with a \`grep:\` on the changed line instead, which can miss at base. ` +
+        "If it protects behaviour the build must not break, declare `kind: guard` (review still " +
+        "executes it at head) and keep a discriminating `grep:` on the new test title beside it.",
     });
   });
   return violations;
@@ -2115,9 +2118,16 @@ export interface BlockedDispositionContext {
  *  RETIREMENT_REASONS} IS TREATED AS ABSENT — "present" means present AND legal, so a bogus string
  *  cannot slip past, and nothing here writes or infers one. Why: W1-T2487, W1-T2474. */
 export function blockedDispositionViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
-  if (task.status !== "blocked") return [];
   const ctx = opts.blockedDisposition;
   if (!ctx) return []; // whole-plan pass: no base to compare against, so no opinion at all
+  // A disposition on a still-runnable record is inert at every retirement consumer. Diagnose
+  // the changed record before publication; only the operator performs the status transition.
+  if (task.retirement !== undefined && task.status !== "blocked") {
+    return [{ check: "blocked-task-disposition", severity: "block", message:
+      `task ${task.id} carries retirement: ${task.retirement} at status: ${task.status}; ` +
+      "retirement requires status: blocked to reach its reader and stop dispatch" }];
+  }
+  if (task.status !== "blocked") return [];
   const hasLegalDisposition = task.retirement !== undefined && (RETIREMENT_REASONS as readonly string[]).includes(task.retirement);
   if (hasLegalDisposition) return [];
   const legalValues = RETIREMENT_REASONS.join("|");
@@ -3388,7 +3398,7 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
   // is the caller's to answer; a wrong guess here would flag every task that merely EDITS a module.
   if (!opts.moduleExists) return [];
   const severity: LintSeverity = opts.callSite ?? "warn";
-  const declaredSrc = (task.files ?? []).filter((f) => f.startsWith("src/") && f.endsWith(".ts") && !f.includes("*"));
+  const declaredSrc = (task.files ?? []).filter((f) => f.startsWith("src/") && (f.endsWith(".ts") || f.endsWith(".tsx")) && !f.includes("*"));
   const declaredSrcSet = new Set(declaredSrc);
   const created = declaredSrc.filter((f) => !opts.moduleExists!(f));
   const addedExports = (opts.addedExports ?? []).filter(
@@ -3405,7 +3415,7 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
     // A CALL, not a mention: the pattern must demand an invocation…
     if (!pattern.includes("(")) return undefined;
     // …in a src/ file, not a test. Tests prove behavior; they do not prove production reachability.
-    if (!path.startsWith("src/") || !path.endsWith(".ts") || path.includes("*")) return undefined;
+    if (!path.startsWith("src/") || (!path.endsWith(".ts") && !path.endsWith(".tsx")) || path.includes("*")) return undefined;
     return { pattern, path };
   };
   const proofs = (task.acceptance ?? []).map(parsedGrepCallProof).filter((p): p is { pattern: string; path: string } => !!p);

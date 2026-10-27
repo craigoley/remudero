@@ -1,4 +1,6 @@
 import type { LifetimeIndexFailure } from "../../lib/lifetime-identity-index.js";
+import { pendingImprovementActions } from "../../lib/improvement-thread.js";
+import type { RatifyCliGateway } from "../../lib/panel-graph.js";
 /**
  * W1-T9333 — the `daemon` verb's handler, moved out of `src/run-task.ts` (decomposition: one verb per module).
  * `daemonCommand` is the unchanged body; the run-task.ts symbols it reaches arrive through {@link DaemonCommandHost}
@@ -39,7 +41,7 @@ import type { InboxCausalScope } from "../../lib/inbox-thread.js";
 import { gitRecommendationEvidence, RECOMMENDATION_SEED_PATH } from "../../lib/inbox-recommendation.js";
 import { censusRunDirs } from "../../lib/run-child-contract.js";
 import { plannedSequence, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
-import { daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
+import { daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktrees } from "../../lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
@@ -91,7 +93,7 @@ import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from
 import { acquireDrainLock, DrainLockError } from "../../lib/drain-lock.js";
 import { testRunnerOnItsOwnCheckout } from "../../lib/self-sync.js";
 import { withLiveEditLadders } from "../../lib/live-edit-ladder.js";
-import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, clearPrAction, consumeStop, isQuietHours, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
+import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
 import { wireSweepWakeToDaemon } from "../../lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "../../lib/github-app.js";
 import { LEDGER_REQUEST_STEP, realScopedMint, startDaemonGitCredentialSocket, type ScopedTokenMint } from "../../lib/secret-boundary.js";
@@ -117,6 +119,16 @@ import { type TickReadOptions, startTickReadWorker, tickReadWorkerUrl, fetchCiFa
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type HostFn = (...args: any[]) => any;
+
+export function daemonImprovementActionDeps(stateDir: string, gateway: RatifyCliGateway) {
+  return {
+    pendingImprovementActions: () => pendingImprovementActions(stateDir),
+    handOffImprovementAction: async (target: { operationId: string; stateDir: string; repoRoot: string }) => {
+      if (!gateway.improvement) throw new Error("The daemon's fresh-source improvement gateway is unavailable.");
+      return gateway.improvement(target);
+    },
+  };
+}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type HostValue = any;
 export interface DaemonCommandHost {
@@ -236,6 +248,25 @@ export function createDaemonInboxResponder(opts: {
     reframe: (proposalId, feedback, input) => opts.ratify.reframe(proposalId, feedback, input),
     syncEvents: createThreadEventSync({ ledgerPath: opts.ledgerPath, threadStorePath, stateDir: join(opts.root, "state"), log: opts.log }).sync,
     decide: opts.decide,
+  };
+}
+
+/**
+ * W1-T10615: ONE daemon's view of the kick markers under its own config root. A repo-scoped marker
+ * (`KICK_REQUESTED-<repo>:<taskId>`) belongs only to the daemon whose target names that repository; an
+ * unscoped legacy marker only to the self daemon, whose plan the console's Run button reads. Every other
+ * daemon leaves a marker alone, so it can neither consume nor refuse a kick another repository's plan
+ * owns. A marker is offered only while the exact file its clear would delete exists, so a marker whose
+ * body disagrees with its name is never dispatched and is left for an operator, as a garbage one is.
+ */
+export function daemonKickPort(root: string, target: { repo: string; isSelf: boolean }): {
+  pendingKicks: () => DaemonKick[];
+  clearKick: (taskId: string, repo?: string) => void;
+} {
+  const addressed = (kick: DaemonKick) => kick.repo === undefined ? target.isSelf : kick.repo.toLowerCase() === target.repo.toLowerCase();
+  return {
+    pendingKicks: () => pendingKicks(root).filter((kick) => addressed(kick) && existsSync(kickFilePath(root, kick.taskId, kick.repo))),
+    clearKick: (taskId, repo) => { clearKick(root, taskId, repo); },
   };
 }
 
@@ -1192,7 +1223,15 @@ export async function daemonCommand(
   // exactly how #1066 merged: consumer wired, producer never.
   const autoTriageHooks = target.isSelf ? (deps.buildAutoTriageHooks ?? buildAutoTriageDaemonHooks)({ config, repairSnapshot: () => {
     const generation = freshReadGeneration(tickReadGeneration, { consumer: "auto_triage_repair", log });
-    if (!generation || generation.facts.openPrError) return undefined;
+    if (!generation || generation.facts.openPrError) {
+      log("auto_triage.repair_snapshot_unavailable", {
+        reasonCode: tickReadGeneration === undefined ? "unpublished-generation" : !generation ? "stale-generation" : "open-pr-read-error",
+        generation: tickReadGeneration?.generation ?? null,
+        read_started_at_ms: tickReadGeneration?.publishedAtMs ?? null,
+        settled_at_ms: tickReadGeneration?.settledAtMs ?? null,
+      });
+      return undefined;
+    }
     return { owner: target.owner, repo: target.repo, asOfMs: generation.publishedAtMs, prs: generation.facts.openPrViews };
   } }) : undefined;
   // W1-T1040: the GitHub-side posture drift check. SELF-TARGET ONLY, same reason retro/auto-triage
@@ -1609,14 +1648,15 @@ export async function daemonCommand(
         // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon
         // consumes markers the write-token API drops, dispatching a kicked task
         // through its normal assertRunnable-gated path and honouring "drain now".
-        pendingKicks: () => pendingKicks(config.root),
-        clearKick: (taskId) => clearKick(config.root, taskId),
+        // W1-T10615: only the kicks addressed to THIS daemon's target, each cleared by its exact marker.
+        ...daemonKickPort(config.root, target),
         consumeDrainNow: () => consumeDrainNow(config.root),
         // Selected-repository PR controls (W1-T3989). The HTTP surface only writes a bounded
         // marker; this is the sole point that reaches the established selected-repository CLI
         // commands. Their own disposition, strike, worktree and review-lock gates remain the
         // authority -- an action request is never a bypass.
         pendingPrActions: () => pendingPrActions(config.root),
+        ...daemonImprovementActionDeps(join(config.root, "state"), fleetRatify),
         livenessPulse: true,
         ...(target.isSelf
           ? {

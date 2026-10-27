@@ -74,6 +74,9 @@ export const listAdmittedCensusMembers = () => [{ testFile: 'test/fixture-census
   put(join(wt, "test/fixture-census.test.ts"), `import { test } from 'node:test'; import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 test('fixture census', () => assert.equal(readFileSync('census-input.txt', 'utf8'), 'healthy'));\n`);
+  // The always-on skill census joins every nonempty diff, so the tree carries a healthy stand-in for it.
+  put(join(wt, "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts"),
+    "import { test } from 'node:test';\ntest('skill census stand-in', () => undefined);\n");
   put(join(wt, "scripts/generate-capability-snapshot.mjs"), `process.exit(${failure === "capability" ? 1 : 0});\n`);
   put(join(wt, "scripts/lint.mjs"), failure === "lint" || failure === "advisory"
     ? `console.error('✗ fixture\\n    [${failure === "advisory" ? "machine-filing-admission" : "proof-dialect"}] fixture finding'); process.exit(1);\n`

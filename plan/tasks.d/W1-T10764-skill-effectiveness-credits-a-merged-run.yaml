@@ -1,0 +1,46 @@
+- id: W1-T10764
+  title: "SKILL EFFECTIVENESS NEVER COUNTS A MERGE — `buildSkillEffectivenessReport` reads a run's outcome only from `step: \"verdict\"` rows, which never say `merged` (merges are `verdict.merged` rows keyed by the sweep's own run), so both arms always report `merged_runs=0` and the merge comparison can never favour a skill; credit a merge to the eligible run whose PR merged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low  # Rule 19: one concern — the report's merge attribution; the RETIRE/REVIEW thresholds and the lifecycle are untouched
+  band_meaning: blast-radius
+  origin: "operator recon 2026-10-26 (H5): `rmd skill effectiveness` on both approved skills"
+  files: [src/lib/skill-workshop.ts, test/learning/skill-effectiveness-credits-a-merged-run.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 7b75a38f7 (2026-10-26).
+    - OBSERVED, `rmd inspect --state-dir /home/node/Remudero/state skill effectiveness <name>` on the core daemon:
+      ci-state-forensics selected merged_runs=0 of 422 terminal (handed_off=333), control merged_runs=0 of 118;
+      proof-preflight selected merged_runs=0 of 410 (handed_off=327), control merged_runs=0 of 130. The fleet merged
+      612 PRs (`verdict.merged` rows) in the same period.
+    - OBSERVED on the ledger union since 2026-10-13: 0 of 1278 `step: "verdict"` rows carry `verdict: "merged"`. A
+      merge is a separate `verdict.merged` row whose `run_id` is the sweep's (`DAEMON-…`), with `task_id`,
+      `pr_number` and `pr_url`. A run's own `verdict` row (`handed_off`, `blocked_ci`) carries its `pr_url`.
+    - `buildSkillEffectivenessReport` fills `terminalOutcomeByRun` from `verdict` rows only, so `merged_runs` is 0
+      by construction, `selectedMergeRate` and `controlMergeRate` are 0, and only `named-harm-signal` or
+      `pending-shipment` can ever decide. Both skills read RETIRE-CANDIDATE on `named-harm-signal`; the knowledge
+      gardener stages retirement on that status.
+    - Out of scope, for the operator: `named-harm-signal` fires on ANY failed selected run, without comparing the
+      control arm (selected failed 44/422 = 10.4% vs control 19/118 = 16.1% for ci-state-forensics).
+  design: |
+    1. Build a PR-to-merge map from `verdict.merged` rows (`pr_url`, else `pr_number` on the row's repo), and when a
+       run's terminal `verdict` row names a PR in that map, its outcome is `merged`. A run whose PR is not in the map
+       keeps its own verdict. Never credit by `task_id` alone: a task can have several runs and only one PR merged.
+    2. The cohorts, horizon and status rules are unchanged; only the outcome a run resolves to changes.
+    New tests go in test/learning/skill-effectiveness-credits-a-merged-run.test.ts (folder from `rmd test-place`).
+    Import through `#src/*`, and use `test(` titles exactly as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/learning/skill-effectiveness-credits-a-merged-run.test.ts"
+    - claim: "a handed-off run whose PR later merged counts as merged"
+      proof: 'grep: test("W1-T10764: a handed-off run whose PR later merged counts as merged" in test/learning/skill-effectiveness-credits-a-merged-run.test.ts'
+    - claim: "a merge of another run's PR for the same task is never credited"
+      proof: 'grep: test("W1-T10764: a merge of another run''s PR for the same task is never credited" in test/learning/skill-effectiveness-credits-a-merged-run.test.ts'
+  falsifier: |
+    Drop the `verdict.merged` join. The first test then reports `merged_runs=0` and `handed_off=1`.

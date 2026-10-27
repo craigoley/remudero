@@ -64,6 +64,7 @@
     "pr-checks",
     "pr-owner",
     "preflight",
+    "procedures",
     "progress-watchdog",
     "project",
     "proof-queue-audit",
@@ -94,6 +95,8 @@
     "up",
     "verdict-calibration",
     "verify-human-sweep",
-    "wipe-test"
+    "wipe-test",
+    "worktree",
+    "improvement-action"
   ]
 }

@@ -1,0 +1,31 @@
+id: incident-a41cbb4c43e15842
+ts: 2026-10-26T17:48:40.735Z
+raw: >-
+  Incident a41cbb4c43e1: intervention
+  review-failed:fix-lane:task-contract-amended-under-this-termina
+
+  First seen: 2026-10-26T17:48:38.800Z
+
+  Last seen: 2026-10-26T17:48:38.800Z
+
+  Count: 3, burn: 3.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#14326@6668a681c actor=claude cause=review-failed:fix-lane:task-contract-amended-under-this-termina — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#14326@fddda8c93 actor=claude cause=review-failed:fix-lane:task-contract-amended-under-this-termina — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#14326@9e0e5ac20 actor=claude cause=review-failed:fix-lane:task-contract-amended-under-this-termina — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#a41cbb4c43e158428e874ab75cb53cfafc1a08b89910ee80624f8d6ad97f1a6f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -121,6 +121,7 @@ function installHook(dir: string): void {
   mkdirSync(join(dir, "scripts", "lib"), { recursive: true });
   mkdirSync(join(dir, "src", "lib"), { recursive: true });
   copyFileSync(join(REPO_ROOT, "src", "lib", "rule-suites.ts"), join(dir, "src", "lib", "rule-suites.ts"));
+  copyFileSync(join(REPO_ROOT, "src", "lib", "trust-root-text.ts"), join(dir, "src", "lib", "trust-root-text.ts"));
   copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(dir, "hooks", "pre-push"));
   chmodSync(join(dir, "hooks", "pre-push"), 0o755);
   for (const script of ["census-precheck.mjs", "clock-signature-ratchet.mjs", "comment-load-ratchet.mjs", "fixture-copy-census.mjs", "house-layout-census.mjs", "deps-interface-census.mjs", "test-repo-root-codemod.mjs", "coverage-session-blanking-check.mjs"]) {
@@ -135,6 +136,10 @@ function installHook(dir: string): void {
 
 let counter = 0;
 
+/** The mandatory skill census runs on every nonempty diff, so each fixture base carries a healthy stand-in. */
+const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
+const SKILL_CENSUS_STUB = 'import { test } from "node:test"; test("healthy mandatory fixture census", () => {});\n';
+
 /** A linked worktree whose origin/main holds `seed`, with this repo's real hook and precheck
  *  installed through core.hooksPath, and `change` committed on the branch being pushed. */
 function pushFixture(seed: Tree, change: Tree) {
@@ -148,7 +153,7 @@ function pushFixture(seed: Tree, change: Tree) {
     }
   };
   installHook(work.dir);
-  write(seed);
+  write({ ...seed, [SKILL_CENSUS]: SKILL_CENSUS_STUB });
   work.git("config", "core.hooksPath", "hooks");
   work.addRemote("origin", remote.dir);
   work.git("add", "-A");
@@ -208,7 +213,7 @@ function branchFixture(seed: Tree, change: Tree): string {
       writeFileSync(join(repo.dir, path), text);
     }
   };
-  write(seed);
+  write({ ...seed, [SKILL_CENSUS]: SKILL_CENSUS_STUB });
   repo.git("add", "-A");
   repo.git("commit", "--quiet", "-m", "the base");
   repo.git("switch", "--quiet", "-c", "work");

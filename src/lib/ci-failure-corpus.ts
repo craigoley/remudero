@@ -21,7 +21,7 @@
 // returns data cannot launder anything, and the fetching lives at the call site where the existing
 // pacing and gateway already are.
 
-import { REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, dedupeRollupByLatestAttempt, type RollupCheckEntry } from "./sweep.js";
+import { REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, dedupeRollupByLatestAttempt, rollupProducerKey, type RollupCheckEntry } from "./sweep.js";
 import { checkRunsRestArgs, combinedStatusRestArgs, rollupFromRest } from "./open-prs-rest.js";
 import type { LedgerLine } from "./ledger.js";
 
@@ -76,6 +76,8 @@ export interface CiFailurePair {
   pr: number;
   gate: string;
   redSha: string;
+  /** Positively identified producer; legacy anonymous fixtures retain their existing shape. */
+  producerKey?: string;
   greenSha?: string;
   repairFiles?: string[];
   state: CiFailurePairState;
@@ -252,22 +254,24 @@ export function collectCiFailureCorpus(input: CiFailureCorpusInput): CiFailureCo
       for (const entry of dedupeRollupByLatestAttempt(commit.rollup)) {
         const gate = gateName(entry);
         if (!gate) continue;
+        const producer = rollupProducerKey(entry);
         const state = gateState(entry);
         if (fullyObserved && (REQUIRED_CHECK_FAIL.has(state) || REQUIRED_CHECK_OK.has(state))) {
           terminalGates.add(gate);
         }
         if (REQUIRED_CHECK_FAIL.has(state)) {
-          if (openByGate.has(gate)) continue; // already tracking this gate's red on this PR
-          const pair: CiFailurePair = { pr: pr.number, gate, redSha: commit.sha, state: "open" };
-          openByGate.set(gate, pair);
+          if (openByGate.has(producer.key)) continue; // already tracking this gate's red on this PR
+          const pair: CiFailurePair = { pr: pr.number, gate, redSha: commit.sha, state: "open",
+            ...(producer.known ? { producerKey: producer.key } : {}) };
+          openByGate.set(producer.key, pair);
           pairs.push(pair);
         } else if (REQUIRED_CHECK_OK.has(state)) {
-          const open = openByGate.get(gate);
-          if (!open) continue; // a green with no earlier red on this PR repairs nothing
+          const open = openByGate.get(producer.key);
+          if (!open || open.redSha === commit.sha) continue; // another producer or the same commit is not a code repair
           open.state = "repaired";
           open.greenSha = commit.sha;
           if (commit.changedFiles) open.repairFiles = commit.changedFiles;
-          openByGate.delete(gate);
+          openByGate.delete(producer.key);
         }
       }
     }

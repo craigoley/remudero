@@ -1,0 +1,34 @@
+id: incident-010630ee115b9bb9
+ts: 2026-10-26T17:28:33.680Z
+raw: >-
+  Incident 010630ee115b: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix stood down at rung.strike and nothing it read has changed (head
+  <sha>, task contract) — no worker is dispatched until one does: merge state is
+  dirty (mergeable === false or mergeable_state === "dirty") — a conflicted PR
+  registers no new check runs, so a strike buys no information; standing down
+  for the sweep's own conflicted disposition rather than retrying blindly
+
+  First seen: 2026-10-26T17:26:42.238Z
+
+  Last seen: 2026-10-26T17:26:42.238Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=14367 escalated: already escalated (reason unreadable: no escalation of this PR at head 426c9aa is in the ledger); this pass: fix stood down at rung.strike and nothing it read has changed (head 426c9aa, task contract) — no worker is dispatched until one does: merge state is dirty (mergeable === false or mergeable_state === "dirty") — a conflicted PR registers no new check runs, so a strike buys no information; standing down for the sweep's own conflicted disposition rather than retrying blindly
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#010630ee115b9bb91da059d42ed1c5b31a9253a7817b403d8173d9204f14c19c
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

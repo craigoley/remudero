@@ -1,0 +1,41 @@
+- id: W1-T10722
+  title: "THE FIX-LANE GARDENER'S COSTLIEST DEFECT CLASS — commit-refused:the task declares no files, so there is no surface to stage cost 4091.41 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.04
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "fix-lane:commit-refused:the task declares no files, so there is no surface to stage#r2"
+  files:
+    - src/run-task.ts
+    - test/worker/run-task/fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts
+  acceptance:
+    - claim: "commit-refused:the task declares no files, so there is no surface to stage no longer needs an operator hand fix"
+      proof: "grep: test(\"W1-T10722: fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage clears without a person\" in test/worker/run-task/fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts"
+  note: "Filed by fix-lane at rung 2; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    commit-refused:the task declares no files, so there is no surface to stage cost 4091.41 PR-hours; owner fix-lane
+    Owner: the fix lane itself (a defect in the harness that repairs PRs, not in the PR).
+    Source owner: src/run-task.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #6436: 832.80 PR-hours — the task declares no files, so there is no surface to stage
+    - PR #6428: 827.34 PR-hours — the task declares no files, so there is no surface to stage
+    - PR #6503: 825.59 PR-hours — the task declares no files, so there is no surface to stage
+    - PR #6507: 825.29 PR-hours — the task declares no files, so there is no surface to stage
+    - PR #6905: 780.59 PR-hours — the task declares no files, so there is no surface to stage
+    Previous remedy W1-T7699: src/run-task.ts, test/fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts; did not fall: share of PR-hours 27.8% (1262.8768180555555/4537.912736388929) before, 27.4% (1262.8768180555555/4601.953433611104) after, over 10.5 day(s) each side. Take a structurally different remedy.
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.75
+    reasons:
+      - "The declared files are src/run-task.ts and one new test file. Nothing in the description points to secrets, auth, permissions, deletion, or merge, deploy and review policy."
+      - "The acceptance criterion is a grep for a named test, so it is verifiable from what is shown."
+      - "The family track record is 5 merged and 0 declined, and the gates state is clean."
+      - "The prior remedy for this cause did not move the metric, so the new approach is less proven. That is an effectiveness concern rather than a danger, and CI and review still apply."
+    judged_at: "2026-10-26T23:14:51.377Z"
+    pin: "5db71419b4d3f148a8597631e2a2d3632637e7e26dc6f2f6d66b534fec2da9cd"

@@ -1,0 +1,76 @@
+id: console-inbox-read-mark-snapshot-20261026
+ts: 2026-10-26T11:50:02.365Z
+raw: >-
+  Investigate and repair the main-thread Inbox read-mark classification path in
+  craigoley/remudero. Signed-in ordinary Inbox viewing on October26
+  intermittently loses proposal/conversation readiness and disables replies
+  after5s upstream timeouts, including the tiny version endpoint.
+
+
+  OBSERVED existing runtime.loop_stall_profile at11:13:05UTC:187510ms
+  lag/181017ms profiled,66s sync spawn profile, leading inbox.ts caller and
+  gitGrepAnchorTrue. This overlaps11:11 HTTP timeouts. Later separate
+  board-snapshot-cache stalls are not this scope and remain with the existing
+  Daily progress owner. This does not establish an Azure-memory root cause.
+
+
+  SOURCE on actual reported serving b96e79e628aec2464aa87d32f72eb2631646c798 and
+  current04a0e1e09381bcf185767a87f9334adcac069215 is identical for
+  inbox/panel-graph/serve/status/read-plane. buildInboxThreadReadRoute uses
+  jsonAction -> operatorThreadItems(deps), whose default invokes
+  classifyAllProposalsMemo. It ignores inboxFromSlowLane for this bookkeeping
+  read mark. Ordinary GET thread routes already await inboxRead, which consumes
+  the maintained slow-lane snapshot when configured. Opening a thread posts a
+  read mark; the source path is a plausible trigger, not a proved identity join
+  to the profiled request.
+
+
+  Prepare the smallest reviewed task, preferably src/lib/panel-graph.ts and
+  existing test/an-inbox-item-is-a-conversation.test.ts. Use the same maintained
+  classification path for a read mark when available and preserve the current
+  legacy classification path when no slow lane is configured. Preserve
+  plan-source refusal, exact thread membership, current source ownership, seq
+  bounds/monotonic marks, corrupt-store failures, authorization tiers and
+  durable audit behavior. Missing or invalid maintained evidence must refuse
+  explicitly; it must not synchronously reclassify on the serving loop or
+  manufacture readiness.
+
+
+  Tests should drive the real HTTP route against a private persisted Inbox
+  fixture and prove a slow-lane read mark succeeds without invoking any
+  classifier/Git dependency, absent evidence refuses without writing,
+  retired/foreign/missing threads and seq-ahead still refuse, valid same/current
+  seq remains idempotent, and ordinary legacy behavior remains. Remove only the
+  source-path correction to produce the intended classifier-call failure, then
+  restore and preserve failures. Verify physical test population,
+  source-positive same-commit coverage, all native
+  resource/ownership/proof/review/hosted gates and protected merge. Timing-only
+  sleeps or a synthetic live pass are not acceptance.
+
+
+  Owner coordination: Plan console insights and fleet view explicitly confirmed
+  no unpublished read-mark change. Its native PR14363 adds improvement
+  gateway/action guards adjacent to the handler and must be
+  preserved/reconciled; do not push onto that PR. Do not alter the approved
+  W1-T10431 ownership policy or rebuild its merged implementation14195. CI
+  infrastructure, Azure memory and services remain other owners; no restart,
+  deployment, model/provider/budget/permission/threshold/guard changes or broad
+  Inbox decisions are requested.
+
+
+  Native feedback intake is requested for a new causal task after
+  current-main/all-open-head subject checks and exclusive ownership; this
+  finding is not a task ruling, merge, deployed fix or permission to bypass any
+  gate.
+attachments:
+  - https://github.com/craigoley/remudero/blob/04a0e1e09381bcf185767a87f9334adcac069215/src/lib/panel-graph.ts
+  - https://nodejs.org/learn/asynchronous-work/dont-block-the-event-loop
+origin: repair#console-inbox-read-mark-snapshot
+status: answered
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: console-followup:93d8c766-26bb-4f35-b36b-088ef2dfbe21
+thread_id: null
+answered_by: fb-1793052066234-d58154

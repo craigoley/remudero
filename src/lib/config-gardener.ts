@@ -33,7 +33,7 @@ import { loadMounts, mountsPath } from "./mounts.js";
 import { loadPlan } from "./plan.js";
 import { planShards } from "./plan-gardener.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { gatherRuns, type LedgerRecord, type RunSummary } from "./retro.js";
+import { GATHER_RUNS_LEDGER_STEPS, gatherRuns, type LedgerRecord, type RunSummary } from "./retro.js";
 import { loadCreditStore } from "./status.js";
 import { deriveTaskClass } from "./task-class.js";
 
@@ -303,18 +303,14 @@ export function capDerivation(rows: Array<Record<string, unknown>>, weights: Rec
  *  inside a run is listed, and (W1-T5526) prices it from its worker rows only; `aggregateCacheHitTotals`
  *  folds every tokened call row. */
 export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
-  // gatherRuns, by name.
-  "run.start", "verdict", "verdict.merged", "recon.done", "implement.done", "implement.resumed", "implement.continued", "implement.preopen_continued", "pr.opened", "correction.provenance",
-  // gatherRuns' pr_url fallback.
-  "report.followups", "pr.head_provider", "dispatch.blocked_independent", "automerge.armed", "automerge.arm_skipped",
-  "automerge.arm_failed", "automerge.clean_status_direct_merge", "review.posted", "review.pending_posted",
-  "review.semantic_setup_refused", "review.semantic_incomplete", "review.replay_input",
-  "review.unwired_advisory", "review.post_refused", "review.stood_down", "acceptance.repaired", "trailer_stamp.failed",
+  // gatherRuns, by name, and its pr_url fallback.
+  ...GATHER_RUNS_LEDGER_STEPS,
   // capDerivation: the knowledge-budget pressure, and the cache-hit mix's call rows.
   "learnings.injected", "review.reviewer", "inbox.draft_synthesized", "triage.synthesized", "retro.synthesized",
   "retro.preflight_repair", "fix.done", "fix.contract_hold", "fix.commit_line_answered", "census_push.strike", "plan.synthesized", "diagnose.worker_done",
   // W1-T5668: the rest that can be a worker run's first pr_url row (0 live rows on 2026-10-04, listed so a first one is read).
   "acceptance.repair.unrepresentable", "changeset_claim.repaired", "retro.pr.recovered", "pr.body_normalize.error",
+  "pr.body_normalize.raced",
 ];
 
 /** W1-T5474: the 60-day union read bounded to {@link CONFIG_GARDEN_LEDGER_STEPS}. An incomplete union fails

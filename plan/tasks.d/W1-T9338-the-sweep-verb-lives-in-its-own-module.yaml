@@ -10,7 +10,10 @@
   band_meaning: span
   origin: "operator approval 2026-10-13: the run-task.ts serialization finding; one step of the split, in measured-churn order W1-T9332 (run-task), W1-T9333 (daemon), W1-T9337 (fix), W1-T9338 (sweep) and W1-T9339 (review)"
   plan_refs: [W1-T9331, W1-T2893, W1-T2883, W1-T2892, W1-T2894, W1-T2325, W1-T3138, W1-T8502]
-  files: [src/run-task.ts, src/cli/commands/sweep.ts, test/the-sweep-verb-lives-in-its-own-module.test.ts]
+  files: [src/run-task.ts, src/cli/commands/sweep.ts, test/the-sweep-verb-lives-in-its-own-module.test.ts, scripts/clock-signature-baseline.json, scripts/house-layout-census.mjs, test/census-precheck-counts-the-house-layout-ratchet.test.ts]
+  # refusal-amendment (W1-T9338, run DAEMON-1793004859639@bd1bee9288e82a86e43c04c613c04425dcbd6282, 2026-10-26T12:16:13.668Z): the worker refused criterion 2 [contradicts-another-criterion] — proposed re-scope-criteria: reconcile the contradicting criteria — re-scope one so both can hold at once
+  #   worker evidence: Complete helper extraction requires changing existing census tests, which design constraint 4 forbids.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 1
   attempts: 0
@@ -31,11 +34,14 @@
     NOT IN SCOPE: re-pointing open shards that declare src/run-task.ts for this verb. A shard edit cannot ride a code
     PR (rule 15). The note names the plan-only follow-up.
   design: |
-    1. Create src/cli/commands/sweep.ts. Move sweepCommand, buildSweepEffects, buildSweepHook, buildSweepLightHook into it, plus every top-level run-task.ts symbol whose references all lie inside
-       the moved set. Find that set with a reference census over run-task.ts at the build's base: a symbol moves when
-       no reference to it remains outside the set. Keep each moved body verbatim, apart from reading its collaborators
-       from the host, so diff-coverage's relocation exemption (W1-T2325, W1-T3138) reads the moved lines as moved
-       code rather than new code.
+    1. Create src/cli/commands/sweep.ts. Move the four root implementations sweepCommand,
+       buildSweepEffects, buildSweepHook and buildSweepLightHook into it. Keep each moved body
+       verbatim apart from reading collaborators from the host, so the relocation exemption
+       (W1-T2325, W1-T3138) reads moved lines as moved code rather than new code.
+       Other top-level helpers remain at their existing physical locations behind the host
+       seam in this step, even when all in-file references are from these four roots. Any
+       subsequent helper extraction needs its own scoped task and relocation qualification;
+       this task claims no helper-extraction credit.
     2. Any other run-task.ts symbol the moved code reaches arrives through one exported
        `SweepCommandHost` interface, taken as a parameter. src/lib symbols are imported
        directly. A collaborator that an earlier step already moved into src/cli/commands/ is imported from there. The
@@ -45,8 +51,10 @@
        function builds the host from run-task.ts's own symbols and delegates to the module. HANDLERS, every in-file
        caller, and every test that imports a root from src/run-task.ts stay unchanged.
     4. Unchanged: COMMANDS (scripts/rmd-help.mjs source-scans that array), and the verb's behaviour, ledger rows,
-       stdout and exit codes. No test file other than the new one is edited. If an existing test must change, the
-       move was not verbatim; fix the move, not the test.
+       stdout and exit codes. No test file other than the new one and the declared house-layout
+       conservation companion is edited. The companion may add qualification/refusal controls only;
+       every existing assertion stays unchanged. Existing behavioural tests stay untouched; fix the move,
+       not those tests.
     5. The PR body reports the moved symbol count and line count, and the host's member count. A large host is
        acceptable. Never shrink it by importing run-task.ts.
     Tests go in the new file test/the-sweep-verb-lives-in-its-own-module.test.ts, with `test(` titles exactly as in the proofs below. They read the two source
@@ -71,3 +79,40 @@
     `dispatch.serialized` and W1-T8771 `dispatch.passed_over` rows whose contended path is src/run-task.ts, before and
     after. FOLLOW-UP (plan-only, after merge): re-point open shards whose work is in sweepCommand, buildSweepEffects, buildSweepHook, buildSweepLightHook from src/run-task.ts to
     src/cli/commands/sweep.ts.
+  amendment: |
+    Operator decision proposed 2026-10-26: bound this extraction to its four named roots.
+    This explicitly replaces design item 1's transitive helper-move requirement; it does not
+    claim that the already-hosted helper bodies have moved. The source-level reference census
+    at the original extraction base 7b49789f1e781b2880578a6efbe06b39235f9acc found a candidate
+    closure of 122 top-level bindings (four roots plus 118 helpers/types/constants), spanning
+    3943 declaration lines. That census is static evidence, not behavioral qualification.
+    Native repair at bd1bee9288e82a86e43c04c613c04425dcbd6282 correctly stopped NEEDS_DESIGN
+    because completing that larger move conflicts with design item 4 and the three-file scope.
+    All original acceptance claims/proofs, behavior, falsifiers, scope, budget and risk remain.
+    No existing test, baseline, limit, import-cycle guard or merge gate exception is granted,
+    except the clock-signature relocation and the exact conserved house-layout split below.
+    The normal native lane retains source repair, semantic review and hosted qualification.
+    Operator decision 2026-10-26 (clock-signature conflict on #14326): a moved body keeps
+    its Date.now() calls verbatim, and its clock-signature counts move with it. The one
+    granted baseline change is in scripts/clock-signature-baseline.json: add a
+    src/cli/commands/sweep.ts row recording the moved calls, and lower src/run-task.ts by the same counts, so
+    the repo-wide total is unchanged. At #14326 that is dateNow 1 (sweepCommand's
+    SWEEP-${Date.now()} run id), with src/run-task.ts dateNow lowered by 1.
+    Swapping a moved Date.now() for systemClock.now() is not verbatim; restore it.
+    No other row, test, limit, import-cycle guard or merge gate exception is granted, apart
+    from the two exact house-layout companions below.
+    Proposed operator decision 2026-10-27: restore buildSweepHook's original comment verbatim,
+    including `.remudero/mounts.yaml`. Only scripts/house-layout-census.mjs and
+    test/census-precheck-counts-the-house-layout-ratchet.test.ts are added as companions.
+    The physical scanner is unchanged. Extend its existing conserved structural-split qualifier
+    only to src/run-task.ts -> src/cli/commands/sweep.ts for `.remudero/`. The old owner must
+    remain readable and retain the token; the moved owner must be new at merge-base. The sum
+    of occurrences over the old owner and every simultaneous eligible declared split may not
+    exceed the old owner's merge-base occurrences, so no occurrence is spent twice. Missing
+    evidence, extra occurrences, other new owners and other tokens get no new relief.
+    This is one conserved physical-file split, not a higher count or an inline-path waiver.
+    All original assertions in the census companion remain byte-identical; only additive
+    conservation and refusal controls are permitted. Existing W1-T9332 qualification remains.
+    All five original criteria/proofs, behaviour, budget, risk and other limits remain.
+    Normal plan/ruling qualification and native source repair ownership remain required;
+    no manual retry, strike reset, worker/claim/service action or source takeover is granted.

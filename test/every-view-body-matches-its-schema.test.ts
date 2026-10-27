@@ -34,16 +34,23 @@ import { EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "../src/lib/ledger.js";
 import { OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_SETTINGS_STEP } from "../src/lib/operator-agent.js";
 import { VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH } from "../src/lib/view-events.js";
 import { createWorkstreamsView, type WorkstreamsData } from "../src/lib/workstreams-view.js";
+import { CODE_HEALTH_VIEW_NAME, createCodeHealthView, type CodeHealthViewData } from "../src/lib/code-health-view.js";
+import { codeHealthRepositoryStateDir, publishCodeHealthSnapshot } from "../src/lib/code-health-store.js";
+import type { CodeHealthProjectionInput } from "../src/lib/code-health-projection.js";
 import { createActionsView, type ActionsData } from "../src/lib/actions-view.js";
 import { createTaskView, taskViewKey, type TaskViewData } from "../src/lib/task-view.js";
 import { createDemandBook, TASK_VIEW_NAME } from "../src/lib/view-demand.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { declaredBody, resolve, violations, type Schema } from "./helpers/openapi-strict.js";
+import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
+import { collectDailyProgress } from "#src/lib/daily-progress-collector.js";
+import { acquireLease, flushReadModelTransactions, openReadModel } from "#src/lib/read-model-db.js";
+import type { DailyProgressReport } from "#src/lib/daily-progress-contract.js";
 
 const NOW = Date.parse("2026-09-30T12:00:00.000Z");
 const SILENT_WORKER = new URL("data:text/javascript,setInterval(() => {}, 1000)");
 const READ = { authorization: "Bearer r" };
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = { after: (fn: () => void | Promise<void>) => void };
 
 const clock: Clock = { now: () => NOW, date: () => new Date(NOW), iso: () => new Date(NOW).toISOString() };
 
@@ -72,7 +79,7 @@ function plan(): Plan {
 /** Core with a week of work: a merge, a running task, spend and a heartbeat, in a registry naming its project. */
 function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps; runs: Array<() => void> } {
   const root = makeTempDir("every-view-schema");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(async () => { await flushReadModelTransactions(); rmSync(root, { recursive: true, force: true }); });
   const stateDir = join(root, "state");
   mkdirSync(stateDir, { recursive: true });
   mkdirSync(join(root, ".remudero"), { recursive: true });
@@ -126,7 +133,7 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
 /** One worker tick over core with every view switched to `serve`, so each materializes a body into the read model. */
 async function materializeAll(root: string, stateDir: string, deps: ServeDeps): Promise<void> {
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", workstreams: "serve", actions: "serve", host: "serve", agent: "serve", incidents: "serve", task: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve", analytics: "serve", "daily-progress": "serve", "code-health": "serve", workstreams: "serve", actions: "serve", host: "serve", agent: "serve", incidents: "serve", task: "serve" } }));
   // W1-T5051: an operator-agent proposal and scoped settings, so the agent view's parts carry items to validate.
   appendFileSync(join(stateDir, "ledger.ndjson"), [
     { ts: iso(120_000), step: OPERATOR_AGENT_PROPOSAL_STEP, task_id: "operator-agent", proposal: { proposalId: "operator-agent:schema:fix:slow-runs", repo: "craigoley/remudero", proposalText: "t", confidence: 0.95, reasoning: "r", category: "fix", status: "pending", createdAt: iso(120_000), evidence: [] } },
@@ -140,6 +147,17 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
   writeFileSync(join(root, "plan", "feedback", "fb-schema.yaml"), ["id: fb-schema", `ts: '${iso(60_000)}'`, "raw: a fixture note", "attachments: []", "origin: cli", "status: new", "proposal_pr: null", ""].join("\n"));
   createRepositoriesSourcePublisher({ stateDir, instances: () => repositoriesSources(deps) })();
+  const cache = createBoardSnapshotCache(root, "craigoley", "remudero", { clock });
+  cache.recordClosedAttempt!({ ok: true, persisted: cache.commitClosed([{ number: 1, url: "https://github.com/craigoley/remudero/pull/1", state: "MERGED",
+    headRefName: "run-W1-T1-1234567890123", headRefOid: "a".repeat(40), body: "Remudero-Task: W1-T1", title: "Repair",
+    autoMergeRequest: null, updatedAt: iso(0), mergedAt: iso(4 * 3_600_000) }]) });
+  const db = openReadModel({ stateDir, instance: "daily-fixture", schemaVersion: 1 });
+  try {
+    const lease = acquireLease(db, { clock }); assert.ok(lease.ok);
+    const collected = await collectDailyProgress({ stateDir, instances: [{ name: "core", repository: "craigoley/remudero", root, stateDir }] }, clock);
+    assert.ok(collected);
+    collected.commit(db, lease.lease);
+  } finally { db.close(); }
   const now = createNowView({
     instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero", feedbackRoot: root }],
     clock, readPlan: plan, github: () => ({ github: fakeGitHub(), generation: "g", source: { asOf: iso(0), state: "fresh" } }),
@@ -162,7 +180,13 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   const demand = createDemandBook({ clock });
   demand.want(TASK_VIEW_NAME, taskViewKey("core", "W1-T1"));
   const task = createTaskView({ instances: [{ name: "core", ledgerDir: stateDir, planPath: deps.panelGraph.planPath, repo: "craigoley/remudero" }], ledgerSource, demand, clock });
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, actions, host, agent, incidents, task], demand, clock, holder: "schema-test", post: () => {} });
+  // The code-health view reads the configured repository list the repositories publisher saved above, and one
+  // saved measurement with a finding, so the selected-repository body carries an assessment and an opportunity.
+  const published = publishCodeHealthSnapshot({ stateDir: codeHealthRepositoryStateDir(stateDir, CODE_HEALTH_REPOSITORY), input: codeHealthInput(), expectedSnapshotId: null, clock });
+  assert.equal(published.state, "published", JSON.stringify(published));
+  demand.want(CODE_HEALTH_VIEW_NAME, CODE_HEALTH_QUERY.slice(1));
+  const codeHealth = createCodeHealthView({ stateDir, keys: () => demand.keys(CODE_HEALTH_VIEW_NAME) });
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, actions, host, agent, incidents, task, codeHealth], demand, clock, holder: "schema-test", post: () => {} });
   ticker.tick();
   // W1-T5055: core's analytics refresh, committed as the slow lane hands it over, so the analytics body carries an instance's metrics.
   const analytics = deriveAnalyticsSnapshot([], clock.iso());
@@ -186,8 +210,26 @@ async function listen(t: TestCtx, server: Server): Promise<string> {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
+const CODE_HEALTH_REPOSITORY = "craigoley/remudero";
+const CODE_HEALTH_QUERY = `?repository=${encodeURIComponent(CODE_HEALTH_REPOSITORY)}`;
+
+/** One complete quality and coverage measurement of the fixture's repository at its current revision. */
+function codeHealthInput(): CodeHealthProjectionInput {
+  const sha = "a".repeat(40);
+  const scans: CodeHealthProjectionInput["scans"] = (["quality", "coverage"] as const).map((kind) => ({
+    kind, repository: CODE_HEALTH_REPOSITORY, scanId: `${kind}:schema`, analyzedSha: sha, observedAt: iso(3_600_000), state: "complete",
+    scopeHash: "scope1", toolVersion: "tool1", rulesVersion: "rules1", configHash: "config1", exclusions: [], reason: null,
+    findings: kind === "quality" ? [{ id: "41", ruleId: "js/repeated-work", status: "open", severity: "high", category: "maintainability", path: "src/first.ts",
+      title: "Repeated work makes this function difficult to change.", effortMinutes: 10 }] : [],
+    checks: [{ id: kind, met: kind !== "quality", reason: kind === "quality" ? "One open finding in the measured maintainability subset." : "Meets the configured coverage baseline." }],
+  }));
+  return { repository: CODE_HEALTH_REPOSITORY, currentSha: sha, analyzedSha: sha, observedAt: iso(3_000_000), nextDueAt: null, scans, baseline: null,
+    registry: { version: "checks1", checks: [{ id: "quality", sourceKind: "quality", category: "maintainability", description: "No findings in the measured maintainability subset." },
+      { id: "coverage", sourceKind: "coverage", category: "tests", description: "Meets the existing coverage baseline." }] } };
+}
+
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "", task: `?${taskViewKey("core", "W1-T1")}` };
+const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", "daily-progress": "?date=today", [CODE_HEALTH_VIEW_NAME]: CODE_HEALTH_QUERY, workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "", task: `?${taskViewKey("core", "W1-T1")}` };
 
 test("every registered view body validates against its declared schema", async (t) => {
   t.mock.method(systemClock, "now", clock.now);
@@ -226,6 +268,9 @@ test("every registered view body validates against its declared schema", async (
   const host = bodies.get("host")!.data as HostViewData;
   assert.deepEqual([host.skills.length, host.selfMeasurement.status, host.gauges.rateLimitRemaining, host.accountUsage.accountUuid !== undefined], [1, "ok", 4321, true], JSON.stringify(host));
   assert.deepEqual((bodies.get("analytics")!.data as AnalyticsViewData).coverage, { counted: 1, of: 1, missing: [] }, "the analytics body merges a committed snapshot");
+  const daily = bodies.get("daily-progress")!.data as DailyProgressReport;
+  assert.deepEqual(daily.totals.mergedChanges, { value: 1, precision: "exact" });
+  assert.ok(daily.events.some(event => event.kind === "merged" && event.taskIds.includes("W1-T1")), "the served Daily schema validates persisted evidence");
   const workstreams = bodies.get("workstreams")!.data as WorkstreamsData;
   assert.deepEqual(workstreams.instances.map((i) => [i.instance, i.activity.state, "items" in i.activity && i.activity.items.length > 0]), [["core", "verified", true]], JSON.stringify(workstreams));
   const actions = bodies.get("actions")!.data as ActionsData;
@@ -247,6 +292,15 @@ test("every registered view body validates against its declared schema", async (
   const incidents = bodies.get("incidents")!.data as IncidentsViewData;
   assert.deepEqual([incidents.store.state === "ok" && incidents.store.incidents.length, incidents.instances.map((i) => [i.instance, i.emergency.active.length, i.liveness.state])],
     [1, [["core", 1, "up"]]], JSON.stringify(incidents));
+  // CONTROL: a measured repository body, so the assessment, summary and opportunity schemas were really validated.
+  const codeHealth = bodies.get(CODE_HEALTH_VIEW_NAME)!.data as CodeHealthViewData;
+  assert.deepEqual([codeHealth.repository, codeHealth.isCurrentSnapshot, codeHealth.assessment?.findings.length, codeHealth.opportunities.length,
+    codeHealth.urgentFindings.value, codeHealth.repositories[0]?.summary === null], [CODE_HEALTH_REPOSITORY, true, 1, 1, 1, false], JSON.stringify(codeHealth));
+  // The portfolio is the route's other body shape; its measured repository summary is validated too.
+  const portfolio = (await (await fetch(`${url}/v1/views/${CODE_HEALTH_VIEW_NAME}`, { headers: READ })).json()) as Record<string, unknown>;
+  assert.deepEqual(violations(portfolio, declaredBody(`/v1/views/${CODE_HEALTH_VIEW_NAME}`, "GET", 200)), [], JSON.stringify(portfolio));
+  assert.deepEqual((portfolio.data as CodeHealthViewData).repositories.map((r) => [r.repository, r.snapshotId === codeHealth.snapshotId, r.summary !== null]),
+    [[CODE_HEALTH_REPOSITORY, true, true]], "the portfolio summarizes the same measured snapshot");
   const needsYou = bodies.get("needs-you")!.data as NeedsYouData;
   assert.deepEqual([needsYou.decisions.map((d) => d.id), needsYou.inbox?.items.length, needsYou.instances[0]?.counts?.actions], [now.decisions.map((d) => d.id), 1, now.actions.length], JSON.stringify(needsYou));
 

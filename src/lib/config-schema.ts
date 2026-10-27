@@ -486,6 +486,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_SERVE_NETWORK", "Declares container-network context for serve wildcard binds.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_READY_SOCKET", "Names the private unix socket a supervised standby serve answers readiness on.", ["src/lib/serve-generation.ts"]),
   envEntry("RMD_SERVE_ROLE", "Set to standby by the serve supervisor so serve warms and waits for promotion before binding its port.", ["src/lib/serve-generation.ts"]),
+  envEntry("RMD_SPAWN_HELPER", "Switch that starts the daemon's small long-lived spawn helper at boot so awaited child spawns route through it; unset or off keeps every spawn direct.", ["src/lib/daemon.ts"]),
   envEntry("RMD_SRE_LANE", "Opts a daemon instance into running the SRE lane.", ["src/run-task.ts"]),
   envEntry("RMD_TASK_PRECONDITION_READ", "Set to 1 on a task precondition read subprocess so a nested precondition check refuses as recursive-read instead of spawning again.", ["src/lib/plan.ts"]),
   envEntry("RMD_WORKER_EGRESS", "Selects the worker egress mode when the spawn arguments do not specify one.", ["src/lib/worker.ts"]),

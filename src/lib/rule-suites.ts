@@ -150,6 +150,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     },
   },
   refusedForPredicate(
+    "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts",
+    "a",
+    "W1-T10135's approved-skill conformance census. git ls-files supplies the MATCH DOMAIN for when-paths globs; " +
+      "each assertion is about an opted-in approved skill, never a property every enumerated src/ file must hold. " +
+      "The test remains an ordinary test/rules suite and runs in normal full CI.",
+  ),
+  refusedForPredicate(
     "test/node-24-runtime-compatibility.test.ts",
     "c",
     "W1-T5882's Node 24 suite. It walks tracked src/, scripts/ and bin/ via git ls-files and asserts every nested `node --test` " +
@@ -260,10 +267,12 @@ const ROSTER_BASENAMES = new Set(CENSUS_POPULATION.map((member) => basename(memb
  * suite by what it EXECUTES rather than by the `ls-files`/`src/` text it mentions. The recognizer no
  * longer counts them as tree-walk candidates, so censusPopulationDrift would call their rows stale,
  * but rule-checks ran every one of them through the roster and must keep running them: no rule suite
- * stops running because its census row left. Exactly the 26 the row removals dropped from
- * listRuleSuites (129 on main before the change, 103 after without this list).
+ * stops running because its census row left. The original 26 row removals dropped listRuleSuites
+ * from 129 to 103. W1-T9049's concurrent repair-classification suite also only mentions the walk
+ * token in fixtures; retain its rule-checks enrollment without a stale census row.
  */
 export const RETAINED_RULE_SUITES: readonly string[] = [
+  "test/a-gate-that-fired-wrongly-is-filed-against-the-gate.test.ts",
   "test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts",
   "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
   "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts",

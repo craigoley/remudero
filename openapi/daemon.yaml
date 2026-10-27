@@ -85,6 +85,1261 @@ components:
         every other route.
 
   schemas:
+    DailyProgressCount:
+      type: object
+      additionalProperties: false
+      required: [value, precision]
+      properties:
+        value: {type: [integer, "null"], minimum: 0}
+        precision: {type: string, enum: [exact, at_least, unavailable]}
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [value, precision]
+          properties: {precision: {type: string, enum: [unavailable]}, value: {type: "null"}}
+        - type: object
+          additionalProperties: false
+          required: [value, precision]
+          properties: {precision: {type: string, enum: [exact, at_least]}, value: {type: integer, minimum: 0}}
+    ExpectedDailyProgressSource:
+      type: object
+      additionalProperties: false
+      required: [id, repository, kind, instanceId, required]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 256}
+        repository: {type: string, minLength: 3, maxLength: 140}
+        kind: {type: string, enum: [pull_requests, ledger_activity, deployments]}
+        instanceId: {type: [string, "null"], minLength: 1, maxLength: 128}
+        required: {type: boolean}
+    DailyProgressSource:
+      type: object
+      additionalProperties: false
+      required: [id, repository, kind, instanceId, required, state, lastAttemptAt, lastSuccessAt, coverageStart, coverageThrough, nextDueAt, reason]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 256}
+        repository: {type: string, minLength: 3, maxLength: 140}
+        kind: {type: string, enum: [pull_requests, ledger_activity, deployments]}
+        instanceId: {type: [string, "null"], minLength: 1, maxLength: 128}
+        required: {type: boolean}
+        state: {type: string, enum: [complete, partial, stale, not_collected, unavailable, unauthorized]}
+        lastAttemptAt: {type: [string, "null"], format: date-time}
+        lastSuccessAt: {type: [string, "null"], format: date-time}
+        coverageStart: {type: [string, "null"], format: date-time}
+        coverageThrough: {type: [string, "null"], format: date-time}
+        nextDueAt: {type: [string, "null"], format: date-time}
+        reason: {type: [string, "null"], maxLength: 2048}
+    DailyProgressEvent:
+      type: object
+      additionalProperties: false
+      required: [id, repository, kind, sourceId, occurredAt, observedAt, fleetAttribution, taskIds, title, url]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 256}
+        repository: {type: string, minLength: 3, maxLength: 140}
+        kind: {type: string, enum: [merged, activity, deployment]}
+        sourceId: {type: string, minLength: 1, maxLength: 256}
+        occurredAt: {type: string, format: date-time}
+        observedAt: {type: string, format: date-time}
+        fleetAttribution: {type: string, enum: [confirmed, unknown, non_fleet]}
+        taskIds: {type: array, maxItems: 256, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
+        title: {type: string, minLength: 1, maxLength: 2048}
+        url: {type: [string, "null"], format: uri, maxLength: 2048}
+    DailyProgressReport:
+      type: object
+      additionalProperties: false
+      description: >
+        daily-progress-v1. Counts use the retained population, independently of this bounded evidence
+        page. Missing evidence is unavailable, not a measured zero. Merges, observed activity,
+        independent deployment evidence and present open work retain separate meanings and clocks.
+      required: [version, scope, reportDate, timeZone, windowStart, windowEnd, revision, correctionReason, generatedAt, phase, coverage, totals, events, page, currentWork]
+      properties:
+        version: {type: string, enum: [daily-progress-v1]}
+        scope:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [kind]
+              properties: {kind: {type: string, enum: [all]}}
+            - type: object
+              additionalProperties: false
+              required: [kind, repository]
+              properties: {kind: {type: string, enum: [repository]}, repository: {type: string, maxLength: 140}}
+        reportDate: {type: string, format: date}
+        timeZone: {type: string, minLength: 1, maxLength: 128}
+        windowStart: {type: string, format: date-time}
+        windowEnd: {type: string, format: date-time}
+        revision: {type: integer, minimum: 1}
+        correctionReason: {type: [string, "null"], maxLength: 2048}
+        generatedAt: {type: string, format: date-time}
+        phase: {type: string, enum: [provisional, finalizing, complete, corrected]}
+        coverage:
+          type: object
+          additionalProperties: false
+          required: [state, expectedRepositories, includedRepositories, expectedSources, sources]
+          properties:
+            state: {type: string, enum: [complete, partial, stale, not_collected, unavailable, unauthorized]}
+            expectedRepositories: {type: array, maxItems: 256, uniqueItems: true, items: {type: string, maxLength: 140}}
+            includedRepositories: {type: array, maxItems: 256, uniqueItems: true, items: {type: string, maxLength: 140}}
+            expectedSources: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/ExpectedDailyProgressSource"}}
+            sources: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/DailyProgressSource"}}
+        totals:
+          type: object
+          additionalProperties: false
+          required: [mergedChanges, completedTasks]
+          properties:
+            mergedChanges: {$ref: "#/components/schemas/DailyProgressCount"}
+            completedTasks: {$ref: "#/components/schemas/DailyProgressCount"}
+        events: {type: array, maxItems: 200, items: {$ref: "#/components/schemas/DailyProgressEvent"}}
+        page:
+          type: object
+          additionalProperties: false
+          required: [totalEvents, nextCursor]
+          properties:
+            totalEvents: {type: integer, minimum: 0}
+            nextCursor: {type: [string, "null"], maxLength: 1024}
+        currentWork:
+          type: [object, "null"]
+          additionalProperties: false
+          required: [asOf, items]
+          properties:
+            asOf: {type: string, format: date-time}
+            items:
+              type: array
+              maxItems: 200
+              items:
+                type: object
+                additionalProperties: false
+                required: [repository, id, title, url]
+                properties:
+                  repository: {type: string, maxLength: 140}
+                  id: {type: string, minLength: 1, maxLength: 256}
+                  title: {type: string, minLength: 1, maxLength: 2048}
+                  url: {type: [string, "null"], format: uri, maxLength: 2048}
+    DailyProgressView:
+      type: object
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view: {type: string, enum: [daily-progress]}
+        version: {type: integer, enum: [1]}
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"], format: date-time}
+        stale: {type: boolean}
+        sources: {type: array, items: {$ref: "#/components/schemas/ViewSource"}}
+        data: {$ref: "#/components/schemas/DailyProgressReport"}
+    ImprovementThreadRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - repository
+        - opportunityId
+        - snapshotId
+        - goal
+        - idempotencyKey
+      properties:
+        repository:
+          type: string
+          maxLength: 140
+          pattern: ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$
+        opportunityId:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        snapshotId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        goal:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        constraints:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 1000
+          maxItems: 16
+        idempotencyKey:
+          type: string
+          pattern: ^[A-Za-z0-9._:-]{16,128}$
+        instance:
+          type: string
+          pattern: ^[A-Za-z0-9._-]{1,128}$
+    ImprovementFailure:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - reason
+      properties:
+        state:
+          type: string
+          enum:
+            - invalid_request
+            - source_unavailable
+            - source_stale
+            - conflict
+            - busy
+            - uncertain
+        reason:
+          type: string
+        requestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+    ImprovementSavedResult:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - version
+        - requestId
+        - threadId
+        - proposalId
+        - repository
+        - instance
+        - snapshotId
+        - opportunityId
+        - reused
+        - planning
+        - execution
+      properties:
+        state:
+          type: string
+          enum:
+            - saved
+        version:
+          type: string
+          enum:
+            - improvement-thread-v1
+        requestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        threadId:
+          type: string
+        proposalId:
+          type: string
+        repository:
+          type: string
+        instance:
+          type: string
+        snapshotId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        opportunityId:
+          type: string
+        reused:
+          type: boolean
+        planning:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+        execution:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+    ImprovementPlanReceipt:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - prUrl
+        - branch
+        - taskIds
+        - taskIdsState
+        - recordedAt
+        - nativeReceiptId
+      properties:
+        state:
+          type: string
+          enum:
+            - plan_pr_opened
+        prUrl:
+          type: string
+          format: uri
+        branch:
+          type: string
+        taskIds:
+          type: array
+          items:
+            type: string
+        taskIdsState:
+          type: string
+          enum:
+            - observed
+            - unavailable
+        recordedAt:
+          type: string
+          format: date-time
+        nativeReceiptId:
+          type: string
+    ImprovementNativeMessage:
+      type: object
+      additionalProperties: false
+      required:
+        - threadId
+        - role
+        - body
+        - seq
+        - ts
+      properties:
+        threadId:
+          type: string
+        role:
+          type: string
+          enum:
+            - escalation
+            - reply
+        body:
+          type: string
+        seq:
+          type: integer
+          minimum: 1
+        ts:
+          type: integer
+        extra:
+          type: object
+          additionalProperties: true
+          description: Native Inbox message metadata. Source context and operator audit are facts; they grant no
+            execution authority.
+    ImprovementThreadView:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - version
+        - requestId
+        - threadId
+        - proposalId
+        - repository
+        - instance
+        - snapshotId
+        - opportunityId
+        - currentRequestId
+        - goal
+        - constraints
+        - goalDigest
+        - source
+        - correspondence
+        - messages
+        - messageCount
+        - messagesPartial
+        - nextBeforeSeq
+        - drafting
+        - filing
+        - execution
+      properties:
+        state:
+          type: string
+          enum:
+            - saved
+        version:
+          type: string
+          enum:
+            - improvement-thread-v1
+        requestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        threadId:
+          type: string
+        proposalId:
+          type: string
+        repository:
+          type: string
+        instance:
+          type: string
+        snapshotId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        opportunityId:
+          type: string
+        currentRequestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        goal:
+          type: string
+        constraints:
+          type: array
+          items:
+            type: string
+        goalDigest:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        source:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+            - reason
+          properties:
+            state:
+              type: string
+              enum:
+                - current
+                - stale
+                - unavailable
+            reason:
+              anyOf:
+                - type: string
+                - type: "null"
+        correspondence:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+            - pendingInputs
+            - pendingWork
+          properties:
+            state:
+              type: string
+              enum:
+                - linked
+                - unknown
+            pendingInputs:
+              anyOf:
+                - type: integer
+                  minimum: 0
+                - type: "null"
+            pendingWork:
+              anyOf:
+                - type: integer
+                  minimum: 0
+                - type: "null"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImprovementNativeMessage"
+          maxItems: 100
+          description: At most 512 KiB of native messages. Use nextBeforeSeq to read earlier messages.
+        messageCount:
+          type: integer
+          minimum: 0
+        messagesPartial:
+          type: boolean
+        nextBeforeSeq:
+          anyOf:
+            - type: integer
+              minimum: 1
+            - type: "null"
+        drafting:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+            - digest
+            - fragmentYaml
+            - reason
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+                - requested
+                - ready
+                - unavailable
+                - refused
+            digest:
+              anyOf:
+                - type: string
+                  pattern: ^[a-f0-9]{64}$
+                - type: "null"
+            fragmentYaml:
+              anyOf:
+                - type: string
+                - type: "null"
+            reason:
+              anyOf:
+                - type: string
+                - type: "null"
+            operationId:
+              type: string
+              pattern: ^[a-f0-9]{64}$
+            sourceRequestId:
+              type: string
+              pattern: ^[a-f0-9]{64}$
+        filing:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+                - requested
+                - plan_pr_opened
+                - refused
+                - uncertain
+            operationId:
+              type: string
+              pattern: ^[a-f0-9]{64}$
+            sourceRequestId:
+              type: string
+              pattern: ^[a-f0-9]{64}$
+            receipt:
+              $ref: "#/components/schemas/ImprovementPlanReceipt"
+            reason:
+              anyOf:
+                - type: string
+                - type: "null"
+        execution:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+    ImprovementDraftRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - goalDigest
+        - idempotencyKey
+      properties:
+        requestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        goalDigest:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        idempotencyKey:
+          type: string
+          pattern: ^[A-Za-z0-9._:-]{16,128}$
+    ImprovementFileRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - goalDigest
+        - idempotencyKey
+        - draftDigest
+      properties:
+        requestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        goalDigest:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        idempotencyKey:
+          type: string
+          pattern: ^[A-Za-z0-9._:-]{16,128}$
+        draftDigest:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+    ImprovementAction:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - operationId
+        - kind
+        - requestId
+        - proposalId
+        - actorId
+        - payloadHash
+        - goalDigest
+        - draftDigest
+        - requestedAt
+        - state
+        - reason
+        - receipt
+      properties:
+        version:
+          type: string
+          enum:
+            - improvement-action-v1
+        operationId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        kind:
+          type: string
+          enum:
+            - draft
+            - file
+        requestId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        proposalId:
+          type: string
+        actorId:
+          type: string
+        payloadHash:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        goalDigest:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        draftDigest:
+          anyOf:
+            - type: string
+              pattern: ^[a-f0-9]{64}$
+            - type: "null"
+        requestedAt:
+          type: string
+          format: date-time
+        state:
+          type: string
+          enum:
+            - prepared
+            - requested
+            - waiting
+            - completed
+            - refused
+            - uncertain
+        reason:
+          anyOf:
+            - type: string
+            - type: "null"
+        receipt:
+          anyOf:
+            - $ref: "#/components/schemas/ImprovementPlanReceipt"
+            - type: "null"
+    ImprovementActionRequested:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - operation
+        - execution
+      properties:
+        state:
+          type: string
+          enum:
+            - requested
+        operation:
+          $ref: "#/components/schemas/ImprovementAction"
+        execution:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+    ImprovementActionObserved:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - operation
+        - execution
+      properties:
+        state:
+          type: string
+          enum:
+            - observed
+        operation:
+          $ref: "#/components/schemas/ImprovementAction"
+        execution:
+          type: object
+          additionalProperties: false
+          required:
+            - state
+          properties:
+            state:
+              type: string
+              enum:
+                - not_requested
+    ProductId:
+      type: string
+      minLength: 36
+      maxLength: 36
+      pattern: '^prd_[a-f0-9]{32}$'
+    ProductRequestId:
+      type: string
+      minLength: 16
+      maxLength: 128
+      pattern: '^[A-Za-z0-9_-]{16,128}$'
+    ProductRevision:
+      type: integer
+      minimum: 1
+      maximum: 9007199254740991
+    ProductResearchLink:
+      type: object
+      additionalProperties: false
+      required: [label, url]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 120 }
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          pattern: '^[Hh][Tt][Tt][Pp][Ss]?:'
+          description: HTTP(S) only; credentials and token, access_token, api_key or x-vercel-protection-bypass query keys are refused.
+    ProductBrief:
+      type: object
+      additionalProperties: false
+      description: >
+        Private operator proposals. Text is trimmed and must remain nonempty. Requested repository
+        and resources confer no execution authority. The resulting stored product must fit 24576 bytes.
+      required: [idea]
+      properties:
+        idea: { type: string, minLength: 1, maxLength: 6000 }
+        name: { type: string, minLength: 1, maxLength: 80 }
+        portfolio: { type: string, minLength: 1, maxLength: 120 }
+        objective: { type: string, minLength: 1, maxLength: 2000 }
+        constraints:
+          type: array
+          maxItems: 24
+          items: { type: string, minLength: 1, maxLength: 500 }
+        decisions:
+          type: array
+          maxItems: 32
+          items:
+            type: object
+            additionalProperties: false
+            required: [key, value, provenance]
+            properties:
+              key: { type: string, minLength: 1, maxLength: 80 }
+              value: { type: string, minLength: 1, maxLength: 2000 }
+              provenance:
+                type: object
+                additionalProperties: false
+                required: [kind]
+                properties:
+                  kind: { type: string, enum: [operator, research, recommendation] }
+                  reference: { type: string, minLength: 1, maxLength: 500 }
+        research:
+          type: array
+          maxItems: 16
+          items: { $ref: "#/components/schemas/ProductResearchLink" }
+        requestedRepository:
+          type: object
+          additionalProperties: false
+          required: [owner, name]
+          properties:
+            owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+            name:
+              type: string
+              minLength: 1
+              maxLength: 100
+              pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$'
+        resourceEnvelope:
+          type: object
+          additionalProperties: false
+          required: [budgetUsd, maxConcurrentBuilds, existingSetupOnly]
+          properties:
+            budgetUsd: { type: number, exclusiveMinimum: 0, maximum: 10000 }
+            maxConcurrentBuilds: { type: integer, minimum: 1, maximum: 16 }
+            existingSetupOnly: { type: boolean }
+    ProductWrite:
+      type: object
+      additionalProperties: false
+      description: >
+        At most 65536 raw request bytes. Omit id and use expectedRevision 0 to create; an update
+        names its existing product and current revision. Ownership comes only from verifiedActor.
+        Reusing requestId with the same normalized command replays its original receipt; a changed
+        command conflicts. Owner, verified repository, stage evidence and execution authority fields
+        are rejected. A changed brief advances objectiveRevision; every accepted write advances revision.
+      required: [version, requestId, expectedRevision, brief]
+      if: { required: [id] }
+      else:
+        properties:
+          expectedRevision: { enum: [0] }
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        requestId: { $ref: "#/components/schemas/ProductRequestId" }
+        id: { $ref: "#/components/schemas/ProductId" }
+        expectedRevision: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        brief: { $ref: "#/components/schemas/ProductBrief" }
+    ProductRepositoryIdentity:
+      type: object
+      additionalProperties: false
+      required: [provider, id, owner, name, defaultBranch, visibility, verifiedAt]
+      properties:
+        provider: { type: string, enum: [github] }
+        id: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+        name: { type: string, minLength: 1, maxLength: 100, pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$' }
+        defaultBranch: { type: string, minLength: 1, maxLength: 255 }
+        visibility: { type: string, enum: [public, private, internal] }
+        verifiedAt: { type: string, format: date-time }
+    ProductStageEvidence:
+      type: object
+      additionalProperties: false
+      required: [id, stage, outcome, objectiveRevision, observedAt, references]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 128 }
+        stage: { type: string, enum: [research, repository, plan, build, review, deploy, improve] }
+        outcome: { type: string, enum: [proposed, queued, admitted, running, succeeded, failed, unknown, blocked] }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        observedAt: { type: string, format: date-time }
+        references:
+          type: array
+          maxItems: 16
+          items: { $ref: "#/components/schemas/ProductResearchLink" }
+    ProductReceipt:
+      type: object
+      additionalProperties: false
+      required: [operationId, productId, revision, objectiveRevision, savedAt, payloadDigest, recordDigest]
+      properties:
+        operationId: { type: string, minLength: 71, maxLength: 71, pattern: '^pwrite_[a-f0-9]{64}$' }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        revision: { $ref: "#/components/schemas/ProductRevision" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        savedAt: { type: string, format: date-time }
+        payloadDigest: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$' }
+        recordDigest: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$' }
+    ProductProjection:
+      type: object
+      additionalProperties: false
+      required: [version, id, revision, objectiveRevision, createdAt, updatedAt, brief, repository, stageEvidence, executionAuthority, history]
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        id: { $ref: "#/components/schemas/ProductId" }
+        revision: { $ref: "#/components/schemas/ProductRevision" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        brief: { $ref: "#/components/schemas/ProductBrief" }
+        repository:
+          oneOf:
+            - $ref: "#/components/schemas/ProductRepositoryIdentity"
+            - { type: "null" }
+        stageEvidence:
+          type: array
+          maxItems: 128
+          items: { $ref: "#/components/schemas/ProductStageEvidence" }
+        executionAuthority: { type: string, enum: [none] }
+        history:
+          type: array
+          maxItems: 128
+          items: { $ref: "#/components/schemas/ProductReceipt" }
+    ProductSummary:
+      type: object
+      additionalProperties: false
+      required: [id, revision, objectiveRevision, createdAt, updatedAt, name]
+      properties:
+        id: { $ref: "#/components/schemas/ProductId" }
+        revision: { $ref: "#/components/schemas/ProductRevision" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        name: { type: string, minLength: 1, maxLength: 80 }
+        portfolio: { type: string, minLength: 1, maxLength: 120 }
+    ProductListResponse:
+      type: object
+      additionalProperties: false
+      required: [version, products]
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        products:
+          type: array
+          maxItems: 64
+          items: { $ref: "#/components/schemas/ProductSummary" }
+    ProductReadResponse:
+      type: object
+      additionalProperties: false
+      required: [version, product]
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        product: { $ref: "#/components/schemas/ProductProjection" }
+    ProductReceiptResponse:
+      type: object
+      additionalProperties: false
+      required: [version, receipt]
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        receipt: { $ref: "#/components/schemas/ProductReceipt" }
+    ProductWriteResponse:
+      type: object
+      additionalProperties: false
+      required: [version, receipt, replayed]
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        receipt: { $ref: "#/components/schemas/ProductReceipt" }
+        replayed: { type: boolean }
+    ProductError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-intent-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, request_too_large]
+    ProductAccessError:
+      type: object
+      additionalProperties: false
+      description: The service's scope, tier or sensitivity gate refused access before the product handler.
+      required: [error]
+      properties:
+        error: { type: string, enum: [unauthorized, forbidden] }
+        required_scope: { type: string, enum: [read, write] }
+        required_tier: { type: string, enum: [middle] }
+        required_sensitivity: { type: string, enum: [sensitive] }
+    ProductResearchRequest:
+      type: object
+      additionalProperties: false
+      required: [version, requestId, productId, expectedObjectiveRevision]
+      properties:
+        version: { type: string, enum: [product-research-v1] }
+        requestId: { $ref: "#/components/schemas/ProductRequestId" }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        expectedObjectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        answers:
+          type: array
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            required: [questionId, answer]
+            properties:
+              questionId: { type: string, minLength: 2, maxLength: 64, pattern: '^[a-z][a-z0-9_]{1,63}$' }
+              answer: { type: string, minLength: 1, maxLength: 2000 }
+    ProductResearchRun:
+      type: object
+      additionalProperties: false
+      description: One durable research run. executionAuthority is always none; provider is the configured one or null.
+      required: [id, objectiveRevision, productRevision, outcome, provider, budgetUsd, spendUsd, sources, executionAuthority, startedAt, finishedAt]
+      properties:
+        id: { type: string, pattern: '^prun_[a-f0-9]{32}$' }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        productRevision: { $ref: "#/components/schemas/ProductRevision" }
+        outcome: { type: string, enum: [completed, unavailable, failed] }
+        failure: { type: string, enum: [provider_error, invalid_output, over_budget] }
+        provider: { type: [string, "null"], maxLength: 120 }
+        budgetUsd: { type: number, minimum: 0 }
+        spendUsd: { type: number, minimum: 0 }
+        sources:
+          type: array
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            required: [label, url, disposition]
+            properties:
+              label: { type: string, minLength: 1, maxLength: 120 }
+              url: { type: string, maxLength: 2048 }
+              disposition: { type: string, enum: [data] }
+        summary: { type: string, minLength: 1, maxLength: 4000 }
+        executionAuthority: { type: string, enum: [none] }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+    ProductResearchResponse:
+      type: object
+      additionalProperties: false
+      required: [version, productId, objectiveRevision, replayed, run, open, accepted]
+      properties:
+        version: { type: string, enum: [product-research-v1] }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        replayed: { type: boolean }
+        run:
+          oneOf:
+            - { $ref: "#/components/schemas/ProductResearchRun" }
+            - { type: "null" }
+        open:
+          type: array
+          maxItems: 72
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, text, origin]
+            properties:
+              id: { type: string, minLength: 2, maxLength: 64 }
+              text: { type: string, minLength: 1, maxLength: 500 }
+              origin: { type: string, enum: [catalog, provider] }
+        accepted:
+          type: array
+          maxItems: 72
+          items:
+            type: object
+            additionalProperties: false
+            required: [questionId, text, answer, answeredAt]
+            properties:
+              questionId: { type: string, minLength: 2, maxLength: 64 }
+              text: { type: string, minLength: 1, maxLength: 500 }
+              answer: { type: string, minLength: 1, maxLength: 2000 }
+              answeredAt: { type: string, format: date-time }
+    ProductResearchError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-research-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, request_too_large, already_answered]
+    ProductRepositoryCommand:
+      type: object
+      additionalProperties: false
+      description: >
+        At most 4096 raw request bytes. action adopt requires the exact provider repositoryId and
+        never creates; action create must not carry repositoryId. owner and name must match the
+        product's requestedRepository when it has one. Reusing requestId with the same command
+        replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor.
+      required: [version, requestId, productId, action, owner, name, visibility, expectedRevision, expectedObjectiveRevision]
+      properties:
+        version: { type: string, enum: [product-repository-v1] }
+        requestId: { $ref: "#/components/schemas/ProductRequestId" }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        action: { type: string, enum: [adopt, create] }
+        owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+        name: { type: string, minLength: 1, maxLength: 100, pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$' }
+        visibility: { type: string, enum: [public, private] }
+        repositoryId: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        expectedRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        expectedObjectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+    ProductRepositoryReceipt:
+      type: object
+      additionalProperties: false
+      required: [operationId, productId, action, outcome, repository, completedAt, payloadDigest, objectiveRevision]
+      properties:
+        operationId: { type: string, minLength: 70, maxLength: 70, pattern: '^prepo_[a-f0-9]{64}$' }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        action: { type: string, enum: [adopt, create] }
+        outcome: { type: string, enum: [adopted, created] }
+        repository: { $ref: "#/components/schemas/ProductRepositoryIdentity" }
+        completedAt: { type: string, format: date-time }
+        objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        payloadDigest: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$' }
+    ProductRepositoryResponse:
+      type: object
+      additionalProperties: false
+      required: [version, receipt, replayed]
+      properties:
+        version: { type: string, enum: [product-repository-v1] }
+        receipt: { $ref: "#/components/schemas/ProductRepositoryReceipt" }
+        replayed: { type: boolean }
+    ProductRepositoryError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-repository-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, not_found, repository_not_found, repository_conflict, idempotency_conflict, creation_denied, capacity, busy, corrupt, unavailable, provider_unreadable, outcome_unknown, request_too_large, stale_revision, recovery_required]
+    ProductRepositoryAccessError:
+      type: object
+      additionalProperties: false
+      description: The service's scope, tier or confirmation gate refused access before the repository handler.
+      required: [error]
+      properties:
+        error: { type: string, enum: [unauthorized, forbidden, confirm_nonce_required] }
+        required_scope: { type: string, enum: [write] }
+        required_tier: { type: string, enum: [high] }
+    ProductRepositoryPreview:
+      type: object
+      additionalProperties: false
+      description: >
+        A server observation of the exact repository a create or adopt would act on, taken at observedAt.
+        It is informational: it writes nothing and authorizes nothing, and the mutation rechecks every
+        prerequisite itself. state ready means the exact adoption target exists, or the creation target
+        is absent and the owner namespace allows creation. absent, conflict, stale, denied and unavailable
+        are never ready; reasons name why. creation reports the provider's answer for the owner namespace
+        and is not_checked when the repository read did not succeed or a product-level state decided first.
+      required: [version, productId, revision, objectiveRevision, action, target, state, reasons, repository, creation, observedAt]
+      properties:
+        version: { type: string, enum: [product-repository-preview-v1] }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        revision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        action: { type: string, enum: [adopt, create] }
+        target:
+          type: object
+          additionalProperties: false
+          required: [owner, name]
+          properties:
+            owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+            name: { type: string, minLength: 1, maxLength: 100, pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$' }
+        state: { type: string, enum: [ready, absent, conflict, stale, denied, unavailable] }
+        reasons:
+          type: array
+          maxItems: 4
+          items:
+            type: string
+            enum: [stale_revision, requested_repository_mismatch, product_already_bound, bound_repository_mismatch, repository_exists, repository_absent, provider_unreadable, creation_denied, creation_unknown]
+        repository:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [provider, id, owner, name, defaultBranch, visibility]
+              properties:
+                provider: { type: string, enum: [github] }
+                id: { type: integer, minimum: 1, maximum: 9007199254740991 }
+                owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+                name: { type: string, minLength: 1, maxLength: 100, pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$' }
+                defaultBranch: { type: string, minLength: 1, maxLength: 255 }
+                visibility: { type: string, enum: [public, private, internal] }
+            - { type: "null" }
+        creation: { type: string, enum: [user, org, denied, unknown, not_checked] }
+        observedAt: { type: string, format: date-time }
+    ProductDeploymentRepository:
+      type: object
+      additionalProperties: false
+      required: [id, owner, name]
+      properties:
+        id: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+        name: { type: string, minLength: 1, maxLength: 100, pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$' }
+    ProductDeploymentCommand:
+      type: object
+      additionalProperties: false
+      description: >
+        At most 4096 raw request bytes. action adopt requires the exact provider projectId and never
+        creates; action create must not carry projectId. repository must be the GitHub repository the
+        product is verified to be bound to, and teamId the server-configured Vercel team. Reusing
+        requestId with the same command replays its receipt; a changed command conflicts. Ownership
+        comes only from verifiedActor. Credentials are server-held and never accepted here.
+      required: [version, requestId, productId, action, teamId, projectName, repository, expectedRevision, expectedObjectiveRevision]
+      properties:
+        version: { type: string, enum: [product-deployment-v1] }
+        requestId: { $ref: "#/components/schemas/ProductRequestId" }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        action: { type: string, enum: [adopt, create] }
+        teamId: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
+        projectName: { type: string, minLength: 1, maxLength: 100, pattern: '^[a-z0-9][a-z0-9._-]*$' }
+        projectId: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
+        repository: { $ref: "#/components/schemas/ProductDeploymentRepository" }
+        expectedRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        expectedObjectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+    ProductDeploymentProject:
+      type: object
+      additionalProperties: false
+      required: [provider, id, name, teamId, repository, verifiedAt]
+      properties:
+        provider: { type: string, enum: [vercel] }
+        id: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
+        name: { type: string, minLength: 1, maxLength: 100, pattern: '^[a-z0-9][a-z0-9._-]*$' }
+        teamId: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
+        repository: { $ref: "#/components/schemas/ProductDeploymentRepository" }
+        verifiedAt: { type: string, format: date-time }
+    ProductDeploymentEvidence:
+      type: object
+      additionalProperties: false
+      description: Binding a project proves none of these; each stays its own independent evidence field.
+      required: [sourceSha, deployment, servedRoute, physicalDevice]
+      properties:
+        sourceSha: { type: "null" }
+        deployment: { type: string, enum: [none] }
+        servedRoute: { type: string, enum: [unverified] }
+        physicalDevice: { type: string, enum: [unverified] }
+    ProductDeploymentReceipt:
+      type: object
+      additionalProperties: false
+      required: [operationId, productId, action, outcome, project, deployed, playable, evidence, completedAt, payloadDigest, objectiveRevision]
+      properties:
+        operationId: { type: string, minLength: 72, maxLength: 72, pattern: '^pdeploy_[a-f0-9]{64}$' }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        action: { type: string, enum: [adopt, create] }
+        outcome: { type: string, enum: [adopted, created] }
+        project: { $ref: "#/components/schemas/ProductDeploymentProject" }
+        deployed: { type: boolean, enum: [false] }
+        playable: { type: boolean, enum: [false] }
+        evidence: { $ref: "#/components/schemas/ProductDeploymentEvidence" }
+        completedAt: { type: string, format: date-time }
+        objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        payloadDigest: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$' }
+    ProductDeploymentResponse:
+      type: object
+      additionalProperties: false
+      required: [version, receipt, replayed]
+      properties:
+        version: { type: string, enum: [product-deployment-v1] }
+        receipt: { $ref: "#/components/schemas/ProductDeploymentReceipt" }
+        replayed: { type: boolean }
+    ProductDeploymentError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-deployment-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, not_found, project_not_found, repository_required, repository_mismatch, team_mismatch, project_conflict, idempotency_conflict, stale_revision, capacity, creation_denied, not_configured, busy, corrupt, unavailable, provider_unreadable, outcome_unknown, recovery_required, request_too_large]
+    ProductBuildCommand:
+      type: object
+      additionalProperties: false
+      description: >
+        At most 4096 raw request bytes. Names one task the target repository's own plan filed for the
+        product's approved plan evidence. Reusing requestId with the same command replays its receipt;
+        a changed command conflicts. Ownership comes only from verifiedActor.
+      required: [version, requestId, productId, planEvidenceId, taskId, expectedRevision, expectedObjectiveRevision]
+      properties:
+        version: { type: string, enum: [product-build-v1] }
+        requestId: { $ref: "#/components/schemas/ProductRequestId" }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        planEvidenceId: { type: string, minLength: 1, maxLength: 128 }
+        taskId: { type: string, minLength: 1, maxLength: 64 }
+        expectedRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        expectedObjectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+    ProductBuildEvidence:
+      type: object
+      additionalProperties: false
+      required: [outcome, observedAt]
+      properties:
+        outcome: { type: string, enum: [queued, admitted, running] }
+        observedAt: { type: string, format: date-time }
+    ProductBuildReceipt:
+      type: object
+      additionalProperties: false
+      description: outcome is the furthest independently recorded phase; queued is never reported as running.
+      required: [operationId, productId, taskId, planEvidenceId, outcome, repository, objectiveRevision, payloadDigest, queuedAt, evidence]
+      properties:
+        operationId: { type: string, minLength: 71, maxLength: 71, pattern: '^pbuild_[a-f0-9]{64}$' }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        taskId: { type: string, minLength: 1, maxLength: 64 }
+        planEvidenceId: { type: string, minLength: 1, maxLength: 128 }
+        outcome: { type: string, enum: [queued, admitted, running] }
+        repository:
+          type: object
+          additionalProperties: false
+          required: [id, owner, name]
+          properties:
+            id: { type: integer, minimum: 1, maximum: 9007199254740991 }
+            owner: { type: string, minLength: 1, maxLength: 39 }
+            name: { type: string, minLength: 1, maxLength: 100 }
+        objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        payloadDigest: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-f0-9]{64}$' }
+        queuedAt: { type: string, format: date-time }
+        evidence:
+          type: array
+          maxItems: 3
+          items: { $ref: "#/components/schemas/ProductBuildEvidence" }
+    ProductBuildResponse:
+      type: object
+      additionalProperties: false
+      required: [version, receipt, replayed]
+      properties:
+        version: { type: string, enum: [product-build-v1] }
+        receipt: { $ref: "#/components/schemas/ProductBuildReceipt" }
+        replayed: { type: boolean }
+    ProductBuildError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-build-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, request_too_large, repository_missing, repository_not_found, repository_conflict, provider_unreadable, plan_not_approved, target_not_enrolled, target_unreadable, target_daemon_missing, runner_missing, bootstrap_unverified, task_not_found, task_unreadable, task_stale, task_claimed, task_merged, budget_exceeded, fleet_halted, kick_failed]
+    ProductBuildAccessError:
+      type: object
+      additionalProperties: false
+      description: The service's scope, tier or confirmation gate refused access before the build handler.
+      required: [error]
+      properties:
+        error: { type: string, enum: [unauthorized, forbidden, confirm_nonce_required] }
+        required_scope: { type: string, enum: [write] }
+        required_tier: { type: string, enum: [high] }
     OperatorAgentAnswer:
       type: object
       description: Bounded read-only answer-v1; missing evidence is explicit and citations are dated.
@@ -6888,7 +8143,7 @@ components:
           type: [integer, "null"]
         reason:
           type: [string, "null"]
-          enum: [inputs-unchanged, process-completed, process-failed, signal-or-cancelled, spawn-failed, memory-budget-shortfall, null]
+          enum: [inputs-unchanged, process-completed, process-failed, signal-or-cancelled, spawn-failed, memory-budget-shortfall, admission-rank, null]
         attempts:
           type: integer
           minimum: 0
@@ -8656,6 +9911,717 @@ components:
         requiredSamples: {type: [integer, "null"]}
         ready: {type: boolean}
         reason: {type: string}
+
+    CodeHealthView:
+      type: object
+      additionalProperties: false
+      required:
+        - view
+        - version
+        - generatedAt
+        - asOf
+        - stale
+        - sources
+        - data
+      properties:
+        view:
+          type: string
+          enum:
+            - code-health
+        version:
+          type: integer
+          enum:
+            - 1
+        generatedAt:
+          type: string
+          format: date-time
+        asOf:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        stale:
+          type: boolean
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+          maxItems: 32
+        data:
+          $ref: "#/components/schemas/CodeHealthViewData"
+    CodeHealthViewData:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - repository
+        - expectedRepositories
+        - unresolvedInstances
+        - repositories
+        - snapshotId
+        - isCurrentSnapshot
+        - assessment
+        - findingCount
+        - urgentFindings
+        - opportunities
+        - relatedWorkState
+        - relatedWorkAsOf
+        - relatedWorkReason
+        - planningAvailable
+        - freshness
+        - page
+      properties:
+        version:
+          type: string
+          enum:
+            - code-health-view-v1
+        repository:
+          type: string
+          description: all, or a configured owner/repository
+        expectedRepositories:
+          type: array
+          items:
+            type: string
+          maxItems: 256
+        unresolvedInstances:
+          type: array
+          items:
+            type: string
+          maxItems: 256
+        repositories:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - repository
+              - snapshotId
+              - state
+              - summary
+              - urgentFindings
+              - measuredAt
+              - analyzedSha
+              - currentSha
+              - freshness
+              - lastAttemptAt
+              - nextCheckDueAt
+              - collection
+              - reason
+              - sourceClocks
+            properties:
+              repository:
+                type: string
+              snapshotId:
+                oneOf:
+                  - type: string
+                    pattern: ^[a-f0-9]{64}$
+                  - type: "null"
+              state:
+                type: string
+                enum:
+                  - measured
+                  - partial
+                  - stale
+                  - not_collected
+                  - unavailable
+                  - unauthorized
+                  - rate_limited
+              summary:
+                oneOf:
+                  - &a1
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - met
+                      - assessed
+                      - expected
+                      - healthy
+                    properties:
+                      met:
+                        type: integer
+                        minimum: 0
+                      assessed:
+                        type: integer
+                        minimum: 0
+                      expected:
+                        type: integer
+                        minimum: 0
+                      healthy:
+                        oneOf:
+                          - type: boolean
+                            description: Check policy result for the saved code version. Current access, source age and urgent findings
+                              remain separate.
+                          - type: "null"
+                  - type: "null"
+              urgentFindings: &a2
+                type: object
+                additionalProperties: false
+                required:
+                  - value
+                  - precision
+                  - scope
+                properties:
+                  value:
+                    oneOf:
+                      - type: integer
+                        minimum: 0
+                      - type: "null"
+                  precision:
+                    type: string
+                    enum:
+                      - exact
+                      - at_least
+                      - unavailable
+                  scope:
+                    type: string
+                    description: The measured CodeQL scope; this is not a comprehensive security assessment.
+              measuredAt:
+                oneOf:
+                  - type: string
+                    format: date-time
+                  - type: "null"
+              analyzedSha:
+                oneOf:
+                  - type: string
+                    pattern: ^[a-f0-9]{40}$
+                  - type: "null"
+              currentSha:
+                oneOf:
+                  - type: string
+                    pattern: ^[a-f0-9]{40}$
+                  - type: "null"
+              freshness:
+                type: string
+                enum:
+                  - fresh
+                  - stale
+                  - unavailable
+              lastAttemptAt:
+                oneOf:
+                  - type: string
+                    format: date-time
+                  - type: "null"
+              nextCheckDueAt:
+                oneOf:
+                  - type: string
+                    format: date-time
+                  - type: "null"
+              collection:
+                oneOf:
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - state
+                    properties:
+                      state:
+                        type: string
+                        enum:
+                          - none
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - state
+                      - startedAt
+                      - finishedAt
+                      - snapshotId
+                      - reason
+                    properties:
+                      state:
+                        type: string
+                        enum:
+                          - failed
+                      startedAt:
+                        type: string
+                        format: date-time
+                      finishedAt:
+                        type: string
+                        format: date-time
+                      snapshotId:
+                        oneOf:
+                          - type: string
+                            pattern: ^[a-f0-9]{64}$
+                          - type: "null"
+                      reason:
+                        type: string
+                      failureKind:
+                        type: string
+                        enum:
+                          - unauthorized
+                          - rate_limited
+                          - unavailable
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - state
+                      - reason
+                    properties:
+                      state:
+                        type: string
+                        enum:
+                          - unavailable
+                      reason:
+                        type: string
+              reason:
+                oneOf:
+                  - type: string
+                  - type: "null"
+              sourceClocks:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                    - kind
+                    - state
+                    - measuredAt
+                    - analyzedSha
+                  properties:
+                    kind:
+                      type: string
+                    state:
+                      type: string
+                      enum:
+                        - complete
+                        - partial
+                        - stale
+                        - not_collected
+                        - unavailable
+                    measuredAt:
+                      oneOf:
+                        - type: string
+                          format: date-time
+                        - type: "null"
+                    analyzedSha:
+                      oneOf:
+                        - type: string
+                          pattern: ^[a-f0-9]{40}$
+                        - type: "null"
+                maxItems: 128
+          maxItems: 256
+        snapshotId:
+          oneOf:
+            - type: string
+              pattern: ^[a-f0-9]{64}$
+            - type: "null"
+        isCurrentSnapshot:
+          oneOf:
+            - type: boolean
+              description: Whether these are the latest saved results. Historical evidence never enables current planning.
+            - type: "null"
+        assessment:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required:
+                - version
+                - repository
+                - analyzedSha
+                - currentSha
+                - baselineSha
+                - policyVersion
+                - observedAt
+                - nextDueAt
+                - state
+                - sources
+                - checks
+                - findings
+                - summary
+              properties:
+                version:
+                  type: string
+                  enum:
+                    - code-health-v1
+                repository:
+                  type: string
+                analyzedSha:
+                  type: string
+                  pattern: ^[a-f0-9]{40}$
+                currentSha:
+                  type: string
+                  pattern: ^[a-f0-9]{40}$
+                baselineSha:
+                  oneOf:
+                    - type: string
+                      pattern: ^[a-f0-9]{40}$
+                    - type: "null"
+                policyVersion:
+                  type: string
+                observedAt:
+                  type: string
+                  format: date-time
+                nextDueAt:
+                  oneOf:
+                    - type: string
+                      format: date-time
+                    - type: "null"
+                state:
+                  type: string
+                  enum:
+                    - measured
+                    - partial
+                    - stale
+                    - not_collected
+                    - unavailable
+                sources:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - id
+                      - kind
+                      - required
+                      - state
+                      - analyzedSha
+                      - observedAt
+                      - scopeHash
+                      - toolVersion
+                      - rulesVersion
+                      - configHash
+                      - baseline
+                      - exclusions
+                      - reason
+                    properties:
+                      id:
+                        type: string
+                      kind:
+                        type: string
+                      required:
+                        type: boolean
+                      state:
+                        type: string
+                        enum:
+                          - complete
+                          - partial
+                          - stale
+                          - not_collected
+                          - unavailable
+                      analyzedSha:
+                        oneOf:
+                          - type: string
+                            pattern: ^[a-f0-9]{40}$
+                          - type: "null"
+                      observedAt:
+                        oneOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      scopeHash:
+                        oneOf:
+                          - type: string
+                          - type: "null"
+                      toolVersion:
+                        oneOf:
+                          - type: string
+                          - type: "null"
+                      rulesVersion:
+                        oneOf:
+                          - type: string
+                          - type: "null"
+                      configHash:
+                        oneOf:
+                          - type: string
+                          - type: "null"
+                      baseline:
+                        oneOf:
+                          - type: object
+                            additionalProperties: false
+                            required:
+                              - sha
+                              - scopeHash
+                              - toolVersion
+                              - rulesVersion
+                              - configHash
+                            properties:
+                              sha:
+                                type: string
+                                pattern: ^[a-f0-9]{40}$
+                              scopeHash:
+                                type: string
+                              toolVersion:
+                                type: string
+                              rulesVersion:
+                                type: string
+                              configHash:
+                                type: string
+                          - type: "null"
+                      exclusions:
+                        type: array
+                        items:
+                          type: string
+                        maxItems: 128
+                      reason:
+                        oneOf:
+                          - type: string
+                          - type: "null"
+                  maxItems: 128
+                checks:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - id
+                      - category
+                      - state
+                      - sourceIds
+                      - reason
+                    properties:
+                      id:
+                        type: string
+                      category:
+                        type: string
+                        enum:
+                          - maintainability
+                          - security
+                          - reliability
+                          - tests
+                      state:
+                        type: string
+                        enum:
+                          - met
+                          - not_met
+                          - not_measured
+                      sourceIds:
+                        type: array
+                        items:
+                          type: string
+                        maxItems: 128
+                      reason:
+                        type: string
+                  maxItems: 256
+                findings:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - fingerprint
+                      - sourceId
+                      - severity
+                      - category
+                      - status
+                      - path
+                      - title
+                      - effortMinutes
+                      - estimateKind
+                    properties:
+                      fingerprint:
+                        type: string
+                      sourceId:
+                        type: string
+                      severity:
+                        type: string
+                        enum:
+                          - critical
+                          - high
+                          - medium
+                          - low
+                      category:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - new
+                          - existing
+                          - unknown
+                      path:
+                        type: string
+                      title:
+                        type: string
+                      effortMinutes:
+                        oneOf:
+                          - type: number
+                            minimum: 0
+                          - type: "null"
+                      estimateKind:
+                        oneOf:
+                          - type: string
+                            enum:
+                              - modeled
+                          - type: "null"
+                  maxItems: 100
+                summary: *a1
+              description: Checks and totals describe the entire saved evidence set. Only findings are paged; findingCount
+                names the complete population. Each source retains its own measurement time and code revision.
+            - type: "null"
+        findingCount:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: "null"
+        urgentFindings: *a2
+        opportunities:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - id
+              - snapshotId
+              - repository
+              - proposalId
+              - ruleId
+              - title
+              - consequence
+              - expectedResult
+              - acceptanceIdeas
+              - uncertainty
+              - mayPlan
+              - evidenceCount
+              - evidence
+              - effortMinutes
+              - estimateKind
+              - relatedWork
+            properties:
+              id:
+                type: string
+              snapshotId:
+                type: string
+                pattern: ^[a-f0-9]{64}$
+              repository:
+                type: string
+              proposalId:
+                type: string
+              ruleId:
+                type: string
+              title:
+                type: string
+              consequence:
+                type: string
+              expectedResult:
+                type: string
+              acceptanceIdeas:
+                type: array
+                items:
+                  type: string
+                maxItems: 16
+              uncertainty:
+                type: array
+                items:
+                  type: string
+                maxItems: 16
+              mayPlan:
+                type: boolean
+              evidenceCount:
+                type: integer
+                minimum: 0
+                description: Total stable findings in this group; evidence entries may be paged. Effort estimates describe the
+                  whole group.
+              evidence:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                    - fingerprint
+                    - sourceId
+                    - scanId
+                    - analyzedSha
+                    - observedAt
+                    - severity
+                    - title
+                    - path
+                  properties:
+                    fingerprint:
+                      type: string
+                    sourceId:
+                      type: string
+                    scanId:
+                      type: string
+                    analyzedSha:
+                      oneOf:
+                        - type: string
+                          pattern: ^[a-f0-9]{40}$
+                        - type: "null"
+                    observedAt:
+                      oneOf:
+                        - type: string
+                          format: date-time
+                        - type: "null"
+                    severity:
+                      type: string
+                      enum:
+                        - critical
+                        - high
+                        - medium
+                        - low
+                    title:
+                      type: string
+                    path:
+                      type: string
+                maxItems: 100
+              effortMinutes:
+                oneOf:
+                  - type: number
+                    minimum: 0
+                  - type: "null"
+              estimateKind:
+                oneOf:
+                  - type: string
+                    enum:
+                      - modeled
+                  - type: "null"
+              relatedWork:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                    - repository
+                    - proposalId
+                  properties:
+                    repository:
+                      type: string
+                    proposalId:
+                      type: string
+                    taskId:
+                      type: string
+                    prUrl:
+                      type: string
+                      format: uri
+                    threadId:
+                      type: string
+                maxItems: 512
+          maxItems: 100
+        relatedWorkState:
+          type: string
+          enum:
+            - reported
+            - partial
+            - stale
+            - unavailable
+            - not_collected
+        relatedWorkAsOf:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        relatedWorkReason:
+          oneOf:
+            - type: string
+            - type: "null"
+        planningAvailable:
+          type: boolean
+          description: Current source evidence can support a planning conversation; this does not approve, file or
+            execute work.
+        freshness:
+          type: string
+          enum:
+            - fresh
+            - stale
+            - unavailable
+        page:
+          type: object
+          additionalProperties: false
+          required:
+            - nextCursor
+          properties:
+            nextCursor:
+              oneOf:
+                - type: string
+                  maxLength: 512
+                - type: "null"
 
     RepositoriesView:
       type: object
@@ -13454,6 +15420,802 @@ components:
 # DECISIONS feed, escalation inbox, question backlog, cost meter) describes is explicit
 # follow-on work, not added here.
 paths:
+  /v1/improvements/threads:
+    post:
+      summary: Save a planning conversation for a verified finding.
+      description: "Resolves repository, fleet instance and immutable evidence on the server. Retries reuse native
+        Inbox messages. Saving this goal requests no model draft, filing, dispatch, merge or deployment.
+        Questions use the existing native Inbox reply path and never approve or file from prose. Write tier:
+        LOW. All existing authentication, admission, ownership, reservation and review guards remain in force."
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImprovementThreadRequest"
+      responses:
+        "200":
+          description: A durable saved receipt. Read its state; acceptance does not mean completion, merged tasks or
+            execution.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementSavedResult"
+        "400":
+          description: The request is invalid.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ImprovementFailure"
+                  - $ref: "#/components/schemas/Error"
+        "401":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The source, goal, draft, request identity or writer changed. Review the stated reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+        "500":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The source or saved outcome cannot currently be verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+  /v1/improvements/thread:
+    get:
+      summary: Read a saved improvement conversation and its current receipts.
+      security:
+        - bearerRead: []
+      description: Provide exactly one of requestId or the native Inbox threadId. Both reopen the same server-owned
+        conversation without changing its goal.
+      parameters:
+        - name: requestId
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: ^[a-f0-9]{64}$
+        - name: threadId
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 256
+        - name: beforeSeq
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: Saved native messages, current goal, source freshness, actual draft readiness and filing receipt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementThreadView"
+        "400":
+          description: The request is invalid.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ImprovementFailure"
+                  - $ref: "#/components/schemas/Error"
+        "401":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The source, goal, draft, request identity or writer changed. Review the stated reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+        "500":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The source or saved outcome cannot currently be verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+  /v1/improvements/threads/draft:
+    post:
+      summary: Request plan task drafts for this saved goal.
+      description: "Persists the explicit decision and requests the existing bounded repository drafting lane. A
+        pending request is not a completed draft. No tasks are filed. Write tier: MIDDLE. All existing
+        authentication, admission, ownership, reservation and review guards remain in force."
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImprovementDraftRequest"
+      responses:
+        "202":
+          description: A durable saved receipt. Read its state; acceptance does not mean completion, merged tasks or
+            execution.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementActionRequested"
+        "400":
+          description: The request is invalid.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ImprovementFailure"
+                  - $ref: "#/components/schemas/Error"
+        "401":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The source, goal, draft, request identity or writer changed. Review the stated reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+        "500":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The source or saved outcome cannot currently be verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+  /v1/improvements/threads/file:
+    post:
+      summary: Review and file the exact completed task draft.
+      description: "Binds the current goal and reviewed draft digest. The owned fresh-source CLI revalidates both
+        and uses the existing governed plan filing path. A plan pull request is not merged tasks or execution.
+        Write tier: HIGH. All existing authentication, admission, ownership, reservation and review guards
+        remain in force."
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImprovementFileRequest"
+      responses:
+        "202":
+          description: A durable saved receipt. Read its state; acceptance does not mean completion, merged tasks or
+            execution.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementActionRequested"
+        "400":
+          description: The request is invalid.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ImprovementFailure"
+                  - $ref: "#/components/schemas/Error"
+        "401":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/HighTierForbidden"
+        "409":
+          description: The source, goal, draft, request identity or writer changed. Review the stated reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+        "500":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The source or saved outcome cannot currently be verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+  /v1/improvements/action:
+    get:
+      summary: Read an improvement action receipt.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: operationId
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: ^[a-f0-9]{64}$
+      responses:
+        "200":
+          description: The saved decision and its observed native outcome. Unknown outcomes remain explicit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementActionObserved"
+        "400":
+          description: The request is invalid.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ImprovementFailure"
+                  - $ref: "#/components/schemas/Error"
+        "401":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The source, goal, draft, request identity or writer changed. Review the stated reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+        "500":
+          description: The existing service authentication or request handler refused the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The source or saved outcome cannot currently be verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImprovementFailure"
+  /v1/products:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Both reads and writes require the
+          configured operator identity; browser owner fields, actor headers and shared bearers
+          cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+    get:
+      summary: Read the verified operator's private product briefs or durable save receipt.
+      description: >
+        With no query, returns at most 64 summaries without source idea text. Supply exactly one
+        id to read its brief, repository identity, stage evidence and latest 128 history receipts,
+        or one requestId to reconcile a save. Duplicate, combined and unknown query keys fail.
+        Responses use Cache-Control private, no-store. Unknown or corrupt storage is a failure.
+      parameters:
+        - name: id
+          in: query
+          schema: { $ref: "#/components/schemas/ProductId" }
+        - name: requestId
+          in: query
+          schema: { $ref: "#/components/schemas/ProductRequestId" }
+      responses:
+        "200":
+          description: A bounded private summary list, full product projection or original receipt.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductListResponse"
+                  - $ref: "#/components/schemas/ProductReadResponse"
+                  - $ref: "#/components/schemas/ProductReceiptResponse"
+        "400":
+          description: Invalid, duplicate or combined query selectors.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAccessError" }
+        "403":
+          description: The verified operator identity or sensitive read grant is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductError"
+                  - $ref: "#/components/schemas/ProductAccessError"
+        "404":
+          description: The product or request receipt does not exist for this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+        "503":
+          description: The state root is unavailable, unreadable or corrupt; no empty success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+    post:
+      summary: Atomically save a private versioned brief with optimistic revisions and a durable receipt.
+      description: >
+        Requires the verified operator and middle write tier. At most 65536 raw request bytes and
+        24576 bytes per stored product; up to 64 products and 4096 receipts per operator in at most
+        4194304 state bytes. Data and receipts commit together in the existing core state root.
+        A post-rename outcome_unknown must be reconciled with GET by requestId or the identical
+        retry; recovery_required preserves a pending artifact for recovery. These outcomes never
+        imply a failed write was rolled back. Responses use Cache-Control private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductWrite" }
+      responses:
+        "200":
+          description: The durable acknowledgement, or the same original receipt on an identical retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductWriteResponse" }
+        "400":
+          description: Malformed JSON, invalid brief, forbidden authority fields or excessive product size.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAccessError" }
+        "403":
+          description: The verified operator identity or required write grant is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductError"
+                  - $ref: "#/components/schemas/ProductAccessError"
+        "404":
+          description: The product to update does not exist for this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+        "409":
+          description: stale_revision, idempotency_conflict or the bounded product, receipt or state capacity is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+        "413":
+          description: The raw request exceeds 65536 bytes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+        "503":
+          description: busy, corrupt, unavailable, outcome_unknown or recovery_required; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductError" }
+  /v1/products/research:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Ownership comes only from that verified
+          identity; owner fields, actor headers and shared bearers cannot substitute for it.
+        schema: { type: string, minLength: 1 }
+    post:
+      summary: Run bounded research and clarification for the operator's own product with durable evidence.
+      description: >
+        Requires the verified operator and middle write tier. At most 65536 raw request bytes. The
+        request names an existing product and the objectiveRevision the operator last saw, plus up to
+        16 answers. Sources come only from the saved brief and are recorded as data; their text is
+        never an instruction. The run uses only the operator-configured provider and per-run ceiling:
+        no request, source or provider text can select a provider or raise spending. A missing
+        provider records an unavailable run, never a fabricated report. At most one completed run
+        exists per objective revision. An answer stays accepted while the brief fields it depends on
+        are unchanged, so it is not asked again after resume; changing those fields invalidates only
+        the affected answers and keeps them as history. Reusing requestId with the same command
+        replays; a changed command conflicts. The run is also recorded as research stage evidence in
+        the product's durable record. Responses use Cache-Control private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductResearchRequest" }
+      responses:
+        "200":
+          description: The current research view (latest run for this objective revision, open questions and accepted answers).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductResearchResponse" }
+        "400":
+          description: Malformed JSON, unknown question, duplicate answer or forbidden fields.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductResearchError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAccessError" }
+        "403":
+          description: The verified operator identity or required write grant is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductResearchError"
+                  - $ref: "#/components/schemas/ProductAccessError"
+        "404":
+          description: The product does not exist for this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductResearchError" }
+        "409":
+          description: stale_revision, idempotency_conflict, already_answered or a bounded capacity is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductResearchError" }
+        "413":
+          description: The raw request exceeds 65536 bytes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductResearchError" }
+        "503":
+          description: busy, corrupt, unavailable, outcome_unknown or recovery_required; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductResearchError" }
+  /v1/products/repository:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+      - name: x-confirm-nonce
+        in: header
+        required: true
+        description: Server-issued HIGH-tier confirmation bound to this exact method, path and body.
+        schema: { type: string, minLength: 1 }
+    post:
+      summary: Create or adopt the exact GitHub repository for a private product, with a recoverable receipt.
+      description: >
+        Requires the verified operator, the write scope and the high tier with a bound confirmation.
+        The operation intent is journaled durably before the single provider create call, and the
+        provider is read back before any receipt is recorded; a lost creation response is reconciled
+        by reading the provider and never by a second create. Adoption performs zero create calls.
+        A conflicting or denied ownership request writes nothing. outcome_unknown must be reconciled
+        by retrying the identical command. No repository is ever deleted as compensation.
+        Responses use Cache-Control private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductRepositoryCommand" }
+      responses:
+        "200":
+          description: The verified repository identity and durable receipt, or the same original receipt on an identical retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryResponse" }
+        "400":
+          description: Malformed JSON, an invalid command, or adopt/create fields that do not match the action.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryAccessError" }
+        "403":
+          description: The verified operator identity, write grant, high tier or confirmation is missing, or organization creation is denied.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductRepositoryError"
+                  - $ref: "#/components/schemas/ProductRepositoryAccessError"
+        "404":
+          description: The product does not exist for this operator, or the repository to adopt does not exist.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+        "409":
+          description: repository_conflict, idempotency_conflict, stale_revision or the operation journal capacity is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+        "413":
+          description: The raw request exceeds 4096 bytes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+        "503":
+          description: busy, corrupt, unavailable, provider_unreadable, outcome_unknown or recovery_required; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+  /v1/products/repository-preview:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+    get:
+      summary: Preview the exact GitHub repository a product create or adopt would act on, without mutation.
+      description: >
+        Requires the verified operator and the sensitive read grant. Supply exactly one each of id, action,
+        owner and name, and optionally expectedRevision and expectedObjectiveRevision; duplicate and unknown
+        keys fail. The server reads the product and the provider through the same scoped transport as the
+        mutation and returns the observed repository identity, visibility and default branch, namespace
+        creation availability and explicit readiness reasons. Nothing is written: no product record,
+        operation journal, repository or enrollment. Unreadable provider metadata is state unavailable,
+        never ready. The preview authorizes nothing; POST /v1/products/repository rechecks independently.
+        Responses use Cache-Control private, no-store.
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/ProductId" }
+        - name: action
+          in: query
+          required: true
+          schema: { type: string, enum: [adopt, create] }
+        - name: owner
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+        - name: name
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 100, pattern: '^(?!\.{1,2}$)[A-Za-z0-9_.-]+$' }
+        - name: expectedRevision
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        - name: expectedObjectiveRevision
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 9007199254740991 }
+      responses:
+        "200":
+          description: The observation, including absent, conflict, stale, denied and unavailable states.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryPreview" }
+        "400":
+          description: Missing, duplicate, unknown or malformed query keys.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAccessError" }
+        "403":
+          description: The verified operator identity or sensitive read grant is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductRepositoryError"
+                  - $ref: "#/components/schemas/ProductAccessError"
+        "404":
+          description: The product does not exist for this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+        "503":
+          description: The product state is busy, corrupt or unavailable; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+  /v1/products/deployment:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+    post:
+      summary: Bind a product to its existing Vercel project and team, with GitHub identity read back.
+      description: >
+        Requires the verified operator, the write scope and the middle tier. The repository in the
+        command must be the product's verified GitHub repository and the team the server-configured
+        one; a different repository or team writes nothing. The operation intent is journaled durably
+        before the single provider create call, and the project is read back with its team and GitHub
+        repository identity verified before any receipt is recorded; a lost creation response resumes
+        the same provider project by reading it and never by a second create. Adoption performs zero
+        create calls. The receipt never marks the product deployed or playable: source SHA, deployment
+        status, served route and physical-device evidence stay separate and unverified. No domain is
+        purchased, no DNS changed and no project deleted. outcome_unknown is reconciled by retrying the
+        identical command. Responses use Cache-Control private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductDeploymentCommand" }
+      responses:
+        "200":
+          description: The verified project identity and durable receipt, or the same original receipt on an identical retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductDeploymentResponse" }
+        "400":
+          description: Malformed JSON, an invalid command, or adopt/create fields that do not match the action.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductAccessError" }
+        "403":
+          description: The verified operator identity or write grant is missing, or project creation is denied by the provider.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductDeploymentError"
+                  - $ref: "#/components/schemas/ProductAccessError"
+        "404":
+          description: The product does not exist for this operator, or the project to adopt does not exist.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+        "409":
+          description: repository_required, repository_mismatch, team_mismatch, project_conflict, idempotency_conflict, stale_revision or the journal capacity is exhausted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+        "413":
+          description: The raw request exceeds 4096 bytes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+        "503":
+          description: not_configured, busy, corrupt, unavailable, provider_unreadable, outcome_unknown or recovery_required; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+  /v1/products/build:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+      - name: x-confirm-nonce
+        in: header
+        required: true
+        description: Server-issued HIGH-tier confirmation bound to this exact method, path and body.
+        schema: { type: string, minLength: 1 }
+    post:
+      summary: Start one approved product task through the existing guarded target-repository path.
+      description: >
+        Requires the verified operator, the write scope and the high tier with a bound confirmation.
+        Immediately before acting the service re-verifies repository identity and head, the approved
+        plan evidence, target enrollment, the registered acceptance runner, README-only bootstrap
+        receipts at the exact head, task provenance, claims, merged credit and the inherited budget.
+        It writes only the existing repo-scoped kick marker, under the config root of the one live
+        registry instance that drives the target, and that daemon's own admission still decides.
+        The receipt reports queued until admitted (a held dispatch claim) or running (a claim or run
+        branch with a sign of life inside two renewal intervals) is independently observed. A refusal
+        writes nothing. Responses use Cache-Control private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductBuildCommand" }
+      responses:
+        "200":
+          description: The durable receipt, or the same original receipt on an identical retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildResponse" }
+        "400":
+          description: Malformed JSON or an invalid command.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildAccessError" }
+        "403":
+          description: The verified operator identity, write grant, high tier or confirmation is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductBuildError"
+                  - $ref: "#/components/schemas/ProductBuildAccessError"
+        "404":
+          description: The product, repository or task does not exist for this operator.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
+        "409":
+          description: A refused precondition - stale revision or ownership, unapproved plan, missing runner, target daemon or bootstrap, claimed or merged task, budget, or halted fleet.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
+        "413":
+          description: The raw request exceeds 4096 bytes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
+        "503":
+          description: busy, corrupt, unavailable or an unreadable provider, target or task; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductBuildError" }
   /v1/analytics:
     get:
       summary: Read the internal benchmark evidence-quality or routing-pool projection.
@@ -17016,6 +19778,52 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /v1/views/daily-progress:
+    get:
+      summary: Work observed for one reporting day, for a repository or the authorized fleet.
+      description: >
+        Cached daily-progress-v1. Collection runs hourly and at civil midnight without browser
+        demand or Analytics activation. Today and Yesterday resolve in the reporting IANA zone
+        before a held body or ETag can answer. Response evidence is capped at 200 events and
+        1 MiB; totals cover retained populations. A page cursor pins scope, date, zone and revision.
+        The native read-model off/shadow/activation policy still applies. No request fetches GitHub
+        or scans the ledger. Source merge does not establish served adoption or deployment.
+      security:
+        - bearerRead: []
+      parameters:
+        - in: query
+          name: repository
+          schema: {type: string, default: all, maxLength: 140}
+          description: A server-known owner/repository, or all for the authorized fleet.
+        - in: query
+          name: date
+          schema: {type: string, default: today, maxLength: 10}
+          description: today, yesterday, or an ISO civil date in the reporting zone.
+        - in: query
+          name: timeZone
+          schema: {type: string, maxLength: 128}
+          description: IANA zone; defaults to the server reporting zone, initially America/New_York.
+        - in: query
+          name: revision
+          schema: {type: integer, minimum: 1, maximum: 999999999999999}
+          description: An immutable repository revision or consolidated publication generation.
+        - in: query
+          name: page
+          schema: {type: string, maxLength: 512}
+          description: The preceding page's opaque nextCursor. Unknown or repeated parameters are refused.
+      responses:
+        "200":
+          description: Report with independent source clocks and coverage.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DailyProgressView"}
+        "304": {description: The request's If-None-Match matches the held report.}
+        "400": {description: Invalid scope, reporting day, zone, revision or page.}
+        "404": {description: The view is off, in shadow, or the requested retained revision is not ready.}
+        "503": {description: Current reporting-day or repository-scope evidence is not ready.}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
   /v1/views/analytics:
     get:
       summary: Every instance's console-v1 analytics merged in core, in one read.
@@ -17065,6 +19873,62 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is switched off (`view_disabled`) or has no body yet (`view_not_ready`).
+
+  /v1/views/code-health:
+    get:
+      summary: Saved code checks and improvement suggestions for one repository or the fleet.
+      description: "Authenticated cached reads only: no scanner, model, ranking or filing runs on a request. All
+        configured repositories remain in the consolidated view, with missing measurements explicit. Check
+        counts and urgent findings are separate from delivery friction. The existing view switch defaults to
+        off; shadow and auto policy remain unchanged. Repository and cursor scope are checked before ETags.
+        Finding pages use the returned snapshot and cursor together, so a newer collection cannot move a page.
+        nextCheckDueAt is a due time, not a guarantee of execution under admission. Saved work links report
+        existing records, not independently verified delivery or benefit."
+      security:
+        - bearerRead: []
+      parameters:
+        - name: repository
+          in: query
+          required: false
+          schema:
+            type: string
+            default: all
+            maxLength: 140
+          description: all, or a server-configured owner/repository.
+        - name: snapshot
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: ^[a-f0-9]{64}$
+          description: Saved snapshot for the selected repository. Required with page.
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+          description: Opaque cursor returned by this repository snapshot; never an offset into a newer result.
+      responses:
+        "200":
+          description: Saved checks, source clocks and paged findings. Totals cover the full evidence set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeHealthView"
+        "304":
+          description: The scope-validated request matches the cached ETag.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is off or shadowed under existing policy.
+        "503":
+          description: The configured repository scope or selected cached result is not ready; retry without treating
+            missing evidence as zero.
 
   /v1/views/repositories:
     get:

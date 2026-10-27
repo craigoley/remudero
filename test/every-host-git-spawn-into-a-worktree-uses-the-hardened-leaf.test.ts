@@ -156,7 +156,13 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "seam argv + CHECKOUT: io.exec(\"git\", args) in push/leasedForcePushSteps run leaf-built argv; " +
       "gitPushEmptyCommit uses repoDir",
   },
-  "src/lib/hand-worktree.ts": { count: 5, reason: "CHECKOUT: findDonor/duplicateWork/createHandWorktree run against the source checkout (-C repoDir)" },
+  "src/lib/cow-worktree.ts": {
+    count: 1,
+    reason:
+      "CHECKOUT (W1-T10257): gitRun is addCowWorktree's git port default; it runs against the operator checkout " +
+      "(repoDir, donorDir) and the new tree it is cutting itself, before any worker runs in it",
+  },
+  "src/lib/hand-worktree.ts": { count: 4, reason: "CHECKOUT: findDonor/duplicateWork/createHandWorktree run against the source checkout (-C repoDir)" },
   "src/lib/host-resource-gardener.ts": { count: 1, reason: "CHECKOUT: gitHeartbeatSource reads the repo root" },
   "src/lib/hot-file-gardener.ts": { count: 1, reason: "CHECKOUT: readMainHistory reads the repo root" },
   "src/lib/image-drift.ts": { count: 1, reason: "CHECKOUT: defaultGit reads the managed checkout (-C repoDir)" },

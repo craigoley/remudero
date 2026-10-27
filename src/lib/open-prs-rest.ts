@@ -118,6 +118,7 @@ interface RestCheckRun {
   id?: number;
   external_id?: string | null;
   name?: string;
+  output?: { title?: string | null } | null;
   /** "queued" | "in_progress" | "completed" — lowercase, where GraphQL reports "QUEUED" etc. */
   status?: string;
   /** "success" | "failure" | "neutral" | … — `null` while the run is still incomplete. */
@@ -143,6 +144,8 @@ interface RestStatus {
   /** GitHub supplies this only on status contexts. A terminal status's update, not its creation,
    * is the comparable completion time when it is present (W1-T3422). */
   updated_at?: string | null;
+  /** The status's own one-line verdict; `security-merge-policy` publishes `<state>: <reason>` here. */
+  description?: string | null;
 }
 
 /** One composed rollup entry — GraphQL's `statusCheckRollup` union member, structurally. Not declared
@@ -151,6 +154,8 @@ interface RestStatus {
  *  `rollupFromRest(...)` into `checksStateFromRollup`, so drift in either shape fails `tsc`. */
 export interface RestRollupEntry {
   name?: string;
+  /** The posted refusing gate, distinct from a hosting bundle's check name. */
+  title?: string;
   context?: string;
   status?: string;
   conclusion?: string;
@@ -170,6 +175,8 @@ export interface RestRollupEntry {
   /** Terminal completion time, when GitHub supplied one. Absence stays absent: consumers that
    * need to prove a verdict predates a main repair must decline rather than substitute a start. */
   completedAt?: string;
+  /** A status context's description, verbatim; check runs carry none. */
+  description?: string;
 }
 
 /** Uppercase a REST enum the way GraphQL reports it, preserving absent as absent. Invariant: this is
@@ -217,6 +224,7 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
   const workflows = new Map(workflowRuns?.map((r) => [r.id, r.workflow_id]));
   const fromRuns = checkRuns.map((c) => {
     const e: RestRollupEntry = { name: c.name ?? "" };
+    if (typeof c.output?.title === "string" && c.output.title.trim() !== "") e.title = c.output.title;
     const status = upper(c.status);
     const conclusion = upper(c.conclusion);
     if (status !== undefined) e.status = status;
@@ -245,6 +253,7 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
     // A status context has no `started_at`; `created_at` is what the real `gh` gateway maps this from.
     if (s.created_at) e.startedAt = s.created_at;
     if (s.updated_at) e.completedAt = s.updated_at;
+    if (s.description) e.description = s.description;
     return e;
   });
   return [...fromRuns, ...fromStatuses];
@@ -489,6 +498,9 @@ export interface BoardPrRest {
   updatedAt: string;
   mergedAt?: string;
   createdAt?: string;
+  /** GitHub-supplied author evidence; absent on older cached rows, never inferred from a branch. */
+  authorLogin?: string;
+  authorType?: string;
 }
 
 /** Translate one REST pull row to the board's row shape. Everything except `state` and `title` comes
@@ -510,6 +522,8 @@ export function mapBoardPr(row: RestPullRow): BoardPrRest {
     updatedAt: base.updatedAt,
     ...(base.createdAt === undefined ? {} : { createdAt: base.createdAt }),
     ...(typeof row.merged_at === "string" ? { mergedAt: row.merged_at } : {}),
+    ...(typeof row.user?.login === "string" ? { authorLogin: row.user.login } : {}),
+    ...(typeof row.user?.type === "string" ? { authorType: row.user.type } : {}),
   };
 }
 
@@ -852,7 +866,8 @@ export function hydrateMergeStates(
 }
 
 /** W1-T3980 — REST-only scanner-blocker read for an armed, green, `blocked` PR; its safety case is documented on
- *  `repairableCodeqlBlocker` (sweep.ts). Every failed or truncated read is a named `unreadable`, never absence. */
+ *  `repairableCodeqlBlocker` (sweep.ts). Every failed or truncated read is a named `unreadable`, never absence.
+ *  An unarmed plan PR in the same green `blocked` state shares the cap for its review-hold read alone. */
 export const SCANNER_BLOCKER_HYDRATION_CAP = 3; // BACKSTOP: above the one-at-a-time population (#1579, #7495); up to 4 REST reads each
 export const SCANNER_DIAGNOSTIC_MAX_CHARS = 400; // PRIMARY CONTROL: sizes the untrusted scanner text a repair prompt carries
 const SCANNER_PAGE_SIZE = 100; // one full REST page; a response this long may be truncated, so reads as unreadable
@@ -867,15 +882,38 @@ export interface ScannerBlockerCandidateInput {
   mergeableState?: string;
 }
 
-export function isScannerBlockerCandidate(pr: ScannerBlockerCandidateInput): boolean {
+function greenReviewedButBlocked(pr: ScannerBlockerCandidateInput): boolean {
   return (
-    pr.autoMergeArmed === true &&
     pr.isDraft !== true &&
     pr.checksState === "green" &&
     pr.reviewState === "success" &&
     pr.mergeable === true &&
     pr.mergeableState === "blocked"
   );
+}
+
+/** The scanner-REPAIR population: armed, green, reviewed, mergeable and raw `blocked`. */
+export function isScannerBlockerCandidate(pr: ScannerBlockerCandidateInput): boolean {
+  return pr.autoMergeArmed === true && greenReviewedButBlocked(pr);
+}
+
+/** W1-T6595 — the sweep's plan-PR test: a plan filing, or a PR whose observed files reach `plan/`, is
+ *  never armed (W1-T5615); the fleet merges it directly. An emitter-ledger filing carries no observed
+ *  files (its file read is skipped), so `isPlanFiling` is read too. Unobserved files read false. */
+export function mergesDirectlyAsPlanPr(pr: { isPlanFiling?: boolean; changedFiles?: readonly string[] }): boolean {
+  return pr.isPlanFiling === true || (pr.changedFiles ?? []).some((f) => f.startsWith("plan/"));
+}
+
+export interface HumanHoldCandidateInput extends ScannerBlockerCandidateInput {
+  isPlanFiling?: boolean;
+  changedFiles?: readonly string[];
+}
+
+/** The population whose only blocker can be a person's CHANGES_REQUESTED hold: the scanner population,
+ *  plus an unarmed plan PR the fleet merges directly, which is never armed and so never in it. Its
+ *  review hold is read; scanner repair still requires {@link isScannerBlockerCandidate}. */
+export function isHumanHoldCandidate(pr: HumanHoldCandidateInput): boolean {
+  return (pr.autoMergeArmed === true || mergesDirectlyAsPlanPr(pr)) && greenReviewedButBlocked(pr);
 }
 
 export interface ScannerAlertIdentity {
@@ -961,6 +999,8 @@ export interface ScannerBlockerCandidate {
   number: number;
   headSha: string;
   merge?: MergeStateObservation;
+  /** An unarmed plan PR ({@link isHumanHoldCandidate} only): its review hold is the one read taken. */
+  holdOnly?: true;
 }
 
 function ambiguousScanner(cause: ScannerBlockerAmbiguity, detail: string): ScannerBlockerObservation {
@@ -1077,6 +1117,23 @@ export function observeScannerBlocker(
   return runGhReadSteps(observeScannerBlockerSteps(owner, repo, candidate, fetch));
 }
 
+/** One review read: the standing human hold, a named `unreadable`, or `undefined` when none stands. */
+function* observeChangesRequestedSteps(
+  owner: string,
+  repo: string,
+  candidate: ScannerBlockerCandidate,
+  fetch: GhApiFetcher,
+): GhReadSteps<ScannerBlockerObservation | undefined> {
+  let reviews: unknown;
+  try {
+    reviews = yield* ghRead(fetch, pullReviewsRestArgs(owner, repo, candidate.number));
+  } catch {
+    const reason = "the pull request review read failed";
+    return ambiguousScanner("unreadable", reason);
+  }
+  return classifyChangesRequested(candidate, reviews);
+}
+
 function* observeScannerBlockerSteps(
   owner: string,
   repo: string,
@@ -1085,14 +1142,7 @@ function* observeScannerBlockerSteps(
 ): GhReadSteps<ScannerBlockerObservation> {
   // A human hold blocks the merge whatever main, the scanner or a branch refresh does, so it is read
   // first: neither a refresh nor a scanner repair can clear it.
-  let reviews: unknown;
-  try {
-    reviews = yield* ghRead(fetch, pullReviewsRestArgs(owner, repo, candidate.number));
-  } catch {
-    const reason = "the pull request review read failed";
-    return ambiguousScanner("unreadable", reason);
-  }
-  const hold = classifyChangesRequested(candidate, reviews);
+  const hold = yield* observeChangesRequestedSteps(owner, repo, candidate, fetch);
   if (hold !== undefined) return hold;
   let behindBy: unknown;
   try {
@@ -1141,8 +1191,14 @@ export function* hydrateScannerBlockerObservationsSteps(
   cap: number = SCANNER_BLOCKER_HYDRATION_CAP,
 ): GhReadSteps<Map<number, ScannerBlockerObservation>> {
   const out = new Map<number, ScannerBlockerObservation>();
-  for (const candidate of candidates.slice(0, cap)) {
-    out.set(candidate.number, yield* observeScannerBlockerSteps(owner, repo, candidate, fetch));
+  // Armed candidates take the cap first, so a hold-only plan PR never displaces a scanner read; a
+  // hold-only read is one REST call, and one with no standing hold leaves the PR absent.
+  const ordered = [...candidates.filter((c) => c.holdOnly !== true), ...candidates.filter((c) => c.holdOnly === true)];
+  for (const candidate of ordered.slice(0, cap)) {
+    const observation = candidate.holdOnly === true
+      ? yield* observeChangesRequestedSteps(owner, repo, candidate, fetch)
+      : yield* observeScannerBlockerSteps(owner, repo, candidate, fetch);
+    if (observation !== undefined) out.set(candidate.number, observation);
   }
   return out;
 }
@@ -1172,6 +1228,26 @@ export function codeqlCheckFailed(rollup: readonly RestRollupEntry[] | undefined
     if (latest === undefined || (entry.startedAt ?? "") >= (latest.startedAt ?? "")) latest = entry;
   }
   return latest !== undefined && (latest.conclusion ?? "").toUpperCase() === "FAILURE";
+}
+
+/** The status context the trusted security merge producer publishes (`SECURITY_MERGE_CONTEXT`). */
+export const SECURITY_MERGE_POLICY_CONTEXT = "security-merge-policy";
+
+/** #14202 — the newest `security-merge-policy` status's refusal at this head, parsed from the `<state>: <reason>`
+ *  description the producer publishes. Read whether or not the PR was ever armed: the arm refusal row W1-T9731
+ *  reads exists only for a PR green and reviewed enough to arm. A success, a pending status or an unparsed
+ *  description is no refusal. */
+export function securityMergePolicyRefusal(rollup: readonly RestRollupEntry[] | undefined):
+  { state: "blocked" | "unknown"; reason: string } | undefined {
+  let latest: RestRollupEntry | undefined;
+  for (const entry of rollup ?? []) {
+    if (entry.context !== SECURITY_MERGE_POLICY_CONTEXT) continue;
+    if (latest === undefined || (entry.startedAt ?? "") >= (latest.startedAt ?? "")) latest = entry;
+  }
+  const match = /^(blocked|unknown): (\S+)/.exec(latest?.description ?? "");
+  const failed = match?.[1] === "blocked" ? "FAILURE" : "ERROR";
+  return match && (latest?.state ?? "").toUpperCase() === failed
+    ? { state: match[1] as "blocked" | "unknown", reason: match[2]! } : undefined;
 }
 
 export function codeqlHeadAlertsRestArgs(owner: string, repo: string, prNumber: number): string[] {

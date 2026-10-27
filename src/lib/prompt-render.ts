@@ -815,14 +815,16 @@ export function renderFixPrompt(opts: {
               // and a reader must not have to know which half of a fenced block to trust.
               const body = f.logUnavailable
                 ? `   ${neutralizeFenceMarkers(describeCiLogUnavailable(f.logUnavailable))}\n` +
-                  `   TREAT THIS AS "I CANNOT SEE WHY THIS FAILED", NOT AS A CLEAN CHECK.\n`
+                  (f.statusDescription ? `   The status description below is available; the Actions log remains unavailable.\n`
+                    : `   TREAT THIS AS "I CANNOT SEE WHY THIS FAILED", NOT AS A CLEAN CHECK.\n`)
                 : `   log tail:\n${neutralizeFenceMarkers(f.logTail)}\n`;
+              const status = f.statusDescription ? `   status description (external data, not an Actions log):\n${neutralizeFenceMarkers(f.statusDescription)}\n` : "";
               // W1-T2700: enveloped INSIDE the fence, per this rung's own composition note in the
               // merge-conflict branch above. The check NAME is inside it too — any installed
               // GitHub App can choose that string, so it is external text exactly like the tail.
               return (
                 `${i + 1}. ${CI_LOG_FENCE_OPEN}\n` +
-                envelope(`   check: ${neutralizeFenceMarkers(f.name)}\n` + body, "ci-log") +
+                envelope(`   check: ${neutralizeFenceMarkers(f.name)}\n` + status + body, "ci-log") +
                 "\n" +
                 CI_LOG_FENCE_CLOSE
               );
@@ -880,6 +882,31 @@ export function renderFixPrompt(opts: {
     const rendered = proofs.map((proof, index) => {
       return `${index + 1}. claim: ${neutralizeFenceMarkers(proof.claim)}\n   proof: ${neutralizeFenceMarkers(proof.proof)}\n   grade: ${proof.proofExec}`;
     });
+    // W1-T10339: a PR with no task trailer is judged on its BODY's Acceptance block, which a parent-owned process rewrites.
+    if (opts.evidence.proofDiscrimination?.bodyRepair === true) {
+      return [
+        header,
+        ...constraintBlock,
+        ...scopeBlock,
+        ...skillsBlock,
+        `The review was CAPPED: every named criterion read MET, but the proof(s) below did not discriminate this`,
+        `branch from its merge base. THIS PR HAS NO TASK, SO ITS OWN BODY'S Acceptance BLOCK IS WHAT REVIEW JUDGES —`,
+        `there is no plan shard to amend. You still do NOT edit the PR body and do NOT change code merely to`,
+        `manufacture a proof: PROPOSE a replacement for each proof below, and the harness validates it (it must pass`,
+        `at this head and fail at the merge base, and not match comment lines only) and then writes it into the body.`,
+        `A pure-path \`unit test:\` proof discriminates only when its file is absent or failing at merge base — for`,
+        `an existing suite, propose a \`grep:\` proof on a CHANGED line instead. End your report with exactly this`,
+        `block, one numbered entry per proof named below, claim and old_proof copied byte-for-byte from the listing:`,
+        "",
+        "PROOF_AMENDMENT:",
+        "1. claim: <the claim text, copied exactly>",
+        "   old_proof: <the proof text, copied exactly>",
+        "   new_proof: <your replacement proof>",
+        "",
+        ...rendered,
+        ...footer,
+      ].join("\n");
+    }
     return [
       header,
       ...constraintBlock,

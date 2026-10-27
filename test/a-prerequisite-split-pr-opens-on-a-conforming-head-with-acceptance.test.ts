@@ -33,6 +33,9 @@ import type { Mount } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { listArchivedTranscripts, TRANSCRIPT_EXCERPT_CAP } from "#src/run-task.js";
+import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { gatherRuns } from "#src/lib/retro.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
 const INSTRUMENT = ["scripts/diff-coverage.mjs"];
@@ -113,6 +116,12 @@ interface Drive {
  *  "the worker obeyed" or "the worker did not" without the test guessing the epoch. */
 async function drive(over: {
   root?: string;
+  priorRows?: Array<Record<string, unknown>>;
+  reviewHead?: string;
+  bodySha256?: string;
+  constraint?: string;
+  progressApproach?: string;
+  taskPatch?: { files?: string[]; design?: string; amendment?: string };
   report?: string;
   onSpawn?: (args: { prompt: string; env?: Record<string, string> }) => void;
   head?: (minted: string) => { ok: boolean; headSha?: string; headRefName?: string };
@@ -146,12 +155,12 @@ async function drive(over: {
     log: (step: string, extra?: Record<string, unknown>) => d.lines.push({ step, ...(extra ?? {}) }),
     say: () => {},
     account: (r: WorkerResult) => r,
-    ledgerLines: () => [],
+    ledgerLines: () => (over.priorRows ?? []).map(row => ({ task_id: opts().taskId, ...row })),
     readPrerequisiteState: async () => ({ ok: true, state: "OPEN" }),
     ...(over.head ? { readLiveHead: async () => over.head!(d.minted()) } : {}),
     ...(over.body ? { fetchPrBody: over.body } : {}),
   };
-  const outcome = await runFixRung({ ...opts(), ...(over.root ? { config: { root: over.root }, worktreePath: over.root } : {}), initialReview: entangledReview(), deps } as never);
+  const outcome = await runFixRung({ ...opts(), ...(over.root ? { config: { root: over.root }, worktreePath: over.root } : {}), task: { ...opts().task, ...over.taskPatch }, prBodySha256: over.bodySha256, constraint: over.constraint, progressApproach: over.progressApproach, initialReview: { ...entangledReview(), ...(over.reviewHead ? { headSha: over.reviewHead } : {}) }, deps } as never);
   return { outcome, ...d };
 }
 
@@ -308,4 +317,93 @@ test("a repeated prerequisite worker can read the prior refusal in the same daem
   assert.ok(copied?.includes(reason), "the actual next spawn receives a readable bounded predecessor copy");
   assert.ok(scratch && !existsSync(scratch), "only this spawn's temporary copies are retired");
   assert.equal(listArchivedTranscripts(root, opts().taskId).length, 2, "same-daemon attempts do not overwrite each other");
+});
+
+
+test("a completed no-PR prerequisite attempt is not repeated until its repair inputs change", async t => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prerequisite-no-pr-reuse-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let spawns = 0;
+  const input = { root, report: "No PR: the required instrument reads a collector absent on main.", bodySha256: "body-a", onSpawn: () => { spawns++; } };
+  const first = await drive(input);
+  assert.equal(spawns, 1);
+  assert.equal(first.outcome.outcome, "escalated");
+  const unchanged = await drive({ ...input, priorRows: first.lines });
+  assert.equal(spawns, 1, "unchanged head, contract, narrative and body cannot launch another prerequisite worker");
+  assert.equal(unchanged.outcome.outcome, "escalated", "the existing operator disposition remains");
+  assert.deepEqual(unchanged.ciWaits, []);
+  const marker = first.lines.find(row => row.step === "fix.prerequisite_dispatch_failed");
+  assert.equal(marker?.prerequisite_outcome, "completed-no-pr");
+  assert.equal(marker?.repair_pr_url, opts().prUrl);
+  assert.equal(marker?.read_head_sha, "deadbeef");
+  assert.equal(typeof marker?.read_contract_revision, "string");
+  assert.equal(typeof marker?.read_task_semantic_revision, "string");
+  assert.equal(marker?.read_body_sha256, "body-a");
+  for (const changed of [{ reviewHead: "new-head" }, { bodySha256: "body-b" },
+    { taskPatch: { files: ["src/qualified-new-companion.ts"] } }, { taskPatch: { design: "operator-qualified revised design" } }]) {
+    const before: number = spawns;
+    await drive({ ...input, priorRows: first.lines, ...changed });
+    assert.equal(spawns, before + 1, "a positively changed repair input returns to existing qualification");
+  }
+});
+
+test("an unbound or foreign no-PR record cannot replace an observed prerequisite attempt", async t => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prerequisite-no-pr-negative-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let spawns = 0;
+  const input = { root, report: "No PR could be built.", onSpawn: () => { spawns++; } };
+  const first = await drive(input);
+  const marker = first.lines.find(row => row.step === "fix.prerequisite_dispatch_failed")!;
+  for (const row of [{ ...marker, read_head_sha: undefined }, { ...marker, read_contract_revision: undefined },
+    { ...marker, prerequisite_outcome: undefined }, { ...marker, repair_pr_url: "https://github.com/acme/foreign/pull/4242" }]) {
+    const before: number = spawns;
+    await drive({ ...input, priorRows: [row] });
+    assert.equal(spawns, before + 1, "historical/unbound/foreign evidence cannot suppress a first qualified attempt");
+  }
+  const before: number = spawns;
+  const existing = await drive({ ...input, priorRows: [...first.lines, { step: "fix.prerequisite_opened", pr_url: opts().prUrl, prerequisite_pr: 9206 }] });
+  assert.equal(spawns, before, "a real prerequisite already opened retains the existing owned route");
+  assert.equal(existing.outcome.outcome, "parked");
+});
+
+
+test("a completed no-PR prerequisite refusal remains effective after real ledger rotation", async t => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prerequisite-no-pr-rotation-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let spawns = 0;
+  const input = { root, report: "No PR could be built from the unchanged source dependency.", onSpawn: () => { spawns++; } };
+  const first = await drive(input);
+  const marker = first.lines.find(row => row.step === "fix.prerequisite_dispatch_failed")!;
+  const path = join(root, "rotation.ndjson");
+  const noCeiling = { ceilingBytes: Number.MAX_SAFE_INTEGER };
+  appendLedger(path, { ...marker, run_id: "FIX-rotation", task_id: opts().taskId, step: "fix.prerequisite_dispatch_failed" }, noCeiling);
+  const ceiling = Buffer.byteLength(JSON.stringify(marker)) * 4;
+  appendLedger(path, { run_id: "noise", task_id: "NOISE", step: "test.noise", detail: "x".repeat(ceiling * 2) }, noCeiling);
+  assert.equal(rotateLedger(path, { ceilingBytes: ceiling, smoothingWindowMs: 0 }).rotated, true);
+  const retained = readLedgerLines(path);
+  assert.ok(retained.some(row => row.step === "fix.prerequisite_dispatch_failed" && row.prerequisite_outcome === "completed-no-pr"));
+  await drive({ ...input, priorRows: retained });
+  assert.equal(spawns, 1, "a real rotation cannot turn a completed attempt into a fresh worker");
+  const run = { step: "run.start", run_id: "repair-attribution", task_id: opts().taskId };
+  assert.equal(gatherRuns([run, { ...marker, run_id: run.run_id }])[0]!.prUrl, undefined, "a refusal names a repair target rather than an opened PR");
+  assert.equal(gatherRuns([run, { ...marker, run_id: run.run_id, pr_url: opts().prUrl }])[0]!.prUrl, opts().prUrl, "positive control: the generic opened-PR field would misattribute this repair target");
+});
+
+
+test("a new operator instruction requalifies a no-PR attempt once while model-only advice does not", async t => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}prerequisite-operator-input-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let spawns = 0;
+  const input = { root, report: "No addressable prerequisite receipt.", constraint: "operator: split the existing instrument", onSpawn: () => { spawns++; } };
+  const first = await drive(input);
+  await drive({ ...input, priorRows: first.lines, progressApproach: "model changed its suggested approach" });
+  assert.equal(spawns, 1, "model-only advice is not new operator authority or dependency evidence");
+  const changed = { ...input, constraint: "operator: qualify the newly supplied dependency under the existing gates" };
+  const second = await drive({ ...changed, priorRows: first.lines });
+  assert.equal(spawns, 2, "a new operator instruction receives the existing qualification once");
+  const history = [...first.lines, ...second.lines];
+  await drive({ ...changed, priorRows: history });
+  await drive({ ...changed, priorRows: history, constraint: `  ${changed.constraint}\n` });
+  await drive({ ...changed, priorRows: history, constraint: undefined });
+  assert.equal(spawns, 2, "the same or consumed instruction cannot manufacture another attempt");
 });

@@ -20,7 +20,9 @@ import { createHash } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { systemClock, type Clock } from "./clock.js";
 import { SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
-import type { Task } from "./plan.js";
+import { TASK_TYPES, type Task } from "./plan.js";
+import { WORKER_PROVIDER_IDS } from "./config-schema.js";
+import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import {
   mineTranscriptWorkflows,
   renderTranscriptWorkflowSteps,
@@ -213,6 +215,8 @@ export interface WorkerAllowlist {
   allowedHosts: string[];
   deniedPathPatterns: string[];
   allowedTools: string[];
+  contextRefusal?: string;
+  capabilityContext?: { generation: string; consumers: ReadonlyArray<{ lane: string; provider: string; source: string }> };
 }
 
 /** Unwraps a `permissions.deny` entry's `Read(<path>)` shape into `<path>`; `null` for anything
@@ -237,6 +241,46 @@ export function workerAllowlistFromSettings(settings: unknown): WorkerAllowlist 
     deniedPathPatterns: denyRead.length > 0 ? denyRead : denyPermissions,
     allowedTools: s.permissions?.allow ?? [],
   };
+}
+
+/** A reporting-only view of existing bounds; no consumer may use this as a runtime grant. */
+export interface SkillWorkerCapabilityContext {
+  generation: string;
+  currentGeneration: string;
+  consumers: ReadonlyArray<{ lane: string; provider: string; source: string; tools: readonly string[] }>;
+}
+
+/** Resolve availability from the execution contract, never from auto-approval rules. */
+export function workerAllowlistFromCapabilityContext(settings: unknown, context: SkillWorkerCapabilityContext | undefined): WorkerAllowlist {
+  const unknown = (reason: string): WorkerAllowlist => ({ allowedHosts: [], deniedPathPatterns: [], allowedTools: [], contextRefusal: `worker-capability-context:${reason}` });
+  if (!context || typeof context !== "object") return unknown("missing");
+  if (typeof context.generation !== "string" || context.generation.length === 0 || context.generation !== context.currentGeneration) return unknown("stale-or-unknown-generation");
+  if (!Array.isArray(context.consumers) || context.consumers.length === 0) return unknown("no-consumers");
+  const identities = new Set<string>();
+  for (const consumer of context.consumers) {
+    if (!consumer || typeof consumer.lane !== "string" || !(TASK_TYPES as readonly string[]).includes(consumer.lane) && consumer.lane !== SKILL_FIX_TASK_TYPE
+      || typeof consumer.provider !== "string" || !(WORKER_PROVIDER_IDS as readonly string[]).includes(consumer.provider)
+      || typeof consumer.source !== "string" || consumer.source.length === 0
+      || !Array.isArray(consumer.tools) || !consumer.tools.every((tool: unknown) => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_]*$/.test(tool))) return unknown("malformed-or-unbounded-consumer");
+    const identity = `${consumer.lane}/${consumer.provider}`;
+    if (identities.has(identity)) return unknown("ambiguous-consumer");
+    identities.add(identity);
+  }
+  const s = settings as { permissions?: { allow?: unknown; deny?: unknown }; sandbox?: { network?: { allowedDomains?: unknown }; filesystem?: { denyRead?: unknown } } } | null;
+  const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === "string");
+  const allow = s?.permissions?.allow, deny = s?.permissions?.deny, hosts = s?.sandbox?.network?.allowedDomains, denyRead = s?.sandbox?.filesystem?.denyRead;
+  if (!strings(allow) || !strings(deny) || !strings(hosts) || !strings(denyRead)) return unknown("settings-unavailable-or-malformed");
+  const tools = context.consumers[0]!.tools.filter((tool: string) => context.consumers.every(c => c.tools.includes(tool))
+    && !deny.includes(tool) && !deny.includes("*"));
+  const paths = [...denyRead, ...deny.flatMap(entry => entry.match(READ_WRAPPER_RE)?.[1] ?? [])];
+  return { allowedHosts: [...hosts], deniedPathPatterns: [...new Set(paths)], allowedTools: [...tools],
+    capabilityContext: { generation: context.generation, consumers: context.consumers.map(c => ({ lane: c.lane, provider: c.provider, source: c.source })) } };
+}
+
+/** The injection domain includes fix, which is not a plan TASK_TYPES member. */
+export function skillDraftConsumerLanes(draft: SkillDraft): string[] {
+  const match = SKILL_APPLIES_TO_RE.exec(splitFrontmatter(draft.markdown).front);
+  return match ? [...new Set(match[1].split(",").map(lane => lane.trim().toLowerCase()).filter(Boolean))] : [];
 }
 
 /** Turn one `settings/worker.json`-shaped glob (`~/../../.ssh/**`) into a `RegExp` matched as a
@@ -306,6 +350,7 @@ function restatesOutcome(line: string, description: string): boolean {
  * `draft.markdown` line by line and returns on the FIRST offence, named.
  */
 export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): SkillDraftScanResult {
+  if (allowlist.contextRefusal) return { ok: false, offendingLine: "<worker-capability-context>", reason: allowlist.contextRefusal };
   const deniedPatterns = allowlist.deniedPathPatterns.map(globToRegExp);
   const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
   const outcomeTokens = descriptions.map((description) => new Set(stepContentTokens(description)));
@@ -321,9 +366,12 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
         return { ok: false, offendingLine: line, reason: `names a path the worker's deny-floor already refuses ('${pattern.source}')` };
       }
     }
-    const toolMatch = line.match(new RegExp(`\\b(${KNOWN_TOOL_NAMES.join("|")})\\b`));
-    if (toolMatch && !allowlist.allowedTools.some((t) => t.includes(toolMatch[1]))) {
-      return { ok: false, offendingLine: line, reason: `names tool '${toolMatch[1]}' outside the worker allowlist` };
+    const toolNames = allowlist.capabilityContext ? [...KNOWN_TOOL_NAMES, "Grep", "Glob", "RunCheck"] : KNOWN_TOOL_NAMES;
+    const toolMatches = line.matchAll(new RegExp(`\\b(${toolNames.join("|")})\\b`, "g"));
+    for (const toolMatch of toolMatches) {
+      if (!allowlist.allowedTools.some(t => t === toolMatch[1] || (!allowlist.capabilityContext && t.startsWith(`${toolMatch[1]}(`)))) {
+        return { ok: false, offendingLine: line, reason: `names tool '${toolMatch[1]}' outside the worker allowlist` };
+      }
     }
     for (const pattern of INSTRUCTION_INJECTION_PATTERNS) {
       if (pattern.test(line)) {
@@ -782,6 +830,12 @@ export const SKILL_FIX_TASK_TYPE = "fix";
 export const SKILL_EFFECTIVENESS_HORIZON = 10;
 /** A terminal worker failure is the named harm signal for this descriptive pilot. */
 export const SKILL_EFFECTIVENESS_HARM_OUTCOMES = ["failed"] as const;
+/** The steps {@link buildSkillEffectivenessReport} reads; every caller passes exactly this as its union read's
+ *  step filter. W1-T10764: a filter without the merge rows hands the report no merge, so both arms read
+ *  `merged_runs=0` by construction and only the harm signal can ever decide. Both merge-row steps
+ *  {@link isMergedLedgerRow} accepts are here: the sweep's `verdict.merged` credit backfill, and the
+ *  `pr.terminal` row the direct merge writes, which is the only record of most merges. */
+export const SKILL_EFFECTIVENESS_LEDGER_STEPS: readonly string[] = ["skills.selection", "verdict", "verdict.merged", PR_TERMINAL_STEP];
 
 export interface SkillEffectivenessCohort {
   observed_eligible_runs: number;
@@ -814,6 +868,12 @@ type SkillLedgerRow = Record<string, unknown>;
 const stringArray = (value: unknown): string[] =>
   Array.isArray(value) && value.every((item): item is string => typeof item === "string") ? value : [];
 
+/** A row's PR: its `pr_url` as `owner/repo#n`, else its `pr_number` on the row's own `repo`. A row naming
+ *  neither has no PR to match, so it is never credited a merge. */
+const effectivenessPrKey = (row: SkillLedgerRow): string | undefined =>
+  prUrlKey(row.pr_url) ??
+  (typeof row.repo === "string" && Number.isInteger(row.pr_number) ? `${row.repo}#${row.pr_number as number}` : undefined);
+
 const emptyCohort = (): SkillEffectivenessCohort => ({
   observed_eligible_runs: 0,
   terminal_runs: 0,
@@ -827,18 +887,29 @@ const emptyCohort = (): SkillEffectivenessCohort => ({
  * Deterministically joins `taskType`'s `skills.selection` row emitted at prompt assembly to the
  * terminal `verdict` row that carries the same run id.  It never reads or writes the approved
  * tree: results are evidence for an operator's later decision, not a lifecycle action.
+ *
+ * W1-T10764: a run's own `verdict` row never reads `merged` — it hands off (`handed_off`,
+ * `blocked_ci`) and the merge is recorded later under another run id: a `verdict.merged` credit
+ * backfill, or a `pr.terminal` row reading `merged`. So a run resolves to `merged` when its terminal
+ * `verdict` row names a PR that any {@link isMergedLedgerRow} row names. The join is by PR, never by
+ * `task_id`: a task can have several runs and only one PR merged.
  */
 export function buildSkillEffectivenessReport(
   rows: readonly SkillLedgerRow[],
   skillName: string,
   taskType: string = SKILL_EFFECTIVENESS_TASK_TYPE,
 ): SkillEffectivenessReport {
-  const terminalOutcomeByRun = new Map<string, string>();
+  const terminalVerdictByRun = new Map<string, { verdict: string; prKey: string | undefined }>();
+  const mergedPrKeys = new Set<string>();
   const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean }>();
 
   for (const row of rows) {
+    if (isMergedLedgerRow(row)) {
+      const prKey = effectivenessPrKey(row);
+      if (prKey !== undefined) mergedPrKeys.add(prKey);
+    }
     if (row.step === "verdict" && typeof row.run_id === "string" && typeof row.verdict === "string") {
-      terminalOutcomeByRun.set(row.run_id, row.verdict);
+      terminalVerdictByRun.set(row.run_id, { verdict: row.verdict, prKey: effectivenessPrKey(row) });
       continue;
     }
     if (
@@ -854,6 +925,14 @@ export function buildSkillEffectivenessReport(
     });
   }
 
+  // Resolved only after every row is read: the merge row is written after the run's verdict, but a union
+  // read need not return them in that order.
+  const terminalOutcome = (runId: string): string | undefined => {
+    const terminal = terminalVerdictByRun.get(runId);
+    if (terminal === undefined) return undefined;
+    return terminal.prKey !== undefined && mergedPrKeys.has(terminal.prKey) ? "merged" : terminal.verdict;
+  };
+
   // Once any randomized row exists for this skill, only randomized rows are compared: the arms are then
   // assigned, so a budget omission (which tracks how many skills a task drew) cannot bias them.
   const randomized = [...selectionByRun.values()].some((o) => o.withheld !== undefined);
@@ -865,7 +944,7 @@ export function buildSkillEffectivenessReport(
     for (const [runId, observation] of selectionByRun) {
       if (!inArm(observation, selected)) continue;
       cohort.observed_eligible_runs++;
-      const outcome = terminalOutcomeByRun.get(runId);
+      const outcome = terminalOutcome(runId);
       if (!outcome) continue;
       cohort.terminal_runs++;
       cohort.outcomes[outcome] = (cohort.outcomes[outcome] ?? 0) + 1;
@@ -1112,14 +1191,14 @@ export function stageSkillLifecycleProposal(
 export function stageSkillDrafts(
   registryPath: string,
   drafts: readonly SkillDraft[],
-  allowlist: WorkerAllowlist,
+  allowlist: WorkerAllowlist | ((draft: SkillDraft) => WorkerAllowlist),
   reachability: (draft: SkillDraft) => { reachable: boolean; reason: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
   stageOne: typeof stageSkillDraft = stageSkillDraft,
 ): void {
   for (const draft of drafts) {
     try {
-      const r = stageOne(registryPath, draft, allowlist, reachability(draft));
+      const r = stageOne(registryPath, draft, typeof allowlist === "function" ? allowlist(draft) : allowlist, reachability(draft));
       log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refreshed: r.refreshed === true, refused: r.refused, reason: r.reason });
     } catch (e) {
       log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });

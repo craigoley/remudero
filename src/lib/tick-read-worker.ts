@@ -32,8 +32,8 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
-import { ghIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
-import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, isScannerBlockerCandidate, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, type PlanFilingFileCache, type PlanFilingFileObservation } from "./open-prs-rest.js";
+import { ghIssueGateway, ghIssueGatewayAsync, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
+import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, type PlanFilingFileCache, type PlanFilingFileObservation } from "./open-prs-rest.js";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
 import { planFilesIdentity } from "./thread-plan.js";
 import { isInPlanScope } from "./plan-architect.js";
@@ -44,7 +44,7 @@ import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, PlanBlobCache, mergePlanBlobsQuarantiningDuplicates, readBlobsAtRef, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
-import { DEFAULT_SWEEP_POLICY, RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, type BaseChangedFiles } from "./sweep.js";
+import { DEFAULT_SWEEP_POLICY, RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, type BaseChangedFiles } from "./sweep.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { ghJson } from "./worker.js";
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
@@ -361,7 +361,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       commitClosed: (rows) => { closedRows = rows; return snapshotCache.commitClosed(rows); },
       commitOpen: (rows) => snapshotCache.commitOpen?.(rows, systemClock.now()) ?? false,
     }, changedFilesCache: {
-      lookup: (url, state) => (state === "MERGED" || state === "CLOSED" ? files : openFiles).lookup(url, state),
+      lookup: (url, state, headRefOid) => (state === "MERGED" || state === "CLOSED" ? files : openFiles).lookup(url, state, headRefOid),
+      evidence: (url, state, headRefOid) => (state === "MERGED" || state === "CLOSED" ? files : openFiles).evidence!(url, state, headRefOid),
       settle: async () => { await files.settle(); await openFiles.settle(); },
     },
     // A logical tick clock expires each half once per generation, independent of read duration.
@@ -427,7 +428,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     credits = beforeCreditRead;
     creditCandidates = credit();
     let escalationIntake: EscalationIntake | undefined;
-    const escalationCandidates = buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
+    const escalationCandidates = await buildEscalationReconcileCandidatesAsync(owner, repo, plan, ledgerPath, log, {
       github, issues: io.issues, evidenceRootFor, creditIo,
       onIntake: (intake) => { escalationIntake = intake; },
     });
@@ -437,7 +438,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     }) : [];
     const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, openPrViews);
     const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
-    const behindMainByPr = buildBehindMainByPr(owner, repo, openPrViews, fetch, undefined, baseChangedFilesByPr);
+    const behindMainByPr = await buildBehindMainByPrAsync(owner, repo, openPrViews, fetchAsync, undefined, baseChangedFilesByPr);
     const mergedFixPrNumbers = [...new Set(DEFAULT_FIX_CLASSES.map((entry) => entry.fixPrNumber))]
       .filter((number) => github.prByRef(number)?.state === "MERGED");
     const rawByNumber = new Map(openPrRows?.map((pr) => [pr.number, pr]));
@@ -576,17 +577,32 @@ export function distanceRefreshProbeTargets(
 const BASE_COMPARE_FILES_CAP = 300;
 
 export function buildBehindMainByPr(
+  owner: string, repo: string, openPrs: readonly OpenPrView[], fetch: GhApiFetcher = ghJson,
+  nowMs: number = systemClock.now(), baseChangedFilesOut?: Map<number, BaseChangedFiles>,
+): Map<number, number> {
+  return runStepsSync(behindMainByPrSteps(owner, repo, openPrs, fetch, nowMs, baseChangedFilesOut));
+}
+
+export function buildBehindMainByPrAsync(
+  owner: string, repo: string, openPrs: readonly OpenPrView[],
+  fetch: GhApiFetcher = (args, budget) => ghJsonAsync(args, undefined, budget),
+  nowMs: number = systemClock.now(), baseChangedFilesOut?: Map<number, BaseChangedFiles>,
+): Promise<Map<number, number>> {
+  return runStepsAsync(behindMainByPrSteps(owner, repo, openPrs, fetch, nowMs, baseChangedFilesOut));
+}
+
+function* behindMainByPrSteps(
   owner: string,
   repo: string,
   openPrs: readonly OpenPrView[],
-  fetch: GhApiFetcher = ghJson,
+  fetch: GhApiFetcher,
   nowMs: number = systemClock.now(),
   baseChangedFilesOut?: Map<number, BaseChangedFiles>,
-): Map<number, number> {
+): Steps<Map<number, number>> {
   const out = new Map<number, number>();
   for (const pr of distanceRefreshProbeTargets(openPrs, nowMs)) {
     try {
-      const compare = fetch(["api", `repos/${owner}/${repo}/compare/${pr.headSha}...main`]) as {
+      const compare = (yield* step(() => fetch(["api", `repos/${owner}/${repo}/compare/${pr.headSha}...main`]))) as {
         ahead_by?: unknown;
         files?: unknown;
       };
@@ -619,6 +635,8 @@ export function buildBehindMainByPr(
 
 /** One rollup check entry as `gh pr list --json statusCheckRollup` returns it. */
 export interface RollupCheck {
+  /** The actual refusing gate posted by a bundled check, preserved from REST output.title. */
+  title?: string;
   /** Exact REST identity and posted constituent outcome; absent on unreadable/GraphQL-only rows. */
   headSha?: string;
   outputSummary?: string;
@@ -639,6 +657,8 @@ export interface RollupCheck {
   /** Terminal completion time from the REST-composed rollup. `fetchCiFailures` preserves it
    * only for the newest deduped failure; it never guesses from the start time (W1-T3422). */
   completedAt?: string;
+  /** A status context's own description, verbatim from REST (`securityMergePolicyRefusal` reads it). */
+  description?: string;
 }
 
 export interface RawOpenPr {
@@ -1574,6 +1594,8 @@ function* ciFailuresSteps(
     }
     failures.push({
       name,
+      ...(c.title ? { title: c.title } : {}),
+      ...(c.context && typeof c.description === "string" && c.description.trim() !== "" ? { statusDescription: c.description } : {}),
       logTail,
       conclusion: (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase(),
       ...(c.completedAt ? { completedAt: c.completedAt } : {}),
@@ -2313,33 +2335,44 @@ export function* openPrViewSteps(
       });
     },
   );
+  // An unarmed plan PR is never armed (W1-T5615), so its human hold is read here or never: the same
+  // facts the view below stamps (`isPlanFiling`, the complete file list) decide it.
+  const holdCandidateFacts = (pr: RawOpenPr) => {
+    const files = planFilingFiles.get(pr.number);
+    return {
+      autoMergeArmed: pr.autoMergeRequest != null,
+      isDraft: pr.isDraft,
+      checksState: checksStateFromRollup(pr.statusCheckRollup, requiredContexts),
+      reviewState: reviewStateFromRollup(pr.statusCheckRollup),
+      mergeable: mergeStateObservations.get(pr.number)?.mergeable,
+      mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
+      isPlanFiling: planFilingClassifications.get(pr.number)?.isPlanFiling ?? false,
+      changedFiles: files?.state === "complete" ? files.paths : undefined,
+    };
+  };
   const scannerBlockers = yield* hydrateScannerBlockerObservationsSteps(
     owner,
     repo,
     raw
-      .filter((pr) =>
-        isScannerBlockerCandidate({
-          autoMergeArmed: pr.autoMergeRequest != null,
-          isDraft: pr.isDraft,
-          checksState: checksStateFromRollup(pr.statusCheckRollup, requiredContexts),
-          reviewState: reviewStateFromRollup(pr.statusCheckRollup),
-          mergeable: mergeStateObservations.get(pr.number)?.mergeable,
-          mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
-        }),
-      )
-      .map((pr) => ({ number: pr.number, headSha: pr.headRefOid, merge: mergeStateObservations.get(pr.number) })),
+      .filter((pr) => isHumanHoldCandidate(holdCandidateFacts(pr)))
+      .map((pr) => ({
+        number: pr.number, headSha: pr.headRefOid, merge: mergeStateObservations.get(pr.number),
+        ...(isScannerBlockerCandidate(holdCandidateFacts(pr)) ? {} : { holdOnly: true as const }),
+      })),
     fetch,
   );
 
   // W1-T5633: a head whose latest `CodeQL` check failed has its open high alerts read, unless its ledger
   // already holds a terminal code-scanning ruling for that head (a false positive, or a fix dispatched).
   // W1-T9731: so does a head whose newest arm the security policy refused on a new high alert.
+  // #14202: and a head whose own security-merge-policy status is blocked, armed or not.
   const codeqlHeadAlerts = yield* hydrateCodeqlHeadAlertsSteps(
     owner,
     repo,
     raw
       .filter((pr) => pr.isDraft !== true &&
-        codeqlAlertsReadDue(ledger, pr.number, pr.headRefOid, codeqlCheckFailed(pr.statusCheckRollup)) &&
+        codeqlAlertsReadDue(ledger, pr.number, pr.headRefOid, codeqlCheckFailed(pr.statusCheckRollup) ||
+          securityMergePolicyRefusal(pr.statusCheckRollup)?.state === "blocked") &&
         !codeScanningHeadSettled(ledger, pr.number, pr.headRefOid))
       .map((pr) => ({ number: pr.number, headSha: pr.headRefOid })),
     fetch,
@@ -2641,6 +2674,7 @@ export function* openPrViewSteps(
       mergeableState: mergeStateObservations.get(pr.number)?.mergeableState,
       scannerBlocker: scannerBlockers.get(pr.number),
       codeqlHeadAlerts: codeqlHeadAlerts.get(pr.number),
+      securityMergePolicy: securityMergePolicyRefusal(pr.statusCheckRollup),
       workflowRuns: workflowRuns.get(pr.number),
       // W1-T2384: the supersessionVerdict producer W1-T920 deferred and never filed — populated
       // ONLY for a PR `supersededBy` above just flagged (the hydration was scoped to exactly that
@@ -3105,6 +3139,26 @@ function reconcileImplementationEvidence(
   return undefined;
 }
 
+/** Await the daemon's issue listings before the synchronous derivation consumes their snapshot. */
+export async function buildEscalationReconcileCandidatesAsync(
+  owner: string, repo: string, plan: Plan, ledgerPath: string,
+  log?: (step: string, extra?: Record<string, unknown>) => void,
+  injected: Omit<NonNullable<Parameters<typeof buildEscalationReconcileCandidates>[5]>, "issues"> & {
+    issues?: AsyncIssueGateway;
+  } = {},
+): Promise<EscalationReconcileCandidate[]> {
+  let open: OpenIssue[];
+  try {
+    open = await listRetirableEscalationIssuesAsync(injected.issues ?? ghIssueGatewayAsync(owner, repo));
+  } catch (error) {
+    log?.("sweep.escalation_reconcile.list_failed", { error: String((error as Error)?.message ?? error) });
+    return [];
+  }
+  return buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
+    ...injected, issues: { listOpen: () => open },
+  });
+}
+
 export function buildEscalationReconcileCandidates(
   owner: string,
   repo: string,
@@ -3115,7 +3169,7 @@ export function buildEscalationReconcileCandidates(
   // both and get the live `gh` gateways; tests supply fakes to drive the parse + derivation
   // without shelling out.
   injected: {
-    issues?: IssueGateway;
+    issues?: Pick<IssueGateway, "listOpen"> & Partial<IssueGateway>;
     github?: GitHub;
     onIntake?: (intake: EscalationIntake) => void;
     // W1-T3873 — the same trailing evidence-root seam buildCreditCandidates takes positionally,

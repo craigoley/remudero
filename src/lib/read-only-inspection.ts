@@ -4,7 +4,7 @@ import { isAbsolute } from "node:path";
 import { parseArgs } from "node:util";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { ledgerGrepCommand } from "./report-commands.js";
-import { buildSkillEffectivenessReport, renderSkillEffectivenessReport } from "./skill-workshop.js";
+import { buildSkillEffectivenessReport, renderSkillEffectivenessReport, SKILL_EFFECTIVENESS_LEDGER_STEPS } from "./skill-workshop.js";
 
 export const READ_ONLY_INSPECTION_USAGE =
   "usage: rmd inspect --state-dir <absolute-dir> ledger-grep <pattern> | skill effectiveness <name>";
@@ -38,7 +38,7 @@ export function readOnlyInspectionCommand(rest: string[],
   if (args[0] === "skill" && args[1] === "effectiveness" && args.length === 3) {
     try {
       const union = readLedger(stateDir, {
-        step: ["skills.selection", "verdict"], requireArchives: true, refuseIncomplete: true,
+        step: SKILL_EFFECTIVENESS_LEDGER_STEPS, requireArchives: true, refuseIncomplete: true,
       });
       if (!union.ok) { console.error("rmd inspect: incomplete ledger union; no effectiveness claim"); return 1; }
       console.log(renderSkillEffectivenessReport(buildSkillEffectivenessReport(union.rows, args[2]!)));

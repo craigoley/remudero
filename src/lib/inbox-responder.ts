@@ -10,7 +10,7 @@ import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
 import { proposalVerdictsWithReceipts, readVerdictReceipts } from "./inbox-verdict-receipts.js";
 import { deriveTaskReferent, parseProposalRegistry, recordRowThreadEvents, THREAD_EVENT_STEPS, type Proposal } from "./inbox.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
-import { inboxKind, inboxOwner } from "./inbox-owner.js";
+import { inboxKind, inboxOwner, isAgeOnlyInboxInformation } from "./inbox-owner.js";
 import type { InboxClassification } from "./inbox.js";
 import type { VerifyHumanRuling } from "./verify-human-judge.js";
 import type { InboxDismissalAudit } from "./inbox-dismissal-audit.js";
@@ -58,6 +58,8 @@ import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 /** One operator-owned inbox item, as the thread views need it. */
 export interface InboxThreadItem {
+  /** Source-qualified history membership only, never permission for an Inbox action. */
+  informational?: boolean;
   requiresReview?: boolean;
   causalScope?: InboxCausalScope;
   reframeHistory?: Proposal["reframeHistory"];
@@ -238,7 +240,7 @@ function openingMessage(item: InboxThreadItem): ThreadMessageView {
     text: `${item.plain.whatHappened} ${item.plain.whatWeNeed}`,
     ts: null,
     plain: item.plain,
-    actions: ACTIONS_BY_STATE[item.state],
+    actions: item.informational ? [] : ACTIONS_BY_STATE[item.state],
   };
 }
 
@@ -315,6 +317,7 @@ function attentionFor(item: InboxThreadItem, last: ThreadMessageView): ThreadSum
   if (item.state === "declined" && last.extra?.event) return "history";
   if (last.from === "operator") return "awaiting_daemon";
   if (last.extra?.question === true) return "reply";
+  if (item.informational) return "history";
   if (item.state === "declined") return "history";
   const kind = inboxKind(item.proposalId);
   // These kinds carry an explicit human judgement even before an Architect has a draft. A
@@ -492,7 +495,7 @@ async function answerLegacyThread(threadId: string, deps: InboxResponderDeps): P
   const questionsAsked = stored.filter((m) => m.role === "escalation" && m.extra?.question).length;
   if (decision.action === "question" && questionsAsked >= MAX_THREAD_QUESTIONS) decision = { action: "none", reply: "" };
   // Only what the item's state allows; anything else becomes a question.
-  if (decision.action !== "question" && decision.action !== "none" && !ACTIONS_BY_STATE[item.state].includes(decision.action)) {
+  if (decision.action !== "question" && decision.action !== "none" && (item.informational || !ACTIONS_BY_STATE[item.state].includes(decision.action))) {
     decision = questionsAsked >= MAX_THREAD_QUESTIONS ? { action: "none", reply: "" } : { action: "question", reply: "" };
   }
   const text = decision.reply && machineTokens(decision.reply).length === 0 ? decision.reply : plainReplyFor(decision.action);
@@ -602,7 +605,7 @@ export async function answerThread(threadId: string, deps: InboxResponderDeps): 
       const stillPending = causalThreadInputs(latest.threads.get(threadId) ?? [], scope, proposalId, current.reframeHistory).pending.some(message =>
         !hasThreadEvent(message.extra) && message.extra!.input!.id === input.id && message.extra!.input!.contentSha256 === input.contentSha256);
       if (!stillPending) return undefined;
-      if (decision.action !== "question" && decision.action !== "none" && !ACTIONS_BY_STATE[current.state].includes(decision.action)) {
+      if (decision.action !== "question" && decision.action !== "none" && (current.informational || !ACTIONS_BY_STATE[current.state].includes(decision.action))) {
         decision = questions >= MAX_THREAD_QUESTIONS ? { action: "none", reply: "" } : { action: "question", reply: "" };
       }
       const text = decision.reply && machineTokens(decision.reply).length === 0 ? decision.reply : plainReplyFor(decision.action);
@@ -694,9 +697,10 @@ export function registryThreadItems(stateDir: string, ledgerPath: string, causal
   const lines = readLedgerLines(ledgerPath);
   const verdicts = proposalVerdictsWithReceipts(lines, readVerdictReceipts(stateDir));
   return proposals
-    .filter((p) => inboxOwner(p) === "operator")
+    .filter((p) => inboxOwner(p) === "operator" || isAgeOnlyInboxInformation(p))
     .map((p) => ({
       proposalId: p.id,
+      ...(isAgeOnlyInboxInformation(p) ? { informational: true } : {}),
       ...(causalScope ? { causalScope } : {}),
       ...(p.reframeHistory ? { reframeHistory: p.reframeHistory } : {}),
       summary: p.summary,
@@ -765,7 +769,8 @@ export interface ThreadEventSync {
 /** The registry's operator-owned proposals: the only items that have a thread. */
 function operatorProposals(stateDir: string): Proposal[] {
   const path = join(stateDir, "inbox-proposals.json");
-  return parseProposalRegistry(existsSync(path) ? readFileSync(path, "utf8") : undefined).filter((p) => inboxOwner(p) === "operator");
+  return parseProposalRegistry(existsSync(path) ? readFileSync(path, "utf8") : undefined)
+    .filter((p) => inboxOwner(p) === "operator" || isAgeOnlyInboxInformation(p));
 }
 
 export function createThreadEventSync(opts: {

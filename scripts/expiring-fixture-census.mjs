@@ -75,6 +75,38 @@ export const STALE_DAYS_OFFSET = "sweep.staleDays";
  */
 export const AGED_FIELDS = [
   {
+    field: "nextDueAt",
+    threshold: "daily progress collection due time",
+    source: "src/lib/daily-progress-collector.ts",
+    evidence: ["Date.parse(previousJob.nextDueAt) > now"],
+    offsetDays: 0,
+  },
+  {
+    field: "savedAt",
+    threshold: "daily progress open snapshot cutoff",
+    source: "src/lib/daily-progress-collector.ts",
+    evidence: ["Date.parse(s.open.snapshot.savedAt) <= now"],
+    offsetDays: 0,
+  },
+  {
+    field: "asOf",
+    threshold: "Code health repository-scope freshness (three minutes)",
+    source: "src/lib/code-health-view.ts",
+    evidence: ["const SCOPE_BUDGET_MS = 180_000;", "Date.parse(value.asOf)", "<= SCOPE_BUDGET_MS"],
+    offsetDays: 0,
+    consumers: ["validateCodeHealthRequest"],
+  },
+  {
+    field: "observedAt",
+    threshold: "code health finding-source freshness (24 hours)",
+    source: "src/lib/codeql-quality-intake.ts",
+    evidence: ["const observedAt = Date.parse(scan.observedAt)", "observedAt <= now", "now - observedAt <= 86_400_000"],
+    offsetDays: 1,
+    // Pure projections take an injected clock. Measure fixtures reaching the view or saved-chat
+    // entry points that can evaluate this source against the current service clock.
+    consumers: ["readCodeHealthReport", "createImprovementThread", "readImprovementThread", "buildImprovementThreadRoutes", "requestImprovementAction", "runImprovementAction"],
+  },
+  {
     field: "lastActivityAt",
     threshold: "sweep.staleDays",
     source: "src/lib/sweep.ts",

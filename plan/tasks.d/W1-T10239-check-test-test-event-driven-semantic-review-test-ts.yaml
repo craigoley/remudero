@@ -3,11 +3,12 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: blast-radius
   priority: 1.34
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/event-driven-semantic-review.test.ts"
@@ -48,10 +49,23 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 1
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
     reasons:
-      - "deterministic backstop: it declares test/infra/check-test-test-event-driven-semantic-review-test-ts.test.ts, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-20T07:57:55.393Z"
-    pin: "60460b8574b270979034453b85cf59b0adce51fe4ba87bc6c2871e89b92358bb"
+      - "The declared files are src/lib/config.ts and a new test under test/infra/. Neither falls into the escalation categories: secrets, credentials, auth, permissions, data or branch deletion, merge/deploy/review policy, or irreversible actions."
+      - "The task is a ci-friction fix aimed at one flaky test failure, backed by evidence from one PR (#12954). It needs no operator-only decision, and the acceptance criterion is a grep-verifiable test name."
+      - "The ci-friction family has a mixed but mostly positive track record (63 merged, Beta mean 0.73), and filingTime is true. The change still goes through CI and review."
+      - "The evidence is thin, with a single round and a failure that may be a timeout (28s duration). That affects how useful the fix is, not how dangerous it is. No bounded change view was supplied, so nothing here shows an unusual change shape."
+    judged_at: "2026-10-26T09:46:47.957Z"
+    pin: "4c67a71359107b22b75d0018d52bb44147d023b4071aee66127a933624b4ec0a"
+  amendment: |
+    Withdrawal disposition 2026-10-26: the recorded #12954 failure was a fixture
+    that expected review to run despite missing task metadata. The parent of
+    #14418 already contains the repaired exit-code/refusal regression. #14418
+    duplicates that control and adds no mechanism that prevents another fix round.
+    Its config.ts owner was selected from an import used only as a type, not a
+    diagnosed production failure. Preserve the original evidence, criterion,
+    proof, rationale and risk ruling. Do not claim remedy credit. The separate
+    source-attribution and evidence-quality defects remain queue-cleanup work;
+    this disposition waives no gate and releases no worker, claim or service hold.

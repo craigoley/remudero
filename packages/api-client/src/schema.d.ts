@@ -5,6 +5,568 @@
 
 export interface components {
   schemas: {
+    DailyProgressCount: ({
+      precision: "unavailable";
+      value: null;
+    }) | ({
+      precision: "exact" | "at_least";
+      value: number;
+    });
+    ExpectedDailyProgressSource: {
+      id: string;
+      repository: string;
+      kind: "pull_requests" | "ledger_activity" | "deployments";
+      instanceId: string | null;
+      required: boolean;
+    };
+    DailyProgressSource: {
+      id: string;
+      repository: string;
+      kind: "pull_requests" | "ledger_activity" | "deployments";
+      instanceId: string | null;
+      required: boolean;
+      state: "complete" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized";
+      lastAttemptAt: string | null;
+      lastSuccessAt: string | null;
+      coverageStart: string | null;
+      coverageThrough: string | null;
+      nextDueAt: string | null;
+      reason: string | null;
+    };
+    DailyProgressEvent: {
+      id: string;
+      repository: string;
+      kind: "merged" | "activity" | "deployment";
+      sourceId: string;
+      occurredAt: string;
+      observedAt: string;
+      fleetAttribution: "confirmed" | "unknown" | "non_fleet";
+      taskIds: (string)[];
+      title: string;
+      url: string | null;
+    };
+    /** daily-progress-v1. Counts use the retained population, independently of this bounded evidence page. Missing evidence is unavailable, not a measured zero. Merges, observed activity, independent deployment evidence and present open work retain separate meanings and clocks. */
+    DailyProgressReport: {
+      version: "daily-progress-v1";
+      scope: ({
+        kind: "all";
+      }) | ({
+        kind: "repository";
+        repository: string;
+      });
+      reportDate: string;
+      timeZone: string;
+      windowStart: string;
+      windowEnd: string;
+      revision: number;
+      correctionReason: string | null;
+      generatedAt: string;
+      phase: "provisional" | "finalizing" | "complete" | "corrected";
+      coverage: {
+        state: "complete" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized";
+        expectedRepositories: (string)[];
+        includedRepositories: (string)[];
+        expectedSources: (ExpectedDailyProgressSource)[];
+        sources: (DailyProgressSource)[];
+      };
+      totals: {
+        mergedChanges: DailyProgressCount;
+        completedTasks: DailyProgressCount;
+      };
+      events: (DailyProgressEvent)[];
+      page: {
+        totalEvents: number;
+        nextCursor: string | null;
+      };
+      currentWork: {
+        asOf: string;
+        items: ({
+          repository: string;
+          id: string;
+          title: string;
+          url: string | null;
+        })[];
+      } | null;
+    };
+    DailyProgressView: {
+      view: "daily-progress";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: DailyProgressReport;
+    };
+    ImprovementThreadRequest: {
+      repository: string;
+      opportunityId: string;
+      snapshotId: string;
+      goal: string;
+      constraints?: (string)[];
+      idempotencyKey: string;
+      instance?: string;
+    };
+    ImprovementFailure: {
+      state: "invalid_request" | "source_unavailable" | "source_stale" | "conflict" | "busy" | "uncertain";
+      reason: string;
+      requestId?: string;
+    };
+    ImprovementSavedResult: {
+      state: "saved";
+      version: "improvement-thread-v1";
+      requestId: string;
+      threadId: string;
+      proposalId: string;
+      repository: string;
+      instance: string;
+      snapshotId: string;
+      opportunityId: string;
+      reused: boolean;
+      planning: {
+        state: "not_requested";
+      };
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ImprovementPlanReceipt: {
+      state: "plan_pr_opened";
+      prUrl: string;
+      branch: string;
+      taskIds: (string)[];
+      taskIdsState: "observed" | "unavailable";
+      recordedAt: string;
+      nativeReceiptId: string;
+    };
+    ImprovementNativeMessage: {
+      threadId: string;
+      role: "escalation" | "reply";
+      body: string;
+      seq: number;
+      ts: number;
+      /** Native Inbox message metadata. Source context and operator audit are facts; they grant no execution authority. */
+      extra?: Record<string, never>;
+    };
+    ImprovementThreadView: {
+      state: "saved";
+      version: "improvement-thread-v1";
+      requestId: string;
+      threadId: string;
+      proposalId: string;
+      repository: string;
+      instance: string;
+      snapshotId: string;
+      opportunityId: string;
+      currentRequestId: string;
+      goal: string;
+      constraints: (string)[];
+      goalDigest: string;
+      source: {
+        state: "current" | "stale" | "unavailable";
+        reason: unknown;
+      };
+      correspondence: {
+        state: "linked" | "unknown";
+        pendingInputs: unknown;
+        pendingWork: unknown;
+      };
+      /** At most 512 KiB of native messages. Use nextBeforeSeq to read earlier messages. */
+      messages: (ImprovementNativeMessage)[];
+      messageCount: number;
+      messagesPartial: boolean;
+      nextBeforeSeq: unknown;
+      drafting: {
+        state: "not_requested" | "requested" | "ready" | "unavailable" | "refused";
+        digest: unknown;
+        fragmentYaml: unknown;
+        reason: unknown;
+        operationId?: string;
+        sourceRequestId?: string;
+      };
+      filing: {
+        state: "not_requested" | "requested" | "plan_pr_opened" | "refused" | "uncertain";
+        operationId?: string;
+        sourceRequestId?: string;
+        receipt?: ImprovementPlanReceipt;
+        reason?: unknown;
+      };
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ImprovementDraftRequest: {
+      requestId: string;
+      goalDigest: string;
+      idempotencyKey: string;
+    };
+    ImprovementFileRequest: {
+      requestId: string;
+      goalDigest: string;
+      idempotencyKey: string;
+      draftDigest: string;
+    };
+    ImprovementAction: {
+      version: "improvement-action-v1";
+      operationId: string;
+      kind: "draft" | "file";
+      requestId: string;
+      proposalId: string;
+      actorId: string;
+      payloadHash: string;
+      goalDigest: string;
+      draftDigest: unknown;
+      requestedAt: string;
+      state: "prepared" | "requested" | "waiting" | "completed" | "refused" | "uncertain";
+      reason: unknown;
+      receipt: unknown;
+    };
+    ImprovementActionRequested: {
+      state: "requested";
+      operation: ImprovementAction;
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ImprovementActionObserved: {
+      state: "observed";
+      operation: ImprovementAction;
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ProductId: string;
+    ProductRequestId: string;
+    ProductRevision: number;
+    ProductResearchLink: {
+      label: string;
+      /** HTTP(S) only; credentials and token, access_token, api_key or x-vercel-protection-bypass query keys are refused. */
+      url: string;
+    };
+    /** Private operator proposals. Text is trimmed and must remain nonempty. Requested repository and resources confer no execution authority. The resulting stored product must fit 24576 bytes. */
+    ProductBrief: {
+      idea: string;
+      name?: string;
+      portfolio?: string;
+      objective?: string;
+      constraints?: (string)[];
+      decisions?: ({
+        key: string;
+        value: string;
+        provenance: {
+          kind: "operator" | "research" | "recommendation";
+          reference?: string;
+        };
+      })[];
+      research?: (ProductResearchLink)[];
+      requestedRepository?: {
+        owner: string;
+        name: string;
+      };
+      resourceEnvelope?: {
+        budgetUsd: number;
+        maxConcurrentBuilds: number;
+        existingSetupOnly: boolean;
+      };
+    };
+    /** At most 65536 raw request bytes. Omit id and use expectedRevision 0 to create; an update names its existing product and current revision. Ownership comes only from verifiedActor. Reusing requestId with the same normalized command replays its original receipt; a changed command conflicts. Owner, verified repository, stage evidence and execution authority fields are rejected. A changed brief advances objectiveRevision; every accepted write advances revision. */
+    ProductWrite: {
+      version: "product-intent-v1";
+      requestId: ProductRequestId;
+      id?: ProductId;
+      expectedRevision: number;
+      brief: ProductBrief;
+    };
+    ProductRepositoryIdentity: {
+      provider: "github";
+      id: number;
+      owner: string;
+      name: string;
+      defaultBranch: string;
+      visibility: "public" | "private" | "internal";
+      verifiedAt: string;
+    };
+    ProductStageEvidence: {
+      id: string;
+      stage: "research" | "repository" | "plan" | "build" | "review" | "deploy" | "improve";
+      outcome: "proposed" | "queued" | "admitted" | "running" | "succeeded" | "failed" | "unknown" | "blocked";
+      objectiveRevision: ProductRevision;
+      observedAt: string;
+      references: (ProductResearchLink)[];
+    };
+    ProductReceipt: {
+      operationId: string;
+      productId: ProductId;
+      revision: ProductRevision;
+      objectiveRevision: ProductRevision;
+      savedAt: string;
+      payloadDigest: string;
+      recordDigest: string;
+    };
+    ProductProjection: {
+      version: "product-intent-v1";
+      id: ProductId;
+      revision: ProductRevision;
+      objectiveRevision: ProductRevision;
+      createdAt: string;
+      updatedAt: string;
+      brief: ProductBrief;
+      repository: (ProductRepositoryIdentity) | (null);
+      stageEvidence: (ProductStageEvidence)[];
+      executionAuthority: "none";
+      history: (ProductReceipt)[];
+    };
+    ProductSummary: {
+      id: ProductId;
+      revision: ProductRevision;
+      objectiveRevision: ProductRevision;
+      createdAt: string;
+      updatedAt: string;
+      name: string;
+      portfolio?: string;
+    };
+    ProductListResponse: {
+      version: "product-intent-v1";
+      products: (ProductSummary)[];
+    };
+    ProductReadResponse: {
+      version: "product-intent-v1";
+      product: ProductProjection;
+    };
+    ProductReceiptResponse: {
+      version: "product-intent-v1";
+      receipt: ProductReceipt;
+    };
+    ProductWriteResponse: {
+      version: "product-intent-v1";
+      receipt: ProductReceipt;
+      replayed: boolean;
+    };
+    ProductError: {
+      version: "product-intent-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large";
+    };
+    /** The service's scope, tier or sensitivity gate refused access before the product handler. */
+    ProductAccessError: {
+      error: "unauthorized" | "forbidden";
+      required_scope?: "read" | "write";
+      required_tier?: "middle";
+      required_sensitivity?: "sensitive";
+    };
+    ProductResearchRequest: {
+      version: "product-research-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      expectedObjectiveRevision: number;
+      answers?: ({
+        questionId: string;
+        answer: string;
+      })[];
+    };
+    /** One durable research run. executionAuthority is always none; provider is the configured one or null. */
+    ProductResearchRun: {
+      id: string;
+      objectiveRevision: ProductRevision;
+      productRevision: ProductRevision;
+      outcome: "completed" | "unavailable" | "failed";
+      failure?: "provider_error" | "invalid_output" | "over_budget";
+      provider: string | null;
+      budgetUsd: number;
+      spendUsd: number;
+      sources: ({
+        label: string;
+        url: string;
+        disposition: "data";
+      })[];
+      summary?: string;
+      executionAuthority: "none";
+      startedAt: string;
+      finishedAt: string;
+    };
+    ProductResearchResponse: {
+      version: "product-research-v1";
+      productId: ProductId;
+      objectiveRevision: ProductRevision;
+      replayed: boolean;
+      run: (ProductResearchRun) | (null);
+      open: ({
+        id: string;
+        text: string;
+        origin: "catalog" | "provider";
+      })[];
+      accepted: ({
+        questionId: string;
+        text: string;
+        answer: string;
+        answeredAt: string;
+      })[];
+    };
+    ProductResearchError: {
+      version: "product-research-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "already_answered";
+    };
+    /** At most 4096 raw request bytes. action adopt requires the exact provider repositoryId and never creates; action create must not carry repositoryId. owner and name must match the product's requestedRepository when it has one. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
+    ProductRepositoryCommand: {
+      version: "product-repository-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      action: "adopt" | "create";
+      owner: string;
+      name: string;
+      visibility: "public" | "private";
+      repositoryId?: number;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+    };
+    ProductRepositoryReceipt: {
+      operationId: string;
+      productId: ProductId;
+      action: "adopt" | "create";
+      outcome: "adopted" | "created";
+      repository: ProductRepositoryIdentity;
+      completedAt: string;
+      objectiveRevision: number;
+      payloadDigest: string;
+    };
+    ProductRepositoryResponse: {
+      version: "product-repository-v1";
+      receipt: ProductRepositoryReceipt;
+      replayed: boolean;
+    };
+    ProductRepositoryError: {
+      version: "product-repository-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "repository_not_found" | "repository_conflict" | "idempotency_conflict" | "creation_denied" | "capacity" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "request_too_large" | "stale_revision" | "recovery_required";
+    };
+    /** The service's scope, tier or confirmation gate refused access before the repository handler. */
+    ProductRepositoryAccessError: {
+      error: "unauthorized" | "forbidden" | "confirm_nonce_required";
+      required_scope?: "write";
+      required_tier?: "high";
+    };
+    /** A server observation of the exact repository a create or adopt would act on, taken at observedAt. It is informational: it writes nothing and authorizes nothing, and the mutation rechecks every prerequisite itself. state ready means the exact adoption target exists, or the creation target is absent and the owner namespace allows creation. absent, conflict, stale, denied and unavailable are never ready; reasons name why. creation reports the provider's answer for the owner namespace and is not_checked when the repository read did not succeed or a product-level state decided first. */
+    ProductRepositoryPreview: {
+      version: "product-repository-preview-v1";
+      productId: ProductId;
+      revision: number;
+      objectiveRevision: number;
+      action: "adopt" | "create";
+      target: {
+        owner: string;
+        name: string;
+      };
+      state: "ready" | "absent" | "conflict" | "stale" | "denied" | "unavailable";
+      reasons: ("stale_revision" | "requested_repository_mismatch" | "product_already_bound" | "bound_repository_mismatch" | "repository_exists" | "repository_absent" | "provider_unreadable" | "creation_denied" | "creation_unknown")[];
+      repository: ({
+        provider: "github";
+        id: number;
+        owner: string;
+        name: string;
+        defaultBranch: string;
+        visibility: "public" | "private" | "internal";
+      }) | (null);
+      creation: "user" | "org" | "denied" | "unknown" | "not_checked";
+      observedAt: string;
+    };
+    ProductDeploymentRepository: {
+      id: number;
+      owner: string;
+      name: string;
+    };
+    /** At most 4096 raw request bytes. action adopt requires the exact provider projectId and never creates; action create must not carry projectId. repository must be the GitHub repository the product is verified to be bound to, and teamId the server-configured Vercel team. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. Credentials are server-held and never accepted here. */
+    ProductDeploymentCommand: {
+      version: "product-deployment-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      action: "adopt" | "create";
+      teamId: string;
+      projectName: string;
+      projectId?: string;
+      repository: ProductDeploymentRepository;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+    };
+    ProductDeploymentProject: {
+      provider: "vercel";
+      id: string;
+      name: string;
+      teamId: string;
+      repository: ProductDeploymentRepository;
+      verifiedAt: string;
+    };
+    /** Binding a project proves none of these; each stays its own independent evidence field. */
+    ProductDeploymentEvidence: {
+      sourceSha: null;
+      deployment: "none";
+      servedRoute: "unverified";
+      physicalDevice: "unverified";
+    };
+    ProductDeploymentReceipt: {
+      operationId: string;
+      productId: ProductId;
+      action: "adopt" | "create";
+      outcome: "adopted" | "created";
+      project: ProductDeploymentProject;
+      deployed: false;
+      playable: false;
+      evidence: ProductDeploymentEvidence;
+      completedAt: string;
+      objectiveRevision: number;
+      payloadDigest: string;
+    };
+    ProductDeploymentResponse: {
+      version: "product-deployment-v1";
+      receipt: ProductDeploymentReceipt;
+      replayed: boolean;
+    };
+    ProductDeploymentError: {
+      version: "product-deployment-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "project_not_found" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_conflict" | "idempotency_conflict" | "stale_revision" | "capacity" | "creation_denied" | "not_configured" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "recovery_required" | "request_too_large";
+    };
+    /** At most 4096 raw request bytes. Names one task the target repository's own plan filed for the product's approved plan evidence. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
+    ProductBuildCommand: {
+      version: "product-build-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      planEvidenceId: string;
+      taskId: string;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+    };
+    ProductBuildEvidence: {
+      outcome: "queued" | "admitted" | "running";
+      observedAt: string;
+    };
+    /** outcome is the furthest independently recorded phase; queued is never reported as running. */
+    ProductBuildReceipt: {
+      operationId: string;
+      productId: ProductId;
+      taskId: string;
+      planEvidenceId: string;
+      outcome: "queued" | "admitted" | "running";
+      repository: {
+        id: number;
+        owner: string;
+        name: string;
+      };
+      objectiveRevision: number;
+      payloadDigest: string;
+      queuedAt: string;
+      evidence: (ProductBuildEvidence)[];
+    };
+    ProductBuildResponse: {
+      version: "product-build-v1";
+      receipt: ProductBuildReceipt;
+      replayed: boolean;
+    };
+    ProductBuildError: {
+      version: "product-build-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "fleet_halted" | "kick_failed";
+    };
+    /** The service's scope, tier or confirmation gate refused access before the build handler. */
+    ProductBuildAccessError: {
+      error: "unauthorized" | "forbidden" | "confirm_nonce_required";
+      required_scope?: "write";
+      required_tier?: "high";
+    };
     /** Bounded read-only answer-v1; missing evidence is explicit and citations are dated. */
     OperatorAgentAnswer: {
       version: "answer-v1";
@@ -2679,7 +3241,7 @@ export interface components {
       queueMs: number | null;
       executionMs: number | null;
       exit: number | null;
-      reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | "memory-budget-shortfall" | null | null;
+      reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | "memory-budget-shortfall" | "admission-rank" | null | null;
       attempts: number;
       completions: number;
       failures: number;
@@ -3627,6 +4189,173 @@ export interface components {
       requiredSamples: number | null;
       ready: boolean;
       reason: string;
+    };
+    CodeHealthView: {
+      view: "code-health";
+      version: 1;
+      generatedAt: string;
+      asOf: (string) | (null);
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: CodeHealthViewData;
+    };
+    CodeHealthViewData: {
+      version: "code-health-view-v1";
+      /** all, or a configured owner/repository */
+      repository: string;
+      expectedRepositories: (string)[];
+      unresolvedInstances: (string)[];
+      repositories: ({
+        repository: string;
+        snapshotId: (string) | (null);
+        state: "measured" | "partial" | "stale" | "not_collected" | "unavailable" | "unauthorized" | "rate_limited";
+        summary: ({
+          met: number;
+          assessed: number;
+          expected: number;
+          healthy: (boolean) | (null);
+        }) | (null);
+        urgentFindings: {
+          value: (number) | (null);
+          precision: "exact" | "at_least" | "unavailable";
+          /** The measured CodeQL scope; this is not a comprehensive security assessment. */
+          scope: string;
+        };
+        measuredAt: (string) | (null);
+        analyzedSha: (string) | (null);
+        currentSha: (string) | (null);
+        freshness: "fresh" | "stale" | "unavailable";
+        lastAttemptAt: (string) | (null);
+        nextCheckDueAt: (string) | (null);
+        collection: ({
+          state: "none";
+        }) | ({
+          state: "failed";
+          startedAt: string;
+          finishedAt: string;
+          snapshotId: (string) | (null);
+          reason: string;
+          failureKind?: "unauthorized" | "rate_limited" | "unavailable";
+        }) | ({
+          state: "unavailable";
+          reason: string;
+        });
+        reason: (string) | (null);
+        sourceClocks: ({
+          kind: string;
+          state: "complete" | "partial" | "stale" | "not_collected" | "unavailable";
+          measuredAt: (string) | (null);
+          analyzedSha: (string) | (null);
+        })[];
+      })[];
+      snapshotId: (string) | (null);
+      isCurrentSnapshot: (boolean) | (null);
+      assessment: ({
+        version: "code-health-v1";
+        repository: string;
+        analyzedSha: string;
+        currentSha: string;
+        baselineSha: (string) | (null);
+        policyVersion: string;
+        observedAt: string;
+        nextDueAt: (string) | (null);
+        state: "measured" | "partial" | "stale" | "not_collected" | "unavailable";
+        sources: ({
+          id: string;
+          kind: string;
+          required: boolean;
+          state: "complete" | "partial" | "stale" | "not_collected" | "unavailable";
+          analyzedSha: (string) | (null);
+          observedAt: (string) | (null);
+          scopeHash: (string) | (null);
+          toolVersion: (string) | (null);
+          rulesVersion: (string) | (null);
+          configHash: (string) | (null);
+          baseline: ({
+            sha: string;
+            scopeHash: string;
+            toolVersion: string;
+            rulesVersion: string;
+            configHash: string;
+          }) | (null);
+          exclusions: (string)[];
+          reason: (string) | (null);
+        })[];
+        checks: ({
+          id: string;
+          category: "maintainability" | "security" | "reliability" | "tests";
+          state: "met" | "not_met" | "not_measured";
+          sourceIds: (string)[];
+          reason: string;
+        })[];
+        findings: ({
+          fingerprint: string;
+          sourceId: string;
+          severity: "critical" | "high" | "medium" | "low";
+          category: string;
+          status: "new" | "existing" | "unknown";
+          path: string;
+          title: string;
+          effortMinutes: (number) | (null);
+          estimateKind: ("modeled") | (null);
+        })[];
+        summary: {
+          met: number;
+          assessed: number;
+          expected: number;
+          healthy: (boolean) | (null);
+        };
+      }) | (null);
+      findingCount: (number) | (null);
+      urgentFindings: {
+        value: (number) | (null);
+        precision: "exact" | "at_least" | "unavailable";
+        /** The measured CodeQL scope; this is not a comprehensive security assessment. */
+        scope: string;
+      };
+      opportunities: ({
+        id: string;
+        snapshotId: string;
+        repository: string;
+        proposalId: string;
+        ruleId: string;
+        title: string;
+        consequence: string;
+        expectedResult: string;
+        acceptanceIdeas: (string)[];
+        uncertainty: (string)[];
+        mayPlan: boolean;
+        /** Total stable findings in this group; evidence entries may be paged. Effort estimates describe the whole group. */
+        evidenceCount: number;
+        evidence: ({
+          fingerprint: string;
+          sourceId: string;
+          scanId: string;
+          analyzedSha: (string) | (null);
+          observedAt: (string) | (null);
+          severity: "critical" | "high" | "medium" | "low";
+          title: string;
+          path: string;
+        })[];
+        effortMinutes: (number) | (null);
+        estimateKind: ("modeled") | (null);
+        relatedWork: ({
+          repository: string;
+          proposalId: string;
+          taskId?: string;
+          prUrl?: string;
+          threadId?: string;
+        })[];
+      })[];
+      relatedWorkState: "reported" | "partial" | "stale" | "unavailable" | "not_collected";
+      relatedWorkAsOf: (string) | (null);
+      relatedWorkReason: (string) | (null);
+      /** Current source evidence can support a planning conversation; this does not approve, file or execute work. */
+      planningAvailable: boolean;
+      freshness: "fresh" | "stale" | "unavailable";
+      page: {
+        nextCursor: (string) | (null);
+      };
     };
     /** GET /v1/views/repositories (docs/views.md, src/lib/repositories-view.ts): the repository portfolio across every instance serve holds, in one body. Each instance's `summary` IS its GET /v1/i/<instance>/repos/summary body, computed by the read-model worker from that instance's projected `repo_row` table; `projects` precomputes the console's grouping and its "worst is <repo>" line. Dark until state/read-model/switches.json sets `repositories` to `serve`. Version 2 carries no clock stamp in `data`: each summary's `generated_at` is its `repositories:<instance>` source's `asOf`, so the ETag moves only when the content does. */
     RepositoriesView: {
@@ -5704,6 +6433,163 @@ export interface components {
 }
 
 export interface paths {
+  "/v1/improvements/threads": {
+    post: {
+      responses: {
+          "200": ImprovementSavedResult;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/thread": {
+    get: {
+      responses: {
+          "200": ImprovementThreadView;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/threads/draft": {
+    post: {
+      responses: {
+          "202": ImprovementActionRequested;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/threads/file": {
+    post: {
+      responses: {
+          "202": ImprovementActionRequested;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": HighTierRefusal;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/action": {
+    get: {
+      responses: {
+          "200": ImprovementActionObserved;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/products": {
+    get: {
+      responses: {
+          "200": (ProductListResponse) | (ProductReadResponse) | (ProductReceiptResponse);
+          "400": ProductError;
+          "401": ProductAccessError;
+          "403": (ProductError) | (ProductAccessError);
+          "404": ProductError;
+          "503": ProductError;
+        };
+    };
+    post: {
+      responses: {
+          "200": ProductWriteResponse;
+          "400": ProductError;
+          "401": ProductAccessError;
+          "403": (ProductError) | (ProductAccessError);
+          "404": ProductError;
+          "409": ProductError;
+          "413": ProductError;
+          "503": ProductError;
+        };
+    };
+  };
+  "/v1/products/research": {
+    post: {
+      responses: {
+          "200": ProductResearchResponse;
+          "400": ProductResearchError;
+          "401": ProductAccessError;
+          "403": (ProductResearchError) | (ProductAccessError);
+          "404": ProductResearchError;
+          "409": ProductResearchError;
+          "413": ProductResearchError;
+          "503": ProductResearchError;
+        };
+    };
+  };
+  "/v1/products/repository": {
+    post: {
+      responses: {
+          "200": ProductRepositoryResponse;
+          "400": ProductRepositoryError;
+          "401": ProductRepositoryAccessError;
+          "403": (ProductRepositoryError) | (ProductRepositoryAccessError);
+          "404": ProductRepositoryError;
+          "409": ProductRepositoryError;
+          "413": ProductRepositoryError;
+          "503": ProductRepositoryError;
+        };
+    };
+  };
+  "/v1/products/repository-preview": {
+    get: {
+      responses: {
+          "200": ProductRepositoryPreview;
+          "400": ProductRepositoryError;
+          "401": ProductAccessError;
+          "403": (ProductRepositoryError) | (ProductAccessError);
+          "404": ProductRepositoryError;
+          "503": ProductRepositoryError;
+        };
+    };
+  };
+  "/v1/products/deployment": {
+    post: {
+      responses: {
+          "200": ProductDeploymentResponse;
+          "400": ProductDeploymentError;
+          "401": ProductAccessError;
+          "403": (ProductDeploymentError) | (ProductAccessError);
+          "404": ProductDeploymentError;
+          "409": ProductDeploymentError;
+          "413": ProductDeploymentError;
+          "503": ProductDeploymentError;
+        };
+    };
+  };
+  "/v1/products/build": {
+    post: {
+      responses: {
+          "200": ProductBuildResponse;
+          "400": ProductBuildError;
+          "401": ProductBuildAccessError;
+          "403": (ProductBuildError) | (ProductBuildAccessError);
+          "404": ProductBuildError;
+          "409": ProductBuildError;
+          "413": ProductBuildError;
+          "503": ProductBuildError;
+        };
+    };
+  };
   "/v1/analytics": {
     get: {
       responses: {
@@ -6867,6 +7753,19 @@ export interface paths {
         };
     };
   };
+  "/v1/views/daily-progress": {
+    get: {
+      responses: {
+          "200": DailyProgressView;
+          "304": undefined;
+          "400": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+          "503": undefined;
+        };
+    };
+  };
   "/v1/views/analytics": {
     get: {
       responses: {
@@ -6885,6 +7784,19 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": undefined;
+        };
+    };
+  };
+  "/v1/views/code-health": {
+    get: {
+      responses: {
+          "200": CodeHealthView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+          "503": undefined;
         };
     };
   };

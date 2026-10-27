@@ -1,0 +1,125 @@
+- id: W1-T10737
+  title: "A HELD BOOT OF THE NEW BUILD IS A HEALTHY DEPLOY — under a fleet PAUSE the kickstarted daemon writes daemon.boot_held and never daemon.boot, so the health window reads 'no daemon.boot heartbeat' and rolls back a good build (2026-10-26 16:28:31Z, 8c1ad448e -> 0118dc85a); a held boot that names the new head counts as healthy, while a crash or restart storm still rolls back"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, what the deploy health window accepts as a live boot; the rollback path, the backstops and lastGoodBootSha's daemon.boot-only evidence are unchanged
+  band_meaning: span
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: read-only host ledger evidence of a deploy.unhealthy_rollback whose only fault was the fleet's own PAUSE"
+  plan_refs: [W1-T244, W1-T5722, W1-T4194, W1-T5343, W1-T3245, W1-T10736, "issues #14475-#14477"]
+  files:
+    - src/lib/deployer.ts
+    - src/cli/commands/daemon.ts
+    - src/lib/ledger.ts
+    - test/deploy/a-held-boot-of-the-new-build-is-a-healthy-deploy.test.ts
+    - test/daemon/a-held-boot-names-the-head-it-loaded.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main 1e7188db5, and read-only on `ssh remudero`
+    (~/rmd-state2/state/ledger.ndjson, niced, bounded greps of the live ledger).
+
+    THE ROLLBACK.
+    `{"ts":"2026-10-26T16:28:31.035Z","step":"deploy.unhealthy_rollback","failed":"8c1ad448e","reason":"no daemon.boot heartbeat within the health window","rolling_back_to":"0118dc85a","observed_rows":["daemon.paths","daemon.boot_held"],"anchor":"booted","actor":"host_automation"}`
+    - The kickstart was `deploy.kickstart` at 16:25:26.844Z. The new process was DAEMON-1793031930844
+      (`daemon.start` 16:26:31.853Z). The fleet was paused (`rmd pause --fleet` from about 15:15Z, resumed
+      about 16:30Z).
+    - The verdict came 184 s after the kickstart: the W1-T5722 backstop of 180 s plus polling.
+
+    THE CODE.
+    - src/cli/commands/daemon.ts:1054-1063: when `resolveFleetControlHold` finds a PAUSE or STOP, the process
+      logs `daemon.boot_held` {control, detail, reason} and runs only the lock sweep. :1065 `daemonBoot` runs
+      only in the else-branch.
+    - So a process that starts held never writes `daemon.boot`, not even after the hold lifts.
+    - `daemon.boot_held` carries no head sha. The loaded sha is known at :491 (`daemonLoadedCodeSha`), and
+      `daemon.boot` records it as `head_sha` (src/lib/daemon.ts:3211-3219).
+    - src/lib/deployer.ts:1485 BOOT_PROGRESS_STEPS and :1492 BOOT_IN_PROGRESS_WINDOW_MS (W1-T5722): a
+      `daemon.boot_held` row only EXTENDS the wait.
+    - :3087-3101 `waitBootHealth` returns `bootObserved: boots >= 1`, counting `daemon.boot` alone (:1534-1551).
+    - :1595-1600 `assessBootHealth` then returns "no daemon.boot heartbeat within the health window". :2359-2374
+      logs the rollback, resets to the newest other `daemon.boot` sha and restarts.
+    - test/the-deploy-health-window-fits-a-measured-boot.test.ts:81-111 pins boot_held only as an extension,
+      followed by a real boot.
+    - Retention: src/lib/ledger.ts:1044-1046 `isHealthOrDeployStep` keeps `daemon.boot` and `deploy.*` for the
+      health window, but not `daemon.boot_held`. A rotation inside the window can drop the very row the check
+      reads.
+
+    DID THE ROLLBACK CAUSE THE 16:28 ESCALATION BURST? NO.
+    - The `pr.stuck` rows behind #14475/#14476 were written at 16:28:20.082Z and 16:28:20.182Z by
+      DAEMON-1793031930844, the held new build, in a review-only light pass (`sweep.pass` surface light). That
+      is 11 s BEFORE the rollback row.
+    - Its `escalation.issue_opened` rows at 16:28:32.029Z and 16:28:36.750Z carry triage_subject.runId
+      DAEMON-1793031930844, and its last rows are 16:28:48Z. The rollback then restarted the process.
+    - #14477 (16:35:28Z) came from the next process, DAEMON-1793032203546 (`daemon.start` 16:31:04.846Z). Its
+      first full pass found #14465's own-red stage over its bound. The restart added the gap from 16:28:48Z to
+      16:31:04Z to that stage's age, but the stage's age was a clock defect either way, filed as W1-T10736.
+
+    THE ROLLBACK DID NOT STICK.
+    - The process after the rollback booted `head_sha` 8c1ad448 at 16:31:13.328Z: the "failed" build itself.
+    - `deploy.skip` at 16:30:15Z already reads install HEAD == origin/main, with running head 0118dc85a (the
+      newest `daemon.boot` sha, since the held process wrote none).
+    - At 16:35:22Z the supervisor wrote `deploy.failure_retracted` and "up-to-date".
+    - So the cost was a restart of a held, healthy daemon, an alert and a DEPLOY_LAST_FAILED record. The
+      cost was not a downgrade.
+
+    MERGE NOTE. Open PR #14467 (W1-T10075) restructures src/lib/deployer.ts into deploy steps. It does not
+    touch the health window. If it lands first, merge origin/main and keep both sides.
+  design: |
+    1. THE HELD BOOT NAMES ITS HEAD. `daemon.boot_held` also records `head_sha` = the process's loaded code
+       sha (the value `daemon.boot` would carry), when it is known.
+    2. A HELD BOOT OF THE NEW BUILD IS HEALTHY. In the health read (readBootProgressAfter / waitBootHealth),
+       a `daemon.boot_held` row after the kickstart whose `head_sha` is the same commit as `toHead` is a
+       live boot of a HELD instance.
+       - The verdict is healthy. `deploy.ok` carries `held: true`, the hold's control, and the observed
+         rows.
+       - The window may end at that row, as it does for a real boot, but still for the whole window when it
+         watches for a storm (point 3).
+       - A held row with no `head_sha`, or with a different sha, is still only an extension, as today.
+    3. A CRASH STILL ROLLS BACK. Each process boot after the kickstart counts toward the crash-loop count,
+       whether it wrote `daemon.boot` or a matching `daemon.boot_held`. So repeated held boots inside the
+       window are a restart storm and roll back. No row at all still fails at the ordinary window. A boot in
+       progress (`daemon.paths` only) that never reaches either row still fails at the backstop.
+    4. EVIDENCE OF RUNNABILITY STAYS STRICT. `readLastGoodBootSha` (the rollback target) keeps reading
+       `daemon.boot` only, because a held boot ran none of daemonBoot's assertions. `readLatestBootSha` (the
+       running-head read behind `stale_running_daemon`) reads the newest of `daemon.boot` and a sha-bearing
+       `daemon.boot_held`. That way a held new build is not reported as running the old head.
+    5. RETENTION. `daemon.boot_held` is kept for the health window like `daemon.boot`
+       (src/lib/ledger.ts `isHealthOrDeployStep`).
+    6. No window, backstop or crash threshold changes. There are no fixed thresholds.
+  prompt: |
+    Write the two NEW test files first and watch each new test fail at base: restore the base code with
+    `git show origin/main:<path>`, never stash.
+    - test/deploy/a-held-boot-of-the-new-build-is-a-healthy-deploy.test.ts drives realDeployDeps'
+      `waitBootHealth` with a fake ledger and sleep, as test/the-deploy-health-window-fits-a-measured-boot.test.ts
+      does, and drives `runDeployCycle` with cycle deps as that file's `cycleDeps` does.
+    - test/daemon/a-held-boot-names-the-head-it-loaded.test.ts drives `daemonCommand` under an injected hold, as
+      test/daemon-pause-before-admission.test.ts (around :420-456) does.
+    Keep these exact paths, the folders `rmd test-place` computes; the proofs grep them. Import through
+    `#src/*`. Every new test title starts with `W1-T10737: ` exactly as in the acceptance proofs.
+    The rollback case must assert that `resetHard` was NOT called and that `deploy.ok` carries `held: true`.
+    It must also assert that the same fixture with a `head_sha` of another commit DOES roll back, so a
+    fixture that never reaches the health read fails loudly.
+    Keep test/the-deploy-health-window-fits-a-measured-boot.test.ts green unchanged. Run the targeted suites,
+    test/deployer.test.ts, and then `rmd preflight --fast` on the committed tree before the first push.
+  acceptance:
+    - claim: "a kickstart whose new build boots held under a fleet PAUSE (daemon.boot_held naming the new head, no daemon.boot) is deployed with deploy.ok held:true and never rolled back, while the same held row naming another head still rolls back"
+      proof: 'grep: test("W1-T10737: a held boot of the new build is a healthy deploy, not a rollback" in test/deploy/a-held-boot-of-the-new-build-is-a-healthy-deploy.test.ts'
+    - claim: "repeated held boots inside the health window are a restart storm and still roll back"
+      proof: 'grep: test("W1-T10737: repeated held boots in the window still roll back as a crash loop" in test/deploy/a-held-boot-of-the-new-build-is-a-healthy-deploy.test.ts'
+    - claim: "a daemon that starts under a fleet hold records daemon.boot_held with the head sha it loaded"
+      proof: 'grep: test("W1-T10737: a held boot names the head it loaded" in test/daemon/a-held-boot-names-the-head-it-loaded.test.ts'
+  falsifier: |
+    Count only `daemon.boot` again, and the held-deploy case must fail at the rollback. Count held boots as
+    healthy but leave them out of the crash count, and the storm case must fail. Drop `head_sha` from
+    `daemon.boot_held`, and the daemon case must fail.
+    GUARDS that held at base and must still hold:
+    - no boot-progress row at all still rolls back at the ordinary window;
+    - `daemon.paths` alone still rolls back at the backstop;
+    - `daemon.boot_held` followed by `daemon.boot` is still healthy (test/the-deploy-health-window-fits-a-measured-boot.test.ts:81-111);
+    - `readLastGoodBootSha` still ignores held rows;
+    - `assessBootHealth` keeps its contract (test/deployer.test.ts:122).
+    Remove each guard's production branch in turn: its case must fail. Restore, and require zero failures.

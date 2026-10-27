@@ -596,8 +596,9 @@ test("a narrow selector edge shard declares the test that covers its edge, so di
   assert.deepEqual(task.files, ["src/lib/affected-suites.ts", SELECTOR_SHADOW_MISS_TEST_PATH]);
   assert.equal(task.risk, "low", "declaring the test file must not raise the edge repair's risk");
   const proofs = (task.acceptance ?? []).map((a) => a.proof);
-  assert.ok(proofs.includes("grep: test/prompt-render\\.test\\.ts in src/lib/affected-suites.ts"), proofs.join(" | "));
-  assert.ok(proofs.includes(`grep: test/prompt-render\\.test\\.ts in ${SELECTOR_SHADOW_MISS_TEST_PATH}`), proofs.join(" | "));
+  assert.deepEqual(proofs, Array(2).fill("unit test: W1-T9041: the selector covers the recorded suite for every recorded edge"));
+  assert.ok(task.note?.includes(`asserts ${miss.file} is selected for each recorded edge`));
+  assert.ok(task.note?.includes(SELECTOR_SHADOW_MISS_TEST_PATH));
   assert.match(task.note ?? "", /diff-coverage blocks an edge no test exercises/);
 });
 
@@ -857,7 +858,7 @@ const operatorShard = (id: string, over: { title?: string; files?: string[] } = 
 test("an operator verify human record is released by a proceed ruling and stays parked on an escalation", async () => {
   const root = planDir({
     "W1-T9100-x.yaml": operatorShard("W1-T9100"),
-    "W1-T9101-x.yaml": operatorShard("W1-T9101", { title: "purge every archive in state" }),
+    "W1-T9101-x.yaml": operatorShard("W1-T9101", { title: "purge every archive in state", files: ["src/lib/archiver.ts"] }),
   });
   try {
     const seen: RiskJudgeInput[] = [];

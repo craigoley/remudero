@@ -281,17 +281,17 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     },
   },
   {
-    file: "src/lib/hand-worktree.ts",
-    site: "createHandWorktree",
-    creates: "a HAND build's run-<taskId>-<epochMs> worktree off fresh origin/main, under an operator-named parent",
+    file: "src/lib/cow-worktree.ts",
+    site: "gitWorktreeAdd",
+    creates: "a worktree off a caller-named base whose unchanged tracked files are cloned copy-on-write from a donor checkout",
     disposition: {
       kind: "exempt",
       because:
-        "worktreeAdd SYMLINKS node_modules (linkWorktreeNodeModules), and a hand build must be able to " +
-        "`npm ci` in its worktree: ensureInstallFresh refuses that through a symlink (SymlinkInstallRefusal) " +
-        "because an install's clear phase empties the shared tree. This site hard-links (`cp -al`) instead. " +
-        "It cuts the same `--no-track` branch off origin/main right after its own fetch, so the currency " +
-        "question is answered by that fetch, and no dispatched worker ever runs in the tree (W1-T5533).",
+        "addCowWorktree is the shared materializer for `rmd worktree add` and hand-worktree: it cuts a " +
+        "`--no-track` branch from the base its CALLER names, so currency against origin/main is the caller's " +
+        "question (hand-worktree fetches origin/main right before it, W1-T5533), and no dispatched worker " +
+        "runs in the tree. It cannot use worktreeAdd, which symlinks node_modules and checks out every file " +
+        "itself; this site adds --no-checkout and lets git write only the paths the clone pass did not (W1-T10257).",
     },
   },
   {

@@ -178,7 +178,7 @@ test("W1-T4439: a missed failure files a task naming the missing edge", async ()
   assert.match(task, /origin: "selector-shadow-miss:test\/a\.test\.ts"/);
   assert.match(task, /verify: human/);
   const filed = parseYaml(task) as Array<{ acceptance: Array<{ proof: string }> }>;
-  assert.equal(filed[0]!.acceptance[0]!.proof, "grep: test/a\\.test\\.ts in src/lib/affected-suites.ts");
+  assert.equal(filed[0]!.acceptance[0]!.proof, "unit test: W1-T9001: the selector covers the recorded suite for every recorded edge");
   assert.match(landed[0]!.body, /## Acceptance/);
   assert.doesNotMatch(landed[0]!.body, /Remudero-Task:/);
   const proof = landed[0]!.body.match(/proof: grep: (.+) in plan\/tasks\.d\/w1-t9001-selector-shadow-miss\.yaml/)?.[1];

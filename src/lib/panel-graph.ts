@@ -25,8 +25,8 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { inboxBoardReferents } from "./inbox-board-referents.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
-import { basename, dirname, join, relative } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   loadPlan,
@@ -67,16 +67,20 @@ import {
   listFeedback,
   readFeedbackEntry,
   recentFeedbackFewShot,
+  qualifyCanonicalGrillContinuation,
   setFeedbackStatus,
   validateFeedbackExpansion,
+  validateDecisionSummary,
   type FeedbackEntry,
   type FeedbackExpanderDeps,
   type FeedbackExpansion,
   type FeedbackOrigin,
   type FeedbackStatus,
+  type CanonicalGrillContinuation,
 } from "./feedback.js";
 import {
   queueFeedbackRecord,
+  landFeedbackStatusContent,
   overlayQueuedFeedback,
   overlayQueuedFeedbackEntries,
   queuedFeedbackLandings,
@@ -110,7 +114,7 @@ import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUni
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, validInboxSnapshot, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
-import { inboxOwner, inboxSender, latestInstant, type InboxSender } from "./inbox-owner.js";
+import { classifiedInboxOwner, hasUnansweredInboxQuestion, inboxOwner, inboxSender, isAgeOnlyInboxInformation, latestInstant, type InboxSender } from "./inbox-owner.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, verdictReceiptOf, PROPOSAL_VERDICT_RECEIPT_STEPS, type VerdictReceipt } from "./inbox-verdict-receipts.js";
 import { judgementFamily } from "./machine-filing-judge.js";
@@ -273,6 +277,100 @@ export function reconcileFeedbackEntries(
 export function acceptMergedFeedback(root: string, statusGithub: GitHub, land: LandFeedbackOpts): string[] {
   const proposed = listFeedback(root, { status: "proposed" });
   return reconcileFeedbackEntries(root, proposed, statusGithub, land).filter((entry) => entry.status === "accepted").map((entry) => entry.id);
+}
+
+
+/** A hand-route marker proposes a reviewed lifecycle change; it never decides a live entry. */
+export interface HandRouteFeedbackOutcome {
+  id: string;
+  outcome: "proposed" | "already_queued" | "refused" | "unknown";
+  reason: string;
+  evidence?: { pr: string; head: string; files: string[] };
+}
+
+/**
+ * W1-T10625: canonical marker: a single physical line `Resolves feedback \`fb-…\``.
+ * One repository-local new entry, one merged PR and its complete exact-head source evidence may
+ * propose `accepted` through the existing landing queue. The checkout and GET projection stay
+ * untouched until the ordinary review/merge path lands that proposal. Nothing here fetches.
+ */
+export function proposeHandRouteFeedback(
+  root: string,
+  github: GitHub,
+  repository: string,
+  land: LandFeedbackOpts & { stateRoot: string },
+): HandRouteFeedbackOutcome[] {
+  const entries = listFeedback(root, { status: "new" });
+  if (entries.length === 0) return [];
+  const unknown = (reason: string): HandRouteFeedbackOutcome[] => entries.map(entry => ({ id: entry.id, outcome: "unknown", reason }));
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) return unknown("invalid_repository_identity");
+  let merged: PrRef[] | null | undefined;
+  try {
+    merged = github.listMergedHeadBranches?.();
+    if (github.readFailed?.()) return unknown("merged_snapshot_unavailable");
+  } catch {
+    const reason = "merged_snapshot_read_failed";
+    return unknown(reason);
+  }
+  if (!merged) return unknown("merged_snapshot_unavailable");
+  let queued: ReturnType<typeof readQueuedFeedbackRecords>;
+  try {
+    queued = readQueuedFeedbackRecords(land.stateRoot);
+  } catch {
+    const reason = "landing_queue_unreadable";
+    return unknown(reason);
+  }
+  const marker = /^Resolves feedback `(?<id>fb-[0-9]{13}-[0-9a-f]{6})`[ \t]*\r?$/;
+  const candidates = new Map<string, PrRef[]>();
+  for (const pr of merged) {
+    const lines = (pr.body ?? "").split("\n").filter(line => /^Resolves feedback\b/.test(line));
+    const match = lines.length === 1 ? marker.exec(lines[0]!) : null;
+    if (match?.groups?.id) candidates.set(match.groups.id, [...(candidates.get(match.groups.id) ?? []), pr]);
+  }
+  return entries.map((entry): HandRouteFeedbackOutcome => {
+    const refuse = (reason: string): HandRouteFeedbackOutcome => ({ id: entry.id, outcome: "refused", reason });
+    const uncertain = (reason: string): HandRouteFeedbackOutcome => ({ id: entry.id, outcome: "unknown", reason });
+    const relPath = feedbackEntryRepoPath(entry.id);
+    if (queued.has(relPath)) return { id: entry.id, outcome: "already_queued", reason: "pending_feedback_record_preserved" };
+    const matches = candidates.get(entry.id) ?? [];
+    if (matches.length !== 1) return refuse(matches.length ? "ambiguous_merged_pr_identity" : "explicit_marker_absent_or_malformed");
+    const pr = matches[0]!;
+    const identity = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/([1-9][0-9]*)$/.exec(pr.url);
+    if (!identity || identity[1] !== repository || !Number.isSafeInteger(Number(identity[2])) || Number(identity[2]) !== pr.number) return refuse("foreign_or_invalid_pr_identity");
+    if (pr.state !== "MERGED") return refuse("pr_not_merged");
+    if (!pr.headRefOid || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(pr.headRefOid)) return uncertain("merged_head_unavailable");
+    let evidence: ReturnType<NonNullable<GitHub["changedFileEvidence"]>>;
+    try {
+      const current = github.prByRef(pr.url);
+      if (!current || current.url !== pr.url || current.number !== pr.number || current.state !== "MERGED" || current.headRefOid !== pr.headRefOid || current.body !== pr.body) return uncertain("merged_snapshot_identity_changed");
+      evidence = github.changedFileEvidence?.(pr.url) ?? { status: "unknown", reason: "qualified_cache_unavailable" };
+    } catch {
+      const reason = "source_evidence_read_failed";
+      return uncertain(reason);
+    }
+    if (evidence.status !== "complete") return uncertain(evidence.reason);
+    if (evidence.repository !== repository || evidence.prNumber !== pr.number || evidence.headRefOid !== pr.headRefOid || evidence.prState !== "MERGED" || evidence.complete !== true || evidence.source !== "github_rest_pull_files_paginated" || evidence.freshness !== "immutable_merged_head" || !Number.isFinite(evidence.observedAt)) return uncertain("source_evidence_binding_mismatch");
+    // Limit kind: protocol — the pull-files endpoint cannot attest completeness at its 3,000-file ceiling.
+    if (evidence.files.length === 0 || evidence.files.length >= 3_000 || new Set(evidence.files).size !== evidence.files.length || evidence.files.some(file => !file || file.includes("\0") || file.split("/").some(part => part === "" || part === "." || part === ".."))) return uncertain("source_evidence_incomplete");
+    if (!evidence.files.some(file => /^(?:src|scripts|packages|deploy)\//.test(file) || file.startsWith(".github/workflows/"))) return refuse("no_product_source_change");
+    const receipt = { pr: pr.url, head: pr.headRefOid, files: [...evidence.files] };
+    const description = "Verified merged source receipt: " + JSON.stringify(receipt);
+    const summary = validateDecisionSummary(entry.summary ? { ...entry.summary, what_happened: entry.summary.what_happened + "\n" + description } : {
+      headline: "Review the hand-route feedback closure",
+      what_happened: description,
+      decision: "Review this lifecycle proposal before accepting the feedback as resolved.",
+      options: [
+        { label: "Accept", consequence: "Accept the lifecycle change through the normal reviewed landing." },
+        { label: "Keep", consequence: "Keep the feedback open if this source repair does not resolve it." },
+      ],
+    });
+    if (!summary) return refuse("source_receipt_exceeds_existing_summary_contract");
+    const result = landFeedbackStatusContent(root, relPath, stringifyYaml({ ...entry, status: "accepted", proposal_pr: pr.url, summary }), land);
+    if (result.error) return uncertain("landing_queue_not_confirmed: " + result.error);
+    if (result.queued === undefined) return uncertain("landing_queue_acknowledgement_missing");
+    if (!result.queued.includes(relPath)) return uncertain("landing_queue_expected_path_absent");
+    return { id: entry.id, outcome: "proposed", reason: "verified_source_queued_for_review", evidence: receipt };
+  });
 }
 
 /**
@@ -488,7 +586,26 @@ export interface FeedbackReplyInput {
 export function captureFeedbackReply(
   deps: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
   input: FeedbackReplyInput,
+  continuation?: CanonicalGrillContinuation,
 ): { entry: FeedbackEntry; landingError?: string } {
+  if (continuation !== undefined) {
+    const id = input.replyTo;
+    if (id === undefined || !input.submissionKey || deps.feedbackLand === undefined || continuation.root !== resolve(deps.root)
+      || continuation.inboxRoot !== resolve(deps.inboxRoot)) {
+      throw new Error("canonical grill continuation has no matching scoped parent and stable reply identity");
+    }
+    // Last check before the first capture: preserve a newer queued decision or competing
+    // answer instead of creating a reply against evidence that changed during the async read.
+    const queued = readQueuedFeedbackRecords(deps.inboxRoot);
+    const current = qualifyCanonicalGrillContinuation(deps.root, deps.inboxRoot, id,
+      queued.get(feedbackEntryRepoPath(id)), continuation.canonical);
+    if (current === undefined || current.pendingFingerprint !== continuation.pendingFingerprint
+      || current.canonicalFingerprint !== continuation.canonicalFingerprint) {
+      throw new Error("canonical grill continuation refused: captured pending identity or canonical metadata changed");
+    }
+    const refusal = replyRefusalFor(deps.root, id, queued, () => JSON.stringify(current.canonical));
+    if (refusal) throw new Error(`canonical grill continuation refused: ${refusal.refused}`);
+  }
   const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
   const land = { stateRoot: deps.inboxRoot };
   const entry = captureFeedback(deps.root, {
@@ -505,7 +622,8 @@ export function captureFeedbackReply(
     const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
     const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
     if (input.replyTo !== undefined) {
-      setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id, ...(deps.feedbackLand ? { land } : {}) });
+      setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id,
+        ...(continuation ? { canonicalBase: continuation.canonical } : {}), ...(deps.feedbackLand ? { land } : {}) });
     }
     const inQueue = new Set(queuedFeedbackLandings(deps.inboxRoot));
     const unqueued = [entry.id, ...flipped].map(feedbackEntryRepoPath).filter((rel) => !inQueue.has(rel));
@@ -2561,6 +2679,8 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   const stores = classified.stores ?? readInboxStores(inboxRoot, proposals, { plan: classified.plan, ledgerLines });
   // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
   const plainStore = stores.plainMessages;
+  const restoredForReview = new Set(classifications.filter(c => c.retirement?.state === "restored_for_review").map(c => c.proposalId));
+  const capturedById = new Map(classifications.map(c => [c.proposalId, c]));
   // W1-T8825: who sent each item and when, from stored instants only.
   const senderOf = (id: string): InboxSender => {
     const known = stores.provenance?.[id];
@@ -2568,10 +2688,11 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   };
 
   // W1-T8826: the plain message with each option's intent and, per lane, the route that performs it — attached here, never stored.
-  const servedPlain = (proposal: { id: string; summary: string }, lane: InboxOptionLane) => servePlainOptions(plainInboxMessage(proposal, plainStore), lane, proposal.id);
+  const servedPlain = (proposal: Proposal, lane: InboxOptionLane) => servePlainOptions(plainInboxMessage(proposal, plainStore), lane, proposal.id,
+    isAgeOnlyInboxInformation(proposal) && classifiedInboxOwner(proposal, capturedById.get(proposal.id) ?? {}) === "fleet");
   // W1-T8950: an operator item's recommended decision, current for its summary and lane, with its route attached here.
   const recommended = (proposal: { id: string; summary: string }, lane: InboxOptionLane): { recommendation?: ServedRecommendation } => {
-    const recommendation = recommendationFor(proposal, lane, stores.recommendations ?? {});
+    const recommendation = recommendationFor(proposal, lane, stores.recommendations ?? {}, capturedById.get(proposal.id));
     return recommendation ? { recommendation } : {};
   };
 
@@ -2652,9 +2773,9 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
   // `fleet` holds the fleet's own findings with the lane each sits in. The top-level
   // lanes retain records; only the shared projection selects the operator's asks (W1-T5340).
-  const restoredForReview = new Set(classifications.filter(c => c.retirement?.state === "restored_for_review").map(c => c.proposalId));
-  const isOperator = (item: { proposalId: string }) => restoredForReview.has(item.proposalId) || inboxOwner({ id: item.proposalId }) === "operator";
-  const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)));
+  const ownerOf = (id: string) => restoredForReview.has(id) ? "operator" as const : classifiedInboxOwner(byId.get(id) ?? { id }, capturedById.get(id) ?? {});
+  const isOperator = (item: { proposalId: string }) => ownerOf(item.proposalId) === "operator";
+  const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)), "core", ownerOf);
   const asks = new Set(humanGates.gates.map((gate) => decodeURIComponent(gate.key.split(":")[2]!)));
   const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
   const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter(isOperator)
@@ -2830,11 +2951,12 @@ function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan
   for (const c of classifications) {
     const state = CLASSIFICATION_TO_THREAD_STATE[c.state];
     const proposal = proposals.find((p) => p.id === c.proposalId);
-    if (!state || !proposal || inboxOwner(proposal) !== "operator" && !c.retirement) continue;
+    if (!state || !proposal || inboxOwner(proposal) !== "operator" && !isAgeOnlyInboxInformation(proposal) && !c.retirement) continue;
     items.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), state,
+      ...(isAgeOnlyInboxInformation(proposal) && classifiedInboxOwner(proposal, c) === "fleet" ? { informational: true } : {}),
       ...((deps.inboxSourceIdentity ?? deps.inboxAuditScope) ? { causalScope: deps.inboxSourceIdentity ?? deps.inboxAuditScope } : {}),
       ...(proposal.reframeHistory ? { reframeHistory: proposal.reframeHistory } : {}),
-      ...(c.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) });
+      ...(c.requiresReview || c.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) });
   }
   return items;
 }
@@ -3032,7 +3154,7 @@ const INBOX_THREAD_LIST_WARM_MS = 60_000;
 
 export interface ThreadListInbox {
   proposals: readonly Proposal[];
-  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state" | "retirement">>;
+  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state" | "retirement" | "displayOwner"> & { requiresReview?: true }>;
 }
 
 export function inboxClassificationEvidence(classified: Pick<ClassifiedInbox, "projection" | "classifications">): ClassificationEvidence {
@@ -3061,7 +3183,9 @@ function readSlowLaneClassification(stateDir: string, registryPath: string): Thr
   const proposals = parseProposalRegistry(readFileIfExists(registryPath));
   const classifications = proposals.flatMap((p) => {
     const state = snapshot.states[p.id];
-    return state === undefined ? [] : [{ proposalId: p.id, state: state as InboxClassification["state"] }];
+    return state === undefined ? [] : [{ proposalId: p.id, state: state as InboxClassification["state"],
+      ...(snapshot.displayOwners?.[p.id] ? { displayOwner: snapshot.displayOwners[p.id] } : {}),
+      ...(snapshot.requiresReview?.includes(p.id) || snapshot.restoredForReview?.includes(p.id) ? { requiresReview: true as const } : {}) }];
   });
   const complete = snapshot.complete === true;
   const incompleteReason = complete ? undefined
@@ -3386,6 +3510,8 @@ export function buildInboxThreadReadRoute(deps: PanelGraphDeps): Route {
  * The response confirms only a hand-off; the resulting PR surfaces via the console's own polling.
  */
 export interface RatifyCliGateway {
+  /** Available only with the owned fresh-source runner; never falls back to an unowned child. */
+  improvement?(target: { operationId: string; stateDir: string; repoRoot: string }): Promise<RatifyCliHandoff>;
   approve(proposalId: string): void;
   reframe(proposalId: string, feedback: string, input?: InboxInputReference): void;
 }
@@ -3476,6 +3602,10 @@ export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: Ratif
       });
   };
   return {
+    ...(seams ? { improvement(target: { operationId: string; stateDir: string; repoRoot: string }) {
+      if (!/^[a-f0-9]{64}$/.test(target.operationId) || !isAbsolute(target.stateDir) || !isAbsolute(target.repoRoot)) return Promise.resolve<RatifyCliHandoff>({ outcome: "refused" });
+      return handOff(seams, `improvement-action:${target.operationId}`, ["improvement-action", target.operationId, "--state-dir", target.stateDir, "--repo-root", target.repoRoot], `improvement-${target.operationId}`);
+    } } : {}),
     approve(proposalId) {
       if (seams) return handOff(seams, proposalId, ["approve", proposalId], `approve-${proposalId}`).then(() => undefined);
       spawnDetached(["approve", proposalId], `approve-${proposalId}`);
@@ -3615,6 +3745,7 @@ function proposalVerdictResponse(
   respond: InboxVerbRespond,
 ): void {
   const { proposals, classifications } = classifyAllProposals(deps);
+  if (refuseInformationalProposal(proposals, classifications, input.proposalId, respond)) return;
   const found = {
     exists: proposals.some((p) => p.id === input.proposalId),
     classification: classifications.find((c) => c.proposalId === input.proposalId),
@@ -3773,9 +3904,28 @@ export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: ()
   ];
 }
 
+/** A readable age observation is not a decision or execution request, including through old options. */
+function refuseInformationalProposal(proposals: Proposal[], classifications: InboxClassification[], proposalId: string, respond: InboxVerbRespond): boolean {
+  const matches = proposals.filter(proposal => proposal.id === proposalId);
+  const classified = classifications.filter(item => item.proposalId === proposalId);
+  if (matches.length !== 1 || classified.length !== 1) return false;
+  const retirement = classified[0]!.retirement;
+  const requiresReview = retirement !== undefined && retirement.state === "restored_for_review";
+  const informational = isAgeOnlyInboxInformation({ ...matches[0]!, requiresReview });
+  if (informational !== true) return false;
+  respond(409, { error: "informational_only", detail: "This age observation is readable information, not an operator decision or work request." });
+  return true;
+}
+
 export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxCausalScope): InboxVerbActions {
+  const improvementReviewRequired = (proposalId: string, respond: InboxVerbRespond): boolean => {
+    if (!proposalId.startsWith("improvement:")) return false;
+    respond(409, { error: "improvement_review_required", detail: "Use this improvement's saved conversation to change its goal, request a draft, or review and file its exact draft." });
+    return true;
+  };
   return {
     approve: validatedInboxAction(validateApproveProposal, async (input, actor, respond) => {
+      if (improvementReviewRequired(input.proposalId, respond)) return;
       const taskId = /^verify-human:([A-Za-z0-9-]+)$/.exec(input.proposalId)?.[1];
       const retained = taskId ? await readRetainedHumanReleases(deps) : undefined;
       const receipt = taskId ? retained?.receipts.get(taskId) : undefined;
@@ -3793,6 +3943,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
         return;
       }
       const classification = classifications.find((c) => c.proposalId === input.proposalId);
+      if (refuseInformationalProposal(proposals, classifications, input.proposalId, respond)) return;
       if (!classification || classification.state !== "ready") {
         respond(409, {
           error: "not_ready",
@@ -3807,12 +3958,14 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       respond(200, { ok: true, proposalId: input.proposalId, started: true });
     }),
     reframe: validatedInboxAction(validateReframeProposal, (input, actor, respond) => {
-      const { proposals } = classifyAllProposals(deps);
+      if (improvementReviewRequired(input.proposalId, respond)) return;
+      const { proposals, classifications } = classifyAllProposals(deps);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
       }
       const origin = actor.origin;
+      if (refuseInformationalProposal(proposals, classifications, input.proposalId, respond)) return;
       clearInboxArchive(join(deps.inboxRoot, "state"), input.proposalId);
       appendPanelLedger(deps.ledgerPath, "panel.proposal_reframe_requested", input.proposalId, origin, { feedback: input.feedback });
       deps.ratify.reframe(input.proposalId, input.feedback);
@@ -3830,6 +3983,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       const proposal = classified.proposals.find(p => p.id === input.proposalId);
       if (!proposal) { respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` }); return; }
       const classification = classified.classifications.find(c => c.proposalId === input.proposalId);
+      if (refuseInformationalProposal(classified.proposals, classified.classifications, input.proposalId, respond)) return;
       if (!classification || classification.state === "ratified" || classification.state === "declined" || classification.state === "retired") {
         respond(409, { error: "not_decidable", detail: "The proposal is no longer awaiting a decision." }); return;
       }
@@ -3878,13 +4032,20 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       // message the responder will silently have no item to answer.
       const classified = await inboxRead(deps);
       if (!classified) return void respond(503, { error: "inbox_not_ready", detail: "serve's slow lane has not persisted an inbox classification yet" }, { "retry-after": "5" });
+      const operator = caller.operator;
+      const actor = caller.origin;
+      const replyId = createHash("sha256").update(`${actor}\0${input.threadId}\0${input.intentId ?? randomUUID()}`).digest("hex");
+      const proposal = classified.proposals.find(p => p.id === proposalId);
+      if (proposal && isAgeOnlyInboxInformation(proposal)) {
+        const thread = readThread(input.threadId, { threadStorePath: inboxThreadStorePath(deps.inboxRoot) });
+        if (thread.status !== "ok") return void respond(503, { error: "thread_store_unreadable", detail: "The current question cannot be verified." });
+        const existingIntent = thread.messages.some(message => message.role === "reply" && message.extra?.replyId === replyId);
+        if (!existingIntent && !hasUnansweredInboxQuestion(thread.messages) && refuseInformationalProposal(classified.proposals, classified.classifications, proposalId, respond)) return;
+      }
       if (!operatorThreadItems(deps, undefined, classified).some((item) => item.proposalId === proposalId && item.state !== "retired")) {
         respond(404, { error: "not_found", detail: "operator inbox thread is unavailable" });
         return;
       }
-      const operator = caller.operator;
-      const actor = caller.origin;
-      const replyId = createHash("sha256").update(`${actor}\0${input.threadId}\0${input.intentId ?? randomUUID()}`).digest("hex");
       const repository = causalScope?.repository ?? deps.inboxSourceIdentity?.repository ?? deps.inboxAuditScope?.repository;
       const inputReference = repository ? captureInboxInput({ repository }, proposalId, input.text, replyId) : undefined;
       const store = { threadStorePath: inboxThreadStorePath(deps.inboxRoot) };

@@ -284,7 +284,15 @@ function failureExcerpt(output: string, buffer: Buffer, budget: number, failingT
       blocks.push(match[0]);
     }
   }
-  if (blocks.length === 0) return utf8Slice(buffer, 0, budget);
+  if (blocks.length === 0) {
+    // A bound can fire before any assertion fails. Keep setup and final progress so its
+    // diagnostic does not become only the first passing suites, within the same byte share.
+    const marker = "\n[... middle output omitted ...]\n";
+    const available = budget - Buffer.byteLength(marker);
+    const headBytes = Math.ceil(available / 2);
+    return utf8Slice(buffer, 0, headBytes) + marker +
+      utf8Slice(buffer, buffer.byteLength - (available - headBytes), buffer.byteLength);
+  }
   const omission = "[... other output omitted ...]\n";
   const tailBytes = Math.min(1024, Math.floor(budget / 4));
   let tail = "";

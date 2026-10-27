@@ -1,0 +1,52 @@
+- id: W1-T10662
+  title: "The existing read-only snapshot gateway exposes qualified head-bound changed-file evidence before feedback can claim a merged source repair"
+  repo: remudero
+  depends_on: []
+  plan_refs: [ W1-T10625, W1-T6259, W1-T9651 ]
+  type: implement
+  principles: { tdd: strict }
+  budget_usd: 12.00
+  verify: auto
+  priority: 2.5
+  dispatch_hold: true
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "feedback-lifecycle:W1-T10625-head-bound-evidence-prerequisite-20261026"
+  files:
+    - src/lib/changed-files-cache.ts
+    - src/lib/status.ts
+    - src/lib/now-view.ts
+    - test/changed-files-cache.test.ts
+    - test/now-view.test.ts
+    - "src/lib/tick-read-worker.ts"
+  acceptance:
+    - claim: "The existing changed-files cache and gateway can report evidence bound to the repository, PR number, immutable observed head and merged-state observation, with source identity and completeness. A URL, CLOSED state, ledger marker or an old list alone never qualifies a merged source repair. Preserve compatibility for existing changedFiles callers without upgrading unbound legacy results into qualified evidence."
+      proof: "unit test: changed file evidence binds repository pull request merged state and immutable head"
+    - claim: "Missing, legacy, unreadable, malformed, truncated, incomplete, stale, wrong-repository, wrong-head or ambiguous evidence has a named unavailable or unknown result, never a fabricated empty list or confirmed repair. A closed PR that reopens or changes head cannot retain qualified terminal evidence. Define freshness against the observed immutable merged head rather than guessing from the wall clock or URL."
+      proof: "unit test: changed file evidence refuses stale foreign incomplete and reopened heads"
+    - claim: "The default persisted snapshotGithub production route reads this qualified evidence through the existing gateway/cache contract. It does not acquire a second fetcher, spawn GitHub work from the view or slow lane, or alter the existing cache owner's fetch schedule, cadence, concurrency, limits, transport, budget or failure rules. A real private persisted-cache fixture reaches the default route with all network execution refused."
+      proof: "unit test: snapshot gateway consumes qualified changed file evidence without fetching"
+    - claim: "A complete merged source-changing PR is a positive control; a plan-only PR, legacy cache entry and missing or changed head are distinguishable controls. This prerequisite exposes evidence only: it does not close feedback, write Inbox state, release W10625, or claim that CI, semantic review or implementation adoption has occurred."
+      proof: "unit test: snapshot changed file evidence distinguishes merged source plan only and unknown"
+    - claim: "Tests remain in the two existing physical modules, preserve old coverage and exercise the real default cache-to-snapshot boundary. Removing only the head/completeness qualification guard causes the named regression to fail, and exact restoration passes. All normal author, full CI, coverage, security, semantic review and ordinary merge gates remain; no skips, guard weakening or new network path."
+      proof: "unit test: snapshot changed file evidence guards are load bearing"
+  note: "Parked test-first proposal only: verify:human is unjudged in the maintained machine-filing contract and independent dispatch_hold:true remains even after a normal judge ruling. Filing or merge is not source implementation authority or a release of W10625. Author NOT RUN is disclosed under the specifically approved plan-only full-CI route. Existing cache and read-model owners remain authoritative; no production reads/writes or new hosted-author attempt."
+  rationale: |
+    W10625 cannot safely identify merged source repairs from its real persisted GitHub snapshot: snapshotGithub supplies metadata but no changedFilesCache, and its execution fallback refuses network work. A seam-only test would not qualify that production boundary. Keep W10625 held rather than invent evidence or create a second fetcher.
+    The current schema-1 changed-files cache persists URL/files/at without head identity and treats CLOSED and MERGED as immutable. CLOSED may reopen; URL-only evidence cannot distinguish the final merged diff from an earlier head. Existing consumers' compatibility and failure behavior must remain distinct from this new qualified evidence contract.
+    The complete captured subject sweep covers 470 advertised heads, 267 distinct shard trees and 26 inline-plan variants, with W10625 and plan-task positive controls. Its two cache source variants differ only by the maintained loop-bounded child migration. W6259 owns the existing async cache; W9651 owns bounded transport. Neither provides this head-bound persisted snapshot evidence. Fresh open-PR subject/file scope and source checks are required again before publication.
+    PR14176 owns daily-progress reporting and overlaps status.ts but does not own this cache-to-snapshot evidence concern; do not edit that branch or duplicate its collector. Source implementation is not authorized by this parked filing. Five necessary files span cache, gateway and snapshot boundaries, so high/span sizing is honest and any advisory is disclosed rather than hidden with a scanner or lint exception.
+    No new GitHub fetcher, normal fetch schedule, policy, actual permissions, dispatch decision, feedback status mutation, trial registration, billing or runtime operation is approved. Serve and workers remain running, W7740 USER_HELD90 and SHADOW/independent holds remain. Foundation and Janitor retain their existing owners. Failure/refusal receipts and all original backlog identities stay retained.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The filed acceptance criteria scope the remedy to qualified read-only evidence through the existing cache and gateway, preserving legacy caller compatibility and existing fetch ownership and limits."
+      - "The record requires default-route fixtures, positive and negative controls, and guard-removal regression proof while retaining normal CI, security, review and merge gates."
+      - "The filing explicitly preserves independent holds and excludes feedback mutation, W10625 release, new network paths and production operation authority; this ruling does not authorize implementation or release those holds."
+    judged_at: "2026-10-26T18:03:26.738Z"
+    pin: "c67ea8fb63d14576ed6bbe164e477e443d3c376014e99ffcd2aa574e73a582cc"

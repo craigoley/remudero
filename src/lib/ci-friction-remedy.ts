@@ -319,7 +319,9 @@ export function ownerSearchTerms(key: string, details: readonly string[]): strin
   const terms: string[] = [];
   if (kind === "fix_refusal") {
     for (const d of details) {
-      const head = d.split(/ — |: /)[0]!.replace(/\b[0-9a-f]{7,40}\b/g, "").trim();
+      if (censusRefusalWithoutMechanism(key, [d])) continue;
+      const diagnostic = key === "fix_refusal:census-precheck" ? d.replace(/^census-precheck:\s*/, "") : d;
+      const head = diagnostic.split(/ — |: /)[0]!.replace(/\b[0-9a-f]{7,40}\b/g, "").trim();
       if (head.length >= 12) terms.push(head);
     }
   } else if (kind === "check") {
@@ -338,12 +340,35 @@ export function reviewStatusWithoutMechanism(key: string, details: readonly stri
   return key === "check:ci-log:remudero-review" && ownerSearchTerms(key, details).length === 1;
 }
 
+/** Missing source coverage is a predicate refusal, not evidence that its verdict producer is defective. */
+export function coverageRefusalWithoutMechanism(key: string, details: readonly string[]): boolean {
+  return key.startsWith("check:ci-log:") && details.some(detail => /\bdiff-coverage:\s*BLOCKED\b/i.test(detail));
+}
+
+/** A branch finding's warning identifies the scanner reporter, not a defect in that reporter. */
+export function scannerWarningWithoutMechanism(key: string, details: readonly string[]): boolean {
+  const family = /^check:ci-log:(codeql-alert-\d+-[^:]+)(?::|$)/.exec(key)?.[1];
+  return family !== undefined && details.some(detail =>
+    ciLogSignatures(family, detail).some(signature => /^UNTRUSTED SCANNER EVIDENCE:/.test(signature)));
+}
+
+/** A census growth finding identifies a refused branch, not a defect in the aggregate reporter. */
+export function censusRefusalWithoutMechanism(key: string, details: readonly string[]): boolean {
+  return key === "fix_refusal:census-precheck" && details.length > 0 && details.every(detail =>
+    /\bcensus-precheck: this branch grows \d+ census count\(s\) CI will refuse:/.test(detail));
+}
+
 /**
  * The code that owns a cause. A refusal is owned by whatever raises its reason; a CI check by the
  * scripts and source that name it; a main-merge cause by the file it conflicts on. `undefined` when
  * nothing can be located — the cause then goes to a person, never to a docs-only record.
  */
 export function locateCiFrictionOwner(key: string, details: readonly string[], search: OwnerSearch): CiFrictionOwner | undefined {
+  if (scannerWarningWithoutMechanism(key, details)) return undefined;
+  if (key === "fix_refusal:census-precheck") {
+    details = details.filter(detail => !censusRefusalWithoutMechanism(key, [detail]));
+    if (details.length === 0) return undefined;
+  }
   if (key.startsWith("hand_fix:")) {
     const file = key.slice("hand_fix:".length);
     return /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes("..") && search.fileExists(file)
@@ -357,6 +382,7 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
     const file = key.slice("main_merge:".length);
     return search.fileExists(file) ? { files: [file], why: [`${file}: main merged into the PR over a change to it`] } : undefined;
   }
+  if (!testPath && coverageRefusalWithoutMechanism(key, details)) return undefined;
   const terms = ownerSearchTerms(key, details);
   const family = key.startsWith("check:") ? terms.at(-1) : undefined;
   const distinctive = family && key.startsWith("check:ci-log:") ? terms.slice(0, -1) : [];
@@ -368,7 +394,7 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
     return workflow ? { ...workflow, ...(testPath ? { failingTest: testPath } : {}) } : undefined;
   }
   if (testPath && search.fileExists(testPath)) {
-    const source = testSourcePaths(testPath, search.readSource?.(testPath))
+    const source = testSourcePaths(testPath, search.readSource?.(testPath), { runtimeOnly: true })
       .find(file => /^(src|scripts)\//.test(file) && !file.split("/").includes("..") && search.fileExists(file));
     return {
       files: source ? [source, testPath] : [testPath],

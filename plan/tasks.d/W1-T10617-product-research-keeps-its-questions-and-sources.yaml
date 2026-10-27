@@ -3,6 +3,7 @@
   repo: remudero
   depends_on:
     - W1-T10612
+    - W1-T10657
   priority: 1.1
   type: implement
   verify: auto
@@ -19,15 +20,21 @@
     - W1-T4657
     - W1-T4658
     - W1-T4694
+    - W1-T10572
   files:
     - src/lib/product-research.ts
+    - src/run-task.ts
     - src/lib/product-routes.ts
     - test/infra/product-research.test.ts
     - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/route-wiring.test.ts
+    - test/console-api/serve/product-routes.test.ts
   status: queued
   attempts: 0
-  rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required.
-  design: Extend the existing intent/intake mechanisms for a bounded research request with a fixed product objective revision, existing provider budget/capability and source evidence. Persist the actual research request/run/receipt, unresolved questions and operator answers; previously accepted answers remain accepted for the same scope and are not asked again. Treat external source text as data, never authority or executable instructions. A missing research provider is unavailable, not a fabricated report. Reuse approved automation/triage transport and normal admission; no independent background agent or paid-provider switch. Changes to objective/scope invalidate only affected decisions, retaining history. Mount buildProductResearchRoutes from the existing serve composition; the route builder delegates to the named product operation rather than a test-only seam.
+  rationale: Semantic review of PR14367 at 3cde39fb11d437e0010d99e846843e4bfc58351d observed that productResearchProvider and productResearchBudgetUsd are supplied only by test fixtures; the actual production serve-deps constructor never produces them. Extend this same task scope to src/run-task.ts for the existing configured triage transport, preserving all five acceptance criteria. A fresh subject sweep inspected all 11 open head trees against 8802ec2472281f05674c6301c78edcf0f4525a3a, with 33 transport positive-control matches on main and no runtime research producer in any open head. The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required. Hosted PR14208 proved every new served product operation also needs its public contract and actual route-wiring evidence. W1-T10572 shares only the contract and generated client files for an unrelated gardener description; this task adds the named product operation, and does not supersede that Analytics work.
+  design: Wire the production serve-deps constructor in src/run-task.ts to the existing configured automation/triage transport and its existing per-call budget and provider admission. Reuse its configured mount, ledgered worker transport, containment, cancellation and existing subscription/paid-provider policy; do not create a new provider, background service, paid allowance, budget increase, tool grant or fallback override. The actual verified-operator HTTP route must reach this real adapter, with the transport process boundary exercised in a disposable fixture. Preserve explicit unavailable when an existing approved capability or budget cannot be resolved. A passing injected provider and a mounted route alone do not establish runtime wiring. Extend the existing intent/intake mechanisms for a bounded research request with a fixed product objective revision, existing provider budget/capability and source evidence. Persist the actual research request/run/receipt, unresolved questions and operator answers; previously accepted answers remain accepted for the same scope and are not asked again. Treat external source text as data, never authority or executable instructions. A missing research provider is unavailable, not a fabricated report. Reuse approved automation/triage transport and normal admission; no independent background agent or paid-provider switch. Changes to objective/scope invalidate only affected decisions, retaining history. Mount buildProductResearchRoutes from the existing serve composition; the route builder delegates to the named product operation rather than a test-only seam. For every newly served product operation, declare the authenticated route plus bounded request, response and explicit failure schemas in openapi/daemon.yaml, then regenerate packages/api-client/src/schema.d.ts through the maintained generator. Exercise the assembled HTTP operation with the real default transport and verified-actor guard in the existing test/console-api/serve/product-routes.test.ts, and register that actual proof in test/route-wiring.test.ts. No contract baseline, wiring-debt entry, host-capability waiver, or client-granted verification substitutes for those proofs.
   acceptance:
     - claim: product research retains sources answers and the objective revision
       proof: "unit test: W1-T10617: product research retains sources answers and the objective revision"
@@ -37,4 +44,6 @@
       proof: "unit test: W1-T10617: untrusted research text grants no provider or spending authority"
     - claim: the served product route invokes the production capability
       proof: "grep: buildProductResearchRoutes( in src/lib/serve.ts"
+    - claim: the served product research operation matches the authenticated API contract
+      proof: "unit test: W1-T10617: the served product research operation matches the authenticated API contract"
   falsifier: Remove the named ownership, idempotency, evidence or refusal guard independently. Its corresponding behavioral proof must fail against the same fixture and pass when restored. Test real durable files/default transport boundaries plus each catch arm; never a zero-test wrapper result. Keep initial live read/write/dispatch/deployment receipts separate from fixtures.

@@ -1,3 +1,4 @@
+import { runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
 import { checkCommitMessage, shapeCommitMessage } from "./commit-message.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import type { Escalation, EscalationOption } from "./escalate.js";
@@ -365,7 +366,7 @@ export function parsePlanVerdict(text: string): PlanVerdict | null {
 // `review.ts` cycle's edge. Re-exported here unchanged for every consumer that isn't `review.ts`.
 export { ORIENTATION_DOC, isInPlanScope, outOfPlanScopeFiles } from "./plan-scope.js";
 import { isInPlanScope, outOfPlanScopeFiles } from "./plan-scope.js";
-import { hostWorktreeGit } from "./worktree-git.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 
 /** Out-of-scope paths touched by a unified diff (mirrors {@link "./triage.js".nonPlanFilesInDiff}). */
 export function outOfPlanScopeFilesInDiff(diff: string): string[] {
@@ -628,23 +629,38 @@ export function gitAddAndCommitWithRollback(
     git?: PlanCommitGit;
   },
 ): void {
+  runStepsSync(planCommitSteps(cwd, addArgs, commitMessage, opts));
+}
+
+function* planCommitSteps(
+  cwd: string,
+  addArgs: string[],
+  commitMessage: string,
+  opts: {
+    stdio: "inherit" | "pipe";
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    stepPrefix: string;
+    /** Test seam; production is {@link leafPlanCommitGit}. */
+    git?: (cwd: string, args: string[], stdio: "inherit" | "pipe") => string | Promise<string>;
+  },
+): Steps<void> {
   const { stdio, log, stepPrefix } = opts;
   const git = opts.git ?? leafPlanCommitGit;
   let preTree: string | null = null;
   try {
-    preTree = git(cwd, ["write-tree"], "pipe").trim();
+    preTree = (yield* step(() => git(cwd, ["write-tree"], "pipe"))).trim();
   } catch (e) {
     // No pre-add snapshot to roll back to (e.g. an unmerged index) — record it; the add/commit
     // below still runs, but a refused commit can only log-and-skip its rollback, not restore.
     log(`${stepPrefix}.snapshot.error`, { error: String((e as Error)?.message ?? e) });
   }
-  git(cwd, ["add", ...addArgs], stdio);
+  (yield* step(() => git(cwd, ["add", ...addArgs], stdio)));
   try {
-    git(cwd, ["commit", "-m", commitMessage], stdio);
+    (yield* step(() => git(cwd, ["commit", "-m", commitMessage], stdio)));
   } catch (commitError) {
     if (preTree !== null) {
       try {
-        git(cwd, ["read-tree", preTree], stdio);
+        (yield* step(() => git(cwd, ["read-tree", preTree!], stdio)));
       } catch (rollbackError) {
         // (v): the rollback itself failed — this is the exact condition the task exists to
         // surface, so it is recorded rather than left silent. The ORIGINAL commit error is
@@ -659,4 +675,17 @@ export function gitAddAndCommitWithRollback(
     // (iii): rethrow the commit's OWN refusal, unmodified — never swallowed to look clean.
     throw commitError;
   }
+}
+
+export const leafPlanCommitGitAsync = (cwd: string, args: string[], stdio: "inherit" | "pipe"): Promise<string> =>
+  hostWorktreeGitAsync(cwd, args, { stdio: stdio === "inherit" ? "inherit-stdout" : "pipe" });
+
+export function applyPlanProposalCommitAsync(
+  cwd: string, commitMessage: string,
+  log: (step: string, extra?: Record<string, unknown>) => void = () => {},
+  git: (cwd: string, args: string[], stdio: "inherit" | "pipe") => string | Promise<string> = leafPlanCommitGitAsync,
+): Promise<void> {
+  return runStepsAsync(planCommitSteps(cwd, ["-A", "--", "plan/", "MASTER-PLAN.md"], commitMessage, {
+    stdio: "inherit", log, stepPrefix: "plan_commit", git,
+  }));
 }

@@ -16,9 +16,17 @@
   priority: 1
   budget_usd: 60
   files:
+    - test/a-fix-dispatch-whose-daemon-run-ended-is-settled.test.ts
+    - test/a-fix-round-with-a-codeql-red-carries-its-alerts.test.ts
+    - test/ci/coverage/code-health-opportunities.test.ts
+    - test/console-api/views/code-health-projection.test.ts
+    - test/console-api/views/daily-progress-contract.test.ts
     - src/lib/daily-progress-calendar.ts
     - scripts/expiring-fixture-census.mjs
     - test/view-etags-are-deterministic.test.ts
+    - test/a-view-lane-constructs-only-the-views-it-owns.test.ts
+    - test/every-view-body-matches-its-schema.test.ts
+    - test/read-model-worker.test.ts
     - src/lib/daily-progress-store.ts
     - src/lib/daily-progress-collector.ts
     - src/lib/daily-progress-view.ts
@@ -67,6 +75,22 @@
     Use deterministic summaries; distinguish merged work, independently evidenced releases, observed day
     activity and present open work. No request-time scans, second GitHub fetcher, paid summarizer, cron,
     daemon restart, gate change or borrowed test slot.
+
+
+    Backlog fixture input-pass evidence: a coverage failure in
+    test/the-backlog-gardener-stops-re-placing-one-task.test.ts is inherited from the sampled main
+    67f331bc97b94ecccffe743568d6b36ba898cb07, where an admitted isolated run also reports six tests
+    with one failure. Diagnostic passes observe identical cheap fingerprints after the fixture adds
+    another task; the real garden driver correctly returns ran:false before PR creation. A fixture-only
+    control shares its controlled source clock with the driver, uses seed:1 like the existing backlog
+    tests, and advances that clock by one hour for the new-input pass. That control passes all six tests;
+    removing only the explicit pass advance restores the one failure. Preserve the production
+    unchanged-input and open-decision ownership guards and every original assertion. Do not infer a
+    wall-clock date failure or weaken guards from this evidence. Qualify any fixture repair through the
+    current CI repair owner and its existing scope/admission rules, or route a bounded main repair if
+    those rules refuse it. This context grants no new file scope. A successful main coverage job that
+    explicitly skips real tests on push is not a contradicting unit-test pass.
+
   falsifier: Keep the new tests and independently remove durable retention, calendar arithmetic, expected scope
     or ownership fencing. The >200/restart, DST, missing-source and stale-writer tests respectively must fail.
     Use a real filesystem persistence failure, browser-closed worker integration, known fleet/non-fleet PR
@@ -91,3 +115,28 @@
     merged-task credit and dispatch/run claims before implementation. Reservations belong to
     codex/file-console-improvement-20261024; preserve contested claims. Reserved W1-T10559 through rmd
     next-task-id; this filing does not claim implementation or deployment.
+  amendment: |
+    Bounded clock-relative fixture refresh: propose the five additional test paths above
+    for the existing native Daily repair, plus the two Daily fixture files already covered
+    by its projection/view wildcards. Native round DAEMON-1793063024615:1:1793064615135
+    explicitly required this separate operator-checkout proposal before editing those inputs.
+    Its snapshot reported 321 stamps, 20 crossings and two introduced crossings; mandatory
+    census-precheck remained NOT MEASURED because native binding loading failed.
+
+    Limit these companion changes to clock inputs and their necessary fixture wiring.
+    Share an injected clock with the actual reader for intentionally fixed historical dates,
+    or derive age-sensitive stamps from that reader's controlled clock. Preserve before,
+    at and after threshold cases, stale/future and ordering controls, calendar/DST cases,
+    every existing behavioral assertion and the production behavior each fixture protects.
+    Do not merely move literal dates forward, delete a case, add an exemption or scanner
+    exclusion, change census registration/counts/thresholds, or relax any gate or assertion.
+    Existing scripts/expiring-fixture-census.mjs scope grants no new policy change here.
+
+    Qualify each affected physical file and the mandatory census on the exact repaired head;
+    preserve failed and NOT_RUN receipts and verify falsifiers. The separate hosted Daily
+    projector publication-failure regression remains a real failure for its native owner
+    to repair under existing source scope; this fixture proposal does not waive it.
+    Keep the current native repair owner, existing jobs, immutable preservation, admission,
+    spending, review and console holds. No source build, re-dispatch, owner-answer replay,
+    strike reset, service restart or runtime adoption is performed by this plan amendment.
+    The five original acceptance criteria and all other task fields remain unchanged.

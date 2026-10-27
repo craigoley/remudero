@@ -1,3 +1,4 @@
+import { buildImprovementThreadRoutes } from "./improvement-thread.js";
 /**
  * lib/serve.ts — `rmd serve`'s assembler: the FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B).
  *
@@ -88,6 +89,7 @@ import {
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { projectClassifiedHumanGates } from "./ask-classification.js";
+import { CODE_HEALTH_VIEW_NAME, validateCodeHealthRequest } from "./code-health-view.js";
 import { buildReadModelViewRoutes, oldestAsOf, viewMode, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { analyticsLegacyView, captureHostModelApprovals, type HostModelApprovalConfig } from "./analytics-view.js";
@@ -101,7 +103,8 @@ import { WORKSTREAMS_VIEW_NAME, WORKSTREAMS_VIEW_VERSION, type WorkstreamsData }
 import { ACTIONS_VIEW_NAME, ACTIONS_VIEW_VERSION, type ActionsData } from "./actions-view.js";
 import { AGENT_VIEW_NAME } from "./agent-view.js";
 import { INCIDENTS_VIEW_NAME } from "./incidents-view.js";
-import { TASK_VIEW_NAME } from "./view-demand.js";
+import { DEMAND_VIEWS, TASK_VIEW_NAME } from "./view-demand.js";
+import { DAILY_PROGRESS_VIEW_NAME, validateDailyProgressRequest } from "./daily-progress-view.js";
 import { consumeHumanGateCounts, unavailableHumanGateCounts, type HumanGateProjection } from "./human-gate.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { withViewShadow } from "./view-shadow.js";
@@ -153,6 +156,8 @@ import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibra
 import { createOperatorAgentRowsSource } from "./operator-agent-read-model.js";
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, prewarmOperatorAgentReads, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
+import type { ProductResearchProvider } from "./product-research.js";
+import { buildProductBuildRoutes, buildProductDeploymentRoutes, buildProductRepositoryRoutes, buildProductResearchRoutes, buildProductRoutes } from "./product-routes.js";
 import { automationTriggerLedgerJournal, buildAutomationTriggerRoutes, createAutomationTriggerRegistry, submitAutomationTrigger, type AutomationTriggerRegistry } from "./automation-trigger.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import {
@@ -381,6 +386,10 @@ export interface ServeDeps {
   issues: IssueCloser;
   /** Fleet-control flag-file root — MUST equal the `config.root` `rmd daemon`/`rmd drain` check (see module header). */
   fleetControlRoot: string;
+  /** Approved research transport for /v1/products/research; absent means research is reported unavailable. */
+  productResearchProvider?: ProductResearchProvider;
+  /** Operator-configured per-run research spending ceiling in USD; never raised by request or provider text. Default 0. */
+  productResearchBudgetUsd?: number;
   /** Core repository resolved from the serving checkout, for assistant-action target binding. */
   assistantRepository?: string;
   /** `plan/questions.ndjson` root — MUST equal the `repoRoot` `appendQuestion` writes into (see module header). */
@@ -2793,7 +2802,8 @@ function assembleServeRoutes(
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
   const routeReads = deps.routeReadRollup ?? createRouteReadRollup();
-  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME], servedByDefault: [readModelStatusView.name],
+  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME, CODE_HEALTH_VIEW_NAME],
+    servedByDefault: [readModelStatusView.name],
     ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log, onSubscribers: (change, n, reason) => routeReads.stream("views", change, n, reason) });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -2948,11 +2958,26 @@ function assembleServeRoutes(
   const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, repository: scope.repository, analytics: scope.analytics })), modelApprovalConfig: deps.modelApprovalConfig });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
-    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME],
+    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME, CODE_HEALTH_VIEW_NAME],
+    demandViews: [...DEMAND_VIEWS, CODE_HEALTH_VIEW_NAME, DAILY_PROGRESS_VIEW_NAME],
     requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"], [AGENT_VIEW_NAME]: ["instance", "part"] },
+    requestValidators: {
+      [CODE_HEALTH_VIEW_NAME]: (params, source) => validateCodeHealthRequest(params, source, systemClock.now()),
+      [DAILY_PROGRESS_VIEW_NAME]: (params, source) => validateDailyProgressRequest(params, source, systemClock.now()),
+    },
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
+    ...buildImprovementThreadRoutes({ stateDir: dirname(deps.ledgerPath) }),
+    ...buildProductRoutes({ root: deps.fleetControlRoot }),
+    ...buildProductResearchRoutes({ root: deps.fleetControlRoot, provider: deps.productResearchProvider, budgetUsd: deps.productResearchBudgetUsd }),
+    ...buildProductRepositoryRoutes({ root: deps.fleetControlRoot }),
+    ...buildProductDeploymentRoutes({ root: deps.fleetControlRoot }),
+    // W1-T10615: the kick marker lands under the target's OWN daemon root, resolved through the same
+    // registry, state base and core instance this serve's instance gateway mounts.
+    ...buildProductBuildRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root, instances: {
+      registryPath: deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
+      stateBase: deps.instances?.stateBase, coreInstance: deps.instances?.coreInstance, readText: deps.instances?.readText } }),
     withStatusNeedsYou(withFleetRuntimeHealth(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), readRuntimeHealth), needsYouGates),
     ...buildRepoDashboardRoutes({
       selectedRegistryObserver,
@@ -3578,13 +3603,15 @@ export function serveGeneration(server: Server): ServeGenerationHooks | undefine
   return serveGenerations.get(server);
 }
 
-export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "instances" | "assistantRepository"> & { panelGraph?: Pick<ServeDeps["panelGraph"], "planPath"> }): ReadModelInstance[] {
-  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), feedbackRoot: deps.questionsRoot,
+export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "fleetControlRoot" | "instances" | "assistantRepository"> & { panelGraph?: Pick<ServeDeps["panelGraph"], "planPath"> }): ReadModelInstance[] {
+  // Board snapshots live under config.root, where the PR collector writes them (`createBoardSnapshotCache(config.root, …)`
+  // in tick-read-worker.ts); `questionsRoot` is the serving checkout, which holds feedback but never snapshots.
+  const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), boardRoot: deps.fleetControlRoot, feedbackRoot: deps.questionsRoot,
     ...(deps.assistantRepository ? { repo: deps.assistantRepository } : {}), ...(deps.panelGraph?.planPath ? { planPath: deps.panelGraph.planPath } : {}) };
   const others = livenessInstances({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances });
   return [core, ...others.map((instance) => {
     const root = instanceStateRoot({ name: instance.name, repo: instance.repo, project: "", live: true }, dirname(dirname(instance.stateDir)));
-    return { name: instance.name, ledgerDir: instance.stateDir, repo: instance.repo,
+    return { name: instance.name, ledgerDir: instance.stateDir, boardRoot: root.root, repo: instance.repo,
       inbox: { instance: instance.name, repository: instance.repo, root: join(root.root, "repos", instance.repo.split("/")[1]),
         planPath: root.planPath, ledgerPath: root.ledgerPath, inboxRoot: root.root } };
   })];

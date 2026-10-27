@@ -1,0 +1,102 @@
+id: console-operator-guidance-generation-store-20261026
+ts: 2026-10-26T19:08:15.379Z
+raw: >-
+  OBSERVED narrow operator-guidance persistence/delivery gap, not a claim that
+  all Inbox or daemon questions share one cause. This chat owns the
+  Console/Inbox follow-up and coordinates with Plan console insights and fleet
+  view. Its existing Code health/runtime-readiness W10745, Daily, Effects, held
+  consumers and the root CI14326 extraction remain separately owned; no
+  competing source change.
+
+
+  One real existing note was accepted by the shipped write-scoped operator-notes
+  API: W1-T10559 at2026-10-26T18:10:02.026Z,
+  marker[cockpit-daily-d175-exact-ci-20261026], author Codex relaying Craig's
+  existing cockpit guard instruction. The peer receipt independently records
+  authenticated GET200, POST200 oktrue and exactGETreadback1. No native prompt
+  ACK had been observed. We did not replay, copy or submit another note.
+
+
+  Our bounded read-only comparison at19:03:48 verified activeServe PID112661
+  stayed at /home/node/rmd-serve-gens/b. Inactive generationa's complete parsed
+  operator-notes file has exactly that tuple,1row,
+  fingerprint01b188745a35599972111ad3be3d812aacf93874a6aeb80ac424c9a33edfc2cb.
+  Activegenerationb's different inode has1older12:59clock-control note
+  and0targetnotes. /home/node/Remudero/remudero/plan/operator-notes.ndjson is
+  absent inServe namespace. The Core daemon container's canonical note file is
+  completely parsed15rows, newest13:20:44,0targetnotes. The earlier expected
+  daemonPID142 is now absent, so its current actor/module-root mapping remains
+  unverified; do not turn fileabsence into a claim about every possible prompt
+  consumer. First broadprocess diagnostic refused64KiBargvbound and is retained;
+  the exact-file comparison did not widen it.
+
+
+  Static inspected source550128607: serveCommand passes module repoRoot as
+  ServeDeps.questionsRoot. serve.ts roots operator-notes and answer-question
+  handlers there. operator-notes.ts writes plan/operator-notes.ndjson under its
+  supplied root; the fix lane reads task notes from its own repoRoot. Immutable
+  serving generations and daemon canonical repo can therefore address different
+  files. Separately the existing answer-question route returns200oktrue even if
+  appendQuestionAnswer returnsfalse; verify that boundary and current native
+  consumers before scoping a correction. Do not infer currentloaded sourceSHA
+  from the version endpoint or attribute SQLite stalls/Analytics timeouts to
+  this observation.
+
+
+  Prepare the smallest normal governed durable-guidance proposal after
+  current-main/all-open-head subject, real merge-credit, native ownership and
+  risk checks. First qualify actual producer/consumer namespace, task/repo
+  scope, existing shared persistent mount and authoritative guidance store;
+  preserve every original note, question, origin and failed receipt. Use
+  explicit verified common persistence/delivery boundaries rather than
+  source-code generation directories. A200must distinguish durably recorded
+  guidance from delivered/consumed guidance; absent/unwritable/unverified sinks
+  must refuse or expose an honest pending/failed state, not successful delivery.
+  Preserve existing write tiers, attribution, actor checks, read-only behavior,
+  idempotency and all business approval semantics. Prove with private real-store
+  route/consumer fixtures that the SAME note remains readable to the correct
+  native task across an immutable generation switch, with write-failure,
+  foreignrepo/task, duplicate and priorhistory controls and a source-only
+  removal falsifier. Do not simply redirect live writes or copy a file to make
+  an observation appear fixed.
+
+
+  This finding grants no migration,
+  service/root/mount/link/permission/budget/provider change, restart,
+  nativeholder release, alternate production answer, source takeover or
+  deployment. Existing tests, author qualification, canonical stored proofs,
+  security, governed review, hostedCI and protected merge remain mandatory;
+  deployment and naturally observed prompt effect are separate. No new model
+  call by capture helper. Queuedfinding is not filed task, risk verdict,
+  repaired source or incident closure.
+attachments:
+  - https://github.com/craigoley/remudero/blob/550128607f3bd5c860e0dcaa25c06ac3e84b8605/src/lib/serve.ts
+  - https://github.com/craigoley/remudero/blob/550128607f3bd5c860e0dcaa25c06ac3e84b8605/src/lib/operator-notes.ts
+  - https://github.com/craigoley/remudero/blob/550128607f3bd5c860e0dcaa25c06ac3e84b8605/src/lib/panel-actions.ts
+origin: repair#console-operator-guidance-generation-store
+status: accepted
+reply_to: null
+proposal_pr: https://github.com/craigoley/remudero/pull/14599
+summary:
+  headline: Propose a bounded guidance persistence and delivery correction
+  what_happened: A note was accepted and stored in one inactive serving
+    generation, but it was absent from the active generation and the daemon’s
+    parsed note file. Source inspection shows these components can use different
+    storage roots, while an answer route can report success even when saving
+    fails; current prompt consumers and shared storage remain unverified.
+  decision: Run the required ownership, namespace, storage, and risk checks, then
+    file the smallest governed proposal that distinguishes recorded guidance
+    from delivered guidance and preserves existing notes and approval rules.
+  options:
+    - label: File a bounded proposal
+      consequence: Qualify real producer and consumer paths first, then prove shared
+        persistence and honest delivery status with private fixtures.
+      intent: approve
+    - label: Keep the finding queued
+      consequence: Make no source or runtime changes; retain the observation until
+        ownership and storage boundaries are verified.
+      intent: keep
+expansion: null
+submission_key: console-followup:60b3a8c5-270c-4f69-a6c8-3484f2f8f45c
+thread_id: null
+answered_by: null

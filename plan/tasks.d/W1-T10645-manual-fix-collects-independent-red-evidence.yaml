@@ -1,0 +1,66 @@
+- id: W1-T10645
+  title: Collect independent required-check evidence before routing the manual fix command
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 15
+  risk: medium
+  band_meaning: span
+  origin: operator-request#wreckterra-console-product-2026-10-25
+  plan_refs:
+    - W1-T3584
+    - W1-T2804
+    - W1-T3278
+    - W1-T9337
+  files:
+    - src/cli/commands/fix.ts
+    - test/fix-lane/manual-fix-collects-independent-red-evidence.test.ts
+  status: queued
+  attempts: 0
+  rationale: >-
+    While qualifying the authorized Console product API, manual fix run
+    FIX-1792955821052 at 2026-10-25T19:18:10.824Z correctly stood down before
+    spending a strike because its rollup reported checks_state green and independent
+    red checks coverage-ratchet and rule-checks, but its miner had zero enumerable
+    failures. The manual command only calls fetchCiFailures when checksState is red.
+    The background tick producer already handles redRequiredChecks with
+    earlyRedEvidenceRollup. A fresh sweep of all 18 open PR head trees against
+    main 0b0a4848f911939c68bf0a3c9acf85655c609edd found no manual caller using
+    that helper; main had 30 positive subject matches. Related PRs 14196 and 14209
+    respectively preserve producer identity and pass already-held findings, neither
+    supplies this missing initial evidence. Existing log transport and annotation
+    fallback mechanisms remain authoritative.
+  design: >-
+    Bring the manual fixCommand evidence bootstrap into agreement with the existing
+    tick-read-worker producer. Mine evidence when checksState is red OR independent
+    redRequiredChecks are present. For an independently red gate with a non-red
+    aggregate, use existing earlyRedEvidenceRollup so red aggregator constituent
+    shards contribute their actual logs and unrelated failures do not enter the
+    repair. Preserve the full-rollup path for an aggregate red verdict, the existing
+    CodeQL fallback, truly green and no-red pending behavior, and all empty-evidence,
+    ownership, progress-judge, strike, admission and action-time guards. No worker
+    is authorized merely by a check name. Exercise the real manual entrypoint and
+    default CI log subprocess through the shared gh shim, injecting only the router
+    so tests cannot dispatch workers. Cover missing/unreadable log evidence without
+    inventing a success. Keep the failing receipt and prove the new case fails when
+    the caller repair is removed, then passes when restored. The new test path was
+    computed from its run-task/config/tmp/gh-shim imports: fix-lane, high confidence.
+  acceptance:
+    - claim: A green aggregate with independently red required checks supplies their real failure evidence to the manual repair router
+      proof: 'unit test: manual fix mines independently red required checks before routing'
+    - claim: A pending aggregate includes the red aggregator shard while excluding unrelated failed checks
+      proof: 'unit test: manual fix mines the red aggregator shard without unrelated failures'
+    - claim: A genuinely green or pending head without independently red checks performs no CI log reads
+      proof: 'unit test: manual fix leaves no-red heads without CI log evidence'
+    - claim: Unreadable CI logs remain explicit unavailable evidence rather than an invented failure diagnosis
+      proof: 'unit test: manual fix preserves unavailable log evidence'
+  falsifier: >-
+    Restore the old checksState-only condition and full-rollup argument in the
+    manual caller while keeping tests and shared background helper unchanged.
+    The independent-red evidence tests must fail on missing or unrelated actual
+    router input; restoring the repair must produce a genuine nonzero test summary
+    with zero failures. Preserve existing aggregate-red and CodeQL behavior.

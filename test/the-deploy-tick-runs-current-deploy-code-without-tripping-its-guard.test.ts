@@ -199,6 +199,15 @@ test("W1-T4917: boot and STOP do not refresh or deploy", (t) => {
   assert.equal(read(f.deployed), "");
 });
 
+// W1-T10409: the two spawns below run the REAL CLI (tsx over a full copy of src/) several times per
+// tick. Under a coverage shard each child inherited NODE_V8_COVERAGE, so it also profiled and wrote out
+// the whole copied tree (paths under the fixture root, which no report counts), and the tick crossed
+// its old 30 s budget: PR #13382 read `null !== 0` at 30277 ms. Blank the session by ASSIGNING it
+// (node re-injects a deleted key) and give a cold real-CLI tick a budget sized for one.
+const REAL_CLI_BUDGET_MS = 120_000;
+const detachedFromCoverage = (env: NodeJS.ProcessEnv, extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv =>
+  ({ ...env, ...extra, NODE_V8_COVERAGE: "" });
+
 test("W1-T4917: the real deploy-run is not the install-separation no-op", (t) => {
   const f = fixture(t);
   // Copy the actual CLI source so its direct-invocation guard sees its real filename.
@@ -216,14 +225,14 @@ test("W1-T4917: the real deploy-run is not the install-separation no-op", (t) =>
   // A child-only bootstrap adds dry-run to the launcher's exact CLI args; deploy-run itself is real.
   const preload = join(f.root, "dry-run.cjs");
   writeFileSync(preload, "if (process.argv.includes('deploy-run')) process.argv.push('--dry-run');\n");
-  const r = spawnSync("bash", [join(f.root, "launcher")], { encoding: "utf8", cwd: f.root, timeout: 30000, env: { ...f.env, HOME: fixtureHome, NODE_OPTIONS: `--require=${preload}` } });
+  const r = spawnSync("bash", [join(f.root, "launcher")], { encoding: "utf8", cwd: f.root, timeout: REAL_CLI_BUDGET_MS, env: detachedFromCoverage(f.env, { HOME: fixtureHome, NODE_OPTIONS: `--require=${preload}` }) });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /### rmd deploy-run — (DEPLOYED|no-op):/, r.stderr);
   assert.match(r.stdout, /### rmd deploy-run — serve /, "the real cycle must be reached after assessment");
   assert.doesNotMatch(r.stdout, /resolves INSIDE|install root .*unfit|absent/);
   assert.match(read(f.calls), new RegExp(`-C ${f.daemon} rev-parse --show-toplevel`));
   const control = spawnSync(join(f.daemon, "bin", "rmd"), ["deploy-run", "--dry-run", "--state-root", f.state, "--repo-root", f.state], {
-    encoding: "utf8", cwd: f.state, timeout: 30000, env: { ...f.env, HOME: fixtureHome },
+    encoding: "utf8", cwd: f.state, timeout: REAL_CLI_BUDGET_MS, env: detachedFromCoverage(f.env, { HOME: fixtureHome }),
   });
   assert.equal(control.status, 0, control.stderr);
   assert.match(control.stdout, /resolves INSIDE the operator's own checkout/, "the real separation guard still refuses a shared parent");

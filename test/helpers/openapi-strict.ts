@@ -44,6 +44,11 @@ export function violations(value: unknown, node: Schema, at = "$"): string[] {
   }
   if ("const" in schema && value !== schema.const) return [`${at}: is ${JSON.stringify(value)}, declared const ${JSON.stringify(schema.const)}`];
   if (Array.isArray(schema.enum) && !schema.enum.includes(value)) return [`${at}: ${JSON.stringify(value)} is not in enum ${JSON.stringify(schema.enum)}`];
+  if (typeof value === "string") {
+    const length = Array.from(value).length;
+    if (typeof schema.minLength === "number" && length < schema.minLength) return [`${at}: length ${length} below minLength ${schema.minLength}`];
+    if (typeof schema.maxLength === "number" && length > schema.maxLength) return [`${at}: length ${length} above maxLength ${schema.maxLength}`];
+  }
   if (typeof schema.pattern === "string" && typeof value === "string" && !new RegExp(schema.pattern).test(value)) {
     return [`${at}: ${JSON.stringify(value)} does not match ${schema.pattern}`];
   }

@@ -11,18 +11,21 @@
  *
  * Its units: the inbox classification (inbox-view.ts), which the daemon's fleet lane acts on, and the
  * analytics refresh (W1-T5055, analytics-view.ts), which runs per instance off serve's event loop and hands
- * each instance's output to the read-model worker to commit as `source_snapshot` rows. The lane makes no GitHub call: it reads the board snapshot whichever keep-warm owns the fetch
+ * each instance's output to the read-model worker to commit as `source_snapshot` rows. The inbox units make no GitHub call: they read the board snapshot whichever keep-warm owns the fetch
  * (switches.json `github`) persists through serve's gateway, the source the board and now view read.
  * THIS FILE IS LOADED TWICE, as read-model-worker.ts is: `workerData.kind` gates the thread's
  * branch, whose body is {@link runSlowLaneWorker}, named so a test can run it in-process.
  */
 import { join } from "node:path";
+import { collectCodeHealth } from "./code-health-collector.js";
+import { CODE_HEALTH_INTERVAL_MS, CODE_HEALTH_VIEW_NAME, readCodeHealthInventory } from "./code-health-view.js";
+import { codeHealthRepositoryStateDir, readCodeHealthCollectionFailure, readCodeHealthSnapshot } from "./code-health-store.js";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, materializeFeedbackView } from "./feedback-view.js";
 import { INBOX_CLASSIFY_INTERVAL_MS, INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification, type InboxRefreshMemo } from "./inbox-view.js";
-import { acceptMergedFeedback, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
+import { acceptMergedFeedback, proposeHandRouteFeedback, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { recordCreditStateEdge } from "./account-usage.js";
 import {
   ANALYTICS_REFRESH_INTERVAL_MS,
@@ -42,6 +45,8 @@ import type { TraceGithub } from "./trace.js";
 import type { ViewSource } from "./views.js";
 import { startWorker } from "./child-entry-argv.js";
 import { NO_INSTANCE_RATIFY } from "./instance-gateway.js";
+import { collectDailyProgress, type DailyProgressCollectionConfig } from "./daily-progress-collector.js";
+import type { DailyProgressPublication } from "./daily-progress-store.js";
 
 const SLOW_LANE_KIND = "remudero-read-model-slow-lane" as const;
 /** BACKSTOP: the lane's heap; a unit that outgrows it kills this thread, never serve's. */
@@ -51,6 +56,8 @@ export const SLOW_LANE_MAX_RESPAWN_MS = 30 * 60_000;
 
 /** What the lane needs, all serializable: `workerData` cannot carry a closure. */
 export interface SlowLaneConfig {
+  /** Daily collection is independent of view switches and reader demand. */
+  dailyProgress?: DailyProgressCollectionConfig;
   /** The inbox unit's inputs; absent, the lane has no inbox unit. */
   inbox?: { root: string; planPath: string; ledgerPath: string; inboxRoot: string; repository: string };
   instanceInboxes?: Array<NonNullable<SlowLaneConfig["inbox"]> & { instance: string }>;
@@ -58,6 +65,7 @@ export interface SlowLaneConfig {
   accountUsage?: { ledgerPath: string; root: string; accountFilePath?: string };
   /** The analytics unit's instances, each by the state dir holding its ledger; it runs only while the analytics view is switched on. */
   analytics?: { instances: Array<{ name: string; stateDir: string; repository?: string }>; intervalMs?: number; timeoutMs?: number };
+  codeHealth?: { stateDir: string; instances: Array<{ name: string; stateDir: string; repository?: string }> };
   intervalMs?: number;
 }
 
@@ -71,6 +79,7 @@ export interface SlowLaneBodies {
 }
 
 export type SlowLaneMessage =
+  | { type: "daily_progress"; publication: DailyProgressPublication; ownershipEpoch: number }
   | { type: "log"; step: string; extra: Record<string, unknown> }
   /** Posted BEFORE a unit's work starts, so a thread that dies inside it is attributed by its parent. */
   | { type: "begin"; work: SlowLaneWork }
@@ -180,6 +189,15 @@ function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, l
       const github = githubSource();
       const accepted = acceptMergedFeedback(deps.root, deps.statusGithub, deps.feedbackLand ?? {});
       if (accepted.length > 0) log("feedback.accepted_merged", { ids: accepted });
+      if (github.some(source => source.state !== "fresh")) {
+        log("feedback.hand_route_deferred", { reason: "snapshot_not_fresh" });
+      } else {
+        const outcomes = proposeHandRouteFeedback(deps.root, deps.statusGithub, config.repository, { ...deps.feedbackLand, stateRoot: deps.feedbackLand?.stateRoot ?? config.inboxRoot });
+        const proposed = outcomes.filter(outcome => outcome.outcome === "proposed");
+        const unknown = outcomes.filter(outcome => outcome.outcome === "unknown");
+        const refused = outcomes.filter(outcome => outcome.outcome === "refused");
+        if (proposed.length || unknown.length || refused.length) log("feedback.hand_route_reconciled", { proposed, unknown: unknown.length, refused: refused.length, reasons: [...new Set([...unknown, ...refused].map(outcome => outcome.reason))] });
+      }
       return { views: [{ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: withSource(materializeFeedbackView({ root: deps.root, planPath: deps.planPath, stateRoot: deps.inboxRoot }, deps.statusGithub, clock), github) }] };
     },
   };
@@ -344,7 +362,37 @@ function analyticsUnit(
 /** A view switch mode under which the view is built: the analytics unit runs only then. */
 const BUILT_MODES: ReadonlySet<unknown> = new Set(["shadow", "serve", "auto"]);
 
-type Port = { on(event: "message", run: (msg: { type?: string; held?: unknown; modes?: unknown; instances?: unknown }) => void): unknown; postMessage(value: unknown): void };
+type Port = { on(event: "message", run: (msg: { type?: string; held?: unknown; modes?: unknown; instances?: unknown; ownershipEpoch?: unknown }) => void): unknown; postMessage(value: unknown): void };
+
+function dailyProgressUnit(config: DailyProgressCollectionConfig, clock: Clock, post: (message: SlowLaneMessage) => void,
+  epoch: () => number, mayRun: () => boolean, ownsInstance: (name: string) => boolean,
+  log: (step: string, extra?: Record<string, unknown>) => void): SlowLaneUnit {
+  let active: AbortController | undefined;
+  return { name: "daily-progress", cancel: () => active?.abort(), run: async () => {
+    if (active || !mayRun()) return { views: [] };
+    const controller = new AbortController(), startedEpoch = epoch();
+    active = controller;
+    const work = { unit: "daily-progress-collection", phase: "cached-sources" };
+    post({ type: "begin", work });
+    // BACKSTOP: use the existing slow-source deadline; no second unbounded worker class.
+    const deadline = setTimeout(() => controller.abort(), ANALYTICS_REFRESH_TIMEOUT_MS);
+    deadline.unref();
+    void (async () => {
+      try {
+        const built = await collectDailyProgress({ ...config, ownedInstanceNames: config.instances.filter(i => ownsInstance(i.name)).map(i => i.name) }, clock, controller.signal);
+        if (built && !controller.signal.aborted && mayRun() && epoch() === startedEpoch) {
+          post({ type: "daily_progress", publication: built.publication, ownershipEpoch: startedEpoch });
+          log("read_model.daily_staged", { generation: built.manifest.generation });
+        }
+      } catch (error) {
+        log(controller.signal.aborted ? "read_model.daily_cancelled" : "read_model.daily_failed", {
+          reason: controller.signal.aborted ? "ownership changed or collection deadline elapsed" : String((error as Error).message).slice(0, 2048),
+        });
+      } finally { clearTimeout(deadline); active = undefined; post({ type: "end", work }); }
+    })();
+    return { views: [] };
+  } };
+}
 
 /**
  * The thread's body: run every unit each interval while the lease is held. A lease newly held runs a
@@ -369,6 +417,7 @@ export function runSlowLaneWorker(
   let ownedInstances = new Set<string>();
   let leaseEpoch = 0;
   let analyticsEpoch = 0;
+  let codeHealthEpoch = 0;
   const post = (message: SlowLaneMessage): void => port.postMessage(message);
   const analytics = data.analytics
     ? [analyticsUnit(data.analytics, clock, post, log, () => BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]), () => {
@@ -376,12 +425,18 @@ export function runSlowLaneWorker(
       return () => !stopped && held && leaseEpoch === leaseAtStart && analyticsEpoch === viewAtStart && BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]);
     }, opts.analyticsRefresh ?? scanAnalyticsLedger, name => ownedInstances.has(name))]
     : [];
+  const daily = data.dailyProgress ? [dailyProgressUnit(data.dailyProgress, clock, post, () => leaseEpoch,
+    () => !stopped && held, name => ownedInstances.has(name), log)] : [];
+  const codeHealth = data.codeHealth ? createCodeHealthCollectionUnit(data.codeHealth, { clock, log, ownsInstance: name => ownedInstances.has(name), captureOwnership: () => {
+    const epoch = leaseEpoch, viewEpoch = codeHealthEpoch;
+    return () => !stopped && held && leaseEpoch === epoch && codeHealthEpoch === viewEpoch && BUILT_MODES.has(modes[CODE_HEALTH_VIEW_NAME]);
+  } }) : undefined;
   const units: SlowLaneUnit[] = [...(data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}) : []),
     ...(data.instanceInboxes ?? []).map(config => instanceInboxUnit(config, clock, () => {
       const startedEpoch = leaseEpoch;
       return () => !stopped && held && ownedInstances.has(config.instance) && leaseEpoch === startedEpoch;
     }, log)),
-    ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : []), ...analytics];
+    ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : []), ...analytics, ...daily, ...(codeHealth ? [codeHealth] : [])];
   let cancel: () => void = () => {};
   const pass = async (): Promise<void> => {
     cancel = () => {};
@@ -413,6 +468,7 @@ export function runSlowLaneWorker(
         analyticsEpoch += 1;
         for (const unit of analytics) unit.cancel?.();
       }
+      if (next[CODE_HEALTH_VIEW_NAME] !== modes[CODE_HEALTH_VIEW_NAME]) codeHealthEpoch += 1;
       modes = next;
     }
     if (msg.type !== "lease") return;
@@ -420,9 +476,11 @@ export function runSlowLaneWorker(
     const previous = [...ownedInstances].join("|");
     ownedInstances = new Set(Array.isArray(msg.instances) ? msg.instances.filter((id): id is string => typeof id === "string") : []);
     held = msg.held === true;
-    if (was !== held || previous !== [...ownedInstances].join("|")) {
-      leaseEpoch += 1;
-      for (const unit of analytics) unit.cancel?.();
+    const suppliedEpoch = typeof msg.ownershipEpoch === "number" && Number.isSafeInteger(msg.ownershipEpoch) && msg.ownershipEpoch >= 0 ? msg.ownershipEpoch : undefined;
+    const epochChanged = suppliedEpoch !== undefined && suppliedEpoch !== leaseEpoch;
+    if (was !== held || previous !== [...ownedInstances].join("|") || epochChanged) {
+      leaseEpoch = suppliedEpoch ?? leaseEpoch + 1;
+      for (const unit of [...analytics, ...daily]) unit.cancel?.();
     }
     if (held && (!was || previous !== [...ownedInstances].join("|")) && !running) {
       cancel();
@@ -433,7 +491,7 @@ export function runSlowLaneWorker(
   return {
     stop: () => {
       stopped = true;
-      for (const unit of analytics) unit.cancel?.();
+      for (const unit of [...analytics, ...daily]) unit.cancel?.();
       cancel();
     },
   };
@@ -445,7 +503,7 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === SL
 
 export interface SlowLane {
   /** Whether this serve holds the home lease; the thread is spawned the first time it does. */
-  lease(held: boolean, instances?: readonly string[]): void;
+  lease(held: boolean, instances?: readonly string[], ownershipEpoch?: number): void;
   /** The view switches as the worker last read them: a unit whose view is off does not run. */
   views(modes: Record<string, string>): void;
   close(): void;
@@ -460,6 +518,7 @@ export function threadSlowLane(opts: {
   onBodies?: (built: SlowLaneBodies) => void;
   /** Each instance's analytics refresh, finished or failed. */
   onSnapshot?: (write: SourceSnapshotWrite) => void;
+  onDailyProgress?: (publication: DailyProgressPublication, ownershipEpoch: number) => void;
   /** Times the work in flight when the thread dies. */
   clock?: Clock;
 }): SlowLane {
@@ -468,6 +527,7 @@ export function threadSlowLane(opts: {
   let worker: Worker | undefined;
   let held = false;
   let ownedInstances: readonly string[] = [];
+  let ownershipEpoch: number | undefined;
   let modes: Record<string, string> = {};
   let deaths = 0;
   let closed = false;
@@ -490,6 +550,9 @@ export function threadSlowLane(opts: {
       else if (msg.type === "log") opts.log(msg.step, msg.extra);
       else if (msg.type === "bodies") opts.onBodies?.({ view: msg.view, version: msg.version, bodies: msg.bodies });
       else if (msg.type === "source_snapshot") opts.onSnapshot?.(msg.snapshot);
+      else if (msg.type === "daily_progress") {
+        if (worker === spawned && held && msg.ownershipEpoch === ownershipEpoch) opts.onDailyProgress?.(msg.publication, msg.ownershipEpoch);
+      }
       else if (msg.ok) deaths = 0;
     });
     spawned.on("error", (error: Error & { code?: unknown }) => {
@@ -507,18 +570,21 @@ export function threadSlowLane(opts: {
         respawn = undefined;
         if (closed) return;
         spawn();
-        worker?.postMessage({ type: "lease", held, instances: ownedInstances });
+        worker?.postMessage({ type: "lease", held, instances: ownedInstances, ...(ownershipEpoch === undefined ? {} : { ownershipEpoch }) });
       }, delayMs);
       respawn.unref();
     });
   };
   return {
-    lease: (now, instances = []) => {
-      if (closed || now === held && JSON.stringify(instances) === JSON.stringify(ownedInstances)) return;
+    lease: (now, instances = [], nextEpoch) => {
+      const sameOwners = now === held && JSON.stringify(instances) === JSON.stringify(ownedInstances);
+      const incomingEpoch = nextEpoch ?? (opts.config.dailyProgress ? sameOwners ? ownershipEpoch : (ownershipEpoch ?? 0) + 1 : undefined);
+      if (closed || sameOwners && incomingEpoch === ownershipEpoch) return;
       held = now;
       ownedInstances = [...instances];
+      ownershipEpoch = incomingEpoch;
       if (held && !worker && respawn === undefined) spawn();
-      worker?.postMessage({ type: "lease", held, instances: ownedInstances });
+      worker?.postMessage({ type: "lease", held, instances: ownedInstances, ...(ownershipEpoch === undefined ? {} : { ownershipEpoch }) });
     },
     views: (next) => {
       if (closed || JSON.stringify(next) === JSON.stringify(modes)) return;
@@ -533,4 +599,38 @@ export function threadSlowLane(opts: {
       void running?.terminate();
     },
   };
+}
+
+
+/** Daily cached assessments share the leased slow lane, independently of Analytics. */
+export function createCodeHealthCollectionUnit(config: NonNullable<SlowLaneConfig["codeHealth"]>, opts: {
+  clock: Clock; captureOwnership: () => () => boolean; ownsInstance: (name: string) => boolean;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  collect?: typeof collectCodeHealth;
+}): SlowLaneUnit {
+  const nextDue = new Map<string, number>(); let cursor = 0;
+  return { name: "code-health", run: async () => {
+    const mayPublish = opts.captureOwnership();
+    if (!mayPublish()) return { views: [] };
+    const inventory = readCodeHealthInventory(config.stateDir), repositories = inventory.repositories;
+    for (let visited = 0; visited < repositories.length; visited++) {
+      const member = repositories[cursor % repositories.length]!; cursor = (cursor + 1) % repositories.length;
+      const instance = config.instances.filter(instance => instance.repository?.toLowerCase() === member.repository && member.instanceIds.includes(instance.name) && opts.ownsInstance(instance.name)).sort((a, b) => a.name.localeCompare(b.name))[0];
+      if (!instance) continue;
+      const repository = member.repository, stateDir = codeHealthRepositoryStateDir(config.stateDir, repository), now = opts.clock.now();
+      const saved = readCodeHealthSnapshot(stateDir, repository), failure = readCodeHealthCollectionFailure(stateDir, repository);
+      const attempt = Math.max(saved.state === "observed" && saved.latestAttemptAt ? Date.parse(saved.latestAttemptAt) : Number.NEGATIVE_INFINITY,
+        failure.state === "failed" ? Date.parse(failure.startedAt) : Number.NEGATIVE_INFINITY);
+      if (now < Math.max(nextDue.get(repository) ?? Number.NEGATIVE_INFINITY, attempt + CODE_HEALTH_INTERVAL_MS)) continue;
+      const owns = () => mayPublish() && opts.ownsInstance(instance.name);
+      if (!owns()) break;
+      // One repository per existing lane pass bounds the burst and leaves its other units first.
+      nextDue.set(repository, now + CODE_HEALTH_INTERVAL_MS);
+      const result = await (opts.collect ?? collectCodeHealth)({ stateDir, repository, coverageStateDir: instance.stateDir, clock: opts.clock, mayPublish: owns });
+      if (result.state === "busy" || result.state === "superseded") nextDue.set(repository, now + INBOX_CLASSIFY_INTERVAL_MS);
+      opts.log("code_health.collection", { repository, state: result.state, ...(owns() ? {} : { reason: "ownership_changed" }) });
+      break;
+    }
+    return { views: [] };
+  } };
 }

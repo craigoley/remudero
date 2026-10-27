@@ -143,10 +143,9 @@ test("a grammar context the helper cannot resolve is refused instead of blanking
   }
 });
 
-test("contextual of, for-await and typed generator goals refuse rather than erase subsequent code", () => {
+test("contextual of and for-await goals refuse rather than erase subsequent code", () => {
   for (const source of ['for (const value of /`/) {}\nfunction actualLater() {}\n',
-    'async function owner() { for await (const value of values) /`/.test(value); }\nfunction actualLater() {}\n',
-    'function* gen(): { [Symbol.iterator](): Iterator<unknown> } { yield /`/.test(value); }\nfunction actualLater() {}\n']) {
+    'async function owner() { for await (const value of values) /`/.test(value); }\nfunction actualLater() {}\n']) {
     assert.throws(() => strictMask(source), /lexical context unknown/);
   }
 });

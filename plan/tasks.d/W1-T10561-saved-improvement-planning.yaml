@@ -24,10 +24,16 @@
     - src/lib/opportunity-intake.ts
     - src/lib/panel-graph.ts
     - src/lib/serve.ts
+    - src/lib/daemon.ts
+    - src/cli/commands/daemon.ts
     - src/run-task.ts
+    - src/lib/ledger.ts
     - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - docs/operator-guide.md
     - test/**/improvement-thread.test.ts
     - test/**/improvement-thread-route.test.ts
+    - test/**/improvement-action-pump.test.ts
   rationale: Native Ask turns are temporary and read-only, existing Inbox routes only read/reply to existing
     conversations, and the intent-plan gateway is explicitly unserved. The approved Plan this improvement
     action needs durable core creation and subsequent reviewed task drafting, not a capture-only success
@@ -50,6 +56,25 @@
     approval, desktop Codex bridge, tool permission, hidden execution, gate weakening or arbitrary
     browser-provided commands. Pin the real read/write contract for the dependent console consumer; an
     unserved stub or feedback capture alone does not satisfy the task.
+
+
+    Daemon-owned saved planning actions: the standalone service persists sealed draft/file requests only.
+    It must not start model or filing work through a service-owned CLI handoff. Reuse the real daemon's
+    fresh-source gateway and normal admission, budget, ownership, provider-refusal and OFF/latch guards;
+    the service must not assign a daemon marker or override an admission predicate. Add a bounded native
+    pump with at most one active handoff. Retain pending requests durably without truncating discovery,
+    and recover them after restart without a browser or a second operator decision. Revalidate the
+    original repository, source, goal, reviewed draft and exact request identity before each handoff.
+    Preserve existing jobs and normal daemon shutdown/freshness behavior. Completed or ambiguous filing
+    is never repeated without its native recovery receipt. A saved or queued request is not worker
+    admission, a completed draft, a filed task, a merge or deployment. The named regression must refuse
+    direct service execution and fail if production daemon-pump wiring or recovery is removed.
+    Receipt retention: the saved filing reader uses approve.id_materialized to recover the actual filed
+    task identities. Register that deciding receipt in the existing ledger retention set so rotation keeps
+    it under the unchanged retention bounds. Exercise the real rotation and filing-receipt reader; an
+    unregistered receipt must lose the identities and fail the regression. No retention cap, admission,
+    source-evidence or ownership guard may be weakened. This is implementation scope, not task credit.
+
   falsifier: Remove idempotency, source/scope validation and action boundary separately; repeated creation,
     cross-repository substitution and no-dispatch assertions must fail. Exercise actual persistence
     interruption and restart. A local React conversation or feedback-only ID cannot pass the saved-thread
@@ -63,6 +88,10 @@
       proof: "unit test: improvement planning separates conversation drafting filing and execution"
     - claim: the evidence mechanism is reached by its production caller
       proof: "grep: buildImprovementThreadRoutes( in src/lib/serve.ts"
+    - claim: saved planning actions use daemon-owned execution and normal admission with durable recovery
+      proof: "unit test: saved improvement actions start only through the daemon-owned handoff"
+    - claim: saved filing receipts retain their task identities across ledger rotation
+      proof: "unit test: improvement filing receipts retain task identities across ledger rotation"
   note: Reviewed core c18e7e4c48cee7cb19d2fc96fa93273ef63d85a5 and console
     c57646ea3636341cc1fad8847df8b144e169d3f1. Before filing, all 10 open core PR heads and main were compared
     by subject; each head had the same subject counts as main, with more than 4,370 plan shards as corpus
@@ -70,3 +99,22 @@
     merged-task credit and dispatch/run claims before implementation. Reservations belong to
     codex/file-console-improvement-20261024; preserve contested claims. Reserved W1-T10561 through rmd
     next-task-id; this filing does not claim implementation or deployment.
+  amendment: |
+    Companion declaration 2026-10-26 for the daemon-owned improvement-action handoff.
+    Add one reasoned CLI_ONLY declaration and its one recorded baseline name, plus the
+    missing operator-guide command row. The HTTP draft/file routes persist requests;
+    they do not execute the admitted daemon handoff and are not action-equivalent routes.
+    No source behavior, existing mapping, original assertion, acceptance criterion,
+    falsifier, budget, admission guard or other limit changes. The three paths above
+    are the only additional companions. Normal plan/ruling qualification and protected
+    CI remain required; native repair retains ownership unless a separately bounded
+    conditional publication handoff is approved.
+
+    Standalone registration PR14468 replaces the product instrument companions.
+    It actually merged at 2026-10-26T16:51:29Z as 1e7188db5e3e9799f70fdc23f79142527e896a41.
+    Keep docs/operator-guide.md as the only remaining additional companion from the earlier declaration.
+    The earlier three-path declaration remains approval history. The two instrument paths
+    are supplied by the separately reviewed registration and are no longer in this task files list.
+    Native repair adopts that merged registration and documents the daemon-owned command through
+    existing ownership. All original product files, six criteria, budgets, source checks, admission,
+    filing, scanner and protected review guards remain unchanged; qualify the real census.

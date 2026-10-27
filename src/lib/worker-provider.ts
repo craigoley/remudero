@@ -115,7 +115,10 @@ interface CodexSpawnArgs {
     teardown?: (pgid: number) => void;
   };
   onSpawnError?: (error: NodeJS.ErrnoException) => void;
-  streamObserver?: (event: { kind: "working" | "tool-executing" | "message"; tsMs: number; text?: string }) => void;
+  /** W1-T10763: a codex tool call also carries `toolName`/`toolInput`/`cwd`, the fields the run-task observer signs. */
+  streamObserver?: (event: {
+    kind: "working" | "tool-executing" | "message"; tsMs: number; text?: string; toolName?: string; toolInput?: unknown; cwd?: string;
+  }) => void;
   clockBound?: { boundMs: number; now?: () => number; pollMs?: number };
   /** W1-T9245 — the caller's cancel, as `SpawnWorkerArgs.signal` is for Claude: aborting it (or passing it aborted) tears the
    * process group down through `teardownOnce`, so an `end_round` abort stops the worker instead of letting it run on. */
@@ -2090,7 +2093,11 @@ interface CodexJsonEvent {
   thread_id?: string;
   usage?: { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number };
   error?: { message?: string };
-  item?: { type?: string; text?: string; command?: string; aggregated_output?: string };
+  item?: {
+    type?: string; text?: string; command?: string; aggregated_output?: string;
+    /** A `file_change` item's changed paths; `kind` is "add", "update" or "delete". */
+    changes?: ReadonlyArray<{ path?: unknown; kind?: unknown } | null>;
+  };
 }
 
 export interface ParsedCodexEvents {
@@ -2279,7 +2286,9 @@ class CodexJsonlAccumulator {
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
   ) as Record<CodexEventByteKind, number>;
 
-  constructor(private nowMs: number, private readonly pendingFile?: string, private readonly observeToolLineage?: (raw: unknown) => void) {}
+  constructor(private nowMs: number, private readonly pendingFile?: string, private readonly observeToolLineage?: (raw: unknown) => void,
+    private readonly observeMessage?: (text: string, tsMs: number) => void,
+    private readonly observeToolCall?: (toolName: "Bash" | "Edit" | "Write", toolInput: Record<string, string>, tsMs: number) => void) {}
 
   push(chunk: string, nowMs = this.nowMs): void {
     this.nowMs = nowMs;
@@ -2417,7 +2426,9 @@ class CodexJsonlAccumulator {
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       this.blocks.push(event.item.text);
       this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
+      this.observeMessage?.(event.item.text, this.nowMs);
     }
+    if (event.type === "item.completed") this.observeToolCalls(event.item);
     if (event.type === "turn.completed") {
       this.turnInProgress = false;
       this.completedTurns += 1;
@@ -2449,6 +2460,75 @@ class CodexJsonlAccumulator {
       this.usageRefusal ??= detectUsageLimitRefusal(message, this.nowMs);
     }
   }
+
+  /** W1-T10763: a completed command or file change is a tool call, named as a claude tool call is so its
+   *  `worker.activity` row carries the same `toolStepSignature`. Only the item's own fields are read: a
+   *  command is `Bash` with the script its shell wrapper ran, and a file change is one call per changed path,
+   *  `Write` for an added file and `Edit` otherwise. */
+  private observeToolCalls(item: CodexJsonEvent["item"]): void {
+    if (!this.observeToolCall) return;
+    if (item?.type === "command_execution" && typeof item.command === "string") {
+      this.observeToolCall("Bash", { command: codexCommandScript(item.command) }, this.nowMs);
+    }
+    if (item?.type === "file_change" && Array.isArray(item.changes)) {
+      for (const change of item.changes) {
+        if (typeof change?.path !== "string" || change.path.length === 0) continue;
+        this.observeToolCall(change.kind === "add" ? "Write" : "Edit", { file_path: change.path }, this.nowMs);
+      }
+    }
+  }
+}
+
+/** W1-T10763: the wrapper codex runs every command in, `<shell> -lc <script>`. */
+export const CODEX_SHELL_WRAPPER_RE = /^(?:\/(?:usr\/)?bin\/)?(?:bash|sh|zsh|dash) +-l?c +([\s\S]+)$/;
+/** One character a shell word may hold unquoted and still mean only itself. */
+export const UNQUOTED_LITERAL_RE = /[A-Za-z0-9_./:@%+,=-]/;
+/** The characters a backslash escapes inside double quotes; before any other, the backslash is literal. */
+const DOUBLE_QUOTE_ESCAPABLE = "$`\"\\\n";
+
+/** W1-T10763: codex reports a command as its whole shell wrapper, `/bin/bash -lc '<script>'`, and the script is
+ *  the command the worker ran. It is returned only when the line is a known shell, `-c`/`-lc` and ONE word whose
+ *  quoting expands nothing; any other line (a variable, a second argument, an unterminated quote) is returned as
+ *  it came, never guessed at. */
+export function codexCommandScript(command: string): string {
+  const wrapped = CODEX_SHELL_WRAPPER_RE.exec(command);
+  return (wrapped && literalShellWord(wrapped[1]!)) || command;
+}
+
+/** The value of one POSIX shell word that expands nothing, or `undefined` for anything else. */
+function literalShellWord(text: string): string | undefined {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === "'") {
+      const end = text.indexOf("'", i + 1);
+      if (end < 0) return undefined;
+      out += text.slice(i + 1, end);
+      i = end;
+    } else if (c === '"') {
+      let j = i + 1;
+      for (; j < text.length && text[j] !== '"'; j++) {
+        if (text[j] === "$" || text[j] === "`") return undefined;
+        if (text[j] === "\\" && j + 1 < text.length && DOUBLE_QUOTE_ESCAPABLE.includes(text[j + 1]!)) {
+          j += 1;
+          if (text[j] !== "\n") out += text[j];
+        } else {
+          out += text[j];
+        }
+      }
+      if (j >= text.length) return undefined;
+      i = j;
+    } else if (c === "\\") {
+      if (i + 1 >= text.length) return undefined;
+      i += 1;
+      if (text[i] !== "\n") out += text[i];
+    } else if (UNQUOTED_LITERAL_RE.test(c)) {
+      out += c;
+    } else {
+      return undefined;
+    }
+  }
+  return out;
 }
 
 /** Parse Codex exec JSONL into the existing provider-neutral worker envelope. */
@@ -5523,7 +5603,10 @@ async function spawnCodexWorkerInPrivateTemp(
   const startedAt = Date.now();
   const toolLineage = createWorkerToolLineage({ provider: "codex", root: config.root, runId: args.runId, taskId: args.taskId });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
-  const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"), raw => observeWorkerToolLineage(toolLineage, raw));
+  const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"), raw => observeWorkerToolLineage(toolLineage, raw),
+    (text, tsMs) => args.streamObserver?.({ kind: "message", tsMs, text }),
+    (toolName, toolInput, tsMs) =>
+      args.streamObserver?.({ kind: "tool-executing", tsMs, text: `[tool_use: ${toolName}]`, toolName, toolInput, cwd: args.cwd }));
   const stdoutDecoder = new StringDecoder("utf8");
   let stdoutBytes = 0;
   const stderrRetainer = new CodexStderrRetainer();

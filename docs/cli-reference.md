@@ -26,6 +26,7 @@ usage:
   rmd preflight [--from <ref>] [--to <ref>] [--no-fast] [--fast] [--ci-parity] [--coverage] [--proofs] [--summary-file <path>] [--sandbox-metrics]   # The HAND route's commit gate: commitlint, tsc --noEmit, commit-message checks.
   rmd pr-checks <pr-number> [--repo <name>]   # Print a PR head's checks (runs and commit statuses, latest attempt) and exit 1 if any is red.
   rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]   # Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.
+  rmd worktree add <dir> -b <branch> <base> [--donor <abs dir>]   # Add a disposable worktree whose unchanged files are cloned copy-on-write from the operator checkout.
   rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit [--reap [--apply | --reconcile]]] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>]   # Claim the next task id, or preview orphan cleanup with --audit --reap; --apply deletes under leases.
   rmd emissions [--days N]   # Which CLI verbs wrote no ledger line in the window -- dead-capability detection.
   rmd receipt <pr> [--repo <name>]   # Print a deterministic in-toto-style run receipt from ledger ground truth.
@@ -65,6 +66,7 @@ usage:
   rmd autonomy-rate   # Report the zero-touch merge rate over every Remudero-Task-trailer merge.
   rmd replay-goldens --confirm-spend --ledger <path> [--limit N]   # Replay the seeded goldens and record what the retro's Self-Harness leg reads.
   rmd skill-eval <proposal-id> --confirm-spend   # Attempt a staged skill draft with and without it on held-out tasks; record the verdict.
+  rmd procedures [--days <n>] [--json]   # Report which tool-call steps clean merged runs repeat, per task type, against repaired runs.
   rmd check-acceptance <body-file>   # Report what the reviewer's own parser actually resolves from a PR body file.
   rmd retro [--dry-run]   # Sync the plan from the ledger (Architect retro).
   rmd drain [--until <id>] [--max <n>] [--repo <name>] [--curated <path>] [--dry-run] [--allow-stale]   # Drain the task DAG through run-task, dispatching from the plan blob.
@@ -116,6 +118,7 @@ usage:
   rmd peek <runId> [--lines <n>] [--follow]   # Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
   rmd pr-owner <pr-number>   # Report whether the local ledger shows a fix lane owning one PR.
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
+  rmd improvement-action <operation-id> --state-dir <path>   # Resume one saved planning action through the daemon's admitted workflow.
   rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
   rmd inbox-bakeoff [--sample <n>]   # Replay real inbox proposals through each draft candidate; rank by clean drafts per dollar.
   rmd approve <P##> [<P##> ...]   # Ratify one or more READY proposals through the gate into a plan PR.
@@ -251,6 +254,16 @@ rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]
 ```
 
 W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the chosen parent and why, the path and branch; exits 0 created, 1 refused, 2 bad usage.
+
+### `rmd worktree`
+
+Add a disposable worktree whose unchanged files are cloned copy-on-write from the operator checkout.
+
+```
+rmd worktree add <dir> -b <branch> <base> [--donor <abs dir>]
+```
+
+W1-T10257: a fresh `git worktree add` writes ~128 MB of tracked files the operator checkout already holds; on APFS a clone shares those blocks. Cuts the worktree with `git worktree add --no-checkout --no-track -b <branch> <dir> <base>`, clones every tracked regular file the donor (default: the repo's main worktree, the operator checkout) holds UNCHANGED (index blob equal to <base>'s blob, working file not dirty; the donor's uncommitted edits are never copied) with the platform's clone backend (`cp -c` on macOS, `cp --reflink=always` on Linux), then `git read-tree <base>` and `git checkout-index -a -q` write only the paths not cloned, `git update-index --refresh` and a clean `git status` are asserted, and a dirty status is repaired by a forced rewrite (reported as reconciled-by-rewrite). A volume that cannot clone gets a plain `git worktree add`, with the reason printed. node_modules is symlinked from the donor. Prints the method, the cloned/written counts and the free-space delta (a shared-volume observation, not a per-job attribution). <dir> and --donor must be absolute. Exits 0 created, 1 refused, 2 bad usage.
 
 ### `rmd next-task-id`
 
@@ -643,6 +656,16 @@ rmd skill-eval <proposal-id> --confirm-spend
 ```
 
 Phase 4 of the held-out skill eval: the production caller of runSkillEval (src/lib/skill-eval-command.ts). It SPENDS: without --confirm-spend it prints why and exits 2 having read nothing. It loads the proposal from <root>/state/inbox-proposals.json and refuses (exit 2, one skill_eval.refused ledger row) one that is absent, carries no skill file, names an unsafe skill or has no skillFileStagedAt stamp, which the skill workshop's next pass sets. A text is judged once: a proposal whose current text already carries a recorded verdict refuses as already-judged, since a second draw of the same text could only launder the first; a run that measured too few tasks judged nothing and may run again. The drafter mines every merged run in its window, so the hold-out is time: from the ledger union (every rotation form; an unread source refuses) and the plan it derives the golden corpus, excludes every task merged at or before the stamp, and draws K held-out tasks of the draft's applies-to type (a refused draw exits 1 and writes nothing). Merge credit is ledger rows only, which under-credits: a missed task is absent, never wrongly admitted. The without-skill arm gets the skills part production renders for the task today; the with-skill arm the part it would render were the draft approved, loaded from a temp tree by the same loader. A draft that part would not inject for some task refuses before any dispatch (draft-not-injected). Each task runs R trials per arm through a sealed, never-pushed paired attempt at its base on one pinned stack, only while the fleet is idle in quiet mode with measured headroom. The verdict is written to the proposal's skillEval only while its staged text is still the one evaluated; otherwise skill_eval.stale is logged and nothing is written. Exit 0 on a recorded pass, 1 on a recorded refusal or a stale run, 2 on any refusal before dispatch.
+
+### `rmd procedures`
+
+Report which tool-call steps clean merged runs repeat, per task type, against repaired runs.
+
+```
+rmd procedures [--days <n>] [--json]
+```
+
+A read-only procedure census (src/lib/procedure-census.ts) over the merged runs that started in the last N days (--days, an integer from 1 to 60, default 14; the window ends now). Each task type splits into CLEAN runs (zero fix rounds) and REPAIRED runs (one or more, attributed as the retro attributes them). A step is a worker tool call's tool_signature from its worker.activity row, coarsened so one file is not one step (Read:src/lib/review.ts reads as Read:src/lib/*.ts; Bash signatures and top-level paths stay verbatim), or the bare tool name on a row that carries no signature. Per type it reports each step's share of clean and repaired runs and their difference (lift), the universal steps (in at least 80% of clean runs, once a type has 5 clean runs), and the contiguous 2- and 3-step sequences at least half the clean runs share. It reports first how many tool-call rows carry a signature at all, and warns when none do, so missing signatures never read as nothing recurring. It reads the ledger union once, filtered to the steps it needs, and exits 2 naming each unread source when the union is incomplete, since an unread rotation can hide a run's fix rounds. --json prints the census object instead of the markdown report. It writes nothing of its own: no ledger row, no state file (the one cli.invoked row the dispatcher ledgers for every verb is all an invocation adds). Exit 0 on a report, 2 on a usage error or an incomplete union.
 
 ### `rmd check-acceptance`
 
@@ -1153,6 +1176,16 @@ rmd plan --mode=create|clarify|expand [<brief>...]
 ```
 
 the unified Architect PLAN skill (MASTER-PLAN §5B, W1-T45) — ONE ground→research→clear-or-grill-or-propose code path shared by all three modes (Refine=clarify, Expand=expand): create scaffolds new plan/tasks.yaml task(s) for the REQUIRED <brief> initiative; clarify grills (or silently resolves) ambiguous/underspecified existing tasks, <brief> optionally narrowing the focus; expand proposes gap-filling tasks that each cite a research source. CLEAR/GRILL touch nothing and open no PR; PROPOSED opens a plan-only PR (plan/** + MASTER-PLAN.md) gated by ci-gate+remudero-review
+
+### `rmd improvement-action`
+
+Resume one saved planning action through the daemon's admitted workflow.
+
+```
+rmd improvement-action <operation-id> --state-dir <path>
+```
+
+Daemon-owned handoff for an exact saved improvement action. Refuses an unowned process before reading execution configuration, verifies the configured fleet and repository, and revalidates the saved source, goal and reviewed draft. Uses the native bounded Inbox draft and governed filing paths; recovers filing from its native receipt rather than repeating ambiguous work. Saving or queuing a request does not admit a worker or complete, file, merge or deploy a task.
 
 ### `rmd inbox`
 

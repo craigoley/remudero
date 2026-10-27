@@ -7,7 +7,7 @@ import { parse as parseYaml } from "yaml";
 
 import { applyBacklogActions, backlogGardenSpec, backlogInventory, type BacklogSources } from "../src/lib/backlog-gardener.js";
 import { fixedClock } from "../src/lib/clock.js";
-import { runGarden } from "../src/lib/gardener.js";
+import { runGardenAsync } from "#src/lib/gardener.js";
 import { REGISTERED_GARDEN_NAMES, gardenSchedule } from "../src/lib/garden-registry.js";
 import type { MainCommit } from "../src/lib/hot-file-gardener.js";
 import type { PlanInventory } from "../src/lib/plan-gardener.js";
@@ -32,6 +32,7 @@ function fixture(t: { after: (fn: () => void) => void }, tasks: Task[], opts: { 
   const plan: PlanInventory = { open: tasks, all: tasks, shards };
   const sources: BacklogSources = {
     repoRoot: root,
+    openDecisions: async () => [],
     plan: () => plan,
     ledger: () => opts.rows ?? [],
     history: () => opts.history ?? [],
@@ -75,7 +76,7 @@ test("W1-T4941: an overtaken task is proposed for retirement with cited evidence
   assert.match(f.read(item.id), /retirement: withdrawn/);
 });
 
-test("W1-T4941: a retirement proposal proves its new decision on the shard", (t) => {
+test("W1-T4941: a retirement proposal proves its new decision on the shard", async (t) => {
   const item = task("W1-T13", { files: ["src/a.ts", "src/b.ts"], acceptance: SHIPPED });
   const f = fixture(t, [item], { history: [{ sha: "a".repeat(40), at: NOW.toISOString(), subject: "fix(core): done (#123)", files: ["src/a.ts", "src/b.ts"] }] });
   ship(f.root);
@@ -85,12 +86,12 @@ test("W1-T4941: a retirement proposal proves its new decision on the shard", (t)
     openWorkspace: () => ({ root: f.root, land: (p: { body: string }) => { body = p.body; return "https://example.test/pull/1"; }, dispose: () => {} }),
   };
   const action = backlogInventory(f.sources).candidates[0]!;
-  runGarden(backlogGardenSpec(deps, f.sources), deps);
+  await runGardenAsync(backlogGardenSpec(deps, f.sources), deps);
   assert.match(body, new RegExp(`proof: grep: # backlog gardener: retirement evidence=${action.evidence.signature} in plan/tasks.d/W1-T13\\.yaml`));
   assert.match(f.read(item.id), /retirement: withdrawn/);
 });
 
-test("W1-T4941: a bounded pass writes exact decision proofs in one plan-only PR", (t) => {
+test("W1-T4941: a bounded pass writes exact decision proofs in one plan-only PR", async (t) => {
   const items = [task("W1-T12"), task("W1-T2"), task("W1-T7")];
   const f = fixture(t, items, { merges: 2 });
   const inv = backlogInventory(f.sources);
@@ -101,7 +102,7 @@ test("W1-T4941: a bounded pass writes exact decision proofs in one plan-only PR"
     stateDir: f.stateDir, repoRoot: f.root, log: () => {}, seed: 1,
     openWorkspace: () => ({ root: f.root, land: (p: { paths: string[]; title: string; body: string }) => { landed.push(p); return "https://example.test/pull/1"; }, dispose: () => {} }),
   };
-  const result = runGarden(backlogGardenSpec(deps, f.sources), deps);
+  const result = await runGardenAsync(backlogGardenSpec(deps, f.sources), deps);
   assert.equal(result.prUrl, "https://example.test/pull/1");
   assert.equal(landed.length, 1);
   assert.deepEqual(landed[0]?.paths, [f.shards.get("W1-T2"), f.shards.get("W1-T7")]);

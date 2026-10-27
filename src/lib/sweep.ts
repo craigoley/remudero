@@ -20,7 +20,7 @@ import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, realDeployDeps } from "./deployer.js";
+import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, realDeploySensorsAsync, type AsyncDeploySensors } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
 import { probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
 import {
@@ -85,7 +85,7 @@ import {
 import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimPool, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
-  securityArmRefusalAtHead, securityHoldReason,
+  securityArmRefusalAtHead, securityHoldReason, securityPolicyCause, type SecurityArmRefusal,
 } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
@@ -264,7 +264,9 @@ import {
   CONFLICT_EVIDENCE_MISSING_REASON_CODE,
   CONFLICT_NOT_ADMITTED_REASON_CODE,
   escalate,
+  escalateAsync,
   ghIssueGateway,
+  ghIssueGatewayAsync,
   isEscalationJudgeExempt,
   taskContractRevision,
   taskSemanticRevision,
@@ -275,6 +277,7 @@ import {
   type EscalationClass,
   type EscalationJudgeDecision,
   type EscalationJudgeVerdict,
+  escalationJudgeReceiptFields,
   type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
@@ -282,6 +285,7 @@ import {
 import { triageEscalation, type EscalationTriageMode, type TriageEvidence, type TriageAction } from "./escalation-triage.js";
 import {
   CODEQL_CHECK_NAME,
+  SECURITY_MERGE_POLICY_CONTEXT,
   compareRestArgs,
   fetchReviewReuseReachFacts,
   type ReviewReuseReachFacts,
@@ -291,7 +295,9 @@ import {
   runsForHeadRestArgs,
   fetchWorkflowRunObservations,
   GhPaceFloorStandDownError,
+  isHumanHoldCandidate,
   isScannerBlockerCandidate,
+  mergesDirectlyAsPlanPr,
   paceGhEntry,
   type GhApiFetcher,
   type GhCallPacer,
@@ -1542,6 +1548,41 @@ export type PlanScopedFixRoundInput = {
   };
 };
 
+/** Build the deploy rows with asynchronous sensors; latch reconciliation remains synchronous. */
+export async function deployStateRowsOffLoop(
+  reader: Omit<DeployStateReader, "deploy"> & { deploy: DeployStateReader["deploy"] | AsyncDeploySensors },
+  history: readonly Record<string, unknown>[],
+  onUnreadableLatch?: (error: unknown) => void,
+): Promise<FleetStateRow[]> {
+  const deploy = reader.deploy;
+  const rows: FleetStateRow[] = [];
+  const baked = await deploy.newestBakedSha?.();
+  if (baked) {
+    rows.push({
+      pipeline: "image", target: baked, desired: `published image containing ${baked}`,
+      observe: () => deploy.imagePublished?.(baked),
+      inFlight: () => deploy.imageBuildInFlight?.(),
+      repair: async () => {
+        if (!deploy.dispatchImageBuild) throw new Error("image build dispatch unavailable");
+        await deploy.dispatchImageBuild();
+      },
+    }, {
+      pipeline: "deploy", target: baked, desired: `healthy deployed image containing ${baked}`,
+      observe: async () => {
+        const behind = await deploy.imageBakedCommitsBehind?.();
+        return behind === undefined ? undefined : behind === 0;
+      },
+      inFlight: async () => {
+        if (deploy.imageRecycleManual?.() === true) return true;
+        const published = await deploy.imagePublished?.(baked);
+        return published === true ? false : published === false ? true : undefined;
+      },
+      repair: () => { if (!reader.deployRequested()) reader.requestDeploy(); },
+    });
+  }
+  return [...rows, ...deployStateRows({ ...reader, deploy: {} }, history, onUnreadableLatch)];
+}
+
 export interface BuildSweepEffectsDeps {
   selectedModeFileIO?: RegistryFileIO;
   contributorAdmissionImpl?: AdmissionObserver;
@@ -2207,6 +2248,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readCiGateRollup",
   "readCiGateRequired", // W1-T5979
   "liveCiRunForHead",
+  "refreshCiRunForHead",
   "reaggregateCiGate",
   "readMainTip",
   "readMainRepair",
@@ -2373,6 +2415,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readCiGateRollup"
   | "readCiGateRequired"
   | "liveCiRunForHead"
+  | "refreshCiRunForHead"
   | "reaggregateCiGate"
   | "readMainTip"
   | "readMainRepair"
@@ -3261,6 +3304,36 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return false;
       }
     },
+    // Complete evidence for refreshes; the legacy repair guard above retains its positive-only behavior.
+    refreshCiRunForHead: async (pr) => {
+      try {
+        // A READ, so it rides readJsonImpl (the read seam), never ghRunImpl (the effect seam).
+        const seenRunIds = new Set<number>();
+        for (let page = 1; ; page++) {
+          const body = (await readJsonImpl(["api", `repos/${owner}/${repo}/actions/runs?head_sha=${pr.headSha}&per_page=50` +
+            (page === 1 ? "" : `&page=${page}`)])) as { workflow_runs?: Array<{ id?: number; path?: string; status?: string }> } | undefined;
+          if (body === undefined || body === null) throw new Error("CI workflow run response unavailable");
+          if (!Array.isArray(body.workflow_runs)) throw new Error("CI workflow run list malformed");
+          let unread = false;
+          for (const run of body.workflow_runs) {
+            const id = run.id;
+            if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0 || seenRunIds.has(id)) {
+              throw new Error("CI workflow run identity unavailable or repeated across pages");
+            }
+            seenRunIds.add(id);
+            if (typeof run.path !== "string" || run.path.length === 0) { unread = true; continue; }
+            if (run.path !== ".github/workflows/ci.yml") continue;
+            if (typeof run.status !== "string" || run.status.length === 0) { unread = true; continue; }
+            if (run.status !== "completed") return true;
+          }
+          if (unread) throw new Error("CI workflow run identity or status unavailable");
+          if (body.workflow_runs.length < 50) return false;
+        }
+      } catch (e) {
+        log("sweep.live_ci_run.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+        return undefined;
+      }
+    },
 
     rerunFailedChecks: async (pr) => {
       const live = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as
@@ -3436,9 +3509,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       let jobId: string | undefined;
       try {
         const rollup = await restRollupFor(owner, repo, pr.headSha, readJsonImpl);
-        const gate = dedupeRollupByLatestAttempt(rollup).find(
-          (c) => (c.name ?? c.context ?? "") === CI_GATE_CHECK_NAME,
-        );
+        const gate = ciGateReaggregateTarget(rollup, transition.gateRunId);
         jobId = gate && checkJobId(gate);
       } catch (e) {
         log("sweep.ci_gate_reaggregate.rollup_error", {
@@ -3542,14 +3613,47 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixOwnerReclaimableAtHold: (pr, decline) => {
       const { worktree_path: ownerPath, branch, task_id: taskId } = decline;
       if (typeof ownerPath !== "string" || typeof branch !== "string" || typeof taskId !== "string") return false;
+      const failed = revalidatedOwnerPreservation(decline.owner_recovery_reason);
+      if (failed && (branch !== pr.headRefName || taskId !== fixLedgerTaskIdFor(pr))) return false;
       try {
-        return decideRegisteredFixOwnerRecovery(registeredOwnerRecovery.capture({
+        const snapshot = registeredOwnerRecovery.capture({
           repoDir, worktreesRoot: worktreesDir(config), ownerPath, taskId, branch,
           expectedRemoteSha: pr.headSha, observedRemoteSha: pr.headSha, inflightDir,
           claimKey: fixBranchClaimKey(owner, repo, branch),
           claimRoundEnded: (claimRunId: string) => fixRoundClaimEnded(ledgerPath, claimRunId),
           idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
-        })).kind !== "keep";
+        });
+        const decision = decideRegisteredFixOwnerRecovery(snapshot);
+        if (!failed) return decision.kind !== "keep";
+        const localSha = snapshot.localSha;
+        if (decision.kind !== failed.kind || typeof localSha !== "string") return false;
+        // Each arm re-runs the claim path's own preservation helper, which proves what it saved before
+        // returning. Revalidation never resets, clears the index, removes the owner or starts work.
+        if (failed.helper === "preserveStaleDirty") {
+          // The helper re-reads every file it saves byte for byte; its result is the directory it made.
+          const saved = registeredOwnerRecovery.preserveStaleDirty?.(config.root, repoDir, ownerPath, branch, localSha);
+          if (typeof saved !== "string" || dirname(saved) !== join(config.root, "recovery", "fix-owner", branch) ||
+              !basename(saved).startsWith(`${localSha}-`)) return false;
+          log("sweep.fix.checkout_owner_stale_dirty_preserved", { pr_number: pr.prNumber, task_id: taskId, branch,
+            worktree_path: snapshot.path, local_sha_prefix: localSha.slice(0, 12), head_sha: pr.headSha,
+            at_current_head: localSha === snapshot.remoteSha, preserved_path: saved, from_backstop_revalidation: true });
+          return true;
+        }
+        // Both ref helpers prove parent and exact-tree identity before returning this immutable ref.
+        const ref = registeredOwnerRecovery[failed.helper]?.(repoDir, ownerPath, branch, localSha);
+        const prefix = `refs/rmd-recovery/fix-dirty/${branch}/${localSha}/`;
+        if (typeof ref !== "string" || !ref.startsWith(prefix) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref.slice(prefix.length))) return false;
+        if (failed.helper === "preserveTrackedDirty") {
+          log("sweep.fix.checkout_owner_dirty_preserved", { pr_number: pr.prNumber, task_id: taskId, branch,
+            local_sha_prefix: localSha.slice(0, 12), recovery_ref: ref.slice(0, 512), from_backstop_revalidation: true });
+          return true;
+        }
+        // The claim path's own receipt choice for a preserved staged residue.
+        const superseded = snapshot.remoteSha !== null && snapshot.remoteSha !== localSha && snapshot.historyState === "contained";
+        log(superseded ? "sweep.fix.checkout_owner_dirty_preserved" : "sweep.fix.owner_residue_preserved", {
+          pr_number: pr.prNumber, task_id: taskId, branch, head_sha: pr.headSha, local_sha_prefix: localSha.slice(0, 12),
+          recovery_ref: ref.slice(0, 512), staged_only: true, from_backstop_revalidation: true });
+        return true;
       } catch {
         // An unreadable owner has the remedy a kept one has: the hold and its single escalation stand.
         return false;
@@ -3581,7 +3685,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // the thing") — a capped, green, unreviewable PR needs an operator to look at it and either
       // override the cap or merge it by hand; nothing downstream can move it further on its own.
       const cls: EscalationClass = reason.startsWith("PR stage stalled:") || isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
-      const file = (context: string): void => { escalate(
+      const file = async (context: string): Promise<void> => { await escalateAsync(
         {
           class: cls,
           // See {@link escalationTaskIdFor} — pure and separately tested, so the mint that makes
@@ -3609,7 +3713,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           options: question.resolutions.map((r) => ({ label: r.label, detail: r.detail })),
           recommendation: question.resolutions[0].label,
         },
-        { issues, ledgerPath, runId },
+        { issues: issuesImpl ?? ghIssueGatewayAsync(owner, repo), ledgerPath, runId },
       ); };
       if (pr.mergeState !== "dirty") return file("");
       return readMainCommit().then((main) => file(conflictEscalationContext(pr, main?.sha)));
@@ -4521,7 +4625,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 signal,
                 intervalMs: fixSupersededPollMsOverride ?? DEFAULT_POLL_INTERVAL_MS,
                 read: async () => {
-                  const v = ghJsonForBuild(["pr", "view", pr.prUrl, "--json", "headRefOid,statusCheckRollup"]) as {
+                  const v = await (deps.ghJsonImpl ?? readJsonImpl)(["pr", "view", pr.prUrl, "--json", "headRefOid,statusCheckRollup"]) as {
                     headRefOid?: string;
                     statusCheckRollup?: RollupCheck[];
                   };
@@ -4856,11 +4960,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           }
         };
         const reader = deps.fleetDeployStateImpl ?? {
-          deploy: deps.fleetDeploySensorsImpl ?? realDeployDeps({
+          deploy: deps.fleetDeploySensorsImpl ?? realDeploySensorsAsync({
             installPath: resolveInstallRoot(config), stateRoot: config.root, ledgerPath,
             daemonLabel: "com.remudero.daemon", serveLabel: "com.remudero.serve",
             servePort: config.serve?.port ?? 4317, uid: process.getuid?.() ?? 0, log,
-          }),
+          }, ghTextAsync),
           requestDeploy: () => {
             mkdirSync(join(config.root, "state"), { recursive: true });
             writeFileSync(deployMarkerPath(config.root), "W1-T4840: published image awaits deploy\n", { flag: "wx" });
@@ -4876,7 +4980,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             }
           },
         };
-        rows.push(...deployStateRows(reader, history, (error) => {
+        rows.push(...await deployStateRowsOffLoop(reader, history, (error) => {
           log("reconcile.unreadable", { pipeline: "failure-latch", reason: String((error as Error)?.message ?? error) });
         }));
       } catch (error) {
@@ -5319,7 +5423,10 @@ export function classifyMergeRefusal(
   }
   if (!rollup) return { kind: "other", check, reason: `GitHub names "${check}", but this head's rollup is unreadable` };
   const { latest, superseded } = classifyRollupSupersession(rollup);
-  const newest = latest.find((c) => rollupEntryName(c) === check);
+  const matches = latest.filter((c) => rollupEntryName(c) === check);
+  const unresolved = matches.filter((c) => !REQUIRED_CHECK_OK.has(rollupEntryState(c)));
+  if (unresolved.length > 1) return { kind: "real-red", check, reason: `"${check}" has multiple unresolved independent producers` };
+  const newest = unresolved[0] ?? matches[0];
   if (!newest) return { kind: "other", check, reason: `GitHub names "${check}", but this head's rollup carries no run of it` };
   const state = rollupEntryState(newest);
   const jobOf = (c: RollupCheckEntry) => c.jobId ?? checkJobId(c);
@@ -5339,9 +5446,9 @@ export function classifyMergeRefusal(
   if (check === CI_GATE_CHECK_NAME) {
     const gated = required.filter((name) => name !== CI_GATE_CHECK_NAME);
     if (gated.length === 0) return { kind: "other", check, reason: "ci-gate's newest run failed and its REQUIRED list is unreadable" };
-    const inputs = gated.map((name) => latest.find((c) => rollupEntryName(c) === name));
-    const present = inputs.filter((c): c is RollupCheckEntry => c !== undefined);
-    const allGreen = present.length === gated.length && present.every((c) => REQUIRED_CHECK_OK.has(rollupEntryState(c)));
+    const present = latest.filter((c) => gated.includes(rollupEntryName(c)));
+    const allGreen = gated.every((name) => present.some((c) => rollupEntryName(c) === name)) &&
+      present.every((c) => REQUIRED_CHECK_OK.has(rollupEntryState(c)));
     const lastInput = present.reduce<RollupCheckEntry | undefined>((acc, c) =>
       acc === undefined || (c.completedAt ?? "") > (acc.completedAt ?? "") ? c : acc, undefined);
     if (allGreen && newest.completedAt && lastInput?.completedAt && lastInput.completedAt > newest.completedAt) {
@@ -5653,6 +5760,8 @@ export function isReviewLaneDisposition(disposition: Disposition): boolean { // 
 export interface CiFailure {
   name: string;
   logTail: string;
+  /** Commit-status description observed in the rollup; separate from an Actions log or test result. */
+  statusDescription?: string;
   /** The check run's posted title, where the read carries it. A bundled check (W1-T3720) keeps its
    *  required NAME and titles itself by the gate(s) that refused — see {@link refusingGatesOf}. */
   title?: string;
@@ -6979,13 +7088,17 @@ export interface OpenPrView {
    *  escalation names THIS reported value, never only the {@link MergeState} bucket. */
   mergeableState?: string;
   /** W1-T3980 — the bounded scanner read taken ONLY for {@link isScannerBlockerCandidate}'s
-   *  population (armed, green, review success, `mergeable`, raw `blocked`). `undefined` means not
-   *  a candidate or over the per-pass cap, and every row behaves exactly as before. */
+   *  population (armed, green, review success, `mergeable`, raw `blocked`), plus the review-hold read
+   *  alone for an unarmed plan PR in that state ({@link isHumanHoldCandidate}). `undefined` means not
+   *  a candidate, over the per-pass cap, or no hold on such a plan PR, and every row behaves as before. */
   scannerBlocker?: ScannerBlockerObservation;
   /** W1-T5633 — the open high CodeQL alerts analysed at THIS head, read ONLY when the head's latest
    *  `CodeQL` results check concluded failure. `undefined` (no such check, a green one, an unread
    *  listing, or a head already ruled on) leaves the `mergeable` arm exactly as it was. */
   codeqlHeadAlerts?: CodeqlHeadObservation;
+  /** #14202 — the `security-merge-policy` status's refusal published at THIS head, armed or not. A blocked verdict
+   *  makes the head's alerts due, and a fix round's policy entry carries them. `undefined`: no refusal observed. */
+  securityMergePolicy?: SecurityArmRefusal;
   /** The merge-conflict fix mode's input — the conflicting file list plus both sides' log since
    *  the merge base (W1-T94's new mode, design note iii). Populated when `mergeState === "dirty"`,
    *  mirroring how `ciFailures` is populated only when `checksState === "red"`. */
@@ -7102,6 +7215,7 @@ export interface RollupCheckEntry {
   externalId?: string;
   workflowRunId?: number;
   workflowId?: number;
+  workflowName?: string;
   jobId?: string;
 }
 
@@ -7131,22 +7245,29 @@ export const REQUIRED_CHECK_FAIL = new Set([
   "STALE",
 ]);
 
-/** W1-T5694: newest run per workflow/name, then latest attempt; independent producers use completion.
+export function rollupProducerKey(c: RollupCheckEntry): { key: string; known: boolean } {
+  const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
+  const kind = c.context !== undefined && c.name === undefined ? "status" : "check";
+  const identifiedWorkflow = c.workflowId !== undefined ? `workflow:${c.workflowId}`
+    : c.workflowName ? `workflow-name:${c.workflowName}` : undefined;
+  const workflow = posted ? identifiedWorkflow ? `posted:${identifiedWorkflow}` : "posted"
+    : identifiedWorkflow ?? "legacy";
+  return { key: JSON.stringify([kind, workflow, c.name ?? c.context ?? ""]),
+    known: posted || c.workflowId !== undefined || Boolean(c.workflowName) };
+}
+
+/** Newest run per producer/name, then latest attempt. Independent producers remain independently
+ *  enforced; a later completion from another workflow cannot clear their failures (#14160).
  *  Entries without workflow identity retain start/id ordering and last-encountered status ties. */
 export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: readonly T[]): T[] {
   const groups = new Map<string, T>();
-  const identity = (c: T) => {
-    const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
-    const workflow = posted ? "posted" : c.workflowId === undefined ? "legacy" : `workflow:${c.workflowId}`;
-    return { key: JSON.stringify([workflow, c.name ?? c.context ?? ""]), known: posted || c.workflowId !== undefined };
-  };
-  const later = (c: T, prior: T, completion = false): boolean => {
-    const time = (e: T) => completion ? e.completedAt ?? e.startedAt ?? "" : e.startedAt ?? "";
+  const later = (c: T, prior: T): boolean => {
+    const time = (e: T) => e.startedAt ?? "";
     if (time(c) !== time(prior)) return time(c) > time(prior);
     return typeof c.checkRunId !== "number" || typeof prior.checkRunId !== "number" || c.checkRunId >= prior.checkRunId;
   };
   for (const c of rollup) {
-    const { key, known } = identity(c);
+    const { key, known } = rollupProducerKey(c);
     const prior = groups.get(key);
     if (!prior) {
       groups.set(key, c);
@@ -7158,13 +7279,7 @@ export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: 
       groups.set(key, c);
     }
   }
-  const latest = new Map<string, T>();
-  for (const c of groups.values()) {
-    const name = c.name ?? c.context ?? "";
-    const prior = latest.get(name);
-    if (!prior || later(c, prior, true)) latest.set(name, c);
-  }
-  return [...latest.values()];
+  return [...groups.values()];
 }
 
 /** One failure a later attempt of the same check outranks; `pendingRerun` when that attempt is still running. */
@@ -7177,10 +7292,10 @@ export interface SupersededRed<T extends RollupCheckEntry = RollupCheckEntry> {
 /** W1-T4908 — `latest` is exactly {@link dedupeRollupByLatestAttempt}'s output; `superseded` names each dropped failure. */
 export function classifyRollupSupersession<T extends RollupCheckEntry>(rollup: readonly T[]): { latest: T[]; superseded: SupersededRed<T>[] } {
   const latest = dedupeRollupByLatestAttempt(rollup);
-  const keep = new Map(latest.map((c) => [c.name ?? c.context ?? "", c]));
+  const keep = new Map(latest.map((c) => [rollupProducerKey(c).key, c]));
   const state = (c: T) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
   const superseded = rollup.flatMap((entry) => {
-    const supersededBy = keep.get(entry.name ?? entry.context ?? "") as T;
+    const supersededBy = keep.get(rollupProducerKey(entry).key) as T;
     if (supersededBy === entry || !REQUIRED_CHECK_FAIL.has(state(entry))) return [];
     const s = state(supersededBy);
     return [{ entry, supersededBy, pendingRerun: !REQUIRED_CHECK_OK.has(s) && !REQUIRED_CHECK_FAIL.has(s) }];
@@ -7191,8 +7306,10 @@ export function classifyRollupSupersession<T extends RollupCheckEntry>(rollup: r
 /** W1-T9913 — check names whose dropped failure is outranked by a newest run that PASSED, never by a red or a pending one. */
 export function supersededRedsNowPassing(rollup: readonly RollupCheckEntry[]): string[] {
   const state = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
-  return [...new Set(classifyRollupSupersession(rollup).superseded
-    .filter((r) => REQUIRED_CHECK_OK.has(state(r.supersededBy))).map((r) => r.entry.name ?? r.entry.context ?? ""))];
+  const { latest, superseded } = classifyRollupSupersession(rollup);
+  return [...new Set(superseded
+    .filter((r) => REQUIRED_CHECK_OK.has(state(r.supersededBy))).map((r) => r.entry.name ?? r.entry.context ?? ""))]
+    .filter((name) => latest.filter((c) => (c.name ?? c.context ?? "") === name).every((c) => REQUIRED_CHECK_OK.has(state(c))));
 }
 
 /** W1-T4105 — what a fix worker was sent against: the PR head and the check(s) it must fix. */
@@ -7225,9 +7342,10 @@ export function decideFixSuperseded(
   }
   if (snapshot.failingChecks.length === 0) return { kind: "continue" };
   const latest = dedupeRollupByLatestAttempt(observed.rollup ?? []);
-  const green = snapshot.failingChecks.every((name) =>
-    latest.some((c) => (c.name ?? c.context) === name && REQUIRED_CHECK_OK.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase())),
-  );
+  const green = snapshot.failingChecks.every((name) => {
+    const matches = latest.filter((c) => (c.name ?? c.context) === name);
+    return matches.length > 0 && matches.every((c) => REQUIRED_CHECK_OK.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase()));
+  });
   return green ? { kind: "superseded", condition: "check-green", oldHead: head, newHead: head } : { kind: "continue" };
 }
 
@@ -7304,7 +7422,7 @@ function requiredCheckGate(
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const required = new Set(requiredContexts ?? []);
   const knownRequired = required.size > 0;
-  // Dedupe to ONE entry per check name — the LATEST attempt — before judging. Dedup cannot change
+  // Dedupe to ONE entry per producer/name — the LATEST attempt — before judging. Dedup cannot change
   // whether `gate` is empty (grouping merges rows sharing a key, it never drops one), so the
   // "required but not yet registered" distinction the caller draws is unaffected (W1-T457).
   const gate = dedupeRollupByLatestAttempt(
@@ -7378,9 +7496,9 @@ export function cancelledRequiredCheckNames(
   if (required.size === 0) return [];
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const gate = dedupeRollupByLatestAttempt(all);
-  return gate
+  return [...new Set(gate
     .filter((c) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase() === "CANCELLED")
-    .map((c) => c.name ?? c.context ?? "unknown");
+    .map((c) => c.name ?? c.context ?? "unknown"))];
 }
 
 const qualityGate = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): RollupCheckEntry[] => dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT && ([...(requiredCheckNames ?? [])].includes(c.name ?? "") || [...(requiredCheckNames ?? [])].includes(c.context ?? ""))));
@@ -7388,7 +7506,7 @@ const rollupState = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.statu
 export const redQualityGateNames = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] => {
   const required = [...(requiredCheckNames ?? [])];
   const red = qualityGate(rollup, required).filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c))).map((c) => c.name ?? c.context ?? "unknown");
-  if (red.length > 0) return red;
+  if (red.length > 0) return [...new Set(red)];
   const latest = dedupeRollupByLatestAttempt(rollup ?? []);
   const families = CI_MATRIX_AGGREGATORS.filter((entry) =>
     (entry.aggregator === "ci" || entry.aggregator === "coverage-ratchet") && required.includes(entry.aggregator) &&
@@ -7459,12 +7577,10 @@ export function stillRedRequiredNames(redNames: readonly string[], rollup: Rollu
   if (redNames.length === 0) return [];
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const deduped = dedupeRollupByLatestAttempt(all);
-  const byKey = new Map(deduped.map((c) => [c.name ?? c.context ?? "", c] as const));
   return redNames.filter((name) => {
-    const fresh = byKey.get(name);
-    if (!fresh || !fresh.startedAt) return true; // unreadable/absent — fail open, still red
-    const s = (fresh.state ?? fresh.conclusion ?? fresh.status ?? "").toUpperCase();
-    return REQUIRED_CHECK_FAIL.has(s);
+    const matches = deduped.filter((c) => (c.name ?? c.context ?? "") === name);
+    return matches.length === 0 || matches.some((fresh) =>
+      !fresh.startedAt || REQUIRED_CHECK_FAIL.has((fresh.state ?? fresh.conclusion ?? fresh.status ?? "").toUpperCase()));
   });
 }
 
@@ -7682,7 +7798,10 @@ const rollupRunId = (c: RollupCheckEntry): number | undefined =>
  *  still in flight. No run identity proves nothing in flight; no rollup proves nothing (W1-T5953). */
 export function deferredRequeueTarget(rollup: RollupCheckEntry[] | undefined, name: string): { jobId?: string; runInFlight: boolean } | undefined {
   if (!rollup) return undefined;
-  const entry = dedupeRollupByLatestAttempt(rollup).find((c) => (c.name ?? c.context) === name);
+  const matches = dedupeRollupByLatestAttempt(rollup).filter((c) => (c.name ?? c.context) === name);
+  const unresolved = matches.filter((c) => !REQUIRED_CHECK_OK.has(rollupState(c)));
+  if (unresolved.length > 1 || (unresolved.length === 0 && matches.length > 1)) return undefined;
+  const entry = unresolved[0] ?? matches[0];
   if (!entry) return { runInFlight: false };
   const run = rollupRunId(entry);
   return {
@@ -8293,12 +8412,23 @@ export function earlyRedEvidenceRollup<T extends RollupCheckEntry>(
  *  sibling's latest attempt is a terminal SUCCESS that STARTED AFTER ci-gate's did. `jobId` is
  *  ci-gate's OWN, never the sibling's: the AGGREGATOR is re-driven. */
 export interface StaleCiGateTransition {
+  /** Bind fresh retry targeting to the failed aggregate's run, never a same-named independent job. */
+  gateRunId?: number;
   jobId?: string;
   /** The required sibling whose later terminal success makes ci-gate's own verdict stale. */
   siblingName: string;
   /** That sibling's latest-attempt `startedAt` (ISO) — names WHICH transition (design iv), and
    *  is what {@link ciGateReaggregateKey} bounds the recompute to firing once for. */
   siblingStartedAt: string;
+}
+
+function ciGateReaggregateTarget(rollup: readonly RollupCheckEntry[], gateRunId?: number): RollupCheckEntry | undefined {
+  const gates = dedupeRollupByLatestAttempt(rollup).filter((c) => (c.name ?? c.context) === CI_GATE_CHECK_NAME);
+  const failed = gates.filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c)) &&
+    (gateRunId === undefined || rollupRunId(c) === gateRunId));
+  if (failed.length !== 1) return undefined;
+  if (gateRunId === undefined && gates.some((c) => c !== failed[0] && !REQUIRED_CHECK_OK.has(rollupState(c)))) return undefined;
+  return failed[0];
 }
 
 /** W1-T1275 — detect the ONE shape design note iii pins, and nothing wider. `ci-gate` must have a
@@ -8309,7 +8439,7 @@ export function staleCiGateTransition(rollup: RollupCheckEntry[] | undefined): S
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   if (all.length === 0) return undefined;
   const deduped = dedupeRollupByLatestAttempt(all);
-  const gate = deduped.find((c) => (c.name ?? c.context ?? "") === CI_GATE_CHECK_NAME);
+  const gate = ciGateReaggregateTarget(deduped);
   if (!gate || !gate.startedAt) return undefined;
   const gateState = (gate.state ?? gate.conclusion ?? gate.status ?? "").toUpperCase();
   if (!REQUIRED_CHECK_FAIL.has(gateState)) return undefined;
@@ -8323,7 +8453,9 @@ export function staleCiGateTransition(rollup: RollupCheckEntry[] | undefined): S
     if (!latest || c.startedAt > (latest.startedAt ?? "")) latest = c;
   }
   if (!latest) return undefined;
-  return { siblingName: latest.name ?? latest.context ?? "unknown", siblingStartedAt: latest.startedAt! };
+  const gateRunId = rollupRunId(gate);
+  return { siblingName: latest.name ?? latest.context ?? "unknown", siblingStartedAt: latest.startedAt!,
+    ...(gateRunId === undefined ? {} : { gateRunId }) };
 }
 
 /** The (head, sibling-transition) identity {@link CI_GATE_REAGGREGATE_STEP}'s rows are keyed on.
@@ -9373,7 +9505,11 @@ export interface MainLatestRun {
   ruleChecks?: { state: "red" | "green"; suites: readonly string[] };
   /** W1-T7848: main's CI reading, present only when a rule-suite probe turned `state` red. */
   ciState?: string;
+  /** W1-T9930: a red decided below the head, re-judged at the head by its own failing tests run there. */
+  headReproduction?: "pending" | "cleared" | "held" | "unrunnable";
 }
+
+const HEAD_REPRODUCTIONS = new Set(["pending", "cleared", "held", "unrunnable"]);
 
 /** W1-T7848 — a base-reproduction probe of the suites a `rule-checks` red names, at one main sha: `red` when
  *  every one fails there, `green` when every one passes. One row per main sha and suite set. */
@@ -9414,6 +9550,9 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
       ...(Array.isArray(line.observed_checks)
         ? { observedChecks: line.observed_checks.filter((n): n is string => typeof n === "string") }
         : {}),
+      ...(HEAD_REPRODUCTIONS.has(String(line.head_reproduction))
+        ? { headReproduction: line.head_reproduction as NonNullable<MainLatestRun["headReproduction"]> }
+        : {}),
     };
   }
   return latest === undefined ? undefined : withRuleChecks(latest, ruleRows);
@@ -9441,10 +9580,11 @@ function refusedHeadContract(lines: readonly Record<string, unknown>[], pr: Open
 async function headContractRefreshHistory(deps: Pick<SweepDeps, "ledgerPath" | "readHeadContractRefreshHistory">) {
   if (deps.readHeadContractRefreshHistory) return deps.readHeadContractRefreshHistory();
   headContractHistoryReader ??= createEscalationTriageHistoryReader({ parseAll: true, slice: {
-    holder: "sweep.head-contract-refresh", version: "1",
-    steps: [HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, CONTRACT_AMENDED_REFRESH_STEP],
+    holder: "sweep.head-contract-refresh", version: "2",
+    steps: [HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, CONTRACT_AMENDED_REFRESH_STEP, "fix.contract_hold", "fix.scope_amendment"],
     project: row => ({ step: row.step, task_id: row.task_id, pr_number: row.pr_number, head_sha: row.head_sha,
-      contract_revision: row.contract_revision, outcome: row.outcome }),
+      contract_revision: row.contract_revision, outcome: row.outcome, kind: row.kind, pr_url: row.pr_url,
+      paths: row.paths, issue_url: row.issue_url }),
   } });
   const read = await headContractHistoryReader(dirname(deps.ledgerPath));
   // The incremental step reader only parses live lines that mention a tracked step or have
@@ -9479,22 +9619,33 @@ function headContractRefreshAttempted(lines: readonly Record<string, unknown>[],
 export async function lightPassHeadContractRefresh(
   prs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "readLedger" | "readHeadContractRefreshHistory" | "readTaskContractRevision" | "updateBranch" | "log">,
-): Promise<Pick<SweepDeps, "headContractRefreshFor" | "readHeadContractRefreshHistory">> {
+): Promise<Pick<SweepDeps, "headContractRefreshFor" | "headContractHoldEvidenceFor" | "readHeadContractRefreshHistory">> {
   if (!deps.updateBranch || headContractRefreshInFlight) return {};
   try {
-    const lines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath); // ledger-read-intent: live — candidate holds; attempts use the strict union below.
-    const candidates = prs.flatMap(pr => {
-      const hold = refusedHeadContract(lines, pr);
-      const revision = hold && pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
-      return hold && revision !== undefined && revision !== hold.contract_revision ? [{ pr, revision }] : [];
-    });
-    if (candidates.length === 0) return {};
+    if (!prs.some(pr => pr.taskId !== undefined)) return {};
+    (deps.readLedger ?? readLedgerLines)(deps.ledgerPath); // Validate the live caller boundary; strict history supplies the rows.
     const history = await headContractRefreshHistory(deps);
     if (!history.complete) return {};
+    const lines = history.lines; // Holds and attempts must both survive rotation in the same strict union.
+    const candidates = prs.flatMap(pr => {
+      const hold = refusedHeadContract(lines, pr);
+      const scope = scopeEscalationStandDown(lines, pr);
+      const scopeRevision = scope?.kind !== "unfiled" && scope?.contractRevision !== undefined &&
+        lines.some(row => row.step === "fix.scope_amendment" && row.task_id === fixLedgerTaskIdFor(pr) &&
+          row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.contract_revision === scope.contractRevision)
+        ? scope.contractRevision : undefined;
+      const standingOn = hold?.contract_revision ?? scopeRevision;
+      const revision = standingOn !== undefined && pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+      return standingOn !== undefined && revision !== undefined && revision !== standingOn ? [{ pr, revision }] : [];
+    });
+    if (candidates.length === 0) return {};
     const selected = candidates.filter(({ pr, revision }) => !headContractRefreshAttempted(history.lines, pr, revision))
       .sort((a, b) => a.pr.prNumber - b.pr.prNumber)[0];
     return selected === undefined ? {} : {
       readHeadContractRefreshHistory: deps.readHeadContractRefreshHistory,
+      headContractHoldEvidenceFor: pr => pr.prNumber === selected.pr.prNumber && pr.headSha === selected.pr.headSha &&
+        pr.taskId === selected.pr.taskId && deps.readTaskContractRevision?.(pr.taskId!) === selected.revision
+        ? lines : undefined,
       headContractRefreshFor: pr => pr.prNumber === selected.pr.prNumber && pr.headSha === selected.pr.headSha &&
         pr.taskId !== undefined && deps.readTaskContractRevision?.(pr.taskId) === selected.revision
         ? deps.updateBranch : undefined,
@@ -9727,6 +9878,7 @@ export const PR_BODY_SCOPED_CHECKS: readonly string[] = [
 export const PR_OWN_INPUT_CHECKS: readonly string[] = [
   ...PR_BODY_SCOPED_CHECKS,
   "prompt-surface-gate", // scripts/prompt-surface-gate.mjs: git diff <base>...HEAD, the PR's own edits.
+  SECURITY_MERGE_POLICY_CONTEXT, // the PR's new alerts in its own changed code; never published on main.
 ];
 
 export type BaseRedDecision = { kind: "own" } | { kind: "wait" | "refresh"; check: string };
@@ -9747,7 +9899,8 @@ export function decideBaseRed(
     // A known passing check is this diff's red, even beside an inherited failure.
     if (names.some((name) => main.observedChecks!.includes(name) && !main.failingChecks.includes(name))) return { kind: "own" };
     // W1-T7848: a red only a rule-suite probe saw names its one check; no other absent check is inherited from it.
-    const absent = main.ciState !== undefined ? undefined
+    // W1-T9930: nor from a run decided below the head, which never observed the head; a probe at the head names it.
+    const absent = main.ciState !== undefined || main.decidedBySha !== main.sha ? undefined
       : names.find((name) => !main.observedChecks!.includes(name) && !PR_OWN_INPUT_CHECKS.includes(name));
     if (absent !== undefined) return { kind: "wait", check: absent };
   }
@@ -9756,7 +9909,9 @@ export function decideBaseRed(
   const key = `${pr.prNumber}@${pr.headSha}`;
   const recorded = history.stoodDown.get(key);
   if (history.refreshed.has(key)) return { kind: "own" };
-  if (recorded !== undefined && names.includes(recorded) && !PR_OWN_INPUT_CHECKS.includes(recorded)) return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
+  // W1-T9930: a red cleared at the head by its own failing tests releases the holds it caused, as green does.
+  const released = main?.state === "green" || (main?.state === "undetermined" && main.headReproduction === "cleared");
+  if (recorded !== undefined && names.includes(recorded) && !PR_OWN_INPUT_CHECKS.includes(recorded)) return { kind: released ? "refresh" : "wait", check: recorded };
   // W1-T6024: a head whose failing tests a probe reproduced on main is main's red, whatever its check is called.
   const named = names[0];
   return main?.state === "green" && named !== undefined && history.reproducedBeforeGreen.has(key) ? { kind: "refresh", check: named } : { kind: "own" };
@@ -9775,7 +9930,7 @@ export const PLAN_REPAIR_STEP = "sweep.plan_repair";
  *  A session's head (`run-unfiled-*`, `run-W1-T*`, `codex/*`) never matches, whoever pushed it.
  *  Exported so a fixture drives its refusing arm directly (W1-T2317's negative-reachability ratchet). */
 export const MACHINE_LANE_HEAD_RE = new RegExp(
-  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay)-garden-\\d+" +
+  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay|queue-judge)-garden-\\d+" +
     "|(?:feedback|decisions|plan-reconcile|ci-learning)-landing(?:-[a-z0-9-]+)?" +
     "|run-(?:TRIAGE|APPROVE)-.+|run-RETRO(?:-.+)?)$",
 );
@@ -9817,7 +9972,7 @@ export interface PlanRepairFacts {
   gardenRecordRefusal?: string;
 }
 
-const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay)-garden-\d+$/;
+const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay|queue-judge)-garden-\d+$/;
 
 function gardenRecordRefusalCandidate(pr: OpenPrView): boolean {
   const names = [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map(f => f.name)]
@@ -11368,7 +11523,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // A HUMAN HOLD IS THE BLOCKER. An armed, green, reviewed PR that GitHub reports `blocked` because a
     // reviewer's standing verdict is CHANGES_REQUESTED read as `mergeable`: re-arming changed nothing, a
     // positive distance pressed update-branch after every main move, and it waited forever with nothing
-    // said. No automation may clear a person's hold, so it is named once per head instead.
+    // said. No automation may clear a person's hold, so it is named once per head instead. An unarmed
+    // plan PR (#14599) is held here too, ordered before `mergeable`, so its direct merge is not retried.
     disposition: "blocked-ambiguous",
     when: (pr) => changesRequestedHold(pr) !== undefined,
     blocker: "escalated",
@@ -11412,7 +11568,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     when: checksGreenReviewSuccess,
     blocker: "awaiting-arm",
     // W1-T6595: a plan PR is never armed (W1-T5615), so its row says what the sweep does instead.
-    reason: (pr) => (pr.changedFiles ?? []).some((f) => f.startsWith("plan/"))
+    reason: (pr) => mergesDirectlyAsPlanPr(pr)
       ? MERGEABLE_PLAN_PR_REASON
       : "review success, required checks green — arming auto-merge",
   },
@@ -11994,11 +12150,13 @@ export function scannerBlockerAmbiguity(pr: OpenPrView, policy: Pick<SweepPolicy
   return undefined;
 }
 
-/** The human CHANGES_REQUESTED holds standing on an armed, green, `blocked` PR, read at this head. */
+/** The human CHANGES_REQUESTED holds standing on a green, `blocked` PR that is armed or is a plan PR the fleet
+ *  merges directly ({@link isHumanHoldCandidate}), read at this head. An unarmed plan PR is never armed, so
+ *  an armed-only test left its hold unread and the direct merge refused every pass with nothing said. */
 export function changesRequestedHold(pr: OpenPrView): ChangesRequestedHold[] | undefined {
   const blocker = pr.scannerBlocker;
   if (blocker === undefined || blocker.kind !== "changes-requested") return undefined;
-  if (blocker.headSha !== pr.headSha || !isScannerBlockerCandidate(pr)) return undefined;
+  if (blocker.headSha !== pr.headSha || !isHumanHoldCandidate(pr)) return undefined;
   return blocker.holds;
 }
 
@@ -12009,9 +12167,10 @@ export function changesRequestedReason(pr: OpenPrView): string {
     const at = hold.commitId === pr.headSha ? "this head" : `${hold.commitId.slice(0, 9)}, before head ${pr.headSha.slice(0, 9)}`;
     return `${hold.login} (review ${hold.reviewId}, at ${at})`;
   });
-  return `armed, checks green and review success, but mergeable_state is blocked by a CHANGES_REQUESTED review from ` +
-    `${holds.join(", ")} — no re-arm, branch refresh or repair can clear a person's hold; it needs that reviewer's ` +
-    `re-review (or the review dismissed), so escalating instead of waiting silently`;
+  const path = pr.autoMergeArmed === true ? "armed" : "an unarmed plan PR the fleet merges directly";
+  return `${path}, checks green and review success, but mergeable_state is blocked by a CHANGES_REQUESTED review from ` +
+    `${holds.join(", ")} — no re-arm, direct merge, branch refresh or repair can clear a person's hold; it needs that ` +
+    `reviewer's re-review (or the review dismissed), so escalating instead of waiting silently`;
 }
 
 /** W1-T3980 — the repair worker's only input, rendered through the ci-log fix mode's fenced,
@@ -12153,7 +12312,7 @@ export interface RefreshValueGate {
 }
 
 export async function buildRefreshValueGate(
-  deps: Pick<SweepDeps, "runId" | "ledgerPath" | "readBranchProtectionStrict" | "refreshJudge" | "baseChangedFilesByPr" | "log">,
+  deps: Pick<SweepDeps, "runId" | "ledgerPath" | "readBranchProtectionStrict" | "refreshJudge" | "baseChangedFilesByPr" | "refreshCiRunForHead" | "log">,
   openPrs: readonly OpenPrView[],
   ledgerLines: readonly Record<string, unknown>[],
   nowMs: number,
@@ -12174,15 +12333,15 @@ export async function buildRefreshValueGate(
   }
   const memo = judgedVerdicts(ledgerLines);
   const rowKey = (l: Record<string, unknown>): string =>
-    JSON.stringify([l.pr_number, l.head_sha, l.path, l.decision, l.judge ?? null]);
+    JSON.stringify([l.pr_number, l.head_sha, l.path, l.decision, l.judge ?? null, l.ci_in_flight ?? null]);
   const written = new Set(ledgerLines.filter((l) => l.step === REFRESH_DECIDED_STEP).map(rowKey));
   const queueDepth = openPrs.filter((pr) => pr.checksState === "pending").length;
   const benefitWeight = observedRefreshBenefitWeight(ledgerLines);
   const ciMinutes = observedCiMinutes(ledgerLines);
-  const valueOf =(c: ArmedStalledPr, view: OpenPrView, path: RefreshPath, judge?: RefreshJudgeVerdict) => {
+  const valueOf =(c: ArmedStalledPr, view: OpenPrView, path: RefreshPath, judge?: RefreshJudgeVerdict, liveCiInFlight = false) => {
     const facts = refreshOverlapOf(c, view, deps.baseChangedFilesByPr?.get(view.prNumber));
     const repairNeeded = facts.repairNeeded || path === "base-red" || path === "plan-repair";
-    const ciInFlight = view.checksState === "pending";
+    const ciInFlight = view.checksState === "pending" || liveCiInFlight;
     const value = decideRefresh({ path, overlap: facts.overlap, overlapFiles: facts.files, repairNeeded, strict, ciInFlight,
       judge, queueDepth, benefitWeight, ciMinutes });
     return { facts, ciInFlight, value };
@@ -12206,7 +12365,27 @@ export async function buildRefreshValueGate(
       const key = `${view.prNumber}@${view.headSha}`;
       let judge: RefreshJudgeVerdict | undefined = memo.get(key);
       let judgeError: string | undefined;
-      let decided = valueOf(c, view, path, judge);
+      // A green/red summary can coexist with a queued or running coverage leg at this exact head.
+      let liveCiInFlight: boolean | undefined = view.checksState === "pending";
+      if (!liveCiInFlight && deps.refreshCiRunForHead) {
+        try { liveCiInFlight = await deps.refreshCiRunForHead(view); }
+        catch (error) {
+          liveCiInFlight = undefined;
+          deps.log?.("sweep.live_ci_run.error", { pr_number: view.prNumber, error: String((error as Error)?.message ?? error) });
+        }
+        if (typeof liveCiInFlight !== "boolean") {
+          const { facts, value } = valueOf(c, view, path);
+          const row = refreshDecidedRow({ runId: deps.runId, taskId: c.taskId, prNumber: view.prNumber, headSha: view.headSha, path,
+            value: { ...value, decision: "skip", reason: "current-head CI activity unavailable — no refresh this pass", predictedBenefit: 0 },
+            overlapFiles: facts.files, strict, ciInFlight: undefined, requestId, forcedBy, updateReason: c.updateReason, nowMs });
+          if (requestId !== undefined || !written.has(rowKey(row))) {
+            written.add(rowKey(row));
+            appendLine(deps.ledgerPath, row as Record<string, unknown> & { run_id: string; task_id: string; step: string });
+          }
+          return false;
+        }
+      }
+      let decided = valueOf(c, view, path, judge, liveCiInFlight);
       if (decided.value.decision === "ask-judge") {
         const base = deps.baseChangedFilesByPr?.get(view.prNumber);
         const asked = await askRefreshJudge(deps.refreshJudge, {
@@ -12216,7 +12395,7 @@ export async function buildRefreshValueGate(
         judge = asked.verdict;
         judgeError = asked.error;
         if (asked.verdict !== "judge-unavailable") memo.set(key, asked.verdict);
-        decided = valueOf(c, view, path, judge);
+        decided = valueOf(c, view, path, judge, liveCiInFlight);
       }
       const row = refreshDecidedRow({ runId: deps.runId, taskId: c.taskId, prNumber: view.prNumber, headSha: view.headSha, path,
         value: decided.value, overlapFiles: decided.facts.files, strict, ciInFlight: decided.ciInFlight, judge, judgeError,
@@ -12885,6 +13064,9 @@ export type NonExecutedProofExecOutcome = Exclude<
 
 export interface ProofDiscriminationEvidence {
   progressApproach?: string;
+  /** W1-T10339: the PR carries no task trailer, so its BODY's Acceptance block is what review judges and the round
+   *  repairs it there — never through a plan shard, which a taskless PR does not have. */
+  bodyRepair?: true;
   /** W1-T5544: `"gate-log"` marks evidence read from the red `proof-discrimination` check's own job log
    *  at this head (no posted review exists for it); absent means the capped review's own rows. */
   readonly source?: "review" | "gate-log";
@@ -13584,8 +13766,15 @@ export function fleetWithheldStageMs(rows: ReadonlyArray<Record<string, unknown>
   let held = 0;
   passes.forEach(({ row, at }, i) => {
     const text = `${String(row.stand_down_reason ?? "")} ${String(row.reason ?? "")}`;
-    if (row.acted === true || !FLEET_WITHHELD_STAND_DOWN.test(text)) return;
-    held += Math.max(0, (passes[i + 1]?.at ?? nowMs) - at);
+    const admissionHeld = row.acted === false && typeof row.stand_down_reason === "string" && (
+      /^not admitted this pass: semantic post-review admission bound \d+(?:, in-flight \d+)?(?:; admitted #\d+(?:, #\d+)* ahead)?$/.test(row.stand_down_reason) ||
+      /^not admitted this pass: at most \d+ plan-filing post-review admissions (?:per light pass|available across light passes)$/.test(row.stand_down_reason) ||
+      row.stand_down_reason === "not admitted this pass: restart latched, and the review would outlast its drain" ||
+      row.stand_down_reason === "overtaken by a repair queued before it — this review keeps its place in the queue, re-derived next pass" ||
+      row.stand_down_reason === "review lanes taken by repairs queued before their reviews — re-derived next pass"
+    );
+    if (row.acted === true || !(FLEET_WITHHELD_STAND_DOWN.test(text) || admissionHeld)) return;
+    held += Math.max(0, Math.min(passes[i + 1]?.at ?? nowMs, nowMs) - at);
   });
   return held;
 }
@@ -13598,6 +13787,24 @@ export const FIX_DISPATCH_FAILED_BACKSTOP = 3;
  *  three is the first attempt plus two retries, time for an exiting owner to clear. */
 export const FIX_CLAIM_DECLINE_BACKSTOP = 3;
 
+/** PR 14405 and its follow-up: each failed owner recovery `declineClaim` names, keyed to the decision
+ *  that must still admit it and the ordinary helper whose verified result lifts its backstop hold.
+ *  A failed stale-dirty RESET re-proves only its preservation: the claim path then redoes both. */
+const REVALIDATED_OWNER_PRESERVATIONS: Readonly<Record<string, {
+  kind: "preserve-tracked-dirty" | "preserve-stale-dirty";
+  helper: "preserveTrackedDirty" | "preserveStagedResidue" | "preserveStaleDirty";
+}>> = {
+  owner_dirty_recovery_preserve_failed: { kind: "preserve-tracked-dirty", helper: "preserveTrackedDirty" },
+  owner_staged_residue_preserve_failed: { kind: "preserve-tracked-dirty", helper: "preserveStagedResidue" },
+  owner_stale_dirty_preserve_failed: { kind: "preserve-stale-dirty", helper: "preserveStaleDirty" },
+  owner_stale_dirty_reset_failed: { kind: "preserve-stale-dirty", helper: "preserveStaleDirty" },
+};
+
+function revalidatedOwnerPreservation(reason: unknown) {
+  return typeof reason === "string" && Object.hasOwn(REVALIDATED_OWNER_PRESERVATIONS, reason)
+    ? REVALIDATED_OWNER_PRESERVATIONS[reason] : undefined;
+}
+
 /** A fix dispatch the backstop holds at this head, read from the ledger alone so EVERY pass (the light
  *  pass included, which never reaches the action arm) classifies it the same way. */
 export interface FixDispatchHold {
@@ -13606,12 +13813,46 @@ export interface FixDispatchHold {
   escalated: boolean;
 }
 
+/** The newest escalation this PR's own lanes delivered at this head, read back off its `sweep.disposed` rows. */
+export interface OwnEscalationAtHead {
+  ts: string | undefined;
+  /** The sentence that escalation carried; undefined when its row holds none. */
+  reason: string | undefined;
+}
+
+/** PR 14326 (issue 14390): an `escalated` stage is a PR some lane ALREADY escalated — a filed blocked-ambiguous
+ *  or refused-escalate disposition, a progress-judge stop, or a dispatch backstop. The stall report reads that
+ *  escalation back here so it can name it instead of "unknown signature". Each latch's FIRST row is the one that
+ *  escalated; its later rows only repeat "already escalated". Only rows at this exact head count, since a new
+ *  head re-earns its own escalation. Undefined when no such row is in `rows`. */
+export function ownEscalationAtHead(
+  rows: ReadonlyArray<Record<string, unknown>>, pr: Pick<OpenPrView, "prNumber" | "headSha">,
+): OwnEscalationAtHead | undefined {
+  const latched = new Set<string>();
+  let found: Record<string, unknown> | undefined;
+  for (const row of rows) {
+    if (row.step !== "sweep.disposed" || row.pr_number !== pr.prNumber || row.head_sha !== pr.headSha) continue;
+    const filed = row.acted === true && (row.disposition === "blocked-ambiguous" || row.disposition === "refused-escalate");
+    const latch = typeof row.progress_escalated_key === "string" ? `progress\u0000${row.progress_escalated_key}`
+      : typeof row.fix_claim_decline_escalated === "string" ? `claim\u0000${row.fix_claim_decline_escalated}`
+        : row.fix_dispatch_failed_escalated === true ? "dispatch-failed" : undefined;
+    const firstOfLatch = latch !== undefined && !latched.has(latch);
+    if (latch !== undefined) latched.add(latch);
+    if (filed || firstOfLatch || row.stand_down_escalation_outcome === "delivered") found = row;
+  }
+  if (found === undefined) return undefined;
+  const said = [found.acted === true ? found.reason : found.stand_down_reason, found.reason]
+    .find((text): text is string => typeof text === "string" && text.trim() !== "");
+  return { ts: typeof found.ts === "string" ? found.ts : undefined, reason: said };
+}
+
 /** W1-T5919 + W1-T5932 — the backstop holds, pure. The claim-decline hold stands only while the
  *  declined owner worktree still exists: once an operator or the janitor removes it, the next pass
  *  re-attempts the claim, so clearing the cause never also needs a hand-pushed head (#10551, 2026-10-10:
  *  a dirty `sweep-` owner held a conflicted PR at one head with nothing able to lift it). A decline
  *  that named no path cannot be re-probed and keeps holding. W1-T7998: a decline the owner DECISION
- *  kept is re-asked through `ownerReclaimable`; once it admits recovery the hold lifts this pass. */
+ *  kept is re-asked through `ownerReclaimable`; once it admits recovery the hold lifts this pass.
+ *  A failed recovery in {@link REVALIDATED_OWNER_PRESERVATIONS} lifts only on a re-verified preservation. */
 export function fixDispatchHoldAtHead(
   pr: OpenPrView,
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -13621,8 +13862,15 @@ export function fixDispatchHoldAtHead(
   const declines = lines.filter((l) => isOwnerClaimDecline(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
   const last = declines[declines.length - 1];
   const ownerPath = typeof last?.worktree_path === "string" ? last.worktree_path : undefined;
+  // Revalidation re-proves a failed RESET's preservation but never tries the reset, so a reset that keeps
+  // failing would lift and re-decline forever with no escalation. It is re-asked once per head: after a
+  // revalidation lifted this head, a reset that fails again holds and escalates.
+  const resetRelifted = last?.owner_recovery_reason === "owner_stale_dirty_reset_failed" &&
+    lines.slice(0, lines.lastIndexOf(last)).some((l) => l.from_backstop_revalidation === true &&
+      l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
   if (declines.length >= FIX_CLAIM_DECLINE_BACKSTOP && (ownerPath === undefined || ownerWorktreeExists(ownerPath)) &&
-      !(ownerPath !== undefined && last.owner_recovery_decision === "keep" && ownerReclaimable?.(pr, last) === true)) {
+      !(ownerPath !== undefined && !resetRelifted && (last.owner_recovery_decision === "keep" ||
+        revalidatedOwnerPreservation(last.owner_recovery_reason) !== undefined) && ownerReclaimable?.(pr, last) === true)) {
     const why = String(last.owner_recovery_reason);
     // W1-T5974: a staged-only refusal names the paths an operator must inspect before clearing it.
     const staged = Array.isArray(last.staged_paths) && last.staged_paths.length > 0
@@ -13721,6 +13969,8 @@ export interface SweepDeps {
   readTaskContractRevision?: (taskId: string) => string | undefined;
   readTaskSemanticRevision?: (taskId: string) => string | undefined;
   headContractRefreshFor?: (pr: OpenPrView) => SweepDeps["updateBranch"];
+  /** Complete scoped hold evidence only for the selected light-pass contract capability. */
+  headContractHoldEvidenceFor?: (pr: OpenPrView) => readonly Record<string, unknown>[] | undefined;
   readHeadContractRefreshHistory?: () => Promise<{ complete: boolean; lines: readonly Record<string, unknown>[] }>;
   headRehome?: HeadRehomePorts;
   /** The already-listed peers retained when the light pass reconciles one PR at a time. */
@@ -13951,6 +14201,8 @@ export interface SweepDeps {
   /** W1-T4586: whether another CI run for this PR's head is still queued or in progress. Omitted, the
    *  sweep never waits on one (the behaviour before this field existed). */
   liveCiRunForHead?: (pr: OpenPrView) => boolean | Promise<boolean>;
+  /** Complete current-head CI activity for refreshes; undefined is unavailable, never observed inactivity. */
+  refreshCiRunForHead?: (pr: OpenPrView) => boolean | undefined | Promise<boolean | undefined>;
   /** W1-T1275 — re-drive `ci-gate`'s OWN job through the same per-job Actions route
    *  {@link requeueCheck} uses, when {@link staleCiGateTransition} names a sibling that reached a
    *  terminal success LATER than the gate's own verdict. AT MOST ONCE per (head, transition). */
@@ -14922,17 +15174,26 @@ export function codeScanningFixCiFailures(alerts: readonly CodeqlHeadAlert[], re
 /** W1-T10066 — a fix round whose red includes a failed `CodeQL` check carries the head's alerts. The results check
  *  has no job log, so its entry would be blank; it is replaced by one entry per alert read at THIS head, and when
  *  none was read at this head a blank entry SAYS so rather than carrying a null tail; an entry that already has
- *  text keeps it. Other failures pass through. */
-export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeqlHeadAlerts">, failures: readonly CiFailure[]): CiFailure[] {
+ *  text keeps it. #14202: a failed `security-merge-policy` status is the same red and is treated alike; beside a
+ *  failed CodeQL check the alerts are carried once. Other failures pass through. */
+export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeqlHeadAlerts" | "securityMergePolicy">,
+  failures: readonly CiFailure[]): CiFailure[] {
   const observed = pr.codeqlHeadAlerts;
+  const verdict = pr.securityMergePolicy ? `${pr.securityMergePolicy.state}: ${pr.securityMergePolicy.reason}` : "verdict unread";
+  let carried = false;
   return failures.flatMap((failure) => {
-    if (failure.name !== CODEQL_CHECK_NAME) return [failure];
+    const policy = failure.name === SECURITY_MERGE_POLICY_CONTEXT;
+    if (failure.name !== CODEQL_CHECK_NAME && !policy) return [failure];
     if (observed !== undefined && observed.headSha === pr.headSha && observed.alerts.length > 0) {
+      if (carried) return [];
+      carried = true;
       return observed.alerts.map((alert) => ({
         name: codeScanningAlertName(alert),
         logTail: codeScanningAlertLogTail(alert, [
-          "UNTRUSTED SCANNER EVIDENCE: the CodeQL check failed at this pull request's head, and this high-severity",
-          "alert is open on it.",
+          policy
+            ? `UNTRUSTED SCANNER EVIDENCE: the security-merge-policy status refused this pull request's head (${verdict}),`
+            : "UNTRUSTED SCANNER EVIDENCE: the CodeQL check failed at this pull request's head, and this high-severity",
+          policy ? "and this high-severity alert is open on it." : "alert is open on it.",
         ]),
       }));
     }
@@ -14940,7 +15201,8 @@ export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeql
     const why = observed === undefined
       ? "no open high-severity alert was read for this head (none is open, the read was not due, or it failed)"
       : `alerts were read at head ${observed.headSha.slice(0, 7)}, not at this head ${pr.headSha.slice(0, 7)}`;
-    return [{ ...failure, logTail: `CodeQL failed at this head; its alerts were not read: ${why}` }];
+    const what = policy ? `security-merge-policy failed at this head (${verdict})` : "CodeQL failed at this head";
+    return [{ ...failure, logTail: `${what}; its alerts were not read: ${why}` }];
   });
 }
 
@@ -15291,6 +15553,24 @@ function priorActionsFromLedger(
   };
 }
 
+/** W1-T10608 — the disposed-line field naming the ONE main adoption a terminal design hold may spend per PR. */
+export const DESIGN_HOLD_MAIN_ADOPTION_FIELD = "design_hold_main_adoption";
+
+/**
+ * W1-T10608 — A DESIGN HOLD ON A HEAD BEHIND MAIN TAKES MAIN ONCE BEFORE A PERSON IS ASKED. PR #13416 sat 39.6 h at
+ * "fix needs design at this exact head" until an operator merged main into it: the hold keys on the head, which only
+ * a person moved. Due while main holds commits the head lacks, and only if no earlier pass on this PR spent the
+ * adoption — read back from `sweep.disposed`, which rotation retains — so a refused or futile refresh escalates as before.
+ */
+export function designHoldMainAdoptionDue(
+  pr: Pick<OpenPrView, "prNumber">, lines: ReadonlyArray<Record<string, unknown>>,
+  behindMainBy: number | undefined, mainTipSha: string | undefined, canUpdateBranch: boolean,
+): boolean {
+  if (!canUpdateBranch || mainTipSha === undefined || behindMainBy === undefined || behindMainBy <= 0) return false;
+  return !lines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+    typeof row[DESIGN_HOLD_MAIN_ADOPTION_FIELD] === "string");
+}
+
 export type TerminalFixDesignHandoff =
   | { kind: "none" }
   | { kind: "unavailable"; reason: string }
@@ -15341,14 +15621,24 @@ export function terminalFixDesignHandoff(
  *  later pass stands down FOREVER; a `fix.stood_down` is such an end. `fix.resolved` is never stalled.
  *  TASK-ID KEYED (callers guard on the CURRENT head). W1-T1210: no `fix.dispatch` row ⇒ stalled. */
 export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown>>, taskId: string | undefined): boolean {
-  if (!taskId) return false;
+  return readFixRungEnd(lines, taskId).stalled;
+}
+
+/** W1-T10339 — the rung's end as `fixRungStalledWithoutNewHead` reads it, plus the `fix.stood_down` row that ended it
+ *  (absent when any other row ended it, or a later dispatch, review or resolution superseded it). */
+function readFixRungEnd(lines: Array<Record<string, unknown>>, taskId: string | undefined):
+  { stalled: boolean; standDown?: Record<string, unknown> } {
+  if (!taskId) return { stalled: false };
   let stalled = false;
+  let standDown: Record<string, unknown> | undefined;
   let dispatched = false;
   let ciHead: unknown;
   let amendmentNumber: number | undefined;
   let awaitingAmendment: number | undefined;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
+    if (line.step === "fix.dispatch" || line.step === "fix.review" || line.step === "fix.resolved" ||
+        line.step === "fix.ci_not_green" || line.step === "fix.commit_refused") standDown = undefined;
     if (line.step === "fix.dispatch") {
       dispatched = true;
       stalled = false;
@@ -15369,6 +15659,7 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = line.state !== "success";
     } else if (line.step === "fix.stood_down") {
       stalled = line.outcome !== "handed_off"; // a stand-down ENDS the rung; a hand-off to the sweep is a live wait
+      standDown = stalled ? line : undefined;
     } else if (line.step === "fix.done" && line.subtype === "admission_abandoned") {
       stalled = true;
     } else if (line.step === "fix.done" && line.worker_exit === "unobserved") {
@@ -15389,10 +15680,45 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
   }
   if (awaitingAmendment !== undefined && lines.some((line) =>
     line.step === PR_TERMINAL_STEP && (line.state === "merged" || line.state === "closed") && Number(line.pr_number) === awaitingAmendment)) {
-    return true;
+    return { stalled: true };
   }
   // W1-T1210: no owning `fix.dispatch` row at all ⇒ treated as stalled — see the doc above.
-  return stalled || !dispatched;
+  return { stalled: stalled || !dispatched, ...(stalled && standDown ? { standDown } : {}) };
+}
+
+/** W1-T10339 — WHAT A STAND-DOWN READ. Each `fix.stood_down` and `fix.needs_design` row names the head, the task-contract
+ *  revision and (for a PR with no task trailer, whose BODY is the authoritative Acceptance) the body digest it worked on. */
+export interface FixRungInputs { headSha: string; contractRevision?: string; bodySha256?: string }
+
+/** The non-conflict rung defers a dirty PR to the existing conflict repair route. */
+export const CONFLICT_REPAIR_HANDOFF_REASON = "merge state is dirty (mergeable === false or mergeable_state === \"dirty\") — a conflicted PR registers no new check runs, so a strike buys no information; standing down for the sweep's own conflicted disposition rather than retrying blindly";
+
+/** sha256 of a PR body as both the sweep and the fix rung read it — trimmed, so a trailing newline is not an edit. */
+export function prBodyDigest(body: string | undefined): string | undefined {
+  return typeof body === "string" ? createHash("sha256").update(body.trim(), "utf8").digest("hex") : undefined;
+}
+
+/** The ledger fields a stand-down records for {@link FixRungInputs}; an input that was not read is not written. */
+export function fixRungInputFields(inputs: Partial<FixRungInputs>): Record<string, string> {
+  return {
+    ...(inputs.headSha === undefined ? {} : { read_head_sha: inputs.headSha }),
+    ...(inputs.contractRevision === undefined ? {} : { read_contract_revision: inputs.contractRevision }),
+    ...(inputs.bodySha256 === undefined ? {} : { read_body_sha256: inputs.bodySha256 }),
+  };
+}
+
+/** W1-T10339 — have the inputs a recorded row read moved? A row written before these fields existed has not recorded
+ *  what it read, so it reads as moved (today's re-dispatch). A contract or body the caller could not read cannot show a
+ *  change. Only an already-open escalation at rung.strike keeps its issue-closing release. */
+export function fixRungInputsUnchanged(row: Record<string, unknown>, current: FixRungInputs): boolean {
+  if (typeof row.read_head_sha !== "string" || row.read_head_sha !== current.headSha ||
+      row.site === "rung.strike" && typeof row.reason === "string" &&
+        row.reason.startsWith("a needs-human escalation for this exact (task, PR, head ") &&
+        row.reason.includes(", cause) is ALREADY OPEN and ")) return false;
+  if (typeof row.read_contract_revision === "string" && current.contractRevision !== undefined &&
+      row.read_contract_revision !== current.contractRevision) return false;
+  return !(typeof row.read_body_sha256 === "string" && current.bodySha256 !== undefined &&
+    row.read_body_sha256 !== current.bodySha256);
 }
 
 /** W1-T9999 — the ledger row a pass writes when it settles an orphaned fix seed. */
@@ -15400,7 +15726,9 @@ export const FIX_SEED_ORPHANED_STEP = "sweep.fix.seed_orphaned";
 
 export interface FixSeed { ts?: string; runId?: string }
 /** `orphaned`: the earlier run no longer owns a continuation; ordinary checkout/worker claims still gate redispatch. */
-export type FixSeedRead = { kind: "live" | "ended" | "orphaned"; seed: FixSeed; orphanReason?: "owner-run-ended" };
+export type FixSeedRead = { kind: "live" | "ended" | "orphaned" | "held"; seed: FixSeed; orphanReason?: "owner-run-ended";
+  /** W1-T10339: `held` only — the stand-down that ended the rung while every input it read still stands. */
+  hold?: { site: string; reason: string } };
 
 function continuationEndedAtEmptyBoot(
   lines: ReadonlyArray<Record<string, unknown>>, from: number, ownerRunId: string, taskId: string, runId: string,
@@ -15423,6 +15751,7 @@ export function fixSeedRead(
   lines: ReadonlyArray<Record<string, unknown>>,
   pr: Pick<OpenPrView, "prNumber" | "headSha" | "taskId">,
   runId: string,
+  current?: FixRungInputs,
 ): FixSeedRead | undefined {
   const taskId = fixLedgerTaskIdFor(pr) ?? reviewLedgerKeyFor(undefined, pr.prNumber);
   const disposed = (line: Record<string, unknown>) => line.step === "sweep.disposed" && line.pr_number === pr.prNumber;
@@ -15455,7 +15784,15 @@ export function fixSeedRead(
     if (seed.runId !== undefined && seed.runId !== runId) return { kind: "orphaned", seed };
     return { kind: fixRungStalledWithoutNewHead([...lines], taskId) ? "ended" : "live", seed };
   }
-  if (fixRungStalledWithoutNewHead([...window], taskId)) return { kind: "ended", seed };
+  const end = readFixRungEnd([...window], taskId);
+  if (end.stalled) {
+    // W1-T10339: a stand-down whose recorded inputs all still stand is a hold, not an ended rung.
+    if (current !== undefined && end.standDown !== undefined && fixRungInputsUnchanged(end.standDown, current)) {
+      return { kind: "held", seed, hold: { site: String(end.standDown.site ?? "unknown"),
+        reason: typeof end.standDown.reason === "string" ? end.standDown.reason : "no reason recorded" } };
+    }
+    return { kind: "ended", seed };
+  }
   const handoffAt = window.findLastIndex((line) => rung(line) && line.step === "fix.stood_down" && line.outcome === "handed_off");
   // Rotation may retain another seed's handoff and an older head's dispatch in this window.
   // Neither owns this seed; unread identities still veto recovery.
@@ -15467,8 +15804,22 @@ export function fixSeedRead(
   // this boot's explicit empty adoption receipt; a different run id or age alone proves nothing.
   if (!ownerHandedOff && seed.runId !== undefined &&
       continuationEndedAtEmptyBoot(lines, seedAt, seed.runId, taskId, runId) &&
-      window.filter((line) => rung(line) && line.step === "fix.dispatch" &&
-        (typeof line.head_sha !== "string" || line.head_sha === pr.headSha)).every((line) => line.run_id === seed.runId)) {
+      window.every((line, index) => {
+        if (!rung(line) || line.step !== "fix.dispatch" ||
+            (typeof line.head_sha === "string" && line.head_sha !== pr.headSha)) return true;
+        if (line.run_id === seed.runId) return true;
+        // Rotation can retain a completed earlier round at this same head while dropping
+        // the dispositions that separated it from the seed. Only its exact terminal before
+        // the seed owner's own dispatch settles that older owner; incomplete joins still veto.
+        return index < dispatchAt && window[dispatchAt].run_id === seed.runId &&
+          typeof line.run_id === "string" && line.run_id.length > 0 &&
+          typeof line.round_id === "string" && line.round_id.length > 0 &&
+          typeof line.worker_run_id === "string" && line.worker_run_id.length > 0 &&
+          window.slice(index + 1, dispatchAt).some(done => done.step === "fix.done" &&
+            done.task_id === taskId && done.run_id === line.run_id &&
+            done.round_id === line.round_id && done.worker_run_id === line.worker_run_id &&
+            done.head_sha === pr.headSha && line.head_sha === pr.headSha);
+      })) {
     return { kind: "orphaned", seed, orphanReason: "owner-run-ended" };
   }
   // A hand-off to the sweep is a live wait only until the sweep has disposed the same head after it.
@@ -17103,6 +17454,8 @@ export async function runSweep(
   deps.markPrelude?.("armed_body_guard");
   const ledgerLines = readLedger(deps.ledgerPath);
   let contractHoldRefreshSpent = false;
+  // W1-T10608: at most one design-hold main adoption per pass, so a main fix never fans out update-branch.
+  let designMainAdoptionSpent = false;
   // An unreadable contract is an unreadable witness (undefined → judged afresh, never reused); it must not
   // abort the PR's disposition, which still owes the fix rung its dispatch.
   const readWitnessContractRevision = (taskId: string): string | undefined => {
@@ -17146,7 +17499,7 @@ export async function runSweep(
     if (row.step === "pr.stuck.resolved") resolvedStages.add(stageKey(row));
   }
   const reportStuckStage = async (pr: OpenPrView, fields: ReturnType<typeof blockerFields>, repairStarted: boolean,
-    standDownReason: string | undefined, escalationHandled: boolean): Promise<void> => {
+    standDownReason: string | undefined, escalationHandled: boolean, blockerReason?: string): Promise<void> => {
     if (deps.dryRun) return;
     const key = stageKey({ pr_number: pr.prNumber, ...fields });
     const record = (step: string, extra: Record<string, unknown>) => appendLine(deps.ledgerPath, {
@@ -17322,13 +17675,35 @@ export async function runSweep(
         other.taskId === pr.taskId && isDispatchedRunBranch(other.headRefName) && other.headRefName !== pr.headRefName)) {
       diagnoses.push("duplicate build");
     }
+    // PR 14326 (issue 14390): an ownerless `escalated` stage reports on its first pass, so a light pass that deferred
+    // the disposition re-escalated a PR whose progress-judge escalation was still open, as "unknown signature".
+    // The report still escalates -- the original may never have reached a person, or been closed unanswered, and a
+    // stall nobody is told about is the defect this report exists for -- but it names the escalation it found.
+    let originalEscalationOpen = false;
+    let escalationFields: Record<string, unknown> = {};
+    if (fields.blocker === "escalated") {
+      const original = ownEscalationAtHead(currentRows, pr);
+      const answered = pr.pendingAnswer !== undefined && pr.pendingAnswer.spent !== true;
+      const at = original?.ts === undefined ? "" : ` at ${original.ts}`;
+      originalEscalationOpen = original?.reason !== undefined && !answered;
+      diagnoses.push(original === undefined
+        ? `already escalated (reason unreadable: no escalation of this PR at head ${pr.headSha.slice(0, 7)} is in the ledger)` +
+          (blockerReason ? `; this pass: ${blockerReason}` : "")
+        : original.reason === undefined ? `already escalated${at} (reason unreadable)`
+          : answered ? `already escalated${at} and answered, yet still stalled: ${original.reason}`
+            : `already escalated${at}, still awaiting an operator: ${original.reason}`);
+      escalationFields = {
+        original_escalation: originalEscalationOpen ? "open" : answered && original?.reason !== undefined ? "answered" : "unreadable",
+        ...(original?.ts === undefined ? {} : { original_escalation_at: original.ts }),
+      };
+    }
     const diagnosis = diagnoses.length ? diagnoses.join("; ") : "unknown signature";
     const reason = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — ${fields.blocker} for ` +
       `${Math.floor(fields.blocker_age_ms / 60_000)} minutes ` +
       `${ownerless ? "(owner: none)" : `(BACKSTOP ${bound?.minutes})`}; since ${fields.blocker_since}; DIAGNOSIS: ${diagnosis}` +
       (heldMs > 0 ? `; the fleet itself withheld the repair for ${Math.floor(heldMs / 60_000)} of those minutes` : "");
     const row = { pr_number: pr.prNumber, ...fields, diagnosis, ...boundFields,
-      held_ms: heldMs };
+      held_ms: heldMs, ...escalationFields };
     recordStuck(row);
     if (escalationHandled) return;
     try {
@@ -17347,6 +17722,8 @@ export async function runSweep(
   };
   const ruleBlockerByIndex = new Map<number, PrBlocker>();
   const planProofBlockedPrs = new Set<number>();
+  /** W1-T10339: taskless capped PRs, repaired in their own body by the fix lane (never plan repair). */
+  const bodyProofRepairPrs = new Set<number>();
   const baseRedStandDownPrs = new Set<number>();
   const incidentHeldPrs = new Set<number>(); // W1-T5939: blocker reads awaiting-ci, so no stage stall escalates
   const infrastructureBlockerByPr = new Map<number, PrBlocker>(); // W1-T9932: a plan-only infra red's re-run or escalation
@@ -17777,9 +18154,9 @@ export async function runSweep(
     const memo = refreshClearanceKey(pr.prNumber, pr.headSha, mainSha, testFiles);
     const decided = refusedClearances.get(memo);
     if (decided !== undefined) return { refresh: false, evidence: decided, reason: "this head's refusal at this main is already recorded" };
-    let mainChangedFiles: string[] | undefined;
+    let facts: RedBaseRefreshFacts | undefined;
     try {
-      mainChangedFiles = (await deps.readRedBaseRefreshFacts?.(pr))?.baseChangedFiles;
+      facts = await deps.readRedBaseRefreshFacts?.(pr);
     } catch (error) {
       // An unread delta is no evidence either way: `mainPathsReachingRed` then proves nothing.
       log("sweep.red_base_refresh.read_error", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
@@ -17791,11 +18168,16 @@ export async function runSweep(
       // An unreadable closure is unknown, never empty: the pre-filter cannot refuse on it.
       log("refresh.clearance.closure_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
     }
+    // The same reach rule over the PR's OWN diff: a test passing on main is evidence main fixed it only when
+    // the head's change cannot reach it. A base-red head's red reproduced on main itself, so its diff decides nothing.
+    const prChangedFiles = arm === "base-red" || facts?.prAddedLines === undefined ? undefined : Object.keys(facts.prAddedLines);
+    const ownReach = mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles: prChangedFiles, closure, isHarnessPath: isCiHarnessPath });
     const clearance = await assessRefreshClearance({
       failingTestFiles: testFiles,
-      reach: mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles, closure, isHarnessPath: isCiHarnessPath }),
+      reach: mainPathsReachingRed({ failingTestFiles: testFiles, mainChangedFiles: facts?.baseChangedFiles, closure, isHarnessPath: isCiHarnessPath }),
       priorRefresh: refreshedOnSameRed(refreshRecords, pr.prNumber, checks, testFiles) ? true
         : history.source === "unreadable" ? undefined : false,
+      ...(ownReach === undefined ? {} : { ownReach: ownReach.counted }),
     }, deps.reproduceFailingTestsOnMerge ? () => deps.reproduceFailingTestsOnMerge!(pr, testFiles, mainSha) : undefined);
     appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REFRESH_CLEARANCE_STEP,
       ...refreshClearanceFields({ arm, pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainSha, checks, test_files: testFiles },
@@ -18598,8 +18980,10 @@ export async function runSweep(
     const mergeHold = disposition === "mergeable" ? automergeHoldFromLedger(ledgerLines, pr.prNumber) : undefined;
     const securityHold = disposition === "mergeable" && !pr.autoMergeArmed && mergeHold === undefined
       ? securityArmRefusalAtHead(ledgerLines, pr.prNumber, pr.headSha) : undefined;
-    const securityText = securityHold && securityHoldReason(securityHold,
-      pr.codeqlHeadAlerts?.headSha === pr.headSha ? pr.codeqlHeadAlerts.alerts : undefined, standDownReason ?? actionError);
+    const alertsAtHead = pr.codeqlHeadAlerts?.headSha === pr.headSha ? pr.codeqlHeadAlerts.alerts : undefined;
+    const securityText = securityHold && securityHoldReason(securityHold, alertsAtHead, standDownReason ?? actionError);
+    const policyCause = !securityHold && pr.securityMergePolicy?.state === "blocked"
+      ? securityPolicyCause(pr.securityMergePolicy, alertsAtHead) : undefined;
     // #10551 (2026-10-10): a fix arm that dispatched nothing must never be ledgered as "dispatching".
     // The rule row's sentence predicts the dispatch; when this pass stood it down, say so and why —
     // and a backstop hold names itself on EVERY pass, the light pass included.
@@ -18610,11 +18994,11 @@ export async function runSweep(
       : undefined;
     const scannerPreparationReason = extraDisposedFields?.code_scanning_fix_preparing === true &&
       typeof extraDisposedFields.code_scanning_fix_reason === "string" ? extraDisposedFields.code_scanning_fix_reason : undefined;
-    const shownReason = mergeHold !== undefined
+    const shownReason = (mergeHold !== undefined
       ? `held by ${describeHoldSetter(mergeHold)}: ${mergeHold.reason} — auto-merge refused until an operator releases it (rmd merge-hold)`
       : securityText ? securityText : scannerPreparationReason !== undefined ? scannerPreparationReason : notDispatched !== undefined
         ? `${reason.replace(/\bdispatching\b/g, "would dispatch")} — NOT DISPATCHED this pass: ${notDispatched}`
-        : reason;
+        : reason) + (policyCause ? `; ${policyCause}` : "");
     if (dispatchHold !== undefined) extraDisposedFields = { ...extraDisposedFields, dispatch_held: dispatchHold.fields.dispatch_held };
     const blocker: PrBlocker = incidentHeldPrs.has(pr.prNumber) ? "awaiting-ci" : infrastructureBlockerByPr.get(pr.prNumber) ??
       finalBlocker(ruleBlockerByIndex.get(index)!, {
@@ -18627,7 +19011,7 @@ export async function runSweep(
       planProofUnrunnable: planProofBlockedPrs.has(pr.prNumber) ||
         (isBlockedCi(pr) && pr.isPlanFiling === true) || metadataWait,
       strikesExhausted: disposition === "blocked-ambiguous" && isFixStrikeExhausted(pr, policy),
-      ownRed: disposition === "blocked-fixable" && isBlockedCi(pr),
+      ownRed: disposition === "blocked-fixable" && (isBlockedCi(pr) || bodyProofRepairPrs.has(pr.prNumber)),
       operatorHold: mergeHold !== undefined,
       dispatchHeld: dispatchHold !== undefined,
       securityArmRefusal: securityHold,
@@ -18640,7 +19024,7 @@ export async function runSweep(
         priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES);
     const blockerRow = {
       ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable,
-        blocker.startsWith("security-") ? securityText : undefined),
+        blocker.startsWith("security-") ? securityText : policyCause),
       ...(blockerReadFailure ? { blocker_read_error: blockerReadFailure.reason } : {}),
     };
     if (armOutcome !== "armed" && armOutcome !== "direct-merged" && !gardenRecordRefusals.has(pr.prNumber)) {
@@ -18651,7 +19035,7 @@ export async function runSweep(
         (blockerRow.blocker_owner === "NONE" && (acted || deduped || actionError !== undefined || disposition === "wait" ||
           (standDownReason !== undefined && (deps.actionable?.(disposition) ?? true))));
       const stageStandDown = disposition === "stale" && acted ? "CLOSED" : standDownReason;
-      await reportStuckStage(pr, blockerRow, repairStarted, stageStandDown, escalationHandled);
+      await reportStuckStage(pr, blockerRow, repairStarted, stageStandDown, escalationHandled, shownReason);
     }
     // A real pass's `sweep.disposed` row below carries every field of these two rows, and on the
     // fleet each was an exact duplicate of it (1,454 of 14,089 core rows, 2026-09-24): write them only
@@ -19104,11 +19488,11 @@ export async function runSweep(
         ...pr.cancelledRequiredChecks!.map(c => c.name),
       ], rollup));
       const cancelled = pr.cancelledRequiredChecks!.filter(c => fresh.has(c.name));
-      const freshByName = new Map(dedupeRollupByLatestAttempt(rollup ?? []).map(c => [c.name ?? c.context, c]));
+      const freshProducers = dedupeRollupByLatestAttempt(rollup ?? []);
       const explained = new Set(pr.cancelledRequiredChecks!.flatMap(c => c.explainedFailures ?? [])
         .filter(alias => {
-          const latest = freshByName.get(alias.name);
-          return !latest || !latest.checkRunId || latest.checkRunId === alias.checkRunId || !REQUIRED_CHECK_FAIL.has(rollupState(latest));
+          const matches = freshProducers.filter(c => (c.name ?? c.context) === alias.name);
+          return matches.every(latest => !latest.checkRunId || latest.checkRunId === alias.checkRunId || !REQUIRED_CHECK_FAIL.has(rollupState(latest)));
         }).map(alias => alias.name));
       const deterministicTimeouts = new Set<string>();
       const outcomes: string[] = [];
@@ -19130,11 +19514,12 @@ export async function runSweep(
         }
         if (deferred !== undefined) continue;
         if (check.explainedFailures?.length) {
-          const producer = freshByName.get(check.name);
+          const producers = freshProducers.filter(latest => (latest.name ?? latest.context) === check.name && checkJobId(latest) === check.jobId);
+          const producer = producers.length === 1 ? producers[0] : undefined;
           if (!producer || (producer.conclusion ?? producer.state ?? "").toUpperCase() !== "CANCELLED" ||
-              (producer.status ?? "").toUpperCase() !== "COMPLETED" || checkJobId(producer) !== check.jobId || !check.explainedFailures.every(alias => {
-                const latest = freshByName.get(alias.name);
-                return latest !== undefined && latest.checkRunId === alias.checkRunId && rollupState(latest) === "FAILURE";
+              (producer.status ?? "").toUpperCase() !== "COMPLETED" || !check.explainedFailures.every(alias => {
+                const aliases = freshProducers.filter(latest => (latest.name ?? latest.context) === alias.name && latest.checkRunId === alias.checkRunId);
+                return aliases.length === 1 && rollupState(aliases[0]) === "FAILURE";
               })) {
             outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
             continue;
@@ -19332,7 +19717,10 @@ export async function runSweep(
     // W1-T7243: capped repairs keep their remedy and counters; the judge chooses whether to repeat it.
     let planShardRepairDue = false;
     if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion).arm) {
-      planProofBlockedPrs.add(pr.prNumber);
+      // W1-T10339: a PR with no task trailer has no plan shard to repair; its body is the Acceptance.
+      const bodyRepairOnly = !carriesTaskTrailer(pr);
+      if (bodyRepairOnly) { bodyProofRepairPrs.add(pr.prNumber); proofDiscrimination.bodyRepair = true; }
+      else planProofBlockedPrs.add(pr.prNumber);
       // W1-T7837: a verdict whose EVERY proof hit a host gap (runner absent, worktree reclaimed, runtime broken,
       // no exec context) says nothing about the body, so a body or shard repair cannot help it. It is re-reviewed.
       // A grade with NO recorded skip reason (a row predating W1-T305, or a base_unreadable proof) cannot be shown to be
@@ -19370,7 +19758,7 @@ export async function runSweep(
         }
       } else {
         const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
-        const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
+        const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function" && !bodyRepairOnly;
         const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
         const action = deps.fixProgressJudge
           ? await judgeCappedRepair({ bodyStrikes: pr.priorStrikes, planRepairStrikes }, ceiling, {
@@ -19427,7 +19815,11 @@ export async function runSweep(
         `proof-repair rounds refused twice at this head (${pr.repeatedFixRefusal}) — no strike spent — ` +
         `the plan-shard flag is the next rung`;
     }
-    let terminalDesignHold: { amended: boolean; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string } | undefined;
+    let terminalDesignHold: { amended: boolean; mainAdoption?: true; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string } | undefined;
+    // W1-T10339: a PR with no task trailer is judged on its BODY, so the body is an input a stand-down read.
+    const standDownBodySha = carriesTaskTrailer(pr) ? undefined : prBodyDigest(pr.body);
+    let designReleasedByBody = false;
+    let standDownHold: { site: string; reason: string } | undefined;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
@@ -19454,20 +19846,57 @@ export async function runSweep(
         if (unreadable) {
           disposition = "wait";
           reason = `terminal design handoff task contract revision unavailable — no fix admitted: ${unreadable.reason}`;
+        } else if (typeof held.read_body_sha256 === "string" && standDownBodySha !== undefined && held.read_body_sha256 !== standDownBodySha) {
+          // W1-T10339: the body this taskless handoff read has been edited — a changed input releases the hold.
+          designReleasedByBody = true;
         } else {
           const semantic = semanticStandingOn !== undefined && semanticCurrent !== undefined && /^narrative-v1:[a-f0-9]{64}$/.test(semanticCurrent)
             ? { standingOn: semanticStandingOn, observed: semanticCurrent } : undefined;
           const amended = current !== undefined && standingOn !== undefined &&
             (current !== standingOn || semantic !== undefined && semantic.standingOn !== semantic.observed);
-          terminalDesignHold = { amended, revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
-          disposition = amended ? "blocked-fixable" : "refused-escalate";
+          const behindBy = deps.behindMainByPr?.get(pr.prNumber);
+          const mainAdoption = !amended && !designMainAdoptionSpent &&
+            designHoldMainAdoptionDue(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
+          terminalDesignHold = { amended, ...(mainAdoption ? { mainAdoption: true as const } : {}),
+            revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
+          disposition = amended || mainAdoption ? "blocked-fixable" : "refused-escalate";
           reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
+            : mainAdoption ? `fix needs design at this exact head (round ${handoff.roundId}), which is ${behindBy} commit(s) ` +
+              `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
             : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
-          if (!amended) ruleBlockerByIndex.set(prIndex, "escalated");
+          if (mainAdoption) designMainAdoptionSpent = true;
+          if (!amended && !mainAdoption) ruleBlockerByIndex.set(prIndex, "escalated");
         }
       } else if (handoff.kind === "unavailable") {
         disposition = "wait";
         reason = handoff.reason;
+      }
+    }
+    // W1-T10339 — A STOOD-DOWN REPAIR IS NOT RE-DISPATCHED ON INPUTS THAT HAVE NOT CHANGED. The newest `fix.stood_down`
+    // recorded the head, task-contract revision and (taskless) body digest it read; while all three stand, a dispatch
+    // would stand down again with no worker. It escalates once through the exact-head escalation route and holds.
+    if ((disposition === "conflicted" || disposition === "blocked-fixable") && terminalDesignHold === undefined &&
+        !designReleasedByBody && prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) &&
+        !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
+        !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
+      let contractRevision: string | undefined;
+      let readable = true;
+      // A run-unfiled PR's task is synthetic (`PR-<n>`): its body, not a plan record, is the contract it read.
+      try {
+        contractRevision = pr.taskId === undefined || /^PR-\d+$/.test(fixLedgerTaskIdFor(pr)) ? undefined
+          : deps.readTaskContractRevision?.(pr.taskId);
+      }
+      catch (error) { readable = false; deps.log?.("sweep.stand_down_hold.unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) }); }
+      const held = readable ? fixSeedRead(ledgerLines, pr, deps.runId,
+        { headSha: pr.headSha, contractRevision, bodySha256: standDownBodySha }) : undefined;
+      const conflictHandoff = disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) &&
+        held?.hold?.site === "rung.strike" && held.hold.reason === CONFLICT_REPAIR_HANDOFF_REASON;
+      if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff) {
+        standDownHold = held.hold;
+        disposition = "refused-escalate";
+        reason = `fix stood down at ${held.hold.site} and nothing it read has changed (head ${pr.headSha.slice(0, 7)}, task contract` +
+          `${standDownBodySha === undefined ? "" : ", PR body"}) — no worker is dispatched until one does: ${held.hold.reason}`;
+        ruleBlockerByIndex.set(prIndex, "escalated");
       }
     }
     byDisposition[disposition]++;
@@ -19703,7 +20132,7 @@ export async function runSweep(
           !metadataRedRuledOut(ledgerLines, pr);
         // W1-T9999: the seed's own rung decides, never an earlier rung's; an earlier run's seed with no rung row is settled.
         const seedRead = dispatchedThisHead ? fixSeedRead(ledgerLines, pr, deps.runId) : undefined;
-        alreadyDone = terminalDesignHold?.amended === true || metadataRed || emptyDiffReviewFailure(pr)
+        alreadyDone = terminalDesignHold?.amended === true || terminalDesignHold?.mainAdoption === true || designReleasedByBody || metadataRed || emptyDiffReviewFailure(pr)
           ? false
           : dispatchedThisHead && (seedRead?.kind ?? "live") === "live"; // no read: a taskless PR's key (W1-T9955)
         if (seedRead?.kind === "orphaned" && !deps.dryRun) {
@@ -19737,11 +20166,15 @@ export async function runSweep(
         // escalation rather than being deduped by a stale head's `acted:true` line forever.
         alreadyDone = isContradictory ? priorContradiction !== undefined || legacyContradiction
           : !strikeLadderDue && !sloLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
+        if (standDownHold !== undefined) alreadyDone = ledgerLines.some(row => row.step === "sweep.disposed" &&
+            row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.stand_down_hold === true &&
+            (row.acted === true || row.stand_down_escalation_outcome === "delivered" || row.stand_down_escalation_outcome === "failed"));
         // W1-T2427: the LARGEST silent population (7,888 rows). Without this sentence the row is
         // indistinguishable from `deps.escalate` being unwired or throwing.
         if (alreadyDone) {
-          dedupStandDownReason =
-            `an escalation was already filed for this head (${pr.headSha.slice(0, 7)}) — the ` +
+          dedupStandDownReason = standDownHold !== undefined
+            ? `stand-down hold: ${reason} — escalated once for this head (${pr.headSha.slice(0, 7)}), no worker dispatched and no capacity spent`
+            : `an escalation was already filed for this head (${pr.headSha.slice(0, 7)}) — the ` +
             `escalation is deduped, not skipped, and a new head re-earns its own`;
         }
         break;
@@ -19851,9 +20284,28 @@ export async function runSweep(
       : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
     if (emptyDiffSupersession) extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
     if (gardenRecordRefusal !== undefined) extraDisposedFields = { ...extraDisposedFields, garden_record_refusal: gardenRecordRefusal };
+    if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_hold: true, stand_down_site: standDownHold.site };
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true, needs_design_round_id: terminalDesignHold.roundId,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
       ...(terminalDesignHold.semantic === undefined ? {} : { progress_task_semantic_revision: terminalDesignHold.semantic.standingOn }) };
+    const selectedContractRefresh = async (
+      revision: string, action: () => Promise<string | undefined>,
+    ): Promise<string | undefined> => {
+      if (contractHoldRefreshSpent || headContractRefreshInFlight) return "another head-contract amendment owns the refresh";
+      headContractRefreshInFlight = true;
+      try {
+        const history = await headContractRefreshHistory(deps);
+        if (!history.complete || headContractRefreshAttempted([...history.lines, ...ledgerLines], pr, revision)) {
+          return history.complete ? "head-contract amendment refresh already attempted — awaiting new evidence"
+            : "head-contract refresh history unreadable — no refresh or fix admitted";
+        }
+        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: fixLedgerTaskIdFor(pr),
+          step: HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+          contract_revision: revision });
+        contractHoldRefreshSpent = true;
+        return await action();
+      } finally { headContractRefreshInFlight = false; }
+    };
     const refreshAmendedContract = async (
       latched: readonly Record<string, unknown>[], inputKey?: string, observedRevision?: string,
       semantic?: { standingOn: string; observed: string },
@@ -20212,49 +20664,52 @@ export async function runSweep(
                 standDownReason = amended ?? "task contract changed during design-handoff observation — no fix admitted";
                 break;
               }
-              const headContractHold = refusedHeadContract(ledgerLines, pr);
+              if (terminalDesignHold?.mainAdoption && deps.updateBranch) {
+                let outcome: string;
+                recordForcedRefresh(deps, pr, "design-hold-main");
+                try { outcome = await deps.updateBranch(pr); }
+                catch (error) { outcome = `error: ${String(error)}`; }
+                extraDisposedFields = { ...extraDisposedFields, [DESIGN_HOLD_MAIN_ADOPTION_FIELD]: outcome };
+                acted = outcome === "updated" || outcome === "head-moved";
+                spent = false;
+                standDownReason = acted
+                  ? `design hold at a head behind main — took main into the branch (${outcome}), so the next round works on main`
+                  : `design hold at a head behind main — branch refresh ${outcome}; the next pass escalates the design question`;
+                break;
+              }
+              const contractHoldLines = deps.headContractHoldEvidenceFor?.(pr) ?? ledgerLines;
+              const headContractHold = refusedHeadContract(contractHoldLines, pr);
               const currentHoldContract = headContractHold && pr.taskId !== undefined
                 ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
               if (headContractHold && currentHoldContract !== undefined && currentHoldContract !== headContractHold.contract_revision) {
                 acted = false;
                 spent = false;
-                if (contractHoldRefreshSpent || headContractRefreshInFlight) {
-                  standDownReason = "another head-contract amendment owns the refresh";
-                  break;
-                }
                 const refresh = deps.updateBranch ?? deps.headContractRefreshFor?.(pr);
                 if (!refresh) {
                   standDownReason = "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
                   break;
                 }
-                headContractRefreshInFlight = true;
-                try {
-                  const history = await headContractRefreshHistory(deps);
-                  if (!history.complete || headContractRefreshAttempted([...history.lines, ...ledgerLines], pr, currentHoldContract)) {
-                    standDownReason = history.complete ? "head-contract amendment refresh already attempted — awaiting new evidence"
-                      : "head-contract refresh history unreadable — no refresh or fix admitted";
-                    break;
-                  }
-                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: fixLedgerTaskIdFor(pr),
-                    step: HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
-                    contract_revision: currentHoldContract });
-                  contractHoldRefreshSpent = true;
-                  standDownReason = await refreshAmendedContract([{ progress_contract_revision: headContractHold.contract_revision }],
-                    undefined, currentHoldContract, undefined, refresh) ?? "head contract changed during amendment observation — no fix admitted";
-                } finally { headContractRefreshInFlight = false; }
+                standDownReason = await selectedContractRefresh(currentHoldContract, () =>
+                  refreshAmendedContract([{ progress_contract_revision: headContractHold.contract_revision }],
+                    undefined, currentHoldContract, undefined, refresh)) ?? "head contract changed during amendment observation — no fix admitted";
                 break;
               }
-              const scopeHold = scopeEscalationStandDown(ledgerLines, pr);
+              const scopeHold = scopeEscalationStandDown(contractHoldLines, pr);
               if (scopeHold?.kind === "unfiled") { acted = false; spent = false; standDownReason = scopeHold.reason; break; }
               // #13317: the operator's answer (an amended contract) takes main in once, releasing an instrument/workflow hold.
               if (scopeHold) {
                 acted = false;
                 spent = false;
                 extraDisposedFields = { ...extraDisposedFields, operator_scope_hold: scopeHold.kind };
-                standDownReason = await refreshAmendedContract([
+                const refresh = deps.updateBranch ?? deps.headContractRefreshFor?.(pr);
+                const revision = pr.taskId === undefined ? undefined : deps.readTaskContractRevision?.(pr.taskId);
+                const action = () => refreshAmendedContract([
                   ...(scopeHold.contractRevision !== undefined ? [{ progress_contract_revision: scopeHold.contractRevision }] : []),
                   ...ledgerLines.filter((line) => line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
-                    line.head_sha === pr.headSha && line.operator_scope_hold === scopeHold.kind)]) ?? scopeHold.reason;
+                    line.head_sha === pr.headSha && line.operator_scope_hold === scopeHold.kind)],
+                  undefined, revision, undefined, refresh);
+                standDownReason = await (deps.updateBranch === undefined && refresh !== undefined && revision !== undefined
+                  ? selectedContractRefresh(revision, action) : action()) ?? scopeHold.reason;
                 break;
               }
               const preflightEscalation = preflightEscalations.get(pr.prNumber);
@@ -21351,7 +21806,14 @@ export async function runSweep(
               break;
             }
             case "refused-escalate":
-              await deps.escalate(pr, reason, question!);
+              try {
+                await deps.escalate(pr, reason, question!);
+                if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_escalation_outcome: "delivered" };
+              } catch (error) {
+                if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_escalation_outcome: "failed",
+                  stand_down_escalation_error: String(error) };
+                throw error;
+              }
               break;
             case "blocked-ambiguous":
               {
@@ -22105,7 +22567,11 @@ export async function runSweep(
   // conflict is REPORTED and skipped rather than retried this pass.
   const ratchetRefreshed = new Set(await runArmedRatchetRejudge(openPrs, deps));
   if (!deps.dryRun && deps.updateBranch) {
-    const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && !refreshAdmission.has(pr.prNumber) && !ladderUpdatedPrs.has(pr.prNumber) && !gardenRecordRefusals.has(pr.prNumber) && !ratchetRefreshed.has(pr.prNumber));
+    // An overlap judgment cannot override a clearance refusal for this same red head and main.
+    // A different identity or a head whose checks are no longer red keeps its ordinary eligibility.
+    const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && !refreshAdmission.has(pr.prNumber) && !ladderUpdatedPrs.has(pr.prNumber) && !gardenRecordRefusals.has(pr.prNumber) && !ratchetRefreshed.has(pr.prNumber))
+      .filter((pr) => pr.checksState !== "red" || mainTipSha === undefined ||
+        ![...refusedClearances.keys()].some((key) => key.startsWith(`${pr.prNumber}@${pr.headSha}@${mainTipSha}@`)));
     const behindMainByPr = deps.behindMainByPr ?? new Map<number, number>();
     // W1-T6022: the ready refresh stands down in an Actions incident and spends one update per (PR, head).
     // The status is read only when a ready PR sits under the distance gate, so a pass with none spends no read.
@@ -24414,7 +24880,7 @@ export const RETIRABLE_ESCALATION_LABELS: readonly string[] = [NEEDS_HUMAN_LABEL
 /** List every OPEN issue across {@link RETIRABLE_ESCALATION_LABELS}, deduped by issue number. Same
  *  fail-soft contract as a single listing: a read failure on ANY label aborts the WHOLE list, never
  *  a partial result a caller could mistake for "nothing else is open". */
-export function listRetirableEscalationIssues(issues: IssueGateway): OpenIssue[] {
+export function listRetirableEscalationIssues(issues: Pick<IssueGateway, "listOpen">): OpenIssue[] {
   const seen = new Map<number, OpenIssue>();
   for (const label of RETIRABLE_ESCALATION_LABELS) {
     for (const issue of issues.listOpen?.(label) ?? []) {
@@ -24477,7 +24943,7 @@ export interface EscalationReconcileSummary {
 
 export interface EscalationReconcileDeps {
   /** Close one issue, posting the citation comment. Wraps `gh issue close --comment` in prod. */
-  closeIssue: (url: string, comment: string) => void;
+  closeIssue: (url: string, comment: string) => unknown;
   ledgerPath: string;
   runId: string;
   appendLine?: typeof appendLedger;
@@ -24579,7 +25045,7 @@ export async function runEscalationReconcile(
     // Action-typed and untyped (the legacy pre-W1-T346 corpus) issues keep today's comment.
     const comment = c.askType === "question" ? renderMootedCloseComment(c) : renderReconcileCloseComment(c);
     try {
-      deps.closeIssue(c.issueUrl, comment);
+      await deps.closeIssue(c.issueUrl, comment);
     } catch (e) {
       // PER-ISSUE THROW CONTAINMENT (W1-T99): one failed close never strands the rest, and an
       // uncounted failure retries next cycle rather than consuming a cap slot forever.
@@ -24860,6 +25326,8 @@ export async function runStaleEscalationRejudge(
       }
     }
 
+    // Preserve the original producer receipt before shadow/act triage replaces the verdict.
+    const judgeReceipt = escalationJudgeReceiptFields(verdict);
     const triaged = evidenceError !== undefined
       ? { kind: "deliver" as const, decidedBy: "default" as const, reason: verdict.reason }
       : triageEscalation(c.escalation, evidence, verdict);
@@ -24896,6 +25364,7 @@ export async function runStaleEscalationRejudge(
         age_ms: c.ageMs,
         judge_decision: verdict.decision,
         judge_reason: verdict.reason,
+        ...judgeReceipt,
       });
     }
 
@@ -25233,6 +25702,8 @@ export interface PostFixReverificationDeps {
    *  the check-run in place or pushing a refresh commit is the effect's own decision; this module
    *  never calls gh or git directly. */
   redrive: (pr: OpenPrView, fixClass: FixClass) => RedriveResult | Promise<RedriveResult>;
+  /** Only a positively absent fix permits a new head. Unknown ancestry holds this rung. */
+  fixInHead?: (pr: OpenPrView, fixClass: FixClass) => boolean | undefined | Promise<boolean | undefined>;
   ledgerPath: string;
   runId: string;
   readLedger?: (path: string) => Array<Record<string, unknown>>;
@@ -25251,7 +25722,7 @@ export interface PostFixReverificationDeps {
 export interface PostFixReverificationResult {
   prNumber: number;
   taskId?: string;
-  outcome: "redriven" | "unmatched" | "already-redriven" | "redrive-failed";
+  outcome: "redriven" | "unmatched" | "already-redriven" | "redrive-failed" | "fix-already-in-head" | "fix-presence-unknown";
   fixClassId?: string;
   /** Present only when outcome === "redriven" AND the redrive returned a fresh, settled view
    *  (design note ii — "re-dispose on the fresh result"). */
@@ -25315,6 +25786,19 @@ export async function runPostFixReverification(
     const already = lines.some((l) => l.step === "sweep.post_fix_redriven" && l.redrive_key === redriveKey);
     if (already) {
       results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome: "already-redriven", fixClassId: cls.id });
+      continue;
+    }
+
+    let fixInHead: boolean | undefined;
+    try {
+      fixInHead = await deps.fixInHead?.(pr, cls);
+    } catch (error) {
+      log("sweep.post_fix_ancestry_unavailable", { pr_number: pr.prNumber, fix_pr_number: cls.fixPrNumber, error: String(error) });
+    }
+    if (fixInHead !== false) {
+      const outcome = fixInHead === true ? "fix-already-in-head" : "fix-presence-unknown";
+      log("sweep.post_fix_held", { pr_number: pr.prNumber, fix_pr_number: cls.fixPrNumber, outcome });
+      results.push({ prNumber: pr.prNumber, taskId: pr.taskId, outcome, fixClassId: cls.id });
       continue;
     }
 

@@ -261,3 +261,21 @@ test("several cancelled posted gates spend only their one physical producer retr
     assert.equal(disposed?.blocker, "awaiting-ci");
   } finally { f.cleanup(); }
 });
+
+test("cancelled producer confirmation preserves an independent same-name gate in either rollup order", async () => {
+  for (const failed of [false, true]) for (const reverse of [false, true]) {
+    const f = fixture();
+    try {
+      const original = producerRollup();
+      const independent: RollupCheck & { workflowName: string } = { ...original[1], workflowName: "Independent workflow", checkRunId: 991,
+        externalId: "run:39710957999:1:job:119601919999", conclusion: failed ? "FAILURE" : "SUCCESS" };
+      const fresh = [...original, independent];
+      if (reverse) fresh.reverse();
+      const pr = producerView(original);
+      await f.pass(pr, { readCiGateRollup: () => fresh });
+      assert.deepEqual(f.requeued, [PRODUCER], "only the exact cancelled job is retried");
+      assert.deepEqual(f.rounds, failed ? [pr.prNumber] : [], "an independent failure remains actionable");
+      assert.equal(f.armed.includes(pr.prNumber), false, "an unresolved producer cannot arm");
+    } finally { f.cleanup(); }
+  }
+});

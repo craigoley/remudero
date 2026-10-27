@@ -1,0 +1,28 @@
+- id: W1-T10743
+  title: "HOT FILE openapi/daemon.yaml — its merge conflicts cost 10.6 PR minute(s) across 8 round(s) on 7 pull request(s), and nothing restructures it: merge-driver"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "hot-file:openapi/daemon.yaml"
+  files:
+    - openapi/daemon.yaml
+    - test/gardeners/two-prs-never-conflict-on-file-eeee99a6f03523011cacccffc03006fe2dd0c9d92.test.ts
+    - .gitattributes
+  acceptance:
+    - claim: "openapi/daemon.yaml no longer strands pull requests in merge conflicts: MERGE-DRIVER: the file's conflicts are mechanically resolvable, so a .gitattributes merge driver resolves them"
+      proof: "grep: test(\"W1-T10743: two pull requests editing openapi/daemon.yaml merge without a conflict\" in test/gardeners/two-prs-never-conflict-on-file-eeee99a6f03523011cacccffc03006fe2dd0c9d92.test.ts"
+  note: "Filed by the hot-file gardener (W1-T4803). BEFORE: openapi/daemon.yaml cost 10.6 recency-weighted PR minute(s) across 8 conflict round(s) on 7 pull request(s). Remedy: MERGE-DRIVER: the file's conflicts are mechanically resolvable, so a .gitattributes merge driver resolves them. The gardener measures the same file again once this lands and credits or debits the merge-driver class by whether it stopped conflicting. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.99
+    reasons:
+      - "high-risk verdict at confidence 0.99 — on the change's description/files alone, no diff was read — The filed remedy explicitly proposes a .gitattributes merge driver to resolve openapi/daemon.yaml conflicts automatically, changing merge policy, which the supplied escalation rule reserves for operator review.; on the change's description/files alone, no diff was read — The supplied evidence cites zero distinct PR references for the seven reported pull requests; it does not establish that their conflicts are mechanically resolvable."
+    judged_at: "2026-10-26T19:17:17.973Z"
+    pin: "9ffb6663661e0e00461d632e2f42b416f2a6faf71127f881384c8dd061f4ee87"

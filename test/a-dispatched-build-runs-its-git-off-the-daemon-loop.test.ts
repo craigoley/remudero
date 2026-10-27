@@ -180,10 +180,11 @@ test("W1-T7744: checkFixCensusSnapshotAsync returns the census refusal with sync
   const syncLog: Array<[string, unknown]> = [];
   const expected = checkFixCensusSnapshot(wt, snapshot, (s, e) => syncLog.push([s, e]),
     ((file: string, args: string[], options: childProcess.SpawnSyncOptionsWithStringEncoding) =>
-      spawnSync(file, redirect(args), options)) as typeof spawnSync);
+      spawnSync(file, args.includes("--snapshot-budget") ? args : redirect(args), options)) as typeof spawnSync);
   const asyncLog: Array<[string, unknown]> = [];
   const actual = await withSyncSpawnsTrapped(() => checkFixCensusSnapshotAsync(wt, snapshot, (s, e) => asyncLog.push([s, e]),
     (file, args, options) => {
+      if (args.includes("--snapshot-budget")) return spawnCensusChild(file, args, options);
       seen.push({ args, env: (options.env as NodeJS.ProcessEnv | undefined)?.RMD_CENSUS_SNAPSHOT });
       return spawnCensusChild(file, redirect(args), options);
     }));

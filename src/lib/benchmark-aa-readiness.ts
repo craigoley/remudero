@@ -26,7 +26,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, closeSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { IMMUTABLE_REVISION_RE, type AaTrialManifest, type BenchmarkAaCommandInput, type BenchmarkAaReport } from "./benchmark-aa.js";
+import { IMMUTABLE_REVISION_RE, parseAaTrialManifest, type AaTrialManifest, type BenchmarkAaCommandInput, type BenchmarkAaReport } from "./benchmark-aa.js";
 import { API_BILLING_REFUSAL, listProspectiveAaRegistrations, prospectiveAaDir, prospectiveAaLedgerRows, resolveAttemptBilling,
   runProspectiveAa, runProspectiveAaPair, type ProspectiveAaPairInput, type ProspectiveAaPairResult,
   type ProspectiveAaProtocol } from "./benchmark-aa-prospective.js";
@@ -104,10 +104,23 @@ function readOptional(path: string): string | undefined {
 /** Every pin compared with the registered stack: unknown and drifting pins are refused by field, never guessed. */
 export function runtimePinRefusals(pins: RuntimePins, stack: AaTrialManifest["stack"]): string[] {
   return REVISION_FIELDS.flatMap((field: RevisionField) => {
-    const pin = field === "harnessRevision" ? pins.harnessRevision : pins.revisions[field];
+    const pin = field === "harnessRevision" ? pins?.harnessRevision : pins?.revisions?.[field];
     if (pin === undefined) return [`runtime-pin-unknown:${field}:not-pinned-by-runtime`];
-    if ("state" in pin) return [`runtime-pin-unknown:${field}:${pin.reason}`];
-    const revisions = new Set((Array.isArray(pin) ? pin : [pin]).map((entry) => String(entry.revision).toLowerCase()));
+    if (pin === null || typeof pin !== "object") return [`runtime-pin-unknown:${field}:malformed-runtime-pin`];
+    if ("state" in pin) return [`runtime-pin-unknown:${field}:${pin.state === "unavailable"
+      && typeof pin.reason === "string" && pin.reason.length > 0 ? pin.reason : "malformed-runtime-pin"}`];
+    const entries = Array.isArray(pin) ? pin : [pin];
+    if (entries.length === 0 || entries.some(entry => entry === null || typeof entry !== "object" || !("revision" in entry)
+      || typeof entry.revision !== "string")) return [`runtime-pin-unknown:${field}:malformed-runtime-pin`];
+    const sources = ["executing-module-git", "image-build-stamp", "resolved-artifact", "trial-manifest"];
+    if (entries.some(entry => typeof (entry as { source?: unknown }).source !== "string"
+      || !sources.includes((entry as { source: string }).source))) return [`runtime-pin-unknown:${field}:pin-source-invalid`];
+    if (entries.some(entry => {
+      const source = (entry as { source: string }).source;
+      return ((source === "executing-module-git" || source === "image-build-stamp") !== (field === "harnessRevision"))
+        && source !== "trial-manifest";
+    })) return [`runtime-pin-unknown:${field}:pin-source-invalid-for-field`];
+    const revisions = new Set(entries.map(entry => entry.revision.toLowerCase()));
     const [revision] = [...revisions];
     if (revisions.size !== 1 || revision === undefined || !IMMUTABLE_REVISION_RE.test(revision)) return [`runtime-pin-unknown:${field}:not-one-immutable-id`];
     return revision === stack[field] ? [] : [`runtime-pin-drift:${field}`];
@@ -387,9 +400,17 @@ export async function runBenchmarkAaReadiness<T extends ReadinessTask>(input: Be
     const local = roots.find((root) => root.stateDir === input.stateDir) ?? roots[0]!;
     if (reconciled.otherActive !== null) reconciled.refusals.push(`another-prospective-aa-active:${reconciled.otherActive}`);
     else {
-      const registered = await runProspectiveAa({ action: "register", stateDir: local.stateDir, manifest: input.manifest, clock });
-      if (!registered.ok) reconciled.refusals.push(`registration-refused:${registered.reason}`);
-      else reconciled = reconcile(roots, input.trialId);
+      const candidate = parseAaTrialManifest(input.manifest);
+      if (!candidate.ok) reconciled.refusals.push(`registration-refused:${candidate.reason}`);
+      else {
+        const pinRefusals = runtimePinRefusals(input.runtimePins(), candidate.manifest.stack);
+        if (pinRefusals.length > 0) reconciled.refusals.push(...pinRefusals);
+        else {
+          const registered = await runProspectiveAa({ action: "register", stateDir: local.stateDir, manifest: input.manifest, clock });
+          if (!registered.ok) reconciled.refusals.push(`registration-refused:${registered.reason}`);
+          else reconciled = reconcile(roots, input.trialId);
+        }
+      }
     }
   } else if (reconciled.owner === null && reconciled.refusals.length === 0) reconciled.refusals.push("trial-not-registered");
   const registryGap = fallback !== undefined && "reason" in fallback ? fallback.reason : null;

@@ -30,7 +30,11 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 type Tree = Record<string, string>;
 
-const NAMES_PLAN = 'export const dir = "plan/tasks.d";\n';
+// The mandatory skill census runs on every nonempty diff, so each fixture base carries a healthy stand-in.
+const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
+const SKILL_CENSUS_STUB = 'import { test } from "node:test"; test("healthy mandatory fixture census", () => {});\n';
+
+const NAMES_PLAN ='export const dir = "plan/tasks.d";\n';
 const NAMES_NOTHING = "export const dir = 1;\n";
 
 function evaluate(head: Tree, base: Tree): string[] {
@@ -93,6 +97,7 @@ function installHook(dir: string): void {
   mkdirSync(join(dir, "scripts", "lib"), { recursive: true });
   mkdirSync(join(dir, "src", "lib"), { recursive: true });
   copyFileSync(join(REPO_ROOT, "src", "lib", "rule-suites.ts"), join(dir, "src", "lib", "rule-suites.ts"));
+  copyFileSync(join(REPO_ROOT, "src", "lib", "trust-root-text.ts"), join(dir, "src", "lib", "trust-root-text.ts"));
   copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(dir, "hooks", "pre-push"));
   chmodSync(join(dir, "hooks", "pre-push"), 0o755);
   for (const script of [
@@ -121,6 +126,7 @@ function installHook(dir: string): void {
       assert.ok(statSync("src/run-task.ts").isFile());
     });
   `);
+  writeFileSync(join(dir, SKILL_CENSUS), SKILL_CENSUS_STUB);
   symlinkSync(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"));
 }
 
@@ -180,7 +186,7 @@ test("census precheck main() reads the tree's own src files: 1 for a new site, 0
         writeFileSync(join(repo.dir, path), text);
       }
     };
-    write({ "src/lib/a.ts": NAMES_PLAN });
+    write({ "src/lib/a.ts": NAMES_PLAN, [SKILL_CENSUS]: SKILL_CENSUS_STUB });
     repo.git("add", "-A");
     repo.git("commit", "--quiet", "-m", "the base");
     repo.git("switch", "--quiet", "-c", "work");
@@ -198,6 +204,8 @@ test("a repo with no src directory at all is measured as zero sites, never as co
   t.mock.method(console, "log", () => {});
   const repo = gitRepo({ kind: "house-layout-no-src" });
   writeFileSync(join(repo.dir, "README.md"), "one\n");
+  mkdirSync(join(repo.dir, "test", "rules"), { recursive: true });
+  writeFileSync(join(repo.dir, SKILL_CENSUS), SKILL_CENSUS_STUB);
   repo.git("add", "-A");
   repo.git("commit", "--quiet", "-m", "the base");
   repo.git("switch", "--quiet", "-c", "work");
