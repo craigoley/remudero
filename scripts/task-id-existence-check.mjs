@@ -38,6 +38,18 @@ import {
   RESERVATION_PUSH_GRACE_MS,
 } from "../src/lib/reservation-chain.mjs";
 
+// W1-T10819: `yaml` is OPTIONAL here. The plan-PR preflight runs this file from a detached copy of the
+// tree with no node_modules, where a static import crashed the whole gate (ERR_MODULE_NOT_FOUND). Without
+// the parser no feedback record can be classified, so every one keeps the ordinary physical-text scan --
+// the strict direction: an id quoted in feedback is then reported, never silently exempted.
+let yamlParser = null;
+try {
+  yamlParser = await import("yaml");
+} catch (err) {
+  yamlParser = null;
+  void err; // unavailable parser == strict scan; the gate itself must still run.
+}
+
 export {
   parseReservationHolderFields,
   parseReservationHolderLine,
@@ -89,6 +101,43 @@ function walkFiles(dir, files) {
  * `{ file, line }` occurrences (file relative to `cwd`), so a failure reports a concrete pointer.
  * Read-only.
  */
+/** W1-T10819: only canonical feedback's actual raw string is quoted input. Optional metadata,
+ * scalar header comments and every ambiguous record retain the ordinary physical-text scan.
+ * Do not turn the AST into JavaScript objects or expand aliases to classify untrusted YAML. */
+function feedbackRawDataSpan(rel, text) {
+  const path = /^plan\/feedback\/(fb-[0-9]+-[a-f0-9]{6})\.yaml$/.exec(rel);
+  if (!path || !yamlParser) return null;
+  const { isAlias, isMap, isScalar, isSeq, parseDocument, visit } = yamlParser;
+  const doc =parseDocument(text, { keepSourceTokens: true, uniqueKeys: true, strict: true });
+  if (doc.errors.length || doc.warnings.length || !isMap(doc.contents)) return null;
+  let unambiguous = true;
+  visit(doc, (_key, node) => {
+    if (isAlias(node) || node?.anchor || node?.tag) unambiguous = false;
+    if (isMap(node) && node.items.some(pair => !isScalar(pair.key) ||
+      typeof pair.key.value !== "string" || pair.key.value === "<<")) unambiguous = false;
+  });
+  if (!unambiguous) return null;
+  const id = doc.get("id"), ts = doc.get("ts"), origin = doc.get("origin"), status = doc.get("status");
+  const raw = doc.get("raw", true), attachments = doc.get("attachments", true);
+  if (id !== path[1] || typeof ts !== "string" || !Number.isFinite(Date.parse(ts)) ||
+      !isScalar(raw) || typeof raw.value !== "string" || !isSeq(attachments) ||
+      !attachments.items.every(item => isScalar(item) && typeof item.value === "string") ||
+      typeof origin !== "string" || !(new Set(["cli", "ui", "issue"]).has(origin) ||
+        /^issue#[0-9]+$/.test(origin) || /^alert#(code-scanning|dependabot|secret-scanning)-.+$/.test(origin) ||
+        /^repair#[a-z][a-z-]*$/.test(origin) || /^incident#[0-9a-f]{64}$/.test(origin)) ||
+      !["new", "grilling", "proposed", "accepted", "rejected", "answered"].includes(status)) return null;
+  const token = raw.srcToken;
+  if (!token || typeof token.source !== "string" || !Number.isSafeInteger(token.offset)) return null;
+  // A block scalar's node range includes `|- # comment`. Only its CST body is raw data.
+  const start = token.type === "block-scalar"
+    ? token.props.reduce((offset, prop) => offset + prop.source.length, token.offset)
+    : token.offset;
+  const end = start + token.source.length;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end > text.length ||
+      !raw.range || start < raw.range[0] || end > raw.range[1] || text.slice(start, end) !== token.source) return null;
+  return [start, end];
+}
+
 export function scanCitedIds(dirs, cwd) {
   const hits = new Map();
   for (const dir of dirs) {
@@ -97,15 +146,20 @@ export function scanCitedIds(dirs, cwd) {
     for (const abs of files) {
       const rel = relative(cwd, abs);
       const text = readFileSync(abs, "utf8");
+      const rawSpan = feedbackRawDataSpan(rel, text);
       const lines = text.split("\n");
+      let lineOffset = 0;
       lines.forEach((line, idx) => {
         TASK_ID_RE.lastIndex = 0;
         let m;
         while ((m = TASK_ID_RE.exec(line)) !== null) {
           const id = m[0];
+          const start = lineOffset + m.index;
+          if (rawSpan && start >= rawSpan[0] && start + id.length <= rawSpan[1]) continue;
           if (!hits.has(id)) hits.set(id, []);
           hits.get(id).push({ file: rel, line: idx + 1 });
         }
+        lineOffset += line.length + 1;
       });
     }
   }
