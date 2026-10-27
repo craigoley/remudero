@@ -82,6 +82,7 @@ import {
   overlayQueuedFeedback,
   overlayQueuedFeedbackEntries,
   queuedFeedbackLandings,
+  queuedFeedbackDir,
   readQueuedFeedbackRecords,
   type LandFeedbackOpts,
   type QueuedFeedbackRecord,
@@ -571,6 +572,7 @@ export interface FeedbackReplyInput {
   expansion?: FeedbackExpansion | null;
   submissionKey?: string;
   origin: FeedbackOrigin;
+  qualifiedTarget?: { entry: FeedbackEntry; pendingContent: string };
 }
 
 /**
@@ -585,6 +587,20 @@ export function captureFeedbackReply(
   deps: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
   input: FeedbackReplyInput,
 ): { entry: FeedbackEntry; landingError?: string } {
+  if (input.qualifiedTarget) {
+    const { entry: target, pendingContent } = input.qualifiedTarget;
+    if (target.id !== input.replyTo || target.status !== "grilling" || !deps.feedbackLand) {
+      throw new Error("invalid qualified grilling target");
+    }
+    const current = readFileSync(join(queuedFeedbackDir(deps.inboxRoot), `${target.id}.yaml`), "utf8");
+    if (current !== pendingContent) throw new Error("pending feedback changed before reply capture");
+    const queued = readQueuedFeedbackRecords(deps.inboxRoot);
+    const refusal = replyRefusalFor(deps.root, target.id, queued, () => stringifyYaml(target));
+    if (refusal) throw new Error(refusal.refused);
+    if (input.submissionKey && findFeedbackBySubmissionKey(deps.root, input.submissionKey, deps.inboxRoot)) {
+      throw new Error("feedback reply submission already captured");
+    }
+  }
   const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
   const land = { stateRoot: deps.inboxRoot };
   const entry = captureFeedback(deps.root, {
@@ -601,7 +617,8 @@ export function captureFeedbackReply(
     const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
     const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
     if (input.replyTo !== undefined) {
-      setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id, ...(deps.feedbackLand ? { land } : {}) });
+      setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id,
+        qualifiedEntry: input.qualifiedTarget?.entry, ...(deps.feedbackLand ? { land } : {}) });
     }
     const inQueue = new Set(queuedFeedbackLandings(deps.inboxRoot));
     const unqueued = [entry.id, ...flipped].map(feedbackEntryRepoPath).filter((rel) => !inQueue.has(rel));

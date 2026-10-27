@@ -51,6 +51,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { parse as parseYaml } from "yaml";
 import { systemClock, type Clock } from "./clock.js";
 import { ghExec, ghTextAsync } from "./github-transport.js";
 import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
@@ -59,9 +61,9 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { contributionOriginFromRest, feedbackContentDigest, observeFeedbackSource, readAdmissionRestAsync,
   type AdmissionRead, type AdmissionSettings, type FeedbackAdmissionSubject } from "./contributor-admission.js";
 import { openLedgerUnion } from "./ledger-union.js";
-import { captureFeedbackReply, replyRefusalFor, type PanelGraphDeps } from "./panel-graph.js";
-import { feedbackEntryRepoPath, findFeedbackBySubmissionKey } from "./feedback.js";
-import { readQueuedFeedbackRecords } from "./feedback-landing.js";
+import { captureFeedbackReply, replyRefusalFor, type FeedbackReplyInput, type PanelGraphDeps } from "./panel-graph.js";
+import { feedbackEntryRepoPath, findFeedbackBySubmissionKey, isValidFeedbackOrigin, type FeedbackEntry } from "./feedback.js";
+import { queuedFeedbackDir, readQueuedFeedbackRecords } from "./feedback-landing.js";
 import {
   ASK_TYPE_LABEL,
   escalationTaskId,
@@ -402,17 +404,43 @@ async function applyGrilledFeedbackAnswer(
   try {
     const queued = readQueuedFeedbackRecords(feedback.inboxRoot);
     const queuedRecord = queued.get(feedbackEntryRepoPath(feedbackId));
-    if (queuedRecord !== undefined && queuedRecord.status !== "grilling") return undefined;
+    if (queuedRecord !== undefined && queuedRecord.status !== "grilling" && queuedRecord.status !== "new") {
+      throw new Error(`pending feedback decision is already ${queuedRecord.status}`);
+    }
+    const pendingContent = queuedRecord === undefined ? undefined
+      : readFileSync(join(queuedFeedbackDir(feedback.inboxRoot), `${feedbackId}.yaml`), "utf8");
     // The route's own status read, fed origin/main's blob read off the loop (a rejection reads as unreadable).
     const mainBlob = await hostWorktreeGitAsync(feedback.root, ["show", `origin/main:${feedbackEntryRepoPath(feedbackId)}`])
       .catch((error: unknown) => ({ unreadable: error }));
-    if (replyRefusalFor(feedback.root, feedbackId, queued, () => {
+    let qualifiedTarget: FeedbackReplyInput["qualifiedTarget"];
+    if (queuedRecord !== undefined && (queuedRecord.status === "new" || typeof mainBlob === "string")) {
+      if (typeof mainBlob !== "string") throw mainBlob.unreadable;
+      const canonical = parseYaml(mainBlob) as FeedbackEntry | null;
+      if (!canonical || canonical.id !== feedbackId || canonical.status !== "grilling" || canonical.answered_by != null) {
+        throw new Error("canonical feedback is not an unanswered grilling target");
+      }
+      const immutable = ({ status, proposal_pr, summary, answered_by, ...capture }: Record<string, unknown>) => capture;
+      const validCapture = queuedRecord.id === feedbackId && typeof queuedRecord.ts === "string"
+        && typeof queuedRecord.raw === "string" && typeof queuedRecord.origin === "string"
+        && isValidFeedbackOrigin(queuedRecord.origin) && Array.isArray(queuedRecord.attachments)
+        && queuedRecord.attachments.every(a => typeof a === "string");
+      const newerDecision = ["proposal_pr", "summary", "answered_by"].some(key => queuedRecord[key] != null
+        && (queuedRecord.status === "new" || !isDeepStrictEqual(queuedRecord[key], canonical[key as keyof FeedbackEntry])));
+      if (!validCapture || newerDecision || !isDeepStrictEqual(immutable(queuedRecord), immutable({ ...canonical }))
+          || !isDeepStrictEqual(parseYaml(pendingContent!), queuedRecord)) {
+        throw new Error("pending feedback does not match the canonical immutable capture");
+      }
+      qualifiedTarget = { entry: canonical, pendingContent: pendingContent! };
+    }
+    const refusal = replyRefusalFor(feedback.root, feedbackId, queued, () => {
       if (typeof mainBlob !== "string") throw mainBlob.unreadable;
       return mainBlob;
-    })) return undefined;
+    });
+    if (refusal) throw new Error(refusal.refused);
     if (findFeedbackBySubmissionKey(feedback.root, picked.origin, feedback.inboxRoot)) return undefined;
     const { entry, landingError } = captureFeedbackReply(feedback, {
       text: picked.text, replyTo: feedbackId, submissionKey: picked.origin, origin: "issue",
+      ...(qualifiedTarget === undefined ? {} : { qualifiedTarget }),
     });
     return { ...base, step: "escalation_answer.feedback_applied", reply_id: entry.id, answer: picked.text,
       ...(landingError === undefined ? { landing: "queued" } : { landing_error: landingError }) };

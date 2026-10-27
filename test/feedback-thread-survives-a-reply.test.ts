@@ -12,6 +12,10 @@ import { captureFeedback, listFeedback, readFeedbackEntry, setFeedbackStatus, ty
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { GitHub } from "../src/lib/status.js";
 import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
+import { readEscalationAnswers } from "#src/lib/escalation-answers.js";
+import { renderIssueBody } from "#src/lib/escalate.js";
+import { readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 // ── W1-T2278: a reply is a new item, and the link back to what it answers must be a durable ────
 // field, not only prose inside the reply's own text ─────────────────────────────────────────
@@ -275,4 +279,35 @@ test("the reply-handling branch of buildSubmitFeedbackRoute names no merge, no P
   // The only status this route ever writes explicitly is the reply-close state itself.
   const statusWrites = [...body.matchAll(/setFeedbackStatus\([^,]+,\s*[^,]+,\s*"([a-z]+)"/g)].map((m) => m[1]);
   assert.deepEqual(new Set(statusWrites), new Set(["answered"]));
+});
+
+test("W1-T10789: current queued decisions and legacy reply callers keep their guards", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const parked = grillingEntry(root, "one ordinary question");
+  const issue = { number: 17, url: "https://github.com/owner/repo/issues/17", body: renderIssueBody({
+    class: "GRILL", taskId: `TRIAGE-${parked.id}`, summary: "where?", detail: "choose",
+    options: [{ label: "core", detail: "core lane" }], recommendation: "core",
+  }) };
+  const deps = depsFor(root, planPath);
+  for (const status of ["answered", "rejected", "accepted", "proposed"]) {
+    setFeedbackStatus(root, parked.id, status as FeedbackEntry["status"], { land: { stateRoot: root } });
+    const before = readFileSync(join(root, "state/feedback-landing-pending/plan/feedback", `${parked.id}.yaml`), "utf8");
+    await readEscalationAnswers(root, "guards", { listOpen: () => [issue], listComments: () => [{
+      id: 1, body: "core", authorLogin: "operator", authorAssociation: "OWNER", authorType: "User",
+    }], reactPlusOne() {} }, { ledgerPath: deps.ledgerPath, feedback: deps });
+    assert.equal(readFileSync(join(root, "state/feedback-landing-pending/plan/feedback", `${parked.id}.yaml`), "utf8"), before);
+    assert.equal([...readQueuedFeedbackRecords(root).values()].filter(e => e.reply_to === parked.id).length, 0);
+    assert.ok(readLedgerLines(deps.ledgerPath).some(row => row.step === "escalation_answer.feedback_unreadable"
+      && typeof row.reason === "string"), "the preserved pending decision has an explicit diagnostic");
+  }
+  // The ordinary console writer still accepts a local grilling entry without continuation evidence.
+  const legacy = grillingEntry(root, "legacy question");
+  await withService(deps, async base => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "legacy answer", replyTo: legacy.id });
+    assert.equal(res.status, 200);
+    const second = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "duplicate", replyTo: legacy.id });
+    assert.equal(second.status, 400);
+  });
+  assert.equal(readFeedbackEntry(root, legacy.id).status, "answered");
 });

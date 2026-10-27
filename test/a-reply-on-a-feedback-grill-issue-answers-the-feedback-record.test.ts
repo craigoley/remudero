@@ -8,9 +8,12 @@
 // (`captureFeedbackReply`), once, only while it is still grilling, picking the option-naming reply, for any id shape.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { stringify as stringifyYaml, parse as parseYaml } from "yaml";
 import { renderIssueBody, type Escalation, type OpenIssue } from "../src/lib/escalate.js";
@@ -28,6 +31,7 @@ import { feedbackHasAnswer } from "../src/lib/human-gate.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
 
 const FB_ID = "fb-1789382125003-abdb87";
 
@@ -338,4 +342,188 @@ test("W1-T8511: a stored question answer reaches the record's answered status en
   assert.equal(answered.status, "answered");
   assert.equal(repliesTo(f)[0].raw, `[answer to feedback#${FB_ID}] site-intake`, "the option answer, not the earlier prose");
   assert.ok(feedbackHasAnswer(answered, records(f)));
+});
+
+function queuedGrillFixture() {
+  const f = fixture();
+  const rel = `plan/feedback/${FB_ID}.yaml`;
+  const path = join(f.root, rel);
+  const capture = { ...parseYaml(readFileSync(path, "utf8")), status: "new", submission_key: "original-capture",
+    attachments: ["https://example.invalid/original.png"],
+    contribution: { kind: "issue", source_ref: "owner/repo#17", actor: { login: "operator" },
+      admission: { outcome: "allowed", reason: "operator" }, relayed_by: ["inbox"], derived_from: null },
+    thread_id: "original-thread", expansion: { claim: "original context" } };
+  const canonical = { ...capture, status: "grilling", proposal_pr: "https://github.com/owner/repo/pull/23",
+    summary: { headline: "canonical decision", options: [] }, future_metadata: { retained: true } };
+  // Unknown immutable fields must agree too; only decision metadata differs.
+  const pending = { ...capture, future_metadata: canonical.future_metadata };
+  const pendingPath = join(f.stateRoot, "state", "feedback-landing-pending", rel);
+  mkdirSync(dirname(pendingPath), { recursive: true });
+  writeFileSync(pendingPath, stringifyYaml(pending));
+  writeFileSync(path, stringifyYaml(canonical));
+  const git = (...args: string[]) => execFileSync("git", ["-C", f.root, ...args], { encoding: "utf8", stdio: "pipe" });
+  git("init", "-b", "main");
+  git("config", "user.name", "Feedback fixture");
+  git("config", "user.email", "feedback@example.invalid");
+  git("add", "plan/feedback");
+  git("-c", "core.hooksPath=/dev/null", "commit", "-m", "fixture canonical grill");
+  git("update-ref", "refs/remotes/origin/main", "HEAD");
+  writeFileSync(path, stringifyYaml(pending)); // the boot checkout also lags main
+  writeFileSync(join(f.root, "plan", "questions.ndjson"), `${JSON.stringify({ ts: "t", task: `TRIAGE-${FB_ID}`,
+    answer: "site-intake", origin: "issue#9913:comment:61" })}\n`);
+  const gateway = { ...gatewayFor(issueFor(9913), [ownerComment(61, "site-intake. Continue the original capture.")]),
+    operatorLogins: ["craigoley"] };
+  const run = () => readEscalationAnswers(f.root, "W1-T10789", gateway, { ledgerPath: f.ledgerPath, feedback: f.feedback });
+  const cleanup = () => [f.root, f.stateRoot, dirname(f.ledgerPath)].forEach(dir => rmSync(dir, { recursive: true, force: true }));
+  return { ...f, rel, path, pendingPath, pending, canonical, git, run, cleanup };
+}
+
+test("W1-T10789: canonical grilling advances an unchanged older capture exactly once", async (t) => {
+  const f = queuedGrillFixture();
+  t.after(f.cleanup);
+  const history = f.git("rev-parse", "HEAD");
+  const source = readFileSync(f.path, "utf8");
+  const questions = readFileSync(join(f.root, "plan", "questions.ndjson"), "utf8");
+  assert.equal((await f.run()).accepted, 0, "the accepted answer is already recorded");
+  const replies = repliesTo(f);
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].submission_key, "issue#9913:comment:61");
+  assert.equal(replies[0].reply_to, FB_ID);
+  assert.equal(record(f).answered_by, replies[0].id);
+  assert.equal(record(f).status, "answered");
+  const after = snapshot(f);
+  await f.run();
+  assert.deepEqual(snapshot(f), after);
+  assert.equal(appliedRows(f.ledgerPath).length, 1);
+  assert.equal(readFileSync(f.path, "utf8"), source);
+  assert.equal(f.git("rev-parse", "HEAD"), history);
+  assert.equal(readFileSync(join(f.root, "plan", "questions.ndjson"), "utf8"), questions);
+});
+
+test("W1-T10789: continuation retains the canonical proposal and source metadata", async (t) => {
+  for (const status of ["new", "grilling"]) await t.test(status, async (st) => {
+    const f = queuedGrillFixture(); st.after(f.cleanup);
+    writeFileSync(f.pendingPath, stringifyYaml({ ...f.pending, status }));
+    await f.run();
+    const reply = repliesTo(f)[0];
+    assert.ok(reply);
+    const target = readQueuedFeedbackRecords(f.stateRoot).get(f.rel);
+    assert.deepEqual(target, { ...f.canonical, status: "answered", answered_by: reply.id });
+    assert.equal(f.git("show", `origin/main:${f.rel}`), stringifyYaml(f.canonical));
+  });
+});
+
+test("W1-T10789: stale or contradictory reply evidence preserves the pending record", async (t) => {
+  const changes: Array<[string, (f: ReturnType<typeof queuedGrillFixture>) => void]> = [
+    ["missing landing bridge", f => { (f.feedback as { feedbackLand?: object }).feedbackLand = undefined; }],
+    ...["new", "grilling"].flatMap(status => ["id", "ts", "raw", "attachments", "origin"].map(key => [
+      `${status} missing ${key}`, (f: ReturnType<typeof queuedGrillFixture>) => {
+        const pending: Record<string, unknown> = { ...f.pending, status };
+        delete pending[key]; writeFileSync(f.pendingPath, stringifyYaml(pending));
+      },
+    ] as [string, (f: ReturnType<typeof queuedGrillFixture>) => void])),
+    ...["raw", "ts", "id", "origin", "submission_key", "thread_id"].map(key => [key, (f: ReturnType<typeof queuedGrillFixture>) => {
+      writeFileSync(f.pendingPath, stringifyYaml({ ...f.pending, [key]: "changed" }));
+    }] as [string, (f: ReturnType<typeof queuedGrillFixture>) => void]),
+    ["attachments", f => { writeFileSync(f.pendingPath, stringifyYaml({ ...f.pending, attachments: ["https://changed.invalid"] })); }],
+    ["lineage", f => { writeFileSync(f.pendingPath, stringifyYaml({ ...f.pending, contribution: { source_ref: "foreign/repo#9" } })); }],
+    ["expansion", f => { writeFileSync(f.pendingPath, stringifyYaml({ ...f.pending, expansion: { claim: "changed" } })); }],
+    ["unknown immutable metadata", f => { writeFileSync(f.pendingPath, stringifyYaml({ ...f.pending, future_metadata: { retained: false } })); }],
+    ["queued proposal", f => { writeFileSync(f.pendingPath, stringifyYaml({ ...f.pending, proposal_pr: "newer proposal" })); }],
+    ["queued summary", f => { writeFileSync(f.pendingPath, stringifyYaml({ ...f.pending, summary: { headline: "new decision" } })); }],
+    ["queued answer", f => { writeFileSync(f.pendingPath, stringifyYaml({ ...f.pending, answered_by: "another-reply" })); }],
+    ["missing main", f => { f.git("update-ref", "-d", "refs/remotes/origin/main"); }],
+    ["missing main record", f => {
+      f.git("rm", "-f", f.rel); f.git("-c", "core.hooksPath=/dev/null", "commit", "-m", "missing record");
+      f.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    }],
+    ["foreign main identity", f => {
+      writeFileSync(f.path, stringifyYaml({ ...f.canonical, id: "foreign" }));
+      f.git("add", f.rel); f.git("-c", "core.hooksPath=/dev/null", "commit", "-m", "foreign identity");
+      f.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    }],
+    ["canonical answer edge", f => {
+      writeFileSync(f.path, stringifyYaml({ ...f.canonical, answered_by: "landed-answer" }));
+      f.git("add", f.rel); f.git("-c", "core.hooksPath=/dev/null", "commit", "-m", "answered canonical");
+      f.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    }],
+    ["unreadable main", f => {
+      writeFileSync(f.path, "[invalid yaml");
+      f.git("add", f.rel); f.git("-c", "core.hooksPath=/dev/null", "commit", "-m", "unreadable main");
+      f.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    }],
+    ...["new", "proposed", "accepted", "rejected", "answered"].map(status => ["main " + status, (f: ReturnType<typeof queuedGrillFixture>) => {
+      writeFileSync(f.path, stringifyYaml({ ...f.canonical, status }));
+      f.git("add", f.rel); f.git("-c", "core.hooksPath=/dev/null", "commit", "-m", "advanced main");
+      f.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    }] as [string, (f: ReturnType<typeof queuedGrillFixture>) => void]),
+    ...["proposed", "accepted", "rejected", "answered", "unknown"].map(status => ["queue " + status, (f: ReturnType<typeof queuedGrillFixture>) => {
+      writeFileSync(f.pendingPath, stringifyYaml({ ...f.pending, status }));
+    }] as [string, (f: ReturnType<typeof queuedGrillFixture>) => void]),
+    ["competing queued reply", f => { writeFileSync(join(dirname(f.pendingPath), "competing.yaml"),
+      stringifyYaml({ ...f.pending, id: "competing", reply_to: FB_ID, submission_key: "other-answer" })); }],
+    ["competing checkout reply", f => { writeFileSync(join(dirname(f.path), "competing.yaml"),
+      stringifyYaml({ ...f.pending, id: "competing", reply_to: FB_ID, submission_key: "other-answer" })); }],
+    ["submission key already captured", f => { writeFileSync(join(dirname(f.pendingPath), "competing.yaml"),
+      stringifyYaml({ ...f.pending, id: "competing", submission_key: "issue#9913:comment:61" })); }],
+  ];
+  for (const [name, change] of changes) await t.test(name, async (st) => {
+    const f = queuedGrillFixture(); st.after(f.cleanup); change(f);
+    const before = snapshot(f);
+    const history = f.git("rev-parse", "HEAD");
+    await f.run();
+    assert.deepEqual(snapshot(f), before);
+    assert.equal(appliedRows(f.ledgerPath).length, 0);
+    assert.equal(f.git("rev-parse", "HEAD"), history);
+    if (name !== "submission key already captured") {
+      assert.ok(readLedgerLines(f.ledgerPath).some(r => r.step === "escalation_answer.feedback_unreadable" && typeof r.reason === "string"));
+    }
+  });
+  await t.test("pending bytes drift during the asynchronous main read", async (st) => {
+    const f = queuedGrillFixture(); st.after(f.cleanup);
+    const before = snapshot(f);
+    const history = f.git("rev-parse", "HEAD");
+    const originalRead = fs.readFileSync;
+    let reads = 0;
+    const drift = `${readFileSync(f.pendingPath, "utf8")}# another owner touched this capture\n`;
+    st.mock.method(fs, "readFileSync", function(path: Parameters<typeof originalRead>[0], ...args: unknown[]) {
+      if (String(path) === f.pendingPath && ++reads === 3) writeFileSync(f.pendingPath, drift);
+      return Reflect.apply(originalRead, fs, [path, ...args]);
+    });
+    syncBuiltinESMExports();
+    try {
+      await f.run();
+    } finally {
+      st.mock.restoreAll(); syncBuiltinESMExports();
+    }
+    assert.ok(reads >= 3, "qualification and capture both read the pending evidence");
+    assert.equal(readFileSync(f.pendingPath, "utf8"), drift);
+    assert.deepEqual(snapshot(f), { ...before, [f.pendingPath]: drift });
+    assert.equal(f.git("rev-parse", "HEAD"), history);
+    assert.equal(repliesTo(f).length, 0);
+    assert.equal(appliedRows(f.ledgerPath).length, 0);
+  });
+  for (const replyTo of [FB_ID, null]) await t.test(`reply evidence arrives before capture: ${replyTo}`, async (st) => {
+    const f = queuedGrillFixture(); st.after(f.cleanup);
+    const before = snapshot(f);
+    const originalRead = fs.readFileSync;
+    let reads = 0;
+    const competitorPath = join(dirname(f.pendingPath), "late-reply.yaml");
+    const competitor = stringifyYaml({ ...f.pending, id: "late-reply", reply_to: replyTo,
+      submission_key: replyTo === null ? "issue#9913:comment:61" : "other-answer" });
+    st.mock.method(fs, "readFileSync", function(path: Parameters<typeof originalRead>[0], ...args: unknown[]) {
+      if (String(path) === f.pendingPath && ++reads === 3) writeFileSync(competitorPath, competitor);
+      return Reflect.apply(originalRead, fs, [path, ...args]);
+    });
+    syncBuiltinESMExports();
+    try { await f.run(); } finally { st.mock.restoreAll(); syncBuiltinESMExports(); }
+    assert.ok(reads >= 3);
+    assert.deepEqual(snapshot(f), { ...before, [competitorPath]: competitor });
+    assert.equal(appliedRows(f.ledgerPath).length, 0);
+  });
+  await t.test("positive control: the same corpus admits an unchanged capture", async (st) => {
+    const f = queuedGrillFixture(); st.after(f.cleanup);
+    await f.run();
+    assert.equal(readQueuedFeedbackRecords(f.stateRoot).get(f.rel)?.status, "answered");
+  });
 });
