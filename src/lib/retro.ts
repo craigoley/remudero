@@ -4620,7 +4620,12 @@ export function defaultRetroBackoffPolicy(): RetroBackoffPolicy {
 
 export type RetroBackoffDecision =
   | { eligible: true }
-  | { eligible: false; streak: number; nextEligibleAt: string; mergesFloor: number };
+  | { eligible: false; streak: number; nextEligibleAt: string; mergesFloor: number; nextEligibleAtState?: never }
+  | { eligible: false; streak: number; nextEligibleAt: null; mergesFloor: number; nextEligibleAtState: "outside-date-range" };
+
+// ECMAScript TimeClip's representation limit, not a retry-policy ceiling:
+// https://tc39.es/ecma262/2025/multipage/numbers-and-dates.html#sec-timeclip
+const MAX_FORMATTABLE_DATE_MS = 8_640_000_000_000_000;
 
 /** PURE (W1-T4664). Decide whether a new automated retro attempt is due, given the last recorded
  *  attempt (if any) and the CURRENT `mergesSinceMarker`/`markerTs`/`now` the trigger is about to
@@ -4643,6 +4648,13 @@ export function evaluateRetroBackoff(
   const mergesFloor = lastAttempt.mergesSinceMarker + policy.mergesThreshold;
   if (now.getTime() >= nextEligibleAtMs || mergesSinceMarker >= mergesFloor) {
     return { eligible: true };
+  }
+  // The default six-hour delay reaches beyond Date at streak30 (and can overflow Number later).
+  // Eligibility above still compares the ORIGINAL deadline and merge floor; never clamp it
+  // to a fabricated date or let formatting turn a valid refusal into a trigger exception.
+  if (Math.abs(nextEligibleAtMs) > MAX_FORMATTABLE_DATE_MS) {
+    return { eligible: false, streak: lastAttempt.streak, nextEligibleAt: null, mergesFloor,
+      nextEligibleAtState: "outside-date-range" };
   }
   return {
     eligible: false,

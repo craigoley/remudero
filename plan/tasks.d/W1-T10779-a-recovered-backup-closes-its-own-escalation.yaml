@@ -1,0 +1,85 @@
+- id: W1-T10779
+  title: "A RECOVERED BACKUP CLOSES ITS OWN ESCALATION — the host-resource gardener logs state_backup_recovered when a verified receipt follows a failure, but never closes the issue it opened, so #12064 stayed open through the verified nights of 10-22 and 10-24; on recovery it closes that issue, citing the verified receipt"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, the backup alarm's issue closing on recovery; no verdict, receipt, cadence or revalidation-garden change
+  band_meaning: span
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: #12064 open since 10-15 across two recoveries; read-only on the Azure host's core ledger rotations"
+  plan_refs: [W1-T5681, W1-T8866, W1-T8864, W1-T130, W1-T10766, W1-T10778]
+  files:
+    - src/lib/host-resource-gardener.ts
+    - src/run-task.ts
+    - test/gardeners/a-recovered-backup-closes-its-own-escalation.test.ts
+  rationale: |
+    READ 2026-10-26 on origin/main 4e339a938. The ledger read was read-only on the Azure host: core's
+    /mnt/rmd/state2/state, every rotation from 10-15 plus the live file.
+
+    THE EPISODE ON THE LEDGER (`host_resource.state_backup_*`, de-duplicated):
+    - 10-15T04:18:59Z state_backup_failed, issue_url #12064
+    - 10-22T05:22:04Z state_backup_recovered
+    - 10-23T05:18:25Z state_backup_failed, issue_url #12064 (appended; the issue was still open)
+    - 10-24T04:58:32Z state_backup_recovered
+    - 10-26T04:25:32Z state_backup_failed, issue_url #12064 (appended)
+    #12064 reads OPEN at 23:51Z (8 comments; the newest is the fleet's 10-26T09:53Z append). Two
+    recoveries did not close it, and nothing would close it after W1-T10766 lands.
+
+    WHY.
+    - host-resource-gardener.ts:1046-1049: a verdict of `ok` newer than the episode only ledgers
+      `state_backup_recovered` and resets the episode. HostResourcePorts (:801-816) has `escalate`
+      and no way to close. The issue URL is in the `state_backup_failed` ledger row only; the state
+      episode keeps `escalatedAt` and no URL.
+    - The issue-revalidation garden (issue-revalidation-garden.ts:18-23, :218) never closes a MANUAL
+      issue. Its header says each producer closing its own issue on recovery is W1-T8866's.
+    - W1-T8866 (merged, #11697) made the gardener overseer and the read-model worker close their own
+      escalations (read-model-consistency.ts:561 closeRecoveredEscalation: URL from the ledger, never
+      memory; cannot-observe means wait). It did not reach the host-resource gardener.
+
+    NOT IN SCOPE, reported separately: the same gardener's ACR-login escalation (:1016-1039) has the
+    identical shape (`acr_login_recovered` logs, nothing closes). The backup flapping itself (2 of 5
+    nights) is W1-T10766's. The reason text is W1-T10778's.
+
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d for state_backup_recovered, host-state-backup and
+    closeWithComment. W1-T5681 is the merged alarm. Open PR heads read at 23:53Z: none touches
+    host-resource-gardener.ts or its wiring.
+  design: |
+    1. On a verified receipt newer than an escalated backup episode for a host, the gardener closes the
+       issue that episode escalated to. The comment cites the host, the verified receipt's `backup_ts`
+       and its off-host result, and says to reopen if the night fails again. Then it ledgers
+       `host_resource.state_backup_cleared` with the issue URL, and only then resets the episode.
+    2. The URL comes from durable evidence, never memory. The episode now records the URL its escalate
+       call returned. An episode written before this change has no URL, so read the newest
+       `state_backup_failed` row for that host from the ledger union, the way W1-T8866's
+       closeRecoveredEscalation does. That is how today's #12064 is closed on its first verified night
+       after deploy. If no URL is readable, nothing is closed, and the episode reports that.
+    3. CANNOT-OBSERVE MEANS WAIT (W1-T130). An absent close port, a close that throws or an unreadable
+       ledger closes nothing, ledgers `host_resource.state_backup_clear_failed` with the reason, and
+       keeps the episode so the next pass retries. A close is never retried for an episode already
+       cleared.
+    4. A later failure escalates exactly as today. raiseDuplicate's dedup appends to an open issue or
+       opens a new one. Verdict parsing, the STALE arm, the receipt and the revalidation garden are
+       unchanged. The close goes through the existing issue gateway's closeWithComment, wired in
+       run-task.ts beside `escalate: raiseDuplicate`.
+    5. Test runHostResourcePassAsync with recording ports and parsed beats, the way
+       test/a-failed-nightly-backup-alarms-the-fleet.test.ts drives it. Put the suite where
+       `rmd test-place` computed (test/gardeners/, confidence high).
+  acceptance:
+    - claim: "a verified receipt newer than an escalated backup failure closes that escalation's issue once, with the verified receipt cited, ledgers state_backup_cleared with the URL, and a pre-change episode with no stored URL is closed by the URL on its ledger row"
+      proof: 'grep: test("W1-T10779: a recovered backup closes the issue its failure escalated to" in test/gardeners/a-recovered-backup-closes-its-own-escalation.test.ts'
+    - claim: "a close that cannot be delivered or a URL that cannot be read closes nothing, ledgers state_backup_clear_failed, and is retried on the next pass, and a later failure escalates again"
+      proof: 'grep: test("W1-T10779: an undelivered close waits and a later failure escalates again" in test/gardeners/a-recovered-backup-closes-its-own-escalation.test.ts'
+  falsifier: |
+    At base both cases fail: recovery only ledgers state_backup_recovered and has no close port.
+    - Read the URL only from the episode: the pre-change-episode arm of the first case closes nothing.
+    - Reset the episode before the close is delivered: the retry arm of the second case never closes.
+    - Close on every ok beat: the once-only assertion of the first case fails.
+    GUARDS that held at base and must still hold: W1-T5681's gardener cases in
+    test/a-failed-nightly-backup-alarms-the-fleet.test.ts. These include "consecutive failed nights
+    remain one episode until a newer receipt recovers" and "a failed backup without an escalation port
+    remains eligible for a later alarm".
