@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
@@ -81,6 +81,19 @@ test("W1-T9114: the inventory moves a kind only on a measured drain cost", () =>
   assert.equal(retro.placement, "process");
   assert.match(retro.reason, /runAutomatedRetroSubprocess/);
   assert.equal(detachedWorkPlacement("not-a-kind", on()).placement, "process");
+});
+
+test("W1-T9114: a spec that cannot be read is malformed, never a build run", () => {
+  const f = fixture();
+  try {
+    const torn = join(f.root, "torn");
+    mkdirSync(torn, { recursive: true });
+    assert.equal(readWorkSpec(torn), "malformed", "a missing spec.json is malformed");
+    writeFileSync(join(torn, "spec.json"), '{ "work": { "kind": "rev');
+    assert.equal(readWorkSpec(torn), "malformed", "a torn spec.json is malformed");
+    writeFileSync(join(torn, "spec.json"), "{}");
+    assert.equal(readWorkSpec(torn), undefined, "a spec without work is a build run");
+  } finally { f.cleanup(); }
 });
 
 test("W1-T9114: a boot adopts a live review child", async () => {

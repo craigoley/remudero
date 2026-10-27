@@ -16,6 +16,7 @@ import { runsBundled } from "./lib/child-entry-argv.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { markRunChildProcessActor } from "./lib/ledger.js";
 import type { Plan, Task } from "./lib/plan.js";
+import { readWorkSpec, type DetachedWorkSpec } from "./lib/run-child.js";
 import { withRunChildReservation } from "./lib/run-child-reservation.js";
 import type { RunResult } from "./lib/run-result.js";
 import {
@@ -38,6 +39,9 @@ export interface ProbeStatusExtras {
 /** The slice of `runTask` this entry drives; the real one is loaded from the run path, a test injects its own. */
 export type RunChildRunTask = (taskId: string, options: Record<string, unknown>) => Promise<RunResult>;
 
+/** W1-T9114: the slice of `runDetachedWork` this entry drives for a spec that carries `work` (the run path exports the real one). */
+export type RunChildDetachedWork = (work: DetachedWorkSpec, ctx: { runId: string; taskId: string }) => Promise<RunResult>;
+
 /** The signals this entry listens on; the default is the process itself. */
 export interface RunChildSignalSource {
   on(signal: "SIGTERM", handler: () => void): unknown;
@@ -50,6 +54,8 @@ export const RUN_CHILD_HEARTBEAT_MS = 15_000;
 export interface RunChildMainPorts {
   /** The run to execute; the default is the `runTask` the loaded run path exports. */
   runTask?: RunChildRunTask;
+  /** W1-T9114: the detached work to execute for a spec that carries `work`; the default is the loaded run path's `runDetachedWork`. */
+  runDetachedWork?: RunChildDetachedWork;
   signals?: RunChildSignalSource;
   heartbeatMs?: number;
   /** Loads the modules a run loads. The default imports the run path's entry module, whose static graph is that set. */
@@ -163,8 +169,15 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
     const spec = readSpec(dir);
     if (!spec.ok) throw new Error(`spec unreadable after it was read: ${spec.detail}`);
     const options = spec.value.options;
+    // W1-T9114: a spec carrying `work` is detached work (a review), never a build run: it is hosted by `runDetachedWork`, reads no plan.
+    const work = readWorkSpec(dir);
+    if (work === "malformed") {
+      await cleanup();
+      status("failed", "spec", {}, contractMismatchFailure("spec names detached work this entry cannot read"));
+      return 1;
+    }
     let planSnapshot: PlanSnapshotSeam | undefined;
-    if (!options.skipGitSync) {
+    if (work === undefined && !options.skipGitSync) {
       const handOver = planSnapshotHandOver(spec.value.planSnapshotPath);
       if ("error" in handOver) {
         await cleanup();
@@ -174,17 +187,29 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
       planSnapshot = handOver.planSnapshot;
     }
     status("starting", "load", {});
-    const loaded = await (deps.loadRunPath ?? defaultLoadRunPath)() as { runTask?: RunChildRunTask } | undefined;
+    const loaded = await (deps.loadRunPath ?? defaultLoadRunPath)() as { runTask?: RunChildRunTask; runDetachedWork?: RunChildDetachedWork } | undefined;
     const runTask = deps.runTask ?? loaded?.runTask;
-    if (runTask === undefined) throw new Error("the loaded run path exports no runTask");
+    const detachedWork = deps.runDetachedWork ?? loaded?.runDetachedWork;
+    if (work !== undefined ? detachedWork === undefined : runTask === undefined) {
+      throw new Error(work !== undefined ? "the loaded run path exports no runDetachedWork" : "the loaded run path exports no runTask");
+    }
     restoreActor = markRunChildProcessActor();
     const background: Promise<unknown>[] = [];
     const beat = setInterval(() => status("running", "run", {}), deps.heartbeatMs ?? RUN_CHILD_HEARTBEAT_MS);
     beat.unref();
     let outcome: { result: RunResult } | { error: unknown };
     try {
-      status("running", "run", {});
-      outcome = abort.signal.aborted
+      status("running", work !== undefined ? work.kind : "run", {});
+      const aborted = (): { error: unknown } => ({ error: Object.assign(new Error("aborted before the run finished"), { name: "AbortError" }) });
+      if (work !== undefined && detachedWork !== undefined && !abort.signal.aborted) {
+        // Detached work has no safe point to stop at: a SIGTERM ends it as `aborted` at once, and the process exit takes the work with it.
+        const stopped = new Promise<{ error: unknown }>((resolve) => { abort.signal.addEventListener("abort", () => resolve(aborted()), { once: true }); });
+        outcome = await Promise.race([
+          withRunChildReservation(spec.value, () => detachedWork(work, { runId, taskId: spec.value.taskId })).then(
+            (result): { result: RunResult } => ({ result }), (error: unknown): { error: unknown } => ({ error })),
+          stopped,
+        ]);
+      } else outcome = abort.signal.aborted || runTask === undefined
         ? { error: Object.assign(new Error("aborted before the run started"), { name: "AbortError" }) }
         : { result: await withRunChildReservation(spec.value, () => runTask(spec.value.taskId, {
           ...(options.planPath !== undefined ? { planPath: options.planPath } : {}),
@@ -196,7 +221,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
           ...(planSnapshot ? { planSnapshot } : {}),
           atAgentWait: deps.atAgentWait ?? (() => collectAtAgentWait()),
           abortSignal: abort.signal,
-          onBackgroundWork: (work: Promise<unknown>) => { background.push(work); },
+          onBackgroundWork: (pending: Promise<unknown>) => { background.push(pending); },
         })) };
     } catch (error) {
       outcome = { error }; // Carried, not erased: it is rethrown as the run's failure, or recorded as the abort that caused it, below.
