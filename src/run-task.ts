@@ -10962,10 +10962,6 @@ export function spawnCensusChild(file: string, args: string[], options: SpawnSyn
   });
 }
 
-// The precheck runs bounded suite children serially, including base retries; allow their own
-// backstops to report before the outer process bound fires. The reach child stays at 60 s.
-const CENSUS_PRECHECK_TIME_BOUND_MS = 8 * 60_000;
-
 function* fixCensusSnapshotSteps(
   root: string,
   path: string | undefined,
@@ -10977,8 +10973,33 @@ function* fixCensusSnapshotSteps(
     .filter(([key]) => !/^(?:GIT_|NODE_TEST_CONTEXT$|RMD_SELF_SYNC_DONE$)/.test(key)));
   env[CENSUS_SNAPSHOT_ENV] = path;
   const scriptsRoot = repoRoot;
+  const childTimeBoundMs = 60_000;
+  // The trusted controller reports its own fixed stage inventory; no worker code/table is loaded here.
+  const budgetRead = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--snapshot-budget"],
+    { cwd: scriptsRoot, env, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
+  let controllerTimeBoundMs: number;
+  try {
+    if (budgetRead.status !== 0 || budgetRead.signal || budgetRead.error) throw new Error("budget inspector did not complete");
+    const budget = JSON.parse(String(budgetRead.stdout)) as { version?: number; childTimeBoundMs?: number;
+      stages?: Record<string, number>; timeoutMs?: number };
+    const stages = budget.stages;
+    const keys = ["setup", "admission", "reach", "joinedGitFree", "structuralGitFree"];
+    if (budget.version !== 1 || budget.childTimeBoundMs !== childTimeBoundMs || !stages || Array.isArray(stages) ||
+        Object.keys(stages).length !== keys.length || keys.some(key => !Number.isSafeInteger(stages[key]) || stages[key]! < 0) ||
+        stages.setup !== 1 || stages.admission !== 1 || stages.reach !== 2 || stages.joinedGitFree !== 2 || stages.structuralGitFree! % 2 !== 0) {
+      throw new Error("unsupported controller stage inventory");
+    }
+    const derived = keys.reduce((sum, key) => sum + stages[key]!, 0) * childTimeBoundMs;
+    if (!Number.isSafeInteger(derived) || budget.timeoutMs !== derived || derived <= childTimeBoundMs) throw new Error("invalid derived controller deadline");
+    controllerTimeBoundMs = derived;
+  } catch (error) {
+    const reason = `controller budget UNKNOWN (${error instanceof Error ? error.message : String(error)})`;
+    const refusal = { text: `census-precheck: NOT MEASURED — ${reason}`, censuses: [], offeredBaselines: [] };
+    log("fix.census_check", { outcome: "refused", refusal: refusal.text, reason });
+    return { refusal, unmeasured: reason };
+  }
   const precheck = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--root", root],
-    { cwd: scriptsRoot, env, encoding: "utf8", timeout: CENSUS_PRECHECK_TIME_BOUND_MS, maxBuffer: 64 * 1024 * 1024 }));
+    { cwd: scriptsRoot, env, encoding: "utf8", timeout: controllerTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
   const text = `${precheck.stdout ?? ""}${precheck.stderr ?? ""}`;
   let refusal = censusPushRefusal(text);
   let unmeasured = precheck.status === 2 ? text.trim() : undefined;
@@ -10993,7 +11014,7 @@ function* fixCensusSnapshotSteps(
     const reach = "test/the-affected-suite-reach-ratchet.test.ts";
     const result = yield* step(() => run(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import",
       "./test/setup/tmp-hygiene.ts", reach],
-      { cwd: scriptsRoot, env, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }));
+      { cwd: scriptsRoot, env, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
     const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
     if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
       refusal = unavailable(`census suite ${reach}`, result, output);
