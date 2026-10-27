@@ -217,3 +217,15 @@ test("snapshot reach retains its existing subtraction of a failure already prese
     assert.equal(result.status, 0, result.text);
   } finally { removeReachFixture(f); }
 });
+
+test("snapshot reach reports an unavailable base suite as unmeasured instead of subtracting its failure", () => {
+  const f = reachFixture(3);
+  try {
+    const snapshot = JSON.parse(readFileSync(f.snapshot, "utf8"));
+    snapshot.basePaths = snapshot.basePaths.filter((path: string) => path !== "test/the-affected-suite-reach-ratchet.test.ts");
+    writeFileSync(f.snapshot, JSON.stringify(snapshot));
+    const result = precheck(f);
+    assert.equal(result.status, 2, result.text);
+    assert.match(result.text, /merge-base suite test\/the-affected-suite-reach-ratchet\.test\.ts is absent/);
+  } finally { removeReachFixture(f); }
+});
