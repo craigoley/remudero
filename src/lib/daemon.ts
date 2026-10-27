@@ -6593,12 +6593,6 @@ export async function runDaemon(
         const task = planForBatch.byId.get(kick.taskId);
         if (!task) { refuse("unknown task id"); continue; }
         if (isMerged(kick.taskId) || pendingMergedCredit.has(kick.taskId)) { refuse("already merged — stale kick"); continue; }
-        if (deps.isCreditIndeterminate?.(kick.taskId)) {
-          log("console.kick_held", { task: kick.taskId, origin: kick.origin, reason: "open PR ownership unreadable", ...kickRepoField(kick) });
-          continue;
-        }
-        const openPr = deps.isOpenPr?.(kick.taskId);
-        if (openPr !== undefined) { refuse(`already has open PR #${openPr} — existing repair owner retains the task`); continue; }
         try {
           // W1-T3216: a console kick for an operator-RELEASED verify:human task must be admitted
           // here too, or the release works from the drain and is refused from the console.
