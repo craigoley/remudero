@@ -89,11 +89,13 @@ function queuedTickets(slotDir: string): string[] {
 const suites = () => ({ fullRun: false, suites: ["test/leaf.test.ts"], reasons: ["W1-T9951 fixture"] });
 
 test("W1-T9951: static-preflight runs while the suite ticket waits", async (t) => {
+  // Loaded BEFORE the holder starts its bound: a cold import under host load must not spend the holder's window.
+  const { main } = await import(AUTHOR) as { main: Main };
   const slotDir = slotEnvironment(t);
   const f = authorFixture(t, observingStatic(slotDir, 0));
   const ready = join(slotDir, "..", "holder-ready");
   // A separate process holds the ONLY suite slot and a ticket ahead, until the static stage has reported
-  // (or a bound passes, so the old order — slot first, static after — fails in seconds rather than hanging).
+  // (or a bound passes, so the old order — slot first, static after — fails within the bound rather than hanging).
   const holder = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
     import { existsSync, writeFileSync } from 'node:fs';
     import { hostname } from 'node:os';
@@ -105,7 +107,7 @@ test("W1-T9951: static-preflight runs while the suite ticket waits", async (t) =
     const ticket = takeTestSlotTicket(${JSON.stringify(slotDir)}, { pid: process.pid, host: hostname(), label: 'ticket-ahead',
       arrivedAt: now, heartbeatAt: now, heartbeatIntervalMs: 50 });
     writeFileSync(${JSON.stringify(ready)}, 'ready');
-    const until = Date.now() + 8000;
+    const until = Date.now() + 30000;
     const timer = setInterval(() => {
       if (!existsSync(${JSON.stringify(join(f.root, "coverage/static-ran.json"))}) && Date.now() < until) return;
       clearInterval(timer); ticket.drop(); lease.release();
@@ -116,7 +118,6 @@ test("W1-T9951: static-preflight runs while the suite ticket waits", async (t) =
   for (let i = 0; i < 1500 && !existsSync(ready); i += 1) await new Promise(resolve => setTimeout(resolve, 10));
   assert.ok(existsSync(ready), "the holder never took the slot and its ticket");
 
-  const { main } = await import(AUTHOR) as { main: Main };
   assert.equal(main([], { root: f.root, select: suites, testSlot: { pollMs: 50, log: () => {} } }), 0);
   const receipt = f.receipt();
   const seen = f.observed();
