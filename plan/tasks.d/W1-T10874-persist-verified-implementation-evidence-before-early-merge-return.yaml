@@ -2,7 +2,7 @@
   title: Save verified implementation evidence before returning a known merge
   repo: remudero
   type: implement
-  verify: human
+  verify: auto
   principles:
     tdd: strict
   risk: high
@@ -90,3 +90,12 @@
     own lanes; this does not grant global source ownership. Fresh main and all open heads still
     require the normal subject and scope audit. Original eight cockpit slices and their runtime
     readiness holds remain intact. The existing Console dependency is not removed or rewritten.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-27T18:15:58.371Z"
+    pin: "3d8987d99c2c0e957eb16709a3ee3dc5e0e7fdd46891d6ee1cb7b2e1099df233"
+    operator_release_pin: "894cf49bfad9c802068d05874b820fc75d91fce19eb1b9992397b71874429d6b"
