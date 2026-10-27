@@ -66,7 +66,6 @@ async function runAggregateScript(
       env: {
         ...process.env,
         PATH: `${dir}:${process.env.PATH}`,
-        TMPDIR: dir,
         GH_TOKEN: "fake-token",
         REPO: "example/example",
         SHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
@@ -159,7 +158,7 @@ test("ci-gate reads all retained attempts before deduping posted gate verdicts",
     ], { kind: "retained-posted-attempts" });
     try {
       const result = spawnSync("bash", ["-c", script], { env: { ...process.env,
-        PATH: `${shim.dir}:${process.env.PATH}`, TMPDIR: shim.dir, GH_TOKEN: "fixture", REPO: "example/example",
+        PATH: `${shim.dir}:${process.env.PATH}`, GH_TOKEN: "fixture", REPO: "example/example",
         SHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", REQUIRED: '["rule-checks"]', IGNORE: "[]",
         GRACE_WINDOW_SECONDS: "0", GRACE_POLL_INTERVAL_SECONDS: "1", WAIT_CAP_SECONDS: "0" },
         encoding: "utf8", timeout: 10_000 });
