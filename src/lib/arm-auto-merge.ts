@@ -2146,7 +2146,7 @@ type VerdictArmCtx = {
 function verdictArmGate(
   verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
   ctx: VerdictArmCtx,
-  ledgerLines: (() => Array<Record<string, unknown>>) | undefined,
+  ledgerLines: () => Array<Record<string, unknown>>,
 ): "skipped" | { reason: string } {
   if (ctx.headRefName?.startsWith("dependabot/")) {
     ctx.log("automerge.arm_skipped", { reason: "dependabot PR — the dep-review lane owns arming for these", head_sha: ctx.headSha });
@@ -2164,7 +2164,7 @@ function verdictArmGate(
   }
   const override = verdict.capped
     ? cappedOverrideFromLedger(
-        (ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(),
+        ledgerLines(),
         ctx.taskId,
         ctx.headSha,
         ctx.prUrl,
@@ -2220,7 +2220,7 @@ export function armIfVerdictPermits(
     ledgerLines?: () => Array<Record<string, unknown>>;
   } = {},
 ): ArmOutcome | "skipped" {
-  const gate = verdictArmGate(verdict, ctx, deps.ledgerLines);
+  const gate = verdictArmGate(verdict, ctx, deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)));
   if (gate === "skipped") return "skipped";
   // W1-T230's own gate still applies inside: it re-reads the live head and refuses a stale
   // verdict. Its OUTCOME is read (impl-BC) rather than discarded, so a refusal is visible.
@@ -2238,7 +2238,7 @@ export async function armIfVerdictPermitsAsync(
     ledgerLines?: () => Array<Record<string, unknown>>;
   } = {},
 ): Promise<ArmOutcome | "skipped"> {
-  const gate = verdictArmGate(verdict, ctx, deps.ledgerLines);
+  const gate = verdictArmGate(verdict, ctx, deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)));
   if (gate === "skipped") return "skipped";
   const arm = deps.arm ?? ((prUrl: string, taskId: string) => armAutoMergeDetailedAsync(prUrl, taskId));
   return logVerdictArmResult(ctx, gate.reason, await arm(ctx.prUrl, ctx.taskId));

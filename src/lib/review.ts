@@ -11779,7 +11779,7 @@ export interface PostRepairLeaseOpts {
   runId: string;
   ledgerPath: string;
   /** Injected raw poster (tests). Defaults to a real `gh api` status POST under {@link
-   *  REPAIR_LEASE_CONTEXT}, reusing {@link execGhStatusPost} unchanged. */
+   *  REPAIR_LEASE_CONTEXT}, through the awaited {@link execGhStatusPostAsync} (W1-T9549). */
   post?: (o: { owner: string; repo: string; sha: string; description?: string }) => void | Promise<void>;
 }
 
