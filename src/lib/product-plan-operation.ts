@@ -149,6 +149,7 @@ export async function verifyProductPlanEvidence(input: ProductPlanVerification):
       receipt = { head: input.targetHead, reviewedHead: pull.head.sha, merge: pull.merge_commit_sha, url: `https://github.com/${repo.owner}/${repo.name}/pull/${input.pullRequest}`, review };
     }
   } catch (error) {
+    // A GitHub read or parse that failed is its own refusal: an unreadable receipt is never "approved" and never "absent".
     void error; return refuse("provider_unreadable");
   }
   const task = input.task ?? (current ? { origin: current.origin, budgetUsd: current.budget_usd } : undefined);
@@ -245,7 +246,10 @@ class Fault extends RmdError {
 }
 const errno = (error: unknown, code: string) => (error as NodeJS.ErrnoException | undefined)?.code === code;
 const processAlive = (pid: number) => {
-  try { process.kill(pid, 0); return true; } catch (error) { return errno(error, "EPERM"); }
+  try { process.kill(pid, 0); return true; } catch (error) {
+    // Signal 0 only probes: EPERM means the process exists under another user; any other failure means it is gone.
+    return errno(error, "EPERM");
+  }
 };
 
 /**
@@ -296,7 +300,6 @@ export class ProductPlanOperationService {
 
   private async propose(actor: string, input: ProductPlanProposal): Promise<{ observation: ProductPlanObservation; replayed: boolean }> {
     const paths = this.paths(actor);
-    this.ensureDirectory(paths);
     let journal = this.readJournal(paths);
     const requestKey = digest(input.requestId);
     const payloadDigest = digest(input);
@@ -313,7 +316,7 @@ export class ProductPlanOperationService {
       if (!repository) throw new Fault("repository_missing");
       if (!product.brief.resourceEnvelope) throw new Fault("envelope_missing");
       if (product.revision !== input.expectedRevision || product.objectiveRevision !== input.expectedObjectiveRevision) throw new Fault("stale_revision");
-      if (!this.options.gateway?.productPlan) throw new Fault("handoff_unavailable");
+      if (this.options.gateway === undefined || typeof this.options.gateway.productPlan !== "function") throw new Fault("handoff_unavailable");
       const subject: PlanRepository = { id: repository.id, owner: repository.owner, name: repository.name, defaultBranch: repository.defaultBranch };
       const live = await this.options.provider.read(repository.owner, repository.name);
       if (live.state === "unreadable") throw new Fault("provider_unreadable");
@@ -415,7 +418,10 @@ export class ProductPlanOperationService {
     }).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
     let started: Promise<{ outcome: PlanHandoffOutcome }>;
     try { started = gateway.productPlan!({ operationId: record.operationId, mode: record.mode, brief, repoRoot: record.command.repoRoot }); }
-    catch (error) { void error; started = Promise.resolve({ outcome: "unknown" as const }); }
+    catch (error) {
+      // A gateway that throws before returning a promise has handed nothing off; the outcome is recorded unknown, never retried.
+      void error; started = Promise.resolve({ outcome: "unknown" as const });
+    }
     void started.then((result) => finished(result.outcome), () => finished("unknown"));
   }
 
@@ -539,6 +545,7 @@ export class ProductPlanOperationService {
   private commit(paths: Paths, journal: Journal): void {
     const body = JSON.stringify(journal);
     if (Buffer.byteLength(body) > PRODUCT_PLAN_OPERATION_LIMITS.stateBytes) throw new Fault("capacity");
+    this.ensureDirectory(paths);
     const temporary = join(paths.directory, `.${paths.ownerKey}.${randomUUID()}.pending`);
     let renamed = false;
     try {

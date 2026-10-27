@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { bootstrapConfirmed } from "#src/lib/product-build.js";
+import { ratifyCliGateway } from "#src/lib/panel-graph.js";
 import {
   productCasePlanText, productPlanLedgerTaskId, productPlanOrigin, ProductPlanOperationService,
   type PlanHandoffOutcome, type PlanRepository, type PlanTargetPort,
@@ -128,7 +129,7 @@ test("W1-T10823: a saved product reaches one native plan operation across replay
   f.provider.next = { state: "found", repository: { id: 7, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" } };
   assert.equal(await refused(f.service().execute(actor, f.command())), "repository_conflict");
   f.provider.next = { state: "found", repository: { id: ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" } };
-  assert.deepEqual(f.calls, [], "no refusal reached the gateway");
+  assert.equal(f.calls.length, 0, "no refusal reached the gateway");
 
   // ONE request: a truthful pending observation at once, the record durable BEFORE the hand-off.
   const process = f.service();
@@ -246,5 +247,70 @@ test("W1-T10823: a plan hand-off refuses an unreadable target plan and plans fre
   assert.equal(none.calls[0]!.mode, "create");
   const unreadable = fixture(t, { planned: "unreadable" });
   assert.equal(await refused(unreadable.service().execute(actor, unreadable.command())), "target_unreadable");
-  assert.deepEqual(unreadable.calls, [], "an unreadable plan is never guessed into a second plan");
+  assert.equal(unreadable.calls.length, 0, "an unreadable plan is never guessed into a second plan");
+});
+
+test("W1-T10823: a hand-off that reports refused, throws or rejects is recorded and never retried", async (t) => {
+  for (const [how, expected] of [["refused", "refused"], ["throws", "unknown"], ["rejects", "unknown"]] as const) {
+    const f = fixture(t, { gateway: false });
+    let calls = 0;
+    const service = new ProductPlanOperationService({
+      root: f.root, store: f.store, provider: f.provider, target: f.target, bootstrapConfirmed, ledgerPath: f.ledgerPath, checkout: () => f.checkout,
+      text: async () => JSON.stringify([]), clock: fixedClock(Date.parse(REQUESTED)),
+      gateway: { productPlan() {
+        calls += 1;
+        if (how === "throws") throw new Error("gateway exploded");
+        return how === "refused" ? Promise.resolve({ outcome: "refused" as const }) : Promise.reject(new Error("child never started"));
+      } },
+    });
+    const first = await ok(service.execute(actor, f.command()));
+    assert.equal(first.observation.mode, "create", "a head holding no plan shard is planned fresh");
+    // Let the owner's own queued completion record the outcome, then read the same record again.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const again = await ok(service.execute(actor, f.command()));
+    assert.equal(again.observation.state, expected, how);
+    assert.equal(again.replayed, true);
+    assert.equal(calls, 1, `${how}: a failed hand-off is never retried`);
+  }
+});
+
+test("W1-T10823: the plan journal refuses a corrupt, foreign or missing target without a hand-off", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const file = join(f.journalDirectory, readdirSync(f.journalDirectory).find((name) => name.endsWith(".json"))!);
+  const original = readFileSync(file, "utf8");
+    writeFileSync(file, "{not json");
+  assert.equal(await refused(f.service().execute(actor, f.command())), "corrupt");
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(original), ownerKey: "0".repeat(64) }));
+  assert.equal(await refused(f.service().execute(actor, f.command())), "corrupt", "another owner's journal is never read as this one's");
+  writeFileSync(file, original);
+  chmodSync(file, 0o644);
+  assert.equal(await refused(f.service().execute(actor, f.command())), "unavailable", "a world-readable journal is refused");
+  chmodSync(file, 0o600);
+  const replay = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.equal(replay.observation.operationId, first.observation.operationId);
+  assert.equal(f.calls.length, 1);
+  // A target whose managed checkout is not there is refused before anything is journaled.
+  const lost = fixture(t);
+  const noCheckout = new ProductPlanOperationService({ root: lost.root, store: lost.store, provider: lost.provider, target: lost.target, bootstrapConfirmed,
+    checkout: () => undefined, text: async () => "[]", gateway: { productPlan: async () => ({ outcome: "queued" as const }) } });
+  assert.equal(await refused(noCheckout.execute(actor, lost.command())), "target_unreadable");
+  assert.equal(await refused(noCheckout.execute("", lost.command())), "invalid_identity");
+  assert.equal(await refused(noCheckout.execute(actor, { requestId: "short" })), "invalid_input");
+  assert.equal(await refused(noCheckout.execute("clerk:bob", lost.command())), "not_found", "another operator's product does not exist");
+});
+
+test("W1-T10823: the maintained gateway's product plan port validates its target before it spawns anything", async (t) => {
+  const root = ownedFixtureDir(t, "product-plan-gateway").dir;
+  const ledgerPath = join(root, "ledger.ndjson");
+  let trees = 0;
+  const gateway = ratifyCliGateway(root, join(root, "logs"), { ledgerPath, freshTree: async (action) => { trees += 1; return action({ path: root, sha: "f".repeat(40) }); } });
+  const good = { operationId: "a".repeat(64), mode: "create" as const, brief: "Approved product brief:\n{}", repoRoot: root };
+  for (const bad of [{ operationId: "short" }, { repoRoot: "relative/path" }, { mode: "expand" as unknown as "create" }, { brief: "   " },
+    { brief: "x".repeat(64 * 1024 + 1) }]) {
+    assert.deepEqual(await gateway.productPlan!({ ...good, ...bad }), { outcome: "refused" });
+  }
+  assert.equal(trees, 0, "a refused target never reaches the fresh-source runner");
+  assert.ok(!existsSync(ledgerPath), "and writes no ledger row");
+  assert.equal(ratifyCliGateway(root, join(root, "logs")).productPlan, undefined, "without the owned runner there is no plan port");
 });
