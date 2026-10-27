@@ -11,7 +11,8 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
+import { execFileSync } from "node:child_process";
 import { stringify as stringifyYaml, parse as parseYaml } from "yaml";
 import { renderIssueBody, type Escalation, type OpenIssue } from "../src/lib/escalate.js";
 import {
@@ -28,6 +29,8 @@ import { feedbackHasAnswer } from "../src/lib/human-gate.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { queueFeedbackRecord, readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const FB_ID = "fb-1789382125003-abdb87";
 
@@ -109,6 +112,110 @@ function snapshot(f: ReturnType<typeof fixture>): Record<string, string> {
 function appliedRows(ledgerPath: string): Array<Record<string, unknown>> {
   return existsSync(ledgerPath) ? readLedgerLines(ledgerPath).filter((r) => r.step === "escalation_answer.feedback_applied") : [];
 }
+
+/** Actual private Git/main and pending YAML, with no injected Git or reply writer. */
+function canonicalContinuationFixture(t: TestContext, queue = true) {
+  const dir = tmpDir("canonical-continuation"), stateRoot = join(dir, "pending");
+  const { dir: root, git } = gitRepo({ scope: t, seedCommit: false, kind: "w10789-canonical-continuation" });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  mkdirSync(stateRoot);
+  const id = "w10789-existing-capture", rel = `plan/feedback/${id}.yaml`, path = join(root, rel);
+  const pending = { id, ts: "2026-10-27T00:00:00.000Z", raw: "Keep the existing verification owner",
+    attachments: ["evidence.txt"], origin: "issue", status: "new", reply_to: "prior-feedback",
+    proposal_pr: null, summary: null, expansion: null, submission_key: "issue#1:comment:7", thread_id: "prior-thread",
+    source_lineage: { repository: "fixture/repo", capture: "original" } };
+  if (queue) {
+    writeFileSync(path, stringifyYaml(pending));
+    assert.equal(queueFeedbackRecord(root, rel, stateRoot).queued?.length, 1);
+  }
+  const canonical = { ...pending, status: "grilling", answered_by: null,
+    proposal_pr: "https://github.com/fixture/repo/pull/1",
+    summary: { headline: "Keep the verified owner", what_happened: "The original request reached a question.",
+      decision: "Choose its existing owner", options: [{ label: "site-intake", consequence: "Keep the existing owner" },
+        { label: "core-proof-runner", consequence: "Request a separate owner" }] } };
+  writeFileSync(path, stringifyYaml(canonical));
+  git("add", "--", rel);
+  git("commit", "-qm", "Canonical grilling fixture"); git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const head = git("rev-parse", "HEAD"), ledgerPath = join(dir, "ledger.ndjson");
+  const feedback = { root, inboxRoot: stateRoot, feedbackLand: {} };
+  const f = { root, stateRoot, ledgerPath, feedback, id, rel, path, git, head, pending, canonical };
+  return f;
+}
+
+function rewriteContinuationPending(f: ReturnType<typeof canonicalContinuationFixture>, change: (r: Record<string, unknown>) => void) {
+  const original = readFileSync(f.path, "utf8"), pending = parseYaml(stringifyYaml(f.pending)) as Record<string, unknown>;
+  change(pending); writeFileSync(f.path, stringifyYaml(pending));
+  try { assert.equal(queueFeedbackRecord(f.root, f.rel, f.stateRoot).queued?.length, 1); }
+  finally { writeFileSync(f.path, original); }
+}
+
+async function continueCanonical(f: ReturnType<typeof canonicalContinuationFixture>) {
+  return readEscalationAnswers(f.root, "W10789-CONTINUE", gatewayFor(issueFor(1078901, f.id), [ownerComment(901, "site-intake")]),
+    { ledgerPath: f.ledgerPath, feedback: f.feedback });
+}
+
+test("W1-T10789: canonical grilling advances an unchanged older capture exactly once", async t => {
+  for (const queue of [false, true]) await t.test(queue ? "unchanged older queued capture" : "ordinary canonical positive control", async t => {
+    const f = canonicalContinuationFixture(t, queue);
+    if (queue) {
+      assert.deepEqual(await readEscalationAnswers(f.root, "W10789-ALREADY-RECORDED",
+        gatewayFor(issueFor(1078901, f.id), [ownerComment(901, "site-intake")]), { ledgerPath: f.ledgerPath }),
+      { accepted: 1, ignored: 0, unreadable: 0 });
+      assert.equal(appliedRows(f.ledgerPath).length, 0, "a question-store acknowledgment is not a feedback continuation");
+    }
+    assert.deepEqual(await continueCanonical(f), { accepted: queue ? 0 : 1, ignored: 0, unreadable: 0 });
+    const queued = readQueuedFeedbackRecords(f.stateRoot), replies = [...queued.values()].filter(r => r.reply_to === f.id);
+    assert.equal(replies.length, 1); assert.equal(replies[0].submission_key, "issue#1078901:comment:901");
+    assert.deepEqual(queued.get(f.rel), { ...f.canonical, status: "answered", answered_by: replies[0].id });
+    const before = snapshot(f);
+    assert.deepEqual(await continueCanonical(f), { accepted: 0, ignored: 0, unreadable: 0 });
+    assert.deepEqual(snapshot(f), before); assert.equal(appliedRows(f.ledgerPath).length, 1);
+    assert.equal(f.git("rev-parse", "HEAD"), f.head);
+    assert.equal(f.git("status", "--porcelain", "--untracked-files=all"), "?? plan/questions.ndjson",
+      "only the already-recognized answer's question-store history is added to the checkout");
+  });
+});
+
+test("W1-T10789: stale or contradictory reply evidence preserves the pending record", async t => {
+  await t.test("matching evidence still advances: refusals do not disable continuation", async t => {
+    const f = canonicalContinuationFixture(t);
+    await continueCanonical(f);
+    const queued = readQueuedFeedbackRecords(f.stateRoot), replies = [...queued.values()].filter(r => r.reply_to === f.id);
+    assert.equal(replies.length, 1);
+    assert.deepEqual(queued.get(f.rel), { ...f.canonical, status: "answered", answered_by: replies[0].id });
+  });
+  const cases: Array<[string, (f: ReturnType<typeof canonicalContinuationFixture>) => void]> = [
+    ["changed text", f => rewriteContinuationPending(f, r => { r.raw = "A newer direction"; })],
+    ["changed attachments", f => rewriteContinuationPending(f, r => { r.attachments = ["different.txt"]; })],
+    ["changed lineage", f => rewriteContinuationPending(f, r => { r.source_lineage = { repository: "foreign/repo", capture: "original" }; })],
+    ["foreign capture id", f => rewriteContinuationPending(f, r => { r.id = "other-capture"; })],
+    ["changed original identity", f => rewriteContinuationPending(f, r => { r.submission_key = "another-original-intent"; })],
+    ["unknown captured fields", f => rewriteContinuationPending(f, r => { r.attachments = "not-an-array"; })],
+    ["newer queued proposal", f => rewriteContinuationPending(f, r => { r.proposal_pr = "https://github.com/fixture/repo/pull/2"; })],
+    ["queued answer", f => rewriteContinuationPending(f, r => { r.status = "answered"; r.answered_by = "existing-answer"; })],
+    ["queued rejection", f => rewriteContinuationPending(f, r => { r.status = "rejected"; })],
+    ["unreadable canonical main", f => { f.git("update-ref", "-d", "refs/remotes/origin/main"); }],
+    ["advanced canonical target", f => {
+      writeFileSync(f.path, stringifyYaml({ ...f.canonical, status: "rejected" }));
+      f.git("add", "--", f.rel); f.git("commit", "-qm", "Later canonical decision");
+      f.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    }],
+    ["malformed canonical YAML", f => {
+      writeFileSync(f.path, "status: [unterminated\n"); f.git("add", "--", f.rel);
+      f.git("commit", "-qm", "Unreadable canonical fixture"); f.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    }],
+  ];
+  for (const [label, change] of cases) await t.test(label, async t => {
+    const f = canonicalContinuationFixture(t); change(f); const before = snapshot(f), head = f.git("rev-parse", "HEAD");
+    await continueCanonical(f);
+    assert.deepEqual(snapshot(f), before, "no capture, pending record, or source history is rewritten");
+    assert.equal([...readQueuedFeedbackRecords(f.stateRoot).values()].filter(r => r.reply_to === f.id).length, 0);
+    assert.equal(appliedRows(f.ledgerPath).length, 0); assert.equal(f.git("rev-parse", "HEAD"), head);
+    const answers = readFileSync(join(f.root, "plan", "questions.ndjson"), "utf8");
+    assert.match(answers, /issue#1078901:comment:901/, "the already-recognized answer remains recorded");
+  });
+});
 
 test("W1-T8511: an operator reply on a feedback grill issue answers its record", async () => {
   const f = fixture();
