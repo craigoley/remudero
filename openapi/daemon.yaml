@@ -10882,7 +10882,7 @@ components:
                 names the complete population. Each source retains its own measurement time and code revision.
             - type: "null"
         improvementFollowUp:
-          anyOf:
+          oneOf:
             - $ref: "#/components/schemas/CodeHealthImprovementFollowUp"
             - type: "null"
         findingCount:

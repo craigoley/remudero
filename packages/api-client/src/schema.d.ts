@@ -4483,7 +4483,7 @@ export interface components {
           healthy: (boolean) | (null);
         };
       }) | (null);
-      improvementFollowUp: unknown;
+      improvementFollowUp: (CodeHealthImprovementFollowUp) | (null);
       findingCount: (number) | (null);
       urgentFindings: {
         value: (number) | (null);
