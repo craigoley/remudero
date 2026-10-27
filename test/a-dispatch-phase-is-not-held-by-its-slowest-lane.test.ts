@@ -68,6 +68,8 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
   const options: NonNullable<Parameters<typeof runTask>[1]> = {
     config: { claudeBin: "/bin/true", root, installRoot: process.cwd(), workerProviders: { harnessCommitsImplement: true } },
     skipGitSync: true, planPath,
+    // Not under test: the harness's own diff-coverage run over the fixture's changed src file.
+    coveragePrecheckPorts: { changedFiles: () => [] },
     github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
     claimReserver: { mintAnchor: () => "boundary-anchor", attempt: () => "created", holder: () => undefined, drop: () => true },
     containmentExec: async (token) => ({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
@@ -197,7 +199,7 @@ async function boundaryRun(t: TestContext, boundary: "preopen_gate" | "checkpoin
       assert.equal(restored?.reconciled, "merge");
       assert.deepEqual(restored?.main_conflicts, ["src/change.ts"]);
       assert.equal(restored?.restored_head_sha, handoff?.head_sha);
-      const resolved = origin.git("rev-list", "--parents", "-1", branchOfResume).trim().split(" ").slice(1);
+      const resolved = origin.git("rev-list", "--parents", "-1", `run-${id}-${clock}`).trim().split(" ").slice(1);
       assert.deepEqual(resolved, [String(handoff?.head_sha), seed.git("rev-parse", "HEAD").trim()], "the worker's commit completes the merge with both parents");
     }
     if (mainMoves === "clean") {
