@@ -27170,7 +27170,7 @@ export function issueRevalidationRunTaskPorts(
     reconcile?: Pick<NonNullable<Parameters<typeof buildEscalationReconcileCandidates>[5]>, "github" | "evidenceRootFor" | "creditIo">;
     spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"];
   } = {},
-): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: (prompt: string, issueNumber: number) => Promise<string> } {
+): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: ReturnType<typeof issueRevalidationJudgeText> } {
   const { owner, repo, repoRoot, stateDir, log } = ctx;
   let plan: Plan | undefined;
   const planNow = (): Plan => (plan ??= (seams.loadPlan ?? (() => loadPlan(resolveRepoLayout(repoRoot).planMonolith)))());
@@ -27194,10 +27194,10 @@ export function issueRevalidationRunTaskPorts(
         return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open` }];
       }));
     },
-    judgeText: (prompt, issueNumber) => {
+    judgeText: (prompt, issueNumber, observe) => {
       const mounts = loadMounts(mountsPath(repoRoot));
       return issueRevalidationJudgeText({ mount: mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), cwd: repoRoot,
-        settingsFile: join(repoRoot, "settings", "worker.json"), spawn: seams.spawn })(prompt, issueNumber);
+        settingsFile: join(repoRoot, "settings", "worker.json"), spawn: seams.spawn })(prompt, issueNumber, observe);
     },
   };
 }
