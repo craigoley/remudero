@@ -5,6 +5,143 @@
 
 export interface components {
   schemas: {
+    ImprovementThreadRequest: {
+      repository: string;
+      opportunityId: string;
+      snapshotId: string;
+      goal: string;
+      constraints?: (string)[];
+      idempotencyKey: string;
+      instance?: string;
+    };
+    ImprovementFailure: {
+      state: "invalid_request" | "source_unavailable" | "source_stale" | "conflict" | "busy" | "uncertain";
+      reason: string;
+      requestId?: string;
+    };
+    ImprovementSavedResult: {
+      state: "saved";
+      version: "improvement-thread-v1";
+      requestId: string;
+      threadId: string;
+      proposalId: string;
+      repository: string;
+      instance: string;
+      snapshotId: string;
+      opportunityId: string;
+      reused: boolean;
+      planning: {
+        state: "not_requested";
+      };
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ImprovementPlanReceipt: {
+      state: "plan_pr_opened";
+      prUrl: string;
+      branch: string;
+      taskIds: (string)[];
+      taskIdsState: "observed" | "unavailable";
+      recordedAt: string;
+      nativeReceiptId: string;
+    };
+    ImprovementNativeMessage: {
+      threadId: string;
+      role: "escalation" | "reply";
+      body: string;
+      seq: number;
+      ts: number;
+      /** Native Inbox message metadata. Source context and operator audit are facts; they grant no execution authority. */
+      extra?: Record<string, never>;
+    };
+    ImprovementThreadView: {
+      state: "saved";
+      version: "improvement-thread-v1";
+      requestId: string;
+      threadId: string;
+      proposalId: string;
+      repository: string;
+      instance: string;
+      snapshotId: string;
+      opportunityId: string;
+      currentRequestId: string;
+      goal: string;
+      constraints: (string)[];
+      goalDigest: string;
+      source: {
+        state: "current" | "stale" | "unavailable";
+        reason: unknown;
+      };
+      correspondence: {
+        state: "linked" | "unknown";
+        pendingInputs: unknown;
+        pendingWork: unknown;
+      };
+      /** At most 512 KiB of native messages. Use nextBeforeSeq to read earlier messages. */
+      messages: (ImprovementNativeMessage)[];
+      messageCount: number;
+      messagesPartial: boolean;
+      nextBeforeSeq: unknown;
+      drafting: {
+        state: "not_requested" | "requested" | "ready" | "unavailable" | "refused";
+        digest: unknown;
+        fragmentYaml: unknown;
+        reason: unknown;
+        operationId?: string;
+        sourceRequestId?: string;
+      };
+      filing: {
+        state: "not_requested" | "requested" | "plan_pr_opened" | "refused" | "uncertain";
+        operationId?: string;
+        sourceRequestId?: string;
+        receipt?: ImprovementPlanReceipt;
+        reason?: unknown;
+      };
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ImprovementDraftRequest: {
+      requestId: string;
+      goalDigest: string;
+      idempotencyKey: string;
+    };
+    ImprovementFileRequest: {
+      requestId: string;
+      goalDigest: string;
+      idempotencyKey: string;
+      draftDigest: string;
+    };
+    ImprovementAction: {
+      version: "improvement-action-v1";
+      operationId: string;
+      kind: "draft" | "file";
+      requestId: string;
+      proposalId: string;
+      actorId: string;
+      payloadHash: string;
+      goalDigest: string;
+      draftDigest: unknown;
+      requestedAt: string;
+      state: "prepared" | "requested" | "waiting" | "completed" | "refused" | "uncertain";
+      reason: unknown;
+      receipt: unknown;
+    };
+    ImprovementActionRequested: {
+      state: "requested";
+      operation: ImprovementAction;
+      execution: {
+        state: "not_requested";
+      };
+    };
+    ImprovementActionObserved: {
+      state: "observed";
+      operation: ImprovementAction;
+      execution: {
+        state: "not_requested";
+      };
+    };
     ProductId: string;
     ProductRequestId: string;
     ProductRevision: number;
@@ -123,6 +260,58 @@ export interface components {
       required_tier?: "middle";
       required_sensitivity?: "sensitive";
     };
+    ProductResearchRequest: {
+      version: "product-research-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      expectedObjectiveRevision: number;
+      answers?: ({
+        questionId: string;
+        answer: string;
+      })[];
+    };
+    /** One durable research run. executionAuthority is always none; provider is the configured one or null. */
+    ProductResearchRun: {
+      id: string;
+      objectiveRevision: ProductRevision;
+      productRevision: ProductRevision;
+      outcome: "completed" | "unavailable" | "failed";
+      failure?: "provider_error" | "invalid_output" | "over_budget";
+      provider: string | null;
+      budgetUsd: number;
+      spendUsd: number;
+      sources: ({
+        label: string;
+        url: string;
+        disposition: "data";
+      })[];
+      summary?: string;
+      executionAuthority: "none";
+      startedAt: string;
+      finishedAt: string;
+    };
+    ProductResearchResponse: {
+      version: "product-research-v1";
+      productId: ProductId;
+      objectiveRevision: ProductRevision;
+      replayed: boolean;
+      run: (ProductResearchRun) | (null);
+      open: ({
+        id: string;
+        text: string;
+        origin: "catalog" | "provider";
+      })[];
+      accepted: ({
+        questionId: string;
+        text: string;
+        answer: string;
+        answeredAt: string;
+      })[];
+    };
+    ProductResearchError: {
+      version: "product-research-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "already_answered";
+    };
     /** At most 4096 raw request bytes. action adopt requires the exact provider repositoryId and never creates; action create must not carry repositoryId. owner and name must match the product's requestedRepository when it has one. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
     ProductRepositoryCommand: {
       version: "product-repository-v1";
@@ -239,6 +428,52 @@ export interface components {
     ProductDeploymentError: {
       version: "product-deployment-v1";
       error: "invalid_identity" | "invalid_input" | "not_found" | "project_not_found" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_conflict" | "idempotency_conflict" | "stale_revision" | "capacity" | "creation_denied" | "not_configured" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "recovery_required" | "request_too_large";
+    };
+    /** At most 4096 raw request bytes. Names one task the target repository's own plan filed for the product's approved plan evidence. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
+    ProductBuildCommand: {
+      version: "product-build-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      planEvidenceId: string;
+      taskId: string;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+    };
+    ProductBuildEvidence: {
+      outcome: "queued" | "admitted" | "running";
+      observedAt: string;
+    };
+    /** outcome is the furthest independently recorded phase; queued is never reported as running. */
+    ProductBuildReceipt: {
+      operationId: string;
+      productId: ProductId;
+      taskId: string;
+      planEvidenceId: string;
+      outcome: "queued" | "admitted" | "running";
+      repository: {
+        id: number;
+        owner: string;
+        name: string;
+      };
+      objectiveRevision: number;
+      payloadDigest: string;
+      queuedAt: string;
+      evidence: (ProductBuildEvidence)[];
+    };
+    ProductBuildResponse: {
+      version: "product-build-v1";
+      receipt: ProductBuildReceipt;
+      replayed: boolean;
+    };
+    ProductBuildError: {
+      version: "product-build-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "fleet_halted" | "kick_failed";
+    };
+    /** The service's scope, tier or confirmation gate refused access before the build handler. */
+    ProductBuildAccessError: {
+      error: "unauthorized" | "forbidden" | "confirm_nonce_required";
+      required_scope?: "write";
+      required_tier?: "high";
     };
     /** Bounded read-only answer-v1; missing evidence is explicit and citations are dated. */
     OperatorAgentAnswer: {
@@ -6106,6 +6341,71 @@ export interface components {
 }
 
 export interface paths {
+  "/v1/improvements/threads": {
+    post: {
+      responses: {
+          "200": ImprovementSavedResult;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/thread": {
+    get: {
+      responses: {
+          "200": ImprovementThreadView;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/threads/draft": {
+    post: {
+      responses: {
+          "202": ImprovementActionRequested;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/threads/file": {
+    post: {
+      responses: {
+          "202": ImprovementActionRequested;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": HighTierRefusal;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
+  "/v1/improvements/action": {
+    get: {
+      responses: {
+          "200": ImprovementActionObserved;
+          "400": (ImprovementFailure) | (Error);
+          "401": Error;
+          "403": Error;
+          "409": ImprovementFailure;
+          "500": Error;
+          "503": ImprovementFailure;
+        };
+    };
+  };
   "/v1/products": {
     get: {
       responses: {
@@ -6127,6 +6427,20 @@ export interface paths {
           "409": ProductError;
           "413": ProductError;
           "503": ProductError;
+        };
+    };
+  };
+  "/v1/products/research": {
+    post: {
+      responses: {
+          "200": ProductResearchResponse;
+          "400": ProductResearchError;
+          "401": ProductAccessError;
+          "403": (ProductResearchError) | (ProductAccessError);
+          "404": ProductResearchError;
+          "409": ProductResearchError;
+          "413": ProductResearchError;
+          "503": ProductResearchError;
         };
     };
   };
@@ -6167,6 +6481,20 @@ export interface paths {
           "409": ProductDeploymentError;
           "413": ProductDeploymentError;
           "503": ProductDeploymentError;
+        };
+    };
+  };
+  "/v1/products/build": {
+    post: {
+      responses: {
+          "200": ProductBuildResponse;
+          "400": ProductBuildError;
+          "401": ProductBuildAccessError;
+          "403": (ProductBuildError) | (ProductBuildAccessError);
+          "404": ProductBuildError;
+          "409": ProductBuildError;
+          "413": ProductBuildError;
+          "503": ProductBuildError;
         };
     };
   };

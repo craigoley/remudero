@@ -11,7 +11,8 @@
   plan_refs: [W1-T3275, W1-T1066, W1-T4915]
   files: [hooks/deny-floor.sh, test/github/a-heredoc-body-that-names-gh-is-not-a-gh-call.test.ts]
   status: queued
-  priority: 2  # operator-2026-10-21: three stalled builds; W1-T9281 waits on it
+  # queue judge: priority=1.5 evidence=50f6c7d98125f1e7
+  priority: 1.5  # operator-2026-10-21: three stalled builds; W1-T9281 waits on it | queue-judge-2026-10-27: Pinned task has two open dependents; raising its priority reduces waiting cost.
   attempts: 0
   rationale: |
     READ 2026-10-04 on origin/main 284015b9. The watch log blamed `ghJsonAsync`; it is not the

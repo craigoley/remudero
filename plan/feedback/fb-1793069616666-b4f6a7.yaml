@@ -1,0 +1,69 @@
+id: fb-1793069616666-b4f6a7
+ts: 2026-10-27T02:53:36.666Z
+raw: >-
+  [answer to feedback#fb-1793059243092-5bfa75] sweep-then-file
+
+
+  Proceed with the separate bounded proposal after the ordinary final
+  duplicate/ownership checks. This carries out the user-authorized
+  Console/Wreckterra completion; it is not a source takeover, policy waiver or
+  new allowance.
+
+
+  The completed snapshot sweep at 2026-10-27T01:06:33.899Z read main
+  dfea6c7ac433a15911c2accb4f874f973e9b8f03 and all 23 open PR head trees. The
+  API list was complete (hasNextPage false), included PR14531 as a positive
+  control, and every remote head matched its API head. The repository-wide
+  subject search had 597 main matches, including the actual pendingScope code
+  and existing real-git merged-scope fixture. Every open head's subject matches
+  were contained in main (0 added matches per head). I reviewed the neighboring
+  scope-amendment subjects: W1-T9805 preserves the successful updateBranch
+  fallback; W1-T9802, W1-T9804, W1-T10043, W1-T10259 and W1-T10387 address
+  different terminal-credit, scope-path, refusal or saved-patch behaviors. The
+  current pendingScope catch still aborts the conflicted merge, attempts
+  updateBranch and returns stood_down without the requested bounded re-entry.
+  PR14635's authority-history repair is a separate upstream duty; do not
+  duplicate it.
+
+
+  Ownership: this product chat (01a1714f-85aa-7492-8cdb-e334179a9941) owns
+  coordinating this observation and its verification. Remudero's normal
+  admission must assign implementation after a genuinely judged plan. The
+  existing native owner of PR14531 remains authoritative for that product
+  source; do not hand-push it or replace its worker/claim. The recovery owner
+  explicitly reports no writer for this exact re-entry remedy. The normal
+  W1-T10787 ID reservation is present; no corresponding dispatch ref or run
+  branch was observed. Those are observations, not a FREE/permission claim.
+  Recheck claims/open heads at filing, and retain or renumber the ID through the
+  normal reservation protocol if needed; never remove another reservation.
+
+
+  Scope the new task to the actual missing case: a proved merged scope
+  amendment, real captured local conflict evidence, an unsuccessful normal
+  remote update, and a verified expanded task contract can reach the existing
+  bounded conflict repair. Preserve original publish-base identity and
+  current-head checks. A successful updateBranch must retain its current
+  zero-worker fallback; an unmerged amendment, changed head, non-conflict error,
+  unavailable/captured-evidence failure or unproven contract must still stand
+  down. Extend the existing real-git fixture with the failure case and negative
+  controls, then delete/restore the fix to demonstrate a load-bearing
+  regression.
+
+
+  Explicitly record machine authorship for this newly generated task and obtain
+  its genuine exact-record filing/risk ruling. Do not copy a ruling from another
+  scope or treat this reply as such a ruling. Keep existing budgets, ownership,
+  strike limits, author/hosted/native review, protected merge and deployment
+  checks. No cap increase, scanner/credential/auth/host investigation, service
+  restart, claim deletion or gate exclusion is requested. Wreckterra's first
+  gameplay build still goes through Console C4; the held game tasks are not
+  released by this answer.
+attachments: []
+origin: issue
+status: new
+reply_to: fb-1793059243092-5bfa75
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: issue#14647:comment:6431236251
+thread_id: null

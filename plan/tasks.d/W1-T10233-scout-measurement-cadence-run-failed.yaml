@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 3.36
   status: queued
@@ -21,10 +21,10 @@
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
   risk_ruling:
-    verdict: "low"
-    action: escalate
-    confidence: 0.6
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
     reasons:
-      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared files list contains only a new test file (test/gardeners/scout-measurement-cadence-run-failed.test.ts). Nothing in it touches secrets, auth, permissions, merge/deploy policy, or deletion of data.; on the change's description/files alone, no diff was read — The description names a recurring ledger failure (measurement_cadence.run_failed) to be fixed at its cause. It does not ask for an operator-only decision, and the acceptance is a grep-verifiable test title.; on the change's description/files alone, no diff was read — Weaknesses are noted: the rows name no file, so the real fix location is unknown and may extend beyond the declared file. The scout family's track record is weak (0 merged, 1 declined). The filing cites no PRs. These argue for care, but the escalation rule does not make them HIGH, and CI and review still apply."
-    judged_at: "2026-10-20T05:34:57.923Z"
-    pin: "ef3b927c2d47a4e55fbff44cd020de1f40bd80e70930269c2516656af2a30868"
+      - "rule 3 (live and low-privilege): the symptom is live, 13 occurrence(s) across 7 day(s), last seen 2026-10-27T04:12:59.411Z, and the record declares no privileged path"
+    judged_at: "2026-10-27T05:40:05.136Z"
+    pin: "d3ed1d2ef7d50afaf7490d179ab617e86f3e971cdc1e515618f09fdde8e2afc4"

@@ -350,3 +350,36 @@ test("W1-T2957 a window that could not be READ exits non-zero, never as an empty
   assert.match(r.out, /no gate was red/);
   assert.doesNotMatch(r.out, /status: clear/);
 });
+
+
+test("a skipped compatibility job cannot repair the posted failure on the same commit", async () => {
+  const { rollupFromRest } = await import("#src/lib/open-prs-rest.js");
+  const sha = "3803eb7c4c2104b3cadc1391a6b3264dc855b448";
+  const checks = [
+    { id: 122016447971, name: "task-id-existence", status: "completed", conclusion: "failure",
+      external_id: "run:40446840387:2:job:122014178404", started_at: "2026-10-27T04:50:27Z" },
+    { id: 122014179501, name: "task-id-existence", status: "completed", conclusion: "skipped",
+      external_id: "ca665e7c-ea8d-58f3-a0d4-9357203f1dab", started_at: "2026-10-27T04:42:43Z" },
+  ];
+  const observed = collectCiFailureCorpus({ prs: [pr(14691, [{ sha, rollup: rollupFromRest(checks, []) }])] });
+  assert.equal(observed.pairs.length, 1);
+  assert.equal(observed.pairs[0]?.state, "open", "simultaneous independent check producers are not a code repair");
+  assert.equal(observed.pairs[0]?.greenSha, undefined);
+  const repaired = collectCiFailureCorpus({ prs: [pr(14691, [{ sha, rollup: rollupFromRest(checks, []) },
+    { sha: "e34234bb8504c2300582d8c3fa0a7a7a5bf8f88c", rollup: rollupFromRest(checks.map(c => ({ ...c, conclusion: "success" })), []) }])] });
+  assert.equal(repaired.pairs.length, 1);
+  assert.equal(repaired.pairs[0]?.state, "repaired");
+  assert.equal(repaired.pairs[0]?.greenSha, "e34234bb8504c2300582d8c3fa0a7a7a5bf8f88c");
+});
+
+test("a later healthy workflow cannot close another producer's failed gate", () => {
+  const failure = { ...run("shared-gate", "FAILURE"), workflowId: 101 };
+  const other = { ...run("shared-gate", "SUCCESS"), workflowId: 202 };
+  const commits = [{ sha: "red", rollup: [failure] }, { sha: "other-producer", rollup: [other] }];
+  const open = collectCiFailureCorpus({ prs: [pr(42, commits)] });
+  assert.equal(open.pairs[0]?.state, "open");
+  const fixed = collectCiFailureCorpus({ prs: [pr(42, [...commits,
+    { sha: "same-producer", rollup: [{ ...failure, conclusion: "SUCCESS" }] }])] });
+  assert.equal(fixed.pairs[0]?.state, "repaired");
+  assert.equal(fixed.pairs[0]?.greenSha, "same-producer");
+});

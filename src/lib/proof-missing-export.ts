@@ -1,5 +1,6 @@
 import { observeProofFileInside, type ProofFileObservation } from "./proof-file-read.js";
 import { dirname, isAbsolute, join, relative } from "node:path";
+import { realpathSync } from "node:fs";
 
 /** One ESM link failure a base-side proof run printed: `importer` names `name` from `specifier`, which lacks it. */
 export interface MissingExportGap {
@@ -104,12 +105,14 @@ function declaresExport(text: string, name: string): boolean {
  *  the caller keeps its fail-closed base_unknown. */
 export async function baseLacksPrAddedExports(output: string, baseCwd: string, headCwd: string): Promise<string | undefined> {
   try {
+  // Node prints canonical importer paths even when the trusted checkout root is an alias.
+  const canonicalBase = realpathSync(baseCwd);
   const gaps = missingExportGaps(output);
   if (gaps === undefined) return undefined;
   const named: string[] = [];
   for (const gap of gaps) {
     if (!isAbsolute(gap.importer)) return undefined;
-    const importerRel = relative(baseCwd, gap.importer);
+    const importerRel = relative(canonicalBase, gap.importer);
     if (importerRel.startsWith("..") || isAbsolute(importerRel)) return undefined;
     const baseMapping = gap.specifier.startsWith("#") ? await subpathModule(baseCwd, importerRel, gap.specifier) : undefined;
     const headMapping = gap.specifier.startsWith("#") ? await subpathModule(headCwd, importerRel, gap.specifier) : undefined;
