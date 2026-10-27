@@ -157,7 +157,7 @@ import { createOperatorAgentRowsSource } from "./operator-agent-read-model.js";
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, prewarmOperatorAgentReads, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
 import type { ProductResearchProvider } from "./product-research.js";
-import { buildProductBuildRoutes, buildProductDeploymentRoutes, buildProductRepositoryRoutes, buildProductResearchRoutes, buildProductRoutes } from "./product-routes.js";
+import { buildProductCaseRoutes, buildProductBuildRoutes, buildProductDeploymentRoutes, buildProductRepositoryRoutes, buildProductResearchRoutes, buildProductRoutes } from "./product-routes.js";
 import { automationTriggerLedgerJournal, buildAutomationTriggerRoutes, createAutomationTriggerRegistry, submitAutomationTrigger, type AutomationTriggerRegistry } from "./automation-trigger.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import {
@@ -2976,6 +2976,9 @@ function assembleServeRoutes(
     // W1-T10615: the kick marker lands under the target's OWN daemon root, resolved through the same
     // registry, state base and core instance this serve's instance gateway mounts.
     ...buildProductBuildRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root, instances: {
+      registryPath: deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
+      stateBase: deps.instances?.stateBase, coreInstance: deps.instances?.coreInstance, readText: deps.instances?.readText } }),
+    ...buildProductCaseRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root, instances: {
       registryPath: deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
       stateBase: deps.instances?.stateBase, coreInstance: deps.instances?.coreInstance, readText: deps.instances?.readText } }),
     withStatusNeedsYou(withFleetRuntimeHealth(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), readRuntimeHealth), needsYouGates),
