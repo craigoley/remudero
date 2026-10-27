@@ -19,7 +19,8 @@ import { loadPolicy } from "./policy.js";
 import { sameTestFile } from "./test-path-resolver.js";
 import { collectCiFailureCorpus, rollupAtSha, type CiFailurePair, type CorpusCommit } from "./ci-failure-corpus.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
-import { checkRunsRestArgs, combinedStatusRestArgs } from "./open-prs-rest.js";
+import { checkRunsRestArgs, combinedStatusRestArgs, rollupFromRest } from "./open-prs-rest.js";
+import { rollupProducerKey } from "./sweep.js";
 import { actionsJobIdOf, type CheckRunRef } from "./fix-lane-gardener.js";
 import { failingRuleSuitesFromCiFailures, RULE_CHECKS_CHECK } from "./base-reproduction.js";
 import { commentCompressionOrigin, nextCommentCompression, readGateFollowupOrigins, type CommentCompressionFinding } from "./comment-compression.js";
@@ -335,7 +336,8 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
       const repairDiff = files.map(file => `diff --git a/${file.filename} b/${file.filename}\n${
         typeof file.patch === "string" ? file.patch : recoveredGateRepairPatch(file, raw, pair)}`).join("\n");
       const direct = rules.filter((rule) => rule.gate === pair.gate);
-      const failed = runs.get(pair.redSha)?.check_runs.find((check) => check.name === pair.gate && check.conclusion === "failure");
+      const failed = runs.get(pair.redSha)?.check_runs.find((check) => check.name === pair.gate && check.conclusion === "failure" &&
+        (pair.producerKey === undefined || rollupProducerKey(rollupFromRest([check], [])[0] ?? {}).key === pair.producerKey));
       let failedLog = "";
       if (!direct.length) {
         const jobId = failed && actionsJobIdOf(failed);
