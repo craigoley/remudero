@@ -20,7 +20,7 @@ import { sameTestFile } from "./test-path-resolver.js";
 import { collectCiFailureCorpus, rollupAtSha, type CiFailurePair, type CorpusCommit } from "./ci-failure-corpus.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { checkRunsRestArgs, combinedStatusRestArgs, rollupFromRest } from "./open-prs-rest.js";
-import { rollupProducerKey } from "./sweep.js";
+import { checkJobId, rollupProducerKey } from "./sweep.js";
 import { actionsJobIdOf, type CheckRunRef } from "./fix-lane-gardener.js";
 import { failingRuleSuitesFromCiFailures, RULE_CHECKS_CHECK } from "./base-reproduction.js";
 import { commentCompressionOrigin, nextCommentCompression, readGateFollowupOrigins, type CommentCompressionFinding } from "./comment-compression.js";
@@ -340,7 +340,7 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
         (pair.producerKey === undefined || rollupProducerKey(rollupFromRest([check], [])[0] ?? {}).key === pair.producerKey));
       let failedLog = "";
       if (!direct.length) {
-        const jobId = failed && actionsJobIdOf(failed);
+        const jobId = failed && (checkJobId(rollupFromRest([failed], [])[0] ?? {}) ?? actionsJobIdOf(failed));
         if (jobId === undefined) { unavailable("no-actions-job"); continue; }
         failedLog = await readTextAsync(["run", "view", "--job", jobId, "--log-failed"]);
       }

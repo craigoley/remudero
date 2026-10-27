@@ -621,23 +621,25 @@ test("the real async gate inventory retains unknown evidence and continues quali
 
 
 test("repair log attribution selects the failing producer that the later commit repaired", async () => {
-  const f = gateRepairIdentityFixture({ name: "ci", details_url: "https://github.com/o/r/actions/runs/90/job/91" });
-  const ghJson = async (args: string[]) => {
-    const body = await f.ghJson(args);
-    const path = args[1] ?? "";
-    if (path.includes("/check-runs") && (path.includes(`/commits/${f.red}/`) || path.includes(`/commits/${f.green}/`))) {
-      const original = (body as { check_runs: Array<Record<string, unknown>> }).check_runs[0]!;
-      return { check_runs: [
-        { ...original, id: 89, conclusion: "failure", external_id: "other-producer", details_url: "https://github.com/o/r/actions/runs/90/job/89" },
-        { ...original, id: 91, external_id: "run:90:1:job:91" },
-      ] };
-    }
-    return body;
-  };
-  const jobs: string[][] = [];
-  const observed = await loadGateRepairObservations([{ ...rule, gate: "test/example.test.ts", trigger: () => true }], {
-    ghJson, ghText: async args => { jobs.push(args); return "rule-checks: failed suites: test/example.test.ts"; },
-  });
-  assert.deepEqual(observed.map(row => row.pair.pr), [1, 2]);
-  assert.deepEqual(jobs, [["run", "view", "--job", "91", "--log-failed"]]);
+  for (const prefix of ["", "run:90:1:"]) {
+    const f = gateRepairIdentityFixture({ name: "ci", app: { slug: "github-actions" } });
+    const ghJson = async (args: string[]) => {
+      const body = await f.ghJson(args);
+      const path = args[1] ?? "";
+      if (path.includes("/check-runs") && (path.includes(`/commits/${f.red}/`) || path.includes(`/commits/${f.green}/`))) {
+        const original = (body as { check_runs: Array<Record<string, unknown>> }).check_runs[0]!;
+        return { check_runs: [
+          { ...original, id: 89, conclusion: "failure", external_id: "other-producer", details_url: "https://github.com/o/r/actions/runs/90/job/89" },
+          { ...original, id: 191, external_id: `${prefix}job:91`, details_url: "https://github.com/o/r/runs/191" },
+        ] };
+      }
+      return body;
+    };
+    const jobs: string[][] = [];
+    const observed = await loadGateRepairObservations([{ ...rule, gate: "test/example.test.ts", trigger: () => true }], {
+      ghJson, ghText: async args => { jobs.push(args); return "rule-checks: failed suites: test/example.test.ts"; },
+    });
+    assert.deepEqual(observed.map(row => row.pair.pr), [1, 2]);
+    assert.deepEqual(jobs, [["run", "view", "--job", "91", "--log-failed"]]);
+  }
 });
