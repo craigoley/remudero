@@ -1231,7 +1231,9 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
   const perFile = peaks ?? files?.[0]?.bytes ?? opts.perFileBytes;
   const basisNote = files ? `; file peaks ${[...new Set(files.map((f) => f.basis))].join(", ")}` : "";
   /** The CPU-derived concurrency, lowered to what the headroom less `reservedBytes` holds when the run names a per-file peak. */
-  const sized = (reservedBytes = 0, cpu = Math.min(maximum, testRunConcurrency(load(), slots))): number => {
+  // An UNSLOTTED run (no coordination) keeps today's share; only a slotted grant reads the holders' CPU.
+  const unslottedShare = measured ? defaultTestSlots(load().cores) : slots;
+  const sized = (reservedBytes = 0, cpu = Math.min(maximum, testRunConcurrency(load(), unslottedShare))): number => {
     if (perFile === undefined) return cpu;
     const headroom = headroomOf();
     return Math.min(cpu, peaks?.length ?? cpu, memoryTestConcurrency(headroom === undefined ? undefined : headroom - reservedBytes, perFile) ?? cpu);
