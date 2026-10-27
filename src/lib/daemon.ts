@@ -44,7 +44,10 @@ import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-revi
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
 import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
-import { runChildOutsideKill, type AdoptedRunChild, type RunChildHandle, type RunChildPending } from "./run-child.js";
+import {
+  DETACHED_WORK_KINDS, detachedWorkPlacement, measureDrainCosts, runChildOutsideKill,
+  type AdoptedRunChild, type DetachedWorkEvidence, type DetachedWorkKind, type DetachedWorkMode, type RunChildHandle, type RunChildPending,
+} from "./run-child.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
@@ -109,6 +112,8 @@ import {
 // A value import, unlike the type-only line above. Safe: sweep.ts imports nothing from this
 // module, so this edge closes no cycle (W1-T2744).
 import {
+  adoptChildWork,
+  childWorkLeftRunning,
   detachSweepAction,
   detachedActionInFlight,
   detachedSweepActionCount,
@@ -1442,6 +1447,10 @@ export interface DaemonDeps {
   /** Called once per task excluded because its own read is indeterminate. */
   onIndeterminate?: (task: Task) => void;
   adoptRunChildren?: () => AdoptedRunChild[];
+  /** W1-T9114: how detached work (reviews, fix dispatches) is placed. Unwired, it reads `off`: everything stays in process. */
+  detachedWorkMode?: () => DetachedWorkMode;
+  /** W1-T9114: the kinds a run-child entry hosts in this process. Unwired, none: a kind is never moved to an entry that is not there. */
+  detachedWorkHosts?: () => ReadonlySet<DetachedWorkKind>;
   /** W1-T9924: will the run-child policy run this refill as an adoptable child? Unwired, it reads false. */
   refillRunsAsChild?: (task: Task) => boolean;
   /** Run ONE task through the existing run-task path (default = runTask). W1-T9089: a restart never reaches into a
@@ -4211,7 +4220,10 @@ export async function runDaemon(
   // W1-T5720 — THE BOOT GATE. Tick 1 runs a light pass at once, then holds its cadences until the first full
   // pass returns or the BACKSTOP passes (10-05: first `sweep.pass` 6.7-15.8 min after `daemon.boot`). It holds
   // only what is wired: with nothing to defer, tick 1's admission keeps W1-T4998's no-wait contract.
-  const adoptedChildren = deps.adoptRunChildren ? deps.adoptRunChildren() : [];
+  const adoptedAll = deps.adoptRunChildren ? deps.adoptRunChildren() : [];
+  // W1-T9114: a child hosting a review or a fix dispatch holds a review slot, never a lane: it is registered with the sweep.
+  for (const child of adoptedAll) if (child.work) void adoptChildWork({ ...child, work: child.work }, log);
+  const adoptedChildren = adoptedAll.filter((child) => child.work === undefined);
   const children = new Map<string, AdoptedRunChild>(adoptedChildren.map((child) => [child.runId, child]));
   let childMode = deps.adoptRunChildren !== undefined;
   const childTaskIds = (): string[] => [...children.values()].map((child) => child.taskId);
@@ -4439,6 +4451,15 @@ export async function runDaemon(
     return action;
   };
 
+  // W1-T9114: where each kind of detached work runs, from the inventory. The ledger is read only when the mode is wired and not `off`.
+  const detachedWorkPlacements = (): Record<string, ReturnType<typeof detachedWorkPlacement>> => {
+    const mode = deps.detachedWorkMode?.() ?? "off";
+    const evidence: DetachedWorkEvidence = {
+      mode, hosted: deps.detachedWorkHosts?.() ?? new Set<DetachedWorkKind>(),
+      measured: mode === "on" ? measureDrainCosts(deps.readLedgerLines?.() ?? []) : {},
+    };
+    return Object.fromEntries(DETACHED_WORK_KINDS.map((kind) => [kind, detachedWorkPlacement(kind, evidence)]));
+  };
   // The drain every restart takes before it returns: live fix workers and in-flight reviews finish (bounded),
   // best-effort cadences and CI waits are released to be re-derived after restart. Shared by the freshness exit
   // and the memory-pressure exit so neither restart can kill work the other would have waited for.
@@ -4538,11 +4559,15 @@ export async function runDaemon(
     const observation = fromLatch?.observation ?? observeDrain(exitAtMs, latchAtMs);
     for (const item of restartDrainInventory()) observation.watch(item);
     const detachedAtFreshness = detachedSweepActionCount();
+    // W1-T9114: the inventory says where each kind runs. A child is left running, never waited for; what is still in process is awaited.
+    const placements = detachedWorkPlacements();
+    const childrenLeft = childWorkLeftRunning();
+    const hasChildrenLeft = Object.keys(childrenLeft).length > 0;
     // A light pass's review sat in no registry the drain waited on, so the exit killed it mid-judgement.
     const reviewsAtExit = inFlightReviewRunsNow();
     const reviewsAtFreshness = reviewsAtExit.length;
     const latchStarted = fromLatch?.started === true ? fromLatch : undefined;
-    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || latchStarted) {
+    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || latchStarted || hasChildrenLeft) {
       const drainStartedAtMs = latchStarted ? latchStarted.latchAtMs : exitAtMs;
       const latchFields = fromLatch ? { started_at: fromLatch.started ? "latch" : "exit", latched_at: fixedClock(fromLatch.latchAtMs).iso() }
         : stepPrefix === "daemon.freshness_drain" ? { started_at: "exit" } : {};
@@ -4595,7 +4620,7 @@ export async function runDaemon(
               });
             },
           }),
-          drainInFlightReviews({ boundMs: reviewBoundMs, onWait: observation.watch }),
+          drainInFlightReviews({ boundMs: reviewBoundMs, onWait: observation.watch, closeRefills: placements.review?.placement !== "child" }),
         ]);
       } finally {
         const stopped = drainReviewClock ? await drainReviewClock.stop() : undefined;
@@ -4604,7 +4629,9 @@ export async function runDaemon(
       }
       if (drainReviewClock) {
         watch(inFlightReviewRunsNow());
-        abandonedReviews = await drainInFlightReviews({ boundMs: Math.max(0, deadlineMs - daemonClock.now()), onWait: observation.watch });
+        abandonedReviews = await drainInFlightReviews({
+          boundMs: Math.max(0, deadlineMs - daemonClock.now()), onWait: observation.watch, closeRefills: placements.review?.placement !== "child",
+        });
       }
       for (const action of abandoned) {
         const release = await abandonDetachedSweepAction(action);
@@ -4625,6 +4652,8 @@ export async function runDaemon(
         abandoned_detached_sweep_actions: abandoned.length,
         in_flight_reviews: latchStarted ? latchStarted.reviews.size : reviewsAtFreshness,
         abandoned_in_flight_reviews: abandonedReviews,
+        detached_children_left_running: childrenLeft,
+        detached_work_placement: Object.fromEntries(Object.entries(placements).map(([kind, p]) => [kind, p.placement])),
         review_passes: reviewPasses,
         duration_ms: Math.max(0, nowMs - drainStartedAtMs),
         ...(stepPrefix === "daemon.freshness_drain" ? {

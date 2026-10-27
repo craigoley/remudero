@@ -16448,9 +16448,13 @@ export function inFlightReviewRunsNow(): Promise<void>[] {
 
 /** Wait for the reviews in flight NOW to settle, bounded. Reviews admitted after the call are not
  *  awaited, so the drain cannot be extended by new work. Returns how many were still running at the bound. */
-export async function drainInFlightReviews(opts: { boundMs: number; onWait?: (item: RestartDrainInventoryEntry) => void }): Promise<number> {
+export async function drainInFlightReviews(opts: {
+  boundMs: number; onWait?: (item: RestartDrainInventoryEntry) => void;
+  /** W1-T9114: `false` when the next review admitted is a run child, which the restart does not wait for. Default: close. */
+  closeRefills?: boolean;
+}): Promise<number> {
   // A drain is an exit: a freed lane must not refill behind it. The next light pass reopens refills.
-  lightPassRefillsClosed = true;
+  if (opts.closeRefills !== false) lightPassRefillsClosed = true;
   const running = [...inFlightReviewRuns.keys()];
   for (const work of running) opts.onWait?.(reviewRestartItem(work, inFlightReviewRuns.get(work)!));
   if (running.length === 0) return 0;
@@ -16466,6 +16470,92 @@ export async function drainInFlightReviews(opts: { boundMs: number; onWait?: (it
   const abandoned = running.filter((review) => !settled.has(review));
   for (const review of abandoned) inFlightReviewStops.get(review)?.abort();
   return abandoned.length;
+}
+
+/** W1-T9114 — DETACHED WORK THAT RUNS AS A RUN CHILD. A review or a fix dispatch hosted in a child is registered here, not in
+ *  {@link inFlightReviewRuns} or {@link detachedSweepActions}: those are what a restart WAITS for, and it waits for nothing it
+ *  does not own. The registry still holds the work's slot and mutex key, so the PR is not re-admitted while the child runs. */
+export interface ChildWorkRegistration {
+  runId: string; kind: string; taskId: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string;
+}
+const childWork = new Map<string, ChildWorkRegistration>();
+const settledChildWork = new Set<string>();
+const childWorkSettleKey = (runId: string, headSha?: string): string => `${runId}@${headSha ?? ""}`;
+
+/** Claims the slot and the mutex key of a child's work. Registering a run id again is a no-op. */
+export function registerChildWork(work: ChildWorkRegistration): void {
+  if (childWork.has(work.runId)) return;
+  childWork.set(work.runId, work);
+  if (work.reviewKey !== undefined) inFlightReviewKeys.add(work.reviewKey);
+  if (work.fixKey !== undefined) inFlightFixKeys.add(work.fixKey);
+}
+
+/** How many registered children run `kind`, or all of them. */
+export function childWorkCount(kind?: string): number {
+  let n = 0;
+  for (const work of childWork.values()) if (kind === undefined || work.kind === kind) n++;
+  return n;
+}
+
+/** The children a restart leaves running, counted by kind. Empty when none. */
+export function childWorkLeftRunning(): Record<string, number> {
+  const byKind: Record<string, number> = {};
+  for (const work of childWork.values()) byKind[work.kind] = (byKind[work.kind] ?? 0) + 1;
+  return byKind;
+}
+
+/**
+ * Releases the slot and the keys of a settled child's work, once per run id and head sha: a second boot (or a second call) finds it
+ * settled and returns `false`, so nothing is posted or acknowledged twice. A lost child releases the same way and its PR is
+ * re-admitted by the next light pass, because the review's durable outcome is its ledger row, which a lost child never wrote.
+ */
+export function settleChildWork(runId: string): boolean {
+  const work = childWork.get(runId);
+  if (work === undefined) return false;
+  const settleKey = childWorkSettleKey(runId, work.headSha);
+  childWork.delete(runId);
+  if (work.reviewKey !== undefined) inFlightReviewKeys.delete(work.reviewKey);
+  if (work.fixKey !== undefined) inFlightFixKeys.delete(work.fixKey);
+  releaseReviewSlot();
+  if (settledChildWork.has(settleKey)) return false;
+  settledChildWork.add(settleKey);
+  return true;
+}
+
+/** Forgets every registered child and every settlement. For a test's fresh process. */
+export function resetChildWork(): void {
+  for (const runId of [...childWork.keys()]) settleChildWork(runId);
+  settledChildWork.clear();
+}
+
+/** The child a boot adopted, as the registry takes it: structural, so this module imports nothing from run-child. */
+export interface AdoptedWorkChild {
+  runId: string; taskId: string;
+  work: { kind: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string };
+  settled: Promise<unknown>;
+  acknowledge?: (outcome: PromiseSettledResult<never>) => void;
+}
+
+/**
+ * W1-T9114: a booting daemon adopts a work child instead of draining it. It keeps its slot and key while it runs; when it settles
+ * the registry releases them and the receipt is acknowledged exactly once, so the boot after never replays it. A terminal review
+ * posted its verdict itself (the child owns the post), so the daemon posts nothing.
+ */
+export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extra?: Record<string, unknown>) => void): Promise<void> {
+  // Already settled in this process for this head: nothing to claim, post or acknowledge a second time.
+  if (settledChildWork.has(childWorkSettleKey(child.runId, child.work.headSha))) return Promise.resolve();
+  registerChildWork({ runId: child.runId, taskId: child.taskId, ...child.work });
+  return child.settled.then(
+    (value) => ({ status: "fulfilled" as const, value }),
+    (reason: unknown) => ({ status: "rejected" as const, reason }),
+  ).then((outcome) => {
+    const first = settleChildWork(child.runId);
+    child.acknowledge?.(outcome as PromiseSettledResult<never>);
+    log("daemon.child_work_settled", {
+      run_id: child.runId, task_id: child.taskId, kind: child.work.kind, ...(child.work.prNumber === undefined ? {} : { pr: child.work.prNumber }),
+      outcome: outcome.status === "fulfilled" ? "terminal" : "lost", first_settlement: first,
+    });
+  });
 }
 
 /** W1-T2981 — is an action of this kind already detached? A second concurrent retro would race the
@@ -23056,7 +23146,8 @@ function lightPassMemoryWaitSummary(pr: OpenPrView, deps: SweepDeps, sinceMs?: n
 
 /** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */
 export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
-  const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight;
+  // W1-T9114: a review child holds its slot while it runs, adopted or not.
+  const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight + childWorkCount("review");
   return { bound: Math.max(0, width - inFlight), inFlight };
 }
 
