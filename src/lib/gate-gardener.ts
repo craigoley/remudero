@@ -336,7 +336,8 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
       const repairDiff = files.map(file => `diff --git a/${file.filename} b/${file.filename}\n${
         typeof file.patch === "string" ? file.patch : recoveredGateRepairPatch(file, raw, pair)}`).join("\n");
       const direct = rules.filter((rule) => rule.gate === pair.gate);
-      const failed = runs.get(pair.redSha)?.check_runs.find((check) => check.name === pair.gate && check.conclusion === "failure");
+      const failed = runs.get(pair.redSha)?.check_runs.find((check) => check.name === pair.gate && check.conclusion === "failure" &&
+        (pair.producerKey === undefined || rollupProducerKey(rollupFromRest([check], [])[0] ?? {}).key === pair.producerKey));
       let failedLog = "";
       if (!direct.length) {
         const jobId = failed && actionsJobIdOf(failed);
