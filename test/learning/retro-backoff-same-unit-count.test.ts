@@ -169,3 +169,30 @@ test("retro backoff changed marker still resets the attempt cycle", async t => {
     assert.equal(result.decision?.mergesSinceMarker, 0);
   }
 });
+
+test("an out-of-range retro horizon still permits cached credit to reach authoritative recheck", async t => {
+  for (const mode of ["sync", "async"] as const) {
+    const ready = fixture(t);
+    for (let i = 1; i < 30; i++) runTask.recordRetroAttempt(ready.config.root, new Date("2026-10-02T12:00:00.000Z"), 5);
+    const accepted = await check(ready, mode);
+    assert.equal(accepted.decision?.fire, true, `${mode}: the unchanged cached30 hint can reach the authoritative30`);
+    assert.equal(accepted.decision?.mergesSinceMarker, 30);
+    assert.equal(accepted.probes, 1);
+    assert.ok(accepted.calls.length > 0, "cached credit still requires the real refreshed pass");
+
+    const receded = fixture(t);
+    for (let i = 1; i < 30; i++) runTask.recordRetroAttempt(receded.config.root, new Date("2026-10-02T12:00:00.000Z"), 5);
+    const changed = receded.rows.map((row, i) => i < 3
+      ? { ...row, updated_at: "2026-10-02T12:15:00.000Z", head: { ref: "run-foreign-1", sha: "b".repeat(40) } } : row);
+    const refused = await check(receded, mode, changed);
+    assert.equal(refused.probes, 1);
+    assert.equal(refused.decision, undefined, "the cached30 is not authority when the refresh returns27");
+    const rows = readFileSync(join(receded.config.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    const backoff = rows.findLast(row => row.step === "daemon.retro_trigger.backoff");
+    assert.equal(backoff?.merges_since_marker, 27);
+    assert.equal(backoff?.count_basis, "authoritative-shipped-plus-runless");
+    assert.equal(backoff?.merges_floor, 30);
+    assert.equal(backoff?.next_eligible_at, null);
+    assert.equal(backoff?.next_eligible_at_state, "outside-date-range");
+  }
+});

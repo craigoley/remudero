@@ -37,6 +37,7 @@ import { WORKER_SCOPE_ENV, readGardenerOrigin } from "./worker-containment.js";
 import {
   assertStateRestorePaths, isEngineDependencyLinkPath, preserveEngineDependencyLinks,
   restoreEngineDependencyLinks, validateEngineDependencyLinks, ENGINE_LINK_MANIFEST,
+  engineTreePath, isEngineEvidenceName, omitVanishedEngines, stateEntryVanished,
 } from "./state-backup-engine-links.js";
 
 /** Append-only NDJSON ledger (MASTER-PLAN §9). One JSON object per line, keyed by task id; `ts` and
@@ -2308,34 +2309,46 @@ export function isLedgerArchiveRelPath(rel: string): boolean {
 
 /** Files and preserved engine links under `root`, sorted, minus `excluded`, for staging and restore. Types
  *  come from readdir, so a temp file renamed away mid-walk cannot fail it (W1-T5545). */
-function listStateFiles(root: string, excluded: ReadonlySet<string> = new Set()): string[] {
+function listStateFiles(root: string, excluded: ReadonlySet<string> = new Set(), vanished?: string[], evidenceOnly = false): string[] {
   const out: string[] = [];
   const ancestors = new Set<string>();
   const walk = (relDir: string): void => {
     const absDir = relDir ? join(root, relDir) : root;
-    const identity = realpathSync(absDir);
-    if (ancestors.has(identity)) throw new StateBackupError(`state backup: directory link cycle at ${absDir}`);
-    ancestors.add(identity);
-    for (const d of readdirSync(absDir, { withFileTypes: true })) {
-      const rel = relDir ? join(relDir, d.name) : d.name;
-      if (excluded.has(rel)) continue;
-      if (d.isSymbolicLink() && isEngineDependencyLinkPath(rel)) {
-        out.push(rel);
-        continue;
-      }
-      let kind;
-      try {
-        kind = d.isSymbolicLink() ? statSync(join(absDir, d.name)) : d;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ELOOP") {
-          throw new StateBackupError(`state backup: directory link cycle at ${rel}`, { cause: error });
+    let identity: string | undefined;
+    try {
+      identity = realpathSync(absDir);
+      if (ancestors.has(identity)) throw new StateBackupError(`state backup: directory link cycle at ${absDir}`);
+      ancestors.add(identity);
+      for (const d of readdirSync(absDir, { withFileTypes: true })) {
+        const rel = relDir ? join(relDir, d.name) : d.name;
+        if (excluded.has(rel)) continue;
+        if (evidenceOnly && engineTreePath(relDir) === relDir && !isEngineEvidenceName(d.name)) continue;
+        if (d.isSymbolicLink() && isEngineDependencyLinkPath(rel)) {
+          out.push(rel);
+          continue;
         }
-        throw error;
+        let kind;
+        try {
+          kind = d.isSymbolicLink() ? statSync(join(absDir, d.name)) : d;
+        } catch (error) {
+          if (vanished && engineTreePath(rel) && stateEntryVanished(error, join(root, rel))) {
+            vanished.push(engineTreePath(rel) ?? rel);
+            continue;
+          }
+          if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+            throw new StateBackupError(`state backup: directory link cycle at ${rel}`, { cause: error });
+          }
+          throw error;
+        }
+        if (kind.isDirectory()) walk(rel);
+        else if (kind.isFile()) out.push(rel);
       }
-      if (kind.isDirectory()) walk(rel);
-      else if (kind.isFile()) out.push(rel);
+    } catch (error) {
+      if (!vanished || !engineTreePath(relDir) || !stateEntryVanished(error, absDir)) throw error;
+      vanished.push(engineTreePath(relDir) ?? relDir);
+    } finally {
+      if (identity !== undefined) ancestors.delete(identity);
     }
-    ancestors.delete(identity);
   };
   walk("");
   return out.sort();
@@ -2420,7 +2433,7 @@ function liveStateCopier(previous: string | undefined, opts: SnapshotStateOption
         }
         copyOneStateFile(src, dst, st.mode);
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT" || existsSync(src)) throw err;
+        if (!stateEntryVanished(err, src)) throw err;
         report.vanished.push(rel);
       }
     }
@@ -2471,10 +2484,11 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: Snaps
     mkdirSync(backupsRoot, { recursive: true });
     const copy = opts.copy ?? liveStateCopier(newestStateBackup(backupsRoot), opts, report);
     tmpDir = mkdtempSync(join(backupsRoot, ".state-backup-tmp-"));
-    const sourceEntries = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS);
-    const engineLinks = preserveEngineDependencyLinks(stateDir, tmpDir, sourceEntries);
+    const sourceEntries = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS, report.vanished, true);
+    let engineLinks = preserveEngineDependencyLinks(stateDir, tmpDir, sourceEntries, report.vanished);
     const linkPaths = new Set(engineLinks?.links.map((link) => link.path));
-    copy(stateDir, tmpDir, liveCopyOrder(sourceEntries.filter((rel) => !linkPaths.has(rel))));
+    const omittedEngines = new Set(report.vanished.map(engineTreePath).filter((rel) => rel !== undefined));
+    copy(stateDir, tmpDir, liveCopyOrder(sourceEntries.filter((rel) => !linkPaths.has(rel) && !omittedEngines.has(engineTreePath(rel) ?? rel))));
     for (let pass = 1; ; pass++) {
       const have = new Set([...listStateFiles(tmpDir), ...report.vanished]);
       // Only root-level ledger archives are eligible for catch-up. The complete
@@ -2493,13 +2507,14 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: Snaps
       copy(stateDir, tmpDir, liveCopyOrder([...late, STATE_BACKUP_LEDGER_RELPATH]));
     }
 
+    engineLinks = omitVanishedEngines(tmpDir, report.vanished, engineLinks);
     const staged = listStateFiles(tmpDir);
     validateEngineDependencyLinks(tmpDir, staged, engineLinks);
     if (staged.length === 0) {
       throw new StateBackupError(`state backup: snapshot of ${stateDir} would be an empty archive — refusing to publish it`);
     }
     const missing = [STATE_BACKUP_LEDGER_RELPATH, STATE_BACKUP_PROPOSALS_REGISTER_RELPATH].filter(
-      (rel) => sourceEntries.includes(rel) && !staged.includes(rel),
+      (rel) => (sourceEntries.includes(rel) || report.vanished.includes(rel)) && !staged.includes(rel),
     );
     if (missing.length > 0) {
       throw new StateBackupError(

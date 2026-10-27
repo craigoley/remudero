@@ -6458,6 +6458,13 @@ export function ensureTaskTrailer(
     const body = view.body ?? "";
     if (body.includes(trailer)) return;
     const newBody = body.trim().length > 0 ? `${body.trimEnd()}\n\n${trailer}\n` : `${trailer}\n`;
+    // GitHub's PR PATCH has no compare-and-swap, so re-read right before writing: a body edited after the read
+    // above (2026-10-13, #11216: a human edit overwritten by this stamp) is left alone, and the next pass stamps it.
+    const live = (read(["pr", "view", prUrl, "--json", "body"]) as { body?: string }).body ?? "";
+    if (live !== body) {
+      log("trailer_stamp.raced", { task_id: taskId, pr_url: prUrl });
+      return;
+    }
     phase = "write";
     // W1-T2948: the SHARED builder, so this stamp cannot retain its own copy of the failing
     // transport. An unresolvable URL throws here and lands in the catch below with phase "write" —
@@ -10965,10 +10972,6 @@ export function spawnCensusChild(file: string, args: string[], options: SpawnSyn
   });
 }
 
-// The precheck runs bounded suite children serially, including base retries; allow their own
-// backstops to report before the outer process bound fires. The reach child stays at 60 s.
-const CENSUS_PRECHECK_TIME_BOUND_MS = 8 * 60_000;
-
 function* fixCensusSnapshotSteps(
   root: string,
   path: string | undefined,
@@ -10980,8 +10983,33 @@ function* fixCensusSnapshotSteps(
     .filter(([key]) => !/^(?:GIT_|NODE_TEST_CONTEXT$|RMD_SELF_SYNC_DONE$)/.test(key)));
   env[CENSUS_SNAPSHOT_ENV] = path;
   const scriptsRoot = repoRoot;
+  const childTimeBoundMs = 60_000;
+  // The trusted controller reports its own fixed stage inventory; no worker code/table is loaded here.
+  const budgetRead = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--snapshot-budget"],
+    { cwd: scriptsRoot, env, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
+  let controllerTimeBoundMs: number;
+  try {
+    if (budgetRead.status !== 0 || budgetRead.signal || budgetRead.error) throw new Error("budget inspector did not complete");
+    const budget = JSON.parse(String(budgetRead.stdout)) as { version?: number; childTimeBoundMs?: number;
+      stages?: Record<string, number>; timeoutMs?: number };
+    const stages = budget.stages;
+    const keys = ["setup", "admission", "reach", "joinedGitFree", "structuralGitFree"];
+    if (budget.version !== 1 || budget.childTimeBoundMs !== childTimeBoundMs || !stages || Array.isArray(stages) ||
+        Object.keys(stages).length !== keys.length || keys.some(key => !Number.isSafeInteger(stages[key]) || stages[key]! < 0) ||
+        stages.setup !== 1 || stages.admission !== 1 || stages.reach !== 2 || stages.joinedGitFree !== 2 || stages.structuralGitFree! % 2 !== 0) {
+      throw new Error("unsupported controller stage inventory");
+    }
+    const derived = keys.reduce((sum, key) => sum + stages[key]!, 0) * childTimeBoundMs;
+    if (!Number.isSafeInteger(derived) || budget.timeoutMs !== derived || derived <= childTimeBoundMs) throw new Error("invalid derived controller deadline");
+    controllerTimeBoundMs = derived;
+  } catch (error) {
+    const reason = `controller budget UNKNOWN (${error instanceof Error ? error.message : String(error)})`;
+    const refusal = { text: `census-precheck: NOT MEASURED — ${reason}`, censuses: [], offeredBaselines: [] };
+    log("fix.census_check", { outcome: "refused", refusal: refusal.text, reason });
+    return { refusal, unmeasured: reason };
+  }
   const precheck = yield* step(() => run(process.execPath, [join(scriptsRoot, "scripts/census-precheck.mjs"), "--root", root],
-    { cwd: scriptsRoot, env, encoding: "utf8", timeout: CENSUS_PRECHECK_TIME_BOUND_MS, maxBuffer: 64 * 1024 * 1024 }));
+    { cwd: scriptsRoot, env, encoding: "utf8", timeout: controllerTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
   const text = `${precheck.stdout ?? ""}${precheck.stderr ?? ""}`;
   let refusal = censusPushRefusal(text);
   let unmeasured = precheck.status === 2 ? text.trim() : undefined;
@@ -10996,7 +11024,7 @@ function* fixCensusSnapshotSteps(
     const reach = "test/the-affected-suite-reach-ratchet.test.ts";
     const result = yield* step(() => run(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import",
       "./test/setup/tmp-hygiene.ts", reach],
-      { cwd: scriptsRoot, env, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }));
+      { cwd: scriptsRoot, env, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
     const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
     if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
       refusal = unavailable(`census suite ${reach}`, result, output);
@@ -11689,7 +11717,7 @@ export function normalizeRunPrAcceptanceFromPlan(
   // The SAME two leaves (and the same defaults) repairRetroAcceptanceBlock injects — reused from its
   // own signature rather than a second inline copy; its retro-only `diff` input is omitted here.
   deps: Omit<NonNullable<Parameters<typeof repairRetroAcceptanceBlock>[2]>, "diff"> = {},
-): "rewritten" | "healthy" | "no-block" | "error" {
+): "rewritten" | "healthy" | "no-block" | "raced" | "error" {
   return runTaskCommandHelpers(runTaskCommandHost()).normalizeRunPrAcceptanceFromPlan(prUrl, taskId, planCriteria, log, deps);
 }
 
@@ -20316,6 +20344,9 @@ function reportRetroTriggerBackoff(
   backoff: Extract<RetroBackoffDecision, { eligible: false }>,
   count: { mergesSinceMarker: number; basis: "attempt-or-runless-lower-bound" | "cached-shipped-plus-runless" | "authoritative-shipped-plus-runless" },
 ): void {
+  const eligibility = backoff.nextEligibleAt === null
+    ? `uncapped time boundary is outside the supported Date range; eligible once ${backoff.mergesFloor} merges have landed since the marker`
+    : `eligible again at ${backoff.nextEligibleAt} or once ${backoff.mergesFloor} merges have landed since the marker`;
   const fingerprint = `${marker?.ts ?? "absent"}\u0000backoff\u0000${backoff.streak}\u0000${backoff.nextEligibleAt}\u0000${count.basis}\u0000${count.mergesSinceMarker}`;
   if (
     lastRetroTriggerDecline?.ledgerPath === ledgerPath &&
@@ -20330,10 +20361,11 @@ function reportRetroTriggerBackoff(
       outcome: "declined",
       reason:
         `automated retro backed off: ${backoff.streak} consecutive failed attempt(s) in this marker cycle; ` +
-        `eligible again at ${backoff.nextEligibleAt} or once ${backoff.mergesFloor} merges have landed since the marker`,
+        eligibility,
       marker_ts: marker?.ts ?? null,
       streak: backoff.streak,
       next_eligible_at: backoff.nextEligibleAt,
+      ...(backoff.nextEligibleAt === null ? { next_eligible_at_state: backoff.nextEligibleAtState } : {}),
       merges_floor: backoff.mergesFloor,
       merges_since_marker: count.mergesSinceMarker,
       count_basis: count.basis,
