@@ -271,18 +271,25 @@ test("W1-T10854: verdict receipt uses the final judge attempt once", async t => 
 });
 
 test("W1-T10854: verdict receipt refuses unavailable or superseded identity", async t => {
-  for (const shape of ["unreported", "unobserved", "foreign", "provider", "conflict", "superseded", "invalid"] as const) {
+  for (const shape of ["unreported", "unobserved", "foreign", "provider", "conflict", "superseded", "invalid", "selection-error", "result-error", "unkeyed-fallback", "fallback-error"] as const) {
     const f = revalidationMoneyFixture(t, async args => {
       if (shape !== "unobserved") receiptSelection(args, shape === "invalid" ? "not-an-immutable-id" : RECEIPT_A);
       if (shape === "conflict") receiptSelection(args, RECEIPT_A, "codex");
+      if (shape === "selection-error") args.onSelectionAssignment?.({ id: RECEIPT_A,
+        get selected() { throw new Error("private-selection-metadata"); } } as WorkerSelectionAssignment);
+      if (shape === "unkeyed-fallback") args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract" });
+      if (shape === "fallback-error") args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract",
+        selectionAssignmentId: { toString() { throw new Error("private-fallback-metadata"); } } as unknown as string });
       if (shape === "superseded") {
         args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract", selectionAssignmentId: RECEIPT_A,
           result: revalidationMoneyResult({ selectionAssignmentId: RECEIPT_A }) });
         receiptSelection(args, RECEIPT_B);
       }
-      return revalidationMoneyResult({ text: RECEIPT_TEXT,
+      const result = revalidationMoneyResult({ text: RECEIPT_TEXT,
         selectionAssignmentId: shape === "unreported" ? undefined : shape === "foreign" ? RECEIPT_B : RECEIPT_A,
         ...(shape === "provider" ? { provider: "codex" } : {}) });
+      if (shape === "result-error") Object.defineProperty(result, "provider", { get() { throw new Error("private-result-metadata"); } });
+      return result;
     }, { select: false });
     const result = await consumeReceipt(receiptConsumer(f.judge));
     assert.equal(result.receipt?.identity_state, "unavailable", shape);
@@ -344,6 +351,19 @@ test("W1-T10854: receipt metadata preserves failures and money", async t => {
   await runIssueRevalidationGarden(unavailable.ports);
   assert.equal(verdictRows(unavailable.rec)[0]!.action, "close");
   assert.equal((verdictRows(unavailable.rec)[0]!.judge_receipt as Record<string, unknown>).identity_state, "unavailable");
+  const malformed = receiptConsumer((async (_prompt: string, _n: number, observe: (value: unknown) => void) => {
+    observe({ get identity_state() { throw new Error("private-identity-metadata"); } });return RECEIPT_TEXT;
+  }) as never);
+  assert.equal((await consumeReceipt(malformed)).receipt.identity_unavailable_reason, "receipt-build-failed");
+  for (const evidence of [
+    { version: 2 },
+    { version: 1, source: "model", parser_state: "parsed", parsed_verdict: "still-true", evidence_state: "missing-citation" },
+    { version: 1, source: "model", parser_state: "unparseable", evidence_state: "accepted" },
+    { version: 1, source: "model", parser_state: "parsed", parsed_verdict: "unknown", evidence_state: "absence-only" },
+  ]) {
+    const r = await consumeReceipt(async () => ({ verdict: "resolved", reason: "r", citation: "PR #100 merged", judgeEvidence: evidence } as never));
+    assert.equal(r.row.action, "close");assert.equal(r.receipt.identity_unavailable_reason, "receipt-build-failed");
+  }
   const brokenLog = ports({ listOpenIssues: async () => [BACKLOG[1]!], log: step => {
     if (step === ISSUE_REVALIDATION_VERDICT_STEP) throw original;
   } });

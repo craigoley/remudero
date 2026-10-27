@@ -189,11 +189,56 @@ export function classifyIssue(issue: RevalidationIssue, hasReferent: (issue: Rev
 
 export type RevalidationVerdictKind = "resolved" | "still-true" | "convert-to-task" | "unknown";
 
+const ASSIGNMENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const IDENTITY_REASONS = new Set(["result-assignment-unreported", "assignment-not-observed", "assignment-conflict",
+  "superseded-assignment", "provider-mismatch", "invalid-assignment", "fallback-assignment-unavailable",
+  "receipt-build-failed", "legacy-text-only", "judge-unavailable", "not-applicable"] as const);
+type IdentityReason = typeof IDENTITY_REASONS extends Set<infer T> ? T : never;
+type JudgeIdentity = { identity_state: "observed"; selection_assignment_id: string } |
+  { identity_state: "unavailable"; identity_unavailable_reason: IdentityReason };
+export type IssueRevalidationJudgeText = (prompt: string, issueNumber: number, observe?: (identity: JudgeIdentity) => void) => Promise<string>;
+type JudgeReceipt = JudgeIdentity & {
+  version: 1;
+  source: "model" | "legacy" | "deterministic" | "cached" | "unjudged" | "judge-unavailable";
+  parser_state: "parsed" | "unparseable" | "not-observed";
+  parsed_verdict?: RevalidationVerdictKind;
+  evidence_state: "accepted" | "missing-citation" | "absence-only" | "not-assessed";
+};
+const unavailableIdentity = (reason: IdentityReason): JudgeIdentity => ({ identity_state: "unavailable", identity_unavailable_reason: reason });
+
+function closedJudgeIdentity(value: JudgeIdentity): JudgeIdentity {
+  if (value.identity_state === "observed" && ASSIGNMENT_ID.test(value.selection_assignment_id)) {
+    return { identity_state: "observed", selection_assignment_id: value.selection_assignment_id };
+  }
+  return value.identity_state === "unavailable" && IDENTITY_REASONS.has(value.identity_unavailable_reason)
+    ? unavailableIdentity(value.identity_unavailable_reason) : unavailableIdentity("receipt-build-failed");
+}
+
+function judgeReceipt(verdict: RevalidationVerdict, source: JudgeReceipt["source"]): JudgeReceipt {
+  const empty = (reason: IdentityReason): JudgeReceipt => ({ version: 1, source,
+    ...unavailableIdentity(reason), parser_state: "not-observed", evidence_state: "not-assessed" });
+  if (source !== "model") return empty(source === "legacy" ? "legacy-text-only" : source === "judge-unavailable" ? "judge-unavailable" : "not-applicable");
+  try {
+    const receipt = verdict.judgeEvidence;
+    if (receipt === undefined) { source = "legacy";return empty("legacy-text-only"); }
+    if (receipt.version !== 1 || !["model", "legacy"].includes(receipt.source) ||
+        !["parsed", "unparseable"].includes(receipt.parser_state) ||
+        !["accepted", "missing-citation", "absence-only", "not-assessed"].includes(receipt.evidence_state) ||
+        (receipt.parser_state === "parsed" && (!VERDICT_KINDS.has(receipt.parsed_verdict!) || receipt.evidence_state === "not-assessed")) ||
+        (receipt.parser_state === "unparseable" && (receipt.parsed_verdict !== undefined || receipt.evidence_state !== "not-assessed")) ||
+        (receipt.evidence_state === "missing-citation" && receipt.parsed_verdict !== "resolved") ||
+        (receipt.evidence_state === "absence-only" && !["resolved", "still-true"].includes(receipt.parsed_verdict!))) return empty("receipt-build-failed");
+    return { version: 1, source: receipt.source, ...(receipt.source === "legacy" ? unavailableIdentity("legacy-text-only") : closedJudgeIdentity(receipt)), parser_state: receipt.parser_state,
+      ...(receipt.parser_state === "parsed" ? { parsed_verdict: receipt.parsed_verdict } : {}), evidence_state: receipt.evidence_state };
+  } catch { return empty("receipt-build-failed"); }
+}
+
 export interface RevalidationVerdict {
   verdict: RevalidationVerdictKind;
   reason: string;
   /** Required for `resolved`: the evidence a reader can check. A `resolved` without one is unknown. */
   citation?: string;
+  judgeEvidence?: JudgeReceipt;
 }
 
 export type RevalidationAction = "close" | "refresh" | "convert" | "keep";
@@ -431,6 +476,7 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     const before = prior.get(issue.number);
     let verdict: RevalidationVerdict;
     let judged = false;
+    let receiptSource: JudgeReceipt["source"] = "deterministic";
     if (issueClass === "referent") {
       verdict = referents.get(issue.number) ?? { verdict: "unknown", reason: "the referent could not be derived this pass" };
     } else if (issueClass === "liveness") {
@@ -441,17 +487,22 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
       nowMs - Date.parse(before.at) < STILL_TRUE_REFRESH_MS) {
       // An unchanged issue judged within the week keeps its verdict: no spawn for unchanged state.
       verdict = { verdict: before.verdict, reason: before.reason ?? "unchanged since the last judgement", ...(before.citation ? { citation: before.citation } : {}) };
+      receiptSource = "cached";
     } else if (judges >= MAX_ISSUE_REVALIDATION_JUDGES_PER_PASS) {
       verdict = { verdict: "unknown", reason: "judge cap reached this pass; judged on a later pass" };
+      receiptSource = "unjudged";
     } else {
       judges++;
       judged = true;
+      receiptSource = "model";
       try {
         verdict = await ports.judge(issue, issueClass, ports.evidence(issue));
       } catch (e) {
         verdict = { verdict: "unknown", reason: `judge unavailable (${String((e as Error)?.message ?? e)})` };
+        receiptSource = "judge-unavailable";
       }
     }
+    const receipt = judgeReceipt(verdict, receiptSource);
     verdict = normalise(verdict);
 
     let spokeLast: boolean | undefined;
@@ -497,6 +548,7 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
       mode: policy.mode, issue_number: issue.number, issue_url: issue.url, issue_class: issueClass,
       escalation_class: escalationClass ?? null, issue_updated_at: issue.updatedAt, verdict: verdict.verdict,
       reason: verdict.reason, citation: verdict.citation ?? null, action, guard: guard ?? null, acted, judged,
+      judge_receipt: receipt,
     });
   }
   const tally = (pick: (r: IssueRevalidationRow) => string) =>
@@ -625,12 +677,20 @@ const VERDICT_KINDS = new Set<RevalidationVerdictKind>(["resolved", "still-true"
 
 /** Parse the judge's lines. Anything unparseable is unknown, and a resolved verdict needs a citation. */
 export function parseIssueRevalidationVerdict(text: string): RevalidationVerdict {
+  return parseIssueRevalidationJudgment(text).verdict;
+}
+
+function parseIssueRevalidationJudgment(text: string): { verdict: RevalidationVerdict; parser_state: "parsed" | "unparseable";
+  parsed_verdict?: RevalidationVerdictKind; evidence_state: JudgeReceipt["evidence_state"] } {
   const kind = /REVALIDATION_VERDICT:\s*([a-z-]+)/i.exec(text)?.[1]?.toLowerCase() as RevalidationVerdictKind | undefined;
-  if (!kind || !VERDICT_KINDS.has(kind)) return { verdict: "unknown", reason: "the judge's output carried no parseable REVALIDATION_VERDICT" };
+  if (!kind || !VERDICT_KINDS.has(kind)) return { verdict: { verdict: "unknown", reason: "the judge's output carried no parseable REVALIDATION_VERDICT" },
+    parser_state: "unparseable", evidence_state: "not-assessed" };
   const reason = /REVALIDATION_REASON:\s*(.+)/i.exec(text)?.[1]?.trim() || "(no reason stated)";
   const cited = /REVALIDATION_CITATION:\s*(.+)/i.exec(text)?.[1]?.trim();
   const citation = cited && !/^none\.?$/i.test(cited) ? cited : undefined;
-  return normalise({ verdict: kind, reason, ...(citation ? { citation } : {}) });
+  return { verdict: normalise({ verdict: kind, reason, ...(citation ? { citation } : {}) }), parser_state: "parsed", parsed_verdict: kind,
+    evidence_state: kind === "resolved" && !citation ? "missing-citation" :
+      citation && isAbsenceOnlyCitation(citation) && (kind === "resolved" || kind === "still-true") ? "absence-only" : "accepted" };
 }
 
 /** The names an issue's text points at: backticked tokens, then path-like and dotted ledger-step words.
@@ -679,7 +739,7 @@ export interface ProductionIssueRevalidationOpts {
   referentVerdicts: IssueRevalidationPorts["referentVerdicts"];
   hasReferent: IssueRevalidationPorts["hasReferent"];
   /** The judge model's raw text for a prompt (one spawn). */
-  judgeText: (prompt: string, issueNumber: number) => Promise<string>;
+  judgeText: IssueRevalidationJudgeText;
   clock?: Clock;
   policy?: () => IssueRevalidationPolicy;
   /** `gh` reads through the shared, paced async transport. */
@@ -783,7 +843,16 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
       }
       return { facts };
     },
-    judge: async (issue, issueClass, evidence) => parseIssueRevalidationVerdict(await opts.judgeText(buildIssueRevalidationPrompt(issue, issueClass, evidence), issue.number)),
+    judge: async (issue, issueClass, evidence) => {
+      let identity = unavailableIdentity("legacy-text-only"), observed = false;
+      const text = await opts.judgeText(buildIssueRevalidationPrompt(issue, issueClass, evidence), issue.number, value => {
+        observed = true;
+        try { identity = closedJudgeIdentity(value); } catch { identity = unavailableIdentity("receipt-build-failed"); }
+      });
+      const parsed = parseIssueRevalidationJudgment(text);
+      return { ...parsed.verdict, judgeEvidence: { version: 1, source: observed ? "model" : "legacy", ...identity,
+        parser_state: parsed.parser_state, ...(parsed.parsed_verdict ? { parsed_verdict: parsed.parsed_verdict } : {}), evidence_state: parsed.evidence_state } };
+    },
     close: async (url, comment) => {
       if (!issues.closeWithComment) throw new Error("the issue gateway cannot close");
       await issues.closeWithComment(url, comment);
@@ -805,11 +874,13 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
 
 /** The existing single judge spawn, with best-effort monetary receipts before parsing can discard a
  * paid result. The optional config names only the evidence sink, never the router or child environment. */
-export function issueRevalidationJudgeText(opts: { mount: Mount; cwd: string; settingsFile: string; spawn?: typeof spawnWorker; config?: Config }): (prompt: string, issueNumber: number) => Promise<string> {
+export function issueRevalidationJudgeText(opts: { mount: Mount; cwd: string; settingsFile: string; spawn?: typeof spawnWorker; config?: Config }): IssueRevalidationJudgeText {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("escalation-summary");
-  return async (prompt, issueNumber) => {
+  return async (prompt, issueNumber, observe) => {
     const identity = { taskId: "ISSUE-REVALIDATION", runId: `issue-revalidation-${issueNumber}-${createHash("sha256").update(prompt).digest("hex").slice(0, 12)}` };
     let assignmentId: string | undefined, unstartedRecorded = false;
+    const selections = new Map<string, { signature: string; provider: string }>(), departed = new Set<string>();
+    let identityInvalid = false, identityConflict = false, unknownFallback = false;
     const recordedIds = new Set<string>(), unkeyedResults = new WeakSet<WorkerResult>(), keyedResults = new WeakSet<WorkerResult>();
     const record = (result: WorkerResult | undefined, id: string | undefined): void => {
       if (id !== undefined && recordedIds.has(id)) return;
@@ -847,11 +918,40 @@ export function issueRevalidationJudgeText(opts: { mount: Mount; cwd: string; se
         cwd: opts.cwd, permissionMode: "bypassPermissions", settingsFile: opts.settingsFile, prompt,
         model: opts.mount.model, effort: opts.mount.effort, maxTurns: opts.mount.maxTurns, tools: [],
         ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
-        onSelectionAssignment: assignment => { assignmentId = assignment.id; },
-        onModelFallbackAttempt: attempt => record(attempt.result, attempt.selectionAssignmentId ?? attempt.result?.selectionAssignmentId),
+        onSelectionAssignment: assignment => {
+          assignmentId = assignment.id;
+          try {
+            if (!ASSIGNMENT_ID.test(assignment.id) || selections.size >= 32) { identityInvalid = true;return; }
+            const provider = assignment.selected.provider, signature = JSON.stringify(assignment.selected);
+            if (!["claude", "codex", "cash"].includes(provider)) { identityInvalid = true;return; }
+            if (selections.has(assignment.id) && selections.get(assignment.id)!.signature !== signature) identityConflict = true;
+            selections.set(assignment.id, { provider, signature });
+          } catch { identityInvalid = true; }
+        },
+        onModelFallbackAttempt: attempt => {
+          const id = attempt.selectionAssignmentId ?? attempt.result?.selectionAssignmentId;
+          record(attempt.result, id);
+          try {
+            if (id && ASSIGNMENT_ID.test(id) && departed.size < 32) departed.add(id);
+            else unknownFallback = true;
+          } catch { unknownFallback = true; }
+        },
       }, identity));
     } catch (error) { record(undefined, assignmentId); throw error; }
-    record(result, result.selectionAssignmentId ?? assignmentId);
+    const finalId = result.selectionAssignmentId;
+    record(result, finalId ?? assignmentId);
+    if (observe) {
+      let identity: JudgeIdentity;
+      try {
+        identity = identityInvalid ? unavailableIdentity("invalid-assignment") : identityConflict ? unavailableIdentity("assignment-conflict") :
+          finalId === undefined ? unavailableIdentity("result-assignment-unreported") : !ASSIGNMENT_ID.test(finalId) ? unavailableIdentity("invalid-assignment") :
+          !selections.has(finalId) ? unavailableIdentity("assignment-not-observed") : unknownFallback ? unavailableIdentity("fallback-assignment-unavailable") :
+          finalId !== assignmentId || departed.has(finalId) ? unavailableIdentity("superseded-assignment") :
+          selections.get(finalId)!.provider !== result.provider ? unavailableIdentity("provider-mismatch") :
+          { identity_state: "observed", selection_assignment_id: finalId };
+      } catch { identity = unavailableIdentity("receipt-build-failed"); }
+      try { observe(identity); } catch { /* optional receipt observers cannot change the worker result */ }
+    }
     return result.text;
   };
 }
