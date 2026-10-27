@@ -169,7 +169,7 @@ test("W1-T5617: the child reads each failing suite from its TAP, top-level only,
     assert.deepEqual(call?.args.slice(-2), [BOUNDS.testFile, TESTS.testFile]);
     assert.ok(call?.args.some((a) => a.endsWith("test/setup/tmp-hygiene.ts")), call?.args.join(" "));
     assert.equal(call?.opts.cwd, "/repo");
-    assert.equal(call?.opts.timeout, 60_000);
+    assert.equal(call?.opts.timeout, 120_000);
     assert.equal(call?.opts.env.GIT_DIR, undefined, "a hook's GIT_DIR never reaches the suites");
     assert.equal(call?.opts.env.NODE_TEST_CONTEXT, undefined, "a parent runner's context never reformats the child's TAP");
     assert.equal(call?.opts.env.RMD_SELF_SYNC_DONE, undefined, "the lanes' read-only escape never makes the setup refuse");

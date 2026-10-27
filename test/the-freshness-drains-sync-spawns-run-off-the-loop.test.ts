@@ -38,18 +38,18 @@ test("the census precheck can report its serial child backstops before the paren
   const run: CensusChildRunner<Promise<CensusChildResult>> = async (_file, args, options) => {
     calls.push(args);
     if (args.includes("--snapshot-budget")) {
-      const budget = { version: 1, childTimeBoundMs: 60_000,
-        stages: { setup: 1, admission: 1, reach: 2, joinedGitFree: 2, structuralGitFree: 4 }, timeoutMs: 600_000 };
+      const budget = { version: 1, childTimeBoundMs: 120_000,
+        stages: { setup: 1, admission: 1, reach: 2, joinedGitFree: 2, structuralGitFree: 4 }, timeoutMs: 1_200_000 };
       return { status: 0, signal: null, stdout: JSON.stringify(budget), stderr: "" };
     }
     if (args[0]?.endsWith("census-precheck.mjs")) {
-      const serialChildElapsedMs = 3 * 60_000;
+      const serialChildElapsedMs = 3 * 120_000;
       if ((options.timeout ?? 0) <= serialChildElapsedMs) {
         return { status: null, signal: "SIGTERM", stdout: "", stderr: "" };
       }
       return { status: 2, signal: null, stdout: "census suites NOT MEASURED (time bound)", stderr: "" };
     }
-    assert.equal(options.timeout, 60_000, "the standalone reach suite keeps its own bound");
+    assert.equal(options.timeout, 120_000, "the standalone reach suite keeps its own bound");
     return { status: 0, signal: null, stdout: "# tests 1\n# fail 0\n", stderr: "" };
   };
   const result = await checkFixCensusSnapshotAsync("/fixture", "/fixture/snapshot.json", (_step, fields) => {
