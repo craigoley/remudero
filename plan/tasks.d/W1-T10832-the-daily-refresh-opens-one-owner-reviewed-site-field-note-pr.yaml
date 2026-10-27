@@ -1,0 +1,101 @@
+- id: W1-T10832
+  title: "THE DAILY FIELD-TRIALS REFRESH NEVER REACHES THE SITE — it passes no --consent and publishes nothing, so a public note would need a hand PR every day before the page's 72 h historical label; after a good refresh with the owner's consent file present, core writes the field-note candidate and keeps one site import PR open through the existing REST writer, and only the owner merges it"
+  repo: remudero
+  depends_on: [W1-T10830, W1-T10831]  # needs a refresh that survives and ledgers its steps, and the exporter's candidate
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 35.00
+  risk: high  # writes a PR on a public repository; a wrongly armed PR or an unreviewed stamp would publish data without the owner
+  band_meaning: blast-radius
+  priority: 1  # Craig 2026-10-27: field trials live on the site, by automation rather than hand PRs
+  status: queued
+  attempts: 0
+  origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 field-trials ask; consent file approved by Craig at ~13:45Z the same day (receipt owner-2026-10-27-craig-oley)"
+  plan_refs: [W1-T4574, W1-T10830, W1-T10831, W1-T10756, W1-T136]
+  files:
+    - deploy/field-trials-refresh.sh
+    - src/lib/field-trials-site-import.ts
+    - src/lib/field-trials-flow.ts
+    - src/run-task.ts
+    - test/routing/a-field-note-candidate-opens-one-reviewed-site-pr.test.ts
+    - test/deploy/the-field-trials-refresh-passes-the-host-consent-file.test.ts
+  rationale: |
+    READ 2026-10-27: core origin/main 07dbdcc77, remudero-site main b80fbbb, the host read-only.
+
+    TODAY. deploy/field-trials-refresh.sh (installed copy blob ab84b6cd = main) runs `rmd field-trials`
+    with no --consent; the 10-18 log reads `release: withheld (no-consent-receipt) ... nothing published`.
+    The host's private directory /home/craigoleyagent/rmd-state2/state/field-trials holds no consent file.
+    CONSENT. Craig approved a field-trials-consent-v1 file at ~13:45Z on 2026-10-27, granting
+    aggregate-opt-in for craigoley/remudero, craigoley/remudero-console and craigoley/remudero-site, each
+    with receipt "owner-2026-10-27-craig-oley". The approved copy is on the operator Mac at
+    ~/Remudero-notes/field-trials/field-trials-consent-v1.json, sha256
+    e117b3d1fc83c97f23577c2156c870896a53367804562124424dd489cf5b6fbd; it validates under
+    parseFieldTrialsConsent (src/lib/field-trials-flow.ts). The site's registry (lib/field-trials-consent.ts,
+    revision owner-2026-09-25-v1) already lists remudero, remudero-console and remudero-site as active
+    aggregate-public; it names repos without the owner prefix, so the exporter maps owner/repo to the repo
+    name.
+    THE SITE SIDE IS BUILT. PORTAL-T37 shipped the importer (remudero-site #178, #181): it validates a
+    reviewed aggregate, refuses overlap and chains a history, and its design reserves the daily candidate PR
+    for "after the core exporter is proven", never auto-merged. Nothing in the site repo schedules an import
+    (no workflow names the importer; no open branch is a field-note branch).
+    THE EXISTING WRITER PATH. src/lib/plan-pr-emitter.ts already opens and probes PRs over REST
+    (probeExistingPlanPr, createPlanPrRest: `gh api --method POST repos/{owner}/{repo}/pulls`) through an
+    injected GhApiFetcher, and the refresh's GitHub step already runs with the fleet GitHub App credentials
+    (GH_APP_ID, GH_APP_INSTALLATION_ID, GH_APP_PRIVATE_KEY_PATH from remudero-daemon). No cross-instance
+    handoff that carries a data payload to the site instance's lane was found, so this uses the REST path.
+  design: |
+    1. CONSENT PATH. The durable host path is the core private directory:
+       /home/craigoleyagent/rmd-state2/state/field-trials/field-trials-consent-v1.json (in the container,
+       /home/node/Remudero/state/field-trials/field-trials-consent-v1.json). The refresh passes it as
+       --consent when it is a regular, non-symlink, owner-only file, honouring an RMD_FIELD_TRIALS_CONSENT
+       override; absent means today's `withheld (no-consent-receipt)`, never a failure of the other steps.
+       The file is NOT committed (it is the owner's grant, not code). Print this operator copy command in the
+       implementation PR exactly, and never run it from a session:
+         scp ~/Remudero-notes/field-trials/field-trials-consent-v1.json remudero:/home/craigoleyagent/rmd-state2/state/field-trials/field-trials-consent-v1.json && ssh remudero 'chmod 600 /home/craigoleyagent/rmd-state2/state/field-trials/field-trials-consent-v1.json && sha256sum /home/craigoleyagent/rmd-state2/state/field-trials/field-trials-consent-v1.json'
+       The printed digest must equal e117b3d1fc83c97f23577c2156c870896a53367804562124424dd489cf5b6fbd.
+       A revoked or removed receipt withdraws that repo from the next candidate (the existing
+       revokeWithdrawnConsent path).
+    2. AFTER A GOOD REFRESH (the snapshot step ok per W1-T10830's step states), run the W1-T10831 exporter.
+       A withheld result ends the pass with its reason in the field-trials.refresh row.
+    3. ONE OPEN SITE PR. With a candidate, open or update ONE ready (never draft) PR on
+       craigoley/remudero-site from a branch outside every fleet branch pattern (not run-*, plan-file-*),
+       found with probeExistingPlanPr and opened with createPlanPrRest. Stage its files by running the
+       site's own scripts/import-model-field-note.mjs in a fresh checkout of site main, so the site's
+       validator, overlap rule and lineage chain decide; a refusal is recorded, not worked around. A newer
+       candidate while the PR is unreviewed replaces its contents with one window from the last RELEASED
+       windowEnd, so there is never a second open import PR or an overlapping window.
+    4. OWNER REVIEW IS THE GATE. reviewedBy/reviewedAt/publishedAt are stamped only from the owner's
+       approving review on that PR (its submitted_at), on the pass after it; automation then re-stages and
+       pushes the stamped note. No automation arms, enqueues or merges the PR; the owner merges. Verify, and
+       pin with a test, that the site instance's sweep does not arm a PR on this branch shape. A PR left
+       unreviewed past the page's 72 h historical label stays open and is refreshed, never merged.
+    syncFieldNoteSiteImport in the new src/lib/field-trials-site-import.ts owns steps 3 and 4; the
+    `rmd field-trials` command calls it after the exporter.
+    5. Every outcome (withheld, candidate, PR opened, PR updated, stamped, refused by the importer) is in
+       the field-trials.refresh row. Prove the App installation can push a branch and open a PR on
+       remudero-site under the SERVICE identity before relying on it; if it cannot, the row says so and the
+       PR reports the exact grant the operator must add.
+  acceptance:
+    - claim: "the refresh passes the core private consent file as --consent only when it is an owner-only regular file, and its absence leaves the other steps running with a withheld release"
+      proof: 'grep: test("W1-T10832: the refresh passes the private consent file only when it is owner-only" in test/deploy/the-field-trials-refresh-passes-the-host-consent-file.test.ts'
+    - claim: "with a candidate and no open import PR the pass opens one ready site PR through the REST writer on a non-fleet branch; with one open it updates that PR instead of opening a second"
+      proof: 'grep: test("W1-T10832: a field-note candidate keeps exactly one site import PR open" in test/routing/a-field-note-candidate-opens-one-reviewed-site-pr.test.ts'
+    - claim: "review fields are stamped only from an approving review by the owner, and no code path arms, enqueues or merges the site PR"
+      proof: 'grep: test("W1-T10832: only the owner review stamps the note and nothing merges it" in test/routing/a-field-note-candidate-opens-one-reviewed-site-pr.test.ts'
+    - claim: "a candidate the site importer refuses is recorded in the refresh row and opens no PR"
+      proof: 'grep: test("W1-T10832: a site importer refusal opens no PR" in test/routing/a-field-note-candidate-opens-one-reviewed-site-pr.test.ts'
+    - claim: "the field-trials command drives the site import through the new module"
+      proof: 'grep: syncFieldNoteSiteImport( in src/lib/field-trials-flow.ts'
+  falsifier: |
+    At base every case fails: the refresh passes no --consent and nothing opens a site PR.
+    - Pass --consent whenever the path exists, symlink or group-readable: the owner-only case fails.
+    - Open a new PR per pass: the one-open-PR case fails.
+    - Stamp reviewedAt at candidate time, or from any approving reviewer: the owner-review case fails.
+    - Call `gh pr merge` or enable auto-merge anywhere on this path: the nothing-merges assertion fails.
+    - Validate in core and skip the site importer: the importer-refusal case fails.
+    GUARDS that held at base and must still hold:
+    - test/field-trials-flow.test.ts (withheld without consent, revocation, refusal on a private join key);
+    - test/plan-pr-emitter.test.ts (the REST create and probe argv).
+    Each guard's existing case must fail when its production branch is removed, and pass again with zero
+    failures once it is restored.
