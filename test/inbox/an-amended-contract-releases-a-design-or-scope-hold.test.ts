@@ -393,6 +393,26 @@ describe("test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
     assert.equal(f.state.escalated, 1, "the scope question is not re-asked");
   });
 
+  test("the light route adopts an answered scope contract without admitting a fix", async () => {
+    const rows: Record<string, unknown>[] = [
+      { step: "sweep.disposed", task_id: TASK, pr_number: 13039, head_sha: HEAD,
+        disposition: "blocked-fixable", acted: true, red_checks: [RED] },
+      { step: "fix.scope_amendment", task_id: TASK, pr_number: 13039, head_sha: HEAD,
+        outcome: "created", amendmentNumber: 13106, paths: ["src/lib/scout-gardener.ts"] },
+      { step: "fix.commit_refused", task_id: TASK, head_sha: HEAD, reason: "non-test paths need scope",
+        scope_amendment_detail: "NEEDS_SCOPE src/lib/scout-gardener.ts" },
+    ];
+    const f = fixture(rows);
+    await runSweep([pr()], { ...f.deps, updateBranch: undefined });
+    assert.equal(lastDisposed(rows).progress_contract_revision, "contract-A");
+    f.state.revision = "contract-B";
+    const capability = await lightPassHeadContractRefresh([pr()], f.deps);
+    await runSweepLightPass([pr()], { ...f.deps, updateBranch: undefined, ...capability });
+    assert.equal(f.state.refreshed, 1, "the approved amendment is adopted through the selected capability");
+    assert.equal(f.state.dispatched, 0, "the old head cannot enter another fix round");
+    assert.equal(f.state.admissions, 0, "contract adoption grants no fix admission");
+  });
+
   test("a fix round's NEEDS_DESIGN row records the contract it worked on", async (t) => {
     const repo = gitRepo({ scope: t, kind: "design-contract" });
     repo.git("config", "user.name", "fixture");
