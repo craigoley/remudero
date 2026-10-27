@@ -282,9 +282,11 @@ test("private registry selection reaches real host and daemon readers: async dep
         /selected instance registry unavailable \(target_missing_or_mismatched\)/);
       assert.deepEqual(calls, [], "an invalid selected target refuses before any transport");
       writeFileSync(fixture.selected, registry("live") + `    state_dir: ${stateRoot}\n    container_name: selected-container\n`);
-      assert.throws(() => realDeploySensorsAsync(options, forbiddenGh),
-        /selected instance registry unavailable \(revision_changed\)/);
-      assert.deepEqual(calls, [], "a revised selected file cannot reach a sensor transport");
+      assert.equal(runtimeRegistry.runtimeInstanceRegistryMode("owner/repo"), "shadow",
+        "the synchronous invocation snapshot never adopts revised live bytes");
+      await assert.rejects(runtimeRegistry.assertInstanceRegistryRuntimeCurrent(),
+        /selected instance registry unavailable \(digest_mismatch\)/);
+      assert.deepEqual(calls, [], "the asynchronous adoption check refuses before any transport");
     }, { envPath: fixture.selected, instanceName: "worker" });
   } finally { fixture.cleanup(); }
 });
