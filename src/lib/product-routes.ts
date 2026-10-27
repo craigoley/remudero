@@ -1,3 +1,4 @@
+import { PRODUCT_CASE_LIMITS, PRODUCT_CASE_VERSION, ProductCaseService } from "./product-case.js";
 import { RawBodyTooLargeError, readBoundedRawBody, verifiedActor, type Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
 import { ProductIntentStore } from "./product-intent-store.js";
@@ -169,4 +170,27 @@ export function buildProductBuildRoutes(options: ProductBuildOptions): Route[] {
       reply(200, result.value);
     } },
   ];
+}
+
+
+/** Resume an adopted product case; build actions retain the existing HIGH-tier spend guards. */
+export function buildProductCaseRoutes(options: ProductBuildOptions): Route[] {
+  const service = new ProductCaseService(options);
+  const codes = { ...repositoryStatus, ...buildStatus };
+  return [{ method: "POST", path: "/v1/products/case", scope: "write", tier: "high", async handler(req, res) {
+    res.setHeader("Cache-Control", "private, no-store");
+    const reply = (code: number, body: Record<string, unknown>) => sendJson(res, code, { version: PRODUCT_CASE_VERSION, ...body });
+    const actor = verifiedActor(req);
+    if (!actor) { reply(403, { error: "invalid_identity" }); return; }
+    let command: unknown;
+    try { command = JSON.parse(await readBoundedRawBody(req, PRODUCT_CASE_LIMITS.requestBytes)); }
+    catch (error) {
+      const tooLarge = error instanceof RawBodyTooLargeError;
+      reply(tooLarge ? 413 : 400, { error: tooLarge ? "request_too_large" : "invalid_input" });
+      return;
+    }
+    const result = await service.execute(actor, command);
+    if (!result.ok) { reply(codes[result.code], { error: result.code }); return; }
+    reply(200, { ...result.value });
+  } }];
 }

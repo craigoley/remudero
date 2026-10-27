@@ -317,6 +317,8 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/products/deployment",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10615).
   "POST /v1/products/build",
+  // Assembled default-transport HTTP proof: W1-T10618 in test/console-api/serve/product-routes.test.ts.
+  "POST /v1/products/case",
   "POST /v1/control/assistant-action",
   "POST /v1/control/stop",
   "POST /v1/control/resume",
@@ -611,6 +613,33 @@ test("W1-T10615: POST /v1/products/build is high tier, confirmed, and reads the 
     assert.equal((await started.json()).error, "repository_missing");
     assert.ok(!existsSync(join(h.fleetRoot, "state", "KICK_REQUESTED-wreckterra:W9-T1")), "a refusal writes no marker");
     assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "a refused build preserves the ledger");
+  }, true, true);
+});
+
+test("W1-T10618: POST /v1/products/case requires confirmation and persists under the fleet root", async () => {
+  await withProductionServer(async (h) => {
+    const headers: Record<string, string> = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+      [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const payload = JSON.stringify({ version: "product-case-v1", action: "import", command: { version: "product-intent-v1",
+      requestId: "wiring-case-00001", expectedRevision: 0, brief: { idea: "approved original mobile prototype" } } });
+    const send = (extra: Record<string, string> = {}) => fetch(`${h.base}/v1/products/case`, {
+      method: "POST", headers: { ...headers, ...extra }, body: payload });
+    const refused = await send();
+    assert.equal(refused.status, 403);
+    assert.equal((await refused.json()).error, "confirm_nonce_required");
+    const confirmed = await fetch(`${h.base}/v1/confirm`, { method: "POST", headers,
+      body: JSON.stringify({ method: "POST", path: "/v1/products/case", payload }) });
+    assert.equal(confirmed.status, 200);
+    const { nonce } = await confirmed.json() as { nonce: string };
+    const saved = await send({ "x-confirm-nonce": nonce });
+    assert.equal(saved.status, 200);
+    const { productId } = await saved.json() as { productId: string };
+    const own = await fetch(`${h.base}/v1/products?id=${productId}`, { headers });
+    assert.equal(own.status, 200);
+    assert.equal((await own.json()).product.brief.idea, "approved original mobile prototype");
+    assert.ok(existsSync(join(h.fleetRoot, "state/products/v1")));
+    assert.ok(!existsSync(join(h.questionsRoot, "state/products")));
+    assert.equal((await send({ "x-confirm-nonce": nonce })).status, 403, "confirmation cannot be replayed");
   }, true, true);
 });
 

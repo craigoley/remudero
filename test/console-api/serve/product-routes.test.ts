@@ -1,22 +1,24 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { stringify } from "yaml";
+import { productCasePlanText } from "#src/lib/product-case.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { buildProductRoutes } from "#src/lib/product-routes.js";
 import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
 import { createService, type IdentityProvider } from "#src/lib/service.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
-import { declaredBody, violations } from "#test/helpers/openapi-strict.js";
+import { declaredBody, violations, SPEC } from "#test/helpers/openapi-strict.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const command = { version: "product-intent-v1", requestId: "route-create-00001", expectedRevision: 0,
   brief: { name: "Wreckterra", idea: "private original mobile combat idea", portfolio: "OleyArcade",
     objective: "Play a solo Central Park skirmish", constraints: ["mobile first"],
-    decisions: [{ key: "players", value: "solo first", provenance: { kind: "operator", reference: "approved brief" } }],
+    decisions: [{ key: "players", value: "solo first", provenance: { kind: "operator" as const, reference: "approved brief" } }],
     research: [{ label: "OpenStreetMap", url: "https://www.openstreetmap.org/copyright" }],
     requestedRepository: { owner: "craigoley", name: "wreckterra" },
     resourceEnvelope: { budgetUsd: 30, maxConcurrentBuilds: 1, existingSetupOnly: true },
@@ -407,4 +409,85 @@ test("W1-T10616: the served product deployment operation matches the authenticat
   assert.equal((await send("alice", undefined, JSON.stringify({ padding: "x".repeat(5000) }))).status, 413);
   delete process.env.VERCEL_TOKEN;
   assert.equal((await send("alice", deploy(productId, { requestId: "route-deploy-000004" }))).status, 503, "a missing server-held credential fails explicitly");
+});
+
+
+test("W1-T10618: the served product case operation matches the authenticated API contract", async (t) => {
+  const head = "d".repeat(40);
+  const shim = ghShim([
+    { when: "commits/main", stdout: JSON.stringify({ sha: head }) },
+    { when: `contents?ref=${head}`, stdout: JSON.stringify([{ name: "src" }]) },
+    { when: "contents/plan/tasks.d?", stdout: JSON.stringify([{ name: "W9-T1-prototype.yaml" }]) },
+    { when: "matching-refs/", stdout: "[]" },
+    { when: "search/issues", stdout: '{"total_count":0}' },
+    { when: "pulls/7/reviews", stdout: JSON.stringify([{ state: "APPROVED", commit_id: head, user: { login: "reviewer" } }]) },
+    { when: "pulls/7/files", stdout: JSON.stringify([{ filename: "plan/tasks.d/W9-T1-prototype.yaml" }]) },
+    { when: "pulls/7", stdout: JSON.stringify({ number: 7, merged_at: "2026-10-26T00:00:00Z", merge_commit_sha: head, head: { sha: head },
+      base: { ref: "main", repo: { id: WRECKTERRA_ID } } }) },
+    { when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra",
+      owner: { login: "craigoley" }, private: false, default_branch: "main" }) },
+  ]);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  t.after(() => { process.env.PATH = originalPath; rmSync(shim.dir, { recursive: true, force: true }); });
+  const root = ownedFixtureDir(t, "product-case-http").dir;
+  const stateBase = join(root, "instances");
+  const products = assembled(root);
+  const mounted = assembled(root, "/v1/products/case", { instances: { stateBase } });
+  assert.equal(mounted[0]?.tier, "high");
+  assert.equal(mounted[0]?.scope, "write");
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  mkdirSync(join(stateBase, "wreckterra/state"), { recursive: true });
+  writeFileSync(join(root, ".remudero/managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
+  writeFileSync(join(root, ".remudero/daemon-instances.yaml"), "instances:\n  core:\n    github_repo: craigoley/remudero\n  wreckterra:\n    github_repo: craigoley/wreckterra\n");
+  const app = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...mounted] });
+  await new Promise<void>((resolve) => app.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve())));
+  const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
+  const send = async (session: "alice" | "bob" | undefined, body: unknown, raw?: string) => {
+    const response = await fetch(`${base}/v1/products/case`, { method: "POST", headers: { authorization: "Bearer fixture-write",
+      "content-type": "application/json", ...(session ? { "x-test-session": session } : { "x-rmd-actor": "clerk:alice" }) },
+      body: raw ?? JSON.stringify(body) });
+    const reply = await response.json() as { error?: string; productId: string; replayed: boolean; revision: number;
+      build?: { outcome: string }; evidence: { deploy: unknown[]; mobile: unknown[] } };
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/case", "POST", response.status)), []);
+    assert.match(response.headers.get("cache-control") ?? "", /no-store/);
+    return { status: response.status, body: reply };
+  };
+  const imported = { version: "product-case-v1", action: "import", command };
+  assert.deepEqual(violations(imported, SPEC.components.schemas.ProductCaseCommand!), []);
+  assert.equal((await send(undefined, imported)).status, 403);
+  assert.equal((await send("alice", { ...imported, verified: true })).status, 400);
+  assert.equal((await send("alice", undefined, "{broken")).status, 400);
+  assert.equal((await send("alice", undefined, JSON.stringify({ padding: "x".repeat(70_000) }))).status, 413);
+  const saved = await send("alice", imported);
+  assert.equal(saved.status, 200);
+  const productId = saved.body.productId;
+  assert.equal((await send("alice", imported)).body.replayed, true);
+  const adoption = { version: "product-case-v1", action: "adopt", command: adopt(productId) };
+  assert.deepEqual(violations(adoption, SPEC.components.schemas.ProductCaseCommand!), []);
+  assert.equal((await send("bob", adoption)).status, 404);
+  assert.equal((await send("alice", adoption)).status, 200);
+  const planEvidenceId = "case-http-plan-v1";
+  const planning = { version: "product-case-v1", action: "plan", command: { requestId: "case-http-plan-01", productId,
+    expectedRevision: 2, expectedObjectiveRevision: 1, taskId: "W9-T1", planEvidenceId, pullRequest: 7 } };
+  assert.deepEqual(violations(planning, SPEC.components.schemas.ProductCaseCommand!), []);
+  const shard = stringify([{ id: "W9-T1", origin: `product-plan#${productId}/${planEvidenceId}`, status: "queued", budget_usd: 10,
+    design: productCasePlanText(command.brief) }]);
+  shim.addRoute({ when: "contents/plan/tasks.d/W9-T1-prototype.yaml", stdout: shard });
+  assert.equal((await send("alice", planning)).status, 200);
+  assert.equal((await send("alice", planning)).body.replayed, true);
+  const build = { version: "product-case-v1", action: "build", command: { version: "product-build-v1", requestId: "case-http-build01", productId,
+    expectedRevision: 3, expectedObjectiveRevision: 1, taskId: "W9-T1", planEvidenceId } };
+  assert.deepEqual(violations(build, SPEC.components.schemas.ProductCaseCommand!), []);
+  assert.equal((await send("alice", { ...build, command: { ...build.command, expectedRevision: 99 } })).status, 409);
+  const started = await send("alice", build);
+  assert.equal(started.status, 200);
+  assert.equal(started.body.productId, productId);
+  assert.equal(started.body.build?.outcome, "queued");
+  assert.deepEqual(started.body.evidence.deploy, []);
+  assert.deepEqual(started.body.evidence.mobile, []);
+  assert.equal((await send("alice", build)).body.replayed, true);
+  assert.ok(existsSync(join(stateBase, "wreckterra/state/KICK_REQUESTED-wreckterra:W9-T1")));
+  assert.ok(!shim.calls().some((call) => call.includes("-X POST")));
 });

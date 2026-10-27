@@ -377,6 +377,93 @@ export interface components {
       version: "product-deployment-v1";
       error: "invalid_identity" | "invalid_input" | "not_found" | "project_not_found" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_conflict" | "idempotency_conflict" | "stale_revision" | "capacity" | "creation_denied" | "not_configured" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "recovery_required" | "request_too_large";
     };
+    ProductCaseImport: {
+      version: "product-intent-v1";
+      requestId: ProductRequestId;
+      expectedRevision: 0;
+      brief: ProductBrief;
+    };
+    ProductCaseAdopt: {
+      version: "product-repository-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      action: "adopt";
+      owner: string;
+      name: string;
+      visibility: "public" | "private";
+      repositoryId: number;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+    };
+    ProductCasePlan: {
+      requestId: ProductRequestId;
+      productId: ProductId;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+      planEvidenceId: string;
+      taskId: string;
+      pullRequest: number;
+    };
+    /** At most 65536 raw bytes. Import an approved brief, adopt its existing repository, verify a merged reviewed plan, or request one guarded build. Client evidence and verification fields are rejected. */
+    ProductCaseCommand: ({
+      version: "product-case-v1";
+      action: "import";
+      command: ProductCaseImport;
+    }) | ({
+      version: "product-case-v1";
+      action: "adopt";
+      command: ProductCaseAdopt;
+    }) | ({
+      version: "product-case-v1";
+      action: "plan";
+      command: ProductCasePlan;
+    }) | ({
+      version: "product-case-v1";
+      action: "build";
+      command: ProductBuildCommand;
+    });
+    ProductCaseResponse: {
+      version: "product-case-v1";
+      productId: ProductId;
+      revision: number;
+      objectiveRevision: number;
+      replayed: boolean;
+      evidence: {
+        source: ({
+          id: string;
+          reference: string;
+        })[];
+        local: ({
+          id: string;
+          reference: string;
+        })[];
+        hosted: ({
+          id: string;
+          reference: string;
+        })[];
+        review: ({
+          id: string;
+          reference: string;
+        })[];
+        merge: ({
+          id: string;
+          reference: string;
+        })[];
+        deploy: ({
+          id: string;
+          reference: string;
+        })[];
+        mobile: ({
+          id: string;
+          reference: string;
+        })[];
+      };
+      build?: ProductBuildReceipt;
+    };
+    ProductCaseError: {
+      version: "product-case-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "fleet_halted" | "kick_failed" | "creation_denied";
+    };
     /** At most 4096 raw request bytes. Names one task the target repository's own plan filed for the product's approved plan evidence. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
     ProductBuildCommand: {
       version: "product-build-v1";
@@ -6415,6 +6502,20 @@ export interface paths {
           "409": ProductDeploymentError;
           "413": ProductDeploymentError;
           "503": ProductDeploymentError;
+        };
+    };
+  };
+  "/v1/products/case": {
+    post: {
+      responses: {
+          "200": ProductCaseResponse;
+          "400": ProductCaseError;
+          "401": ProductBuildAccessError;
+          "403": (ProductCaseError) | (ProductBuildAccessError);
+          "404": ProductCaseError;
+          "409": ProductCaseError;
+          "413": ProductCaseError;
+          "503": ProductCaseError;
         };
     };
   };
