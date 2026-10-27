@@ -7,6 +7,9 @@ import { gitRepo } from "./helpers/git-repo.js";
 import * as precheck from "../scripts/census-precheck.mjs";
 
 const PROOF = "test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts";
+// The mandatory skill census joins every nonempty diff, so the base carries a healthy stand-in; the injected runs
+// below never see it, keeping the assertions about the joining member alone.
+const SKILL = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 const MEMBER = { testFile: "test/population.test.ts", script: "census:population", walks: ["population/"] };
 const SUITE = `import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -21,6 +24,7 @@ function fixture(base = "unhealthy", suiteAtBase = true) {
     writeFileSync(join(repo.dir, path), text);
   };
   write("population/value", base);
+  write(SKILL, 'import { test } from "node:test"; test("healthy mandatory fixture census", () => {});\n');
   if (suiteAtBase) write(MEMBER.testFile, SUITE);
   repo.git("add", "-A");
   repo.git("commit", "--quiet", "-m", "base census");
@@ -44,7 +48,9 @@ test(`${PROOF}: injected runSuites passes both-red, refuses head-only red, and e
     errors.length = 0;
     const result = precheck.main(["--root", repo.dir, "--base", "main"], {
       admitted: () => [MEMBER],
-      runSuites: ({ root, files }: { root: string; files: string[] }) => {
+      runSuites: ({ root, files: joined }: { root: string; files: string[] }) => {
+        const files = joined.filter((file) => file !== SKILL);
+        if (files.length === 0) return [];
         calls.push({ root, files });
         if (root === repo.dir) return files;
         assert.equal(readFileSync(join(root, "population/value"), "utf8"), "unhealthy");
@@ -71,8 +77,9 @@ test(`${PROOF}: a green head never creates or runs a base tree`, (t) => {
   let runs = 0;
   assert.equal(precheck.main(["--root", repo.dir, "--base", "main"], {
     admitted: () => [MEMBER],
-    runSuites: ({ root }: { root: string }) => {
+    runSuites: ({ root, files }: { root: string; files: string[] }) => {
       assert.equal(root, repo.dir);
+      assert.deepEqual([...files].sort(), [MEMBER.testFile, SKILL].sort());
       runs++;
       return [];
     },
