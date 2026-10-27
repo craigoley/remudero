@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   author_class: machine
   principles: {tdd: strict}
   budget_usd: 3.00
@@ -84,3 +84,14 @@
     control must fail. Separately restore the reader's cached fingerprint/cached-blob self-check:
     unchanged-summary/current-source and foreign cached advice controls must fail. Restore both fixes
     and pass all controls, including positive actual same-repository advice and preserved raw history.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.86
+    reasons:
+      - "The declared files are 4 existing source modules and 3 test suites, all existing at base. The description states it adds no permission, deploy, CI, merge or review policy change, and no budget or provider setting change."
+      - "The description says raw history, proposals and operator decisions are preserved. It omits cached advice rather than deleting data, so it is not irreversible."
+      - "All four acceptance criteria are checkable by unit tests (verify: auto), and the defect is described with concrete, verifiable evidence (foreign task and PR in Console advice, daemon wiring through repoRoot instead of targetCheckoutRoot)."
+      - "The family track record is 8 merged, 5 operator-approved and 0 declined, and the gates state is clean. No bounded change view was supplied, so this verdict rests on the description alone."
+    judged_at: "2026-10-27T18:00:34.610Z"
+    pin: "d3037355641d0722e01dada0ee6702722d5a6b7d0591fad717e1821b7a363f36"
