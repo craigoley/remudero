@@ -14,8 +14,10 @@ import { join, sep } from "node:path";
 import { test } from "node:test";
 // @ts-ignore the executable .mjs module has no declaration file.
 import { LOCATION_RELATIVE_ERE, aliasFor, hasLocationRelativeSpecifier, isTransientTestPath, main as codemodMain, rewriteSource } from "#scripts/test-location-codemod.mjs";
+import { repoRoot } from "#test/helpers/repo-root.js";
 
-const ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+// The checkout this file lives in, not the process's working directory (which another test may have moved).
+const ROOT = repoRoot();
 
 function git(args: string[]): string {
   return execFileSync("git", args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
