@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
   BOOTSTRAP_CHECKS, bootstrapConfirmed, bootstrapEvidenceId, ghProductBuildTarget, productBuildKickOrigin, productPlanOrigin, ProductBuildService,
-  readTargetExecution, registryDaemonRoot,
-  type BuildObservation, type BuildTask, type ExecutionQuery, type ProductBuildOptions, type ProductBuildTarget, type TargetInspection, type TaskRead,
+  readTargetExecution, registryDaemonRoot, starterEvidenceId,
+  type BootstrapRead, type BuildObservation, type BuildTask, type ExecutionQuery, type ProductBuildOptions, type ProductBuildTarget, type TargetInspection, type TaskRead,
 } from "#src/lib/product-build.js";
 import { daemonKickPort } from "#src/cli/commands/daemon.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
@@ -45,6 +45,9 @@ class FakeTarget implements ProductBuildTarget {
   runnerRegistered() { this.calls.push("runner"); return this.runner; }
   async task() { this.calls.push("task"); return this.taskRead ?? { state: "absent" as const }; }
   async observe() { this.calls.push("observe"); return this.observation; }
+  bootstrapRead: BootstrapRead = { state: "absent" };
+  bootstrapHeads: string[] = [];
+  async bootstrap(_repo: unknown, head: string) { this.calls.push("bootstrap"); this.bootstrapHeads.push(head); return this.bootstrapRead; }
 }
 
 function fixture(t: TestContext, over: { target?: FakeTarget; envelope?: boolean } = {}) {
@@ -505,22 +508,69 @@ test("W1-T10615: a README-only product verifies bootstrap before filing source t
   assert.equal(bootstrapConfirmed(product.value, { head: undefined, readmeOnly: true }), false);
   assert.equal(bootstrapConfirmed(product.value, { head: HEAD, readmeOnly: undefined }), false);
   assert.equal(bootstrapConfirmed(product.value, { head: HEAD, readmeOnly: false }), true, "a repository with source needs no bootstrap");
-  // Receipts for an OLDER head never satisfy the current head; three of four never suffice.
-  const record = (head: string, checks: readonly (typeof BOOTSTRAP_CHECKS)[number][], revision: number, requestId: string) => {
-    const saved = f.store.transition(actor, { version: "product-intent-v1", requestId, id: f.productId, expectedRevision: revision, expectedObjectiveRevision: 1,
-      stageEvidence: checks.map((check) => ({ id: bootstrapEvidenceId(head, check), stage: "repository" as const, outcome: "succeeded" as const,
-        objectiveRevision: 1, observedAt: "2026-10-26T00:30:00.000Z", references: [{ label: "starter PR", url: "https://github.com/craigoley/wreckterra/pull/1" }] })) });
-    assert.ok(saved.ok);
-  };
-  record("b".repeat(40), BOOTSTRAP_CHECKS, 2, "bootstrap-stale-0001");
+  assert.deepEqual(target.bootstrapHeads, [HEAD], "the production reconciler asked GitHub about the exact head");
+  const bootstrapRows = () => { const read = f.store.read(actor, f.productId); assert.ok(read.ok); return read.value.stageEvidence.filter((item) => item.id.startsWith("bootstrap")); };
+  assert.deepEqual(bootstrapRows(), [], "an absent starter records nothing");
+  // Receipts for an OLDER head never satisfy the current head (seeded as a trusted mechanism would have left them).
+  const stale = f.store.transition(actor, { version: "product-intent-v1", requestId: "bootstrap-stale-0001", id: f.productId, expectedRevision: 2, expectedObjectiveRevision: 1,
+    stageEvidence: BOOTSTRAP_CHECKS.map((check) => ({ id: bootstrapEvidenceId("b".repeat(40), check), stage: "repository" as const, outcome: "succeeded" as const,
+      objectiveRevision: 1, observedAt: "2026-10-26T00:30:00.000Z", references: [{ label: "starter PR", url: "https://github.com/craigoley/wreckterra/pull/1" }] })) });
+  assert.ok(stale.ok);
+  const allChecks = { test: true, typecheck: true, build: true, security: true };
+  target.bootstrapRead = { state: "absent" };
   assert.equal(await refused(f.service.execute(actor, f.command({ expectedRevision: 3 }))), "bootstrap_unverified");
-  record(HEAD, ["test", "typecheck", "build"], 3, "bootstrap-partial-001");
-  assert.equal(await refused(f.service.execute(actor, f.command({ expectedRevision: 4 }))), "bootstrap_unverified");
-  record(HEAD, ["security"], 4, "bootstrap-security-01");
-  const started = await f.service.execute(actor, f.command({ expectedRevision: 5 }));
+  target.bootstrapRead = { state: "unreadable" };
+  assert.equal(await refused(f.service.execute(actor, f.command({ expectedRevision: 3 }))), "bootstrap_unverified");
+  target.bootstrapRead = { state: "found", starter: { number: 7, reviewed: false }, checks: allChecks };
+  assert.equal(await refused(f.service.execute(actor, f.command({ expectedRevision: 3 }))), "bootstrap_unverified");
+  assert.equal(bootstrapRows().filter((item) => item.id.includes(HEAD)).length, 0, "an unreviewed starter records no receipt: nothing is invented");
+  // Reviewed, but only three checks really passed: those are persisted, the fourth stays unverified and the gate closed.
+  target.bootstrapRead = { state: "found", starter: { number: 7, reviewed: true }, checks: { ...allChecks, security: false } };
+  assert.equal(await refused(f.service.execute(actor, f.command({ expectedRevision: 3 }))), "bootstrap_unverified");
+  assert.deepEqual(bootstrapRows().filter((item) => item.id.includes(HEAD)).map((item) => item.id),
+    [starterEvidenceId(HEAD), ...(["test", "typecheck", "build"] as const).map((check) => bootstrapEvidenceId(HEAD, check))]);
+  assert.deepEqual(f.kicks, []);
+  // The reconciler recorded real receipts, so the next request (at the revision it produced) is admitted without any fixture write.
+  target.bootstrapRead = { state: "found", starter: { number: 7, reviewed: true }, checks: allChecks };
+  const started = await f.service.execute(actor, f.command({ expectedRevision: 4 }));
   assert.ok(started.ok);
   assert.equal(started.value.receipt.outcome, "queued");
   assert.equal(f.kicks.length, 1);
+  const recorded = f.store.read(actor, f.productId);
+  assert.ok(recorded.ok);
+  assert.equal(bootstrapConfirmed(recorded.value, target.inspection), true);
+  assert.ok(bootstrapRows().filter((item) => item.id.includes(HEAD)).every((item) => item.references[0]?.url === "https://github.com/craigoley/wreckterra/pull/7"));
+});
+
+test("W1-T10615: the default target reads the starter PR, its review and check receipts at the exact head", async () => {
+  const repo = { id: ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main" };
+  const calls: string[] = [];
+  let pulls: unknown = [{ number: 7, merged_at: "2026-10-26T00:10:00Z", merge_commit_sha: HEAD, base: { ref: "main" } }];
+  let reviews: unknown = [{ state: "APPROVED", user: { login: "rev" } }, { state: "COMMENTED", user: { login: "rev" } }];
+  let runs: unknown = { check_runs: [
+    { name: "test", status: "completed", conclusion: "success" }, { name: "CI / typecheck", status: "completed", conclusion: "success" },
+    { name: "build", status: "completed", conclusion: "success" }, { name: "security", status: "completed", conclusion: "failure" }] };
+  const text = async (args: string[]) => {
+    const path = args.at(-1) ?? "";
+    calls.push(path);
+    if (path.includes("/pulls/7/reviews")) return JSON.stringify(reviews);
+    if (path.includes(`/commits/${HEAD}/pulls`)) return JSON.stringify(pulls);
+    if (path.includes(`/commits/${HEAD}/check-runs`)) return JSON.stringify(runs);
+    throw new Error(`unrouted ${path}`);
+  };
+  const target = ghProductBuildTarget({ text });
+  assert.deepEqual(await target.bootstrap(repo, HEAD), { state: "found", starter: { number: 7, reviewed: true }, checks: { test: true, typecheck: true, build: true, security: false } });
+  runs = { check_runs: [{ name: "test", status: "in_progress", conclusion: null }] };
+  assert.deepEqual((await target.bootstrap(repo, HEAD) as { checks: unknown }).checks, { test: false, typecheck: false, build: false, security: false });
+  reviews = [{ state: "APPROVED", user: { login: "rev" } }, { state: "CHANGES_REQUESTED", user: { login: "other" } }];
+  assert.equal((await target.bootstrap(repo, HEAD) as { starter: { reviewed: boolean } }).starter.reviewed, false, "an outstanding change request is not review");
+  reviews = [{ state: "APPROVED", user: { login: "rev" } }, { state: "DISMISSED", user: { login: "rev" } }];
+  assert.equal((await target.bootstrap(repo, HEAD) as { starter: { reviewed: boolean } }).starter.reviewed, false, "a dismissed approval is not review");
+  pulls = [{ number: 7, merged_at: "2026-10-26T00:10:00Z", merge_commit_sha: "c".repeat(40), base: { ref: "main" } }, { number: 8, merged_at: null, merge_commit_sha: HEAD, base: { ref: "main" } }];
+  assert.deepEqual(await target.bootstrap(repo, HEAD), { state: "absent" }, "only the merged PR whose merge commit is this head counts");
+  pulls = { not: "an array" };
+  assert.deepEqual(await target.bootstrap(repo, HEAD), { state: "unreadable" });
+  assert.ok(calls.every((path) => !path.includes("undefined")));
 });
 
 test("W1-T10615: the default target reads the real managed set, runner registry and gh transport", async (t) => {

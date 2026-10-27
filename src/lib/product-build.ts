@@ -32,6 +32,8 @@ export const BOOTSTRAP_CHECKS = ["test", "typecheck", "build", "security"] as co
 export const productPlanOrigin = (productId: string, planEvidenceId: string) => `product-plan#${productId}/${planEvidenceId}`;
 /** The trusted bootstrap-receipt evidence id: bound to the exact head so a moved head never inherits it. */
 export const bootstrapEvidenceId = (head: string, check: (typeof BOOTSTRAP_CHECKS)[number]) => `bootstrap:${head}:${check}`;
+/** The reviewed starter PR's own evidence id, bound to the head its merge produced. */
+export const starterEvidenceId = (head: string) => `bootstrap-starter:${head}`;
 /** The kick origin names THIS build request, so the target daemon's own dispatch row correlates to it, not to the product. */
 export const productBuildKickOrigin = (productId: string, operationId: string) => `product:${productId}/${operationId}`;
 
@@ -69,6 +71,15 @@ export type TaskRead = { state: "found"; task: BuildTask } | { state: "absent" }
  * branches are only links: neither can express `running`, which only the target daemon's own ledger evidences.
  */
 export type BuildObservation = { state: "none" | "admitted"; branches: readonly string[] } | { state: "unknown" };
+export type BootstrapCheck = (typeof BOOTSTRAP_CHECKS)[number];
+/**
+ * What GitHub shows for the starter/template change that produced EXACTLY this head: the merged pull request whose
+ * merge commit is the head, whether a reviewer approved it, and which of the four checks concluded `success` on it.
+ * `absent`: no such merged PR; `unreadable`: GitHub could not be read, which is never "no starter".
+ */
+export type BootstrapRead =
+  | { state: "found"; starter: { number: number; reviewed: boolean }; checks: Record<BootstrapCheck, boolean> }
+  | { state: "absent" } | { state: "unreadable" };
 /** Everything the operation must verify about the target immediately before it acts. */
 export interface ProductBuildTarget {
   inspect(repository: BuildRepository): Promise<TargetInspection>;
@@ -76,6 +87,8 @@ export interface ProductBuildTarget {
   runnerRegistered(repository: BuildRepository): boolean;
   task(repository: BuildRepository, taskId: string): Promise<TaskRead>;
   observe(repository: BuildRepository, taskId: string): Promise<BuildObservation>;
+  /** The reviewed starter PR and real test/typecheck/build/security conclusions at the exact `head`. */
+  bootstrap(repository: BuildRepository, head: string): Promise<BootstrapRead>;
 }
 
 /** One build request, as the target daemon's ledger must name it before its run can read as this build's. */
@@ -259,6 +272,32 @@ export function ghProductBuildTarget(options: { repoRoot?: string; text?: GhText
         void error; return { state: "unknown" };
       }
     },
+    async bootstrap(repo, head) {
+      try {
+        const pulls = z.array(z.object({ number: z.number().int().positive(), merged_at: z.string().nullable(), merge_commit_sha: z.string().nullable(),
+          base: z.object({ ref: z.string() }) }).passthrough()).parse(JSON.parse(await api(`${slug(repo)}/commits/${head}/pulls`)));
+        // Only the merged PR whose merge commit IS this head, into the default branch, is this head's starter.
+        const starter = pulls.find((pull) => pull.merged_at !== null && pull.merge_commit_sha === head && pull.base.ref === repo.defaultBranch);
+        if (!starter) return { state: "absent" };
+        const reviews = z.array(z.object({ state: z.string(), user: z.object({ login: z.string() }).passthrough().nullable() }).passthrough())
+          .parse(JSON.parse(await api(`${slug(repo)}/pulls/${starter.number}/reviews`)));
+        // A reviewer's LATEST verdict stands: an approval later withdrawn by that reviewer does not count.
+        const latest = new Map<string, string>();
+        for (const review of reviews) if (review.user !== null && ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state)) latest.set(review.user.login, review.state);
+        const reviewed = [...latest.values()].includes("APPROVED") && ![...latest.values()].includes("CHANGES_REQUESTED");
+        const runs = z.object({ check_runs: z.array(z.object({ name: z.string(), status: z.string(), conclusion: z.string().nullable() }).passthrough()) })
+          .parse(JSON.parse(await api(`${slug(repo)}/commits/${head}/check-runs?per_page=100`))).check_runs;
+        const passed = (check: BootstrapCheck) => {
+          const named = runs.filter((run) => { const name = run.name.toLowerCase(); return name === check || name.endsWith(`/ ${check}`); });
+          return named.length > 0 && named.every((run) => run.status === "completed" && run.conclusion === "success");
+        };
+        return { state: "found", starter: { number: starter.number, reviewed },
+          checks: { test: passed("test"), typecheck: passed("typecheck"), build: passed("build"), security: passed("security") } };
+      } catch (error) {
+        // Unreadable bootstrap evidence is unknown, which leaves the gate closed; it is never read as "bootstrapped".
+        void error; return { state: "unreadable" };
+      }
+    },
   };
 }
 
@@ -353,6 +392,8 @@ export class ProductBuildService {
       if (!isAbsolute(daemon.root)) throw new Fault("unavailable");
       if (isStopped(daemon.root) || isPaused(daemon.root)) throw new Fault("fleet_halted");
       if (inspected.head === undefined || inspected.readmeOnly === undefined) throw new Fault("target_unreadable");
+      // A README-only head records its reviewed starter PR and real check receipts from GitHub BEFORE the gate reads them.
+      if (inspected.readmeOnly && !bootstrapConfirmed(product, inspected)) product = await this.reconcileBootstrap(actor, product, subject, inspected.head);
       if (!bootstrapConfirmed(product, inspected)) throw new Fault("bootstrap_unverified");
 
       const read = await this.target.task(subject, input.taskId);
@@ -404,6 +445,30 @@ export class ProductBuildService {
         repository: { id: subject.id, owner: subject.owner, name: subject.name },
         objectiveRevision: product.objectiveRevision, payloadDigest, queuedAt: queuedEvidence.observedAt, evidence },
     };
+  }
+
+  /**
+   * Persists what GitHub shows for this exact head: the reviewed starter PR and each check that really concluded
+   * `success`. Nothing is invented or waived: an unreviewed starter, a failing or absent check, or a PR that is not
+   * this head's merge records nothing, so the gate stays closed and the missing receipt stays actionable.
+   */
+  private async reconcileBootstrap(actor: string, product: StoredProduct, subject: BuildRepository, head: string): Promise<StoredProduct> {
+    const read = await this.target.bootstrap(subject, head);
+    if (read.state !== "found" || !read.starter.reviewed) return product;
+    const url = `https://github.com/${subject.owner}/${subject.name}/pull/${read.starter.number}`;
+    const wanted = [
+      { id: starterEvidenceId(head), label: "Reviewed starter PR" },
+      ...BOOTSTRAP_CHECKS.filter((check) => read.checks[check]).map((check) => ({ id: bootstrapEvidenceId(head, check), label: `Starter ${check} receipt` })),
+    ].filter((item) => !product.stageEvidence.some((known) => known.id === item.id));
+    if (wanted.length === 0) return product;
+    const saved = this.store.transition(actor, {
+      version: "product-intent-v1", requestId: `pboot_${digest(`${product.id}:${wanted.map((item) => item.id).join(",")}`).slice(0, 48)}`,
+      id: product.id, expectedRevision: product.revision, expectedObjectiveRevision: product.objectiveRevision,
+      stageEvidence: wanted.map((item) => ({ id: item.id, stage: "repository" as const, outcome: "succeeded" as const,
+        objectiveRevision: product.objectiveRevision, observedAt: this.clock.iso(), references: [{ label: item.label, url }] })),
+    });
+    if (!saved.ok) throw new Fault(saved.code);
+    return this.readProduct(actor, product.id);
   }
 
   private append(actor: string, product: StoredProduct, requestId: string, item: { id: string; outcome: ProductBuildOutcome; url: string }, observedAt = this.clock.iso()): StoredProduct {
