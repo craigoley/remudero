@@ -1,21 +1,24 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
 import { assertProvenance, lintPrompt } from "../src/lib/provenance.js";
 import { renderImplementPrompt, renderReconPrompt } from "../src/run-task.js";
 import type { Task } from "../src/lib/plan.js";
+import { noteCommand } from "#src/run-task.js";
 import {
   appendOperatorNote,
   buildAddOperatorNoteRoute,
   buildListOperatorNotesRoute,
   loadOperatorNotesForTask,
   renderOperatorNotes,
+  operatorNoteStore,
+  type OperatorNoteStore,
   type OperatorNoteEntry,
-} from "../src/lib/operator-notes.js";
+} from "#src/lib/operator-notes.js";
 
 // ── W1-T164 acceptance (plan/tasks.yaml):
 //   (1) a stamped operator_note on task A is injected into task A's recon/implement prompt,
@@ -23,8 +26,17 @@ import {
 //   (2) a note on task A never appears in task B's prompt (cross-task-leakage falsifier).
 //   (3) an UNSTAMPED note is REFUSED at injection — never rendered into any prompt.
 
+const roots: string[] = [];
+after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
 function tmpRoot(): string {
-  return mkdtempSync(join(tmpdir(), "rmd-operator-notes-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-operator-notes-"));
+  roots.push(root);
+  return root;
+}
+
+function context(root: string): OperatorNoteStore {
+  mkdirSync(join(root, "state"), { recursive: true });
+  return operatorNoteStore({ stateDir: join(root, "state"), repository: "acme/remudero", legacyRoot: root })!;
 }
 
 function storePath(root: string): string {
@@ -232,7 +244,7 @@ async function withRoutes<T>(root: string, fn: (baseUrl: string) => Promise<T>):
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const server = createService({
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
-    routes: [buildAddOperatorNoteRoute({ root, ledgerPath }), buildListOperatorNotesRoute({ root })],
+    routes: [buildAddOperatorNoteRoute({ root, store: context(root), ledgerPath }), buildListOperatorNotesRoute({ root, store: context(root) })],
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
@@ -262,7 +274,7 @@ test("POST /v1/operator-notes/add: writes a stamped note (ts stamped server-side
     assert.equal(body.taskId, "W1-T1");
     assert.ok(!Number.isNaN(Date.parse(body.ts)), "server must stamp a real ts");
   });
-  const loaded = loadOperatorNotesForTask(root, "W1-T1");
+  const loaded = loadOperatorNotesForTask(context(root), "W1-T1");
   assert.equal(loaded.length, 1);
   assert.equal(loaded[0].note, "steer this way");
   assert.equal(loaded[0].author, "craig");
@@ -308,7 +320,7 @@ test("POST /v1/operator-notes/add: a write failure surfaces as 500 write_failed 
   const root = tmpRoot();
   const ledgerPath = join(root, "state", "ledger.ndjson");
   // Force appendOperatorNote to fail from inside the handler: make the store path a directory.
-  mkdirSync(storePath(root), { recursive: true });
+  mkdirSync(join(root, "state", "operator-notes", "acme%2Fremudero.ndjson"), { recursive: true });
   await withRoutes(root, async (base) => {
     const res = await post(base, "/v1/operator-notes/add", WRITE_TOKEN, { taskId: "W1-T1", author: "craig", note: "x" });
     assert.equal(res.status, 500);
@@ -337,4 +349,62 @@ test("GET /v1/operator-notes with no taskId -> 400 (never a repo-wide dump)", as
     const res = await fetch(`${base}/v1/operator-notes`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
     assert.equal(res.status, 400);
   });
+});
+
+test("W1-T10772: unverified and unwritable note stores refuse writes", async () => {
+  const root = tmpRoot();
+  const store = context(root);
+  const entry = { ts: new Date().toISOString(), taskId: "W1-T1", author: "operator", note: "keep this" };
+  assert.equal(operatorNoteStore(undefined), undefined);
+  assert.equal(operatorNoteStore({ stateDir: join(root, "missing"), repository: store.repository }), undefined);
+  assert.equal(operatorNoteStore({ stateDir: "relative", repository: store.repository }), undefined);
+  assert.equal(operatorNoteStore({ stateDir: root, repository: "../foreign" }), undefined);
+  assert.equal(operatorNoteStore({ stateDir: root, repository: store.repository, legacyRoot: "relative" }), undefined);
+  assert.equal(appendOperatorNote(undefined, entry), false);
+  assert.equal(await noteCommand([entry.taskId, entry.note], { root, noteStore: undefined, log: () => {} }), 1);
+  assert.equal(appendOperatorNote({ ...store }, entry), false, "a structural copy has not been verified");
+  assert.deepEqual(loadOperatorNotesForTask({ ...store }, entry.taskId), []);
+  for (const candidate of [undefined, { ...store }, store]) {
+    if (candidate === store) chmodSync(store.stateDir, 0o500);
+    const server = createService({ tokens: { read: READ_TOKEN, write: WRITE_TOKEN }, routes: [
+      buildAddOperatorNoteRoute({ root, store: candidate, ledgerPath: join(root, "ledger.ndjson") }),
+    ] });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const result = await post(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, "/v1/operator-notes/add", WRITE_TOKEN, entry);
+      assert.equal(result.status, 500);
+      assert.deepEqual(await result.json(), { error: "write_failed" });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      chmodSync(store.stateDir, 0o700);
+    }
+  }
+  assert.equal(existsSync(join(root, "ledger.ndjson")), false);
+  assert.equal(existsSync(storePath(root)), false);
+  rmSync(store.stateDir, { recursive: true });
+  assert.equal(appendOperatorNote(store, entry), false, "a removed binding must not be recreated");
+  assert.equal(existsSync(store.stateDir), false);
+});
+
+test("W1-T10772: guidance preserves scope provenance and baseline history", () => {
+  const root = tmpRoot();
+  const store = context(root);
+  const baseline = { ts: "2026-07-01T00:00:00.000Z", taskId: "W1-T1", author: "original", note: "old guidance" };
+  writeRawLine(root, baseline);
+  assert.equal(operatorNoteStore({ stateDir: storePath(root), repository: store.repository }), undefined);
+  const before = readFileSync(storePath(root), "utf8");
+  const first = { ...baseline, ts: "2026-07-02T00:00:00.000Z", author: "operator", note: "first append" };
+  const second = { ...first, note: "second append" };
+  assert.equal(appendOperatorNote(store, first), true);
+  assert.equal(appendOperatorNote(store, second), true);
+  assert.equal(appendOperatorNote(store, { ...first, taskId: "W1-T2", note: "other task" }), true);
+  assert.equal(appendOperatorNote(store, { ...first, author: "" }), false);
+  const foreign = operatorNoteStore({ stateDir: store.stateDir, repository: "foreign/remudero" })!;
+  assert.equal(appendOperatorNote(foreign, { ...first, note: "foreign repository" }), true);
+  appendFileSync(join(store.stateDir, "operator-notes", "acme%2Fremudero.ndjson"),
+    JSON.stringify({ ...first, repository: foreign.repository, note: "misfiled foreign note" }) + "\n");
+  assert.deepEqual(loadOperatorNotesForTask(store, "W1-T1"), [baseline, first, second]);
+  assert.deepEqual(loadOperatorNotesForTask(foreign, "W1-T1").map(n => n.note), ["foreign repository"]);
+  assert.equal(readFileSync(storePath(root), "utf8"), before, "legacy history stays byte-for-byte intact");
+  assert.match(renderOperatorNotes(loadOperatorNotesForTask(store, "W1-T1")), /\[src: operator#original@2026-07-01T00:00:00.000Z\]/);
 });
