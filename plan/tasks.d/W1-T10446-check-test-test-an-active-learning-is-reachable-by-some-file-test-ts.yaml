@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.58
   status: queued
@@ -64,10 +64,10 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.9
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
     reasons:
-      - "high-risk verdict at confidence 0.90 — on the change's description/files alone, no diff was read — The supplied rounds establish recurring failures, but do not establish a shared cause remediable in src/lib/learnings.ts; the explicit assertion identifies ci.yaml:687, outside the declared files.; on the change's description/files alone, no diff was read — The record requests prevention or self-healing without identifying the mechanism. Its grep acceptance checks for a test declaration rather than demonstrating that fix rounds are prevented, leaving the proposed remedy unverifiable from what is shown."
-    judged_at: "2026-10-23T01:22:42.186Z"
-    pin: "6dbab26367a9c45f52a3b380512e78e5bab0f83de971acc91f76101006fcd6c1"
+      - "rule 3 (live and low-privilege): the symptom is live, 1 occurrence(s) across 7 day(s), last seen 2026-10-22T22:16:31.102Z, and the record declares no privileged path"
+    judged_at: "2026-10-27T05:40:05.137Z"
+    pin: "d2624a5b4b3a11b9e6276febf477472fc479ddee6ffad0305e0ff16503c7a1fa"

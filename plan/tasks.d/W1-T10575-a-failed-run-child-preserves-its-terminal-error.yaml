@@ -5,12 +5,13 @@
   type: implement
   principles: {tdd: strict}
   budget_usd: 12.00
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   dispatch_hold: true
   risk: high
   band_meaning: span
   priority: 4
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-10-27T05:40:08.048Z
   # backlog gardener: band=4 evidence=2bc5a91603846dca
   # backlog gardener: placed=2026-10-25T06:35:30.274Z
   attempts: 0

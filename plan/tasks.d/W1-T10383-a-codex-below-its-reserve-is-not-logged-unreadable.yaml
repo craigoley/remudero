@@ -49,11 +49,13 @@
        95% window reads `below-reserve` in providerEligibility and in the routing decision's considered[]. A probe
        failure and a quota-unreadable model still read `unreadable`.
   acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/worker/spawn/a-codex-below-its-reserve-is-not-logged-unreadable.test.ts"
     - claim: "an exhausted Codex capacity is recorded below-reserve, not unreadable"
-      proof: "unit test: W1-T10383: an exhausted codex capacity reads below-reserve in considered"
+      proof: 'grep: test("W1-T10383: an exhausted codex capacity reads below-reserve in considered" in test/worker/spawn/a-codex-below-its-reserve-is-not-logged-unreadable.test.ts'
     - claim: "a genuinely unreadable Codex probe still reads unreadable"
-      proof: "unit test: W1-T10383: an unreadable codex probe still reads unreadable"
+      proof: 'grep: test("W1-T10383: an unreadable codex probe still reads unreadable" in test/worker/spawn/a-codex-below-its-reserve-is-not-logged-unreadable.test.ts'
   falsifier: |
-    Restore the readability test ahead of `exhausted`, and the first proof reads `unreadable` again.
+    Restore the readability test ahead of `exhausted`, and the exhausted-capacity test reads `unreadable` again.
   note: |
     Reservation refs/rmd-id/W1-T10383 is held by filing branch file-1022-fleet-routing.

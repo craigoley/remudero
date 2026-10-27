@@ -9580,10 +9580,11 @@ function refusedHeadContract(lines: readonly Record<string, unknown>[], pr: Open
 async function headContractRefreshHistory(deps: Pick<SweepDeps, "ledgerPath" | "readHeadContractRefreshHistory">) {
   if (deps.readHeadContractRefreshHistory) return deps.readHeadContractRefreshHistory();
   headContractHistoryReader ??= createEscalationTriageHistoryReader({ parseAll: true, slice: {
-    holder: "sweep.head-contract-refresh", version: "1",
-    steps: [HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, CONTRACT_AMENDED_REFRESH_STEP],
+    holder: "sweep.head-contract-refresh", version: "2",
+    steps: [HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, CONTRACT_AMENDED_REFRESH_STEP, "fix.contract_hold", "fix.scope_amendment"],
     project: row => ({ step: row.step, task_id: row.task_id, pr_number: row.pr_number, head_sha: row.head_sha,
-      contract_revision: row.contract_revision, outcome: row.outcome }),
+      contract_revision: row.contract_revision, outcome: row.outcome, kind: row.kind, pr_url: row.pr_url,
+      paths: row.paths, issue_url: row.issue_url }),
   } });
   const read = await headContractHistoryReader(dirname(deps.ledgerPath));
   // The incremental step reader only parses live lines that mention a tracked step or have
@@ -9618,10 +9619,14 @@ function headContractRefreshAttempted(lines: readonly Record<string, unknown>[],
 export async function lightPassHeadContractRefresh(
   prs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "readLedger" | "readHeadContractRefreshHistory" | "readTaskContractRevision" | "updateBranch" | "log">,
-): Promise<Pick<SweepDeps, "headContractRefreshFor" | "readHeadContractRefreshHistory">> {
+): Promise<Pick<SweepDeps, "headContractRefreshFor" | "headContractHoldEvidenceFor" | "readHeadContractRefreshHistory">> {
   if (!deps.updateBranch || headContractRefreshInFlight) return {};
   try {
-    const lines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath); // ledger-read-intent: live — candidate holds; attempts use the strict union below.
+    if (!prs.some(pr => pr.taskId !== undefined)) return {};
+    (deps.readLedger ?? readLedgerLines)(deps.ledgerPath); // Validate the live caller boundary; strict history supplies the rows.
+    const history = await headContractRefreshHistory(deps);
+    if (!history.complete) return {};
+    const lines = history.lines; // Holds and attempts must both survive rotation in the same strict union.
     const candidates = prs.flatMap(pr => {
       const hold = refusedHeadContract(lines, pr);
       const scope = scopeEscalationStandDown(lines, pr);
@@ -9634,12 +9639,13 @@ export async function lightPassHeadContractRefresh(
       return standingOn !== undefined && revision !== undefined && revision !== standingOn ? [{ pr, revision }] : [];
     });
     if (candidates.length === 0) return {};
-    const history = await headContractRefreshHistory(deps);
-    if (!history.complete) return {};
     const selected = candidates.filter(({ pr, revision }) => !headContractRefreshAttempted(history.lines, pr, revision))
       .sort((a, b) => a.pr.prNumber - b.pr.prNumber)[0];
     return selected === undefined ? {} : {
       readHeadContractRefreshHistory: deps.readHeadContractRefreshHistory,
+      headContractHoldEvidenceFor: pr => pr.prNumber === selected.pr.prNumber && pr.headSha === selected.pr.headSha &&
+        pr.taskId === selected.pr.taskId && deps.readTaskContractRevision?.(pr.taskId!) === selected.revision
+        ? lines : undefined,
       headContractRefreshFor: pr => pr.prNumber === selected.pr.prNumber && pr.headSha === selected.pr.headSha &&
         pr.taskId !== undefined && deps.readTaskContractRevision?.(pr.taskId) === selected.revision
         ? deps.updateBranch : undefined,
@@ -13963,6 +13969,8 @@ export interface SweepDeps {
   readTaskContractRevision?: (taskId: string) => string | undefined;
   readTaskSemanticRevision?: (taskId: string) => string | undefined;
   headContractRefreshFor?: (pr: OpenPrView) => SweepDeps["updateBranch"];
+  /** Complete scoped hold evidence only for the selected light-pass contract capability. */
+  headContractHoldEvidenceFor?: (pr: OpenPrView) => readonly Record<string, unknown>[] | undefined;
   readHeadContractRefreshHistory?: () => Promise<{ complete: boolean; lines: readonly Record<string, unknown>[] }>;
   headRehome?: HeadRehomePorts;
   /** The already-listed peers retained when the light pass reconciles one PR at a time. */
@@ -20669,7 +20677,8 @@ export async function runSweep(
                   : `design hold at a head behind main — branch refresh ${outcome}; the next pass escalates the design question`;
                 break;
               }
-              const headContractHold = refusedHeadContract(ledgerLines, pr);
+              const contractHoldLines = deps.headContractHoldEvidenceFor?.(pr) ?? ledgerLines;
+              const headContractHold = refusedHeadContract(contractHoldLines, pr);
               const currentHoldContract = headContractHold && pr.taskId !== undefined
                 ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
               if (headContractHold && currentHoldContract !== undefined && currentHoldContract !== headContractHold.contract_revision) {
@@ -20685,7 +20694,7 @@ export async function runSweep(
                     undefined, currentHoldContract, undefined, refresh)) ?? "head contract changed during amendment observation — no fix admitted";
                 break;
               }
-              const scopeHold = scopeEscalationStandDown(ledgerLines, pr);
+              const scopeHold = scopeEscalationStandDown(contractHoldLines, pr);
               if (scopeHold?.kind === "unfiled") { acted = false; spent = false; standDownReason = scopeHold.reason; break; }
               // #13317: the operator's answer (an amended contract) takes main in once, releasing an instrument/workflow hold.
               if (scopeHold) {
