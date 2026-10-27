@@ -162,6 +162,37 @@ test("manual file overlap never fabricates a named failing-check observation", (
   assert.ok(added.every(row => row.cause.kind === "hand_fix" && row.cause.name === "src/worker.ts"));
   assert.ok(added.every(row => row.pricing === "median-proxy" && row.minutes === 5));
   assert.deepEqual({ fixes, rounds }, before, "historical inputs and measured costs remain untouched");
+  // The production inventory also prices checks from the gate report: PRs 9 and 10 red on a measured gate already
+  // carry its 8 measured check-minutes, so their manual changes must earn no second, proxy cost.
+  const root = mkdtempSync(join(tmpdir(), "rmd-hand-gate-"));
+  const logs: string[] = [];
+  try {
+    const gate = { gate: "coverage-ratchet", prs: 2, runs: 3, redRuns: 2, refusals: 1, repaired: 1, overridden: 0, minutes: 12, redMinutes: 8, redPrs: 2 };
+    const report = (redPrNumbers?: number[]) => ({ status: "measured" as const, prsScanned: 2, neverFired: [], alwaysFired: [],
+      gates: [{ ...gate, ...(redPrNumbers ? { redPrNumbers } : {}) }] });
+    const inventory = (redPrNumbers?: number[]) => ciFrictionGardenSpec({ stateDir: root, repoRoot: root, clock, log: (step) => logs.push(step),
+      openWorkspace: () => { throw new Error("not needed"); } }, {
+      ledgerRecords: () => [
+        { step: "pr.opened", run_id: "run-2", pr_url: "https://github.com/owner/repo/pull/2", ts: "2026-10-01T10:00:00.000Z" },
+        { step: "fix.base_refreshed", run_id: "run-2", matching_base_files: ["src/other.ts"], ts: "2026-10-01T10:05:00.000Z" },
+      ],
+      handFixes: () => ({ state: "observed", fixes }), gateFireRates: () => report(redPrNumbers),
+      planState: () => ({ tasks: [] }), ownerSearch: search, mintTaskId: () => "W1-T1",
+    }).inventory();
+    const proxies = (inv: ReturnType<typeof inventory>) => inv.rounds.filter(r => r.pricing === "median-proxy").map(r => [r.pr, r.cause.kind, r.minutes]);
+    assert.deepEqual(proxies(inventory([3, 4])), [[9, "hand_fix", 5], [10, "hand_fix", 5]], "control: manual changes on unpriced PRs keep their proxy");
+    const gatePriced = inventory([9, 10]);
+    assert.deepEqual(proxies(gatePriced), [], "PRs 9 and 10 already carry measured check minutes: no proxy cost is added");
+    assert.equal(gatePriced.priced.some(p => p.cause.kind === "hand_fix"), false);
+    assert.equal(gatePriced.priced.find(p => p.cause.kind === "check")?.minutes, 8, "the measured gate cost is charged exactly once");
+    assert.deepEqual(ciFrictionHandFixRounds(fixes, rounds, priceCiFrictionCauses(rounds), search, report([9, 10])), []);
+    assert.equal(logs.includes("ci-friction.hand_fixes_unpriced"), false);
+    // A report persisted before `redPrNumbers` counts red PRs without naming them: keep each observation, charge none.
+    const legacy = inventory();
+    assert.deepEqual(proxies(legacy), [[9, "hand_fix", 0], [10, "hand_fix", 0]], "unnamed red PRs are never guessed priced or unpriced");
+    assert.match(legacy.rounds.find(r => r.pr === 9)?.detail ?? "", /no proxy minutes.*coverage-ratchet without naming them/);
+    assert.ok(logs.includes("ci-friction.hand_fixes_unpriced"));
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("a manual change with an actual priced failure does not receive a second proxy cost", () => {
