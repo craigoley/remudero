@@ -12,7 +12,7 @@
   status: queued
   attempts: 0
   origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 field-trials ask; consent file approved by Craig at ~13:45Z the same day (receipt owner-2026-10-27-craig-oley)"
-  plan_refs: [W1-T4574, W1-T10830, W1-T10831, W1-T10756, W1-T136]
+  plan_refs: [W1-T4574, W1-T10830, W1-T10831, W1-T10756, W1-T136, PORTAL-T41]
   files:
     - deploy/field-trials-refresh.sh
     - src/lib/field-trials-site-import.ts
@@ -39,6 +39,15 @@
     reviewed aggregate, refuses overlap and chains a history, and its design reserves the daily candidate PR
     for "after the core exporter is proven", never auto-merged. Nothing in the site repo schedules an import
     (no workflow names the importer; no open branch is a field-note branch).
+    THE SITE STAGE MODE (PORTAL-T41, filed in remudero-site PR #201, branch plan-file-1793108648359, read
+    2026-10-27). It gives scripts/import-model-field-note.mjs a non-interactive stage mode with three outcomes,
+    each with a distinct exit code: staged, unchanged (the candidate is the release already recorded; nothing
+    is written) and refused (the validator's reason; nothing is written). It also writes a reviewer summary
+    built only from public fields. It makes the owner's MERGE of the import PR the review, so a
+    machine-staged note never claims reviewedBy owner before a review has happened. ORDER: a depends_on link
+    across repos cannot be expressed, so this task's site-PR step runs only after PORTAL-T41 has merged on
+    site main. Until then the pass stops after the W1-T10831 candidate and records
+    `site-stage-mode-unavailable` in the field-trials.refresh row.
     THE EXISTING WRITER PATH. src/lib/plan-pr-emitter.ts already opens and probes PRs over REST
     (probeExistingPlanPr, createPlanPrRest: `gh api --method POST repos/{owner}/{repo}/pulls`) through an
     injected GhApiFetcher, and the refresh's GitHub step already runs with the fleet GitHub App credentials
@@ -58,21 +67,25 @@
        revokeWithdrawnConsent path).
     2. AFTER A GOOD REFRESH (the snapshot step ok per W1-T10830's step states), run the W1-T10831 exporter.
        A withheld result ends the pass with its reason in the field-trials.refresh row.
-    3. ONE OPEN SITE PR. With a candidate, open or update ONE ready (never draft) PR on
-       craigoley/remudero-site from a branch outside every fleet branch pattern (not run-*, plan-file-*),
-       found with probeExistingPlanPr and opened with createPlanPrRest. Stage its files by running the
-       site's own scripts/import-model-field-note.mjs in a fresh checkout of site main, so the site's
-       validator, overlap rule and lineage chain decide; a refusal is recorded, not worked around. A newer
-       candidate while the PR is unreviewed replaces its contents with one window from the last RELEASED
-       windowEnd, so there is never a second open import PR or an overlapping window.
-    4. OWNER REVIEW IS THE GATE. reviewedBy/reviewedAt/publishedAt are stamped only from the owner's
-       approving review on that PR (its submitted_at), on the pass after it; automation then re-stages and
-       pushes the stamped note. No automation arms, enqueues or merges the PR; the owner merges. Verify, and
-       pin with a test, that the site instance's sweep does not arm a PR on this branch shape. A PR left
-       unreviewed past the page's 72 h historical label stays open and is refreshed, never merged.
+    3. ONE OPEN SITE PR. With a candidate, run PORTAL-T41's stage mode of the site's own
+       scripts/import-model-field-note.mjs in a fresh checkout of site main, so the site's validator,
+       overlap rule and lineage chain decide. Act on its exit code:
+       - staged: open or update ONE ready (never draft) PR on craigoley/remudero-site. Use a branch outside
+         every fleet branch pattern (not run-*, plan-file-*) and no Remudero-Task trailer. Find an existing
+         PR with probeExistingPlanPr; open a new one with createPlanPrRest. The PR carries only the two data
+         files the stage mode changed, and its body is the stage mode's reviewer summary.
+       - unchanged: open no PR and change nothing.
+       - refused: record the reason. Open no PR and do not work around the refusal.
+       A newer candidate while the PR is unmerged replaces its contents with one window from the last
+       RELEASED windowEnd, so there is never a second open import PR or an overlapping window.
+    4. THE OWNER'S MERGE IS THE REVIEW: ONE OWNER TOUCH. Core never writes reviewedBy, reviewedAt or
+       publishedAt, and never edits the staged note; PORTAL-T41's stage mode owns those fields. No
+       automation arms, enqueues, approves or merges the PR; the owner merges it. Verify the site
+       instance's sweep does not arm a PR on this branch shape, and pin that with a test. A PR left
+       unmerged past the page's 72 h historical label stays open and is refreshed, never merged.
     syncFieldNoteSiteImport in the new src/lib/field-trials-site-import.ts owns steps 3 and 4; the
     `rmd field-trials` command calls it after the exporter.
-    5. Every outcome (withheld, candidate, PR opened, PR updated, stamped, refused by the importer) is in
+    5. Every outcome (withheld, candidate, site-stage-mode-unavailable, staged with PR opened or updated, unchanged, refused by the importer) is in
        the field-trials.refresh row. Prove the App installation can push a branch and open a PR on
        remudero-site under the SERVICE identity before relying on it; if it cannot, the row says so and the
        PR reports the exact grant the operator must add.
@@ -81,19 +94,20 @@
       proof: 'grep: test("W1-T10832: the refresh passes the private consent file only when it is owner-only" in test/deploy/the-field-trials-refresh-passes-the-host-consent-file.test.ts'
     - claim: "with a candidate and no open import PR the pass opens one ready site PR through the REST writer on a non-fleet branch; with one open it updates that PR instead of opening a second"
       proof: 'grep: test("W1-T10832: a field-note candidate keeps exactly one site import PR open" in test/routing/a-field-note-candidate-opens-one-reviewed-site-pr.test.ts'
-    - claim: "review fields are stamped only from an approving review by the owner, and no code path arms, enqueues or merges the site PR"
-      proof: 'grep: test("W1-T10832: only the owner review stamps the note and nothing merges it" in test/routing/a-field-note-candidate-opens-one-reviewed-site-pr.test.ts'
-    - claim: "a candidate the site importer refuses is recorded in the refresh row and opens no PR"
-      proof: 'grep: test("W1-T10832: a site importer refusal opens no PR" in test/routing/a-field-note-candidate-opens-one-reviewed-site-pr.test.ts'
+    - claim: "core never writes reviewedBy, reviewedAt or publishedAt into the staged note, and no code path arms, enqueues, approves or merges the site PR"
+      proof: 'grep: test("W1-T10832: core stamps no review fields and nothing merges the site PR" in test/routing/a-field-note-candidate-opens-one-reviewed-site-pr.test.ts'
+    - claim: "a stage-mode refusal is recorded in the refresh row and opens no PR, and an unchanged outcome opens no PR and writes nothing"
+      proof: 'grep: test("W1-T10832: a refused or unchanged stage opens no PR" in test/routing/a-field-note-candidate-opens-one-reviewed-site-pr.test.ts'
     - claim: "the field-trials command drives the site import through the new module"
       proof: 'grep: syncFieldNoteSiteImport( in src/lib/field-trials-flow.ts'
   falsifier: |
     At base every case fails: the refresh passes no --consent and nothing opens a site PR.
     - Pass --consent whenever the path exists, symlink or group-readable: the owner-only case fails.
     - Open a new PR per pass: the one-open-PR case fails.
-    - Stamp reviewedAt at candidate time, or from any approving reviewer: the owner-review case fails.
+    - Stamp reviewedBy or reviewedAt in core, at candidate time or from any review: the no-stamp case fails.
     - Call `gh pr merge` or enable auto-merge anywhere on this path: the nothing-merges assertion fails.
-    - Validate in core and skip the site importer: the importer-refusal case fails.
+    - Validate in core and skip the site stage mode: the refusal case fails.
+    - Treat the unchanged exit code as staged: the unchanged half of that case opens a PR and fails.
     GUARDS that held at base and must still hold:
     - test/field-trials-flow.test.ts (withheld without consent, revocation, refusal on a private join key);
     - test/plan-pr-emitter.test.ts (the REST create and probe argv).

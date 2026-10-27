@@ -12,7 +12,7 @@
   status: queued
   attempts: 0
   origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 field-trials ask; the site contract read from craigoley/remudero-site main b80fbbb"
-  plan_refs: [W1-T4574, W1-T100001, W1-T10830, W1-T10832, W1-T10833]
+  plan_refs: [W1-T4574, W1-T100001, W1-T10830, W1-T10832, W1-T10833, PORTAL-T41]
   files:
     - src/lib/field-trials-field-note.ts
     - src/lib/field-trials-flow.ts
@@ -56,10 +56,10 @@
     output directory and salt) that reads the latest field-trials-flow-v1 snapshot and writes a CANDIDATE
     for the site, never a published note:
     - The file is an envelope with state `candidate-unreviewed`, the withheld-cell count and reasons, the
-      served-model gap summary, and `note`: a model-field-note-v1 body with reviewedBy, reviewedAt and
-      publishedAt left for the owner review (W1-T10832). The note body must pass the site's validator once
-      those fields are stamped; the candidate state lives outside it because the site schema admits no
-      extra keys.
+      served-model gap summary, and `note`: a model-field-note-v1 body that leaves reviewedBy, reviewedAt and
+      publishedAt to the site's stage mode (PORTAL-T41). Core never stamps them, and the owner's merge of
+      the import PR is the review. The note body must pass the site's validator once those fields are
+      stamped; the candidate state lives outside it because the site schema admits no extra keys.
     - Rows are per selected model x task class over whole UTC days ending at the last whole day the
       snapshot covers, starting where the previous core-recorded field-note window ended (never overlapping
       it). Each row reports assigned, servedObserved (served model known on the joined call) and
