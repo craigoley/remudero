@@ -3330,15 +3330,24 @@ export { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch
  * flagged and skipped, a fixable blocker gets a bounded fix attempt (W1-T174), and a genuine blocker escalates once
  * and parks until its PR ownership materially changes. Idling is an in-process state, never a process exit.
  * Forensics: docs/forensics/daemon.md. */
+/** The saved-planning pump's handle. `stop()` refuses every further handoff but never interrupts the active one;
+ *  `settled()` resolves when that one has finished, and `activeOperation()` names it while it runs. */
+export interface ImprovementActionPump {
+  stop(): void;
+  settled(): Promise<void>;
+  isBusy(): boolean;
+  activeOperation(): string | undefined;
+}
+
 /** Runs saved planning requests serially without blocking dispatch or interrupting an active child. */
 export function startImprovementActionPump(
   deps: Pick<DaemonDeps, "pendingImprovementActions" | "handOffImprovementAction" | "checkStop" | "checkPause">,
   intervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
-): { stop(): void; settled(): Promise<void>; isBusy(): boolean } {
+): ImprovementActionPump {
   const pending = deps.pendingImprovementActions, run = deps.handOffImprovementAction;
-  if (!pending || !run) return { stop() {}, settled: async () => {}, isBusy: () => false };
-  let stopped = false, pass: Promise<void> | undefined;
+  if (!pending || !run) return { stop() {}, settled: async () => {}, isBusy: () => false, activeOperation: () => undefined };
+  let stopped = false, pass: Promise<void> | undefined, active: string | undefined;
   const tick = (): void => {
     if (stopped || pass) return;
     pass = (async () => {
@@ -3346,17 +3355,46 @@ export function startImprovementActionPump(
       for await (const target of pending()) {
         if (stopped || resolveFleetControlHold(deps)) break;
         log("improvement.action_started", { operation_id: target.operationId });
+        active = target.operationId;
         try {
           const result = await run(target);
           log("improvement.action_handoff_settled", { operation_id: target.operationId, result });
         } catch (error) {
           log("improvement.action_handoff_failed", { operation_id: target.operationId, error: String(error) });
+        } finally {
+          active = undefined;
         }
       }
     })().catch(error => { log("improvement.action_read_failed", { error: String(error) }); }).finally(() => { pass = undefined; });
   };
   const timer = setInterval(tick, Math.max(1, intervalMs)); timer.unref?.(); tick();
-  return { stop: () => { stopped = true; clearInterval(timer); }, settled: async () => { await pass; }, isBusy: () => pass !== undefined };
+  return {
+    stop: () => { stopped = true; clearInterval(timer); },
+    settled: async () => { await pass; },
+    isBusy: () => pass !== undefined,
+    activeOperation: () => active,
+  };
+}
+
+/** What a clean STOP's bounded wait left running: the active handoff's operation, or the queue read that precedes one. */
+interface AbandonedImprovementPass { operation_id: string | null; phase: "handoff" | "discovery" }
+
+/** A clean STOP waits for the stopped pump's pass, bounded like the in-flight review drain. Returns what was still
+ *  running at the bound, or `undefined` when nothing was running or it settled within the bound. */
+async function drainImprovementActionHandoff(pump: ImprovementActionPump, boundMs: number): Promise<AbandonedImprovementPass | undefined> {
+  if (!pump.isBusy()) return undefined;
+  let settled = false;
+  const work = pump.settled().then(() => { settled = true; });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<void>((resolve) => { timer = setTimeout(resolve, Math.max(0, boundMs)); });
+  try {
+    await Promise.race([work, bound]);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (settled) return undefined;
+  const operation = pump.activeOperation();
+  return { operation_id: operation ?? null, phase: operation === undefined ? "discovery" : "handoff" };
 }
 
 /**
@@ -4154,7 +4192,9 @@ export async function runDaemon(
 
   // W1-T4077: stopped by `summary`, which every exit path of this function returns through.
   const prActionPumpRef: { stop: () => void; isBusy: () => boolean } = { stop: () => {}, isBusy: () => false };
-  const improvementActionPumpRef = { stop: () => {}, isBusy: () => false };
+  const improvementActionPumpRef: ImprovementActionPump = {
+    stop: () => {}, settled: async () => {}, isBusy: () => false, activeOperation: () => undefined,
+  };
   // W1-T4087: its own timer, so a main loop busy for many minutes never delays a plain message.
   const plainBackfill = deps.plainBackfill ? startPlainBackfill(deps.plainBackfill, pollIntervalMs, log) : undefined;
   const recommendationBackfill = deps.recommendationBackfill ? startRecommendationBackfill(deps.recommendationBackfill, pollIntervalMs, log) : undefined;
@@ -4212,9 +4252,20 @@ export async function runDaemon(
     await closeOwnedServices(report);
     if (stopReason === "stopped") {
       if (backgroundSweep) await backgroundSweep;
-      const abandonedReviews = await drainInFlightReviews({ boundMs: sweepWallClockBoundMs });
-      if (abandonedReviews > 0) report("daemon.stop_drain.completed", {
+      // The pump is stopped above, so no new handoff starts; the active one finishes within the review bound.
+      const [abandonedPass, abandonedReviews] = await Promise.all([
+        drainImprovementActionHandoff(improvementActionPumpRef, sweepWallClockBoundMs),
+        drainInFlightReviews({ boundMs: sweepWallClockBoundMs }),
+      ]);
+      if (abandonedPass) {
+        // Never a clean settle: the exit row and the summary both name what the bound left running.
+        report("improvement.action_handoff_abandoned", { ...abandonedPass, bound_ms: sweepWallClockBoundMs });
+        const what = abandonedPass.operation_id === null ? "saved-action queue read" : `handoff ${abandonedPass.operation_id}`;
+        stopDetail = [stopDetail, `improvement ${what} still running at the ${sweepWallClockBoundMs} ms stop bound`].filter(Boolean).join("; ");
+      }
+      if (abandonedReviews > 0 || abandonedPass) report("daemon.stop_drain.completed", {
         abandoned_in_flight_reviews: abandonedReviews, bound_ms: sweepWallClockBoundMs,
+        ...(abandonedPass ? { abandoned_improvement_pass: abandonedPass } : {}),
       });
     }
     flushIdleLaneWindow(report);
@@ -4240,9 +4291,7 @@ export async function runDaemon(
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
-  const improvementActionPump = startImprovementActionPump(deps, pollIntervalMs, log);
-  improvementActionPumpRef.stop = improvementActionPump.stop;
-  improvementActionPumpRef.isBusy = improvementActionPump.isBusy;
+  Object.assign(improvementActionPumpRef, startImprovementActionPump(deps, pollIntervalMs, log));
   // W1-T5720 — THE BOOT GATE. Tick 1 runs a light pass at once, then holds its cadences until the first full
   // pass returns or the BACKSTOP passes (10-05: first `sweep.pass` 6.7-15.8 min after `daemon.boot`). It holds
   // only what is wired: with nothing to defer, tick 1's admission keeps W1-T4998's no-wait contract.

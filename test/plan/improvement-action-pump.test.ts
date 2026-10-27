@@ -60,6 +60,104 @@ test("saved improvement actions start only through the daemon-owned handoff: dae
 });
 
 
+test("saved improvement pump names its active handoff and starts no second target after stop", async () => {
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const starts: string[] = [], steps: string[] = [];
+  const p = daemon.startImprovementActionPump({
+    pendingImprovementActions: async function* () { yield target("d"); yield target("e"); },
+    handOffImprovementAction: async (request: ReturnType<typeof target>) => { starts.push(request.operationId); await barrier; },
+  }, 5, step => steps.push(step));
+  try {
+    for (let i = 0; i < 100 && !starts.length; i++) await turn();
+    assert.equal(p.activeOperation(), target("d").operationId, "the running handoff is named while it runs");
+    p.stop();
+    for (let i = 0; i < 20; i++) await turn();
+    assert.equal(p.isBusy(), true, "stop never interrupts the active handoff");
+    release(); await p.settled();
+    assert.deepEqual(starts, [target("d").operationId], "stop refuses the second target");
+    assert.equal(p.activeOperation(), undefined);
+    assert.deepEqual(steps, ["improvement.action_started", "improvement.action_handoff_settled"]);
+  } finally { p.stop(); release(); await p.settled(); }
+});
+
+type Row = { step: string; fields: Record<string, unknown> };
+async function until(done: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 2000 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 1));
+  assert(done(), what);
+}
+/** The real runDaemon with one saved action; STOP is raised once the pump has reached `stopWhen`. */
+function stoppingDaemon(saved: { pendingImprovementActions: () => AsyncIterable<ReturnType<typeof target>>; handOffImprovementAction: (request: ReturnType<typeof target>) => Promise<unknown> }, stopWhen: () => boolean, opts: daemon.DaemonOpts = {}) {
+  const rows: Row[] = [];
+  const state = { returned: false };
+  const loop = daemon.runDaemon(loadPlanFromYaml("[]", "improvement-stop-fixture"), {
+    ...saved, refreshMerged: () => () => true,
+    runOne: async () => { throw new Error("no build is part of a planning request"); },
+    checkStop: () => stopWhen() ? "operator stop" : undefined,
+    sleep: async () => { await turn(); }, log: (step, fields = {}) => { rows.push({ step, fields }); },
+  }, { pollIntervalMs: 1, ...opts }).then(result => { state.returned = true; return result; });
+  return { loop, rows, state };
+}
+
+test("saved improvement actions start only through the daemon-owned handoff: a daemon stop waits for the active handoff", async () => {
+  let release!: () => void, started = false, finished = false;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const { loop, rows, state } = stoppingDaemon({
+    pendingImprovementActions: async function* () { yield target("f"); },
+    handOffImprovementAction: async () => { started = true; await barrier; finished = true; return { outcome: "drafted" }; },
+  }, () => started);
+  try {
+    await until(() => rows.some(r => r.step === "daemon.stop"), "STOP was not observed after the handoff started");
+    for (let i = 0; i < 25; i++) await new Promise(resolve => setTimeout(resolve, 1));
+    assert.equal(state.returned, false, "runDaemon must not report stopped while its owned handoff is active");
+    assert.equal(rows.some(r => r.step === "daemon.summary"), false);
+    release();
+    const result = await loop;
+    assert.equal(result.stopReason, "stopped"); assert.equal(result.stopDetail, "operator stop"); assert.equal(finished, true);
+    const settled = rows.findIndex(r => r.step === "improvement.action_handoff_settled");
+    assert(settled >= 0, "the active handoff's settlement is logged");
+    assert.equal(rows[settled]!.fields.operation_id, target("f").operationId);
+    assert(settled < rows.findIndex(r => r.step === "daemon.summary"), "the handoff settles before the exit summary");
+    assert.equal(rows.some(r => r.step === "improvement.action_handoff_abandoned" || r.step === "daemon.stop_drain.completed"), false);
+  } finally { release(); await loop; }
+});
+
+test("saved improvement actions start only through the daemon-owned handoff: the stop bound names an abandoned handoff", async () => {
+  let release!: () => void, started = false;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const { loop, rows } = stoppingDaemon({
+    pendingImprovementActions: async function* () { yield target("g"); },
+    handOffImprovementAction: async () => { started = true; await barrier; },
+  }, () => started, { sweepWallClockBoundMs: 20 });
+  try {
+    const result = await loop;
+    assert.equal(result.stopReason, "stopped");
+    assert.equal(result.stopDetail, `operator stop; improvement handoff ${target("g").operationId} still running at the 20 ms stop bound`);
+    const abandoned = rows.find(r => r.step === "improvement.action_handoff_abandoned");
+    assert.deepEqual(abandoned?.fields, { operation_id: target("g").operationId, phase: "handoff", bound_ms: 20 });
+    assert.deepEqual(rows.find(r => r.step === "daemon.stop_drain.completed")?.fields, {
+      abandoned_in_flight_reviews: 0, bound_ms: 20, abandoned_improvement_pass: { operation_id: target("g").operationId, phase: "handoff" },
+    });
+    assert.equal(rows.some(r => r.step === "improvement.action_handoff_settled"), false, "an abandoned handoff is never claimed settled");
+  } finally { release(); await loop; }
+});
+
+test("saved improvement actions start only through the daemon-owned handoff: the stop bound names an unfinished queue read", async () => {
+  let release!: () => void, reading = false, handed = 0;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const { loop, rows } = stoppingDaemon({
+    pendingImprovementActions: async function* () { reading = true; await barrier; yield target("h"); },
+    handOffImprovementAction: async () => { handed++; },
+  }, () => reading, { sweepWallClockBoundMs: 20 });
+  try {
+    const result = await loop;
+    assert.equal(result.stopDetail, "operator stop; improvement saved-action queue read still running at the 20 ms stop bound");
+    assert.deepEqual(rows.find(r => r.step === "improvement.action_handoff_abandoned")?.fields, { operation_id: null, phase: "discovery", bound_ms: 20 });
+    release(); for (let i = 0; i < 20; i++) await turn();
+    assert.equal(handed, 0, "a stopped pump starts no handoff once its queue read returns");
+  } finally { release(); await loop; }
+});
+
 test("saved improvement actions start only through the daemon-owned handoff: command wiring", async () => {
   await withTempDir("improvement-command-wiring", async home => {
     const root = join(home, "Remudero"), planPath = join(home, "tasks.yaml");
