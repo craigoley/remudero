@@ -9621,14 +9621,8 @@ export async function lightPassHeadContractRefresh(
     const lines = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath); // ledger-read-intent: live — candidate holds; attempts use the strict union below.
     const candidates = prs.flatMap(pr => {
       const hold = refusedHeadContract(lines, pr);
-      const scope = scopeEscalationStandDown(lines, pr);
-      const scopeRevision = scope?.kind !== "unfiled" && scope?.contractRevision !== undefined &&
-        lines.some(row => row.step === "fix.scope_amendment" && row.task_id === fixLedgerTaskIdFor(pr) &&
-          row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.contract_revision === scope.contractRevision)
-        ? scope.contractRevision : undefined;
-      const standingOn = hold?.contract_revision ?? scopeRevision;
-      const revision = standingOn !== undefined && pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
-      return standingOn !== undefined && revision !== undefined && revision !== standingOn ? [{ pr, revision }] : [];
+      const revision = hold && pr.taskId !== undefined ? deps.readTaskContractRevision?.(pr.taskId) : undefined;
+      return hold && revision !== undefined && revision !== hold.contract_revision ? [{ pr, revision }] : [];
     });
     if (candidates.length === 0) return {};
     const history = await headContractRefreshHistory(deps);
@@ -20273,24 +20267,6 @@ export async function runSweep(
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true, needs_design_round_id: terminalDesignHold.roundId,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
       ...(terminalDesignHold.semantic === undefined ? {} : { progress_task_semantic_revision: terminalDesignHold.semantic.standingOn }) };
-    const selectedContractRefresh = async (
-      revision: string, action: () => Promise<string | undefined>,
-    ): Promise<string | undefined> => {
-      if (contractHoldRefreshSpent || headContractRefreshInFlight) return "another head-contract amendment owns the refresh";
-      headContractRefreshInFlight = true;
-      try {
-        const history = await headContractRefreshHistory(deps);
-        if (!history.complete || headContractRefreshAttempted([...history.lines, ...ledgerLines], pr, revision)) {
-          return history.complete ? "head-contract amendment refresh already attempted — awaiting new evidence"
-            : "head-contract refresh history unreadable — no refresh or fix admitted";
-        }
-        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: fixLedgerTaskIdFor(pr),
-          step: HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
-          contract_revision: revision });
-        contractHoldRefreshSpent = true;
-        return await action();
-      } finally { headContractRefreshInFlight = false; }
-    };
     const refreshAmendedContract = async (
       latched: readonly Record<string, unknown>[], inputKey?: string, observedRevision?: string,
       semantic?: { standingOn: string; observed: string },
@@ -20668,14 +20644,30 @@ export async function runSweep(
               if (headContractHold && currentHoldContract !== undefined && currentHoldContract !== headContractHold.contract_revision) {
                 acted = false;
                 spent = false;
+                if (contractHoldRefreshSpent || headContractRefreshInFlight) {
+                  standDownReason = "another head-contract amendment owns the refresh";
+                  break;
+                }
                 const refresh = deps.updateBranch ?? deps.headContractRefreshFor?.(pr);
                 if (!refresh) {
                   standDownReason = "task contract amended since this head was escalated — deferred to full sweep (update-branch not available on this pass)";
                   break;
                 }
-                standDownReason = await selectedContractRefresh(currentHoldContract, () =>
-                  refreshAmendedContract([{ progress_contract_revision: headContractHold.contract_revision }],
-                    undefined, currentHoldContract, undefined, refresh)) ?? "head contract changed during amendment observation — no fix admitted";
+                headContractRefreshInFlight = true;
+                try {
+                  const history = await headContractRefreshHistory(deps);
+                  if (!history.complete || headContractRefreshAttempted([...history.lines, ...ledgerLines], pr, currentHoldContract)) {
+                    standDownReason = history.complete ? "head-contract amendment refresh already attempted — awaiting new evidence"
+                      : "head-contract refresh history unreadable — no refresh or fix admitted";
+                    break;
+                  }
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: fixLedgerTaskIdFor(pr),
+                    step: HEAD_CONTRACT_REFRESH_ATTEMPT_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+                    contract_revision: currentHoldContract });
+                  contractHoldRefreshSpent = true;
+                  standDownReason = await refreshAmendedContract([{ progress_contract_revision: headContractHold.contract_revision }],
+                    undefined, currentHoldContract, undefined, refresh) ?? "head contract changed during amendment observation — no fix admitted";
+                } finally { headContractRefreshInFlight = false; }
                 break;
               }
               const scopeHold = scopeEscalationStandDown(ledgerLines, pr);
@@ -20685,15 +20677,10 @@ export async function runSweep(
                 acted = false;
                 spent = false;
                 extraDisposedFields = { ...extraDisposedFields, operator_scope_hold: scopeHold.kind };
-                const refresh = deps.updateBranch ?? deps.headContractRefreshFor?.(pr);
-                const revision = pr.taskId === undefined ? undefined : deps.readTaskContractRevision?.(pr.taskId);
-                const action = () => refreshAmendedContract([
+                standDownReason = await refreshAmendedContract([
                   ...(scopeHold.contractRevision !== undefined ? [{ progress_contract_revision: scopeHold.contractRevision }] : []),
                   ...ledgerLines.filter((line) => line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
-                    line.head_sha === pr.headSha && line.operator_scope_hold === scopeHold.kind)],
-                  undefined, revision, undefined, refresh);
-                standDownReason = await (deps.updateBranch === undefined && refresh !== undefined && revision !== undefined
-                  ? selectedContractRefresh(revision, action) : action()) ?? scopeHold.reason;
+                    line.head_sha === pr.headSha && line.operator_scope_hold === scopeHold.kind)]) ?? scopeHold.reason;
                 break;
               }
               const preflightEscalation = preflightEscalations.get(pr.prNumber);
