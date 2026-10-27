@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
-import { dailyWindow } from "#src/lib/daily-progress-calendar.js";
+import { dailyWindow, nextDailyDue } from "#src/lib/daily-progress-calendar.js";
 import { readDailyProgressRepositories } from "#src/lib/daily-progress-collector.js";
 import { prepareDailyProgressPublication, type DailyProgressRecord } from "#src/lib/daily-progress-store.js";
-import { createDailyProgressView, dailyProgressRequestKey, readDailyProgressReport, validateDailyProgressRequest, DAILY_PROGRESS_VIEW_NAME } from "#src/lib/daily-progress-view.js";
+import { createDailyProgressView, dailyProgressRequestKey, readDailyProgressReport, validateDailyProgressRequest, DAILY_PROGRESS_SCOPE_KEY, DAILY_PROGRESS_VIEW_NAME } from "#src/lib/daily-progress-view.js";
 import { acquireLease, openReadModel } from "#src/lib/read-model-db.js";
 import { createRepositoriesSourcePublisher } from "#src/lib/repositories-view.js";
 import { withTempDir } from "#src/lib/tmp.js";
@@ -104,16 +104,64 @@ test("daily source freshness does not move forward just because another retry is
       const lease = acquireLease(db); assert.ok(lease.ok); if (!lease.ok) return;
       const saved = record("acme/a", 1, "2026-11-02T05:55:00.000Z"); saved.phase = "finalizing";
       saved.totals.mergedChanges.precision = saved.totals.completedTasks.precision = "at_least";
-      const source = saved.coverage.sources[0]!;
+      const source = saved.coverage.sources[0]!, readAt = Date.parse("2026-11-02T06:00:00Z");
+      // The scheduled retry is the slot after the read itself, so it is always still in the future.
       Object.assign(source, { state: "partial", lastAttemptAt: "2026-11-02T04:50:00.000Z", lastSuccessAt: "2026-11-02T04:50:00.000Z",
-        coverageThrough: "2026-11-02T04:50:00.000Z", nextDueAt: "2026-11-02T07:00:00.000Z", reason: "The saved source does not cover the report cutoff." });
+        coverageThrough: "2026-11-02T04:50:00.000Z", nextDueAt: fixedClock(nextDailyDue(readAt)).iso(), reason: "The saved source does not cover the report cutoff." });
+      assert.ok(Date.parse(source.nextDueAt!) > readAt, "positive control: the retry is scheduled after the read");
       prepareDailyProgressPublication(stateDir, [saved], []).commit(db, lease.lease);
-      const read = () => readDailyProgressReport({ stateDir, params: new URLSearchParams({ repository: "acme/a", date: "2026-11-01" }), now: Date.parse("2026-11-02T06:00:00Z") });
+      const read = () => readDailyProgressReport({ stateDir, params: new URLSearchParams({ repository: "acme/a", date: "2026-11-01" }), now: readAt });
       assert.equal(read().sources[0]!.state, "stale", "a future retry cannot extend an old successful reading's freshness");
       assert.deepEqual(read().data.totals.mergedChanges, { value: 1, precision: "at_least" }, "the last good evidence stays visible");
       Object.assign(source, { lastAttemptAt: "2026-11-02T05:45:00.000Z", lastSuccessAt: "2026-11-02T05:45:00.000Z", coverageThrough: saved.windowEnd });
       prepareDailyProgressPublication(stateDir, [saved], []).commit(db, lease.lease);
       assert.equal(read().sources[0]!.state, "fresh", "a genuinely newer source receipt is the positive control");
+    } finally { db.close(); }
+  });
+});
+
+test("daily request validation waits for the current day's roster when no scope body is held", async () => {
+  await withTempDir("daily-cold-roster", async stateDir => {
+    createRepositoriesSourcePublisher({ stateDir, instances: () => [{ instanceId: "core", options: { root: stateDir, instanceRepository: { owner: "acme", repo: "a" } } }] })();
+    const db = openReadModel({ stateDir, instance: "proof", schemaVersion: 1 });
+    try {
+      const lease = acquireLease(db); assert.ok(lease.ok); if (!lease.ok) return;
+      prepareDailyProgressPublication(stateDir, [record("acme/a", 1)], []).commit(db, lease.lease);
+      let now = Date.parse("2026-11-02T04:59:00Z");
+      const clock = { now: () => now, iso: () => fixedClock(now).iso(), date: () => fixedClock(now).date() };
+      const built = new Map<string, ViewBodyEntry>();
+      for (const item of createDailyProgressView({ stateDir }).materialize({ now, instances: [] })) {
+        const rendered = renderView({ name: DAILY_PROGRESS_VIEW_NAME, version: 1, compute: () => item }, clock);
+        assert.ok(!("error" in rendered)); if ("error" in rendered) continue;
+        built.set(item.key, { view: DAILY_PROGRESS_VIEW_NAME, key: item.key, version: 1, generation: 1, ...rendered });
+      }
+      const currentKey = dailyProgressRequestKey(new URLSearchParams({ repository: "all", date: "today" }), now);
+      assert.ok(built.has(DAILY_PROGRESS_SCOPE_KEY) && built.has(currentKey), "positive control: the worker builds both the scope and the all-repository Today body");
+      const reads: string[] = [], wants: string[] = [];
+      let held = new Map<string, ViewBodyEntry>();
+      const source: ViewBodySource = { switches: () => ({ views: { [DAILY_PROGRESS_VIEW_NAME]: "serve" } }), judge: (sources, at) => sources.map(s => judgeSource(s, at)),
+        body(_view, requestKey = "") { reads.push(requestKey); return held.get(requestKey); }, want(view, requestKey) { wants.push(`${view} ${requestKey}`); return true; } };
+      const validate = (query: Record<string, string>) => validateDailyProgressRequest(new URLSearchParams(query), source, now);
+      const waiting = { error: "view_not_ready", status: 503, detail: "Daily progress is waiting for the current reporting day." };
+
+      assert.deepEqual(validate({ repository: "acme/a", date: "today" }), waiting, "with no roster held, no repository scope is authorized");
+      assert.deepEqual(reads, [DAILY_PROGRESS_SCOPE_KEY, currentKey], "the scope body is tried first, then the current day's all-repository body");
+      assert.deepEqual(wants, [`${DAILY_PROGRESS_VIEW_NAME} ${currentKey}`], "the current day's roster is demanded from the worker");
+
+      now = Date.parse("2026-11-02T05:00:00Z");
+      const midnightKey = dailyProgressRequestKey(new URLSearchParams({ repository: "all", date: "today" }), now);
+      assert.notEqual(midnightKey, currentKey, "midnight moves Today to a new civil date");
+      held = new Map([[midnightKey, built.get(currentKey)!]]); wants.length = 0;
+      assert.deepEqual(validate({ repository: "acme/a", date: "yesterday" }), waiting, "a body carrying the previous day cannot stand in for the new day's roster");
+      assert.deepEqual(wants, [`${DAILY_PROGRESS_VIEW_NAME} ${midnightKey}`]);
+
+      now = Date.parse("2026-11-02T04:59:00Z");
+      held = new Map([...built].filter(([key]) => key !== DAILY_PROGRESS_SCOPE_KEY)); wants.length = 0;
+      assert.equal(validate({ repository: "all", date: "today" }), undefined, "the current day's all-repository body authorizes its own scope");
+      assert.deepEqual(validate({ repository: "evil/hidden", date: "today" }), { error: "invalid_request", status: 400, detail: "unknown repository" }, "the cold roster still refuses a foreign repository");
+      const selected = dailyProgressRequestKey(new URLSearchParams({ repository: "acme/a", date: "today" }), now);
+      assert.deepEqual(validate({ repository: "acme/a", date: "today" }), { error: "view_not_ready", status: 503, detail: "Daily progress is preparing the selected report." });
+      assert.deepEqual(wants, [`${DAILY_PROGRESS_VIEW_NAME} ${selected}`], "an authorized scope demands its own report, never the roster again");
     } finally { db.close(); }
   });
 });

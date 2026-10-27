@@ -19,7 +19,7 @@ function record(size = 205): DailyProgressRecord {
       { id: "acme/app:ledger", repository: "acme/app", kind: "ledger_activity", instanceId: null, required: false },
       { id: "acme/app:deployments", repository: "acme/app", kind: "deployments", instanceId: null, required: false }], sources: [{
       id: "acme/app:prs", repository: "acme/app", kind: "pull_requests", instanceId: null, required: true, state: "complete", lastAttemptAt: at, lastSuccessAt: at,
-      coverageStart: window.windowStart, coverageThrough: window.windowEnd, nextDueAt: "2026-11-02T07:00:00.000Z", reason: null,
+      coverageStart: window.windowStart, coverageThrough: window.windowEnd, nextDueAt: fixedClock(nextDailyDue(Date.parse(at))).iso(), reason: null,
     }, { id: "acme/app:ledger", repository: "acme/app", kind: "ledger_activity", instanceId: null, required: false, state: "not_collected", lastAttemptAt: null,
       lastSuccessAt: null, coverageStart: null, coverageThrough: null, nextDueAt: null, reason: "Activity evidence is not collected." },
     { id: "acme/app:deployments", repository: "acme/app", kind: "deployments", instanceId: null, required: false, state: "not_collected", lastAttemptAt: null,

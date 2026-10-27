@@ -253,6 +253,46 @@ test("daily collector keeps every configured PR source visible before counting e
   });
 });
 
+test("daily collector keeps a source that is no longer configured as optional retained history", async () => {
+  await withTempDir("daily-historical-source", async root => {
+    let now = Date.parse("2026-11-02T12:00:00.000Z");
+    const clock = { now: () => now, iso: () => fixedClock(now).iso(), date: () => fixedClock(now).date() };
+    const repository = "acme/app", zone = "America/New_York", stateDir = join(root, "state"); mkdirSync(stateDir);
+    const instance = (name: string) => {
+      const boardRoot = join(root, name), ledgerDir = join(boardRoot, "state");
+      mkdirSync(ledgerDir, { recursive: true }); writeFileSync(join(ledgerDir, "ledger.ndjson"), "");
+      return { name, root: boardRoot, stateDir: ledgerDir, repository };
+    };
+    const core = instance("core"), extra = instance("extra");
+    const cache = createBoardSnapshotCache(core.root, "acme", "app", { clock });
+    const db = openReadModel({ stateDir, instance: "historical-source", schemaVersion: 1 });
+    const collect = async (instances: Array<typeof core>) => {
+      cache.recordClosedAttempt!({ ok: true, persisted: cache.commitClosed([]) }); cache.commitOpen!([], now);
+      const collected = await collectDailyProgress({ stateDir, expectedRepositories: [repository], instances, timeZone: zone }, clock);
+      assert(collected, "the hourly collection job is due");
+      const held = acquireLease(db, { holder: "historical-source", clock }); assert(held.ok); collected.commit(db, held.lease);
+      return readDailyProgressRevision(stateDir, readDailyProgressManifest(stateDir).days[dailyProgressDayKey(repository, zone, dailyDateAt(now, zone))]!).report;
+    };
+    try {
+      const before = await collect([core, extra]);
+      assert.deepEqual(before.coverage.expectedSources.find(s => s.id === "acme/app:prs:extra"),
+        { id: "acme/app:prs:extra", repository, kind: "pull_requests", instanceId: "extra", required: true }, "positive control: the configured sibling is required");
+      assert.equal(before.totals.mergedChanges.precision, "unavailable", "the uncollected required sibling withholds exact totals");
+      now += 3_600_000;
+      const after = await collect([core]);
+      assert.equal(after.revision, 2, "the same reporting day is collected again over its retained report");
+      for (const [id, kind] of [["acme/app:prs:extra", "pull_requests"], ["acme/app:ledger:extra", "ledger_activity"]] as const) {
+        assert.deepEqual(after.coverage.expectedSources.find(s => s.id === id), { id, repository, kind, instanceId: "extra", required: false }, `${id} stays expected, as optional history`);
+        const retained = after.coverage.sources.find(s => s.id === id); assert(retained, `${id} keeps its retained evidence`);
+        assert.equal(retained.required, false); assert.equal(retained.state, "unavailable");
+        assert.equal(retained.reason, "This historical source is no longer configured; retained evidence remains available.");
+      }
+      assert.deepEqual(after.coverage.expectedSources.filter(s => s.required).map(s => s.id), ["acme/app:prs:core"], "only the still-configured PR source is required");
+      assert.deepEqual(after.totals.mergedChanges, { value: 0, precision: "exact" }, "a retired source no longer withholds the measured zero");
+    } finally { db.close(); await flushReadModelTransactions(); }
+  });
+});
+
 test("daily production slow lane retains required unowned siblings before counting exact totals", { timeout: 15_000 }, async () => {
   await withTempDir("daily-partial-ownership", async root => {
     const clock = fixedClock(Date.parse("2026-11-02T12:00:00.000Z")), repository = "acme/app";

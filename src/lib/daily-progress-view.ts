@@ -1,7 +1,7 @@
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
-import { dailyDateAt, dailyWindow, DEFAULT_DAILY_PROGRESS_ZONE, resolveDailyDate, shiftDailyDate } from "./daily-progress-calendar.js";
+import { dailyDateAt, DEFAULT_DAILY_PROGRESS_ZONE, resolveDailyDate, shiftDailyDate } from "./daily-progress-calendar.js";
 import { readDailyProgressRepositories } from "./daily-progress-collector.js";
 import { validateDailyProgressReport, type DailyProgressReport, type MeasuredCount, type SourceCoverage } from "./daily-progress-contract.js";
 import { dailyProgressDayKey, readDailyProgressManifest, readDailyProgressRevision, type DailyProgressRevision } from "./daily-progress-store.js";
