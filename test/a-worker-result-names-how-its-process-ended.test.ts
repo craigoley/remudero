@@ -47,6 +47,10 @@ async function codexRun(stream: string, code: number | null, signal?: string): P
   const stderr = new PassThrough();
   const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t6027-home-`));
+  // A tool-less spawn is a writer, whose async Git probe runs BEFORE the containment spawn: the child may
+  // only exit once it exists, or its `exit` has no listener and the worker waits forever.
+  let spawned!: () => void;
+  const hasSpawned = new Promise<void>((resolve) => { spawned = resolve; });
   try {
     const run = spawnCodexWorker(
       {
@@ -54,12 +58,13 @@ async function codexRun(stream: string, code: number | null, signal?: string): P
         cwd: process.cwd(),
         prompt: "how did it end",
         settingsFile: join(process.cwd(), "settings", "worker.json"),
-        containment: { spawn: () => ({ process: proc as never, pid: 60_270 }), teardown: () => {} },
+        containment: { spawn: () => { spawned(); return { process: proc as never, pid: 60_270 }; }, teardown: () => {} },
       },
       { claudeBin: "/unused", root: "/tmp", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" } } as Config,
     );
     stdout.write(stream);
     stdout.end();
+    await hasSpawned;
     // Let the stream's data events land before the child reports its end, as a real pipe drains.
     await new Promise((resolve) => setImmediate(resolve));
     if (signal === undefined) proc.emit("exit", code);

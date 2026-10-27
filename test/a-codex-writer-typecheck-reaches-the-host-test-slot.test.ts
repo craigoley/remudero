@@ -6,8 +6,8 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
@@ -79,7 +79,12 @@ async function withEnv<T>(env: Record<string, string | undefined>, body: () => P
 }
 
 const WRITER = ["Read", "Write", "Edit", "Bash"];
-const slotArgs = (args: string[]) => args.filter((arg, i) => arg.includes("RMD_TEST_SLOT") || arg === "--add-dir" || args[i - 1] === "--add-dir");
+// A writer's private native-cache grant is a separate concern from the slot grant, so it is not counted here.
+const NATIVE_CACHE = join(realpathSync(homedir()), ".cache", "remudero", "swc-native");
+const slotArgs = (args: string[]) => args.filter((arg, i) => {
+  if (arg === NATIVE_CACHE || (arg === "--add-dir" && args[i + 1] === NATIVE_CACHE)) return false;
+  return arg.includes("RMD_TEST_SLOT") || arg === "--add-dir" || args[i - 1] === "--add-dir";
+});
 
 test("a Codex writer alone is granted and told the host test slot dir so its npm run typecheck serialises on the host", async () => {
   const repo = gitRepo({ kind: "codex-slot" });

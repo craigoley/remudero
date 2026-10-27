@@ -890,6 +890,10 @@ test("W1-T3490 criterion 2: fragmented Codex JSONL remains a complete neutral wo
   const stderr = new PassThrough();
   const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr });
   const workerHome = mkdtempSync(join(tmpdir(), "rmd-codex-home-"));
+  // A tool-less spawn is a writer, whose async Git probe runs BEFORE the containment spawn: the child may
+  // only exit once it exists, or its `exit` has no listener and the worker waits forever.
+  let spawned!: () => void;
+  const hasSpawned = new Promise<void>((resolve) => { spawned = resolve; });
   try {
     const resultPromise = spawnCodexWorker(
       {
@@ -898,7 +902,7 @@ test("W1-T3490 criterion 2: fragmented Codex JSONL remains a complete neutral wo
         prompt: "collect fragmented JSONL",
         settingsFile: join(process.cwd(), "settings", "worker.json"),
         containment: {
-          spawn: () => ({ process: proc as never, pid: 34_901 }),
+          spawn: () => { spawned(); return { process: proc as never, pid: 34_901 }; },
           teardown: () => {},
         },
       },
@@ -909,6 +913,8 @@ test("W1-T3490 criterion 2: fragmented Codex JSONL remains a complete neutral wo
     stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n');
     stdout.write('{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":25,"output_tokens":10}}\n');
     stdout.end();
+    await hasSpawned;
+    await new Promise((resolve) => setImmediate(resolve));
     proc.emit("exit", 0);
 
     const result = await resultPromise;
