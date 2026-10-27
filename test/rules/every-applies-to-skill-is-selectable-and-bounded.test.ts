@@ -15,8 +15,27 @@ import { makeTempDir } from "#src/lib/tmp.js";
 import { implementToolBound, resolveDispatchLaneToolBound, resolveGenericRouteToolBound } from "#src/lib/worker.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: REPO_ROOT, encoding: "utf8" }).split("\0").filter(Boolean);
-const generation = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+/** Run git over the repo; a host with no git on PATH (the census snapshot round runs git-free) answers `undefined`. */
+function gitOrAbsent(args: string[]): string | undefined {
+  try {
+    return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; // git is absent from PATH: fall back to the tree
+    throw error;
+  }
+}
+
+/** Every file under `dir` (repo-relative, `/`-separated), skipping VCS, dependency and run-state directories. */
+function walkTree(dir: string, prefix = ""): string[] {
+  return readdirSync(join(dir, prefix), { withFileTypes: true }).flatMap(entry => {
+    if (entry.isDirectory()) return [".git", "node_modules", "coverage", "state", "worktrees"].includes(entry.name) ? [] : walkTree(dir, `${prefix}${entry.name}/`);
+    return entry.isFile() ? [`${prefix}${entry.name}`] : [];
+  });
+}
+
+const lsFiles = gitOrAbsent(["ls-files", "-z"]);
+const tracked = lsFiles === undefined ? walkTree(REPO_ROOT) : lsFiles.split("\0").filter(Boolean);
+const generation = gitOrAbsent(["rev-parse", "HEAD"])?.trim() || "untracked-tree";
 const settings: unknown = JSON.parse(readFileSync(join(REPO_ROOT, "settings", "worker.json"), "utf8"));
 
 /** This is a census of reporting/selection, never a provider invocation or a tool grant. */
