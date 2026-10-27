@@ -327,3 +327,100 @@ test("W1-T8950: unreadable stores, seeds, records and logs read as nothing, and 
   assert.equal(await writer({ context: "p" }), null, "no object in the answer");
   assert.equal(await writer({ context: "p" }), null, "an unparseable object");
 });
+
+test("inbox advice requires independently captured current repository evidence", (t) => {
+  const { root, stateDir } = stateRoot(t);
+  const task = { id: "verify-human:W1-T1015", summary: "A task awaits a human check." };
+  const same = { id: "machine-judge:W1-T5418", summary: READY_SUMMARY };
+  const mono = { id: "machine-judge:W1-T204", summary: "A legacy-plan task is parked." };
+  const ruling = { id: "ruling:budget", summary: "A budget ruling is open." };
+  const lanesFor = () => lanesOf(root, [task, same, mono, ruling].map((p) => ({ ...p, state: "ready" as const })));
+  const servedIds = () => lanesFor().needsYou.ready.filter((i) => i.recommendation !== undefined).map((i) => i.proposalId).sort();
+  const rows = {
+    [task.id]: stored(task, "ready", { repository: "acme/core", evidence: ["#6377"] }, "core-blob"),
+    [same.id]: stored(same, "ready", { repository: "acme/target" }, "blob-new-a"),
+    [mono.id]: stored(mono, "ready", { repository: "acme/target" }),
+    [ruling.id]: stored(ruling, "ready", { repository: "acme/target" }),
+  };
+  writeFileSync(recommendationStorePath(stateDir), JSON.stringify(rows));
+  const raw = readFileSync(recommendationStorePath(stateDir), "utf8");
+  const target = { repository: "acme/target", tasks: { "W1-T5418": "blob-new-a" }, monolith: ["W1-T204"] };
+
+  assert.deepEqual(servedIds(), [], "no captured source: nothing cached is current");
+  writeFileSync(recommendationSourcePath(stateDir), "{ torn");
+  assert.deepEqual(servedIds(), [], "an unreadable source is no evidence");
+
+  writeSource(stateDir, target);
+  assert.deepEqual(servedIds(), [mono.id, same.id, ruling.id], "valid task, monolith and non-task advice stays; the foreign Core task is omitted");
+
+  // The same fingerprint over a task record that moved on main: the summary is unchanged, the blob is not.
+  writeSource(stateDir, { ...target, tasks: { "W1-T5418": "blob-moved" } });
+  assert.deepEqual(servedIds(), [mono.id, ruling.id], "a moved task blob omits advice even though its stored fingerprint still self-checks");
+
+  writeSource(stateDir, { ...target, tasks: { "W1-T5418": "blob-new-a", "W1-T1015": "core-blob" }, repository: "acme/core" });
+  assert.deepEqual(servedIds(), [task.id], "advice stamped for another repository is not served; a Core source qualifies only Core's own");
+
+  writeSource(stateDir, { ...target, monolith: [] });
+  assert.deepEqual(servedIds(), [same.id, ruling.id], "a monolith task absent from the current plan is omitted");
+
+  const legacy = { ...rows, [ruling.id]: { ...rows[ruling.id]!, repository: undefined } };
+  writeFileSync(recommendationStorePath(stateDir), JSON.stringify(legacy));
+  writeSource(stateDir, target);
+  assert.deepEqual(servedIds(), [mono.id, same.id], "a legacy non-task entry proves no repository and does not acquire the selected one");
+
+  writeFileSync(recommendationStorePath(stateDir), raw);
+  assert.equal(readFileSync(recommendationStorePath(stateDir), "utf8"), raw, "reading never rewrites the stored history");
+});
+
+test("a fixed recommendation source refuses repository and revision drift", async (t) => {
+  const target = gitRepo({ kind: "inbox-recommendation" });
+  const foreign = gitRepo({ kind: "inbox-recommendation" });
+  const commitTask = (repo: ReturnType<typeof gitRepo>, id: string, title: string) => {
+    mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
+    writeFileSync(join(repo.dir, "plan", "tasks.d", `${id}-x.yaml`), `- id: ${id}\n  title: ${title}\n`);
+    repo.git("add", "plan");
+    repo.git("commit", "--quiet", "-m", `feat: ${title} (${id})`);
+    repo.git("update-ref", "refs/remotes/origin/main", repo.git("rev-parse", "HEAD"));
+  };
+  try {
+    commitTask(target, "W1-T5418", "a console task");
+    commitTask(foreign, "W1-T1015", "a core task");
+    const plan = { planDir: "plan", planMonolith: "plan/tasks.yaml" };
+    const evidenceIn = (git: (...a: string[]) => string, selected: string) =>
+      gitRecommendationEvidence(async (args) => git(...args), plan, { repository: "acme/target", checkoutRoot: selected });
+
+    const pinned = await evidenceIn(target.git, target.dir).pin!();
+    const first = target.git("rev-parse", "origin/main");
+    assert.equal(pinned.commit, first, "the pass fixes a verified commit");
+    assert.deepEqual((await pinned.qualification()).tasks, { "W1-T5418": target.git("rev-parse", "origin/main:plan/tasks.d/W1-T5418-x.yaml") });
+    assert.equal((await pinned.qualification()).repository, "acme/target");
+
+    // Cross-repository: a git runner that lands in Core while Console is selected is refused, not read.
+    await assert.rejects(evidenceIn(foreign.git, target.dir).pin!(), /is not the selected checkout/);
+
+    // Mid-pass drift: main moves after the pin; the pinned reads keep the old tree and the pass refuses to publish.
+    commitTask(target, "W1-T6000", "a task landed mid pass");
+    assert.deepEqual([...(await pinned.shards()).keys()], ["W1-T5418"], "every read stays on the pinned commit");
+    await assert.rejects(pinned.assertUnchanged(), /moved from .* during the pass/);
+
+    // End to end: a main that moves while the writer is answering stores nothing as current advice.
+    const { root, stateDir } = stateRoot(t);
+    const proposal = { id: "machine-judge:W1-T5418", summary: READY_SUMMARY };
+    const evidence = evidenceIn(target.git, target.dir);
+    let moves = 0;
+    const deps = { stateDir, evidence, readProposals: () => [proposal], readLanes: () => ({ [proposal.id]: "ready" as const }),
+      summarize: async () => {
+        if (moves++ === 0) commitTask(target, `W1-T600${moves}`, "main moved while answering");
+        return { action: "approve", why: "Its proof passed.", evidence: ["W1-T5418"], obsolete: false };
+      } };
+    await assert.rejects(backfillRecommendations(deps, 1), /moved from/);
+    assert.equal(existsSync(recommendationStorePath(stateDir)), false, "the drifted answer is not stored as current advice");
+    assert.deepEqual(lanesOf(root, [{ ...proposal, state: "ready" }]).needsYou.ready[0]!.recommendation, undefined);
+    assert.equal((await backfillRecommendations(deps, 1)).written, 1, "control: a steady main stores the advice");
+    const row = readRecommendationStore(recommendationStorePath(stateDir))[proposal.id]!;
+    assert.deepEqual({ repository: row.repository, sourceCommit: row.sourceCommit }, { repository: "acme/target", sourceCommit: target.git("rev-parse", "origin/main") });
+  } finally {
+    target.cleanup();
+    foreign.cleanup();
+  }
+});
