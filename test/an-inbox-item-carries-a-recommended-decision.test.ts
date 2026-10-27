@@ -15,6 +15,7 @@ import {
   gitRecommendationEvidence,
   readRecommendationStore,
   realRecommendationWriter,
+  recommendationSourcePath,
   recommendationFingerprint,
   recommendationStorePath,
   startRecommendationBackfill,
@@ -50,6 +51,13 @@ function stored(proposal: { id: string; summary: string }, lane: Parameters<type
   };
 }
 
+/** The independently captured current source the writer's pinned pass leaves beside the store. */
+function writeSource(stateDir: string, fields: { tasks?: Record<string, string>; monolith?: string[]; repository?: string } = {}): void {
+  writeFileSync(recommendationSourcePath(stateDir), JSON.stringify({
+    repository: fields.repository ?? "acme/target", commit: "a".repeat(40), tasks: fields.tasks ?? {}, monolith: fields.monolith ?? [],
+  }));
+}
+
 function lanesOf(root: string, items: Array<{ id: string; summary: string; state: InboxState }>) {
   const classifications: InboxClassification[] = items.map((i) => ({ proposalId: i.id, state: i.state, reasons: [] }));
   return inboxLanes(
@@ -82,6 +90,7 @@ test("W1-T8950: a ready item serves its recommendation with its route", (t) => {
     [OBSOLETE_ID]: stored(obsolete, "notReady", { action: "decline", text: "Moot while the merge queue is off.", obsolete: true, source: "operator-session-seed", evidence: ["W1-T6088"] }),
     [FLEET_ID]: stored({ id: FLEET_ID, summary: "unused" }, "ready", {}),
   }));
+  writeSource(stateDir, { monolith: ["W1-T5418", "W1-T6088"] });
   const lanes = lanesOf(root, [
     { ...ready, state: "ready" }, { ...obsolete, state: "not_ready" }, { id: FLEET_ID, summary: "unused", state: "ready" },
   ]);
@@ -198,6 +207,7 @@ test("W1-T8950: the seed is imported once for items still in the inbox", async (
   assert.equal(store[OBSOLETE_ID]!.source, "operator-session-seed");
   assert.equal(store[OBSOLETE_ID]!.sourceFingerprint, recommendationFingerprint(proposals[0]!, "notReady", "blob6088"));
 
+  writeSource(stateDir, { tasks: { "W1-T6088": "blob6088" } });
   // The falsifier: the seeded item serves its decline with the decline route, and a changed summary hides it.
   const served = lanesOf(root, [{ ...proposals[0]!, state: "not_ready" }]).needsYou.notReady[0]!.recommendation;
   assert.deepEqual({ action: served?.action, obsolete: served?.obsolete, source: served?.source, route: served?.route }, {
