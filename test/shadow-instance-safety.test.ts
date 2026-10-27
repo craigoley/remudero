@@ -269,25 +269,22 @@ test("private registry selection reaches real host and daemon readers: async dep
         execFile: (command, args) => { calls.push([command, ...args]); return ""; } };
       const forbiddenGh = async (): Promise<string> => { throw new Error("unexpected external transport"); };
       const sensors = realDeploySensorsAsync(options, forbiddenGh);
+      options.installPath = join(fixture.root, "retargeted-install");
       const pending = sensors.newestBakedSha();
       assert.equal(typeof pending.then, "function", "the actual async sensor adapter remains asynchronous");
       await pending;
-      assert.ok(calls.some(args => args[0] === "git"), "the healthy control reaches the sensor transport");
+      assert.ok(calls.some(args => args[0] === "git" && args.includes(fixture.root)),
+        "the healthy control reaches the sensor transport with the original selected installation");
+      assert.equal(calls.some(args => args.includes(options.installPath)), false,
+        "the async factory retains its original selected installation snapshot");
       calls.length = 0;
       assert.throws(() => realDeploySensorsAsync({ ...options, instance: "different" }, forbiddenGh),
         /selected instance registry unavailable \(target_missing_or_mismatched\)/);
       assert.deepEqual(calls, [], "an invalid selected target refuses before any transport");
-      const recycler = sensors.restartBackends!().find(backend => backend.name === "recycle-container")!;
-      options.instance = "retargeted";
-      recycler.restart();
-      assert.equal(calls.length, 1);
-      assert.equal(calls[0]![0], "bash");
-      assert.ok(calls[0]!.includes("worker") && calls[0]!.includes(fixture.selected));
-      assert.equal(calls[0]!.includes("retargeted"), false, "the new async factory retains the original selection");
-      calls.length = 0;
       writeFileSync(fixture.selected, registry("live") + `    state_dir: ${stateRoot}\n    container_name: selected-container\n`);
-      assert.throws(() => recycler.restart(), /selected instance registry unavailable \(revision_changed\)/);
-      assert.deepEqual(calls, [], "a revised selected file cannot trigger a restart");
+      assert.throws(() => realDeploySensorsAsync(options, forbiddenGh),
+        /selected instance registry unavailable \(revision_changed\)/);
+      assert.deepEqual(calls, [], "a revised selected file cannot reach a sensor transport");
     }, { envPath: fixture.selected, instanceName: "worker" });
   } finally { fixture.cleanup(); }
 });
