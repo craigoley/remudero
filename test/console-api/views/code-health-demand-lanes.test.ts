@@ -59,7 +59,7 @@ test("code health production factory reads configured durable state before the p
 });
 
 test("demand lane ownership preserves expiry and key limits", async () => {
-  await withTempDir("demand-key-ownership", stateDir => {
+  for (const perInstance of [false, true]) await withTempDir("demand-key-ownership", stateDir => {
     let now = Date.now();
     const clock = clockFromMillisFn(() => now), holder = "demand-key-ownership";
     writeFileSync(join(stateDir, "ledger.ndjson"), "");
@@ -79,8 +79,8 @@ test("demand lane ownership preserves expiry and key limits", async () => {
       ticker.observe(state.instances);
     };
     const start = (book: ReturnType<typeof createDemandBook>, selected = instances, withPeer = false) => {
-      const views: ReadModelView[] = [{ name: "task", version: 1, perInstance: true, demand: true, materialize: ctx =>
-        book.keys("task").filter(key => new URLSearchParams(key).get("instance") === ctx.instances[0]?.state.instance)
+      const views: ReadModelView[] = [{ name: "task", version: 1, perInstance, demand: true, materialize: ctx =>
+        book.keys("task").filter(key => ctx.instances.some(instance => new URLSearchParams(key).get("instance") === instance.state.instance))
           .map(key => ({ key, data: { fixture: key }, sources: [] })) }];
       if (withPeer) views.push({ name: "peer-view", version: 1, demand: true, materialize: () =>
         book.keys("peer-view").map(key => ({ key, data: { fixture: key }, sources: [] })) });
@@ -117,10 +117,10 @@ test("demand lane ownership preserves expiry and key limits", async () => {
 
       core.want("task", next); core.buildNow("task");
       assert.ok(has("task", next), "positive control: an actual wanted body exists before lane transfer");
-      core.lane({ view: "task", instance: "core", heavy: true, dueAt: clock.now(), costMs: 0 });
+      core.lane({ view: "task", instance: perInstance ? "core" : undefined, heavy: true, dueAt: clock.now(), costMs: 0 });
       now += VIEW_DEMAND_EVICT_MS; projector.tick(); observe(core); core.tick();
       assert.ok(has("task", next), "a lane that lost this unit cannot expire its body");
-      core.lane({ view: "task", instance: "core", heavy: false, dueAt: clock.now(), costMs: 0 }); core.tick();
+      core.lane({ view: "task", instance: perInstance ? "core" : undefined, heavy: false, dueAt: clock.now(), costMs: 0 }); core.tick();
       assert.equal(has("task", next), false, "regaining the unit invalidates the old key absent from this owner's demand book");
       core.want("task", next); core.buildNow("task");
       assert.ok(has("task", next), "a new read is served after the genuine invalidation");
