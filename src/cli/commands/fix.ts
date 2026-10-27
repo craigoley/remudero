@@ -3417,7 +3417,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 
       if (prerequisitePr === undefined) {
         const priorNoPr = ledgerLines.findLast(row => row.step === "fix.prerequisite_dispatch_failed" &&
-          row.task_id === opts.taskId && row.pr_url === opts.prUrl && row.prerequisite_outcome === "completed-no-pr" &&
+          row.task_id === opts.taskId && row.repair_pr_url === opts.prUrl && row.prerequisite_outcome === "completed-no-pr" &&
           typeof row.read_contract_revision === "string" &&
           fixRungInputsUnchanged(row, { headSha: review.headSha, contractRevision: currentContractRevision, bodySha256: opts.prBodySha256 }) &&
           !(typeof row.read_task_semantic_revision === "string" && currentSemanticRevision !== undefined &&
@@ -3472,7 +3472,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           // reported it could not build one) — escalate exactly as this refusal always has,
           // rather than leave a second, worker-authored stuck PR beside the first.
           deps.log("fix.prerequisite_dispatch_failed", {
-            strike: strikes, pr_url: opts.prUrl,
+            strike: strikes, repair_pr_url: opts.prUrl,
             ...fixRungInputFields({ headSha: review.headSha, contractRevision: currentContractRevision, bodySha256: opts.prBodySha256 }),
             ...(currentSemanticRevision === undefined ? {} : { read_task_semantic_revision: currentSemanticRevision }),
             ...(spawnOutcome.kind === "spawned" ? { prerequisite_outcome: "completed-no-pr" } : {}),
