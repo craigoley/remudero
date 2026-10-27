@@ -22,6 +22,7 @@ import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
@@ -1172,7 +1173,7 @@ for (const mode of ["live", "shadow"] as const) test(`W1-T975: a ${mode} run rec
   // The real arm deps load the HOST config for the merge write's operator-hold fence, which fails
   // closed on an absent ledger: point a fixture HOME's config at this run's own root, whose ledger
   // the run writes, so the fence reads real "no hold recorded" evidence instead of the host's.
-  const fixtureHome = mkdtempSync(join(tmpdir(), "arm-verdict-merged-home-"));
+  const fixtureHome = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}arm-verdict-merged-home-`));
   mkdirSync(join(fixtureHome, ".config", "remudero"), { recursive: true });
   writeFileSync(join(fixtureHome, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
   mkdirSync(join(root, "state"), { recursive: true });
