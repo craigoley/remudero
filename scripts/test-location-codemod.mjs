@@ -19,7 +19,7 @@
 //
 // USAGE: node scripts/test-location-codemod.mjs [--folder <name> ...] [--files <list-file>] [--write] [file ...]
 //   --folder <name>  every test the placement table (scripts/test-placement/test-folders.tsv, W1-T9874) maps to
-//                    <name>; when that file is absent the folder selects nothing and says so.
+//                    <name> or to a sub-folder of it (console-api covers console-api/board); when that file is absent the folder selects nothing and says so.
 //   --files <path>   a newline-separated list of test files.
 //   --write          write the rewrite in place; without it the codemod only reports (a dry run).
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -102,7 +102,7 @@ export function folderMembers(folder, root = repoRoot()) {
   const members = [];
   for (const line of readFileSync(tsv, "utf8").split("\n")) {
     const [file, dest] = line.split("\t");
-    if (file && dest === folder) members.push(file);
+    if (file && (dest === folder || dest?.startsWith(`${folder}/`))) members.push(file);
   }
   return members;
 }
