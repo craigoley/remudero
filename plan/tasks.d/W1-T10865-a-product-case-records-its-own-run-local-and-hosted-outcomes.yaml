@@ -22,6 +22,9 @@
   files:
     - src/lib/product-case.ts
     - src/lib/product-build.ts
+    - src/lib/local-qualification-receipt.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/lib/product-intent.ts
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
     - test/plan/product-case-run-receipts.test.ts
@@ -61,23 +64,44 @@
     reconciler boundary. It adds no new route, no evidence-writing command, no UI toggle and no client-supplied
     outcome. (1) Identity. ProductBuildService hands back, internally, the ExecutionRead its own replay already
     computes (runId, the daemon state root it read, and the operationId/origin). Do not re-derive a daemon root in
-    product-case.ts. Never infer a run from matching task text or branch names. (2) Local channel. For an ended or
-    silent run, read only THAT run's rows from the same complete rotated-plus-live union reader, scoped by
-    ledgerRunBelongsToTask and the runId. Map the run's own terminal verdict through ONE explicit, exhaustive table
-    to succeeded/failed/blocked/unknown. An unlisted verdict, a missing verdict, pr.opened_with_failing_proof, or an
-    unreadable/incomplete/absent ledger stays unknown or failed, never succeeded. running stays running. The receipt
-    carries actor, productId, objectiveRevision, repository id, taskId, operationId, runId and the head_sha the run
-    itself logged. (3) Hosted channel. This channel is separate from local. Use the run's own pr_url and head_sha
+    product-case.ts. Never infer a run from matching task text or branch names. (2) Local qualification is separate from execution completion. Preserve the correlated native run's actual
+    execution state, but never map a final merged/ended/normal run verdict to local test success. The existing real
+    producer is scripts/preflight-author.mjs, which writes coverage/preflight-author.json and per-capture receipts
+    on the committed author tree. Do not change that instrument or its qualification semantics. Add a bounded typed
+    local-qualification receipt reader/capture helper in src/lib/local-qualification-receipt.ts. Wire its real default
+    producer call into the maintained runTaskBody path in src/cli/commands/run-task-verb.ts after the worker's final
+    source commit is known and before its owned worktree is retired. Read only the real fixed author receipt path
+    beneath that owned worktree, never an HTTP-supplied path or transcript assertion. Validate the actual receipt
+    schema, source head, real measured suite/test summary, complete/partial verdict and captured result provenance.
+    Preserve the original author verdict, errors and earlier attempts: failed, NOT_RUN, over-capacity, zero-test or
+    incomplete results cannot become full local PASS. Persist a bounded immutable run/task/head-correlated snapshot
+    and digest under the existing state root before cleanup, and log its genuine artifact reference on that same run.
+    Missing, unreadable, wrong-head or uncorrelated evidence stays unknown; the capture cannot fail a healthy source
+    run solely because a receipt is unavailable and cannot rerun tests or launch a worker. The bridge reads the real
+    snapshot through the same helper and verifies its digest and matching native run/head row over the complete
+    union. Local succeeded requires an actual complete passing local qualification receipt at that head, with
+    positive nonzero measured tests; execution completion remains a different field. A later native repair head
+    with no corresponding local snapshot stays unknown instead of inheriting the earlier head's result. Record
+    actor, productId, objectiveRevision, repository, taskId, operationId, runId and actual qualified source head as
+    typed receipt metadata. (3) Hosted channel. This channel is separate from local. Use the run's own pr_url and head_sha
     and the existing bounded gh transport. Read the PR (base repository id must equal the product repository id; the
-    live head must equal the logged head, otherwise the receipt is stale/unknown), the base branch's required
-    status checks (the existing branch-protection read), the check runs and statuses at that exact head, and the
-    latest review per reviewer at that head. succeeded requires EVERY required context to conclude success at that
-    head and a current approval with no outstanding changes-requested. One arbitrary green context is not enough.
+    live head must equal the logged head, otherwise the receipt is stale/unknown), the base branch's actual required
+    status checks through a supported existing bounded metadata/policy reader, the check runs and statuses at that exact head, and the
+    latest review per reviewer at that head. succeeded requires EVERY current required context to conclude success at that exact head and the actual
+    maintained native review protocol, resolved through the existing trusted review provenance reader, with no
+    standing decisive human changes-requested hold. A native COMMENTED/PASS review can satisfy that protocol without
+    an APPROVED submission; arbitrary green contexts or comment prose cannot. Do not apply the plan-only task/brief
+    verifier to a source PR. Reuse the actual trusted native-review and standing-hold contracts instead. One arbitrary green context is not enough.
     Pending is running. A failed, cancelled or timed-out required context is failed, with the context and
     conclusion in the reference label. An unreadable or truncated page (100 or more items), or an empty or
     unreadable required set, is unknown. (4) Contract. Extend recordEvidence minimally to take a typed outcome from
-    the stored enum. Keep it trusted and unreachable from the HTTP command union. Add an outcome to ONLY the local
-    and hosted projection items, and to their openapi/daemon.yaml schema, then regenerate
+    the stored enum and bounded typed local/hosted receipt metadata. Declare the optional discriminated receipt
+    metadata in the strict stored stageEvidence schema in src/lib/product-intent.ts, with known bounded fields for
+    channel, operation/run/task, repository/head and actual qualification reference/summary. Preserve old records
+    without that metadata as legacy/unknown rather than synthesizing a result. It is trusted-mechanism data and must
+    remain excluded from browser brief writes and generic HTTP evidence writing. Do not pack commands or opaque
+    JSON in labels/URLs. Project typed outcome and correlation fields for the new local/hosted items and declare
+    their exact OpenAPI schema, then regenerate
     packages/api-client/src/schema.d.ts with the maintained generator. Earlier failed attempts and
     other-head/other-objective receipts stay stored, and never project as current success. (5) Idempotency and
     concurrency. Derive the evidence id and the store requestId deterministically from (productId,
@@ -95,7 +119,15 @@
     from the actual imports before writing it, and use the #src/#test aliases. Drive buildProductCaseRoutes'
     handler with the default ProductCaseService and ProductBuildService over a real ProductIntentStore directory,
     real rotated-plus-live ledger files, and a controlled gh subprocess shim at the transport boundary. A fake
-    injected recordEvidence is not a proof.
+    injected recordEvidence is not a proof. Qualify the actual default runTaskBody capture boundary with a controlled
+    worker fixture that writes a real fixed-path author receipt and a known final commit; prove the durable native
+    artifact, ledger correlation and served reply after worktree retirement. A unit fake calling the helper is not
+    that default producer proof. Add explicit failed/missing/partial/over-capacity local qualification, native
+    COMMENTED/PASS without APPROVED, standing human hold, wrong-head snapshot and corrupt artifact controls. Remove
+    each new qualification/provenance guard independently and require the corresponding test to fail then pass when
+    restored. Run actual test-place from the written imports and obtain a normal scope correction if it disagrees.
+    No access expansion is required: if the configured existing required-context read is unavailable, record unknown.
+    No collector may mint a missing qualification artifact or substitute a final run verdict.
   acceptance:
     - claim: "replaying the product build through the served case route records a local and a hosted receipt bound to the actor, product, objective, repository, task, operation, native run and exact head, reading only that run's ledger rows and that head's required checks and reviews"
       proof: "unit test: test/plan/product-case-run-receipts.test.ts"

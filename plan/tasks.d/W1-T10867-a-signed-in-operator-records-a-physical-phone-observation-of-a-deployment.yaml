@@ -19,6 +19,7 @@
   files:
     - src/lib/product-case.ts
     - src/lib/product-routes.ts
+    - src/lib/product-intent.ts
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
     - test/plan/product-case-device-observations.test.ts
@@ -57,6 +58,14 @@
     gameplay stays signed-in Console C4. TEST. One whole file at test/plan/product-case-device-observations.test.ts.
     Confirm it with rmd test-place from the actual imports, and use aliases. Drive buildProductCaseRoutes' default
     handler over a real product store with a real operator-session-verified request and a bearer-verified control.
+    Typed receipt follow-through: extend the strict optional receipt metadata in src/lib/product-intent.ts for
+    this channel and its actual bounded observer/scenario/platform/browser/device/deployment/source fields. Extend the mobile reply
+    projection with outcome, operator-attested provenance and separate iOS/Android observations, not only id and URL.
+    Declare the exact stored and served types and regenerate the maintained API client. Preserve legacy records,
+    existing byte/collection limits and the same-objective binding. No packed command/opaque JSON in labels or URLs.
+    Prove reconstruction from durable typed data through the actual served reply after a new service instance and
+    restart, with stale/foreign/replayed/concurrent controls. A reference label alone is not a structured identity or
+    outcome proof. Existing budgets, claims, holds and source owners are unchanged.
   acceptance:
     - claim: "an operator-session observation through the served case route records an operator-attested mobile receipt bound to the actor, product, objective, repository, scenario, platform and the referenced deploy receipt's deployment and commit"
       proof: "unit test: test/plan/product-case-device-observations.test.ts"
