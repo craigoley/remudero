@@ -290,13 +290,14 @@ function fixturePidEnded(pid: number): boolean {
   }
 }
 
-async function nestedWatchdogFixture(mode: "silence" | "total" | "output"): Promise<void> {
+async function nestedWatchdogFixture(mode: "silence" | "total" | "output" | "ordinary" | "resistant"): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "rmd-retro-owned-group-")), nonce = randomUUID();
   const actor = join(dir, "actor.cjs"), wrapper = join(dir, "wrapper.cjs");
   // Private stdio is essential: killing the wrapper must not merely wait for an inherited pipe.
   // Both actors also have a nonce-bound stop request and finite fallback lifetime under deletion.
   writeFileSync(actor, `const fs=require('node:fs'),p=require('node:path');
-const [dir,role,nonce]=process.argv.slice(2),file=n=>p.join(dir,role+'.'+n);
+const [dir,role,nonce,resistant]=process.argv.slice(2),file=n=>p.join(dir,role+'.'+n);
+if(resistant==='resistant')process.on('SIGTERM',()=>{});
 fs.writeFileSync(file('ready.tmp'),JSON.stringify({pid:process.pid,nonce}));
 fs.renameSync(file('ready.tmp'),file('ready'));
 const tick=setInterval(()=>{fs.appendFileSync(file('heart'),'tick\\n');
@@ -304,10 +305,12 @@ const tick=setInterval(()=>{fs.appendFileSync(file('heart'),'tick\\n');
 setTimeout(()=>{clearInterval(tick);process.exit(0)},6000);`);
   writeFileSync(wrapper, `const fs=require('node:fs'),p=require('node:path'),{spawn}=require('node:child_process');
 const [dir,actor,nonce,mode]=process.argv.slice(2);
-const child=spawn(process.execPath,[actor,dir,'owned',nonce],{stdio:'ignore',env:process.env});
+if(mode==='resistant')process.on('SIGTERM',()=>{});
+const child=spawn(process.execPath,[actor,dir,'owned',nonce,mode],{stdio:'ignore',env:process.env});
 child.once('error',()=>process.exit(2));
 const ready=setInterval(()=>{if(!fs.existsSync(p.join(dir,'owned.heart')))return;
  clearInterval(ready);process.stdout.write('fixture-ready\\n');
+ if(mode==='ordinary')process.exit(0);
  if(mode==='output')process.stdout.write('x'.repeat(8192));
  if(mode==='total')setInterval(()=>process.stdout.write('tick\\n'),40);},10);
 setTimeout(()=>process.exit(0),6500);`);
@@ -324,6 +327,8 @@ setTimeout(()=>process.exit(0),6500);`);
     return ready.pid;
   };
   const heart = (role: string) => readFileSync(join(dir, role + ".heart")).byteLength;
+  let responsiveTicks = 0;
+  const responsive = setInterval(() => { responsiveTicks++; }, 25);
   try {
     await untilFixture(() => existsSync(join(dir, "sibling.heart")), "the independent sibling must really start");
     assert.equal(siblingError, undefined);
@@ -334,13 +339,23 @@ setTimeout(()=>process.exit(0),6500);`);
     assert.match(result.stdout, /fixture-ready/, "a missing descendant start is not discrimination");
     ownedPid = readPid("owned");
     assert.ok(heart("owned") > 0, "the owned descendant must have executed");
-    assert.equal((result.error as NodeJS.ErrnoException | undefined)?.code, mode === "output" ? "ENOBUFS" : "ETIMEDOUT");
+    if (mode === "ordinary") {
+      assert.equal(result.status, 0); assert.equal(result.error, undefined);
+    } else {
+      assert.equal((result.error as NodeJS.ErrnoException | undefined)?.code, mode === "output" ? "ENOBUFS" : "ETIMEDOUT");
+    }
+    assert.equal(result.cleanupError, undefined);
+    if (mode === "resistant") {
+      assert.equal(result.signal, "SIGKILL", "a TERM-resistant leader requires the bounded escalation");
+      assert.ok(responsiveTicks > 10, "waiting for teardown must leave the caller event loop responsive");
+    }
     const ownedAtResult = heart("owned"), siblingAtResult = heart("sibling");
     await new Promise(resolve => setTimeout(resolve, 250));
     assert.equal(heart("owned"), ownedAtResult, "the known owned descendant must not keep writing after the result");
     assert.ok(heart("sibling") > siblingAtResult, "an unrelated sibling must remain live and writing");
     await untilFixture(() => fixturePidEnded(ownedPid!), "a stopped heartbeat alone is not teardown evidence");
   } finally {
+    clearInterval(responsive);
     // The original/deleted runner leaves its descendant live. Ask only these fixture actors to exit,
     // then verify exact PIDs before deleting scratch. No foreign PID or inherited group is signalled.
     try {
@@ -361,12 +376,12 @@ setTimeout(()=>process.exit(0),6500);`);
 }
 
 test("W1-T10885: the retro watchdog stops its owned descendants without signaling a sibling", async t => {
-  for (const mode of ["silence", "total", "output"] as const) {
+  for (const mode of ["silence", "total", "output", "ordinary", "resistant"] as const) {
     await t.test(mode, () => nestedWatchdogFixture(mode));
   }
 });
 
-test("W1-T10885: retro process-group cleanup preserves ordinary results and spawn failures", async () => {
+test("W1-T10885: retro process-group cleanup preserves ordinary results and spawn failures", async t => {
   const ordinary = await runRetroPrepublishCommand(process.execPath, ["-e", 'process.stdout.write("ordinary");process.stderr.write("warning")'], options(5_000));
   assert.equal(ordinary.status, 0); assert.equal(ordinary.signal, null); assert.equal(ordinary.error, undefined);
   assert.equal(ordinary.stdout, "ordinary"); assert.equal(ordinary.stderr, "warning");
@@ -396,4 +411,71 @@ test("W1-T10885: retro process-group cleanup preserves ordinary results and spaw
   assert.deepEqual({ calls, repairs, regenerations }, { calls: 2, repairs: 0, regenerations: 0 });
   assert.equal(events.find(x => x.step === "retro.preflight_failed")?.fields.exit_class, "process_timeout");
   assert.ok(events.some(x => x.step === "retro.preflight_repair_stood_down"));
+
+  // Exercise the real cleanup catch with a finite real child. A denied group signal remains
+  // unknown, while the command's independently observed exit is still reported truthfully.
+  const kill = process.kill.bind(process);
+  const denied = Object.assign(new Error("fixture group signal denied"), { code: "EPERM" });
+  const signalCalls: NodeJS.Signals[] = [];
+  const mocked = t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid < 0) { signalCalls.push(signal as NodeJS.Signals); throw denied; }
+    return kill(pid, signal);
+  });
+  try {
+    const unconfirmed = await runRetroPrepublishCommand(process.execPath, ["-e", 'process.stdout.write("ready\\n");setTimeout(()=>process.exit(0),2500)'], options(1_000, 5_000));
+    assert.match(unconfirmed.stdout, /ready/); assert.equal(unconfirmed.status, 0);
+    assert.equal((unconfirmed.error as NodeJS.ErrnoException).code, "ETIMEDOUT", "cleanup failure cannot replace the first watchdog reason");
+    assert.equal(unconfirmed.cleanupError, denied);
+    assert.ok(signalCalls.includes("SIGTERM") && signalCalls.includes("SIGKILL"));
+    const cleanExit = await runRetroPrepublishCommand(process.execPath, ["-e", "process.exit(0)"], options(5_000));
+    assert.equal(cleanExit.status, 0);
+    assert.equal((cleanExit.error as NodeJS.ErrnoException).code, "EPROCESSGROUP");
+    assert.equal(cleanExit.cleanupError, denied, "an exit zero does not turn an unreadable cleanup into success");
+  } finally { mocked.mock.restore(); }
+});
+
+test("W1-T10885: errored zero-exit enumeration cannot start a suite or repair", async () => {
+  for (const timedOut of [true, false]) {
+    let calls = 0, repairs = 0;
+    const events: Array<{ step: string; fields: Record<string, unknown> }> = [];
+    const result = await runRetroPrepublishPreflight({
+      worktreePath: REPO_ROOT, provenance: { model: "fixture", effort: "default", sessionId: "enumeration-bound" },
+      remotePrExisted: false, repair: async () => { repairs++; }, regenerateHarnessArtifacts: () => {},
+      log: (step, fields) => { events.push({ step, fields }); },
+      deps: { changedFiles: async () => ({ unreadable: "no PR diff" }), run: () => {
+        calls++;
+        return { status: 0, signal: null, stdout: "test/fixture.test.ts\n", stderr: "",
+          ...(timedOut ? { error: Object.assign(new Error("fixture enumeration timed out"), { code: "ETIMEDOUT" }) } : {}),
+          cleanupError: new Error("fixture unknown cleanup") };
+      } },
+    });
+    assert.deepEqual(result, { ok: false, attempts: 1, suiteCount: 1, repaired: false });
+    assert.equal(calls, 1); assert.equal(repairs, 0);
+    assert.equal(events.find(x => x.step === "retro.preflight_failed")?.fields.process_cleanup_failed, true);
+    assert.equal(events.find(x => x.step === "retro.preflight_failed")?.fields.exit_class, timedOut ? "process_timeout" : "process_cleanup_failed");
+  }
+});
+
+test("W1-T10885: interrupted diff classification cannot narrow the checked suite set", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-retro-diff-bound-"));
+  const calls: string[][] = [];
+  const events: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  try {
+    const result = await runRetroPrepublishPreflight({
+      worktreePath: REPO_ROOT, provenance: { model: "fixture", effort: "default", sessionId: "diff-bound" },
+      remotePrExisted: false, repair: async () => {}, regenerateHarnessArtifacts: () => {},
+      log: (step, fields) => { events.push({ step, fields }); },
+      deps: { tmpRoot: dir, changedFiles: async () => ({ files: ["plan/tasks.d/fixture.yaml"] }), run: (_command, args) => {
+        calls.push(args);
+        if (calls.length === 1) return { status: 0, signal: null, stdout: "PLAN_ONLY\n", stderr: "", error: new Error("interrupted classification") };
+        if (calls.length === 2) return { status: 0, signal: null, stdout: "test/fixture.test.ts\n", stderr: "" };
+        return { status: 0, signal: null, stdout: "# tests 1\n# fail 0\n", stderr: "" };
+      } },
+    });
+    assert.equal(result.ok, true); assert.equal(calls.length, 3);
+    assert.equal(calls[1].includes("--changed-files"), false, "an interrupted classification must retain the broad set");
+    assert.equal(events.find(x => x.step === "retro.preflight_passed")?.fields.suite_selection, "broad");
+    assert.match(String(events.find(x => x.step === "retro.preflight_passed")?.fields.suite_selection_reason), /command error/);
+    assert.deepEqual(readdirSync(dir), []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
