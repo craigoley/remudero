@@ -111,7 +111,15 @@ export interface PriorBlocker {
   blocker: PrBlocker;
   since?: string;
   sinceSource?: "first-seen";
+  /** The head the latest observation was made at, when its row recorded one. */
+  headSha?: string;
 }
+
+/** #14910 — the stages a new head restarts: its review and its merge both wait on that head's own checks,
+ *  so a head the clock has not seen begins a new stage. The fleet's own main refresh at 18:50 kept
+ *  `awaiting-arm` aging from 18:17, and the stall escalated the minute the refreshed head turned green.
+ *  A refresh loop stays bounded by its own refresh caps; `armed-idle` and every repair stage keep their clock. */
+export const HEAD_SCOPED_BLOCKERS: ReadonlySet<PrBlocker> = new Set<PrBlocker>(["awaiting-review", "awaiting-arm"]);
 
 export function priorBlockersFromLedger(lines: readonly Record<string, unknown>[]): Map<number, PriorBlocker> {
   const byPr = new Map<number, PriorBlocker>();
@@ -123,6 +131,7 @@ export function priorBlockersFromLedger(lines: readonly Record<string, unknown>[
     byPr.set(row.pr_number, {
       blocker: row.blocker as PrBlocker, since,
       ...(row.blocker_since_source === "first-seen" ? { sinceSource: "first-seen" } : {}),
+      ...(typeof row.head_sha === "string" ? { headSha: row.head_sha } : {}),
     });
   }
   return byPr;
@@ -136,8 +145,10 @@ export function blockerOwner(blocker: PrBlocker, planRepairCapable: boolean): st
 }
 
 export function blockerFields(blocker: PrBlocker, prior: PriorBlocker | undefined, now: number,
-  planRepairCapable = false, cause?: string) {
-  const continues = prior?.blocker === blocker && prior.since !== undefined;
+  planRepairCapable = false, cause?: string, headSha?: string) {
+  const newHead = HEAD_SCOPED_BLOCKERS.has(blocker) && headSha !== undefined && prior?.headSha !== undefined &&
+    prior.headSha !== headSha;
+  const continues = prior?.blocker === blocker && prior.since !== undefined && !newHead;
   const since = continues ? prior.since! : fixedClock(now).iso();
   const source = continues ? prior.sinceSource : prior?.since === undefined ? "first-seen" : undefined;
   return {

@@ -9,8 +9,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { runTask } from "#src/run-task.js";
-import type { ScopeAmendmentOutcome, ScopeAmendmentRequest } from "#src/lib/proof-amendment.js";
+import { requiredCompanions, runTask } from "#src/run-task.js";
+import { readBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest } from "#src/lib/proof-amendment.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult, spawnWorker } from "#src/lib/worker.js";
@@ -187,4 +187,67 @@ test("W1-T10026: an amendment that throws is a named refusal", async () => {
   } finally {
     f.cleanup();
   }
+});
+
+
+test("a committed source larger than the Git pipe buffer still asks for its exact missing companion", async () => {
+  const f = fixture();
+  try {
+    const asked: ScopeAmendmentRequest[] = [];
+    const largeImporter = "/* " + "é".repeat(600_000) + " */\n" + IMPORTING["src/lib/task-linter.ts"];
+    assert.ok(Buffer.byteLength(largeImporter, "utf8") > 1024 * 1024, "the real Git read crosses Node's default byte buffer");
+    const { result, created } = await dispatch(f, { ...IMPORTING, "src/lib/task-linter.ts": largeImporter }, request => {
+      asked.push(request);
+      return { kind: "created", amendmentUrl: "https://github.com/acme/remudero/pull/7", amendmentNumber: 7 };
+    });
+    assert.equal(asked.length, 1);
+    assert.deepEqual(asked[0]!.paths, [LEFT_OUT]);
+    assert.ok(asked[0]!.importers?.includes("src/lib/task-linter.ts"));
+    assert.equal(created.length, 0, "the undeclared source is never published without normal scope qualification");
+    assert.equal(result.verdict, "no_pr");
+    const recovery = f.rows().findLast(row => row.step === "implement.scope_needed" && typeof row.recovery_path === "string");
+    assert.ok(recovery, "the exact source and companion recovery is preserved before cleanup");
+    const saved = readBuildScopeRecovery(String(recovery.recovery_path), TASK_ID);
+    if (saved.status !== "verified") assert.fail(saved.reason);
+    assert.ok(Buffer.byteLength(saved.data.patch, "utf8") > 1024 * 1024);
+    assert.ok(saved.data.patch.includes("é".repeat(600_000)), "the complete multi-byte patch payload survives");
+  } finally {
+    f.cleanup();
+  }
+});
+
+
+test("companion blob recovery refuses unreadable immutable size evidence", () => {
+  for (const size of ["", "-1", "12x", "9007199254740992"]) {
+    let retried = false;
+    const git: Parameters<typeof requiredCompanions>[2] = (args, options) => {
+      if (args[0] === "diff-tree") return "src/lib/task-linter.ts\0";
+      if (args[0] === "show" && options === undefined) throw Object.assign(new Error("fixture pipe full"), { code: "ENOBUFS" });
+      if (args[0] === "cat-file") return size;
+      retried = true;
+      throw new Error("no blob read is allowed without a measured size");
+    };
+    assert.throws(() => requiredCompanions("fixture-sha", [LEFT_OUT], git), /unreadable blob size/);
+    assert.equal(retried, false);
+  }
+});
+
+test("companion blob recovery preserves byte mismatches and unrelated Git failures", () => {
+  const git: Parameters<typeof requiredCompanions>[2] = (args, options) => {
+    if (args[0] === "diff-tree") return "src/lib/task-linter.ts\0";
+    if (args[0] === "show" && options === undefined) throw Object.assign(new Error("fixture pipe full"), { code: "ENOBUFS" });
+    if (args[0] === "cat-file") return "100";
+    assert.deepEqual(options, { maxBuffer: 100 });
+    return "short";
+  };
+  assert.throws(() => requiredCompanions("fixture-sha", [LEFT_OUT], git), /does not match its immutable blob size/);
+  const original = Object.assign(new Error("fixture unreadable Git object"), { code: "ENOENT" });
+  let metadataReads = 0;
+  const unread: Parameters<typeof requiredCompanions>[2] = args => {
+    if (args[0] === "diff-tree") return "src/lib/task-linter.ts\0";
+    if (args[0] === "cat-file") metadataReads += 1;
+    throw original;
+  };
+  assert.throws(() => requiredCompanions("fixture-sha", [LEFT_OUT], unread), error => error === original);
+  assert.equal(metadataReads, 0);
 });

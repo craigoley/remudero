@@ -145,10 +145,10 @@ function targetsPlanShard(whitelisted: WhitelistedProof, planShardPaths: Readonl
 
 /** The reviewer's comment-only downgrade reads the grep pattern against the target file's text (review.ts
  *  `matchedLineCommentContext`); the same context here keeps a validated replacement from being capped again. */
-function grepCommentContext(parsed: WhitelistedProof, cwd: string): { pattern: string; fileText: string } | undefined {
+function grepCommentContext(parsed: WhitelistedProof, cwd: string): { pattern: string; fileText: string; path: string } | undefined {
   const dialect = parsed.authorSelectedArgv !== true && parsed.args.length === 4 && parsed.args[0] === "-arn" && parsed.args[1] === "--";
   const path = dialect ? join(cwd, parsed.args[3]!) : undefined;
-  return path !== undefined && existsSync(path) ? { pattern: parsed.args[2]!, fileText: readFileSync(path, "utf8") } : undefined;
+  return path !== undefined && existsSync(path) ? { pattern: parsed.args[2]!, fileText: readFileSync(path, "utf8"), path: parsed.args[3]! } : undefined;
 }
 
 export interface ProofAmendmentValidationInput {
@@ -805,12 +805,22 @@ export async function saveBuildScopeRecovery(input: {
     if (data === null) throw new Error(`companion is missing: ${path}`);
     return { path, bytes: data, mode: mode & 0o111 ? 0o755 : 0o644 };
   });
-  const data: BuildScopeRecovery = { version: 1, taskId, branch, amendmentUrl, headSha, companions,
-    patch: git(["diff", "--binary", `${headSha}^`, headSha]),
-    committedPaths: git(["diff", "--name-only", "-z", `${headSha}^`, headSha]).split("\0").filter(Boolean) };
-  const digest = recoveryDigest(data);
   const directory = join(input.root, "state", "recovery", "build-scope", taskId);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const capture = join(directory, `.patch-${randomUUID()}`);
+  let created = false;
+  let patch: string;
+  try {
+    writeFileSync(capture, "", { flag: "wx", mode: 0o600 });
+    created = true;
+    git(["diff", "--binary", `${headSha}^`, headSha, `--output=${capture}`]);
+    patch = readFileSync(capture, "utf8");
+  } finally {
+    if (created) rmSync(capture, { force: true });
+  }
+  const data: BuildScopeRecovery = { version: 1, taskId, branch, amendmentUrl, headSha, companions, patch,
+    committedPaths: git(["diff", "--name-only", "-z", `${headSha}^`, headSha]).split("\0").filter(Boolean) };
+  const digest = recoveryDigest(data);
   const path = join(directory, `${digest}.json`);
   writeFileSync(path, JSON.stringify({ data, digest }), { mode: 0o600 });
   const saved = readBuildScopeRecovery(path, taskId);

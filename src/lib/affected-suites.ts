@@ -92,6 +92,8 @@ export interface AffectedSuitesInput {
   impact?: ImpactArmInput;
   /** W1-T6084: main's read map — which suites READ or LISTED each non-code path — and its drift. */
   readMap?: ReadMapInput;
+  /** W1-T10820: the tree whose package.json `imports` resolves the `#src/*` family; absent, this checkout's. */
+  packageRoot?: string;
 }
 
 const CODE_FILE = /\.(?:ts|mts|mjs|js|cjs)$/;
@@ -325,13 +327,78 @@ function namedEdges(file: string, content: string, known: ReadonlySet<string>): 
   }).map(({ path }) => path);
 }
 
-/** Resolves a relative specifier from `from` against the known files, TS's `.js` → `.ts` included. */
-function resolve(from: string, spec: string, known: ReadonlySet<string>): string | undefined {
-  if (!spec.startsWith(".")) return undefined;
-  const base = normalize(join(dirname(from), spec)).split("\\").join("/");
+/** The candidate files a resolved base path may name, TS's `.js` → `.ts` included. */
+function resolveBase(base: string, known: ReadonlySet<string>): string | undefined {
   const stem = base.replace(/\.(?:js|mjs|cjs)$/, "");
   const candidates = [base, `${stem}.ts`, `${stem}.mts`, `${base}.ts`, `${base}.mjs`, `${base}.js`, `${base}/index.ts`];
   return candidates.find((c) => known.has(c));
+}
+
+/** W1-T10820 — a package.json `imports` map as Node reads it: `"#src/*": "./src/*"`. */
+export type PackageImports = Readonly<Record<string, unknown>>;
+
+/** Where a graph's `#` aliases come from: the map itself, or the root whose package.json holds it. */
+export type AliasSource = PackageImports | { readonly root: string };
+
+/** Reads `imports` from `<root>/package.json`. THROWS, naming the file, when it cannot be read or parsed; a
+ *  package with no `imports` has no aliases. */
+export function readPackageImports(root: string): PackageImports {
+  const path = join(root, "package.json");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new Error(`cannot read the package imports map from ${path}: ${(err as Error).message}`);
+  }
+  const imports = (parsed as { imports?: unknown } | null)?.imports;
+  if (imports === undefined) return {};
+  if (typeof imports !== "object" || imports === null || Array.isArray(imports)) {
+    throw new Error(`${path}: "imports" is not an object map, which the affected-suite resolver does not model`);
+  }
+  return imports as PackageImports;
+}
+
+/** One validated imports entry: Node's key with at most one `*`, and a string target inside the package. */
+interface AliasRule { key: string; prefix: string; suffix: string | undefined; target: string }
+
+/** Node's PACKAGE_IMPORTS_RESOLVE order: exact keys first, then pattern keys, the longest prefix first. THROWS
+ *  naming any key or target shape this resolver does not model (conditions, arrays, a target outside the package). */
+function aliasRules(map: PackageImports): AliasRule[] {
+  const rules = Object.entries(map).map(([key, target]): AliasRule => {
+    if (!key.startsWith("#") || key.split("*").length > 2) {
+      throw new Error(`package imports key ${JSON.stringify(key)} is not one the affected-suite resolver models`);
+    }
+    if (typeof target !== "string" || !target.startsWith("./") || target.split("/").includes("..") || target.split("*").length > 2) {
+      throw new Error(`package imports target for ${JSON.stringify(key)} (${JSON.stringify(target)}) is not a string inside the package, which the affected-suite resolver does not model`);
+    }
+    const star = key.indexOf("*");
+    return { key, prefix: star < 0 ? key : key.slice(0, star), suffix: star < 0 ? undefined : key.slice(star + 1), target };
+  });
+  return rules.sort((a, b) => Number(a.suffix !== undefined) - Number(b.suffix !== undefined) || b.prefix.length - a.prefix.length);
+}
+
+/** Resolves a `#` specifier through the rules to a repo-relative base path, or undefined when no key matches. */
+function aliasBase(spec: string, rules: readonly AliasRule[]): string | undefined {
+  for (const rule of rules) {
+    if (rule.suffix === undefined) {
+      if (spec === rule.key) return normalize(rule.target).split("\\").join("/");
+    } else if (spec.length >= rule.key.length && spec.startsWith(rule.prefix) && spec.endsWith(rule.suffix)) {
+      const matched = spec.slice(rule.prefix.length, spec.length - rule.suffix.length);
+      return normalize(rule.target.replaceAll("*", matched)).split("\\").join("/");
+    }
+  }
+  return undefined;
+}
+
+/** Resolves a specifier from `from` against the known files, TS's `.js` → `.ts` included: relative ones against
+ *  the importer, `#` ones through the package `imports` rules (`aliases`, loaded on first use). */
+function resolve(from: string, spec: string, known: ReadonlySet<string>, aliases: () => readonly AliasRule[]): string | undefined {
+  if (spec.startsWith("#")) {
+    const base = aliasBase(spec, aliases());
+    return base === undefined ? undefined : resolveBase(base, known);
+  }
+  if (!spec.startsWith(".")) return undefined;
+  return resolveBase(normalize(join(dirname(from), spec)).split("\\").join("/"), known);
 }
 
 export interface AffectedSuitesGraph {
@@ -343,8 +410,14 @@ export interface AffectedSuitesGraph {
 
 /** The selector's comment-free graph, shared with the reach census. Extra targets cover deletions. */
 export function buildAffectedSuitesGraph(
-  files: ReadonlyMap<string, string>, extraTargets: readonly string[] = [],
+  files: ReadonlyMap<string, string>, extraTargets: readonly string[] = [], aliasSource?: AliasSource,
 ): AffectedSuitesGraph {
+  // The alias map is read on the first `#` specifier only: a tree that names none never needs it, and a map
+  // this resolver cannot model THROWS there (callers turn that into a named full run).
+  let rules: AliasRule[] | undefined;
+  const aliases = (): readonly AliasRule[] => rules ??= aliasRules(
+    aliasSource === undefined ? readPackageImports(HARNESS_ROOT) : "root" in aliasSource && typeof aliasSource.root === "string"
+      ? readPackageImports(aliasSource.root) : aliasSource as PackageImports);
   const all = [...files.keys()].filter((f) => CODE_FILE.test(f));
   const known = new Set([...all, ...extraTargets]);
   const dependencies = new Map<string, Set<string>>();
@@ -353,7 +426,7 @@ export function buildAffectedSuitesGraph(
   const namedDependencies = new Map<string, Set<string>>();
   for (const file of all) {
     const content = stripComments(files.get(file)!);
-    const imported = new Set(specifiers(content).map((s) => resolve(file, s, known))
+    const imported = new Set(specifiers(content).map((s) => resolve(file, s, known, aliases))
       .filter((dep): dep is string => dep !== undefined && dep !== file));
     const named = new Set(namedEdges(file, content, known).filter((dep) => dep !== file));
     directImports.set(file, imported);
@@ -397,7 +470,7 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   for (const f of files) if (SUITE.test(f)) pick(f, "changed test");
 
   // The reverse import graph, walked breadth-first from every changed module or contract.
-  const { importers, namedDependencies, directImports } = buildAffectedSuitesGraph(input.files, files);
+  const { importers, namedDependencies, directImports } = buildAffectedSuitesGraph(input.files, files, input.packageRoot === undefined ? undefined : { root: input.packageRoot });
   // Resolve against this input's tree, keeping the selector independent of the checkout and git.
   const suitePathOptions: ResolveTestPathOptions = {
     root: "", tree: "input", cache: new Map(),
@@ -770,7 +843,7 @@ export function readAffectedSuitesInput(
   // W1-T6136: coveragePrecheck (run-task.ts) passes a WORKER worktree, so the listing goes through the leaf.
   const tracked = hostWorktreeGit(repoRoot, TRACKED_CODE_ARGS, { maxBuffer: 1 << 26 });
   const files = trackedCodeFiles(repoRoot, tracked);
-  return { files, pathReaders: readAffectedListings(repoRoot, changed), ...extra };
+  return { files, pathReaders: readAffectedListings(repoRoot, changed), packageRoot: repoRoot, ...extra };
 }
 
 /** W1-T7744 — {@link readAffectedSuitesInput} with its git and listing children awaited, for the build lane the
@@ -782,7 +855,7 @@ export async function readAffectedSuitesInputAsync(
 ): Promise<AffectedSuitesInput> {
   const tracked = await hostWorktreeGitAsync(repoRoot, TRACKED_CODE_ARGS, { maxBuffer: 1 << 26 });
   const files = trackedCodeFiles(repoRoot, tracked);
-  return { files, pathReaders: await readAffectedListingsAsync(repoRoot, changed), ...extra };
+  return { files, pathReaders: await readAffectedListingsAsync(repoRoot, changed), packageRoot: repoRoot, ...extra };
 }
 
 const TRACKED_CODE_ARGS = ["ls-files", "--", "src", "scripts", "bin", "test"];

@@ -110,3 +110,17 @@ test("W1-T9679: the fix tier reads the learned fix estimate, not the implement d
   const readers = productionFixAdmissionReaders({ fixProgressJudge: (() => undefined) as never, ledgerPath: "/nonexistent/state/ledger.ndjson" });
   assert.ok((readers.readTypical?.("fix").estimateMib ?? 0) > 0, "production admission reads the learned typical peak");
 });
+
+
+test("an aged repair does not bypass a live fix tree's admission protection", () => {
+  const c = createSweepFixAdmissionController({
+    surface: "full", queueDepth: 1, hostWorkerBudget: 8, activeWorkers: 1, reviewReservations: 0,
+    readReviewReservations: () => 0, readActiveWorkers: () => 1,
+    readPressure: () => ({ availableMib: FLOOR + 1_908, floorMib: FLOOR, binding: "host", tier: "fits" }),
+    readEstimate: (kind) => ({ estimateMib: kind === "fix" ? 3_674 : 1_024, samples: 40 }),
+    readTypical: (kind) => ({ estimateMib: kind === "fix" ? 786 : 1_024, samples: 40 }),
+    readResidents: () => ({ review: [], fix: [900] }),
+    reviewQueue: [], waitSinceMs: () => Date.now() - 24 * 60 * 60 * 1_000,
+  });
+  assert.equal(c.claim(pr).admitted, false, "age cannot supply an unapproved live-fix admission exception");
+});

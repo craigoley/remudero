@@ -209,10 +209,10 @@ test("W1-T4785: Opus and Sonnet reservations share one Foundry Claude daily cap"
     let sonnetAdmitted = 0;
     assert.throws(() => {
       for (let i = 0; i < 10; i++) { reserve(`sonnet-${i}`, "claude-sonnet-5-5"); sonnetAdmitted++; }
-    }, /\$5\.00 dailyCapUsd/);
+    }, /\$5\.00 foundry-claude cap/);
     assert.equal(sonnetAdmitted, 2);
     // And the other direction: Sonnet's reservations count against Opus.
-    assert.throws(() => reserve("opus-over", "claude-opus-5-5"), /\$5\.00 dailyCapUsd/);
+    assert.throws(() => reserve("opus-over", "claude-opus-5-5"), /\$5\.00 foundry-claude cap/);
     // The squeeze keeps its own, larger $10 ceiling for both deployments.
     reserve("sonnet-squeezed", "claude-sonnet-5-5", true);
     reserve("opus-squeezed", "claude-opus-5-5", true);
