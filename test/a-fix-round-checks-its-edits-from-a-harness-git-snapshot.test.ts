@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,14 +16,20 @@ const REACH = "test/the-affected-suite-reach-ratchet.test.ts";
 const SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";
 const IMPORT_CLI = `import ${JSON.stringify("../src/run-task.js")};\n`;
 
-function fixture(root = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-"))) {
+/** The always-on skill census is gitFree and joins every nonempty diff, so a precheck over this tree runs it:
+ *  the tree carries a healthy stand-in and, when `linkModules` is set, the dependency donor it runs from. */
+const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
+
+function fixture(root = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-")), linkModules = false) {
   const baseline = JSON.parse(readFileSync(join(ROOT, "scripts/affected-reach-baseline.json"), "utf8"));
   const texts: Record<string, string> = {
     "src/run-task.ts": "export {};\n",
     "src/lib/affected-suites.ts": "export {};\n",
     [REACH]: "export {};\n",
+    [SKILL_CENSUS]: 'import { test } from "node:test";\ntest("skill census stand-in", () => undefined);\n',
     "scripts/affected-reach-baseline.json": JSON.stringify(baseline),
   };
+  if (linkModules) symlinkSync(join(ROOT, "node_modules"), join(root, "node_modules"), "dir");
   for (const path of baseline.importers) texts[path] = IMPORT_CLI;
   for (const [path, text] of Object.entries(texts)) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
@@ -96,7 +102,7 @@ test("a CommonJS probe loads the harness snapshot functions without git or async
 });
 
 test("test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts: no git on PATH, edited census inputs and a new importer are refused", () => {
-  const f = fixture();
+  const f = fixture(undefined, true);
   const reachArgs = ["--test", "--test-reporter=tap", "--import", "tsx"];
   const clean = run(REACH, reachArgs, f.env);
   assert.equal(clean.status, 0, clean.text);
