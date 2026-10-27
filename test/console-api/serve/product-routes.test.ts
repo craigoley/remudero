@@ -7,6 +7,7 @@ import { test, type TestContext } from "node:test";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { stringify } from "yaml";
 import { productCasePlanText } from "#src/lib/product-case.js";
+import { REVIEWER_IDENTITY_ENV } from "#src/lib/review.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { buildProductRoutes } from "#src/lib/product-routes.js";
 import { ratifyCliGateway } from "#src/lib/panel-graph.js";
@@ -816,12 +817,16 @@ test("W1-T10616: the served product deployment operation matches the authenticat
 
 test("W1-T10618: the served product case operation matches the authenticated API contract", async (t) => {
   const head = "d".repeat(40);
+  const trusted = "remudero-reviewer[bot]", previousTrusted = process.env[REVIEWER_IDENTITY_ENV];
+  process.env[REVIEWER_IDENTITY_ENV] = trusted;
+  t.after(() => { if (previousTrusted === undefined) delete process.env[REVIEWER_IDENTITY_ENV]; else process.env[REVIEWER_IDENTITY_ENV] = previousTrusted; });
   const shim = ghShim([
     { when: "commits/main", stdout: JSON.stringify({ sha: head }) },
     { when: `contents?ref=${head}`, stdout: JSON.stringify([{ name: "src" }]) },
     { when: "contents/plan/tasks.d?", stdout: JSON.stringify([{ name: "W9-T1-prototype.yaml" }]) },
     { when: "matching-refs/", stdout: "[]" },
     { when: "search/issues", stdout: '{"total_count":0}' },
+    { when: `commits/${head}/status`, stdout: JSON.stringify({ statuses: [{ context: "remudero-review", state: "success", creator: { login: trusted, type: "Bot" } }] }) },
     { when: "pulls/7/reviews", stdout: JSON.stringify([{ state: "APPROVED", commit_id: head, user: { login: "reviewer" } }]) },
     { when: "pulls/7/files", stdout: JSON.stringify([{ filename: "plan/tasks.d/W9-T1-prototype.yaml" }]) },
     { when: "pulls/7", stdout: JSON.stringify({ number: 7, merged_at: "2026-10-26T00:00:00Z", merge_commit_sha: head, head: { sha: head },
@@ -912,18 +917,27 @@ test("W1-T10823: the served plan proposal reaches the maintained native handoff"
   mkdirSync(join(checkout, ".git"), { recursive: true });
   mkdirSync(join(repoRoot, ".remudero"), { recursive: true });
   writeFileSync(join(repoRoot, ".remudero/managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
-  // A REAL child executable, spawned by the real gateway from a "fresh tree": it records how it was called and writes the
-  // rows the native plan verb writes (`plan.start` with the writer's own pid, then `pr.opened`) into the real ledger.
+  // The real gateway spawns this controlled planner at its argv/ledger boundary. Its native-shaped rows retain the
+  // complete brief and mode; process identity alone is not the production correlation rule.
   const tree = join(root, "fresh-tree");
   mkdirSync(join(tree, "bin"), { recursive: true });
   const ledgerPath = join(root, "state/ledger.ndjson");
   const argsFile = join(root, "child-args.txt");
   const countFile = join(root, "child-count.txt");
-  writeFileSync(join(tree, "bin", "rmd"), [
-    "#!/bin/sh", `printf 'invoked\\n' >> '${countFile}'`, `for a in "$@"; do printf '%s\\n' "$a"; done > '${argsFile}'`, "sleep 1",
-    `printf '{"ts":"%s","run_id":"PLAN-clarify-1","task_id":"PLAN-clarify","step":"plan.start","lane":"plan","actor_pid":%s}\\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" >> '${ledgerPath}'`,
-    `printf '{"ts":"%s","run_id":"PLAN-clarify-1","task_id":"PLAN-clarify","step":"pr.opened","lane":"plan","pr_url":"https://github.com/craigoley/wreckterra/pull/42"}\\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> '${ledgerPath}'`,
-    "exit 0", ""].join("\n"));
+  writeFileSync(join(tree, "bin", "rmd"), String.raw`#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(countFile)}, "invoked\n");
+fs.writeFileSync(${JSON.stringify(argsFile)}, args.join("\n") + "\n");
+setTimeout(() => {
+  const mode = args[1].slice("--mode=".length), run_id = "PLAN-" + mode + "-fixture", task_id = "PLAN-" + mode;
+  const rows = [
+    { ts: new Date().toISOString(), run_id, task_id, step: "plan.start", lane: "plan", actor_pid: process.pid, mode, brief: args[2] },
+    { ts: new Date().toISOString(), run_id, task_id, step: "pr.opened", lane: "plan", pr_url: "https://github.com/craigoley/wreckterra/pull/42" }
+  ];
+  fs.appendFileSync(${JSON.stringify(ledgerPath)}, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+}, 1000);
+`);
   chmodSync(join(tree, "bin", "rmd"), 0o755);
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(ledgerPath, "");
@@ -973,7 +987,10 @@ test("W1-T10823: the served plan proposal reaches the maintained native handoff"
   const started = rows.find((row) => row.step === "ratify.cli_started");
   assert.equal(started?.task_id, `product-plan:${operationId}`, "the gateway's rows carry the durable operation identity");
   assert.equal(typeof started?.pid, "number");
-  assert.equal(rows.find((row) => row.step === "plan.start")?.actor_pid, started?.pid, "the native run is correlated by the child's own pid");
+  const nativeStart = rows.find((row) => row.step === "plan.start");
+  assert.equal(typeof nativeStart?.actor_pid, "number", "the controlled writer records its actual runtime PID");
+  assert.equal(nativeStart?.mode, "clarify");
+  assert.ok(String(nativeStart?.brief).includes(productCasePlanText(command.brief)), "native protocol retains the complete frozen brief");
   assert.deepEqual(rows.find((row) => row.step === "ratify.cli_exited")?.code, 0);
 
   const proposed = await send("alice", propose());

@@ -9,6 +9,7 @@ import { z } from "zod";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghTextAsync } from "./github-transport.js";
+import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { isHumanHoldCandidate, type GhApiFetcher } from "./open-prs-rest.js";
 import { ProductIntentStore } from "./product-intent-store.js";
@@ -94,8 +95,7 @@ const associationRecorded = (product: ProductPlanVerification["product"], planEv
 /**
  * The ONE plan rule both {@link ProductCaseService} and `ProductBuildService.start` apply. With a pull request it reads
  * GitHub through the bounded default transport and requires: the PR merged into the verified repository's default branch;
- * a latest GitHub approval at the head OR the native contract (a trusted `remudero-review` success at the exact head, resolved
- * through its poster, on a plan-only PR); no standing CHANGES_REQUESTED review or human hold; one task content at the reviewed
+ * the native contract (a trusted `remudero-review` success at the exact head, resolved through its poster, on a plan-only PR); no standing CHANGES_REQUESTED review or human hold; one task content at the reviewed
  * head, the merge and the current target head; the complete approved brief in its design. Always: the task's origin is this
  * plan's, or an explicit recorded association; its budget fits the product's resource envelope. Nothing is waived: foreign,
  * stale, missing or ambiguous receipts refuse, and an unreadable source is never read as "approved".
@@ -124,16 +124,13 @@ export async function verifyProductPlanEvidence(input: ProductPlanVerification):
       if (reviews.length >= 100 || pull.number !== input.pullRequest || !pull.merged_at || !pull.merge_commit_sha || pull.base.repo.id !== repo.id ||
         pull.base.ref !== repo.defaultBranch || [...latest.values()].some((review) => review.state === "CHANGES_REQUESTED")) return refuse("plan_not_approved");
       const files = z.array(z.object({ filename: z.string() })).parse(JSON.parse(await api(`${slug}/pulls/${input.pullRequest}/files?per_page=100`)));
-      let review: "native-status" | "github-approval" = "github-approval";
-      if (![...latest.values()].some((entry) => entry.state === "APPROVED" && entry.commit_id === pull.head.sha)) {
-        // The native contract: the trusted reviewer's own success status at the EXACT head, on a plan-only pull request.
-        const trusted = (input.trustedReviewer ?? process.env[REVIEWER_IDENTITY_ENV] ?? "").trim();
-        if (!trusted || files.length >= 100 || !files.every((file) => file.filename.startsWith("plan/") || file.filename === masterPlanFile)) return refuse("plan_not_approved");
-        const fetcher: GhApiFetcher = async (args) => JSON.parse(await text(args, { maxBuffer: 1024 * 1024, timeout: 20_000 })) as unknown;
-        const entry = await readReviewStatusEntry(repo.owner, repo.name, pull.head.sha, fetcher);
-        if (resolveReviewProvenance(entry, trusted) !== "success") return refuse("plan_not_approved");
-        review = "native-status";
-      }
+      // Manual approval can withdraw a human hold; it never substitutes for the filed native plan protocol.
+      const trusted = (input.trustedReviewer ?? process.env[REVIEWER_IDENTITY_ENV] ?? "").trim();
+      if (!trusted || files.length >= 100 || !files.every((file) => file.filename.startsWith("plan/") || file.filename === masterPlanFile)) return refuse("plan_not_approved");
+      const fetcher: GhApiFetcher = async (args) => JSON.parse(await text(args, { maxBuffer: 1024 * 1024, timeout: 20_000 })) as unknown;
+      const entry = await readReviewStatusEntry(repo.owner, repo.name, pull.head.sha, fetcher);
+      if (resolveReviewProvenance(entry, trusted) !== "success") return refuse("plan_not_approved");
+      const review = "native-status" as const;
       if (isHumanHoldCandidate({ autoMergeArmed: false, isPlanFiling: true, checksState: "green", reviewState: "success",
         mergeable: pull.mergeable ?? undefined, mergeableState: pull.mergeable_state, changedFiles: files.map((file) => file.filename) })) return refuse("plan_not_approved");
       const names = z.array(z.object({ name: z.string().regex(/^[A-Za-z0-9_.-]+$/) })).parse(JSON.parse(await api(`${slug}/contents/${shardDirectory}?ref=${input.targetHead}`)));
@@ -242,6 +239,17 @@ const journalSchema = z.object({
 type Journal = z.infer<typeof journalSchema>;
 interface Paths { directory: string; state: string; ownerKey: string }
 
+// Service instances share one actor journal. Order in-process writers before taking the real cross-process lock.
+const journalChains = new Map<string, Promise<unknown>>();
+async function serializedJournal<T>(path: string, work: () => Promise<T>): Promise<T> {
+  const previous = journalChains.get(path) ?? Promise.resolve();
+  const next = previous.then(work, work);
+  const tail = next.catch(() => undefined /* the caller awaits next and receives its failure */);
+  journalChains.set(path, tail);
+  try { return await next; }
+  finally { if (journalChains.get(path) === tail) journalChains.delete(path); }
+}
+
 class Fault extends RmdError {
   constructor(readonly code: ProductPlanOperationCode) { super("usage", GENERIC_EXIT_CODE, `product plan operation: ${code}`); }
 }
@@ -287,10 +295,22 @@ export class ProductPlanOperationService {
       if (typeof actor !== "string" || !actor.trim() || actor.length > 512) throw new Fault("invalid_identity");
       const parsed = productPlanProposalSchema.safeParse(command);
       if (!parsed.success) throw new Fault("invalid_input");
-      return { ok: true, value: await this.propose(actor, parsed.data) };
+      // An unbound product cannot have a plan operation: refuse before creating its journal lock directory.
+      // The locked path reads the product again, so this early read never replaces the live mutation checks.
+      if (!this.readProduct(actor, parsed.data.productId).repository) throw new Fault("repository_missing");
+      return { ok: true, value: await this.mutate(this.paths(actor), () => this.propose(actor, parsed.data)) };
     } catch (error) {
-      return { ok: false, code: error instanceof Fault ? error.code : "unavailable" };
+      return { ok: false, code: error instanceof Fault ? error.code : error instanceof InflightLockError ? "busy" : "unavailable" };
     }
+  }
+
+  private mutate<T>(paths: Paths, work: () => Promise<T>): Promise<T> {
+    return serializedJournal(paths.state, async () => {
+      this.ensureDirectory(paths);
+      const handle = acquireInflightLock(join(paths.directory, "locks"), paths.ownerKey, { run_id: `product-plan-${randomUUID()}` });
+      try { return await work(); }
+      finally { handle.release(); }
+    });
   }
 
   private readProduct(actor: string, id: string): StoredProduct {
@@ -410,13 +430,13 @@ export class ProductPlanOperationService {
   private handOff(paths: Paths, record: Record_, brief: string): void {
     const gateway = this.options.gateway!;
     this.flying.add(record.operationId);
-    const finished = (outcome: PlanHandoffOutcome) => this.enqueue(async () => {
+    const finished = (outcome: PlanHandoffOutcome) => this.enqueue(() => this.mutate(paths, async () => {
       this.flying.delete(record.operationId);
       const journal = this.readJournal(paths);
       const stored = journal.operations[record.operationId];
       if (!stored) return;
       this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff: { outcome, at: this.clock.iso() } } } });
-    }).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
+    })).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
     let started: Promise<{ outcome: PlanHandoffOutcome }>;
     try { started = gateway.productPlan!({ operationId: record.operationId, mode: record.mode, brief, repoRoot: record.command.repoRoot }); }
     catch (error) {
@@ -440,10 +460,10 @@ export class ProductPlanOperationService {
     else if (seen.pid !== undefined) state = (this.options.isAlive ?? processAlive)(seen.pid) ? "pending" : "unknown";
     else if (this.flying.has(record.operationId)) state = "pending";
     else state = record.handoff?.outcome === "refused" ? "refused" : "unknown";
-    if (state !== "proposed") {
-      if (product.objectiveRevision !== record.objectiveRevision || digest(productCasePlanText(product.brief)) !== record.briefDigest) state = "changed-brief";
-      else if (liveHead !== undefined && liveHead !== record.targetHead) state = "stale-target";
-    }
+    // A late proposal is historical evidence for its frozen brief, never for a newer objective.
+    if (product.objectiveRevision !== record.objectiveRevision || digest(productCasePlanText(product.brief)) !== record.briefDigest) state = "changed-brief";
+    // An opened plan can itself advance the target when merged; do not relabel that normal completion as stale.
+    else if (state !== "proposed" && liveHead !== undefined && liveHead !== record.targetHead) state = "stale-target";
     return { operationId: record.operationId, state, mode: record.mode, planEvidenceId: record.planEvidenceId, repository: record.repository,
       targetHead: record.targetHead, revision: record.revision, objectiveRevision: record.objectiveRevision, briefDigest: record.briefDigest,
       requestedAt: record.requestedAt, ...(seen.opened !== undefined ? { proposal: seen.opened } : {}) };
@@ -451,8 +471,9 @@ export class ProductPlanOperationService {
 
   /**
    * What the core ledger shows for THIS operation: the gateway's `ratify.cli_started` row (bound by the operation id it
-   * carries), the native plan run that child's pid wrote (`plan.start` with `actor_pid`), and that run's own `pr.opened`.
-   * A pull request outside the target repository, or a run no row ties to the child, is never this proposal.
+   * carries), the native `plan.start` whose complete brief and mode match the frozen command, and that run's own `pr.opened`.
+   * The maintained tsx launcher can have a different PID from its inner native runtime. Its PID remains a liveness hint,
+   * never the correlation key. Ambiguous native runs or a pull request outside the target are never this proposal.
    */
   private ledger(record: Record_): { pid?: number; exited: boolean; failed: boolean; opened?: string } {
     const none = { exited: false, failed: false };
@@ -468,15 +489,20 @@ export class ProductPlanOperationService {
     const pid = started?.pid as number | undefined;
     const exited = mine.some((row) => row.step === "ratify.cli_exited");
     const failed = mine.some((row) => row.step === "ratify.handoff_failed");
-    const run = started === undefined ? undefined : rows.find((row) => row.step === "plan.start" && row.actor_pid === pid && at(row) >= Date.parse(record.requestedAt));
+    const candidates = started === undefined ? [] : rows.filter((row) => row.step === "plan.start" && row.lane === "plan" &&
+      row.task_id === `PLAN-${record.mode}` && row.mode === record.mode && typeof row.run_id === "string" &&
+      typeof row.brief === "string" && digest(row.brief) === record.command.briefDigest && at(row) >= Date.parse(record.requestedAt));
+    const runs = new Map(candidates.map((row) => [row.run_id, row]));
+    const run = runs.size === 1 ? [...runs.values()][0] : undefined;
     const pull = run === undefined ? undefined : rows.find((row) => row.step === "pr.opened" && row.run_id === run.run_id && typeof row.pr_url === "string");
     const url = pull?.pr_url as string | undefined;
     const own = url !== undefined && url.startsWith(`https://github.com/${record.repository.owner}/${record.repository.name}/pull/`) && /^\d+$/.test(url.slice(url.lastIndexOf("/") + 1));
-    return { ...(pid !== undefined ? { pid } : {}), exited, failed, ...(own ? { opened: url } : {}) };
+    return { ...(pid !== undefined ? { pid } : {}), exited: exited && runs.size < 2, failed: failed || runs.size > 1, ...(own ? { opened: url } : {}) };
   }
 
   /** Terminal fates become the product's own supported stage evidence, once each. */
   private settle(actor: string, product: StoredProduct, observation: ProductPlanObservation): StoredProduct {
+    if (product.objectiveRevision !== observation.objectiveRevision || digest(productCasePlanText(product.brief)) !== observation.briefDigest) return product;
     const base = `pplan-op:${observation.operationId.slice(0, 32)}`;
     const terminal = observation.state === "proposed" ? { id: `${base}:proposed`, outcome: "proposed" as const, url: observation.proposal! }
       : observation.state === "refused" ? { id: `${base}:refused`, outcome: "failed" as const, url: undefined } : undefined;

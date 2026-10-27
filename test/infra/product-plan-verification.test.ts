@@ -256,3 +256,16 @@ test("W1-T10823: a product build refuses more active builds than its envelope al
     assert.equal(next.ok ? undefined : next.code, second, `maxConcurrentBuilds ${allowed}`);
   }
 });
+
+
+test("W1-T10823: manual approval never substitutes for the native plan verdict", async (t) => {
+  const f = wreck(t);
+  f.setPage({ reviews: [{ state: "APPROVED", commit_id: REVIEWED, user: { login: "craigoley" } }] });
+  f.shim.addRoute({ when: `commits/${REVIEWED}/status`, stdout: JSON.stringify({ statuses: [] }) });
+  assert.equal(refusal(await f.verify()), "plan_not_approved");
+  assert.ok(f.shim.calls().some((call) => call.includes(`commits/${REVIEWED}/status`)), "manual approval still reads the native verdict");
+  f.shim.addRoute({ when: `commits/${REVIEWED}/status`, stdout: JSON.stringify({ statuses: [{ context: "remudero-review", state: "success", creator: { login: TRUSTED, type: "Bot" } }] }) });
+  assert.ok((await f.verify()).ok);
+  f.setPage({ files: [{ filename: shardPath }, { filename: "src/lib/anything.ts" }] });
+  assert.equal(refusal(await f.verify()), "plan_not_approved", "approval does not broaden the plan-only protocol");
+});
