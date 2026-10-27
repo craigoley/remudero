@@ -40,7 +40,7 @@ async function productionRepair(gate: string, repairFile: string, patch: string,
     if (path.includes("/pulls?")) return [{ number: pair.pr, base: { sha: "base" } }];
     if (path.endsWith(`/pulls/${pair.pr}/commits?per_page=100`)) return [{ sha: "red" }, { sha: "green" }];
     if (path.includes("/check-runs")) return { check_runs: [{ id: 7, name: gate, status: "completed",
-      conclusion: path.includes("/commits/red/") ? "failure" : "success" }] };
+      details_url: "https://github.com/o/r/actions/runs/6/job/7", conclusion: path.includes("/commits/red/") ? "failure" : "success" }] };
     if (path.endsWith("/status")) return { statuses: [] };
     if (path.includes("/compare/red...green")) return { files: [{ filename: repairFile, patch }] };
     if (path.includes("/compare/base...red")) return { merge_base_commit: { sha: "base" }, files: [{ filename: source }] };
