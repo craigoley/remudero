@@ -291,6 +291,8 @@ export async function daemonCommand(
      *  throttled. Mirrors {@link drainCommand}'s identical seam so a test can prove which
      *  gateway the daemon derives from without a network round-trip. */
     githubFactory?: (owner: string, repo: string) => GitHub;
+    /** Explicit fixture configuration; production keeps the existing config loader. */
+    config?: Config;
     /** Injectable self-target repo root. Defaults to this module's real `repoRoot`. A
      *  self-target run with no explicit `--plan` derives its plan path from THIS value
      *  (`resolveDaemonTarget`) and then git-syncs it (`syncPlanOrRefuse`) — a test that
@@ -500,7 +502,7 @@ export async function daemonCommand(
     // `fixSpawnWallClockBoundMs`'s own doc for why one row could no longer bound both).
     sweepWallClockBoundMs: policy.values.sweepWallClockBoundMs,
   };
-  const config = loadConfig();
+  const config = deps.config ?? loadConfig();
   // Headroom governor switch (operator ruling fb-1784894405468-a4153e; default clause
   // reversed 2026-07-25 — the switch now defaults ON, and this host opts OUT explicitly
   // via config `headroom.enabled: false`): resolve the host posture from config/env HERE

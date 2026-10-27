@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { parse as parseYaml } from "yaml";
+import { resolveOwnerRepoAtAsync } from "./owner-repo.js";
 
 import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs, isOptionIntent, type OptionIntent, type SummarizeInput } from "./feedback.js";
@@ -162,7 +164,7 @@ export function recommendationFor(proposal: { id: string; summary: string }, lan
   if (classifiedInboxOwner(proposal, classification) !== "operator") return undefined;
   const stored = store[proposal.id];
   if (!wellShaped(stored) || source === undefined) return undefined;
-  if (stored.repository !== undefined && stored.repository !== source.repository) return undefined;
+  if (stored.repository !== source.repository) return undefined;
   const taskId = recommendationTaskId(proposal.id);
   let currentBlob: string | undefined;
   if (taskId === undefined) {
@@ -170,7 +172,7 @@ export function recommendationFor(proposal: { id: string; summary: string }, lan
     if (stored.repository !== source.repository) return undefined;
   } else {
     currentBlob = source.tasks[taskId];
-    if (currentBlob !== undefined ? stored.shardBlob !== currentBlob : stored.shardBlob !== undefined || !source.monolith.includes(taskId)) return undefined;
+    if (currentBlob !== undefined ? stored.shardBlob !== currentBlob : stored.shardBlob !== undefined || !source.monolith.includes(taskId) || stored.sourceCommit !== source.commit) return undefined;
   }
   if (stored.sourceFingerprint !== recommendationFingerprint(proposal, lane, currentBlob)) return undefined;
   const route = optionAction(stored.action, lane, proposal.id);
@@ -229,20 +231,53 @@ export function gitRecommendationEvidence(git: GitRunner, plan: { planDir: strin
       if (top === "" || realpathSync(top) !== realpathSync(selected.checkoutRoot)) {
         throw new Error(`recommendation source ${top} is not the selected checkout ${selected.checkoutRoot}`);
       }
+      const assertRepository = async () => {
+        const currentTop = (await git(["rev-parse", "--show-toplevel"])).trim();
+        if (currentTop === "" || realpathSync(currentTop) !== realpathSync(selected.checkoutRoot)) throw new Error("recommendation source is not the selected checkout");
+        let actual: { owner: string; repo: string };
+        try { actual = await resolveOwnerRepoAtAsync(currentTop); }
+        catch { throw new Error("recommendation source repository identity is unreadable"); }
+        if ((actual.owner + "/" + actual.repo).toLowerCase() !== selected.repository.toLowerCase()) {
+          throw new Error("recommendation source does not match the selected repository");
+        }
+      };
+      await assertRepository();
       const commit = (await git(["rev-parse", "--verify", "origin/main^{commit}"])).trim();
       if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error("recommendation source commit is unreadable");
       const at = evidenceAt(git, plan, commit);
+      // Include monolith records with their actual immutable blob, so unchanged IDs cannot certify changed text.
+      let pendingRecords: Promise<{ shards: Map<string, { path: string; blob: string }>; monolith: string[] }> | undefined;
+      const records = () => pendingRecords ??= (async () => {
+        const shards = await at.shards();
+        const listing = await git(["ls-tree", commit, "--", plan.planMonolith]);
+        const monolith: string[] = [];
+        if (listing.trim() !== "") {
+          const match = /^\d+ blob ([0-9a-f]{40})\t([^\n]+)\n?$/.exec(listing);
+          if (!match || match[2] !== plan.planMonolith) throw new Error("recommendation source monolith identity is unreadable");
+          const parsed: unknown = parseYaml(await git(["show", commit + ":" + plan.planMonolith]));
+          if (!Array.isArray(parsed)) throw new Error("recommendation source monolith is malformed");
+          const seen = new Set<string>();
+          for (const row of parsed) {
+            const id: unknown = row && typeof row === "object" ? row.id : undefined;
+            if (typeof id !== "string" || !/^[A-Z][A-Z0-9]*-T[A-Za-z0-9]+$/.test(id) || seen.has(id)) throw new Error("recommendation source monolith task identity is malformed");
+            seen.add(id);
+            if (!shards.has(id)) { monolith.push(id); shards.set(id, { path: plan.planMonolith, blob: match[1]! }); }
+          }
+        }
+        return { shards, monolith };
+      })();
       return {
         ...at, repository: selected.repository, commit,
+        shards: async () => new Map((await records()).shards),
+        shardText: async (path) => git(["show", commit + ":" + path]),
         qualification: async () => {
           const tasks: Record<string, string> = {};
-          for (const [id, shard] of await at.shards()) tasks[id] = shard.blob;
-          const present = await succeeds(git(["cat-file", "-e", `${commit}:${plan.planMonolith}`]));
-          const text = present ? await git(["show", `${commit}:${plan.planMonolith}`]) : "";
-          const monolith = [...text.matchAll(/^- id: ([A-Z][A-Z0-9]*-T[A-Za-z0-9]+)[ \t]*$/gm)].map((m) => m[1]!).filter((id) => tasks[id] === undefined);
+          const { shards, monolith } = await records();
+          for (const [id, shard] of shards) tasks[id] = shard.blob;
           return { repository: selected.repository, commit, tasks, monolith };
         },
         assertUnchanged: async () => {
+          await assertRepository();
           const now = (await git(["rev-parse", "--verify", "origin/main^{commit}"])).trim();
           if (now !== commit) throw new Error(`recommendation source moved from ${commit} to ${now} during the pass`);
         },
@@ -476,14 +511,21 @@ export async function backfillRecommendations(deps: RecommendationBackfill, max:
   const snapshot = readClassificationSnapshot(deps.stateDir);
   const lanes = deps.readLanes ? deps.readLanes() : snapshotLanes(snapshot);
   // One verified commit of the selected repository is read for the whole pass; a pass that cannot pin it stores nothing.
-  const pinned = deps.evidence.pin ? await deps.evidence.pin() : undefined;
+  const sourceRead = async <T>(read: () => Promise<T>): Promise<T> => {
+    try { return await read(); }
+    catch (error) {
+      // A failed current-source check revokes the qualification, not the historical recommendation bytes.
+      if (deps.evidence.pin) writeAtomic(recommendationSourcePath(deps.stateDir), JSON.stringify({ state: "unavailable", at: (deps.clock ?? systemClock).iso() }) + "\n");
+      throw error;
+    }
+  };
+  const pinned = deps.evidence.pin ? await sourceRead(() => deps.evidence.pin!()) : undefined;
   const evidence: RecommendationEvidence = pinned ?? deps.evidence;
   const stamp = pinned ? { repository: pinned.repository, sourceCommit: pinned.commit } : {};
-  const shards = await evidence.shards();
-  if (pinned) {
-    // The independently captured current source the reader qualifies stored advice against.
-    const captured = await pinned.qualification();
-    await pinned.assertUnchanged();
+  const shards = await sourceRead(() => evidence.shards());
+  const captured = pinned ? await sourceRead(() => pinned.qualification()) : undefined;
+  if (pinned && captured) {
+    await sourceRead(() => pinned.assertUnchanged());
     writeAtomic(recommendationSourcePath(deps.stateDir), JSON.stringify(captured, null, 2) + "\n");
   }
   const items = new Map<string, CurrentItem>();
@@ -494,26 +536,25 @@ export async function backfillRecommendations(deps: RecommendationBackfill, max:
     if (lane === undefined || classifiedInboxOwner(proposal, ownership) !== "operator") continue;
     const taskId = recommendationTaskId(proposal.id);
     const shard = taskId === undefined ? undefined : shards.get(taskId);
+    if (captured && taskId !== undefined && captured.tasks[taskId] === undefined && !captured.monolith.includes(taskId)) continue;
     items.set(proposal.id, { proposal, lane, ...(shard ? { shard } : {}), fingerprint: recommendationFingerprint(proposal, lane, shard?.blob) });
   }
   const path = recommendationStorePath(deps.stateDir);
   const store = readRecommendationStore(path);
-  let changed = false;
   for (const [id, stored] of Object.entries(store)) {
     const item = items.get(id);
     if (item && recommendationTaskId(id) !== undefined && stored?.shardBlob !== item.shard?.blob) {
-      delete store[id];
+      // Keep historical bytes until a new qualified answer replaces them; current readers already omit the old blob.
       tick.dropped += 1;
-      changed = true;
     }
   }
   tick.seeded = importSeedOnce(deps, items, store, stamp);
-  if (changed || tick.seeded > 0) writeAtomic(path, JSON.stringify(store, null, 2) + "\n");
+  if (tick.seeded > 0) writeAtomic(path, JSON.stringify(store, null, 2) + "\n");
   const ask = deps.summarize;
   if (!ask) return tick;
   const refusals = readJsonObject<string>(refusalsPath(deps.stateDir));
   const pending = [...items.values()]
-    .filter((item) => store[item.proposal.id]?.sourceFingerprint !== item.fingerprint && refusals[item.proposal.id] !== item.fingerprint)
+    .filter((item) => (store[item.proposal.id]?.sourceFingerprint !== item.fingerprint || (pinned && store[item.proposal.id]?.repository !== pinned.repository)) && refusals[item.proposal.id] !== item.fingerprint)
     .slice(0, max);
   const plainStore = readPlainStore(plainStorePath(deps.stateDir));
   for (const item of pending) {
@@ -521,8 +562,8 @@ export async function backfillRecommendations(deps: RecommendationBackfill, max:
     const plain = plainInboxMessage(item.proposal, plainStore);
     const ctx: RecommendationContext = {
       proposal: item.proposal, lane: item.lane, plain,
-      ...(item.shard ? { shardText: await evidence.shardText(item.shard.path) } : {}),
-      history: taskId === undefined ? [] : await evidence.taskHistory(taskId),
+      ...(item.shard ? { shardText: await sourceRead(() => evidence.shardText(item.shard!.path)) } : {}),
+      history: taskId === undefined ? [] : await sourceRead(() => evidence.taskHistory(taskId)),
     };
     let problems: string[] = [];
     let accepted: Record<string, unknown> | undefined;
@@ -542,7 +583,7 @@ export async function backfillRecommendations(deps: RecommendationBackfill, max:
     }
     const a = accepted as unknown as InboxRecommendation;
     // A source that moved or changed during the answer is refused rather than stored as current.
-    await pinned?.assertUnchanged();
+    if (pinned) await sourceRead(() => pinned.assertUnchanged());
     latest[item.proposal.id] = {
       action: a.action, ...(typeof a.text === "string" && a.text.trim() !== "" ? { text: a.text } : {}), why: a.why, evidence: a.evidence, obsolete: a.obsolete,
       ...(typeof a.group === "string" && a.group.trim() !== "" ? { group: a.group } : {}),

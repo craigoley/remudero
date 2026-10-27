@@ -907,6 +907,19 @@ test("every inbox page shares independently qualified recommendation evidence", 
   assert.deepEqual([...new Set(current.seen.values())], ["keep"], "materialized first and continuation pages all carry the qualified advice");
   assert.deepEqual([...current.legacyActions], ["keep"], "the legacy page carries the same advice");
 
+  // A genuine failed refresh revokes qualification, preserving the historical advice on every reader path.
+  await assert.rejects(backfillRecommendations({ stateDir, readProposals: () => w.proposals,
+    evidence: { ...pinnedEvidence("owner/core"), pin: async () => { throw new Error("selected source is unreadable"); } } }, 0), /selected source is unreadable/);
+  s.put(await w.refresh());
+  const failed = await recommended();
+  assert.deepEqual([...new Set(failed.seen.values())], [undefined], "a failed source pin cannot leave old advice actionable");
+  assert.deepEqual([...failed.legacyActions], [undefined]);
+  assert.equal(readRecommendationSource(stateDir), undefined);
+  assert.equal(readFileSync(recommendationStorePath(stateDir), "utf8"), storeBytes);
+  await backfillRecommendations({ stateDir, readProposals: () => w.proposals, evidence: pinnedEvidence("owner/core") }, 0);
+  s.put(await w.refresh());
+  assert.deepEqual([...new Set((await recommended()).seen.values())], ["keep"], "independent source recovery restores matching advice without another model call");
+
   // The same stored advice, read against a source captured for another repository, is omitted on every path.
   writeFileSync(recommendationSourcePath(stateDir), JSON.stringify({ repository: "owner/console", commit: "b".repeat(40), tasks: {}, monolith: [] }));
   s.put(await w.refresh());

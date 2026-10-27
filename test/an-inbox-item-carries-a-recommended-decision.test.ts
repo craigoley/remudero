@@ -86,8 +86,8 @@ test("W1-T8950: a ready item serves its recommendation with its route", (t) => {
   const ready = { id: READY_ID, summary: READY_SUMMARY };
   const obsolete = { id: OBSOLETE_ID, summary: OBSOLETE_SUMMARY };
   writeFileSync(recommendationStorePath(stateDir), JSON.stringify({
-    [READY_ID]: stored(ready, "ready", {}),
-    [OBSOLETE_ID]: stored(obsolete, "notReady", { action: "decline", text: "Moot while the merge queue is off.", obsolete: true, source: "operator-session-seed", evidence: ["W1-T6088"] }),
+    [READY_ID]: stored(ready, "ready", { repository: "acme/target", sourceCommit: "a".repeat(40) }),
+    [OBSOLETE_ID]: stored(obsolete, "notReady", { repository: "acme/target", sourceCommit: "a".repeat(40), action: "decline", text: "Moot while the merge queue is off.", obsolete: true, source: "operator-session-seed", evidence: ["W1-T6088"] }),
     [FLEET_ID]: stored({ id: FLEET_ID, summary: "unused" }, "ready", {}),
   }));
   writeSource(stateDir, { monolith: ["W1-T5418", "W1-T6088"] });
@@ -118,8 +118,8 @@ test("W1-T8950: a ready item serves its recommendation with its route", (t) => {
 
   // approve is never routed off a ready item; keep records a decision in this lane too.
   writeFileSync(recommendationStorePath(stateDir), JSON.stringify({
-    [READY_ID]: stored(ready, "declined", {}),
-    [OBSOLETE_ID]: stored(obsolete, "notReady", { action: "keep" }),
+    [READY_ID]: stored(ready, "declined", { repository: "acme/target", sourceCommit: "a".repeat(40) }),
+    [OBSOLETE_ID]: stored(obsolete, "notReady", { repository: "acme/target", sourceCommit: "a".repeat(40), action: "keep" }),
   }));
   const unrouted = lanesOf(root, [{ ...ready, state: "declined" }, { ...obsolete, state: "not_ready" }]);
   const declined = unrouted.needsYou.declined[0]!.recommendation!;
@@ -196,7 +196,10 @@ test("W1-T8950: the seed is imported once for items still in the inbox", async (
   });
   const proposals = [{ id: OBSOLETE_ID, summary: OBSOLETE_SUMMARY }, { id: READY_ID, summary: READY_SUMMARY }];
   const lanes = { [OBSOLETE_ID]: "notReady" as const, [READY_ID]: "ready" as const };
-  const deps = { stateDir, evidence: mainEvidence({}, { "W1-T6088": "blob6088" }), readProposals: () => proposals, readLanes: () => lanes, readSeed: () => seed };
+  const baseEvidence = mainEvidence({}, { "W1-T6088": "blob6088" });
+  const evidence: RecommendationEvidence = { ...baseEvidence, pin: async () => ({ ...baseEvidence, repository: "acme/target", commit: "a".repeat(40),
+    qualification: async () => ({ repository: "acme/target", commit: "a".repeat(40), tasks: { "W1-T6088": "blob6088" }, monolith: ["W1-T5418"] }), assertUnchanged: async () => undefined }) };
+  const deps = { stateDir, evidence, readProposals: () => proposals, readLanes: () => lanes, readSeed: () => seed };
   writeFileSync(recommendationStorePath(stateDir), JSON.stringify({ [READY_ID]: stored(proposals[1]!, "ready", { why: "Already written by the writer." }) }));
 
   const first = await backfillRecommendations(deps, 1);
@@ -339,7 +342,7 @@ test("inbox advice requires independently captured current repository evidence",
   const rows = {
     [task.id]: stored(task, "ready", { repository: "acme/core", evidence: ["#6377"] }, "core-blob"),
     [same.id]: stored(same, "ready", { repository: "acme/target" }, "blob-new-a"),
-    [mono.id]: stored(mono, "ready", { repository: "acme/target" }),
+    [mono.id]: stored(mono, "ready", { repository: "acme/target", sourceCommit: "a".repeat(40) }),
     [ruling.id]: stored(ruling, "ready", { repository: "acme/target" }),
   };
   writeFileSync(recommendationStorePath(stateDir), JSON.stringify(rows));
@@ -368,6 +371,9 @@ test("inbox advice requires independently captured current repository evidence",
   writeSource(stateDir, target);
   assert.deepEqual(servedIds(), [mono.id, same.id], "a legacy non-task entry proves no repository and does not acquire the selected one");
 
+  writeFileSync(recommendationStorePath(stateDir), JSON.stringify({ ...rows, [same.id]: { ...rows[same.id], repository: undefined }, [mono.id]: { ...rows[mono.id], repository: undefined } }));
+  assert.deepEqual(servedIds(), [ruling.id], "legacy task and monolith advice must prove their repository too");
+
   writeFileSync(recommendationStorePath(stateDir), raw);
   assert.equal(readFileSync(recommendationStorePath(stateDir), "utf8"), raw, "reading never rewrites the stored history");
 });
@@ -383,6 +389,8 @@ test("a fixed recommendation source refuses repository and revision drift", asyn
     repo.git("update-ref", "refs/remotes/origin/main", repo.git("rev-parse", "HEAD"));
   };
   try {
+    target.git("config", "remote.origin.url", "https://github.com/acme/target.git");
+    foreign.git("config", "remote.origin.url", "https://github.com/acme/foreign.git");
     commitTask(target, "W1-T5418", "a console task");
     commitTask(foreign, "W1-T1015", "a core task");
     const plan = { planDir: "plan", planMonolith: "plan/tasks.yaml" };
@@ -397,6 +405,15 @@ test("a fixed recommendation source refuses repository and revision drift", asyn
 
     // Cross-repository: a git runner that lands in Core while Console is selected is refused, not read.
     await assert.rejects(evidenceIn(foreign.git, target.dir).pin!(), /is not the selected checkout/);
+
+    await assert.rejects(evidenceIn(foreign.git, foreign.dir).pin!(), /does not match the selected repository/, "a correct checkout path cannot relabel a foreign origin");
+
+    target.git("config", "remote.origin.url", "https://github.com/acme/foreign.git");
+    await assert.rejects(pinned.assertUnchanged(), /does not match the selected repository/, "origin drift is refused even when the commit is unchanged");
+    target.git("config", "--unset", "remote.origin.url");
+    await assert.rejects(evidenceIn(target.git, target.dir).pin!(), /repository identity is unreadable/);
+    target.git("config", "remote.origin.url", "https://github.com/acme/target.git");
+    await pinned.assertUnchanged();
 
     // Mid-pass drift: main moves after the pin; the pinned reads keep the old tree and the pass refuses to publish.
     commitTask(target, "W1-T6000", "a task landed mid pass");
@@ -419,6 +436,34 @@ test("a fixed recommendation source refuses repository and revision drift", asyn
     assert.equal((await backfillRecommendations(deps, 1)).written, 1, "control: a steady main stores the advice");
     const row = readRecommendationStore(recommendationStorePath(stateDir))[proposal.id]!;
     assert.deepEqual({ repository: row.repository, sourceCommit: row.sourceCommit }, { repository: "acme/target", sourceCommit: target.git("rev-parse", "origin/main") });
+
+    // An unchanged task fingerprint cannot lend a legacy row the repository it never proved.
+    writeFileSync(recommendationStorePath(stateDir), JSON.stringify({ [proposal.id]: { ...row, repository: undefined } }));
+    assert.equal((await backfillRecommendations(deps, 1)).written, 1, "the normal bounded writer can replace unproven legacy advice");
+    assert.equal(readRecommendationStore(recommendationStorePath(stateDir))[proposal.id]!.repository, "acme/target");
+
+    const mono = { id: "machine-judge:W1-T204", summary: "A legacy-plan task is parked." };
+    const commitMonolith = (text: string) => {
+      writeFileSync(join(target.dir, plan.planMonolith), text);
+      target.git("add", plan.planMonolith); target.git("commit", "--quiet", "-m", "test: update monolith evidence");
+      target.git("update-ref", "refs/remotes/origin/main", target.git("rev-parse", "HEAD"));
+    };
+    commitMonolith("- id: W1-T204\n  title: Original record\n");
+    const monoDeps = { ...deps, readProposals: () => [mono], readLanes: () => ({ [mono.id]: "ready" as const }),
+      summarize: async () => ({ action: "keep", text: "Keep the task parked for its existing ruling.", why: "The task record changed on main.", evidence: ["W1-T204"], obsolete: false }) };
+    const monoTick = await backfillRecommendations(monoDeps, 1);
+    assert.equal(monoTick.written, 1, JSON.stringify(monoTick));
+    const monoBlob = target.git("rev-parse", "origin/main:" + plan.planMonolith);
+    assert.equal(readRecommendationStore(recommendationStorePath(stateDir))[mono.id]!.shardBlob, monoBlob);
+    assert.equal(lanesOf(root, [{ ...mono, state: "ready" }]).needsYou.ready[0]!.recommendation?.action, "keep");
+    const history = readFileSync(recommendationStorePath(stateDir), "utf8");
+    commitMonolith("- id: W1-T204\n  title: Changed record, same ID\n");
+    await backfillRecommendations(monoDeps, 0);
+    assert.equal(lanesOf(root, [{ ...mono, state: "ready" }]).needsYou.ready[0]!.recommendation, undefined, "changed monolith text refuses advice even with the same task ID");
+    assert.equal(readFileSync(recommendationStorePath(stateDir), "utf8"), history, "a source-only refresh preserves historical advice bytes");
+    commitMonolith("not: [valid");
+    await assert.rejects(backfillRecommendations(monoDeps, 0));
+    assert.equal(lanesOf(root, [{ ...mono, state: "ready" }]).needsYou.ready[0]!.recommendation, undefined, "a malformed current monolith cannot reuse the previous qualification");
   } finally {
     target.cleanup();
     foreign.cleanup();
