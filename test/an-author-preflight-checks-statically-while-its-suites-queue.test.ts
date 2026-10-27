@@ -3,7 +3,8 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -343,6 +344,25 @@ test("an unreadable static record names no peak, and an unreadable slot record h
     assert.equal(handed.outcome, "slot");
     assert.match(handed.note, /^slot-1\.json needs private coordination/);
   });
+});
+
+test("a static record that is listed as a file but refuses to open names no peak", (t) => {
+  const { slots } = scratch(t, "w1-t9951-denied-static-");
+  const planted = join(slots, `static-${randomUUID()}.json`);
+  const now = new Date().toISOString();
+  writeFileSync(planted, JSON.stringify({ pid: process.pid, host: "w1-t9951", startedAt: now, heartbeatAt: now, label: "denied", memoryBytes: 64 * GiB }));
+  // The record is a regular file at lstat time but its open is denied (a uid-independent EACCES): swap openSync for that path only.
+  const realOpen = fs.openSync;
+  t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
+    if (typeof args[0] === "string" && basename(args[0]) === basename(planted)) throw Object.assign(new Error(`EACCES: permission denied, open '${planted}'`), { code: "EACCES" });
+    return realOpen(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const admitted = admitStaticWork("beside-denied-static", { dir: slots, memoryBytes: GiB, memoryHeadroom: () => 8 * GiB, log: () => {} });
+  t.after(() => admitted.release());
+  assert.equal(admitted.outcome, "admitted");
+  assert.match(admitted.note, /and 0 live holder\(s\)/, "the denied record's 64 GiB peak was not counted");
 });
 
 test("a static record that vanishes while the directory is scanned is skipped", (t) => {
