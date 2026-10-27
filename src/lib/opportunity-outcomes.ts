@@ -103,13 +103,6 @@ export function reconcileImprovementEffects(source: ImprovementEffectSource, evi
     if (compareCodeHealthEvidence(comparison).state !== "comparable") return refuse("Scope, tool, rules, exclusions, or independently measured finding states are not comparable.");
     const original = prior.findings.filter(row => row.ruleId === source.ruleId && row.category === "maintainability" && row.status === "open");
     if (!original.length) return refuse("The saved baseline does not identify any linked open findings.");
-    for (const finding of original) {
-      const matches = current.findings.filter(row => row.id === finding.id && row.ruleId === finding.ruleId);
-      const now = matches[0];
-      if (matches.length !== 1 || !now || now.status !== "open" && (now.status !== "fixed" || !now.fixedAt || !now.fixedSha || relevant.some(pr => !descends(pr.mergeSha, now.fixedSha!)) ||
-          !sha(now.fixedSha) || !descends(now.fixedSha, after.input.analyzedSha) || relevant.some(pr => Date.parse(now.fixedAt!) < Date.parse(pr.mergedAt)) ||
-          Date.parse(now.fixedAt) > afterAt)) return refuse("Each linked finding needs an explicit open or independently confirmed fixed state. Absence or dismissal does not prove a fix.");
-    }
     const remaining = current.findings.filter(row => row.ruleId === source.ruleId && row.category === "maintainability" && row.status === "open").length;
     result.stage = "measured"; result.verdict = remaining < original.length ? "helped" : remaining > original.length ? "hurt" : "unchanged";
     result.observed = { before: original.length, after: remaining, denominator: original.length };
