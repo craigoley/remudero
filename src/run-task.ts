@@ -20313,6 +20313,9 @@ function reportRetroTriggerBackoff(
   backoff: Extract<RetroBackoffDecision, { eligible: false }>,
   count: { mergesSinceMarker: number; basis: "attempt-or-runless-lower-bound" | "cached-shipped-plus-runless" | "authoritative-shipped-plus-runless" },
 ): void {
+  const eligibility = backoff.nextEligibleAt === null
+    ? `uncapped time boundary is outside the supported Date range; eligible once ${backoff.mergesFloor} merges have landed since the marker`
+    : `eligible again at ${backoff.nextEligibleAt} or once ${backoff.mergesFloor} merges have landed since the marker`;
   const fingerprint = `${marker?.ts ?? "absent"}\u0000backoff\u0000${backoff.streak}\u0000${backoff.nextEligibleAt}\u0000${count.basis}\u0000${count.mergesSinceMarker}`;
   if (
     lastRetroTriggerDecline?.ledgerPath === ledgerPath &&
@@ -20327,10 +20330,11 @@ function reportRetroTriggerBackoff(
       outcome: "declined",
       reason:
         `automated retro backed off: ${backoff.streak} consecutive failed attempt(s) in this marker cycle; ` +
-        `eligible again at ${backoff.nextEligibleAt} or once ${backoff.mergesFloor} merges have landed since the marker`,
+        eligibility,
       marker_ts: marker?.ts ?? null,
       streak: backoff.streak,
       next_eligible_at: backoff.nextEligibleAt,
+      ...(backoff.nextEligibleAt === null ? { next_eligible_at_state: backoff.nextEligibleAtState } : {}),
       merges_floor: backoff.mergesFloor,
       merges_since_marker: count.mergesSinceMarker,
       count_basis: count.basis,
