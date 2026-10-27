@@ -1,6 +1,6 @@
 - repo: remudero
   type: implement
-  verify: auto
+  verify: human
   principles:
     tdd: strict
   risk: high
@@ -23,6 +23,8 @@
     - test/console-api/views/daily-progress-contract.test.ts
     - src/lib/daily-progress-calendar.ts
     - scripts/expiring-fixture-census.mjs
+    - test/expiring-fixture-census.test.ts
+    - test/a-non-core-inbox-has-its-own-classification-producer.test.ts
     - test/view-etags-are-deterministic.test.ts
     - test/a-view-lane-constructs-only-the-views-it-owns.test.ts
     - test/every-view-body-matches-its-schema.test.ts
@@ -140,3 +142,22 @@
     spending, review and console holds. No source build, re-dispatch, owner-answer replay,
     strike reset, service restart or runtime adoption is performed by this plan amendment.
     The five original acceptance criteria and all other task fields remain unchanged.
+
+    Current native repair companion ruling proposed at head
+    8b18fe90f4ce96ba14af61dbc62bd5ea17e18ecf: override the earlier prohibition
+    ONLY for the two existing additive AGED_FIELDS rows nextDueAt and savedAt
+    in src/lib/daily-progress-collector.ts, each offsetDays: 0 and the existing
+    literal Date.parse comparison evidence. Preserve all twelve original
+    registrations, thresholds, crossing horizons, exclusion lists and refusals.
+    The census test companion may retain its additive discovery/completeness
+    control. The non-core inbox test companion may add only the configured
+    fleetControlRoot input to its existing fixture; every original assertion
+    and the non-core isolation behavior remain unchanged.
+
+    Standing rule 25 is already advisory under its recorded operator withdrawal;
+    this amendment creates no exception or new mixed-instrument policy. Native
+    source repair retains ownership; no private caller overlay or publication
+    handoff is granted. Keep all five original criteria and proofs, production
+    obligations, budget, risk and every other scope and gate. Normal high-risk
+    plan/ruling qualification remains required. No retry, strike reset, claim,
+    worker, schedule, service or runtime action is granted.
