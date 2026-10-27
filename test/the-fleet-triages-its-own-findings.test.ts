@@ -322,16 +322,23 @@ test("the fleet lane remembers its decisions after the live ledger rotates", () 
 test("W1-T4089: two findings with the same subject become one task", () => {
   assert.equal(findingSubject(A1), findingSubject(A2), "same kind, same file");
   assert.notEqual(findingSubject(A1), findingSubject(P1));
-  assert.equal(findingSubject("followup:W1-T3999:research"), findingSubject("followup:W1-T3999:ci"), "same kind, same task");
-  assert.notEqual(findingSubject("proof-debt:W1-T3999"), findingSubject("followup:W1-T3999:ci"), "different kinds stay apart");
+  // operator ruling 2026-10-13: a shared task id alone no longer merges two follow-ups; W1-T9103 judges such a pair
+  // (a shared path, or a judge's "same") before it folds one into the other.
+  assert.equal(findingSubject("followup:W1-T3999:research"), undefined, "a follow-up naming only a task has no shared subject");
+  assert.equal(findingSubject("followup:W1-T3999:ci"), undefined);
+  assert.equal(findingSubject("followup:src/lib/plan.ts:a"), findingSubject("followup:src/lib/plan.ts:b"), "same kind, same file");
+  assert.notEqual(findingSubject("proof-debt:W1-T3999"), findingSubject("followup:src/lib/plan.ts:b"), "different kinds stay apart");
+  assert.equal(findingSubject("proof-debt:W1-T3999"), "proof-debt|W1-T3999", "a non-follow-up id is still one finding per task");
   assert.equal(findingSubject("codeql-quality:js/x"), "codeql-quality|js/x");
   assert.equal(findingSubject("skill-draft:implement-clean-a4ce"), undefined, "a finding that names nothing shared is never folded");
   const f = fx({ "followup:W1-T3999:research": "ready", "followup:W1-T3999:ci": "not_ready" }, ["followup:W1-T3999:research"]);
   const pass = triageFleetLane(f.deps(5));
-  assert.deepEqual(pass.merged, ["followup:W1-T3999:ci"]);
-  assert.deepEqual(pass.filed, ["followup:W1-T3999:research"]);
+  assert.deepEqual(pass.merged, [], "two same-task follow-ups with no shared path stay two items");
+  assert.deepEqual(pass.filed, ["followup:W1-T3999:research"], "the drafted one is filed");
   const { classificationAgeMs: _age, ...second } = triageFleetLane(f.deps(5));
   assert.deepEqual(second, { filed: [], merged: [], room: 5 - 1 }, "a second pass decides nothing twice");
+  const g = fx({ [A1]: "ready", [A2]: "ready" }, []);
+  assert.deepEqual(triageFleetLane(g.deps(5)).merged, [A2], "findings about one file still fold into the oldest");
 });
 
 test("W1-T4089: a finding whose evidence no longer holds is retired", () => {
