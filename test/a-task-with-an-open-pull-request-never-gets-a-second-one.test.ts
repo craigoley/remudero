@@ -22,6 +22,7 @@ import type { GitHub } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { PREOPEN_GATE_STEP } from "#src/lib/preopen-gate.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const TASK_ID = "W1-T990072";
@@ -141,6 +142,8 @@ async function drive(reader: OpenPrJsonReader): Promise<{ rows: Array<{ step: st
       runReviewFn: async () => { throw new Error("review is unreachable in this fixture"); },
       say: () => {},
       spawn: committingSpawn,
+      // Direct body callers declare the injected worker, as the normal runTask entry does.
+      spawnInjected: true,
       task: plan.byId.get(TASK_ID)!,
       taskId: TASK_ID,
       workerStateSensor: { observer: () => {}, startPolling: () => () => {}, setRunawayBound: () => {} },
@@ -240,4 +243,14 @@ test("W1-T5520: an unreadable files read for a trailer-only match is unreadable,
     state: "unreadable",
     error: "pulls/8800/files was not an array",
   });
+});
+
+test("an injected duplicate-PR fixture stays out of production pre-open validation", async () => {
+  const driven = await drive(listOnly([]));
+  assert.equal(driven.created.length, 1, "the real duplicate-PR path still reaches its recorded forge seam");
+  assert.equal(
+    driven.rows.filter((r) => r.step === PREOPEN_GATE_STEP).length,
+    0,
+    "the fixture's injected worker must not start unrelated production pre-open validation",
+  );
 });
