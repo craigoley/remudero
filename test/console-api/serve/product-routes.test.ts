@@ -892,3 +892,60 @@ test("W1-T10618: the served product case operation matches the authenticated API
   assert.ok(existsSync(join(stateBase, "wreckterra/state/KICK_REQUESTED-wreckterra:W9-T1")));
   assert.ok(!shim.calls().some((call) => call.includes("-X POST")));
 });
+
+test("W1-T10619: the served product evaluation operation matches the authenticated API contract", async (t) => {
+  const root = ownedFixtureDir(t, "product-evaluation-http").dir;
+  const products = assembled(root);
+  const mounted = assembled(root, "/v1/products/evaluation");
+  assert.equal(mounted[0]?.scope, "write");
+  assert.equal(mounted[0]?.tier, "middle", "recording a proposal is middle tier: it never builds, spends or deploys");
+  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...mounted] });
+  await new Promise<void>((resolve) => instance.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(instance.address() as AddressInfo).port}`;
+  t.after(() => new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve())));
+  const send = async (session: "alice" | "bob" | undefined, body: unknown, raw?: string) => {
+    const result = await fetch(`${base}/v1/products/evaluation`, { method: "POST", headers: { authorization: "Bearer fixture-write",
+      "content-type": "application/json", ...(session ? { "x-test-session": session } : {}) }, body: raw ?? JSON.stringify(body) });
+    const reply = await result.json() as { version: string; error?: string; replayed?: boolean;
+      receipt?: { verdict: string; autoDeploy: boolean; deployed: boolean; executionAuthority: string; coverage: Record<string, string> } };
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/evaluation", "POST", result.status)), [],
+      `the real evaluation response (${result.status}) must match its declared contract`);
+    assert.match(result.headers.get("cache-control") ?? "", /no-store/);
+    return { status: result.status, body: reply };
+  };
+  const created = await request(base, "/v1/products", "alice", command);
+  const productId = created.body.receipt!.productId;
+  const versions = { objectiveVersion: "objective-1", evaluatorVersion: "evaluator-1" };
+  const evaluation = (over: Record<string, unknown> = {}) => ({ version: "product-evaluation-v1", requestId: "route-eval-0000001", productId,
+    expectedRevision: 1, expectedObjectiveRevision: 1, objective: versions, baseline: versions, candidate: versions,
+    holdouts: [{ kind: "geography", id: "central-park", baseline: 0.5, candidate: 0.6 }, { kind: "device", id: "phone-small", baseline: 0.7, candidate: 0.7 }],
+    evidence: [{ channel: "replay", reference: "https://example.com/replays/1" }],
+    proposal: { summary: "tighten the skirmish pacing", pullRequests: 1, costUsd: 5 }, ...over });
+  assert.equal((await send(undefined, evaluation())).status, 403, "a shared bearer is not a verified operator");
+  const recorded = await send("alice", evaluation());
+  assert.equal(recorded.status, 200);
+  assert.equal(recorded.body.receipt?.verdict, "reviewable");
+  assert.equal(recorded.body.receipt?.executionAuthority, "none");
+  assert.equal(recorded.body.receipt?.autoDeploy, false);
+  assert.equal(recorded.body.receipt?.deployed, false);
+  assert.equal(recorded.body.replayed, false);
+  assert.equal((await send("alice", evaluation())).body.replayed, true);
+  assert.ok(existsSync(join(root, "state/products/v1/evaluations")), "the proposal is durable under the fleet root");
+  assert.equal((await send("bob", evaluation({ requestId: "route-eval-0000002" }))).status, 404);
+  const unknown = await send("alice", evaluation({ requestId: "route-eval-0000003", expectedRevision: 2,
+    holdouts: [{ kind: "geography", id: "central-park", baseline: 0.5, candidate: null }] }));
+  assert.equal(unknown.status, 200);
+  assert.equal(unknown.body.receipt?.verdict, "unknown");
+  assert.deepEqual(unknown.body.receipt?.coverage, { geography: "unknown", device: "unknown" });
+  const changed = await send("alice", evaluation({ requestId: "route-eval-0000004", expectedRevision: 3, candidate: { ...versions, evaluatorVersion: "evaluator-2" } }));
+  assert.deepEqual([changed.status, changed.body.error], [409, "objective_changed"]);
+  const failed = await send("alice", evaluation({ requestId: "route-eval-0000005", expectedRevision: 4,
+    holdouts: [{ kind: "device", id: "phone-small", baseline: 0.7, candidate: 0.2 }] }));
+  assert.deepEqual([failed.status, failed.body.error], [409, "holdout_failed"]);
+  assert.equal((await send("alice", evaluation({ requestId: "route-eval-0000006", expectedRevision: 5, proposal: { summary: "x", pullRequests: 1, costUsd: 31 } }))).body.error, "budget_exceeded");
+  assert.equal((await send("alice", evaluation({ expectedRevision: 5, proposal: { summary: "other", pullRequests: 1, costUsd: 5 } }))).status, 409);
+  assert.equal((await send("alice", evaluation({ requestId: "route-eval-0000007", expectedRevision: 1 }))).body.error, "stale_revision");
+  assert.equal((await send("alice", { ...evaluation({ requestId: "route-eval-0000008" }), autoDeploy: true })).status, 400);
+  assert.equal((await send("alice", undefined, "{broken")).status, 400);
+  assert.equal((await send("alice", undefined, JSON.stringify({ padding: "x".repeat(17_000) }))).status, 413);
+});
