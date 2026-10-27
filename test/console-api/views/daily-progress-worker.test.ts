@@ -14,6 +14,7 @@ import { withTempDir } from "#src/lib/tmp.js";
 import { createReadModelTicker, createReadModelWorker, readModelSwitchesPath } from "#src/lib/read-model-worker.js";
 import { createRepositoriesSourcePublisher } from "#src/lib/repositories-view.js";
 import { runSlowLaneWorker, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
+import { INBOX_CLASSIFY_INTERVAL_MS } from "#src/lib/inbox-view.js";
 import { readModelInstances } from "#src/lib/serve.js";
 import { mapBoardPr, type BoardPrRest } from "#src/lib/open-prs-rest.js";
 
@@ -353,7 +354,7 @@ test("daily production slow lane retains required unowned siblings before counti
   });
 });
 
-test("daily projector refuses a publication it cannot commit and keeps durable history unchanged", { timeout: 30_000 }, async () => {
+test("daily projector refuses a publication it cannot commit and keeps durable history unchanged", { timeout: 150_000 }, async () => {
   const { DatabaseSync } = await import("node:sqlite");
   const { dailyProgressStorePath } = await import("#src/lib/daily-progress-store.js");
   await withTempDir("daily-refused-threads", async root => {
@@ -368,16 +369,22 @@ test("daily projector refuses a publication it cannot commit and keeps durable h
     const store = dailyProgressStorePath(stateDir); mkdirSync(store, { recursive: true });
     const lock = new DatabaseSync(join(store, "publication-lock.sqlite"), { timeout: 0 });
     lock.exec("BEGIN IMMEDIATE");
-    let refused: string | undefined, committed = false;
+    let refused: string | undefined, committed = false, onRefused = (): void => {};
+    const refusedSeen = new Promise<void>(resolve => { onRefused = resolve; });
     const worker = createReadModelWorker({ stateDir, instances: [{ name: "core", repo: "acme/app", ledgerDir: stateDir, boardRoot }], tickMs: 50,
       log(step, extra) {
-        if (step === "read_model.daily_publication_refused") refused = String(extra?.reason ?? "");
+        if (step === "read_model.daily_publication_refused") { refused = String(extra?.reason ?? ""); onRefused(); }
         if (step === "read_model.daily_committed") committed = true;
       } });
     worker.start();
     try {
-      // BACKSTOP: wait for the parent's refusal receipt, never a staged worker verdict.
-      for (let attempt = 0; refused === undefined && attempt < 600; attempt++) await new Promise(resolve => setTimeout(resolve, 25));
+      // Wait for the parent's refusal receipt, never a staged worker verdict. Thread startup and the first
+      // collection took ~5 s idle and ~9 s under load, and a fixed 15 s poll timed out once on a CI runner.
+      // An ownership-epoch change cancels a collection and the next pass is a full slow-lane interval away,
+      // so the BACKSTOP sits past two intervals rather than at a guess of runner speed.
+      let backstop: NodeJS.Timeout | undefined;
+      await Promise.race([refusedSeen, new Promise<void>(resolve => { backstop = setTimeout(resolve, 2 * INBOX_CLASSIFY_INTERVAL_MS); })]);
+      clearTimeout(backstop);
       assert.ok(refused, "the projector reports the publication it could not commit");
       assert.match(refused, /locked|busy/i, "the refusal names the held publication lock");
       assert.equal(committed, false, "a refused publication is never reported as committed");
