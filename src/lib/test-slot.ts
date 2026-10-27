@@ -1677,6 +1677,7 @@ export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryB
   let dir: string;
   try { dir = opts.dir ?? resolveTestSlotDir().dir; }
   catch (error) {
+    // No directory means no peer peak is readable: the stage runs OPEN, and the note names the failure.
     return { outcome: "open", executionAllowed: true, waitedMs: 0, release: () => {},
       note: `static admission OPEN: slot directory unresolved (${String((error as Error)?.message ?? error)}); no peak could be counted` };
   }
@@ -1708,7 +1709,10 @@ export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryB
     const seen = { peaks: 0, holders: [] as string[] };
     let names: string[] = [];
     try { names = readdirSync(dir); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { ...seen, unjudgeable: `slot directory unreadable: ${String(error)}` }; }
+    catch (error) {
+      // Absent: nobody holds anything. Unreadable: memory cannot judge, so today's slot admission does.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { ...seen, unjudgeable: `slot directory unreadable: ${String(error)}` };
+    }
     for (const name of names.sort()) {
       const slot = SLOT_RECORD.test(name);
       if (name === ownName || (!slot && !STATIC_RECORD.test(name))) continue;
@@ -1744,7 +1748,10 @@ export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryB
     const need = seen.peaks + opts.memoryBytes;
     const admit = (outcome: StaticAdmission["outcome"], why: string): StaticAdmission => {
       try { if (!unrecorded) write(clock.iso()); }
-      catch (error) { unrecorded = `; own peak UNRECORDED (${String((error as Error)?.message ?? error)})`; }
+      catch (error) {
+        // The stage still runs; only the admittedAt mark is lost, and the note says its peak is unrecorded.
+        unrecorded = `; own peak UNRECORDED (${String((error as Error)?.message ?? error)})`;
+      }
       if (announced) log(JSON.stringify({ step: "test_slot.static_admitted", label, outcome, waitedMs: waited() }));
       return { outcome, executionAllowed: true, waitedMs: waited(), release, note: `${why}${unrecorded ?? ""}`,
         ...(unrecorded ? {} : { childEnvironment: { [TEST_SLOT_DIR_ENV]: dir } }) };
