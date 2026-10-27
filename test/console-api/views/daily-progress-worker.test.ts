@@ -27,7 +27,7 @@ test("daily progress uses server board roots instead of guessing from ledger loc
   });
 });
 
-test("daily default projector publishes through the real parent and slow-lane threads with all page views off", { timeout: 30_000 }, async () => {
+test("daily default projector publishes through the real parent and slow-lane threads with all page views off", { timeout: 150_000 }, async () => {
   await withTempDir("daily-default-threads", async root => {
     const stateDir = join(root, "ledger"), boardRoot = join(root, "snapshot-owner");
     mkdirSync(stateDir); mkdirSync(boardRoot); writeFileSync(join(stateDir, "ledger.ndjson"), "");
@@ -39,16 +39,21 @@ test("daily default projector publishes through the real parent and slow-lane th
       updatedAt: fixedClock(now).iso(), mergedAt: occurredAt }]) });
     createRepositoriesSourcePublisher({ stateDir, instances: () => [{ instanceId: "core", options: { root: boardRoot, instanceRepository: { owner: "acme", repo: "app" } } }] })();
     writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { analytics: "off", "daily-progress": "off" } }));
-    let committed = false; const failures: string[] = [];
+    let committed = false, onCommitted = (): void => {}; const failures: string[] = [];
+    const committedSeen = new Promise<void>(resolve => { onCommitted = resolve; });
     const worker = createReadModelWorker({ stateDir, instances: [{ name: "core", repo: "acme/app", ledgerDir: stateDir, boardRoot }], tickMs: 50,
       log(step, extra) {
-        if (step === "read_model.daily_committed") committed = true;
+        if (step === "read_model.daily_committed") { committed = true; onCommitted(); }
         if (/daily.*(?:failed|refused)|worker_error/.test(step)) failures.push(`${step}: ${String(extra?.reason ?? extra?.error ?? "unknown")}`);
       } });
     worker.start();
     try {
-      // BACKSTOP: wait for the actual parent persistence receipt, never a staged worker verdict.
-      for (let attempt = 0; !committed && attempt < 600; attempt++) await new Promise(resolve => setTimeout(resolve, 25));
+      // Wait for the actual parent persistence receipt, never a staged worker verdict. Like the refusal
+      // test below, real thread startup plus the first collection outgrew a fixed 15 s poll on a CI runner,
+      // so the BACKSTOP sits past two slow-lane intervals rather than at a guess of runner speed.
+      let backstop: NodeJS.Timeout | undefined;
+      await Promise.race([committedSeen, new Promise<void>(resolve => { backstop = setTimeout(resolve, 2 * INBOX_CLASSIFY_INTERVAL_MS); })]);
+      clearTimeout(backstop);
       assert.ok(committed, `default thread wiring did not commit: ${failures.slice(-5).join("; ")}`);
       const day = readDailyProgressManifest(stateDir).days[dailyProgressDayKey("acme/app", "America/New_York", date)]; assert.ok(day);
       const report = readDailyProgressRevision(stateDir, day);
