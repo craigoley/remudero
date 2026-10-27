@@ -14,7 +14,7 @@
  * A ticket carries NO authority over any slot record; it orders waiters and nothing else.
  */
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, fchmodSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, fchmodSync, fstatSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
@@ -180,12 +180,16 @@ function writeWhole(path: string, body: string): void {
 
 /**
  * Widen a queue dir WE own to 0o777 — the legacy slot dir's own sequence (mkdir, then chmod when we own it).
- * `lstat` does not follow, so a symlink or a non-directory at `dir` is never widened.
+ * Judged and widened through ONE descriptor opened O_DIRECTORY|O_NOFOLLOW: a symlink or a non-directory at
+ * `dir` is refused by the open itself, and nothing re-resolves the path between the check and the chmod, so a
+ * dir swapped for a link after the check can never redirect a world-writable chmod (CodeQL js/file-system-race).
  */
 function widenOwnDir(dir: string): void {
-  const st = lstatSync(dir);
-  if (!st.isDirectory()) throw new Error(`test slot queue path is not a directory: ${dir}`);
-  if ((st.mode & 0o777) !== 0o777 && st.uid === process.getuid?.()) chmodSync(dir, 0o777);
+  const fd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const st = fstatSync(fd);
+    if ((st.mode & 0o777) !== 0o777 && st.uid === process.getuid?.()) fchmodSync(fd, 0o777);
+  } finally { closeSync(fd); }
 }
 
 /**
@@ -262,7 +266,9 @@ export function readHoldHistory(slotDir: string): HoldRecord[] {
   let raw: string;
   try { raw = readFileSync(join(testSlotQueueDir(slotDir), TEST_SLOT_HOLD_HISTORY), "utf8"); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    // No queue dir (ENOENT), or a non-directory where it would be (ENOTDIR): no hold was ever recorded there.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return [];
     throw error;
   }
   const rows: HoldRecord[] = [];
@@ -297,14 +303,6 @@ export function holdRetention(slots: number): number {
  */
 export function recordTestSlotHold(slotDir: string, hold: HoldRecord, slots: number): boolean {
   const queueDir = testSlotQueueDir(slotDir);
-  // Presence check only; the temp file below is created O_EXCL|O_NOFOLLOW, so a dir that
-  // changes after this check fails the write rather than redirecting it.
-  try { if (!lstatSync(queueDir).isDirectory()) return false; }
-  catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return false;
-    throw error;
-  }
   const keep = holdRetention(slots), all = [...readHoldHistory(slotDir), hold], kept: HoldRecord[] = [];
   const seen = new Map<string, number>();
   for (let i = all.length - 1; i >= 0; i -= 1) {
@@ -313,7 +311,14 @@ export function recordTestSlotHold(slotDir: string, hold: HoldRecord, slots: num
     if (n <= keep) kept.unshift(all[i]!);
   }
   const temp = join(queueDir, `.hold-${randomUUID()}.tmp`);
-  createWhole(temp, kept.map(r => JSON.stringify(r)).join("\n") + "\n", 0o666);
+  // No separate presence check (CodeQL js/file-system-race): the O_EXCL|O_NOFOLLOW create IS the check, and a
+  // queue dir that is absent (ENOENT) or not a directory (ENOTDIR) means nobody has queued — nothing to record.
+  try { createWhole(temp, kept.map(r => JSON.stringify(r)).join("\n") + "\n", 0o666); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return false;
+    throw error;
+  }
   renameSync(temp, join(queueDir, TEST_SLOT_HOLD_HISTORY));
   return true;
 }
