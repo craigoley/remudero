@@ -683,7 +683,7 @@ test("a refused broker socket bind leaves no heartbeat timer keeping its process
   ].join("\n");
   // This child owns the deliberately invalid socket path; the timeout bounds the old leaked-timer falsifier.
   const observed = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code], {
-    cwd: ROOT, encoding: "utf8", timeout: 30_000,
+    cwd: ROOT, encoding: "utf8", timeout: 10_000,
   });
   assert.ifError(observed.error);
   assert.equal(observed.status, 0, observed.stderr);
