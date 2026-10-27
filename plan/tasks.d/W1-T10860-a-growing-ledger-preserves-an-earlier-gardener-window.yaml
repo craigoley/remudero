@@ -1,0 +1,66 @@
+- id: W1-T10860
+  title: "A GROWING LEDGER PRESERVES AN EARLIER GARDENER WINDOW — ordinary valid post-cutoff appends cannot invalidate previously complete money and worker-call evidence"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  author_class: machine
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high
+  band_meaning: span
+  origin: "feedback#console-gardener-cutoff-race-20261027; actual observation landing #14834"
+  plan_refs: [W1-T9658, W1-T10287, W1-T10461]
+  files: [src/lib/gardener-spend.ts, test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts, test/many-gardener-receipts-fit-a-bounded-cost-summary.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    The unchanged default capture records its through-clock before awaiting the three-form ledger union.
+    A physical filesystem reproduction at collector SHA256050c0edc7b97b216e849e4e43359d3f06ff7229eb7a60bc6c52af685a3e8445c
+    measured a healthy priced parent at2USD, then a valid new parent appended after that cutoff but before
+    the advanced read clock made the same earlier window incomplete with totalnull and subtotal2.
+    True future and malformed controls still refused. A natural queue-judge pass independently carries
+    an exact assignment, attempt and canonical produced API receipt0.01619175USD; a12:07cached snapshot
+    reported an incomplete current window. These observations establish a failure class, not the cause
+    of every live stale snapshot, invoice completeness, a new provider charge or zero spend.
+    The normal triage run1793112147180 ended after three configured relint attempts at Law5 because its
+    draft used verify:auto without a risk ruling. It opened no PR. This operator-reserved machine proposal
+    instead preserves verify:human; only an actual operator or ratified native judge may release it.
+    The fresh22-open-head audit read every immutable head, had198gardener subject controls and no collector
+    source overlap. The only subsequently adopted main delta was our unrelated W1-T6012 plan amendment.
+  design: |
+    The collector keeps its declared through clock fixed for the entire capture.
+    Both monetary and worker-call accumulation share that fixed window.
+    Qualify ordinary valid arrivals later than that cutoff against a separately observed read clock,
+    then exclude them from both accumulators before they can invalidate the earlier captured window.
+    Do not slide or stretch the published window, borrow another generation, or turn missing prices
+    into zeros. Genuine future timestamps relative to the read observation must still refuse; do not
+    blanket-ignore every later timestamp. Preserve malformed and unreadable-source refusals, exact
+    repository/generation/parent joins, cancellation, generation recheck, replay deduplication and all
+    existing scan, identity and64KiB ceilings. Optional call coverage cannot crowd valid money out.
+    Physical default-path controls qualify the append boundary and preserve true-future refusals.
+    Use real temporary files, the default union/capture path and advancing clock controls for concurrent
+    parent, price, assignment and attempt appends. Keep a frozen earlier positive window with known money
+    and matched calls. Exercise ordinary no-append reads, malformed/unreadable/foreign/generation-change
+    and cancellation negatives, unknown prices, duplicate receipts and existing size-boundary cases.
+    Remove the source correction and require the append controls to fail, then restore and pass them.
+    Extend the two existing physical suites; new code uses package aliases and the common root helper.
+    Normal native author, stored acceptance, source-positive coverage, census, semantic review, hosted
+    security/tests and protected merge gates remain. No new model or gardener pass may manufacture evidence.
+    No provider, permissions, spending setting, action capability, service/restart/deployment, CI or
+    Azure-memory policy change is part of this task. The original117/9 Inbox identities and captured
+    original reply remain separate; do not replay or close them through this technical finding.
+    This filing records no risk verdict and grants no implementation release.
+  acceptance:
+    - claim: "The default physical capture retains complete earlier priced money and exact joined calls when ordinary valid post-cutoff parent, price, assignment and attempt rows arrive; those later rows contribute neither money nor call coverage to the fixed earlier window"
+      proof: "unit test: a gardener capture keeps its fixed window when ordinary later rows arrive"
+    - claim: "True future, malformed, unreadable, foreign, cancelled and changed-generation evidence still withholds completeness while unknown prices and replay deduplication preserve their existing meaning"
+      proof: "unit test: a gardener fixed window preserves evidence refusals during concurrent capture"
+    - claim: "Money and usage share the immutable cutoff, retain identity and64KiB ceilings and independent monetary priority, and the append regression fails with the source correction removed and passes restored"
+      proof: "unit test: a bounded gardener capture keeps money and usage aligned at its cutoff"
+  falsifier: |
+    Keep the unconditional post-start timestamp rejection and early calls.add path. Append a valid later
+    parent, receipt, assignment and attempt through the real live file during capture while the wall clock
+    advances. The declared earlier priced/joined window becomes incomplete and the append regression fails.
+    Restoring the correction must restore its positive window without making genuine future records pass.
