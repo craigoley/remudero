@@ -1,0 +1,32 @@
+- id: W1-T10804
+  title: Audit worker-spawn exit-listener race exposure across queueMicrotask-based test fixtures
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: human
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/worker.ts
+    - test/no-worker-writes-a-git-config-the-host-push-honours.test.ts
+    - test/codex-writable-resume-sandbox.test.ts
+  acceptance:
+    - claim: The report lists every production spawn path in src/lib/worker-provider.ts and src/lib/worker.ts where the child process's exit or error listener is registered only after the function's first `await`, naming each call site by function and line
+      proof: "demonstration: the operator reads the report and sees each call site named with its function, line, and whether listener registration precedes or follows the first await"
+    - claim: For every test fixture across the repository that emits a fake child-process exit via queueMicrotask from a callback invoked before the production code's listener registration (including test/no-worker-writes-a-git-config-the-host-push-honours.test.ts and test/codex-writable-resume-sandbox.test.ts), the report states whether that fixture's assertions depend on output produced after exit (text, blocks, harnessCommit) or check only the captured spawn arguments
+      proof: "demonstration: the operator reads the report and sees one row per fixture naming the file, the assertions it makes, and whether a real ordering hazard would be caught or masked"
+    - claim: The report concludes, for each confirmed hazard, whether the fix belongs in the spawn code (attach listeners before any await) or in the test (assert on post-exit output), and states explicitly whether test/no-worker-writes-a-git-config-the-host-push-honours.test.ts and test/codex-writable-resume-sandbox.test.ts are exposed or already safe
+      proof: "demonstration: the operator reads the report's conclusion section and sees a disposition — safe, or needs a follow-up with a named remedy — for each of the two named tests"
+  origin: followup:DAEMON-1793081348651:2026-10-27T06:58:20.991Z:0
+  rationale: >-
+    From the 2026-10-27 follow-up on https://github.com/craigoley/remudero/pull/14620, ratified
+    via rmd approve:
+  
+    follow-up harvest [research]: other tests that assert on output text and emit `exit` through
+    `queueMicrotask` from a callback running before the worker attaches its listeners could hit
+    the same race. Examples are `test/no-worker-writes-a-git-config-the-host-push-honours.test.ts`
+    and `test/codex-writable-resume-sandbox.test.ts`. They only check `args` today, so they pass.
+    — from PR-14620 (run DAEMON-1793081348651, https://github.com/craigoley/remudero/pull/14620)
