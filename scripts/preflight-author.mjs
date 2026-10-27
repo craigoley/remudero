@@ -6,8 +6,9 @@ import { join, relative, resolve, sep } from 'node:path';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
   planOnlySelectionOrFull, readAffectedSuitesInput, readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
 import { callerReachableSuites } from '../src/lib/ci-parity.ts';
-import { acquireTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
+import { admitStaticWork, enqueueTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
   TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
+import { TYPECHECK_COLD_PEAK_BYTES } from '../src/lib/typecheck-buildinfo.ts';
 import { listTestFiles, manifestEntryFor, medianMeasuredDurationMs, mergeDurations, reportManifestFallbacks, weightedDurationMs } from './test-tier-manifest.mjs';
 import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from './pure-test-pool.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
@@ -24,6 +25,10 @@ import { guardedAuthorEntry, MacAuthorCapacityRefusal } from './lib/mac-author-a
 export const OVER_CAPACITY_EXIT = 3;
 /** The most test files an author run runs at once (the cap test-slot.ts has always applied here). */
 export const AUTHOR_MAX_WORKERS = 4;
+/** The author's suite slot asks for one worker; before admission the suites are priced at it. */
+const AUTHOR_SLOT_CEILING = 1;
+const AUTHOR_SUITE_LABEL = 'preflight-author:static-and-affected';
+const AUTHOR_STATIC_LABEL = 'preflight-author:static';
 /** BACKSTOP: a docs freshness failure must not wait through a heavy author phase. */
 export const AUTHOR_DOCS_PRECHECK_MAX_MS = 30_000;
 /** Only docs-index inputs and its executable contract; deletion/rename sides remain in the diff. */
@@ -284,7 +289,8 @@ export function authorPublicationIdentity({ headRef, headSha, baseSha, publicati
 }
 
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
-  select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined } = {}) {
+  select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined,
+  testSlot = {} } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
     deadline: { type: 'string' },
@@ -507,17 +513,31 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             }
           }
         }
-        // The cheap census runs first. One owner then admits BOTH expensive phases;
-        // nested production checks borrow only its actual live ancestor lease.
-        const slot = acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: 1 });
-        try {
+        // The cheap census runs first. W1-T9951: the suite ticket is taken NOW, so it holds its place in
+        // line while the static stage runs on its own memory admission; suites are admitted after it.
+        const queue = enqueueTestSlot(AUTHOR_SUITE_LABEL, { ...testSlot, perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: AUTHOR_SLOT_CEILING });
+        receipt.suiteQueue = { ticketed: queue.ticketed, positionAtEnqueue: queue.position ?? null, note: queue.note };
+        let slot;
+        let staticEndedAt;
+        const admitSuites = () => {
+          const waitStartedAt = Date.now();
+          slot = queue.admit();
           receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
+          receipt.suiteQueue = { ...receipt.suiteQueue, outcome: 'admitted', waitedMs: Date.now() - (staticEndedAt ?? waitStartedAt) };
           if (!testSlotExecutionAllowed(slot)) throw new Error(`author preflight NOT_RUN (${slot.note})`);
+        };
+        const cancelSuites = (reason) => {
+          if (receipt.suiteQueue.outcome) return;
+          queue.cancel(reason);
+          receipt.suiteQueue = { ...receipt.suiteQueue, outcome: 'cancelled', reason };
+        };
+        try {
           let runtimeProfile, runtimeManifest;
           const admitRuntime = (stage, staticReserveMs, files = receipt.suites,
-            workers = Math.min(AUTHOR_MAX_WORKERS, slot.concurrency)) => {
+            workers = Math.min(AUTHOR_MAX_WORKERS, slot?.concurrency ?? AUTHOR_SLOT_CEILING)) => {
             if (deadline === undefined) return;
-            if (!['acquired', 'inherited'].includes(slot.outcome)) throw new Error('runtime admission requires a real slot; unslotted fallback is not deadline-fit capacity');
+            // Before static no slot is held yet; the suites are priced at the ceiling the slot is asked for.
+            if (stage !== 'before-static' && !['acquired', 'inherited'].includes(slot?.outcome)) throw new Error('runtime admission requires a real slot; unslotted fallback is not deadline-fit capacity');
             runtimeProfile ??= readRuntimeProfile(root, values['runtime-profile'], runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
             // An empty full-fallback partial set runs no suite: the profile is still validated, nothing is priced.
             if (files.length === 0) return;
@@ -532,38 +552,50 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           admitRuntime('before-static', undefined, partial ? partial.suites : receipt.suites);
           const staticCapacity = admitHost('static-preflight');
           if (staticCapacity) (receipt.hostCapacity ??= []).push(staticCapacity);
-          const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
-            join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
-            '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
-          const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, slot.childEnvironment,
-            AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
-          const staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
-          report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
-          // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
-          // receipt and selected floor, but don't spend another full run on known-doomed tests.
-          // W1-T7809: a plan-only selection is plan lint first; a failed lint is as unpublishable as a failed static gate.
+          // Its record names a cold tsc's peak; the nested typecheck sees this ancestor's record and inherits it.
+          const staticAdmission = admitStaticWork(AUTHOR_STATIC_LABEL, { ...testSlot, memoryBytes: TYPECHECK_COLD_PEAK_BYTES });
+          receipt.staticAdmission = { outcome: staticAdmission.outcome, waitedMs: staticAdmission.waitedMs, note: staticAdmission.note };
+          let staticOk = false;
           let lintOk = true;
-          if (staticOk && receipt.selection === 'plan-only') {
-            const lint = runStep('lint-plan-fast', ['--import', 'tsx', join(root, 'scripts/lint-plan-offline.mjs'),
-              '--base', 'origin/main', '--merge-base'], process.execPath, slot.childEnvironment, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
-            lintOk = lint.status === 0 && !lint.signal && !lint.error;
-            report('lint-plan-fast', lint, lintOk);
+          try {
+            if (!staticAdmission.executionAllowed) throw new Error(`author static stage NOT_RUN (${staticAdmission.note})`);
+            const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
+              join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
+              '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
+            const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, staticAdmission.childEnvironment ?? {}, AUTHOR_STEP_RUNTIME_MS);
+            staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
+            report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
+            // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
+            // receipt and selected floor, but don't spend another full run on known-doomed tests.
+            // W1-T7809: a plan-only selection is plan lint first; a failed lint is as unpublishable as a failed static gate.
+            if (staticOk && receipt.selection === 'plan-only') {
+              const lint = runStep('lint-plan-fast', ['--import', 'tsx', join(root, 'scripts/lint-plan-offline.mjs'),
+                '--base', 'origin/main', '--merge-base'], process.execPath, staticAdmission.childEnvironment ?? {}, AUTHOR_STEP_RUNTIME_MS);
+              lintOk = lint.status === 0 && !lint.signal && !lint.error;
+              report('lint-plan-fast', lint, lintOk);
+            }
+          } finally {
+            staticAdmission.release();
+            staticEndedAt = Date.now();
           }
           if (staticOk && lintOk) {
             const dependencyAfterStatic=authorDependencyProvenance(root);
             receipt.dependencyProvenance.afterStatic=dependencyAfterStatic;
             if(!sameAuthorDependencyProvenance(dependencyBefore,dependencyAfterStatic))throw new Error('installed dependency donor changed during static validation; tests not started');
+            // W1-T9951: a selection naming no suite leaves the line; one that names suites waits its turn here.
+            if ((partial ? partial.suites : receipt.suites).length === 0) cancelSuites('the selection names no suite');
+            else admitSuites();
             // W1-T7809: price the selection against what this host can carry NOW, before spending it.
             let manifest = { files: {} };
             try { manifest = JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8')); }
             catch (error) { receipt.manifestUnavailable = error.message; }
-            const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot.concurrency });
+            const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot?.concurrency ?? AUTHOR_SLOT_CEILING });
             // A deadline without a validated native profile was refused before static work.
             // Never expand workers or restart the deadline to admit a larger selection.
             const nativeBudget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline }) : legacyBudget;
             // W1-T9953: a full fallback is priced against the HOST, never the deadline; a deadline may only shrink it.
             const budget = partial && nativeBudget.budgetMs > legacyBudget.budgetMs ? legacyBudget : nativeBudget;
-            const executionWorkers = runtimeProfile ? budget.workers : Math.min(AUTHOR_MAX_WORKERS, slot.concurrency);
+            const executionWorkers = runtimeProfile ? budget.workers : Math.min(AUTHOR_MAX_WORKERS, slot?.concurrency ?? AUTHOR_SLOT_CEILING);
             receipt.executionWorkers = executionWorkers;
             const priced = partial ? partial.suites : receipt.suites;
             reportManifestFallbacks(priced, manifest);
@@ -656,11 +688,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             }
           } else {
             const gate = staticOk ? 'lint-plan-fast' : 'static-preflight';
+            cancelSuites(`${gate} did not succeed`);
             receipt.affectedTestsNotRunReason = `${gate} did not succeed; see its native outcome`;
             console.log(`affected-tests: NOT RUN — ${gate} did not succeed; selected floor retained in the receipt`);
           }
         } finally {
-          slot.release();
+          cancelSuites('the author stage ended before suite admission');
+          slot?.release();
         }
       }
       if (git(['rev-parse', 'HEAD']).trim() !== receipt.headSha || git(['status', '--porcelain', '--untracked-files=normal']).trim()) {

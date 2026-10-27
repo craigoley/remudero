@@ -21,7 +21,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, unlinkSync, writeSync, type Stats } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync, type Stats } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
@@ -878,6 +878,8 @@ export interface TestSlotOptions {
   /** Join the FIFO waiter queue (W1-T9950). Default: on for the host's resolved shared slot dir; off for an
    *  injected `dir` or a per-test-process dir, whose owner (a fixture) owns nothing beside it to clean up. */
   queue?: boolean;
+  /** A ticket {@link enqueueTestSlot} already took (W1-T9951): the acquisition waits in ITS place, never a new one. */
+  ticket?: OwnTicket;
   /** The human line a queued waiter prints when where it stands changes; default stderr unless `log` is injected. */
   say?: (line: string) => void;
   /** Which priority binaries exist, for the caller's {@link lowPriorityCommand}. */
@@ -972,6 +974,79 @@ export async function acquireTestSlotAsync(label: string, opts: Omit<TestSlotOpt
     next = acquisition.next();
   }
   return next.value;
+}
+
+/** A suite ticket taken ahead of its admission (W1-T9951): it holds its arrival place while other work runs. */
+export interface TestSlotQueueHold {
+  ticketed: boolean;
+  /** 1-based place in line when the ticket was taken; undefined when no ticket was taken. */
+  position?: number;
+  note: string;
+  /** Wait for a slot in this ticket's place; the ticket is gone once this returns. */
+  admit(): TestSlotLease;
+  /** Leave the line without ever touching a slot. */
+  cancel(reason: string): void;
+}
+
+/**
+ * Take a FIFO ticket now and admit later, so work that needs no slot runs while the ticket waits. No ticket
+ * (queue off, a live inherited parent, or the queue unusable) leaves {@link TestSlotQueueHold.admit} as a plain
+ * {@link acquireTestSlot}, and the note says which.
+ */
+export function enqueueTestSlot(label: string, opts: TestSlotOptions = {}): TestSlotQueueHold {
+  const clock = opts.clock ?? systemClock;
+  const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
+  const host = opts.hostname ?? hostname, bootId = opts.bootId ?? (() => readBootId());
+  const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive, pidNamespace = opts.pidNamespace ?? (() => readPidNamespace());
+  const parentPolicy = opts.privateParentPolicy === "require-entry-protection";
+  const pid = opts.pid ?? process.pid;
+  const maximum = opts.maxConcurrency ?? Number.MAX_SAFE_INTEGER;
+  if (!Number.isSafeInteger(maximum) || maximum < 1) throw new RangeError("test worker ceiling must be a positive safe integer");
+  const { dir, scope } = opts.dir !== undefined || parentPolicy ? { dir: opts.dir ?? "", scope: "configured" as const } : resolveTestSlotDir();
+  // A wider live parent is refused HERE, before the work the ticket waits beside, exactly as admission would.
+  const inherited = parentPolicy ? undefined : inheritedTestSlot(dir).lease;
+  if (inherited && inherited.concurrency > maximum) throw new Error("inherited test slot exceeds explicit worker ceiling");
+  let ticket: OwnTicket | undefined, position: number | undefined, note: string;
+  try {
+    if (parentPolicy || !(opts.queue ?? (opts.dir === undefined && scope !== "test-process"))) note = "queue off for this slot directory; admission polls unqueued";
+    else if (inherited) note = "a live parent slot is inherited; no ticket taken";
+    else {
+      const arrivedAt = clock.iso();
+      const own = takeTestSlotTicket(dir, { pid, host: host(), bootId: bootId(), pidNs: pidNamespace(), processStart: testSlotProcessFacts(pid)?.start,
+        label, arrivedAt, heartbeatAt: arrivedAt, heartbeatIntervalMs: opts.pollMs ?? TEST_SLOT_POLL_MS });
+      ticket = own;
+      const judge: TicketJudge = { now: () => clock.now(), hostname: host, bootId, pidNamespace, isPidAlive, silentBeats: TEST_SLOT_SILENT_BEATS };
+      const ahead = readTestSlotQueue(dir, judge, row => log(JSON.stringify({ ...row, by: label })), own.name).filter(t => t.name < own.name);
+      position = ahead.length + 1;
+      note = `ticket ${own.name} at position ${position}`;
+      log(JSON.stringify({ step: "test_slot.enqueued", label, ticket: own.name, position, ahead: ahead.map(t => ({ label: t.ticket.label, pid: t.ticket.pid })) }));
+    }
+  } catch (error) {
+    // Cannot queue collapses to today's unqueued polling at admit(); the note names why, never a refusal.
+    note = `queue unavailable (${String((error as Error)?.message ?? error)}); admission polls unqueued`;
+    try { ticket?.drop(); } catch (dropError) { log(JSON.stringify({ step: "test_slot.ticket_cleanup_failed", label, error: String(dropError) })); }
+    ticket = undefined;
+    position = undefined;
+  }
+  let settled = false;
+  const drop = (): void => {
+    try { ticket?.drop(); } catch (error) { log(JSON.stringify({ step: "test_slot.ticket_cleanup_failed", label, ticket: ticket?.name, error: String(error) })); }
+  };
+  return {
+    ticketed: ticket !== undefined, position, note,
+    admit(): TestSlotLease {
+      if (settled) throw new Error("test slot ticket already admitted or cancelled");
+      settled = true;
+      try { return acquireTestSlot(label, ticket ? { ...opts, ticket } : opts); }
+      finally { drop(); }
+    },
+    cancel(reason: string): void {
+      if (settled) return;
+      settled = true;
+      drop();
+      if (ticket) log(JSON.stringify({ step: "test_slot.ticket_cancelled", label, ticket: ticket.name, reason }));
+    },
+  };
 }
 
 /** The acquisition as a generator of sleeps, so a test can interleave two waiters on one shared clock. */
@@ -1172,8 +1247,8 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
   };
   let announced = false;
   // W1-T9950: a FIFO ticket per waiter, so admission follows arrival. An explicit protected parent gets no new entry.
-  const queueEnabled = !parentPolicy && (opts.queue ?? (opts.dir === undefined && scope !== "test-process"));
-  let queueing = queueEnabled, ticket: OwnTicket | undefined, lastQueued = "";
+  const queueEnabled = !parentPolicy && (opts.queue ?? (opts.ticket !== undefined || (opts.dir === undefined && scope !== "test-process")));
+  let queueing = queueEnabled, ticket: OwnTicket | undefined = queueEnabled ? opts.ticket : undefined, lastQueued = "";
   const say = opts.say ?? (opts.log ? undefined : (line: string) => void process.stderr.write(`${line}\n`));
   const judge: TicketJudge = { now: () => clock.now(), hostname: host, bootId, pidNamespace, isPidAlive, silentBeats: TEST_SLOT_SILENT_BEATS };
   const dropTicket = (): void => {
@@ -1558,5 +1633,134 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
       if (report) say?.(report.message);
       yield Math.min(pollMs, Math.max(0, waitBoundMs - waitedMs));
     }
+  }
+}
+
+/** A static stage's admission (W1-T9951): memory headroom against named peaks, never a suite ticket or slot count. */
+export interface StaticAdmission {
+  /** `slot`: private coordination or an unreadable peer handed the judgment to {@link acquireTestSlot}. */
+  outcome: "admitted" | "inherited" | "open" | "wait_bound_exceeded" | "slot";
+  executionAllowed: boolean;
+  waitedMs: number;
+  note: string;
+  /** Names this admission's slot directory to a child, so a nested static stage finds the record that covers it. */
+  childEnvironment?: Record<string, string>;
+  release(): void;
+}
+
+const STATIC_RECORD = /^static-[0-9a-f-]{36}\.json$/;
+const SLOT_RECORD = /^slot-[1-9][0-9]*\.json$/;
+
+/**
+ * Admit one static stage (a cold `tsc`, a lint) whose cost is memory, not suite fan-out. Its record
+ * (`static-<nonce>.json` beside the slot records) names `memoryBytes`, so a later static stage counts it. It
+ * opens when the headroom holds this peak beside every live suite holder's and every earlier or running
+ * static stage's named peak — the rule `memoryShort` applies to a slot. With no memory reading it opens and says
+ * so. A static record held by an ANCESTOR (the author whose step this is) already covers this process.
+ */
+export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryBytes: number }): StaticAdmission {
+  const clock = opts.clock ?? systemClock;
+  const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
+  const startedAt = clock.now(), startedIso = clock.iso();
+  const waited = (): number => clock.now() - startedAt;
+  const host = opts.hostname ?? hostname, bootId = opts.bootId ?? (() => readBootId());
+  const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive, pidNamespace = opts.pidNamespace ?? (() => readPidNamespace());
+  const headroomOf = opts.memoryHeadroom ?? readMemoryHeadroom;
+  const waitBoundMs = opts.waitBoundMs ?? TEST_SLOT_WAIT_BOUND_MS, pollMs = opts.pollMs ?? TEST_SLOT_POLL_MS;
+  const mib = (bytes: number): number => Math.round(bytes / 1024 ** 2);
+  const viaSlot = (why: string): StaticAdmission => {
+    const lease = acquireTestSlot(label, opts);
+    return { outcome: "slot", executionAllowed: testSlotExecutionAllowed(lease), waitedMs: waited(), note: `${why}; ${lease.note}`,
+      ...(lease.childEnvironment ? { childEnvironment: lease.childEnvironment } : {}), release: () => lease.release() };
+  };
+  if (opts.ownershipProtocol || opts.privateCoordinationRequired || opts.privateParentPolicy) return viaSlot("private coordination configured");
+  let dir: string;
+  try { dir = opts.dir ?? resolveTestSlotDir().dir; }
+  catch (error) {
+    return { outcome: "open", executionAllowed: true, waitedMs: 0, release: () => {},
+      note: `static admission OPEN: slot directory unresolved (${String((error as Error)?.message ?? error)}); no peak could be counted` };
+  }
+  const ownName = `static-${randomUUID()}.json`, ownPath = join(dir, ownName);
+  const pid = opts.pid ?? process.pid;
+  let unrecorded: string | undefined;
+  const write = (admittedAt?: string): void => {
+    const body: TestSlotHolder & { admittedAt?: string } = { pid, host: host(), bootId: bootId(), pidNs: pidNamespace(), startedAt: startedIso,
+      heartbeatAt: clock.iso(), label, processStart: testSlotProcessFacts(pid)?.start, memoryBytes: opts.memoryBytes, ...(admittedAt ? { admittedAt } : {}) };
+    const temp = join(dir, `.${ownName}.tmp`);
+    writeFileSync(temp, JSON.stringify(body), { mode: 0o644 });
+    renameSync(temp, ownPath);
+  };
+  const unlinkOwn = (): void => {
+    try { unlinkSync(ownPath); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") log(JSON.stringify({ step: "test_slot.static_release_failed", label, error: String(error) })); }
+  };
+  process.on("exit", unlinkOwn);
+  const release = (): void => { process.removeListener("exit", unlinkOwn); unlinkOwn(); };
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o777 });
+    write();
+  } catch (error) {
+    // Unrecorded is still judged on memory below; only peers lose sight of this peak, and the note says so.
+    unrecorded = `; own peak UNRECORDED (${String((error as Error)?.message ?? error)})`;
+  }
+  /** The live peers' named peaks, or why memory cannot judge them (a private or unreadable slot record). */
+  const scan = (): { peaks: number; holders: string[]; inheritedFrom?: string; unjudgeable?: string } => {
+    const seen = { peaks: 0, holders: [] as string[] };
+    let names: string[] = [];
+    try { names = readdirSync(dir); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { ...seen, unjudgeable: `slot directory unreadable: ${String(error)}` }; }
+    for (const name of names.sort()) {
+      const slot = SLOT_RECORD.test(name);
+      if (name === ownName || (!slot && !STATIC_RECORD.test(name))) continue;
+      const path = join(dir, name);
+      let held: (TestSlotHolder & { admittedAt?: string }) | null;
+      try {
+        const st = lstatSync(path);
+        if (slot && (!st.isFile() || (st.mode & 0o077) === 0)) return { ...seen, unjudgeable: `${name} needs private coordination` };
+        held = st.isFile() ? readTestSlotHolder(path, st) : null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        if (slot) return { ...seen, unjudgeable: `${name} unreadable: ${String(error)}` };
+        continue; // An unreadable static record names no peak; static records are advisory, slots are not.
+      }
+      if (!held || testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace })) continue;
+      if (!slot && testSlotHasAncestor(held.pid, pid)) return { ...seen, inheritedFrom: `${name} (${held.label}, pid ${held.pid})` };
+      // Static stages go in arrival order: a later one still waiting is not counted against an earlier one.
+      if (!slot && !held.admittedAt && (held.startedAt > startedIso || (held.startedAt === startedIso && name > ownName))) continue;
+      seen.peaks += held.memoryBytes ?? 0;
+      seen.holders.push(`${held.label} (pid ${held.pid}${held.memoryBytes ? `, ${mib(held.memoryBytes)} MiB` : ""})`);
+    }
+    return seen;
+  };
+  let announced = false;
+  for (;;) {
+    const seen = scan();
+    if (seen.unjudgeable) { release(); return viaSlot(seen.unjudgeable); }
+    if (seen.inheritedFrom) {
+      release();
+      return { outcome: "inherited", executionAllowed: true, waitedMs: waited(), release: () => {}, note: `static admission inherited from ancestor ${seen.inheritedFrom}` };
+    }
+    const headroom = headroomOf();
+    const need = seen.peaks + opts.memoryBytes;
+    const admit = (outcome: StaticAdmission["outcome"], why: string): StaticAdmission => {
+      try { if (!unrecorded) write(clock.iso()); }
+      catch (error) { unrecorded = `; own peak UNRECORDED (${String((error as Error)?.message ?? error)})`; }
+      if (announced) log(JSON.stringify({ step: "test_slot.static_admitted", label, outcome, waitedMs: waited() }));
+      return { outcome, executionAllowed: true, waitedMs: waited(), release, note: `${why}${unrecorded ?? ""}`,
+        ...(unrecorded ? {} : { childEnvironment: { [TEST_SLOT_DIR_ENV]: dir } }) };
+    };
+    if (headroom === undefined || Number.isNaN(headroom)) return admit("open", "static admission OPEN: no memory reading on this host");
+    if (seen.holders.length === 0 || headroom >= need) {
+      return admit("admitted", `static admission by memory: headroom ${mib(headroom)} MiB holds ${mib(need)} MiB for this stage and ${seen.holders.length} live holder(s)`);
+    }
+    if (waited() >= waitBoundMs) {
+      log(JSON.stringify({ step: "test_slot.static_wait_bound_exceeded", label, waitedMs: waited(), holders: seen.holders }));
+      return admit("wait_bound_exceeded", `static admission WAIT BOUND EXCEEDED after ${Math.round(waited() / 1000)}s (headroom ${mib(headroom)} MiB < ${mib(need)} MiB beside ${seen.holders.join("; ")}); ran anyway`);
+    }
+    if (!announced) {
+      announced = true;
+      log(JSON.stringify({ step: "test_slot.static_waiting", label, headroomMiB: mib(headroom), needMiB: mib(need), holders: seen.holders }));
+    }
+    (opts.sleep ?? sleepSync)(Math.min(pollMs, Math.max(0, waitBoundMs - waited())));
   }
 }
