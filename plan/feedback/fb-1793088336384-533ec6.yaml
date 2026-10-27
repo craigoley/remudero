@@ -50,7 +50,7 @@ attachments: []
 origin: issue
 status: proposed
 reply_to: fb-1793052066234-d58154
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/14970
 summary: null
 expansion: null
 submission_key: issue#14638:comment:6430660829
