@@ -1,0 +1,92 @@
+- id: W1-T10874
+  title: Save verified implementation evidence before returning a known merge
+  repo: remudero
+  type: implement
+  verify: human
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span
+  author_class: machine
+  origin: "cockpit-credit-persistence: a dependent Console filing stays held because an already known implementation merge has only a bookkeeping receipt, 2026-10-27"
+  status: queued
+  attempts: 0
+  priority: 1
+  budget_usd: 6
+  depends_on: []
+  plan_refs: [W1-T951, W1-T3996, W1-T5353, W1-T5552]
+  files:
+    - src/lib/status.ts
+    - test/a-verified-plan-text-credit-is-persisted.test.ts
+  rationale: |
+    A dependent Console filing is correctly refused by native offline admission because the
+    store has only a backfill bookkeeping receipt for its dependency. The implementation PR
+    actually merged with the exact task trailer and accepted build branch. The native root,
+    repository, current plan and optional override read were verified; an older task with a
+    canonical MERGED trailer is a positive control. The missing canonical slot is not a false
+    unmerged observation, and the bookkeeping receipt must never become authority by itself.
+
+    A controlled memory-only run of the unchanged production deriveStatus reproduces two
+    paths: ledger-opened and explicit-pr MERGED early returns write no canonical evidence,
+    leaving the strict native reader UNKNOWN. Removing those early associations reaches the
+    existing canonical trailer path, which writes one proper slot and satisfies the same
+    reader. Source blob 79658ca39dcddd25241546bc9a7b7c92e360be32 matches the observed main.
+    This establishes a concrete producer gap, not a diagnosis of every absent credit.
+  design: |
+    Repair positive evidence production for this observed receipt-only early-return class.
+    Keep deriveStatus merge-status precedence and the common-path API cost guarantees. Only
+    existing source-qualified API MERGED implementation evidence may enter the existing
+    normal canonical writer. A ledger row or backfill label alone is insufficient. Require
+    exact task ownership through current anchored-trailer or accepted run-branch rules,
+    matching canonical repository, PR and head identity, and a nonempty implementation diff.
+    Reuse qualified immutable changed-file evidence and the existing bounded normal collection
+    path. Missing cache evidence stays unknown; do not force reads or add unbudgeted work.
+
+    Preserve every plan-only refusal, quarantine, invalidation, subtract-only override and
+    correction. Do not change durableDependencyCredit, offline filing admission, task status,
+    test baselines, scanner rules or any policy to accept weaker evidence. Unknown, missing,
+    malformed, foreign, mismatched-head or throwing evidence must leave the store unchanged
+    and the strict reader UNKNOWN. A failed persistence request is not durable acceptance.
+    Keep actual merge-status behavior intact when stronger persistence evidence is missing.
+
+    Verify ledger-opened and explicit-pr cases separately, alongside the current trailer-path
+    positive control. Exercise the real default atomic writer and native read-after-write in
+    private filesystem fixtures, plus each new catch path. Include plan-only, empty or unreadable
+    paths, wrong task/repository/head/PR, non-MERGED states, quarantined and overridden candidates,
+    and existing correction precedence. Extend the existing durable-writer suite beside its actual filesystem and plan-text
+    refusal fixtures. Keep every original assertion and do not move tests or
+    manufacture a production credit. Prove falsifiers by removing only the new wiring and each
+    boundary under normal test admission; restore and qualify the exact committed tree.
+
+    File this plan separately from source. Before a build, use actual API merge credit and the
+    native selector, claims and open-head subject sweep. Validate current types, relevant credit,
+    status and offline-admission suites, all source-positive coverage and required hosted checks,
+    stored acceptance proofs, native review and protected merge. Only natural runtime adoption,
+    genuine normal producer persistence and actual re-evaluation of the held filing establish
+    recovery. No direct production projectPlan, backfill, store, override or claim mutation;
+    no CI/review rerun over a due owner, service restart, allowance increase or consumer hold release.
+  acceptance:
+    - claim: verified implementation evidence survives the ledger-opened merge early return
+      proof: "unit test: native implementation evidence survives ledger merge early return"
+    - claim: verified implementation evidence survives the explicit-pr merge early return
+      proof: "unit test: native implementation evidence survives explicit PR merge early return"
+    - claim: receipt-only evidence cannot bypass implementation ownership or refusal boundaries
+      proof: "unit test: receipt-only merge evidence cannot bypass implementation or ownership"
+    - claim: corrections quarantines and subtract-only overrides retain their existing precedence
+      proof: "unit test: durable merge evidence keeps corrections and refusals"
+    - claim: the real default writer produces evidence the unchanged strict reader can verify
+      proof: "unit test: default stored implementation evidence satisfies the strict dependency reader"
+  falsifier: |
+    Keep the new tests while deleting only the producer wiring: both early-return persistence
+    assertions must fail while their existing merged-status assertions remain true. Remove each
+    ownership, implementation, quarantine and override boundary separately and require the named
+    negative to fail. Restore all source and run complete physical suites with real summaries.
+    No actual native credit store or global configuration may be used as a test fixture.
+  note: |
+    Reserved by the native allocator from codex/file-native-credit-producer-20261027. This is
+    a new machine proposal, parked at verify human until a genuine configured risk ruling or
+    explicit exact-contract operator release. No ruling or prior approval is borrowed. Both
+    authorized Console and queue chats report no status.ts/credit-persistence overlap in their
+    own lanes; this does not grant global source ownership. Fresh main and all open heads still
+    require the normal subject and scope audit. Original eight cockpit slices and their runtime
+    readiness holds remain intact. The existing Console dependency is not removed or rewritten.
