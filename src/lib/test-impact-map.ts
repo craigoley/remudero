@@ -34,6 +34,8 @@ export const IMPACT_MAP_FORMAT = "rmd-test-impact-map-v1";
 const REGEX_PRECEDERS = "(,=:[!&|?{};+-*%<>~^";
 const CONSERVATIVE_REGEX_PRECEDERS = "(,=:[!&|?{;+-*%<>~^/";
 const CONTROL_KEYWORDS = /^(?:if|while|for|with|switch|catch)$/;
+/** Keywords after which a `{` opens an object literal, whose keyword-named method a generator must refuse. */
+const OBJECT_KEYWORDS = /^(?:return|yield|await|throw|case|typeof|void|delete|in|of|instanceof|new|extends|default)$/;
 const REGEX_KEYWORDS = new Set(["return", "throw", "case", "delete", "void", "typeof", "instanceof", "in", "else", "do", "new", "extends", "default", "break", "continue", "debugger"]);
 
 /** W1-T5701 — `content` with every comment blanked, STRING-AWARE: a `//` or `/*` inside a string,
@@ -108,11 +110,12 @@ function scanSource(content: string, mask: boolean, keepLines: boolean, conserva
     let generator = inheritedGenerator;
     let pendingFunction: boolean | undefined;
     let functionBody: boolean | undefined;
+    let returnType: { nesting: string[]; operand: boolean } | undefined;
     let arrowPending = false;
     let lineBreak = false;
     let expressionArrow: number | undefined;
     const parens: { control: boolean | undefined; fn?: boolean }[] = [];
-    const scopes: { fn: boolean; generator?: boolean; arrow?: number }[] = [];
+    const scopes: { fn: boolean; generator?: boolean; arrow?: number; object: boolean }[] = [];
     const unknown = () => new Error(`lexical context unknown at line ${content.slice(0, i).split("\n").length} after ${last}`);
     while (i < n) {
       const c = content[i]!;
@@ -136,6 +139,51 @@ function scanSource(content: string, mask: boolean, keepLines: boolean, conserva
         if (/[\r\n]/.test(c)) lineBreak = true;
         else if (!/\s/.test(c)) lineBreak = false;
       }
+      if (conservative && functionBody === true && c === ":" && returnType === undefined) {
+        returnType = { nesting: [], operand: true };
+        out += c;
+        last = c;
+        i++;
+        continue;
+      }
+      // A generator's return annotation is type text until a completed type meets the body brace.
+      if (returnType && c !== '"' && c !== "'" && c !== "`") {
+        if (c === "{" && returnType.nesting.length === 0 && !returnType.operand) {
+          returnType = undefined;
+        } else {
+          if (c === "/") throw unknown();
+          if (/[A-Za-z_$]/.test(c)) {
+            let end = i + 1;
+            while (end < n && /[\w$]/.test(content[end]!)) end++;
+            const word = content.slice(i, end);
+            returnType.operand = /^(?:extends|keyof|typeof|infer|readonly|new|is|asserts)$/.test(word);
+            out += word;
+            last = word;
+            i = end;
+            continue;
+          }
+          if (c === "=" && next === ">") {
+            returnType.operand = true;
+            out += "=>";
+            last = "=>";
+            i += 2;
+            continue;
+          }
+          if ("(<[{".includes(c)) {
+            returnType.nesting.push(c);
+            returnType.operand = true;
+          } else if (")>]}".includes(c)) {
+            if (returnType.nesting.pop() !== { ")": "(", ">": "<", "]": "[", "}": "{" }[c]) throw unknown();
+            returnType.operand = false;
+          } else if (!/\s/.test(c)) {
+            returnType.operand = "|&?:,.".includes(c);
+          }
+          out += c;
+          if (!/\s/.test(c)) last = c;
+          i++;
+          continue;
+        }
+      }
       if (conservative && arrowPending && !/\s/.test(c) && c !== "{") {
         expressionArrow = parens.length;
         arrowPending = false;
@@ -145,7 +193,7 @@ function scanSource(content: string, mask: boolean, keepLines: boolean, conserva
         while (end < n && /[\w$]/.test(content[end]!)) end++;
         const word = content.slice(i, end), property = last === "." || last === "#";
         if (!property && ((last === "*" && (word === "function" || CONTROL_KEYWORDS.test(word))) ||
-            (generator === true && CONTROL_KEYWORDS.test(word)))) throw unknown();
+            (generator === true && scopes.at(-1)?.object && CONTROL_KEYWORDS.test(word)))) throw unknown();
         if (!property && word === "function") pendingFunction = false;
         out += word;
         last = property ? `.${word}` : word;
@@ -154,6 +202,7 @@ function scanSource(content: string, mask: boolean, keepLines: boolean, conserva
       }
       if (c === "`") {
         i = scanTemplate(i, generator);
+        if (returnType) returnType.operand = false;
         last = "`";
         continue;
       }
@@ -165,11 +214,11 @@ function scanSource(content: string, mask: boolean, keepLines: boolean, conserva
           j += 1;
         }
         out += literal(content.slice(i, j + 1));
+        if (returnType) returnType.operand = false;
         i = j + 1;
         last = c;
         continue;
       }
-      if (conservative && functionBody === true && c === ":") throw unknown();
       if (conservative && c === "/" && (last === "}" || last === "await" || last === "of" || last === "unknown)" ||
           (last === "yield" && (generator === undefined || expressionArrow !== undefined)))) throw unknown();
       if (c === "/" && (last === "" || (conservative ? CONSERVATIVE_REGEX_PRECEDERS : REGEX_PRECEDERS).includes(last) ||
@@ -220,7 +269,8 @@ function scanSource(content: string, mask: boolean, keepLines: boolean, conserva
         const body = arrowPending ? false : functionBody !== undefined && !/^(?::|<|\||&|\?|=)$/.test(last)
           ? functionBody : last === ")" ? undefined : null;
         const fn = body !== null;
-        scopes.push({ fn, generator, arrow: expressionArrow });
+        scopes.push({ fn, generator, arrow: expressionArrow,
+          object: body === null && (OBJECT_KEYWORDS.test(last) || (CONSERVATIVE_REGEX_PRECEDERS.includes(last) && last !== "{" && last !== ";")) });
         if (body !== null) {
           generator = body;
           expressionArrow = undefined;
@@ -253,6 +303,7 @@ function scanSource(content: string, mask: boolean, keepLines: boolean, conserva
       if (!/\s/.test(c)) last = c;
       i += 1;
     }
+    if (returnType) throw unknown();
     return n;
   };
 
