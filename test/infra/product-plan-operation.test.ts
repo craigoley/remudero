@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
@@ -284,9 +284,11 @@ test("W1-T10823: the plan journal refuses a corrupt, foreign or missing target w
   writeFileSync(file, JSON.stringify({ ...JSON.parse(original), ownerKey: "0".repeat(64) }));
   assert.equal(await refused(f.service().execute(actor, f.command())), "corrupt", "another owner's journal is never read as this one's");
   writeFileSync(file, original);
-  chmodSync(file, 0o644);
-  assert.equal(await refused(f.service().execute(actor, f.command())), "unavailable", "a world-readable journal is refused");
-  chmodSync(file, 0o600);
+  renameSync(file, `${file}.kept`);
+  mkdirSync(file);
+  assert.equal(await refused(f.service().execute(actor, f.command())), "unavailable", "a journal that is not a regular file is refused");
+  rmdirSync(file);
+  renameSync(`${file}.kept`, file);
   const replay = await ok(f.service({ gateway: false }).execute(actor, f.command()));
   assert.equal(replay.observation.operationId, first.observation.operationId);
   assert.equal(f.calls.length, 1);

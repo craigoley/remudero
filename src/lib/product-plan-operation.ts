@@ -33,6 +33,7 @@ export const productCasePlanText = (brief: ProductBrief) => `Approved product br
 
 const layout = resolveRepoLayout(sep, () => undefined);
 const shardDirectory = relative(layout.root, join(layout.planDir, "tasks.d")).split(sep).join("/");
+const masterPlanFile = relative(layout.root, layout.masterPlan).split(sep).join("/");
 const digest = (value: unknown) => createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
 const sha = /^[a-f0-9]{40}$/;
 const revision = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
@@ -127,7 +128,7 @@ export async function verifyProductPlanEvidence(input: ProductPlanVerification):
       if (![...latest.values()].some((entry) => entry.state === "APPROVED" && entry.commit_id === pull.head.sha)) {
         // The native contract: the trusted reviewer's own success status at the EXACT head, on a plan-only pull request.
         const trusted = (input.trustedReviewer ?? process.env[REVIEWER_IDENTITY_ENV] ?? "").trim();
-        if (!trusted || files.length >= 100 || !files.every((file) => file.filename.startsWith("plan/") || file.filename === "MASTER-PLAN.md")) return refuse("plan_not_approved");
+        if (!trusted || files.length >= 100 || !files.every((file) => file.filename.startsWith("plan/") || file.filename === masterPlanFile)) return refuse("plan_not_approved");
         const fetcher: GhApiFetcher = async (args) => JSON.parse(await text(args, { maxBuffer: 1024 * 1024, timeout: 20_000 })) as unknown;
         const entry = await readReviewStatusEntry(repo.owner, repo.name, pull.head.sha, fetcher);
         if (resolveReviewProvenance(entry, trusted) !== "success") return refuse("plan_not_approved");

@@ -944,7 +944,7 @@ test("W1-T10823: the served plan proposal reaches the maintained native handoff"
     assert.match(response.headers.get("cache-control") ?? "", /no-store/);
     return { status: response.status, body: reply };
   };
-  const ledgerRows = () => readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+  const childRows = () => readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
   const saved = await send("alice", { version: "product-case-v1", action: "import", command });
   const productId = saved.body.productId;
   assert.equal((await send("alice", { version: "product-case-v1", action: "adopt", command: adopt(productId) })).status, 200);
@@ -968,8 +968,8 @@ test("W1-T10823: the served plan proposal reaches the maintained native handoff"
   const operationId = pending.body.planOperation!.operationId;
   // The maintained gateway starts the real child and records its own rows; wait for its exit row.
   const deadline = Date.now() + 20_000;
-  while (!ledgerRows().some((row) => row.step === "ratify.cli_exited") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
-  const rows = ledgerRows();
+  while (!childRows().some((row) => row.step === "ratify.cli_exited") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+  const rows = childRows();
   const started = rows.find((row) => row.step === "ratify.cli_started");
   assert.equal(started?.task_id, `product-plan:${operationId}`, "the gateway's rows carry the durable operation identity");
   assert.equal(typeof started?.pid, "number");
