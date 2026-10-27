@@ -1,3 +1,4 @@
+// @census-reads: src/run-task.ts src/lib/drain.ts src/lib/daemon.ts src/cli/commands/daemon.ts src/lib/fleet-control.ts src/lib/panel-actions.ts src/lib/action-executor.ts src/lib/serve.ts src/lib/product-build.ts
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
