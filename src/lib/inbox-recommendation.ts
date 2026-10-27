@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { parse as parseYaml } from "yaml";
+import { resolveOwnerRepoAtAsync } from "./owner-repo.js";
 
 import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs, isOptionIntent, type OptionIntent, type SummarizeInput } from "./feedback.js";
@@ -40,6 +43,9 @@ export interface InboxRecommendation {
 
 export interface StoredRecommendation extends InboxRecommendation {
   sourceFingerprint: string;
+  /** The repository and fixed main commit the writer read this advice against; absent from a legacy entry, which proves neither. */
+  repository?: string;
+  sourceCommit?: string;
   /** The task record's blob on main the fingerprint was taken over; absent when the item names no task. */
   shardBlob?: string;
 }
@@ -115,12 +121,60 @@ function servedFields(r: InboxRecommendation): InboxRecommendation {
   };
 }
 
-/** The item's current recommendation with its route, or undefined: none stored, a changed source, or a fleet item. */
+/** What one captured pass of the selected repository says is current: each shard task's blob, and the tasks that
+ *  live in the plan monolith. Read from {@link recommendationSourcePath}, never from the recommendation store. */
+export interface RecommendationQualification {
+  repository: string;
+  commit: string;
+  tasks: Record<string, string>;
+  monolith: string[];
+}
+
+export function recommendationSourcePath(stateDir: string): string {
+  return `${stateDir}/inbox-recommendation-source.json`;
+}
+
+/** The writer's last captured source, or undefined when none is readable or well shaped. */
+export function readRecommendationSource(stateDir: string): RecommendationQualification | undefined {
+  const raw = readJsonObject<unknown>(recommendationSourcePath(stateDir));
+  const { repository, commit, tasks, monolith } = raw as Partial<Record<keyof RecommendationQualification, unknown>>;
+  if (typeof repository !== "string" || repository === "" || typeof commit !== "string" || !/^[0-9a-f]{40}$/.test(commit)) return undefined;
+  if (!tasks || typeof tasks !== "object" || Array.isArray(tasks) || !Object.values(tasks).every((b) => typeof b === "string")) return undefined;
+  if (!isStringArray(monolith)) return undefined;
+  return { repository, commit, tasks: tasks as Record<string, string>, monolith };
+}
+
+/** The qualification narrowed to the given proposals' tasks, so the persisted stores carry only what they cite. */
+export function narrowQualification(source: RecommendationQualification, proposalIds: Iterable<string>): RecommendationQualification {
+  const tasks: Record<string, string> = {};
+  const monolith = new Set<string>();
+  for (const id of proposalIds) {
+    const taskId = recommendationTaskId(id);
+    if (taskId === undefined) continue;
+    if (source.tasks[taskId] !== undefined) tasks[taskId] = source.tasks[taskId]!;
+    if (source.monolith.includes(taskId)) monolith.add(taskId);
+  }
+  return { repository: source.repository, commit: source.commit, tasks, monolith: [...monolith] };
+}
+
+/** The item's current recommendation with its route, or undefined: none stored, a changed source, a fleet item, or no
+ *  independently captured current repository evidence that the stored advice still matches. */
 export function recommendationFor(proposal: { id: string; summary: string }, lane: InboxOptionLane, store: RecommendationStore,
-  classification: Parameters<typeof classifiedInboxOwner>[1] = {}): ServedRecommendation | undefined {
+  classification: Parameters<typeof classifiedInboxOwner>[1] = {}, source?: RecommendationQualification): ServedRecommendation | undefined {
   if (classifiedInboxOwner(proposal, classification) !== "operator") return undefined;
   const stored = store[proposal.id];
-  if (!wellShaped(stored) || stored.sourceFingerprint !== recommendationFingerprint(proposal, lane, stored.shardBlob)) return undefined;
+  if (!wellShaped(stored) || source === undefined) return undefined;
+  if (stored.repository !== source.repository) return undefined;
+  const taskId = recommendationTaskId(proposal.id);
+  let currentBlob: string | undefined;
+  if (taskId === undefined) {
+    // A non-task recommendation is served only when it proves the repository it was written for.
+    if (stored.repository !== source.repository) return undefined;
+  } else {
+    currentBlob = source.tasks[taskId];
+    if (currentBlob !== undefined ? stored.shardBlob !== currentBlob : stored.shardBlob !== undefined || !source.monolith.includes(taskId) || stored.sourceCommit !== source.commit) return undefined;
+  }
+  if (stored.sourceFingerprint !== recommendationFingerprint(proposal, lane, currentBlob)) return undefined;
   const route = optionAction(stored.action, lane, proposal.id);
   return { ...servedFields(stored), ...(route ? { route } : {}) };
 }
@@ -138,6 +192,18 @@ export interface RecommendationEvidence {
   taskHistory(taskId: string): Promise<string[]>;
   /** The kind an evidence entry resolves as on main, or undefined when it resolves as nothing. */
   resolve(entry: string): Promise<EvidenceKind | undefined>;
+  /** Fix one verified commit of the selected repository and read everything from it; refuses a foreign or unreadable
+   *  repository. Absent from a fake, which then reads as one unpinned pass. */
+  pin?(): Promise<PinnedRecommendationEvidence>;
+}
+
+export interface PinnedRecommendationEvidence extends RecommendationEvidence {
+  repository: string;
+  commit: string;
+  /** Every shard task's blob and the plan-monolith task ids, at the pinned commit. */
+  qualification(): Promise<RecommendationQualification>;
+  /** Throws when the selected repository's main moved off the pinned commit. */
+  assertUnchanged(): Promise<void>;
 }
 
 export type GitRunner = (args: string[]) => Promise<string>;
@@ -154,11 +220,77 @@ async function succeeds(run: Promise<unknown>): Promise<boolean> {
 
 /** {@link RecommendationEvidence} over git against origin/main; `plan` names the plan monolith and its directory,
  *  repo-relative, as the repo layout resolves them. */
-export function gitRecommendationEvidence(git: GitRunner, plan: { planDir: string; planMonolith: string }): RecommendationEvidence {
+export function gitRecommendationEvidence(git: GitRunner, plan: { planDir: string; planMonolith: string },
+  selected?: { repository: string; checkoutRoot: string }): RecommendationEvidence {
+  const evidence = evidenceAt(git, plan, "origin/main");
+  if (!selected) return evidence;
+  return {
+    ...evidence,
+    pin: async () => {
+      const top = (await git(["rev-parse", "--show-toplevel"])).trim();
+      if (top === "" || realpathSync(top) !== realpathSync(selected.checkoutRoot)) {
+        throw new Error(`recommendation source ${top} is not the selected checkout ${selected.checkoutRoot}`);
+      }
+      const assertRepository = async () => {
+        const currentTop = (await git(["rev-parse", "--show-toplevel"])).trim();
+        if (currentTop === "" || realpathSync(currentTop) !== realpathSync(selected.checkoutRoot)) throw new Error("recommendation source is not the selected checkout");
+        let actual: { owner: string; repo: string };
+        try { actual = await resolveOwnerRepoAtAsync(currentTop); }
+        catch { throw new Error("recommendation source repository identity is unreadable"); }
+        if ((actual.owner + "/" + actual.repo).toLowerCase() !== selected.repository.toLowerCase()) {
+          throw new Error("recommendation source does not match the selected repository");
+        }
+      };
+      await assertRepository();
+      const commit = (await git(["rev-parse", "--verify", "origin/main^{commit}"])).trim();
+      if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error("recommendation source commit is unreadable");
+      const at = evidenceAt(git, plan, commit);
+      // Include monolith records with their actual immutable blob, so unchanged IDs cannot certify changed text.
+      let pendingRecords: Promise<{ shards: Map<string, { path: string; blob: string }>; monolith: string[] }> | undefined;
+      const records = () => pendingRecords ??= (async () => {
+        const shards = await at.shards();
+        const listing = await git(["ls-tree", commit, "--", plan.planMonolith]);
+        const monolith: string[] = [];
+        if (listing.trim() !== "") {
+          const match = /^\d+ blob ([0-9a-f]{40})\t([^\n]+)\n?$/.exec(listing);
+          if (!match || match[2] !== plan.planMonolith) throw new Error("recommendation source monolith identity is unreadable");
+          const parsed: unknown = parseYaml(await git(["show", commit + ":" + plan.planMonolith]));
+          if (!Array.isArray(parsed)) throw new Error("recommendation source monolith is malformed");
+          const seen = new Set<string>();
+          for (const row of parsed) {
+            const id: unknown = row && typeof row === "object" ? row.id : undefined;
+            if (typeof id !== "string" || !/^[A-Z][A-Z0-9]*-T[A-Za-z0-9]+$/.test(id) || seen.has(id)) throw new Error("recommendation source monolith task identity is malformed");
+            seen.add(id);
+            if (!shards.has(id)) { monolith.push(id); shards.set(id, { path: plan.planMonolith, blob: match[1]! }); }
+          }
+        }
+        return { shards, monolith };
+      })();
+      return {
+        ...at, repository: selected.repository, commit,
+        shards: async () => new Map((await records()).shards),
+        shardText: async (path) => git(["show", commit + ":" + path]),
+        qualification: async () => {
+          const tasks: Record<string, string> = {};
+          const { shards, monolith } = await records();
+          for (const [id, shard] of shards) tasks[id] = shard.blob;
+          return { repository: selected.repository, commit, tasks, monolith };
+        },
+        assertUnchanged: async () => {
+          await assertRepository();
+          const now = (await git(["rev-parse", "--verify", "origin/main^{commit}"])).trim();
+          if (now !== commit) throw new Error(`recommendation source moved from ${commit} to ${now} during the pass`);
+        },
+      };
+    },
+  };
+}
+
+function evidenceAt(git: GitRunner, plan: { planDir: string; planMonolith: string }, ref: string): RecommendationEvidence {
   const shardDir = `${plan.planDir}/tasks.d/`;
   return {
     shards: async () => {
-      const out = await git(["ls-tree", "origin/main", shardDir]);
+      const out = await git(["ls-tree", ref, shardDir]);
       const shards = new Map<string, { path: string; blob: string }>();
       for (const line of out.split("\n")) {
         const [meta, path] = line.split("\t");
@@ -170,14 +302,14 @@ export function gitRecommendationEvidence(git: GitRunner, plan: { planDir: strin
     },
     shardText: async (path) => {
       try {
-        return await git(["show", `origin/main:${path}`]);
+        return await git(["show", `${ref}:${path}`]);
       } catch {
         // deliberate: a record that left main between the listing and this read is context the writer goes without.
         return undefined;
       }
     },
     taskHistory: async (taskId) => {
-      const out = await git(["log", "origin/main", "-n", "20", "--format=%h %s", "--fixed-strings", `--grep=${taskId}`]);
+      const out = await git(["log", ref, "-n", "20", "--format=%h %s", "--fixed-strings", `--grep=${taskId}`]);
       return out.split("\n").filter((l) => l.trim() !== "");
     },
     resolve: async (entry) => {
@@ -185,20 +317,20 @@ export function gitRecommendationEvidence(git: GitRunner, plan: { planDir: strin
       const pr = /^#(\d+)$/.exec(value)?.[1];
       if (pr !== undefined) {
         try {
-          const hit = await git(["log", "origin/main", "-n", "1", "--format=%H", "--fixed-strings", `--grep=(#${pr})`]);
+          const hit = await git(["log", ref, "-n", "1", "--format=%H", "--fixed-strings", `--grep=(#${pr})`]);
           return hit.trim() !== "" ? "pr" : undefined;
         } catch {
           // deliberate: a log that cannot be read proves nothing, so the entry does not resolve.
           return undefined;
         }
       }
-      if (/^[0-9a-f]{7,40}$/.test(value)) return (await succeeds(git(["merge-base", "--is-ancestor", value, "origin/main"]))) ? "sha" : undefined;
+      if (/^[0-9a-f]{7,40}$/.test(value)) return (await succeeds(git(["merge-base", "--is-ancestor", value, ref]))) ? "sha" : undefined;
       if (/^[A-Z][A-Z0-9]*-T[A-Za-z0-9]+$/.test(value)) {
-        return (await succeeds(git(["grep", "-q", "-e", `^- id: ${value}[[:space:]]*$`, "origin/main", "--", plan.planMonolith, shardDir]))) ? "task" : undefined;
+        return (await succeeds(git(["grep", "-q", "-e", `^- id: ${value}[[:space:]]*$`, ref, "--", plan.planMonolith, shardDir]))) ? "task" : undefined;
       }
       const path = value.replace(/:\d+(?:-\d+)?$/, "");
       if (!/^[\w.-]+(?:\/[\w.-]+)+$/.test(path) || path.split("/").includes("..")) return undefined;
-      return (await succeeds(git(["cat-file", "-e", `origin/main:${path}`]))) ? "path" : undefined;
+      return (await succeeds(git(["cat-file", "-e", `${ref}:${path}`]))) ? "path" : undefined;
     },
   };
 }
@@ -341,7 +473,8 @@ function parseSeed(raw: string | undefined): Record<string, unknown> {
 
 /** Import the operator-session seed once: each entry whose item is still a current operator item with no stored
  *  recommendation, at the item's current fingerprint. The checker is not applied. Returns how many it imported. */
-function importSeedOnce(deps: RecommendationBackfill, items: Map<string, CurrentItem>, store: RecommendationStore): number {
+function importSeedOnce(deps: RecommendationBackfill, items: Map<string, CurrentItem>, store: RecommendationStore,
+  stamp: { repository?: string; sourceCommit?: string }): number {
   if (!deps.readSeed) return 0;
   const markers = readJsonObject<{ importedAt: string; ids: string[] }>(seedMarkerPath(deps.stateDir));
   if (markers[SEED_NAME] !== undefined) return 0;
@@ -355,7 +488,7 @@ function importSeedOnce(deps: RecommendationBackfill, items: Map<string, Current
       action: r.action, ...(typeof r.text === "string" ? { text: r.text } : {}), why: r.why, evidence: r.evidence, obsolete: r.obsolete,
       ...(typeof r.group === "string" ? { group: r.group } : {}),
       generatedAt: typeof r.generatedAt === "string" ? r.generatedAt : (deps.clock ?? systemClock).iso(),
-      source: "operator-session-seed", sourceFingerprint: item.fingerprint, ...(item.shard ? { shardBlob: item.shard.blob } : {}),
+      source: "operator-session-seed", ...stamp, sourceFingerprint: item.fingerprint, ...(item.shard ? { shardBlob: item.shard.blob } : {}),
     };
     imported.push(id);
   }
@@ -377,7 +510,24 @@ export async function backfillRecommendations(deps: RecommendationBackfill, max:
   const tick: RecommendationTick = { seeded: 0, written: 0, refused: 0, dropped: 0 };
   const snapshot = readClassificationSnapshot(deps.stateDir);
   const lanes = deps.readLanes ? deps.readLanes() : snapshotLanes(snapshot);
-  const shards = await deps.evidence.shards();
+  // One verified commit of the selected repository is read for the whole pass; a pass that cannot pin it stores nothing.
+  const sourceRead = async <T>(read: () => Promise<T>): Promise<T> => {
+    try { return await read(); }
+    catch (error) {
+      // A failed current-source check revokes the qualification, not the historical recommendation bytes.
+      if (deps.evidence.pin) writeAtomic(recommendationSourcePath(deps.stateDir), JSON.stringify({ state: "unavailable", at: (deps.clock ?? systemClock).iso() }) + "\n");
+      throw error;
+    }
+  };
+  const pinned = deps.evidence.pin ? await sourceRead(() => deps.evidence.pin!()) : undefined;
+  const evidence: RecommendationEvidence = pinned ?? deps.evidence;
+  const stamp = pinned ? { repository: pinned.repository, sourceCommit: pinned.commit } : {};
+  const shards = await sourceRead(() => evidence.shards());
+  const captured = pinned ? await sourceRead(() => pinned.qualification()) : undefined;
+  if (pinned && captured) {
+    await sourceRead(() => pinned.assertUnchanged());
+    writeAtomic(recommendationSourcePath(deps.stateDir), JSON.stringify(captured, null, 2) + "\n");
+  }
   const items = new Map<string, CurrentItem>();
   for (const proposal of deps.readProposals()) {
     const lane = lanes[proposal.id];
@@ -386,26 +536,25 @@ export async function backfillRecommendations(deps: RecommendationBackfill, max:
     if (lane === undefined || classifiedInboxOwner(proposal, ownership) !== "operator") continue;
     const taskId = recommendationTaskId(proposal.id);
     const shard = taskId === undefined ? undefined : shards.get(taskId);
+    if (captured && taskId !== undefined && captured.tasks[taskId] === undefined && !captured.monolith.includes(taskId)) continue;
     items.set(proposal.id, { proposal, lane, ...(shard ? { shard } : {}), fingerprint: recommendationFingerprint(proposal, lane, shard?.blob) });
   }
   const path = recommendationStorePath(deps.stateDir);
   const store = readRecommendationStore(path);
-  let changed = false;
   for (const [id, stored] of Object.entries(store)) {
     const item = items.get(id);
     if (item && recommendationTaskId(id) !== undefined && stored?.shardBlob !== item.shard?.blob) {
-      delete store[id];
+      // Keep historical bytes until a new qualified answer replaces them; current readers already omit the old blob.
       tick.dropped += 1;
-      changed = true;
     }
   }
-  tick.seeded = importSeedOnce(deps, items, store);
-  if (changed || tick.seeded > 0) writeAtomic(path, JSON.stringify(store, null, 2) + "\n");
+  tick.seeded = importSeedOnce(deps, items, store, stamp);
+  if (tick.seeded > 0) writeAtomic(path, JSON.stringify(store, null, 2) + "\n");
   const ask = deps.summarize;
   if (!ask) return tick;
   const refusals = readJsonObject<string>(refusalsPath(deps.stateDir));
   const pending = [...items.values()]
-    .filter((item) => store[item.proposal.id]?.sourceFingerprint !== item.fingerprint && refusals[item.proposal.id] !== item.fingerprint)
+    .filter((item) => (store[item.proposal.id]?.sourceFingerprint !== item.fingerprint || (pinned && store[item.proposal.id]?.repository !== pinned.repository)) && refusals[item.proposal.id] !== item.fingerprint)
     .slice(0, max);
   const plainStore = readPlainStore(plainStorePath(deps.stateDir));
   for (const item of pending) {
@@ -413,14 +562,14 @@ export async function backfillRecommendations(deps: RecommendationBackfill, max:
     const plain = plainInboxMessage(item.proposal, plainStore);
     const ctx: RecommendationContext = {
       proposal: item.proposal, lane: item.lane, plain,
-      ...(item.shard ? { shardText: await deps.evidence.shardText(item.shard.path) } : {}),
-      history: taskId === undefined ? [] : await deps.evidence.taskHistory(taskId),
+      ...(item.shard ? { shardText: await sourceRead(() => evidence.shardText(item.shard!.path)) } : {}),
+      history: taskId === undefined ? [] : await sourceRead(() => evidence.taskHistory(taskId)),
     };
     let problems: string[] = [];
     let accepted: Record<string, unknown> | undefined;
     for (let attempt = 0; attempt < 2 && accepted === undefined; attempt += 1) {
       const answer = await ask({ context: buildRecommendationPrompt(ctx, problems) });
-      const check = await checkRecommendation(answer, { id: item.proposal.id, lane: item.lane, ifNothingHappens: plain.ifNothingHappens }, deps.evidence);
+      const check = await checkRecommendation(answer, { id: item.proposal.id, lane: item.lane, ifNothingHappens: plain.ifNothingHappens }, evidence);
       if (check.ok) accepted = answer as Record<string, unknown>;
       else problems = check.problems;
     }
@@ -433,10 +582,12 @@ export async function backfillRecommendations(deps: RecommendationBackfill, max:
       continue;
     }
     const a = accepted as unknown as InboxRecommendation;
+    // A source that moved or changed during the answer is refused rather than stored as current.
+    if (pinned) await sourceRead(() => pinned.assertUnchanged());
     latest[item.proposal.id] = {
       action: a.action, ...(typeof a.text === "string" && a.text.trim() !== "" ? { text: a.text } : {}), why: a.why, evidence: a.evidence, obsolete: a.obsolete,
       ...(typeof a.group === "string" && a.group.trim() !== "" ? { group: a.group } : {}),
-      generatedAt: (deps.clock ?? systemClock).iso(), source: "writer",
+      generatedAt: (deps.clock ?? systemClock).iso(), source: "writer", ...stamp,
       sourceFingerprint: item.fingerprint, ...(item.shard ? { shardBlob: item.shard.blob } : {}),
     };
     writeAtomic(path, JSON.stringify(latest, null, 2) + "\n");

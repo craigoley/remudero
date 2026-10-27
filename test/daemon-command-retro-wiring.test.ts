@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { resolveOwnerRepoAt } from "#src/lib/owner-repo.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -172,3 +178,64 @@ test(
     }
   },
 );
+
+// W1-T10873: the recommendation writer's evidence and seed ports read the SELECTED target's checkout, never the
+// daemon's own code checkout. The real daemonCommand boots with explicit isolated fixture config, so this
+// process's environment is untouched; its runDaemon stub captures the wired ports, which are then driven for real.
+test("inbox recommendation wiring reads the selected target repository", async (t) => {
+  const execFileAsync = promisify(execFile);
+  const home = makeTempDir("rmd-recommendation-wiring");
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const root = join(home, "Remudero");
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+
+  const checkout = join(root, "repos", "console-fixture");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  const console_ = gitRepo({ kind: "recommendation-console" });
+  const seedText = JSON.stringify({ version: 1, recommendations: { "machine-judge:W1-T1": { marker: "console seed" } } });
+  mkdirSync(join(console_.dir, "plan", "tasks.d"), { recursive: true });
+  mkdirSync(join(console_.dir, "plan", "seeds"), { recursive: true });
+  writeFileSync(join(console_.dir, "plan", "tasks.d", "W1-T1-console.yaml"), "- id: W1-T1\n  title: console task\n");
+  writeFileSync(join(console_.dir, "plan", "seeds", "inbox-recommendations-2026-10-13.json"), seedText);
+  console_.git("config", "remote.origin.url", "https://github.com/" + resolveOwnerRepoAt(REPO_ROOT).owner + "/console-fixture.git");
+  console_.git("add", "plan");
+  console_.git("commit", "--quiet", "-m", "feat: console task (W1-T1)");
+  console_.git("update-ref", "refs/remotes/origin/main", console_.git("rev-parse", "HEAD"));
+  renameSync(console_.dir, checkout);
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+
+  const child = `
+    const { pathToFileURL } = await import("node:url");
+    const { daemonCommand } = await import(pathToFileURL(process.env.RMD_WIRING_MODULE).href);
+    let wired;
+    const code = await daemonCommand(process.argv.slice(1).filter((a) => a !== "--"), { config: { claudeBin: "/bin/true", root: process.env.RMD_WIRING_ROOT }, runDaemon: async (_plan, deps) => { wired = deps.recommendationBackfill; return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 }; } });
+    const seed = wired.readSeed();
+    let evidence = null;
+    try { const pinned = await wired.evidence.pin(); evidence = { repository: pinned.repository, tasks: Object.keys((await pinned.qualification()).tasks), taskBlobs: (await pinned.qualification()).tasks }; } catch (e) { evidence = { error: String(e.message) }; }
+    console.log("RESULT " + JSON.stringify({ code, seed, evidence }));
+  `;
+  const boot = async (args: string[]) => {
+    const out = await execFileAsync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", child, "--", ...args],
+      { cwd: REPO_ROOT, env: { ...process.env, RMD_WIRING_ROOT: root, RMD_WIRING_MODULE: join(REPO_ROOT, "src", "run-task.ts") }, encoding: "utf8", maxBuffer: 1 << 24 });
+    const line = out.stdout.split("\n").find((l) => l.startsWith("RESULT "));
+    assert.ok(line, `the child reported its wiring: ${out.stdout}${out.stderr}`);
+    return JSON.parse(line.slice("RESULT ".length)) as { code: number; seed?: string; evidence: { repository?: string; tasks?: string[]; taskBlobs?: Record<string, string>; error?: string } };
+  };
+
+  const selected = await boot(["--repo", "console-fixture", "--plan", planPath, "--max", "0"]);
+  assert.equal(selected.code, 0);
+  assert.equal(selected.seed, seedText, "the seed is the selected target's, not the code checkout's");
+  assert.deepEqual(selected.evidence.tasks, ["W1-T1"], "real git evidence lists only the selected target's tasks, never Core's");
+  assert.match(selected.evidence.repository ?? "", /\/console-fixture$/, "and names the selected repository");
+
+  // Positive self-target control: the code checkout's own seed and its own repository identity are kept.
+  const self = await boot(["--allow-self-target", "--plan", planPath, "--max", "0"]);
+  assert.equal(self.code, 0);
+  assert.equal(self.seed, readFileSync(join(REPO_ROOT, "plan", "seeds", "inbox-recommendations-2026-10-13.json"), "utf8"), "a self-target keeps reading its own seed");
+  assert.equal(self.evidence.error, undefined, "the real self-target source must qualify successfully");
+  assert.ok(self.evidence.tasks!.includes("W1-T10873") && self.evidence.tasks!.length > 1, "a self-target reads its actual Core plan");
+  assert.notEqual(self.evidence.taskBlobs?.["W1-T1"], selected.evidence.taskBlobs?.["W1-T1"], "the same task ID in both repositories keeps its own source blob");
+  assert.notEqual(self.evidence.repository, selected.evidence.repository);
+});
