@@ -1,0 +1,40 @@
+- id: W1-T10870
+  title: A login session's scope is never a test slot's dedicated scope, so a dead owner's slot is not held for as long as the login lives
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 8
+  risk: high  # one concern: when a dead owner's slot counts as ended; too eager double-books live work (W1-T9928)
+  band_meaning: blast-radius
+  origin: operator-session#cloudflared-filing-2026-10-27
+  plan_refs:
+    - W1-T10251
+    - W1-T9928
+  files:
+    - src/lib/test-slot.ts
+    - test/ci/suites/a-login-session-scope-never-holds-a-dead-owners-test-slot.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-27 on the Azure host, from an operator Claude session reached over SSH. Its shell's /proc/self/cgroup is `0::/user.slice/user-1000.slice/session-2646.scope`, which is a systemd-logind login scope.
+    - An author preflight (`scripts/preflight-author.mjs`) started there took slot 2 in /mnt/scratch/rmd/test-slots. The slot record was pid 1489644, host Remudero, startedAt 14:06:15Z, cgroupScope {path: /user.slice/user-1000.slice/session-2646.scope, dedicated: true}.
+    - It was killed by a `timeout` at about 14:29Z; its last heartbeat was 14:29:50Z. Pid 1489644 was then gone.
+    - The next preflight logged `test_slot.reclaim_withheld` slot 2 pid 1489644, evidence `live`, coverage `cgroup-scope`, reason "dedicated scope still holds processes". At 15:16Z it was refused with `test_slot.wait_bound_exceeded` after 2700 s.
+    - At that point session-2646.scope held 7 processes: sshd x2, bash, claude, plus the probe's own pipeline. Not one belonged to the preflight.
+    - So from 14:29Z the host's 2-slot pool ran on 1 slot for every author preflight, the fleet's included. The record was gone by 16:01Z, released by something other than the operator session, which deleted nothing.
+    CAUSE (src/lib/test-slot.ts at origin/main, symbols): readTestSlotCgroup records a scope as dedicated when every member is in the owner's process group OR is one of the owner's ancestors. The ancestor admission (W1-T10251) exists for a builder's `systemd-run --scope timeout ... job.sh` wrappers, which end with the job.
+    A logind session scope passes the same test: sshd, the login shell and the agent CLI are all ancestors of the preflight. But they OUTLIVE it. probeCgroupScope then reads the scope's non-empty cgroup.procs as live work, for as long as the login lasts.
+  design: |
+    Keep W1-T10251's ancestor admission for job scopes. Add one exclusion:
+    (1) readTestSlotCgroup records a systemd-logind session scope as NOT dedicated, reason naming it a login session. That is a path whose final segment is `session-<id>.scope`, under `user-<uid>.slice`.
+    (2) probeCgroupScope treats a STORED record whose scope path is a login session as carrying no cgroup-scope evidence, even if it says dedicated: true. Records written before this fix, like slot 2's, then fall to the existing reclaim evidence instead of reading the login's processes as the owner's work.
+    A builder's `systemd-run --scope` (run-*.scope) keeps today's behaviour. A live owner in a login session is still live by its own pid and start time.
+  acceptance:
+    - claim: an owner in a login session scope records it as not dedicated, a stored dedicated record for a login session is not read as live from that session's processes, and a systemd-run job scope wrapping the owner is still dedicated and still held while it holds work
+      proof: "unit test: test/ci/suites/a-login-session-scope-never-holds-a-dead-owners-test-slot.test.ts"
+  falsifier: |
+    Drop the login-session exclusion. The test's dead-owner record, whose session scope still holds the login's ancestor processes, then probes `live` with reason "dedicated scope still holds processes", and the test fails.
