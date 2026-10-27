@@ -1525,6 +1525,7 @@ import {
   observeSkillSelection,
   renderSkillEffectivenessReport,
   renderSkillsPart,
+  SKILL_EFFECTIVENESS_LEDGER_STEPS,
   SKILL_FIX_TASK_TYPE,
   skillsInjectedEvent,
   skillWithheldForRun,
@@ -39915,7 +39916,7 @@ export function skillEffectivenessCommand(
   let ledgerUnion: ReturnType<typeof readLedgerUnionRecordsSync>;
   try {
     ledgerUnion = (deps.readLedger ?? readLedgerUnionRecordsSync)(stateDir, {
-      step: ["skills.selection", "verdict"],
+      step: SKILL_EFFECTIVENESS_LEDGER_STEPS,
       refuseIncomplete: true,
     });
   } catch (error) {
@@ -39965,7 +39966,7 @@ export function skillLifecycleCommand(
   let ledgerUnion: ReturnType<typeof readLedgerUnionRecordsSync>;
   try {
     ledgerUnion = (deps.readLedger ?? readLedgerUnionRecordsSync)(stateDir, {
-      step: ["skills.selection", "verdict"],
+      step: SKILL_EFFECTIVENESS_LEDGER_STEPS,
       refuseIncomplete: true,
     });
   } catch (error) {
