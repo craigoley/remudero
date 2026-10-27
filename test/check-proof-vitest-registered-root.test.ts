@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { resolveVitestLeafCandidates } from "../src/lib/check-proof.js";
 import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/run-task.js";
 
 function vitestCheckout(): string {
@@ -39,8 +40,9 @@ test("check-proof runs a registered Vitest title without a core test/ corpus", (
     assert.equal(existsSync(join(dir, "test")), false, "positive control: only tests/ exists");
     const result = check(dir, "site proof title");
     assert.equal(result.code, CHECK_PROOF_EXIT.pass, result.out);
-    assert.match(result.out, /candidates: delegated to the registered Vitest suite root/);
-    assert.match(result.out, /argv:.*--reporter=tap -t site proof title tests\//);
+    // W1-T10742: a file under the registered root names the title, so the run is scoped to it.
+    assert.match(result.out, /candidates: 1 file\(s\) — tests\/unit\/sample\.test\.ts/);
+    assert.match(result.out, /argv:.*--reporter=tap -t site proof title tests\/unit\/sample\.test\.ts/);
     assert.doesNotMatch(result.out, /NOT EXECUTED|test\/\*\*\/\*\.test\.ts/);
     assert.match(result.out, /verdict:\s+pass/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -51,7 +53,30 @@ test("registered Vitest still reports an unmatched title as no-match", () => {
   try {
     const result = check(dir, "another title");
     assert.equal(result.code, CHECK_PROOF_EXIT.noMatch, result.out);
+    assert.match(result.out, /candidates: delegated to the registered Vitest suite root/);
     assert.match(result.out, /verdict:\s+no-match/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an unreadable Vitest suite root keeps the root-wide run rather than guessing absence", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-vitest-noroot-"));
+  try {
+    assert.equal(existsSync(join(dir, "tests", "unit")), false, "positive control: the root is absent");
+    assert.equal(
+      resolveVitestLeafCandidates(dir, { args: ["--reporter=tap", "tests/unit"], label: "site proof title" }),
+      undefined,
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an unreadable candidate file stays in scope, as the executor keeps it", () => {
+  const dir = vitestCheckout();
+  try {
+    // A directory named like a test file lists as a candidate entry but cannot be read as text.
+    mkdirSync(join(dir, "tests", "unit", "unreadable.test.ts"), { recursive: true });
+    const found = resolveVitestLeafCandidates(dir, { args: ["--reporter=tap", "tests/unit"], label: "CONSOLE-T127: site proof title" });
+    assert.equal(found?.leaf, "site proof title");
+    assert.deepEqual([...(found?.files ?? [])].sort(), ["tests/unit/sample.test.ts", "tests/unit/unreadable.test.ts"]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -60,6 +85,6 @@ test("the console's registered Vitest root reaches the same proof executor", () 
   try {
     const result = check(dir, "site proof title", "craigoley/remudero-console");
     assert.equal(result.code, CHECK_PROOF_EXIT.pass, result.out);
-    assert.match(result.out, /candidates: delegated to the registered Vitest suite root/);
+    assert.match(result.out, /candidates: 1 file\(s\) — tests\/unit\/sample\.test\.ts/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

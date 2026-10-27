@@ -57,7 +57,7 @@ import { decideGatePosture, type GatePostureDecision, type GatePostureFinding, t
 import { refusalReason } from "../../lib/inbox.js";
 import { gatherRuns, parseLedger } from "../../lib/retro.js";
 import type { ChildEntryStoreOptions } from "../../lib/child-entry-argv.js";
-import { bodyWithFailingProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, readOtherOpenPrForTask, recordRefusedPrOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
+import { bodyWithFailingProofAtOpen, bodyWithInconclusiveProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, readOtherOpenPrForTask, recordRefusedPrOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuildScopeRecovery, restoreBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentWritePorts } from "../../lib/proof-amendment.js";
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
@@ -1782,14 +1782,26 @@ async function ghPrCreateFillCommandAsync(
   try {
     checkedBody = await openPullRequestCheckedAsync(draft.body, branch, worktreePath, "origin/main", runProofAsync ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: childStore })), { owner, repo });
   } catch (err) {
-    if (!openOnFailingProof || !(err instanceof PrOpenRefusedError) || err.failingProof === undefined) throw err;
-    const opened: PrCreateDiagnostic = {
-      step: "pr.opened_with_failing_proof",
-      extra: { branch, proof: err.failingProof.proof, refusal_class: err.refusalClass },
+    if (!openOnFailingProof || !(err instanceof PrOpenRefusedError)) throw err;
+    if (err.failingProof !== undefined) {
+      const opened: PrCreateDiagnostic = {
+        step: "pr.opened_with_failing_proof",
+        extra: { branch, proof: err.failingProof.proof, refusal_class: err.refusalClass },
+      };
+      return withDiagnostics(
+        prCreateArgv(worktreePath, owner, repo, branch, draft.title, bodyWithFailingProofAtOpen(err.failingProof)),
+        [...draft.diagnostics, opened],
+      );
+    }
+    // W1-T10742: a proof that reached no verdict (even re-run) opens the PR as a conclusively failing one does.
+    if (err.inconclusiveProof === undefined) throw err;
+    const inconclusive: PrCreateDiagnostic = {
+      step: "pr.opened_with_inconclusive_proof",
+      extra: { branch, proof: err.inconclusiveProof.proof, attempts: err.inconclusiveProof.attempts },
     };
     return withDiagnostics(
-      prCreateArgv(worktreePath, owner, repo, branch, draft.title, bodyWithFailingProofAtOpen(err.failingProof)),
-      [...draft.diagnostics, opened],
+      prCreateArgv(worktreePath, owner, repo, branch, draft.title, bodyWithInconclusiveProofAtOpen(err.inconclusiveProof)),
+      [...draft.diagnostics, inconclusive],
     );
   }
   return withDiagnostics(prCreateArgv(worktreePath, owner, repo, branch, draft.title, checkedBody), draft.diagnostics);
@@ -7270,6 +7282,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           branch,
           head_sha: headSha,
           refusal_class: err.refusalClass,
+          // W1-T10742: the strike classifiers read this as the harness's outcome, never the worker's miss.
+          ...(err.inconclusiveProof ? { proof_exec: "exec_error" } : {}),
           ...(issueUrl ? { issue_url: issueUrl } : {}),
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
