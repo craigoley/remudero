@@ -9,6 +9,7 @@ import {
   RETRO_PUBLICATION_STRIKE_CAP,
   type RetroLedgerRowView,
 } from "../src/lib/retro.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 const NOW = Date.parse("2026-09-06T23:48:02.314Z");
 const ago = (ms: number): string => new Date(NOW - ms).toISOString();
@@ -104,4 +105,31 @@ test("W1-T2988: rows outside the episode window are not counted as strikes", () 
   const d = decideRetroPublicationEscalation(stale, NOW);
   assert.equal(d.strikes, 0);
   assert.equal(d.escalate, false);
+});
+
+test("W1-T2988: with no issues gateway injected, the escalation files through the real gh gateway", () => {
+  // The production caller (run-task.ts) passes no `issues`. Before the default, tryEscalate read `listOpen` off
+  // undefined, so all 16 retro escalations on the host from 2026-09-08 to 2026-10-23 ledgered `delivered: false`.
+  const { ledgerPath } = lane();
+  const argv: string[][] = [];
+  const ghExec = (args: string[]): string => {
+    argv.push(args);
+    if (args[0] === "api") return "[]";
+    if (args[0] === "issue" && args[1] === "create") return "https://github.com/o/r/issues/7\n";
+    return "";
+  };
+  const decision = withLiveWritesAllowed(() => escalateRetroPublicationFailure(
+    { attempts: 2 },
+    { owner: "o", repo: "r", ledgerPath, runId: "RETRO-1", ghExec, nowMs: NOW,
+      readLedger: () => failures(RETRO_PUBLICATION_STRIKE_CAP) },
+  ));
+  assert.equal(decision.escalate, true);
+  const create = argv.find((a) => a[0] === "issue" && a[1] === "create");
+  assert.ok(create, `gh issue create was never called; argv: ${JSON.stringify(argv)}`);
+  assert.deepEqual(create.slice(2, 4), ["--repo", "o/r"]);
+  const rows = readFileSync(ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.equal(rows.some((r) => r.step === "escalation.failed"), false, JSON.stringify(rows));
+  const escalated = rows.find((r) => r.step === "retro.publication.escalated");
+  assert.equal(escalated?.delivered, true);
+  assert.equal(escalated?.issue_url, "https://github.com/o/r/issues/7");
 });

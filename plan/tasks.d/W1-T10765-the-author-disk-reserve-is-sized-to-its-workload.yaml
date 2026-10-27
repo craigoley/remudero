@@ -1,0 +1,47 @@
+- id: W1-T10765
+  title: "THE MAC AUTHOR PREFLIGHT DEMANDS 20 GiB FREE FOR EVERY DIFF — `MAC_AUTHOR_FREE_RESERVE_BYTES` copies the full coverage gate's scratch reserve, so a one-file plan change is refused NOT_RUN on a disk with 16 GB free; size the reserve to the selected workload from a measured peak, keeping 20 GiB for a full run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, three files — a gate's reserve sizing; high because it changes when the local author gate admits a run
+  band_meaning: blast-radius
+  origin: "operator ask 2026-10-26: \"Why do we need a full 20GB? This feels very inefficient. Improve the disk usage efficiency\""
+  plan_refs: [W1-T9953]
+  files: [scripts/lib/mac-author-admission.mjs, scripts/lib/coverage-disk-profile.mjs, scripts/preflight-author.mjs, test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 7b75a38f7 (2026-10-26).
+    - OBSERVED on the Mac mini, 2026-10-26: `node --import tsx scripts/preflight-author.mjs` on a branch changing one
+      plan shard printed `author preflight NOT_RUN: {"minimumFreeBytes":21474836480,"workspaceFreeBytes":16187711488,
+      ... "reasons":["workspaceFreeBytes:below-existing-20GiB-reserve","scratchFreeBytes:below-existing-20GiB-reserve"]}`.
+      The pushes waited until the same preflight was run on another host.
+    - `MAC_AUTHOR_FREE_RESERVE_BYTES = 20 * 1024 ** 3` (scripts/lib/mac-author-admission.mjs) "matches ci-parity's
+      existing local coverage scratch reserve" (`COVERAGE_FREE_RESERVE_BYTES`, src/lib/ci-parity.ts). It applies to
+      every author run, whatever the selection. scripts/lib/coverage-disk-profile.mjs already has a `profiled`
+      mode with `estimatedPeakBytes`, but `validProfile` requires `minimumFreeBytes >= MAC_AUTHOR_FREE_RESERVE_BYTES`,
+      so no profile can lower it.
+    - `--low-footprint` (scripts/lib/author-low-footprint.mjs) sizes its reserve as 2 x scratch + output limit, but
+      it runs only named test files and is "NOT full author assurance".
+  design: |
+    1. MEASURE FIRST: record the disk peak (workspace and scratch) of the full author preflight for a PLAN_ONLY
+       selection, a small changed-paths selection and a full run on the Mac, and put the numbers in the PR body.
+    2. The admission's reserve becomes the selection's measured peak times a safety factor (at least 2x) plus a fixed
+       floor for the OS, capped at today's 20 GiB. A full or unknown selection keeps 20 GiB. A selection whose peak
+       has not been measured keeps 20 GiB. `NOT_RUN` keeps naming the reserve it applied and why.
+    3. ci-parity's coverage reserve and every hosted gate are unchanged.
+    New tests go in test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts (folder from
+    `rmd test-place`). Use `test(` titles exactly as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts"
+    - claim: "a plan-only selection is admitted below 20 GiB free when its measured peak fits"
+      proof: 'grep: test("W1-T10765: a plan-only selection is admitted below 20 GiB free when its measured peak fits" in test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts'
+    - claim: "a full or unmeasured selection still requires 20 GiB"
+      proof: 'grep: test("W1-T10765: a full or unmeasured selection still requires 20 GiB" in test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts'
+  falsifier: |
+    Return `MAC_AUTHOR_FREE_RESERVE_BYTES` for every selection. The plan-only test is then refused NOT_RUN.

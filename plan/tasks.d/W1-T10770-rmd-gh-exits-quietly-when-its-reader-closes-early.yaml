@@ -1,0 +1,101 @@
+- id: W1-T10770
+  title: "`rmd gh` EXITS QUIETLY WHEN ITS READER CLOSES EARLY, INSTEAD OF DYING ON AN UNHANDLED EPIPE — ghCommand writes the broker's answer with a bare process.stdout.write and no stream error listener, so `rmd gh -- … | paste -s` (a reader that exits first) prints a Node stack trace, `Error: write EPIPE` at gh-read-broker.ts:1357/:1359/:1400, on every call"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 5.00
+  risk: medium  # Rule 19: one concern, what `rmd gh` does when its stdout reader goes away; no broker, cache, class or read-path change
+  band_meaning: span
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "filing agent 2026-10-26: an operator session's `rmd gh --class interactive -- pr view … --jq … | paste -s` crashed with an unhandled EPIPE; reproduced on the Mac at 22:13Z"
+  plan_refs: [W1-T10279, W1-T4063, W1-T10310, W1-T10369]
+  files:
+    - src/lib/gh-read-broker.ts
+    - test/infra/rmd-gh-exits-quietly-when-its-reader-closes-early.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-26 on origin/main 7b75a38f7, and reproduced on the Mac against the live read broker.
+
+    THE REPRODUCTION (22:13:16Z). `./bin/rmd gh --class agent -- pr view 2293 --repo
+    craigoley/remudero-console --json title,files,body | paste -s`. macOS `paste -s` with no file argument
+    prints its usage and exits at once, closing the pipe. rmd's stderr then held:
+    `node:events:505 throw er; // Unhandled 'error' event … Error: write EPIPE … at write
+    (src/lib/gh-read-broker.ts:1357:103) at out (…:1359:30) at ghCommand (…:1400:5) Emitted 'error' event
+    on Socket instance … code: 'EPIPE'`. `(rmd gh … | true)` crashes the same way.
+    CONTROL: `(./bin/rmd ledger-grep --help | true)` and `(./bin/rmd help | true)` print nothing to stderr.
+
+    THE DEFECT.
+    - src/lib/gh-read-broker.ts:1352-1408 `ghCommand`. Its default `write` (:1357) is `(stream, text) =>
+      void process[stream].write(text)`. `out(result.stdout)` (:1400) writes the broker's whole answer
+      there.
+    - A pipe whose reader has gone makes Node emit `error` (EPIPE) on process.stdout. Nothing in `rmd gh`'s
+      path listens: no `stdout.on("error"` anywhere in src/run-task.ts or src/lib/flush-exit.ts. So the
+      event is unhandled and the process dies with a stack.
+    - W1-T4063's flush-exit.ts:14-40 `drained` listens for `error` only during the final flush, so it
+      cannot catch a write made earlier.
+    - Verbs that print through `console.log` survive this. Node's global console ignores stream errors,
+      which is why the control above is quiet. `rmd gh` writes the stream directly.
+    - The read itself succeeded, and the crash says nothing about it. The trace is noise in every
+      session that pipes a broker read into a consumer that stops early: `head`, `paste` misuse, `grep
+      -m`, `jq` failing.
+    - The `catch` at :1403-1407 answers a THROWN error by running `gh` directly. That would be a second,
+      unbrokered read. An EPIPE that ever surfaced as a throw there would double the read, so the fix must
+      keep an early close out of that arm.
+
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d on origin/main for EPIPE and gh-read-broker.
+    - W1-T4063 (merged) flushes before exit and never HANGS on a closed reader. It does not handle the
+      write-time error event.
+    - W1-T9560 is a host snapshot's SIGPIPE.
+    - W1-T10279, W1-T10310, W1-T10368 and W1-T10369 are the broker's own server, key, cache root and
+      bundle.
+    Read the 14 open core PRs' titles at 22:15Z: none touches gh-read-broker.ts. No run- branch for this id
+    exists.
+  design: |
+    1. In `ghCommand`, the default writer treats the end of its reader as a normal early close.
+       - It listens for `error` on the stream it writes. EPIPE and ERR_STREAM_DESTROYED mean the reader
+         is gone: it marks that stream closed and writes nothing more to it, with no trace. Any other
+         stream error still surfaces as today.
+       - A closed stdout never reaches the `catch` arm that runs `gh` directly, so the read is never
+         repeated.
+       - `ghCommand` returns the broker read's own exit code. The read succeeded, and the pipeline's
+         status is its last command's anyway.
+       - stderr lines the read produced are still written while stderr is open.
+       - The listener is scoped to this verb's writes, and it never swallows another verb's errors.
+    2. Nothing else. No broker, cache, class, pacing or fallback change, and no change to other verbs.
+  prompt: |
+    Write test/infra/rmd-gh-exits-quietly-when-its-reader-closes-early.test.ts. `rmd test-place` computed
+    that folder on 2026-10-26 (confidence none, for an import of `#src/lib/gh-read-broker.js`). Keep this
+    exact path, because the proofs grep it. Import through `#src/*`, and compute the repository root with
+    `#test/helpers/repo-root.js`. Every new test title starts with `W1-T10770: `, exactly as in the
+    acceptance proofs.
+    - Real-pipe case. In-process stubs cannot see an unhandled stream error, so spawn a child `node --import
+      tsx`. The child calls `ghCommand` with an injected read that resolves a sizeable stdout only after
+      the parent has destroyed the child's stdout pipe, and with whatever `ghReadBrokerLive`
+      (gh-read-broker-client.ts:73) needs to read the broker as live.
+      - Assert the child's stderr has no `EPIPE` and no `Unhandled 'error' event`, and that its exit
+        code is the read's.
+      - Assert the injected read ran once and the direct-gh fallback never ran. Use a recording
+        `runDirect`.
+    - Guard case. With an open reader, the same child delivers the whole stdout and exits with the read's
+      code.
+    Restore base code with `git show origin/main:<path>`, never stash, and watch the first case fail on the
+    unhandled EPIPE. Run the suite, `npm run -s lint-plan:fast` and `rmd preflight --fast` on the committed
+    tree before the first push.
+  acceptance:
+    - claim: "rmd gh whose stdout reader has closed exits with the read's own code, prints no EPIPE stack, and never repeats the read through the direct-gh fallback"
+      proof: 'grep: test("W1-T10770: a closed reader ends rmd gh quietly with the exit code of the read" in test/infra/rmd-gh-exits-quietly-when-its-reader-closes-early.test.ts'
+  falsifier: |
+    At base the child dies on `Unhandled 'error' event` with `Error: write EPIPE`, so the first case's
+    stderr assertion fails.
+    - Remove the stream error listener: the stack returns and the case fails.
+    - Let the early close throw into ghCommand's catch: the recording runDirect sees a call and the case
+      fails.
+    GUARDS that held at base and must still hold:
+    - with an open reader every byte is delivered and the exit code is the read's (the guard case);
+    - a write or auth argv is still refused, and a dead broker still falls back to gh directly
+      (test/github/every-mac-session-reads-github-through-one-broker.test.ts).
+    Remove each guard's production branch in turn, and its existing case must fail. Then restore it and
+    require zero failures.

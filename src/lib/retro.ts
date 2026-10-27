@@ -13,7 +13,7 @@ import fsMarker from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { updateProposalRegistry, updateProposalRegistryAsync, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
-import { tryEscalate } from "./escalate.js";
+import { ghIssueGateway, tryEscalate } from "./escalate.js";
 import { appendLedger, type LedgerLine, type LedgerWriterDeps } from "./ledger.js";
 import { promotionTaint } from "./learnings.js";
 import type { Lifecycle, LearningEntry, PromotionResult, PromotionTaintResult } from "./learnings.js";
@@ -5247,7 +5247,12 @@ export interface RetroPublicationEscalationCtx {
   repo: string;
   ledgerPath: string;
   runId: string;
+  /** Absent: the real `gh` gateway for `owner/repo`, as every other run-task.ts escalation builds it. Before this
+   *  default the only production caller passed none, so `tryEscalate` read `listOpen` off `undefined` and every
+   *  retro publication escalation landed as `escalation.failed` with `delivered: false`. */
   issues?: Parameters<typeof tryEscalate>[1]["issues"];
+  /** The raw `gh` stand-in for that default gateway (`ghIssueGateway`'s own `opts.exec`); tests only. */
+  ghExec?: (args: string[]) => string;
   episodeMs?: number;
   strikeCap?: number;
   nowMs?: number;
@@ -5346,7 +5351,8 @@ export function escalateRetroPublicationFailure(
       ],
       recommendation: "fix the failing suite",
     },
-    { issues: ctx.issues ?? undefined, ledgerPath: ctx.ledgerPath, runId: ctx.runId } as Parameters<typeof tryEscalate>[1],
+    { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo, ctx.ghExec ? { exec: ctx.ghExec } : {}),
+      ledgerPath: ctx.ledgerPath, runId: ctx.runId } as Parameters<typeof tryEscalate>[1],
   );
   appendLedger(ctx.ledgerPath, {
     run_id: ctx.runId,

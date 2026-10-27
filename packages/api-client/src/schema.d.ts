@@ -161,6 +161,30 @@ export interface components {
       required_scope?: "write";
       required_tier?: "high";
     };
+    /** A server observation of the exact repository a create or adopt would act on, taken at observedAt. It is informational: it writes nothing and authorizes nothing, and the mutation rechecks every prerequisite itself. state ready means the exact adoption target exists, or the creation target is absent and the owner namespace allows creation. absent, conflict, stale, denied and unavailable are never ready; reasons name why. creation reports the provider's answer for the owner namespace and is not_checked when the repository read did not succeed or a product-level state decided first. */
+    ProductRepositoryPreview: {
+      version: "product-repository-preview-v1";
+      productId: ProductId;
+      revision: number;
+      objectiveRevision: number;
+      action: "adopt" | "create";
+      target: {
+        owner: string;
+        name: string;
+      };
+      state: "ready" | "absent" | "conflict" | "stale" | "denied" | "unavailable";
+      reasons: ("stale_revision" | "requested_repository_mismatch" | "product_already_bound" | "bound_repository_mismatch" | "repository_exists" | "repository_absent" | "provider_unreadable" | "creation_denied" | "creation_unknown")[];
+      repository: ({
+        provider: "github";
+        id: number;
+        owner: string;
+        name: string;
+        defaultBranch: string;
+        visibility: "public" | "private" | "internal";
+      }) | (null);
+      creation: "user" | "org" | "denied" | "unknown" | "not_checked";
+      observedAt: string;
+    };
     ProductDeploymentRepository: {
       id: number;
       owner: string;
@@ -6162,6 +6186,18 @@ export interface paths {
           "404": ProductRepositoryError;
           "409": ProductRepositoryError;
           "413": ProductRepositoryError;
+          "503": ProductRepositoryError;
+        };
+    };
+  };
+  "/v1/products/repository-preview": {
+    get: {
+      responses: {
+          "200": ProductRepositoryPreview;
+          "400": ProductRepositoryError;
+          "401": ProductAccessError;
+          "403": (ProductRepositoryError) | (ProductAccessError);
+          "404": ProductRepositoryError;
           "503": ProductRepositoryError;
         };
     };

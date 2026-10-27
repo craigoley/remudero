@@ -48,7 +48,8 @@ function assembled(root: string, prefix = "/v1/products", extra: Partial<ServeDe
   const routes = buildServeRoutes(deps).filter((route) => route.path === prefix);
   assert.deepEqual(readdirSync(root, { recursive: true }), before, "assembling product routes creates no state");
   assert.deepEqual(routes.map((route) => `${route.method} ${route.path}`).sort(),
-    prefix === "/v1/products" ? ["GET /v1/products", "POST /v1/products"] : [`POST ${prefix}`]);
+    prefix === "/v1/products" ? ["GET /v1/products", "POST /v1/products"]
+      : [`${prefix.endsWith("-preview") ? "GET" : "POST"} ${prefix}`]);
   return routes;
 }
 
@@ -181,6 +182,60 @@ test("W1-T10613: the served product repository operation matches the authenticat
     assert.equal((await send("alice", { ...adopt(productId), extra: true })).status, 400);
     assert.equal((await send("alice", undefined, "{broken")).status, 400);
     assert.equal((await send("alice", undefined, JSON.stringify({ padding: "x".repeat(5000) }))).status, 413);
+  } finally { await new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve())); }
+});
+
+test("W1-T10726: served preview matches the public product contract", async (t) => {
+  const shim = ghShim([
+    { when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra",
+      owner: { login: "craigoley" }, private: false, default_branch: "main" }) },
+    { when: "api repos/craigoley/fresh", stderr: "gh: Not Found (HTTP 404)", exit: 1 },
+    { when: "api user/memberships/orgs/", stderr: "gh: Not Found (HTTP 404)", exit: 1 },
+    { when: "api user", stdout: JSON.stringify({ login: "craigoley" }) },
+  ]);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  t.after(() => { process.env.PATH = originalPath; });
+  const root = ownedFixtureDir(t, "product-preview-http").dir;
+  const products = assembled(root);
+  const preview = assembled(root, "/v1/products/repository-preview");
+  assert.equal(preview[0]?.scope, "read", "a preview is a read");
+  assert.equal(preview[0]?.sensitivity, "sensitive");
+  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...preview] });
+  await new Promise<void>((resolve) => instance.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(instance.address() as AddressInfo).port}`;
+  const get = async (session: "alice" | "bob" | undefined, query: string) => {
+    const result = await fetch(`${base}/v1/products/repository-preview${query}`, { headers: { authorization: "Bearer fixture-read",
+      ...(session ? { "x-test-session": session } : {}) } });
+    const reply = await result.json() as { version: string; error?: string; state?: string; reasons?: string[]; repository?: { id: number } | null; creation?: string };
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/repository-preview", "GET", result.status)), [],
+      `the real preview response (${result.status}) must match its declared contract`);
+    assert.match(result.headers.get("cache-control") ?? "", /no-store/);
+    return { status: result.status, body: reply };
+  };
+  try {
+    const saved = await request(base, "/v1/products", "alice", command);
+    const id = saved.body.receipt!.productId;
+    const q = (over: Record<string, string> = {}) => "?" + new URLSearchParams({ id, action: "adopt", owner: "craigoley", name: "wreckterra", ...over });
+    const before = readdirSync(root, { recursive: true }).sort();
+    assert.equal((await get(undefined, q())).status, 403);
+    const ready = await get("alice", q({ expectedRevision: "1", expectedObjectiveRevision: "1" }));
+    assert.equal(ready.status, 200);
+    assert.equal(ready.body.state, "ready");
+    assert.equal(ready.body.repository?.id, WRECKTERRA_ID);
+    assert.equal(ready.body.creation, "user");
+    const stale = await get("alice", q({ expectedRevision: "9" }));
+    assert.equal(stale.body.state, "stale");
+    const mismatch = await get("alice", q({ owner: "someone" }));
+    assert.equal(mismatch.body.state, "conflict");
+    assert.equal((await get("alice", q({ action: "create" }))).body.state, "conflict", "creating over an existing repository conflicts");
+    assert.equal((await get("bob", q())).status, 404);
+    assert.equal((await get("alice", "?id=" + id)).status, 400);
+    assert.equal((await get("alice", q() + "&owner=other")).status, 400, "a duplicate key is refused");
+    assert.equal((await get("alice", q() + "&extra=1")).status, 400);
+    assert.equal((await get("alice", q({ action: "nope" }))).status, 400);
+    assert.deepEqual(readdirSync(root, { recursive: true }).sort(), before, "preview creates no product or journal state");
+    assert.ok(!shim.calls().some((call) => call.includes("-X POST")), "preview makes no create call over the real transport");
   } finally { await new Promise<void>((resolve, reject) => instance.close((error) => error ? reject(error) : resolve())); }
 });
 
