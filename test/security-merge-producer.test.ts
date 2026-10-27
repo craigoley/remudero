@@ -11,6 +11,57 @@ import {ghStubPath} from './helpers/gh-stub.js';
 import {runSecurityMergeProducer,createSecurityMetadataReader} from '../scripts/security-merge-producer.mjs';
 const head='a'.repeat(40),base='b'.repeat(40);
 const repository={full_name:'craigoley/remudero'};
+
+test('CodeQL workflow completion reobserves its asynchronous analysis without granting stale or unknown permission',async()=>{
+ for(const outcome of ['safe','blocked','pending','drift','unreadable'] as const){
+  let waits=0;const writes:any[]=[];
+  const event={repository,workflow_run:{name:'CodeQL',head_sha:head,status:'completed',conclusion:'success'}};
+  const api={
+   wait:async(ms:number)=>{assert.equal(ms,60_000);waits++;},
+   read:async(p:string)=>{
+    if(p.includes('/pulls?'))return [{number:1,state:'open',head:{sha:head}}];
+    if(p.includes('/files?'))return [{filename:'src/security.ts'}];
+    if(p.includes('/check-runs?')){
+     if(waits && outcome==='unreadable')throw Error('metadata unavailable');
+     const completed=waits>0 && outcome!=='pending';
+     return {total_count:1,check_runs:[{id:1,name:'CodeQL',head_sha:head,
+      app:{slug:'github-advanced-security',id:57789,owner:{login:'github'}},
+      status:completed?'completed':'queued',conclusion:completed?'success':null,
+      output:completed?{title:'No new alerts in code changed by this pull request',summary:outcome==='blocked'
+       ?'Security Alerts:\n * 1 high\n'
+       :'[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A1+tool%3ACodeQL+is%3Aopen).'}:{}}]};
+    }
+    return {state:'open',head:{sha:waits && outcome==='drift'?'c'.repeat(40):head},
+     base:{sha:base,ref:'main',repo:repository},changed_files:1};
+   },status:async(s:any)=>writes.push(s),
+  };
+  const [result]=await runSecurityMergeProducer('workflow_run',event,api);
+  assert.equal(waits,outcome==='pending'?3:1,outcome);
+  assert.equal(writes[0].state,'error',outcome);
+  assert.equal(result.decision.mergeAllowed,outcome==='safe',outcome);
+  assert.equal(writes.some(s=>s.state==='success'),outcome==='safe',outcome);
+  assert.ok(writes.every(s=>s.sha===head),outcome);
+  if(outcome==='pending')assert.equal(writes.length,4);
+  if(outcome==='blocked')assert.equal(writes.at(-1).state,'failure');
+  if(outcome==='drift'){assert.equal(writes.length,1);assert.equal(result.published,false);}
+  if(outcome==='unreadable')assert.equal(writes.at(-1).state,'error');
+ }
+});
+
+test('security completion reobservation excludes unrelated events and untrusted analysis identities',async()=>{
+ for(const scenario of ['pull-request','running','failed-workflow','untrusted'] as const){
+  const event={repository,pull_request:{number:1,head:{sha:head}},workflow_run:{name:'CodeQL',head_sha:head,
+   status:scenario==='running'?'in_progress':'completed',conclusion:scenario==='failed-workflow'?'failure':'success'}};
+  const writes:any[]=[];
+  const api={wait:async()=>{throw Error('must not wait');},status:async(s:any)=>writes.push(s),read:async(p:string)=>
+   p.includes('/pulls?')?[{number:1,state:'open',head:{sha:head}}]:p.includes('/files?')?[{filename:'src/security.ts'}]:
+   p.includes('/check-runs?')?{total_count:1,check_runs:[{id:1,name:'CodeQL',head_sha:head,status:'queued',
+    app:{slug:'github-advanced-security',id:scenario==='untrusted'?123:57789,owner:{login:'github'}}}]}:
+   {state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:repository},changed_files:1}};
+  const [result]=await runSecurityMergeProducer(scenario==='pull-request'?'pull_request_target':'workflow_run',event,api);
+  assert.equal(result.decision.mergeAllowed,false);assert.equal(writes.length,1);assert.equal(writes[0].state,'error');
+ }
+});
 test('trusted security producer covers fork and Dependabot metadata without executing their code',async()=>{
  const writes:any[]=[];
  const api={read:async(p:string)=>p.includes('/files?')?[{filename:'docs/a.md'}]:{state:'open',head:{sha:head},
