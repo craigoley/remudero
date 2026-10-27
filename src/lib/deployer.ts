@@ -1,3 +1,4 @@
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 /**
  * lib/deployer.ts — the OUT-OF-PROCESS deploy supervisor's decision core.
  *
@@ -53,6 +54,29 @@ import {
   type DeployWorthJudge,
   type RecordedDeployRestartThreshold,
 } from "./deploy-judge.js";
+
+type DeploySteps<R> = Generator<() => unknown, R, unknown>;
+function* deployStep<T>(effect: () => T | Promise<T>): DeploySteps<T> {
+  return (yield effect) as T;
+}
+
+function driveDeploySteps<R>(steps: DeploySteps<R>): R;
+function driveDeploySteps<R>(steps: DeploySteps<R>, async: boolean): R | Promise<R>;
+function driveDeploySteps<R>(steps: DeploySteps<R>, async = false): R | Promise<R> {
+  const advance = (next: IteratorResult<() => unknown, R>): R | Promise<R> => {
+    while (!next.done) {
+      let value: unknown;
+      try { value = next.value(); }
+      catch (error) { next = steps.throw(error); continue; }
+      if (async) return Promise.resolve(value).then(
+        result => advance(steps.next(result)), error => advance(steps.throw(error)),
+      );
+      next = steps.next(value);
+    }
+    return next.value;
+  };
+  return async ? Promise.resolve().then(() => advance(steps.next())) : advance(steps.next());
+}
 
 // ── Pure decisions ─────────────────────────────────────────────────────────────
 
@@ -739,12 +763,20 @@ export function bakedPathCommitsBehind(
   runGit: (args: readonly string[]) => string,
   role?: string,
 ): number | undefined {
+  return driveDeploySteps(bakedPathCommitsBehindSteps(imageBuildSha, runGit, role));
+}
+
+function* bakedPathCommitsBehindSteps(
+  imageBuildSha: string | undefined,
+  runGit: (args: readonly string[]) => string | Promise<string>,
+  role?: string,
+): DeploySteps<number | undefined> {
   const sha = imageBuildSha?.trim();
   if (!sha) return undefined;
   let out: string;
   try {
     // W1-T9094 — only the inputs THIS role executes from the image; an unknown role counts them all.
-    out = runGit(["rev-list", "--count", `${sha}..origin/main`, "--", ...imageBakedPathsForRole(role)]);
+    out = (yield* deployStep(() => runGit(["rev-list", "--count", `${sha}..origin/main`, "--", ...imageBakedPathsForRole(role)])));
   } catch {
     return undefined; // an unknown sha, a shallow clone, no git — UNKNOWN, never zero
   }
@@ -765,16 +797,25 @@ export function roleScopedBakedCommitsBehind(
   role: string | undefined,
   log: (step: string, data?: Record<string, unknown>) => void,
 ): number | undefined {
-  const behindRole = bakedPathCommitsBehind(imageBuildSha, runGit, role);
+  return driveDeploySteps(roleScopedBakedCommitsBehindSteps(imageBuildSha, runGit, role, log));
+}
+
+function* roleScopedBakedCommitsBehindSteps(
+  imageBuildSha: string | undefined,
+  runGit: (args: readonly string[]) => string | Promise<string>,
+  role: string | undefined,
+  log: (step: string, data?: Record<string, unknown>) => void,
+): DeploySteps<number | undefined> {
+  const behindRole = (yield* bakedPathCommitsBehindSteps(imageBuildSha, runGit, role));
   const rolePaths = imageBakedPathsForRole(role);
   if (rolePaths === IMAGE_BAKED_PATHS) return behindRole;
-  const behindAll = bakedPathCommitsBehind(imageBuildSha, runGit);
+  const behindAll = (yield* bakedPathCommitsBehindSteps(imageBuildSha, runGit));
   if (behindAll === behindRole) return behindRole;
   const withheld = IMAGE_BAKED_PATHS.filter((path) => !rolePaths.includes(path));
   let files: string[] = [];
   let filesError: string | undefined;
   try {
-    const out = runGit(["log", "--format=", "--name-only", `${imageBuildSha!.trim()}..origin/main`, "--", ...withheld]);
+    const out = (yield* deployStep(() => runGit(["log", "--format=", "--name-only", `${imageBuildSha!.trim()}..origin/main`, "--", ...withheld])));
     files = [...new Set(String(out).split("\n").map((line) => line.trim()).filter(Boolean))].sort();
   } catch (err) {
     filesError = err instanceof Error ? err.message : String(err); // the counts stand; say why files is empty
@@ -805,10 +846,17 @@ export function imageDependencyInputFingerprint(
   ref: string,
   runGit: (args: readonly string[]) => string,
 ): string | undefined {
+  return driveDeploySteps(imageDependencyInputFingerprintSteps(ref, runGit));
+}
+
+function* imageDependencyInputFingerprintSteps(
+  ref: string,
+  runGit: (args: readonly string[]) => string | Promise<string>,
+): DeploySteps<string | undefined> {
   try {
     const object = (value: unknown): value is Record<string, unknown> =>
       value !== null && typeof value === "object" && !Array.isArray(value);
-    const lock: unknown = JSON.parse(runGit(["show", `${ref}:${ROOT_LOCKFILE_PATH}`]));
+    const lock: unknown = JSON.parse((yield* deployStep(() => runGit(["show", `${ref}:${ROOT_LOCKFILE_PATH}`]))));
     if (!object(lock) || (lock.lockfileVersion !== 2 && lock.lockfileVersion !== 3) || !object(lock.packages) || !object(lock.packages[""])) return undefined;
     const manifests = new Set(["package.json"]);
     for (const [path, entry] of Object.entries(lock.packages)) {
@@ -823,7 +871,7 @@ export function imageDependencyInputFingerprint(
     }
     const inputs: Record<string, unknown> = { [ROOT_LOCKFILE_PATH]: lock };
     for (const path of [...manifests].sort()) {
-      const manifest: unknown = JSON.parse(runGit(["show", `${ref}:${path}`]));
+      const manifest: unknown = JSON.parse((yield* deployStep(() => runGit(["show", `${ref}:${path}`]))));
       if (!object(manifest)) return undefined;
       inputs[path] = manifest;
     }
@@ -839,24 +887,35 @@ export function imageDependenciesCommitsBehind(
   imageBuildSha: string | undefined,
   runGit: (args: readonly string[]) => string,
 ): number | undefined {
+  return driveDeploySteps(imageDependenciesCommitsBehindSteps(imageBuildSha, runGit));
+}
+
+function* imageDependenciesCommitsBehindSteps(
+  imageBuildSha: string | undefined,
+  runGit: (args: readonly string[]) => string | Promise<string>,
+): DeploySteps<number | undefined> {
   if (imageBuildSha === undefined || imageBuildSha.trim() === "") return undefined;
-  const before = imageDependencyInputFingerprint(imageBuildSha.trim(), runGit);
-  const after = imageDependencyInputFingerprint("origin/main", runGit);
+  const before = (yield* imageDependencyInputFingerprintSteps(imageBuildSha.trim(), runGit));
+  const after = (yield* imageDependencyInputFingerprintSteps("origin/main", runGit));
   return before === undefined || after === undefined ? undefined : before === after ? 0 : 1;
 }
 
 /** First-parent push boundaries match the workflow's before/head pairs, including merge commits.
  * Never skip an unreadable newer input and misname an older commit as the current build input. */
 export function newestImageDependencyInputSha(runGit: (args: readonly string[]) => string): string | undefined {
+  return driveDeploySteps(newestImageDependencyInputShaSteps(runGit));
+}
+
+function* newestImageDependencyInputShaSteps(runGit: (args: readonly string[]) => string | Promise<string>): DeploySteps<string | undefined> {
   try {
-    const shas = runGit(["log", "--first-parent", "--format=%H", "origin/main", "--", ROOT_LOCKFILE_PATH, "package.json", "packages"])
+    const shas = (yield* deployStep(() => runGit(["log", "--first-parent", "--format=%H", "origin/main", "--", ROOT_LOCKFILE_PATH, "package.json", "packages"])))
       .trim().split("\n").filter(Boolean);
     for (const sha of shas) {
-      const after = imageDependencyInputFingerprint(sha, runGit);
+      const after = (yield* imageDependencyInputFingerprintSteps(sha, runGit));
       if (after === undefined) return undefined;
-      const parents = runGit(["rev-list", "--parents", "-n", "1", sha]).trim().split(/\s+/);
+      const parents = (yield* deployStep(() => runGit(["rev-list", "--parents", "-n", "1", sha]))).trim().split(/\s+/);
       if (parents.length === 1) return sha;
-      const before = imageDependencyInputFingerprint(`${sha}^`, runGit);
+      const before = (yield* imageDependencyInputFingerprintSteps(`${sha}^`, runGit));
       if (before === undefined) return undefined;
       if (before !== after) return sha;
     }
@@ -2558,11 +2617,39 @@ export function githubSlugOf(remoteUrl: string): string | undefined {
   return /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\s*$/.exec(remoteUrl.trim())?.[1];
 }
 
-export function realDeployDeps(o: RealDeployOpts): DeployDeps {
+type DeploySensorName = "newestBakedSha" | "imageBakedCommitsBehind" | "imagePublished" | "imageBuildInFlight" | "dispatchImageBuild";
+export type AsyncDeploySensors = {
+  [K in DeploySensorName]-?: (...args: Parameters<NonNullable<DeployDeps[K]>>) => Promise<ReturnType<NonNullable<DeployDeps[K]>>>;
+} & Pick<DeployDeps, "imageRecycleManual">;
+
+type DeploySensorExec = (cmd: string, args: string[]) => Promise<string>;
+
+/** The fleet reconciler supplies its existing bounded GitHub transport. */
+export function realDeploySensorsAsync(o: RealDeployOpts, gh: (args: string[]) => Promise<string>): AsyncDeploySensors {
+  return realDeployDeps(o, (cmd, args) => {
+    if (o.execFile) return Promise.resolve(o.execFile(cmd, args));
+    return cmd === "gh" ? gh(args)
+      : execFileLoopBounded(cmd, args, { encoding: "utf8" }).then(({ stdout }) => stdout);
+  });
+}
+
+export function realDeployDeps(o: RealDeployOpts): DeployDeps;
+export function realDeployDeps(o: RealDeployOpts, sensorExec: DeploySensorExec): Omit<DeployDeps, DeploySensorName> & AsyncDeploySensors;
+export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec): Omit<DeployDeps, DeploySensorName> & {
+  [K in DeploySensorName]?: (...args: Parameters<NonNullable<DeployDeps[K]>>) =>
+    ReturnType<NonNullable<DeployDeps[K]>> | Promise<ReturnType<NonNullable<DeployDeps[K]>>>;
+} {
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const clock = (): number => Date.now();
   const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
-  const git = (args: string[]): string => exec("git", ["-C", o.installPath, ...args]);
+  const drive = <R>(steps: DeploySteps<R>): R | Promise<R> => driveDeploySteps(steps, sensorExec !== undefined);
+  const execSensor = (cmd: string, args: string[]) => deployStep(() => sensorExec ? sensorExec(cmd, args) : exec(cmd, args));
+  function git(args: readonly string[]): string;
+  function git(args: readonly string[], run: DeploySensorExec): Promise<string>;
+  function git(args: readonly string[], run: (cmd: string, argv: string[]) => string | Promise<string> = exec): string | Promise<string> {
+    return run("git", ["-C", o.installPath, ...args]);
+  }
+  const gitSensor = (args: readonly string[]) => deployStep(() => sensorExec ? git(args, sensorExec) : git(args));
   const sleep = o.sleep ?? ((ms: number) => exec("sleep", [String(Math.ceil(ms / 1000))]));
   const log = o.log ?? buildDeployLogger(ledgerPath);
   const windowMs = o.healthWindowMs ?? 45_000;
@@ -2788,24 +2875,24 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     // which is why `runningHead` above cannot stand in for it. Read through `docker exec`,
     // exactly as scripts/fleet-heartbeat.sh already does to publish `image_build_sha` (W1-T496);
     // a failure there means the container is down, and that becomes UNKNOWN, never a restart.
-    imageBakedCommitsBehind: () => {
+    imageBakedCommitsBehind: () => drive((function* (): DeploySteps<number | undefined> {
       let sha: string | undefined;
       try {
-        sha = exec("docker", ["exec", imageShaContainer, "cat", IMAGE_BUILD_SHA_PATH]).trim();
+        sha = (yield* execSensor("docker", ["exec", imageShaContainer, "cat", IMAGE_BUILD_SHA_PATH])).trim();
       } catch {
         return undefined; // container down / no docker — UNKNOWN, never "current"
       }
       // W1-T9094 — a build (daemon) container is stale only for the image inputs it executes.
       const role = process.env.RMD_RESOURCE_POLICY_ROLE;
-      const baked = roleScopedBakedCommitsBehind(sha, (args) => git([...args]), role, log);
+      const baked = (yield* roleScopedBakedCommitsBehindSteps(sha, (args) => drive(gitSensor(args)), role, log));
       // W1-T4061 — a playwright-core version bump is image drift too, even though it lands only
       // in the root lockfile (never in IMAGE_BAKED_PATHS). UNKNOWN only when BOTH readings are:
       // one known signal must never be swallowed by the other going unreadable.
-      const dependencies = imageDependenciesCommitsBehind(sha, (args) => git([...args]));
+      const dependencies = (yield* imageDependenciesCommitsBehindSteps(sha, (args) => drive(gitSensor(args))));
       // A known positive survives an independent unknown, but a known zero cannot erase it.
       if ((baked ?? 0) > 0 || (dependencies ?? 0) > 0) return (baked ?? 0) + (dependencies ?? 0);
       return baked === undefined || dependencies === undefined ? undefined : 0;
-    },
+    })()),
     resourcePolicyDrift: () =>
       // W1-T4267: the launcher names the container and role it owns; the policy is evaluated by the
       // SAME sourced shell file recycle-container.sh applies. Either side unreadable ⇒ UNKNOWN.
@@ -2818,20 +2905,20 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       ),
     mountPlanDrift: () => // the launcher's own scratch_plan, from the checkout the recycle launches with
       readMountPlanDrift(exec, o.installPath, o.stateRoot, process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer),
-    newestBakedSha: () => {
+    newestBakedSha: () => drive((function* (): DeploySteps<string | undefined> {
       let newestBaked: string | undefined;
       try {
-        newestBaked = git(["log", "-1", "--format=%H", "origin/main", "--", ...IMAGE_BAKED_PATHS]).trim() || undefined;
+        newestBaked = (yield* gitSensor(["log", "-1", "--format=%H", "origin/main", "--", ...IMAGE_BAKED_PATHS])).trim() || undefined;
       } catch {
         newestBaked = undefined; // no git answer — the tick treats the image's publication as UNKNOWN and waits
       }
       // W1-T10366: the same semantic input pair that the workflow builds, not the latest touch.
-      const newestPlaywright = newestImageDependencyInputSha((args) => git([...args]));
+      const newestPlaywright = (yield* newestImageDependencyInputShaSteps((args) => drive(gitSensor(args))));
       if (!newestPlaywright) return undefined; // Do not label an older baked commit current when dependency history is unknown.
       if (!newestBaked) return newestPlaywright;
       try {
-        const bakedDistance = Number.parseInt(git(["rev-list", "--count", `${newestBaked}..origin/main`]).trim(), 10);
-        const playwrightDistance = Number.parseInt(git(["rev-list", "--count", `${newestPlaywright}..origin/main`]).trim(), 10);
+        const bakedDistance = Number.parseInt((yield* gitSensor(["rev-list", "--count", `${newestBaked}..origin/main`])).trim(), 10);
+        const playwrightDistance = Number.parseInt((yield* gitSensor(["rev-list", "--count", `${newestPlaywright}..origin/main`])).trim(), 10);
         if (Number.isFinite(bakedDistance) && Number.isFinite(playwrightDistance)) {
           return playwrightDistance <= bakedDistance ? newestPlaywright : newestBaked;
         }
@@ -2839,10 +2926,10 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         // fall through to the baked-path reading below
       }
       return newestBaked;
-    },
+    })()),
     // The build tags each image with the commit that triggered it (acr-build.yml), so a tag for
     // the newest image-input commit exists exactly when that image is published.
-    imagePublished: (sha) => {
+    imagePublished: (sha: string) => drive((function* (): DeploySteps<boolean | undefined> {
       const image = registryText === undefined ? undefined : imageRefFor(registryText, o.stateRoot);
       if (!image) return undefined;
       const repository = image.replace(/:[^:/]+$/, "");
@@ -2860,16 +2947,16 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // W1-T4809: a build of a DESCENDANT of `sha` also carries the change. Its git tag
       // (`image/<date>-<sha7>`, pushed only after a successful build) names the commit; the
       // registry then confirms that commit's full-sha tag exists.
-      const containingImagePublished = (): boolean => {
+      const containingImagePublished = function* (): DeploySteps<boolean> {
         try {
-          const tags = git(["tag", "--list", "image/*", "--sort=-creatordate"])
+          const tags = (yield* gitSensor(["tag", "--list", "image/*", "--sort=-creatordate"]))
             .split("\n").map((l) => l.trim()).filter(Boolean).slice(0, IMAGE_TAG_SCAN_LIMIT);
           for (const tag of tags) {
             try {
-              const built = git(["rev-list", "-n", "1", tag]).trim();
+              const built = (yield* gitSensor(["rev-list", "-n", "1", tag])).trim();
               if (!/^[0-9a-f]{40}$/i.test(built)) continue;
-              git(["merge-base", "--is-ancestor", sha, built]); // exit 1 (not an ancestor) throws
-              exec("docker", ["manifest", "inspect", `${repository}:${built}`]);
+              (yield* gitSensor(["merge-base", "--is-ancestor", sha, built])); // exit 1 (not an ancestor) throws
+              (yield* execSensor("docker", ["manifest", "inspect", `${repository}:${built}`]));
               log("deploy.image_published_by_descendant", { baked: sha.slice(0, 9), built: built.slice(0, 9), tag });
               return true;
             } catch (skip) {
@@ -2882,13 +2969,13 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         return false;
       };
       try {
-        exec("docker", ["manifest", "inspect", ref]);
+        (yield* execSensor("docker", ["manifest", "inspect", ref]));
         return true;
       } catch (err) {
         if (!authFailure(err)) {
           // Only a registry that answered "no such tag" is a no; network trouble stays unknown.
           const exact = classify(err);
-          return exact === false && containingImagePublished() ? true : exact;
+          return exact === false && (yield* containingImagePublished()) ? true : exact;
         }
       }
       // ACR's Docker token can expire while the Azure CLI session is still valid. Refresh once,
@@ -2896,42 +2983,42 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       const registry = /^([a-z0-9-]+)\.azurecr\.io\//i.exec(image)?.[1];
       if (!registry) return undefined;
       try {
-        exec("az", ["acr", "login", "-n", registry]);
+        (yield* execSensor("az", ["acr", "login", "-n", registry]));
       } catch {
         log("deploy.image_auth_refresh", { outcome: "failed", registry });
         return undefined;
       }
       try {
-        exec("docker", ["manifest", "inspect", ref]);
+        (yield* execSensor("docker", ["manifest", "inspect", ref]));
         log("deploy.image_auth_refresh", { outcome: "recovered", registry });
         return true;
       } catch (err) {
         const published = classify(err);
         log("deploy.image_auth_refresh", { outcome: published === false ? "absent" : "unknown", registry });
-        return published === false && containingImagePublished() ? true : published;
+        return published === false && (yield* containingImagePublished()) ? true : published;
       }
-    },
+    })()),
     // W1-T4809: the two seams that heal a build nobody started. The GitHub CLI reads/dispatches
     // against this checkout's own origin; any failure is UNKNOWN (undefined, or a throw the tick
     // logs), never a "no build running".
-    imageBuildInFlight: () => {
+    imageBuildInFlight: () => drive((function* (): DeploySteps<boolean | undefined> {
       try {
-        const slug = githubSlugOf(git(["remote", "get-url", "origin"]));
+        const slug = githubSlugOf((yield* gitSensor(["remote", "get-url", "origin"])));
         if (!slug) return undefined;
-        const runs = JSON.parse(exec("gh", [
+        const runs = JSON.parse((yield* execSensor("gh", [
           "run", "list", "-R", slug, "--workflow", IMAGE_BUILD_WORKFLOW, "--limit", "30", "--json", "status",
-        ])) as { status?: unknown }[];
+        ]))) as { status?: unknown }[];
         if (!Array.isArray(runs)) return undefined;
         return runs.some((r) => typeof r.status === "string" && IMAGE_BUILD_ACTIVE_STATUSES.includes(r.status));
       } catch {
         return undefined; // no CLI / no auth / no network — never a licence to dispatch
       }
-    },
-    dispatchImageBuild: () => {
-      const slug = githubSlugOf(git(["remote", "get-url", "origin"]));
+    })()),
+    dispatchImageBuild: () => drive((function* (): DeploySteps<void> {
+      const slug = githubSlugOf((yield* gitSensor(["remote", "get-url", "origin"])));
       if (!slug) throw new Error("origin is not a github.com remote");
-      exec("gh", ["workflow", "run", IMAGE_BUILD_WORKFLOW, "-R", slug, "--ref", "main"]);
-    },
+      (yield* execSensor("gh", ["workflow", "run", IMAGE_BUILD_WORKFLOW, "-R", slug, "--ref", "main"]));
+    })()),
     imageRecycleManual: () => existsSync(deployImageManualPath(o.stateRoot)),
     lastFailedAtMs: () => {
       try {

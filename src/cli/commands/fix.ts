@@ -7,7 +7,7 @@ import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, r
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
 import { fixRoundBaseHead } from "../../lib/fix-round-base.js";
 import { admittedFixTestPaths } from "../../lib/fix-test-scope.js";
-import { fixRungInputFields, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, requeuedCheckKeysFromLedger, type JobRequeueOutcome } from "../../lib/sweep.js";
+import { CONFLICT_REPAIR_HANDOFF_REASON, fixRungInputFields, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, requeuedCheckKeysFromLedger, type JobRequeueOutcome } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -992,10 +992,7 @@ async function fixRungStandDownReason(
     }
     if (facts?.mergeable === "CONFLICTING") {
       return {
-        reason:
-          "merge state is dirty (mergeable === false or mergeable_state === \"dirty\") — a conflicted PR " +
-          "registers no new check runs, so a strike buys no information; standing down for the sweep's own " +
-          "conflicted disposition rather than retrying blindly",
+        reason: CONFLICT_REPAIR_HANDOFF_REASON,
       };
     }
   }
@@ -3945,6 +3942,19 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // The unpublished local merge is the commit base; the push still leases the PR's original tip.
     const roundPushBaseSha = scopeMergeStartSha ?? roundBase.baseSha;
     if (roundBase.advanced) deps.log("fix.round_head_advanced", { head_sha: priorHeadSha, round_base_sha: roundBase.baseSha, reason: roundBase.reason });
+    if (roundBase.advanced && scopeMergeStartSha === undefined) {
+      let publishedHead: string | undefined;
+      try { publishedHead = await (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch); }
+      catch { deps.log("fix.evidence_head_unread", { head_sha: priorHeadSha, worktree_head_sha: roundBase.baseSha,
+        reason: "remote branch head read failed; no published advance was established" }); }
+      // A retained unpublished commit is still this round's existing recovery input, not proof the PR moved.
+      if (publishedHead !== undefined && publishedHead !== priorHeadSha) {
+        const reason = `published branch advanced from ${priorHeadSha} to ${publishedHead} before the worker started; the ordinary sweep must read fresh exact-head failure evidence`;
+        deps.log("fix.evidence_head_superseded", { head_sha: priorHeadSha, current_head_sha: publishedHead, worktree_head_sha: roundBase.baseSha, reason });
+        deps.log("fix.stood_down", { head_sha: priorHeadSha, current_head_sha: publishedHead, site: "rung.evidence_head", reason });
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+      }
+    }
     const fixRoundStartedAtMs = systemClock.now();
     const roundId = `${opts.runId}:${attempt + retriggers}:${fixRoundStartedAtMs}`;
     const fixReceipt = host.fixWorkerReceipt(deps.spawn, deps.log, host.fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),

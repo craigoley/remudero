@@ -1,0 +1,33 @@
+id: incident-2a55fdba6851be47
+ts: 2026-10-26T20:39:52.263Z
+raw: >-
+  Incident 2a55fdba6851: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  mandatory census cannot be measured because SWC native-cache validation fails
+  on both edited and frozen-base inputs; runtime correction is outside this
+  repair’s scope
+
+  First seen: 2026-10-26T20:36:39.369Z
+
+  Last seen: 2026-10-26T20:36:49.787Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=14176 escalated: already escalated (reason unreadable: no escalation of this PR at head d175c66 is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793040751223:1:1793045215198) — mandatory census cannot be measured because SWC native-cache validation fails on both edited and frozen-base inputs; runtime correction is outside this repair’s scope
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#2a55fdba6851be47fd1eee82f53421064ea4153937dcd08c0451fefefaddce3f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

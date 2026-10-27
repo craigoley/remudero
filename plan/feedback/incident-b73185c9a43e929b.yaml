@@ -1,0 +1,30 @@
+id: incident-b73185c9a43e929b
+ts: 2026-10-26T19:45:45.621Z
+raw: >-
+  Incident b73185c9a43e: anomaly run.running_long:docs
+
+  First seen: 2026-10-26T19:44:57.272Z
+
+  Last seen: 2026-10-26T19:44:59.371Z
+
+  Count: 40, burn: 40.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - task W1-T10694 (run W1-T10694-1793011513530) has run 32258730ms against class "docs"'s median 1446283ms (×8, n=5, excluded=4)
+    - task W1-T10694 (run W1-T10694-1793013390067) has run 30386480ms against class "docs"'s median 1446283ms (×8, n=5, excluded=4)
+    - task W1-T6153 (run W1-T6153-1792961554933) has run 82219912ms against class "docs"'s median 1446283ms (×8, n=5, excluded=4)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#b73185c9a43e929b280ed7843b6486b03cc2fea7c544a6e836cae7eb2cc30956
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

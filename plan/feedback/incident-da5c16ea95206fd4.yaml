@@ -1,0 +1,29 @@
+id: incident-da5c16ea95206fd4
+ts: 2026-10-26T21:20:49.694Z
+raw: >-
+  Incident da5c16ea9520: flow pr-stage-stall:awaiting-review:checks green,
+  review never posted — running the review lane on #<pr>
+
+  First seen: 2026-10-26T21:12:03.325Z
+
+  Last seen: 2026-10-26T21:12:03.325Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=14534 awaiting-review: repeat: "checks green, review never posted — running the review lane on #<pr>" x2
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#da5c16ea95206fd4578e5cd6de6cfb9c99fec38b9c042b48e03efc0de2475598
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

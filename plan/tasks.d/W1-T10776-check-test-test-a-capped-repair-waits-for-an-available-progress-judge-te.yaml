@@ -1,0 +1,37 @@
+- id: W1-T10776
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/a-capped-repair-waits-for-an-available-progress-judge.test.ts cost 65 PR minute(s) across 13 round(s) on 13 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.06
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/a-capped-repair-waits-for-an-available-progress-judge.test.ts"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/check-test-test-a-capped-repair-waits-for-an-available-progress-judge-te.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/a-capped-repair-waits-for-an-available-progress-judge.test.ts"
+      proof: "unit test: W1-T10776: check:test:test/a-capped-repair-waits-for-an-available-progress-judge.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/a-capped-repair-waits-for-an-available-progress-judge.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/a-capped-repair-waits-for-an-available-progress-judge.test.ts cost 65 PR minute(s) (seven-day half-life) across 13 fix round(s) on 13 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/sweep.ts: test/a-capped-repair-waits-for-an-available-progress-judge.test.ts imports it
+    - test/a-capped-repair-waits-for-an-available-progress-judge.test.ts: named by the failing check
+    - the rounds name a failing test: test/a-capped-repair-waits-for-an-available-progress-judge.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #14423 at 2026-10-26T15:33:55Z: hand fix PR #14423: src/lib/sweep.ts; minutes are the pass median proxy (5.661533333333333), not measured repair time
+    - PR #14422 at 2026-10-26T15:29:03Z: hand fix PR #14422: src/lib/sweep.ts; minutes are the pass median proxy (5.661533333333333), not measured repair time
+    - PR #14405 at 2026-10-26T12:16:27Z: hand fix PR #14405: src/lib/sweep.ts; minutes are the pass median proxy (5.661533333333333), not measured repair time
+    - PR #14400 at 2026-10-26T11:46:19Z: hand fix PR #14400: src/lib/sweep.ts; minutes are the pass median proxy (5.661533333333333), not measured repair time
+    - PR #14345 at 2026-10-26T06:23:26Z: hand fix PR #14345: src/lib/refresh-value.ts, src/lib/sweep.ts; minutes are the pass median proxy (5.661533333333333), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

@@ -13,7 +13,7 @@ import fsMarker from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { updateProposalRegistry, updateProposalRegistryAsync, type EvidenceAnchor, type Proposal, type UpdateProposalRegistryOpts } from "./inbox.js";
-import { tryEscalate } from "./escalate.js";
+import { ghIssueGateway, tryEscalate } from "./escalate.js";
 import { appendLedger, type LedgerLine, type LedgerWriterDeps } from "./ledger.js";
 import { promotionTaint } from "./learnings.js";
 import type { Lifecycle, LearningEntry, PromotionResult, PromotionTaintResult } from "./learnings.js";
@@ -403,6 +403,19 @@ function ledgerCreditFor(
   if (byTask) return { row: byTask, match: "task_id" };
   return undefined;
 }
+
+/** The ledger steps {@link gatherRuns} reads: the steps it names, then every step that can carry a run's
+ *  first `pr_url` row, which it falls back to with no `pr.opened` or verdict line. A step-filtered union
+ *  read that feeds `gatherRuns` spreads this list rather than copying it. */
+export const GATHER_RUNS_LEDGER_STEPS: readonly string[] = [
+  // gatherRuns, by name.
+  "run.start", "verdict", "verdict.merged", "recon.done", "implement.done", "implement.resumed", "implement.continued", "implement.preopen_continued", "pr.opened", "correction.provenance",
+  // gatherRuns' pr_url fallback.
+  "report.followups", "pr.head_provider", "dispatch.blocked_independent", "automerge.armed", "automerge.arm_skipped",
+  "automerge.arm_failed", "automerge.clean_status_direct_merge", "review.posted", "review.pending_posted",
+  "review.semantic_setup_refused", "review.semantic_incomplete", "review.replay_input",
+  "review.unwired_advisory", "review.post_refused", "review.stood_down", "acceptance.repaired", "trailer_stamp.failed",
+];
 
 /** Reduce ledger lines into per-run summaries, keyed by run_id (deterministic). */
 export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
@@ -5234,7 +5247,12 @@ export interface RetroPublicationEscalationCtx {
   repo: string;
   ledgerPath: string;
   runId: string;
+  /** Absent: the real `gh` gateway for `owner/repo`, as every other run-task.ts escalation builds it. Before this
+   *  default the only production caller passed none, so `tryEscalate` read `listOpen` off `undefined` and every
+   *  retro publication escalation landed as `escalation.failed` with `delivered: false`. */
   issues?: Parameters<typeof tryEscalate>[1]["issues"];
+  /** The raw `gh` stand-in for that default gateway (`ghIssueGateway`'s own `opts.exec`); tests only. */
+  ghExec?: (args: string[]) => string;
   episodeMs?: number;
   strikeCap?: number;
   nowMs?: number;
@@ -5333,7 +5351,8 @@ export function escalateRetroPublicationFailure(
       ],
       recommendation: "fix the failing suite",
     },
-    { issues: ctx.issues ?? undefined, ledgerPath: ctx.ledgerPath, runId: ctx.runId } as Parameters<typeof tryEscalate>[1],
+    { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo, ctx.ghExec ? { exec: ctx.ghExec } : {}),
+      ledgerPath: ctx.ledgerPath, runId: ctx.runId } as Parameters<typeof tryEscalate>[1],
   );
   appendLedger(ctx.ledgerPath, {
     run_id: ctx.runId,

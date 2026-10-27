@@ -21,7 +21,7 @@ import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { isTestRunner } from "./live-write-guard.js";
 import { boardRefreshRollup, type BoardSnapshotCache } from "./board-snapshot-cache.js";
-import type { ChangedFilesCache } from "./changed-files-cache.js";
+import type { ChangedFileEvidence, ChangedFilesCache } from "./changed-files-cache.js";
 import type { WorkerState } from "./worker.js";
 import {
   type BoardIssueRest,
@@ -294,6 +294,8 @@ export interface GitHub {
    *  (W1-T413). `undefined` MEANS UNAVAILABLE AND KEEPS TODAY'S ANSWER, never "no files": an absent head cannot
    *  be evidence FOR a credit, whereas WITHDRAWING one would re-dispatch finished work. */
   changedFiles?(prUrl: string): string[] | undefined;
+  /** Qualified merged-head evidence, or named unknown; this read never schedules GitHub work. */
+  changedFileEvidence?(prUrl: string): ChangedFileEvidence;
   /** Is auto-merge already armed on this PR? OPTIONAL (W1-T155); omitted ⇒ fail-soft "not armed". */
   autoMergeArmed?(prUrl: string): boolean;
   /** OPTIONAL (W1-T154): force this gateway's fetch NOW rather than lazily, so serve boot never pays a cold
@@ -5715,7 +5717,10 @@ export function buildBatchedGithub(
       // files at any page size, so this cannot ride the one fetch the way body, head ref and title do. It is
       // O(1) per PR that reaches the refusal, MEMOISED for the gateway's lifetime, and pre-filtered by the free
       // own-run-branch test.
-      if (opts.changedFilesCache) return opts.changedFilesCache.lookup(prUrl, cache?.byUrl.get(prUrl)?.state);
+      if (opts.changedFilesCache) {
+        const row = cache?.byUrl.get(prUrl);
+        return opts.changedFilesCache.lookup(prUrl, row?.state, row?.headRefOid);
+      }
       const cached = changedFilesByUrl.get(prUrl);
       if (cached !== undefined) return cached ?? undefined;
       const number = prUrl.match(/\/pull\/(\d+)/)?.[1];
@@ -5732,6 +5737,10 @@ export function buildBatchedGithub(
       // projection — the exact multiplication this method exists to avoid.
       changedFilesByUrl.set(prUrl, paths ?? null);
       return paths;
+    },
+    changedFileEvidence(prUrl) {
+      const row = index().byUrl.get(prUrl);
+      return opts.changedFilesCache?.evidence?.(prUrl, row?.state, row?.headRefOid) ?? { status: "unknown", reason: "qualified_cache_unavailable" };
     },
     autoMergeArmed(prUrl) {
       return index().byUrl.get(prUrl)?.autoMergeRequest != null;

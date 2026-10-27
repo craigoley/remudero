@@ -215,6 +215,123 @@ export interface components {
       required_tier?: "middle";
       required_sensitivity?: "sensitive";
     };
+    /** At most 4096 raw request bytes. action adopt requires the exact provider repositoryId and never creates; action create must not carry repositoryId. owner and name must match the product's requestedRepository when it has one. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
+    ProductRepositoryCommand: {
+      version: "product-repository-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      action: "adopt" | "create";
+      owner: string;
+      name: string;
+      visibility: "public" | "private";
+      repositoryId?: number;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+    };
+    ProductRepositoryReceipt: {
+      operationId: string;
+      productId: ProductId;
+      action: "adopt" | "create";
+      outcome: "adopted" | "created";
+      repository: ProductRepositoryIdentity;
+      completedAt: string;
+      objectiveRevision: number;
+      payloadDigest: string;
+    };
+    ProductRepositoryResponse: {
+      version: "product-repository-v1";
+      receipt: ProductRepositoryReceipt;
+      replayed: boolean;
+    };
+    ProductRepositoryError: {
+      version: "product-repository-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "repository_not_found" | "repository_conflict" | "idempotency_conflict" | "creation_denied" | "capacity" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "request_too_large" | "stale_revision" | "recovery_required";
+    };
+    /** The service's scope, tier or confirmation gate refused access before the repository handler. */
+    ProductRepositoryAccessError: {
+      error: "unauthorized" | "forbidden" | "confirm_nonce_required";
+      required_scope?: "write";
+      required_tier?: "high";
+    };
+    /** A server observation of the exact repository a create or adopt would act on, taken at observedAt. It is informational: it writes nothing and authorizes nothing, and the mutation rechecks every prerequisite itself. state ready means the exact adoption target exists, or the creation target is absent and the owner namespace allows creation. absent, conflict, stale, denied and unavailable are never ready; reasons name why. creation reports the provider's answer for the owner namespace and is not_checked when the repository read did not succeed or a product-level state decided first. */
+    ProductRepositoryPreview: {
+      version: "product-repository-preview-v1";
+      productId: ProductId;
+      revision: number;
+      objectiveRevision: number;
+      action: "adopt" | "create";
+      target: {
+        owner: string;
+        name: string;
+      };
+      state: "ready" | "absent" | "conflict" | "stale" | "denied" | "unavailable";
+      reasons: ("stale_revision" | "requested_repository_mismatch" | "product_already_bound" | "bound_repository_mismatch" | "repository_exists" | "repository_absent" | "provider_unreadable" | "creation_denied" | "creation_unknown")[];
+      repository: ({
+        provider: "github";
+        id: number;
+        owner: string;
+        name: string;
+        defaultBranch: string;
+        visibility: "public" | "private" | "internal";
+      }) | (null);
+      creation: "user" | "org" | "denied" | "unknown" | "not_checked";
+      observedAt: string;
+    };
+    ProductDeploymentRepository: {
+      id: number;
+      owner: string;
+      name: string;
+    };
+    /** At most 4096 raw request bytes. action adopt requires the exact provider projectId and never creates; action create must not carry projectId. repository must be the GitHub repository the product is verified to be bound to, and teamId the server-configured Vercel team. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. Credentials are server-held and never accepted here. */
+    ProductDeploymentCommand: {
+      version: "product-deployment-v1";
+      requestId: ProductRequestId;
+      productId: ProductId;
+      action: "adopt" | "create";
+      teamId: string;
+      projectName: string;
+      projectId?: string;
+      repository: ProductDeploymentRepository;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+    };
+    ProductDeploymentProject: {
+      provider: "vercel";
+      id: string;
+      name: string;
+      teamId: string;
+      repository: ProductDeploymentRepository;
+      verifiedAt: string;
+    };
+    /** Binding a project proves none of these; each stays its own independent evidence field. */
+    ProductDeploymentEvidence: {
+      sourceSha: null;
+      deployment: "none";
+      servedRoute: "unverified";
+      physicalDevice: "unverified";
+    };
+    ProductDeploymentReceipt: {
+      operationId: string;
+      productId: ProductId;
+      action: "adopt" | "create";
+      outcome: "adopted" | "created";
+      project: ProductDeploymentProject;
+      deployed: false;
+      playable: false;
+      evidence: ProductDeploymentEvidence;
+      completedAt: string;
+      objectiveRevision: number;
+      payloadDigest: string;
+    };
+    ProductDeploymentResponse: {
+      version: "product-deployment-v1";
+      receipt: ProductDeploymentReceipt;
+      replayed: boolean;
+    };
+    ProductDeploymentError: {
+      version: "product-deployment-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "project_not_found" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_conflict" | "idempotency_conflict" | "stale_revision" | "capacity" | "creation_denied" | "not_configured" | "busy" | "corrupt" | "unavailable" | "provider_unreadable" | "outcome_unknown" | "recovery_required" | "request_too_large";
+    };
     /** Bounded read-only answer-v1; missing evidence is explicit and citations are dated. */
     OperatorAgentAnswer: {
       version: "answer-v1";
@@ -2889,7 +3006,7 @@ export interface components {
       queueMs: number | null;
       executionMs: number | null;
       exit: number | null;
-      reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | "memory-budget-shortfall" | null | null;
+      reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | "memory-budget-shortfall" | "admission-rank" | null | null;
       attempts: number;
       completions: number;
       failures: number;
@@ -6102,6 +6219,46 @@ export interface paths {
           "409": ProductError;
           "413": ProductError;
           "503": ProductError;
+        };
+    };
+  };
+  "/v1/products/repository": {
+    post: {
+      responses: {
+          "200": ProductRepositoryResponse;
+          "400": ProductRepositoryError;
+          "401": ProductRepositoryAccessError;
+          "403": (ProductRepositoryError) | (ProductRepositoryAccessError);
+          "404": ProductRepositoryError;
+          "409": ProductRepositoryError;
+          "413": ProductRepositoryError;
+          "503": ProductRepositoryError;
+        };
+    };
+  };
+  "/v1/products/repository-preview": {
+    get: {
+      responses: {
+          "200": ProductRepositoryPreview;
+          "400": ProductRepositoryError;
+          "401": ProductAccessError;
+          "403": (ProductRepositoryError) | (ProductAccessError);
+          "404": ProductRepositoryError;
+          "503": ProductRepositoryError;
+        };
+    };
+  };
+  "/v1/products/deployment": {
+    post: {
+      responses: {
+          "200": ProductDeploymentResponse;
+          "400": ProductDeploymentError;
+          "401": ProductAccessError;
+          "403": (ProductDeploymentError) | (ProductAccessError);
+          "404": ProductDeploymentError;
+          "409": ProductDeploymentError;
+          "413": ProductDeploymentError;
+          "503": ProductDeploymentError;
         };
     };
   };
