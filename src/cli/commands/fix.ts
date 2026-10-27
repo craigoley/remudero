@@ -3416,16 +3416,6 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       let prerequisitePr = priorPrerequisitePrFor(ledgerLines, opts.prUrl);
 
       if (prerequisitePr === undefined) {
-        const priorNoPr = ledgerLines.findLast(row => row.step === "fix.prerequisite_dispatch_failed" &&
-          row.task_id === opts.taskId && row.repair_pr_url === opts.prUrl && row.prerequisite_outcome === "completed-no-pr" &&
-          typeof row.read_contract_revision === "string" &&
-          fixRungInputsUnchanged(row, { headSha: review.headSha, contractRevision: currentContractRevision, bodySha256: opts.prBodySha256 }) &&
-          !(typeof row.read_task_semantic_revision === "string" && currentSemanticRevision !== undefined &&
-            row.read_task_semantic_revision !== currentSemanticRevision));
-        if (priorNoPr) {
-          deps.say("fix rung: the completed prerequisite attempt opened no PR; unchanged repair inputs retain its operator escalation");
-          return await escalateAndExhaust();
-        }
         deps.say(
           `fix rung: instrument path(s) ${instrumentList} entangled with src/ path(s) ${srcList} — dispatching ` +
             `a worker to open the prerequisite PR (never escalating straight to an issue): ${opts.prUrl}`,
