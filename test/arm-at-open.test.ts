@@ -1162,7 +1162,11 @@ function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: strin
   return fakeBinDir;
 }
 
-for (const mode of ["live", "shadow"] as const) test(`W1-T975: a ${mode} run records its verdict and ${mode === "live" ? "arms" : "does not arm"} auto-merge`, async (t) => {
+const armVerdictCases = [
+  { mode: "live", title: "W1-T975: a live run records its verdict and arms auto-merge using only its run-owned hold ledger" },
+  { mode: "shadow", title: "W1-T975: a shadow run records its verdict and does not arm auto-merge" },
+] as const;
+for (const { mode, title } of armVerdictCases) test(title, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "arm-verdict-merged-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
