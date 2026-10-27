@@ -1,0 +1,34 @@
+id: incident-f4e49ffcf4202d6f
+ts: 2026-10-26T22:04:03.162Z
+raw: >-
+  Incident f4e49ffcf420: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: armed, checks green and review success, but mergeable_state is blocked
+  by a CHANGES_REQUESTED review from cao825 (review <sha>, at this head) — no
+  re-arm, branch refresh or repair can clear a person's hold; it needs that
+  reviewer's re-review (or the review dismissed), so escalating instead of
+  waiting silently
+
+  First seen: 2026-10-26T22:03:33.076Z
+
+  Last seen: 2026-10-26T22:03:33.076Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=14543 escalated: already escalated (reason unreadable: no escalation of this PR at head 823f3fa is in the ledger); this pass: armed, checks green and review success, but mergeable_state is blocked by a CHANGES_REQUESTED review from cao825 (review 5658329545, at this head) — no re-arm, branch refresh or repair can clear a person's hold; it needs that reviewer's re-review (or the review dismissed), so escalating instead of waiting silently
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#f4e49ffcf4202d6ff99e105f94791e9087376f33b52f3440ef9a62353abeb57f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -2890,7 +2890,7 @@ export interface components {
       queueMs: number | null;
       executionMs: number | null;
       exit: number | null;
-      reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | "memory-budget-shortfall" | null | null;
+      reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | "memory-budget-shortfall" | "admission-rank" | null | null;
       attempts: number;
       completions: number;
       failures: number;
