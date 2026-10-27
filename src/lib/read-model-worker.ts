@@ -1401,9 +1401,9 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const demandSwept = new Set<ViewUnit>();
 
   function demandKeyBelongsTo(unit: ViewUnit, key: string): boolean {
-    if (!unit.slot) return true;
     const instances = new URLSearchParams(key).getAll("instance");
-    return instances.length === 1 && instances[0] === unit.slot.instance.name;
+    if (unit.slot) return instances.length === 1 && instances[0] === unit.slot.instance.name;
+    return instances.length === 0 || (instances.length === 1 && slots.some(slot => slot.instance.name === instances[0]));
   }
 
   /**
