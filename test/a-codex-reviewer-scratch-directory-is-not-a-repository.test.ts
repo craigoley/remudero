@@ -51,7 +51,9 @@ async function captureSpawn(
           stdout.write(`${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "review complete" } })}\n`);
           stdout.write(`${JSON.stringify({ type: "turn.completed", usage: {} })}\n`);
           stdout.end();
-          queueMicrotask(() => child.emit("exit", 0));
+          // `exit` only after the stdout 'data' events have landed (a macrotask later): a microtask would end the
+          // worker before the stream flowed, and the result text would be empty.
+          setImmediate(() => child.emit("exit", 0));
           return { process: child as never, pid: 31_274 };
         },
         teardown: () => {},
