@@ -284,6 +284,7 @@ export async function captureGardenerSpendSource(stateDir: string, clock: Clock 
     Date.parse(runtime.configuredAt) > Date.parse(observedAt) || Date.parse(runtime.observedAt) > Date.parse(observedAt)) {
     return { reason: "invalid_registry" };
   }
+  const cutoff = Date.parse(observedAt);
   const costs = costAccumulator(runtime, observedAt);
   const calls = callAccumulator(runtime, observedAt);
   const seen = new Set<string>();
@@ -295,8 +296,16 @@ export async function captureGardenerSpendSource(stateDir: string, clock: Clock 
     onUnreadDirectory: () => { complete = false; },
     onMalformedRow: () => { complete = false; }, onLiveRead: () => { liveObserved = true; },
     onAcceptedRecord: (row, raw) => {
-      if (row.step === "worker.assignment" || row.step === "worker.attempt") calls.add(row, raw);
+      const callRow = row.step === "worker.assignment" || row.step === "worker.attempt";
       const parent = row.step === "garden.lifecycle" || row.step === "garden.pass";
+      if (!callRow && !parent && spendRoleOf(row) !== "produced") return;
+      // The declared window is fixed at its cutoff. An ordinary row appended after it but no later
+      // than this separately observed read clock belongs to a LATER window: it contributes neither
+      // money nor call coverage and cannot invalidate the earlier one. A stamp beyond the read
+      // clock is a genuinely future record and falls through to the existing refusals.
+      const stamp = Date.parse(String(row.ts));
+      if (stamp > cutoff && stamp <= clock.now()) return;
+      if (callRow) calls.add(row, raw);
       if (!parent && spendRoleOf(row) !== "produced") return;
       const identity = fingerprintLedgerLine(raw);
       if (seen.has(identity) || overflow) return;

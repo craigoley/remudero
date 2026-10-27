@@ -4803,15 +4803,17 @@ export function branchPrTitle(worktreePath: string, task?: { id: string; title?:
   return runTaskCommandHelpers(runTaskCommandHost()).branchPrTitle(worktreePath, task);
 }
 
-/** Where {@link restoreBoundaryCheckpoint} left a fresh run's branch: on current main, or on the checkpoint's
- *  own base when main conflicts with it (naming those paths, or why the merge could not be read). */
+/** Where {@link restoreBoundaryCheckpoint} left a fresh run's branch: on current main, or on the checkpoint with main's
+ *  conflicting merge open (`reconciled: "merge"`, naming those paths, or why the merge could not be read). */
 
 /**
  * A restart checkpoint is RESTORED BY MERGE, never replayed: the fresh branch becomes the checkpoint's
  * head with current main merged in (the checkpoint is the first parent, so its commits keep their shas).
- * When main conflicts, the branch stays on the checkpoint's own base and the run goes on; the conflict
- * reaches the PR, whose merge-conflict repair rounds resolve it. Why: a cherry-pick onto a moved main
- * conflicted and ended W1-T7806 and W1-T7766 `restart_checkpoint_restore_failed`, stranding paid work.
+ * When main conflicts, main is merged for real (`--no-commit`) and the conflict stays in the worktree for the worker
+ * to resolve (W1-T10752); the run never resumes on the checkpoint's own stale base. A checkpoint whose changes main
+ * already carries (tree-equal, blobs-equal, or this task credited on a later main commit) is dropped as superseded and
+ * the run starts from main. Why: a cherry-pick onto a moved main conflicted and ended W1-T7806 and W1-T7766
+ * `restart_checkpoint_restore_failed`, stranding paid work, and a stale base later failed CONSOLE-T127's PR open.
  * An absent head is recovered or dropped; a moved head still refuses replay of someone else's work.
  */
 export async function restoreBoundaryCheckpoint(
