@@ -9,7 +9,7 @@
   budget_usd: 3.00
   risk: high
   band_meaning: span
-  origin: "feedback#console-gardener-cutoff-race-20261027; actual observation landing #14834"
+  origin: "console-followup:gardener-cutoff-race-20261027; feedback#console-gardener-cutoff-race-20261027; observation #14834"
   plan_refs: [W1-T9658, W1-T10287, W1-T10461]
   files: [src/lib/gardener-spend.ts, test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts, test/many-gardener-receipts-fit-a-bounded-cost-summary.test.ts]
   status: queued
@@ -26,7 +26,7 @@
     of every live stale snapshot, invoice completeness, a new provider charge or zero spend.
     The normal triage run1793112147180 ended after three configured relint attempts at Law5 because its
     draft used verify:auto without a risk ruling. It opened no PR. This operator-reserved machine proposal
-    instead preserves verify:human; only an actual operator or ratified native judge may release it.
+    begins at verify:human; only an actual operator or ratified native judge may release it.
     The fresh22-open-head audit read every immutable head, had198gardener subject controls and no collector
     source overlap. The only subsequently adopted main delta was our unrelated W1-T6012 plan amendment.
   design: |
@@ -51,7 +51,7 @@
     No provider, permissions, spending setting, action capability, service/restart/deployment, CI or
     Azure-memory policy change is part of this task. The original117/9 Inbox identities and captured
     original reply remain separate; do not replay or close them through this technical finding.
-    This filing records no risk verdict and grants no implementation release.
+    Any release requires an actual recorded native ruling and all normal implementation gates.
   acceptance:
     - claim: "The default physical capture retains complete earlier priced money and exact joined calls when ordinary valid post-cutoff parent, price, assignment and attempt rows arrive; those later rows contribute neither money nor call coverage to the fixed earlier window"
       proof: "unit test: a gardener capture keeps its fixed window when ordinary later rows arrive"
