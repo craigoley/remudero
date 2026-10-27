@@ -19,7 +19,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:net";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 
@@ -408,7 +408,9 @@ describe("W1-T6148: the codex lane has no gitdir grant and the harness commits f
     // config.root spans the seed and the tree, so the old grant (limited to config.root) would have fired.
     const { args } = await runCodex(wt, codexChild(() => {}, "nothing"), {}, realpathSync(tmpdir()));
     assert.equal(args[args.indexOf("--sandbox") + 1], "workspace-write");
-    assert.deepEqual(args.flatMap((a, i) => (a === "--add-dir" ? [args[i + 1]] : [])), [], "no writable git administrative root");
+    // The one grant a writer keeps is its private addon namespace (never a git administrative root).
+    const nativeCache = join(realpathSync(homedir()), ".cache", "remudero", "swc-native");
+    assert.deepEqual(args.flatMap((a, i) => (a === "--add-dir" ? [args[i + 1]] : [])), [nativeCache], "no writable git administrative root");
   });
 
   it("the edits a codex writer leaves are committed through the leaf under its COMMIT_MESSAGE, end to end", async () => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
@@ -94,7 +94,12 @@ test("W1-T2946: disposable reviews get private test writes without widening othe
     const implementation = await captureCodexSpawn(root, ["Read", "Write", "Edit", "Bash"], undefined, [dependencyRoot]);
     assert.equal(implementation.options.args[implementation.options.args.indexOf("--sandbox") + 1], "workspace-write");
     assert.equal(implementation.options.args.includes("sandbox_workspace_write.network_access=true"), true);
-    assert.equal(implementation.options.args.includes("--add-dir"), false, "W1-T6148: implementation workers get no Git metadata grant");
+    const nativeCache = join(realpathSync(homedir()), ".cache", "remudero", "swc-native");
+    assert.deepEqual(
+      implementation.options.args.flatMap((arg, index, all) => (arg === "--add-dir" ? [all[index + 1]] : [])),
+      [nativeCache],
+      "W1-T6148: implementation workers get no Git metadata grant, only their private native cache",
+    );
     assert.equal(implementation.options.args.some((arg) => arg.includes(realpathSync(dependencyRoot))), false);
   } finally {
     rmSync(root, { recursive: true, force: true });

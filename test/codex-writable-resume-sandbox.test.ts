@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { spawnCodexWorker } from "../src/lib/worker-provider.js";
 import type { ContainedSpawnOptions } from "../src/lib/worker-containment.js";
+
+/** The one `--add-dir` a Codex writer keeps: its private addon namespace, never a git administrative root. */
+function nativeCacheRoot(): string {
+  return join(realpathSync(homedir()), ".cache", "remudero", "swc-native");
+}
 
 function config(root: string) {
   return {
@@ -94,7 +99,7 @@ test("W1-T3792: writable Codex resume keeps fresh containment roots", async () =
     const cwdIndex = args.indexOf("-C");
     const writableRoots = args.flatMap((arg, index) => arg === "--add-dir" ? [args[index + 1]] : []);
     assert.equal(args[cwdIndex + 1], worktree, "the fresh invocation keeps the requested worktree cwd");
-    assert.deepEqual(writableRoots, [], "W1-T6148: no git administrative root is writable; the harness commits");
+    assert.deepEqual(writableRoots, [nativeCacheRoot()], "W1-T6148: no git administrative root is writable; the harness commits");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -111,7 +116,11 @@ test("W1-T3792: Codex resume preserves read-only and non-repository boundaries",
     const writer = await captureArgs(root, nonRepository, ["Read", "Write", "Edit", "Bash"], "failed-fix-session");
     assert.equal(writer.includes("resume"), false, "the fresh writer path still owns a write-capable continuation");
     assert.equal(writer.includes("--skip-git-repo-check"), false, "a writer outside Git receives no trust bypass");
-    assert.equal(writer.includes("--add-dir"), false, "an unproven repository layout earns no writable root");
+    assert.deepEqual(
+      writer.flatMap((arg, index) => (arg === "--add-dir" ? [writer[index + 1]] : [])),
+      [nativeCacheRoot()],
+      "an unproven repository layout earns no writable root beyond the private native cache",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
