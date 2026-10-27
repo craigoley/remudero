@@ -294,9 +294,11 @@ test("W1-T5617: every admitted suite is run by census-precheck under its own npm
 
 
 test("a census process exit is unmeasured rather than an attributable assertion failure", () => {
-  const wrapper = TAP_HEAD + `# Subtest: ${BOUNDS.testFile}\nnot ok 1 - ${BOUNDS.testFile}\n  ---\n  location: '/repo/${BOUNDS.testFile}:1:1'\n  failureType: 'testCodeFailure'\n  exitCode: 1\n  signal: ~\n  error: 'test failed'\n  code: 'ERR_TEST_FAILURE'\n  ...\n` + tapSummary(1, 1);
-  assert.throws(() => viaChild({ status: 1, stdout: wrapper }, [BOUNDS.testFile]).failing(),
-    /census suite process.*did not complete its assertions/);
+  for (const processResult of ["exitCode: 1\n  signal: ~", "exitCode: ~\n  signal: 'SIGTERM'", "exitCode: ~\n  signal: 'SIGKILL'"]) {
+    const wrapper = TAP_HEAD + `# Subtest: ${BOUNDS.testFile}\nnot ok 1 - ${BOUNDS.testFile}\n  ---\n  location: '/repo/${BOUNDS.testFile}:1:1'\n  failureType: 'testCodeFailure'\n  ${processResult}\n  error: 'test failed'\n  code: 'ERR_TEST_FAILURE'\n  ...\n` + tapSummary(1, 1);
+    assert.throws(() => viaChild({ status: 1, stdout: wrapper }, [BOUNDS.testFile]).failing(),
+      /census suite process.*did not complete its assertions/, processResult);
+  }
   const assertion = TAP_HEAD + notOk(1, "the population rejects an invalid member", `/repo/${BOUNDS.testFile}`) + tapSummary(1, 1);
   assert.deepEqual(viaChild({ status: 1, stdout: assertion }, [BOUNDS.testFile]).failing(), [BOUNDS.testFile],
     "a genuine completed assertion failure remains attributable and refuses a caused regression");
