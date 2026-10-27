@@ -805,12 +805,22 @@ export async function saveBuildScopeRecovery(input: {
     if (data === null) throw new Error(`companion is missing: ${path}`);
     return { path, bytes: data, mode: mode & 0o111 ? 0o755 : 0o644 };
   });
-  const data: BuildScopeRecovery = { version: 1, taskId, branch, amendmentUrl, headSha, companions,
-    patch: git(["diff", "--binary", `${headSha}^`, headSha]),
-    committedPaths: git(["diff", "--name-only", "-z", `${headSha}^`, headSha]).split("\0").filter(Boolean) };
-  const digest = recoveryDigest(data);
   const directory = join(input.root, "state", "recovery", "build-scope", taskId);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const capture = join(directory, `.patch-${randomUUID()}`);
+  let created = false;
+  let patch: string;
+  try {
+    writeFileSync(capture, "", { flag: "wx", mode: 0o600 });
+    created = true;
+    git(["diff", "--binary", `${headSha}^`, headSha, `--output=${capture}`]);
+    patch = readFileSync(capture, "utf8");
+  } finally {
+    if (created) rmSync(capture, { force: true });
+  }
+  const data: BuildScopeRecovery = { version: 1, taskId, branch, amendmentUrl, headSha, companions, patch,
+    committedPaths: git(["diff", "--name-only", "-z", `${headSha}^`, headSha]).split("\0").filter(Boolean) };
+  const digest = recoveryDigest(data);
   const path = join(directory, `${digest}.json`);
   writeFileSync(path, JSON.stringify({ data, digest }), { mode: 0o600 });
   const saved = readBuildScopeRecovery(path, taskId);

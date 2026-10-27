@@ -3826,13 +3826,31 @@ async function resumeForMissingCommitLine(
 function requiredCompanions(
   sha: string,
   leftOut: readonly string[],
-  git: (args: string[]) => string,
+  git: (args: string[], options?: Pick<HostWorktreeGitOptions, "maxBuffer">) => string,
 ): RequiredCompanion[] {
   if (leftOut.length === 0) return [];
   const paths = (args: string[]) => git(args).split("\0").filter(Boolean);
   const committed = paths(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--diff-filter=d", sha])
     .filter((path) => /\.(?:ts|mts|mjs|js|cjs)$/.test(path));
-  const files = new Map(committed.map((path) => [path, git(["show", `${sha}:${path}`])]));
+  const readSource = (path: string): string => {
+    const object = `${sha}:${path}`;
+    try { return git(["show", object]); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOBUFS") throw error;
+      // The immutable blob supplies its exact byte budget; metadata and all other Git reads keep their existing limits.
+      const raw = git(["cat-file", "-s", object]).trim();
+      const bytes = Number(raw);
+      if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(bytes)) {
+        throw new Error(`required companion source ${object} has an unreadable blob size`);
+      }
+      const source = git(["show", object], { maxBuffer: bytes });
+      if (Buffer.byteLength(source, "utf8") !== bytes) {
+        throw new Error(`required companion source ${object} does not match its immutable blob size`);
+      }
+      return source;
+    }
+  };
+  const files = new Map(committed.map((path) => [path, readSource(path)]));
   const { directImports } = buildAffectedSuitesGraph(files, [...paths(["ls-tree", "-r", "--name-only", "-z", sha]), ...leftOut]);
   const left = new Set(leftOut);
   const importers = new Map<string, string[]>();
@@ -3856,7 +3874,7 @@ async function askScopeForLeftOutImports(input: {
   taskId: string;
   branch: string;
   commit: { sha: string; undeclared: readonly string[] } | undefined;
-  git: (args: string[]) => string;
+  git: (args: string[], options?: Pick<HostWorktreeGitOptions, "maxBuffer">) => string;
   amend: (request: ScopeAmendmentRequest) => ScopeAmendmentOutcome | Promise<ScopeAmendmentOutcome>;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }): Promise<{ companions: RequiredCompanion[]; amendment: ScopeAmendmentOutcome } | undefined> {
@@ -7053,7 +7071,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
     // W1-T10026: a commit whose own files import a path it left out never opens bare; it asks for that scope.
     const scopeNeeded = await askScopeForLeftOutImports({
-      taskId, branch, commit: harnessCommitted, log, git: (args) => hostWorktreeGit(worktreePath, args),
+      taskId, branch, commit: harnessCommitted, log, git: (args, options) => hostWorktreeGit(worktreePath, args, options),
       amend: opts.implementScopeAmendment ?? ((request) => requestScopeAmendment(request, buildProofAmendmentWritePorts({
         taskId, worktreePath: repoDir, config, owner, repo: task.repo, prNumber: request.prNumber, ledgerLinesNow: [], log,
         gitOps: buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
