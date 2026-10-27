@@ -18,12 +18,12 @@ function cashResult(model: string, over: Partial<WorkerResult> = {}): WorkerResu
 }
 
 /** A Sonnet attempt that billed one request, then was refused by the named limit on the next. */
-function billedThenRefused(model: string, limit: "fleet" | "foundry-claude"): WorkerResult {
+function billedThenRefused(model: string, limit: "fleet" | "foundry-claude", billed = true): WorkerResult {
   return cashResult(model, { isError: true, subtype: "cash_allowance_exhausted", budgetRefused: true,
-    budgetReservedUsd: 0.4, budgetSettledUsd: 0.05, costUsd: 0.05, cashAllowanceLimit: limit });
+    budgetReservedUsd: 0.4, budgetSettledUsd: billed ? 0.05 : 0, costUsd: billed ? 0.05 : 0, cashAllowanceLimit: limit });
 }
 
-async function drive(limit: "fleet" | "foundry-claude") {
+async function drive(limit: "fleet" | "foundry-claude", billed = true) {
   const root = mkdtempSync(join(tmpdir(), "rmd-foundry-cap-luna-"));
   const settingsFile = join(root, "settings.json");
   writeFileSync(settingsFile, JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true,
@@ -40,7 +40,7 @@ async function drive(limit: "fleet" | "foundry-claude") {
       onModelFallbackAttempt: (attempt) => { attempts.push(attempt.reason); },
       providerRouting: { spawnOpenWeight: async (_args: SpawnWorkerArgs, _config: Config, selection: { model: string }) => {
         models.push(selection.model);
-        return models.length === 1 ? billedThenRefused(selection.model, limit) : cashResult(selection.model);
+        return models.length === 1 ? billedThenRefused(selection.model, limit, billed) : cashResult(selection.model);
       } },
     } as SpawnWorkerArgs);
     return { returned, models, attempts };
@@ -63,6 +63,12 @@ test("W1-T10384: a fleet cap refusal does not re-enter cash", async () => {
   assert.equal(returned.isError, true);
   assert.equal(returned.cashAllowanceLimit, "fleet");
   assert.deepEqual(attempts, []);
+  // An unbilled fleet refusal (nothing settled) is the arm the legacy zero-spend rule would have re-entered.
+  const unbilled = await drive("fleet", false);
+  assert.deepEqual(unbilled.models, ["claude-sonnet-5-5"], "an unbilled fleet refusal does not re-enter either");
+  assert.equal(unbilled.returned.isError, true);
+  assert.equal(unbilled.returned.cashAllowanceLimit, "fleet");
+  assert.deepEqual(unbilled.attempts, []);
   // The real reservation tags a fleet refusal as such: other-deployment spend fills the fleet cap, Foundry's own is empty.
   const root = mkdtempSync(join(tmpdir(), "rmd-foundry-cap-fleet-"));
   try {

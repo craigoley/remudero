@@ -2408,6 +2408,7 @@ function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
   // W1-T10384: the Foundry Claude sub-cap binds below the fleet cap, so Luna still has room even
   // after earlier requests billed (already settled, never charged again). A fleet refusal has none.
   if (result.budgetRefused === true && result.cashAllowanceLimit === "foundry-claude") return true;
+  if (result.budgetRefused === true && result.cashAllowanceLimit === "fleet") return false;
   if ((result.budgetSettledUsd ?? 0) > 0) return false;
   return result.budgetRefused === true || result.openWeightDeploymentAbsent !== undefined ||
     (result.budgetReservedUsd ?? 0) === 0;
