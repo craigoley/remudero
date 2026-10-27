@@ -119,6 +119,7 @@ test("W1-T9549: a review status post and lifecycle read await gh with sync spawn
     assert.equal(value.lifecycle.baseRef, "main");
     assert.equal(typeof value.lifecycle.reviewInputDigest, "string", "the same fold keeps the head+body identity");
     assert.equal(value.token.trim(), "t9549-reviewer-token", "the poster's own env (the reviewer token) reaches the gh child");
+    await assert.rejects(fetchPrLifecycleAsync("not-a-pr-url"), /cannot resolve owner\/repo\/number/, "an unparseable PR url is refused, never guessed");
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(shim.dir, { recursive: true, force: true });

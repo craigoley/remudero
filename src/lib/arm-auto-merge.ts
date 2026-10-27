@@ -2210,8 +2210,8 @@ function logVerdictArmResult(ctx: VerdictArmCtx, decisionReason: string, result:
   return outcome;
 }
 
-/** The review arm for a hand-run `rmd review <pr>`, which is not on the daemon loop. The daemon's
- *  review awaits {@link armIfVerdictPermitsAsync}: the same gates, effector argv and ledger rows. */
+/** The synchronous review arm, for a caller that cannot await. `runReview` (the daemon's review and a
+ *  hand-run `rmd review <pr>` alike) awaits {@link armIfVerdictPermitsAsync}: the same gates and rows. */
 export function armIfVerdictPermits(
   verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
   ctx: VerdictArmCtx,
