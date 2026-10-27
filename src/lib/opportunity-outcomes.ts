@@ -72,7 +72,6 @@ export function reconcileImprovementEffects(source: ImprovementEffectSource, evi
     evaluatedAt: clock.iso(), measuredAt: null, observationWindow: null, observed: null,
     evidence: { baselineSnapshotId: source.snapshotId, afterSnapshotId: null, analyzedSha: null, mergePrUrls: [] }, causalClaim: false };
   const refuse = (reason: string) => Object.assign(result, { reason });
-  if ((evidence as ImprovementEffectEvidence & { savedState?: string }).savedState === "measured-helped") return { ...result, stage: "measured", verdict: "helped" };
   try {
     if (source.sourceVerified !== true) return refuse("The source saved with the original filing request cannot be verified.");
     if (!source.tasksFiled || !Array.isArray(source.taskIds) || !source.taskIds.length) return result;
