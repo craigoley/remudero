@@ -1,0 +1,76 @@
+- id: W1-T10875
+  title: "A LADDER REFUSAL IS COUNTED AS THE MODEL'S FAILURE — field-trials counts every unsuccessful worker.attempt against the model it names, so 1,627 pre-request refusals (all 1,004 cash gpt-6-luna failures) and ~400 infrastructure deaths would publish as model failures; one shared function classifies each outcome as success, model, pre-request-refusal, infrastructure or unknown, and every field-trials count uses only model-attributable outcomes"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # public data: a mis-attributed failure publishes a false per-model rate
+  band_meaning: blast-radius
+  origin: "operator ruling, Craig 2026-10-27: per-model guidance on the public field-trials page at disclosure level B (contract ~/Remudero-notes/field-trials/model-guidance-contract-v1.md: a cell's rate counts only MODEL-ATTRIBUTABLE outcomes); evidence from a read-only ledger census the same day"
+  plan_refs: [W1-T4574, W1-T10831, W1-T10833, W1-T10843, W1-T10877, W1-T10878]
+  files:
+    - src/lib/attempt-outcome-attribution.ts
+    - src/lib/field-trials-cohorts.ts
+    - test/routing/an-attempt-failure-is-attributed-before-it-counts-against-a-model.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-27, read-only, on the host ledger union 2026-09-27T18:00Z..2026-10-27T17:58Z (594 archives
+    plus the live file; positive control 36,856 worker.assignment and 36,635 worker.attempt rows read) at
+    origin/main aa90fdc44.
+    - 1,627 unsuccessful worker.attempt rows are PRE-REQUEST: 0 tokens, ~26 ms, $0, and served_model_reason
+      "no cash response was received, so none named the model that served it"
+      (CASH_SERVED_MODEL_REASONS.noResponse, src/lib/worker-provider.ts). All 1,004 cash gpt-6-luna
+      "failures" are of this kind: the ladder refused before any provider call. The census inferred this from
+      the row shape; the builder confirms it against the code path that writes these rows before relying on it.
+    - ~400 are INFRASTRUCTURE: orphaned by process exit (orphanedAttemptFields / ORPHANED_BY_PROCESS_EXIT in
+      src/lib/benchmark-run.ts), restart and recycle latches, SIGKILL, spawn-threw-before-assignment.
+    - MODEL-ATTRIBUTABLE signals seen: draft-contract (37, gpt-oss), "no assistant message" (37, Sonnet 5.5),
+      Codex stdout/stderr retention (40), the clock bound (9, Luna), served-model unnamed (146).
+    servedTrialCohorts (src/lib/field-trials-cohorts.ts) adds `!attempt.success` to workerFailed for every
+    unsuccessful attempt, so a published cash Luna row would read near 0% for failures the model never had a
+    chance to make. W1-T10831's field-note exporter and W1-T10878's guidance generator both read these counts.
+  design: |
+    1. ONE FUNCTION. New src/lib/attempt-outcome-attribution.ts exports attributeAttemptOutcome(row) over a
+       worker.attempt row, returning exactly one of "success", "model", "pre-request-refusal",
+       "infrastructure" or "unknown", plus the signal that decided it. Each class is decided from named fields
+       and named constants, never from free-text matching beyond the existing exported reason constants:
+       - success: `success === true`.
+       - pre-request-refusal: no provider invocation is observed (no response, zero observed tokens and cost,
+         or invocation not-started / admission-abandoned, or an allowance refusal) AND the failure names a
+         pre-request refusal (CASH_SERVED_MODEL_REASONS.noResponse, a capability refusal such as an unsupported
+         response format, a request too large for the window or the per-minute ceiling, or a subscription-only
+         refusal).
+       - infrastructure: worker_failure ORPHANED_BY_PROCESS_EXIT, a restart or recycle latch, a signal death,
+         or selection_assignment_unavailable_reason spawn-threw-before-assignment.
+       - model: the provider was invoked and the failure is the reply's (contract-dirty draft, no assistant
+         message, truncated reply, output retention, the clock bound, served model unnamed).
+       - unknown: none of the above can be decided. Per the doctrine catch-is-a-claim, unknown is a third value
+         the caller sees: it counts as neither success nor model failure and is reported with its count.
+    2. COHORTS. servedTrialCohorts counts workerFailed from "model" only, and adds per-class counters for
+       pre-request-refusal, infrastructure and unknown so nothing disappears from the totals.
+    3. CONSUMERS. W1-T10831's exporter and W1-T10878's generator call attributeAttemptOutcome; this task only
+       ships the function and the cohort change.
+  acceptance:
+    - claim: "a cash attempt that received no response and spent nothing is a pre-request refusal and never counts as a model failure"
+      proof: 'grep: test("W1-T10875: a cash ladder refusal with no response never counts as a model failure" in test/routing/an-attempt-failure-is-attributed-before-it-counts-against-a-model.test.ts'
+    - claim: "an attempt orphaned by process exit, ended by a signal or thrown before assignment is infrastructure"
+      proof: 'grep: test("W1-T10875: an orphaned or signal-ended attempt is infrastructure, not the model" in test/routing/an-attempt-failure-is-attributed-before-it-counts-against-a-model.test.ts'
+    - claim: "a provider-invoked contract, truncation or no-assistant-message failure is the model's"
+      proof: 'grep: test("W1-T10875: a provider-invoked contract or truncation failure is the model" in test/routing/an-attempt-failure-is-attributed-before-it-counts-against-a-model.test.ts'
+    - claim: "an attempt the signals cannot place is unknown, counted in neither success nor model failure, and reported"
+      proof: 'grep: test("W1-T10875: an attempt the signals cannot place is unknown and counted in neither" in test/routing/an-attempt-failure-is-attributed-before-it-counts-against-a-model.test.ts'
+    - claim: "the served-trial cohort counts worker failures through the shared attribution function"
+      proof: 'grep: attributeAttemptOutcome( in src/lib/field-trials-cohorts.ts'
+  falsifier: |
+    At base servedTrialCohorts counts every unsuccessful attempt as workerFailed, so the ladder-refusal case
+    fails.
+    - Count every non-success as "model": the ladder-refusal and infrastructure cases fail.
+    - Fold "unknown" into "model" or drop it: the unknown case fails on the reported count.
+    - Classify by matching free text instead of the exported reason constants: a reworded reason string in the
+      fixture flips the class and the case fails.
+    GUARD that held at base and must still hold: the servedTrialCohorts cases in test/field-trials-flow.test.ts
+    (assignment-to-attempt join, refusal reasons); each must still pass with the attribution change in place.

@@ -58,6 +58,7 @@ import {
   disarmAutoMerge,
   logArmAttribution,
   mergeDirectViaRestAsync,
+  assertOperatorMergeUnheld,
   readHeadShaRest as readArmHeadShaRest,
   readArmTimeline,
   readMergeQueueMembership,
@@ -2969,7 +2970,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
         mergeDirect: async (prUrl) => {
           assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
-          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha, selectedModeQualification);
+          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha, selectedModeQualification,
+            () => assertOperatorMergeUnheld(prUrl, { ledgerLines: () => readLedgerLines(ledgerPath), say: (message) => console.log(message) })); // ledger-read-intent: live
         },
       } : undefined;
       let attemptError: string | undefined;
@@ -17534,6 +17536,16 @@ export async function runSweep(
         /(?:MERGED|CLOSED)/.test(standDownReason ?? "")) return;
     const belongs = (row: Record<string, unknown>) => row.pr_number === pr.prNumber || row.pr_url === pr.prUrl ||
       (row.pr_number === undefined && row.pr_url === undefined && pr.taskId !== undefined && row.task_id === pr.taskId);
+    // A pass that works from an older open-PR view must not page anyone about a PR that has since merged or
+    // closed: #14898 merged at 18:28 and its stall issue opened at 19:06. A failed read reports as before. Read
+    // before the stage history below, so two overlapping passes still dedupe on the ledger without an await between.
+    let live: LiveStateResult | undefined;
+    try { live = await deps.readLiveState?.(pr); } catch { live = { ok: false }; } // a thrown read is an unread one: escalate as before
+    const terminal = live?.ok === true ? terminalStateReason(live.state) : undefined;
+    if (terminal !== undefined) {
+      record("pr.stuck.not_open", { blocker: fields.blocker, blocker_since: fields.blocker_since, reason: terminal });
+      return;
+    }
     const since = Date.parse(fields.blocker_since);
     let currentRows = ledgerLines;
     let stageHistoryError: string | undefined;
@@ -19040,7 +19052,7 @@ export async function runSweep(
         priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES);
     const blockerRow = {
       ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable,
-        blocker.startsWith("security-") ? securityText : policyCause),
+        blocker.startsWith("security-") ? securityText : policyCause, pr.headSha),
       ...(blockerReadFailure ? { blocker_read_error: blockerReadFailure.reason } : {}),
     };
     if (armOutcome !== "armed" && armOutcome !== "direct-merged" && !gardenRecordRefusals.has(pr.prNumber)) {
@@ -19467,7 +19479,7 @@ export async function runSweep(
       selectDispositionRule(dispositionView, policy, now, dispositionFacts).rule?.when === isFixStrikeJudgedExhausted;
     // W1-T5690: a blocked-ambiguous PR whose blocker is older than its SLO and still has an untaken
     // rung takes it, even when the strike rule did not match (owner NONE, awaiting-ci, conflict ...).
-    const sloBlocker = blockerFields(derived.blocker, priorBlockerByPr.get(pr.prNumber), now);
+    const sloBlocker = blockerFields(derived.blocker, priorBlockerByPr.get(pr.prNumber), now, false, undefined, pr.headSha);
     const sloContext: SloContext = {
       blocker: derived.blocker, owner: sloBlocker.blocker_owner, ageMs: sloBlocker.blocker_age_ms,
       noOp: derived.blocker === "strikes-exhausted" && pr.repeatedFixRefusal !== undefined,

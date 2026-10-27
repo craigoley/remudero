@@ -792,7 +792,8 @@ test("real tree: runReview forwards its own optional `arm` parameter straight in
   assert.ok(runReviewFn, "sanity: runReview is a function declaration in src/cli/commands/review.ts");
   assert.match(
     runReviewFn!.bodyText,
-    /armIfVerdictPermits\([^)]*\{\s*arm:\s*args\.arm\s*\}/s,
+    // W1-T9549: the daemon's review awaits the arm, so the call site is armIfVerdictPermitsAsync.
+    /armIfVerdictPermits(?:Async)?\([^)]*\{\s*arm:\s*args\.arm\s*\}/s,
     "runReview's own call site must forward { arm: args.arm } into armIfVerdictPermits — the exact shape rationale (1) quotes at its own line 4577/4580",
   );
 });

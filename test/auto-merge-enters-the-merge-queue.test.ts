@@ -9,6 +9,9 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type { Config } from "#src/lib/config.js";
 
 import {
   armFailureIsAlreadyQueued,
@@ -106,12 +109,15 @@ test("W1-T4405: auto-merge enqueues when a merge queue is configured", () => {
     {when:"api repos/craigoley/remudero/pulls/5",stdout:JSON.stringify({state:"open",head:{sha:securityHead},
       base:{sha:"b".repeat(40),ref:"main",repo:{full_name:"craigoley/remudero"}},changed_files:1})},
   ], { kind: "w1t4405" });
+  mkdirSync(join(shim.dir, "state"), { recursive: true });
+  writeFileSync(join(shim.dir, "state", "ledger.ndjson"), "");
+  const scoped = realArmDeps(() => ({ root: shim.dir } as Config));
   const oldPath = process.env.PATH;
   const oldCache = process.env.RMD_GH_CACHE_HOME;
   process.env.PATH = `${shim.dir}:${oldPath}`;
   process.env.RMD_GH_CACHE_HOME=shim.dir;
   try {
-    withLiveWritesAllowed(() => real.enqueue?.(PR));
+    withLiveWritesAllowed(() => scoped.enqueue?.(PR));
   } finally {
     process.env.PATH = oldPath;
     if(oldCache===undefined)delete process.env.RMD_GH_CACHE_HOME;else process.env.RMD_GH_CACHE_HOME=oldCache;

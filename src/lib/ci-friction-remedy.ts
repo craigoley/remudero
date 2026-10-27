@@ -35,7 +35,8 @@ export interface RemedyRound {
 }
 
 /** The legacy remedies file: a record declaring only it (or no files) is rung 0 — not a remedy. */
-export const CI_FRICTION_REMEDIES_DOC = "docs/ci-friction-remedies.md";
+export const CI_FRICTION_REMEDY_SOURCE = "src/lib/ci-friction-remedy.ts";
+export const CI_FRICTION_REMEDIES_DOC ="docs/ci-friction-remedies.md";
 
 /** The rung at which a cause stops being re-drafted and goes to a person. */
 export const CI_FRICTION_ESCALATE_RUNG = 3;
@@ -371,6 +372,9 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
   }
   if (key.startsWith("hand_fix:")) {
     const file = key.slice("hand_fix:".length);
+    // The remedy generator cannot remedy itself: its hand fixes are judgment edits, so a task filed
+    // against this file would only be repaired by hand again. No owner sends the cause to a person.
+    if (file === CI_FRICTION_REMEDY_SOURCE) return undefined;
     return /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes("..") && search.fileExists(file)
       ? { files: [file], why: [`${file}: repaired by hand in multiple distinct merged PRs`] } : undefined;
   }

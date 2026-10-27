@@ -686,6 +686,7 @@ import {
   taskSemanticRevision,
   ghIssueGateway,
   ghIssueGatewayAsync,
+  maintenanceOperatorChannel,
   presenceMode,
   setPresenceMode,
   tryEscalate,
@@ -1474,7 +1475,7 @@ import {
   tallyDispositions,
   type CloneReapSummary,
 } from "./lib/clone-reaper.js";
-import { runRepositoryMaintenance, activeWorkerProbes, defaultListInflightLocks, type MaintenanceContext, type ObjectReapDeps, type ObjectReapResult } from "./lib/object-reaper.js";
+import { runRepositoryMaintenance, activeWorkerProbes, defaultListInflightLocks, fleetPruneInputs, type MaintenanceContext, type ObjectReapDeps, type ObjectReapResult } from "./lib/object-reaper.js";
 
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
  *  rather than authorising something the operator never read. "2" (operator ruling 2026-10-06):
@@ -7266,8 +7267,8 @@ async function runReview(args: {
   /** Head ref of the PR under review — used ONLY to exclude `dependabot/` heads from the
    *  post-verdict arm, which the dep-review lane owns. Absent ⇒ not a dependabot PR. */
   headRefName?: string;
-  /** Injectable arm (impl-BG). Default: the real {@link armAutoMerge}. */
-  arm?: (prUrl: string, taskId: string) => ArmOutcome;
+  /** Injectable arm (impl-BG), awaited (W1-T9549). Default: the awaited {@link armAutoMergeDetailedAsync}. */
+  arm?: (prUrl: string, taskId: string) => ArmOutcome | Promise<ArmOutcome>;
   /**
    * W1-T178 (verdict stability): the run's ledger path, so a semantic-lane
    * downgrade on an UNCHANGED head sha whose deterministic floor still passes
@@ -25872,8 +25873,14 @@ export async function runRepositoryMaintenanceRung(
   log: (step: string, fields: Record<string, unknown>) => void,
   context: MaintenanceContext,
   policy?: ReturnType<typeof loadDefaultPolicy>["values"]["objectReap"],
+  issues?: AsyncIssueGateway,
 ): Promise<void> {
   const limits = policy ?? loadDefaultPolicy().values.objectReap;
+  // W1-T10750: the gateway is resolved at first use, so a store that never escalates never reads the repo identity.
+  const operator = {
+    open: (note: Parameters<ReturnType<typeof maintenanceOperatorChannel>["open"]>[0]) => maintenanceOperatorChannel(issues ?? fleetIssueGatewayAsync()).open(note),
+    close: (repo: string, url: string | undefined, comment: string) => maintenanceOperatorChannel(issues ?? fleetIssueGatewayAsync()).close(repo, url, comment),
+  };
   const roots = new Set<string>();
   const reposRoot = join(config.root, "repos");
   if (existsSync(reposRoot)) {
@@ -25887,6 +25894,8 @@ export async function runRepositoryMaintenanceRung(
   for (const repo of roots) {
     const state = join(config.root, "state", `repository-maintenance-${createHash("sha256").update(repo).digest("hex").slice(0, 16)}.json`);
     await runRepositoryMaintenance(repo, state, limits, log, {
+      operator,
+      pruneInputs: fleetPruneInputs(join(config.root, "state", "inflight")),
       context: () => {
         const freeBytes = readDiskFreeBytes(config.root);
         const inflight = join(config.root, "state", "inflight");
@@ -27170,7 +27179,7 @@ export function issueRevalidationRunTaskPorts(
     reconcile?: Pick<NonNullable<Parameters<typeof buildEscalationReconcileCandidates>[5]>, "github" | "evidenceRootFor" | "creditIo">;
     spawn?: Parameters<typeof issueRevalidationJudgeText>[0]["spawn"];
   } = {},
-): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: (prompt: string, issueNumber: number) => Promise<string> } {
+): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: ReturnType<typeof issueRevalidationJudgeText> } {
   const { owner, repo, repoRoot, stateDir, log } = ctx;
   let plan: Plan | undefined;
   const planNow = (): Plan => (plan ??= (seams.loadPlan ?? (() => loadPlan(resolveRepoLayout(repoRoot).planMonolith)))());
@@ -27194,10 +27203,10 @@ export function issueRevalidationRunTaskPorts(
         return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open` }];
       }));
     },
-    judgeText: (prompt, issueNumber) => {
+    judgeText: (prompt, issueNumber, observe) => {
       const mounts = loadMounts(mountsPath(repoRoot));
       return issueRevalidationJudgeText({ mount: mounts.escalation_judge ?? resolveRiskJudgeMount(mounts), cwd: repoRoot,
-        settingsFile: join(repoRoot, "settings", "worker.json"), spawn: seams.spawn })(prompt, issueNumber);
+        settingsFile: join(repoRoot, "settings", "worker.json"), spawn: seams.spawn })(prompt, issueNumber, observe);
     },
   };
 }
@@ -30948,7 +30957,7 @@ export async function resumeForMissingCommitLine(
 export function requiredCompanions(
   sha: string,
   leftOut: readonly string[],
-  git: (args: string[]) => string,
+  git: (args: string[], options?: Pick<HostWorktreeGitOptions, "maxBuffer">) => string,
 ): RequiredCompanion[] {
   return runTaskCommandHelpers(runTaskCommandHost()).requiredCompanions(sha, leftOut, git);
 }
@@ -30969,7 +30978,7 @@ export async function askScopeForLeftOutImports(input: {
   taskId: string;
   branch: string;
   commit: { sha: string; undeclared: readonly string[] } | undefined;
-  git: (args: string[]) => string;
+  git: (args: string[], options?: Pick<HostWorktreeGitOptions, "maxBuffer">) => string;
   amend: (request: ScopeAmendmentRequest) => ScopeAmendmentOutcome | Promise<ScopeAmendmentOutcome>;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }): Promise<{ companions: RequiredCompanion[]; amendment: ScopeAmendmentOutcome } | undefined> {

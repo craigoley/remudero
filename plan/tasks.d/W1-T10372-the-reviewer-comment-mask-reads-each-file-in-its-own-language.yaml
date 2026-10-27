@@ -15,6 +15,7 @@
     - src/lib/review.ts
     - test/review/the-reviewer-comment-mask-reads-each-file-in-its-own-language.test.ts
     - "src/lib/knowledge-gardener.ts"
+    - "src/lib/proof-amendment.ts"
   status: queued
   priority: 1.5  # every grep proof into a YAML or Markdown file after a stray `/*` is capped; a taskless PR then loops on a proof that is true
   attempts: 0

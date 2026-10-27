@@ -22,6 +22,7 @@ import { benchmarkNonDispatchSpawn, receiptIdentity } from "#src/lib/benchmark-r
 import type { Config } from "#src/lib/config.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const HOUR = 3_600_000;
 
@@ -207,6 +208,168 @@ function ports(over: Partial<IssueRevalidationPorts> & { mode?: IssueRevalidatio
 
 const verdictRows = (rec: Recorder) => rec.rows.filter((r) => r.step === ISSUE_REVALIDATION_VERDICT_STEP).map((r) => r.extra);
 const byIssue = (rec: Recorder) => new Map(verdictRows(rec).map((r) => [r.issue_number as number, r]));
+
+const RECEIPT_A = "11111111-1111-4111-8111-111111111111";
+const RECEIPT_B = "22222222-2222-4222-8222-222222222222";
+const RECEIPT_TEXT = "REVALIDATION_VERDICT: resolved\nREVALIDATION_REASON: repaired\nREVALIDATION_CITATION: PR #100 merged";
+function receiptSelection(args: SpawnWorkerArgs, id: string, provider: "claude" | "codex" = "claude"): void {
+  args.onSelectionAssignment?.({ version: 1, id, phase: "pre-execution",
+    requested: { model: args.model ?? "fixture", effort: args.effort ?? "low", maxTurns: null },
+    selected: { provider, model: "fixture", effort: "low" },
+    routing: { mode: "claude-only", policy: { preference: "automatic", reservePercent: 5, provenance: "default" } }, candidates: [] });
+}
+function receiptConsumer(judgeText: (prompt: string, n: number) => Promise<string>) {
+  return productionIssueRevalidationPorts({ owner: "acme", repo: "remudero", repoRoot: REPO_ROOT,
+    stateDir: "/unused/receipt-consumer", log: () => {}, clock,
+    hasReferent: () => false, referentVerdicts: async () => new Map(), judgeText,
+  }).judge;
+}
+async function consumeReceipt(judge: IssueRevalidationPorts["judge"]) {
+  const f = ports({ judge, listOpenIssues: async () => [BACKLOG[1]!] });
+  const summary = await runIssueRevalidationGarden(f.ports);
+  return { ...f, summary, row: verdictRows(f.rec)[0]!, receipt: verdictRows(f.rec)[0]!.judge_receipt as Record<string, unknown> };
+}
+
+test("W1-T10854: verdict receipt uses the final judge attempt once", async t => {
+  for (const fallback of [false, true]) {
+    const f = revalidationMoneyFixture(t, async args => {
+      receiptSelection(args, RECEIPT_A);
+      if (fallback) {
+        args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract", selectionAssignmentId: RECEIPT_A,
+          result: revalidationMoneyResult({ text: "unparseable prior rung", costUsd: 0.125, selectionAssignmentId: RECEIPT_A }) });
+        receiptSelection(args, RECEIPT_B);
+      }
+      return revalidationMoneyResult({ text: RECEIPT_TEXT, selectionAssignmentId: fallback ? RECEIPT_B : RECEIPT_A });
+    }, { select: false });
+    let parses = 0;
+    const original = RegExp.prototype.exec;
+    const counter = t.mock.method(RegExp.prototype, "exec", function(this: RegExp, text: string) {
+      if (this.source.startsWith("REVALIDATION_VERDICT:")) parses++;
+      return original.call(this, text);
+    });
+    try {
+      const result = await consumeReceipt(receiptConsumer(f.judge));
+      assert.equal(result.receipt?.selection_assignment_id, fallback ? RECEIPT_B : RECEIPT_A);
+      assert.equal(result.receipt.source, "model");
+      assert.equal(result.receipt.identity_state, "observed");
+      assert.equal(result.receipt.parser_state, "parsed");
+      assert.equal(result.receipt.evidence_state, "accepted");
+      assert.equal(result.receipt.parsed_verdict, "resolved");
+      assert.equal(result.row.action, "close");
+      assert.equal(parses, 1, "the receipt describes the consumed parse, never a second parse");
+      assert.equal(f.requests.length, 1);
+      assert.deepEqual(f.money().map(r => r.selection_assignment_id), fallback ? [RECEIPT_A, RECEIPT_B] : [RECEIPT_A]);
+    } finally { counter.mock.restore(); }
+  }
+  const bridge = issueRevalidationRunTaskPorts({ owner: "acme", repo: "remudero", repoRoot: REPO_ROOT,
+    stateDir: "/unused/default-bridge", log: () => {} }, { spawn: async args => {
+    receiptSelection(args, RECEIPT_B);
+    return revalidationMoneyResult({ text: RECEIPT_TEXT, selectionAssignmentId: RECEIPT_B });
+  } });
+  assert.equal((await consumeReceipt(receiptConsumer(bridge.judgeText))).receipt.selection_assignment_id, RECEIPT_B,
+    "the real run-task bridge forwards per-invocation evidence without replacing default composition");
+});
+
+test("W1-T10854: verdict receipt refuses unavailable or superseded identity", async t => {
+  for (const shape of ["unreported", "unobserved", "foreign", "provider", "conflict", "superseded", "invalid", "selection-error", "result-error", "unkeyed-fallback", "fallback-error"] as const) {
+    const f = revalidationMoneyFixture(t, async args => {
+      if (shape !== "unobserved") receiptSelection(args, shape === "invalid" ? "not-an-immutable-id" : RECEIPT_A);
+      if (shape === "conflict") receiptSelection(args, RECEIPT_A, "codex");
+      if (shape === "selection-error") args.onSelectionAssignment?.({ id: RECEIPT_A,
+        get selected() { throw new Error("private-selection-metadata"); } } as unknown as WorkerSelectionAssignment);
+      if (shape === "unkeyed-fallback") args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract" });
+      if (shape === "fallback-error") args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract",
+        selectionAssignmentId: { toString() { throw new Error("private-fallback-metadata"); } } as unknown as string });
+      if (shape === "superseded") {
+        args.onModelFallbackAttempt?.({ model: "fixture", reason: "draft-contract", selectionAssignmentId: RECEIPT_A,
+          result: revalidationMoneyResult({ selectionAssignmentId: RECEIPT_A }) });
+        receiptSelection(args, RECEIPT_B);
+      }
+      const result = revalidationMoneyResult({ text: RECEIPT_TEXT,
+        selectionAssignmentId: shape === "unreported" ? undefined : shape === "foreign" ? RECEIPT_B : RECEIPT_A,
+        ...(shape === "provider" ? { provider: "codex" } : {}) });
+      if (shape === "result-error") Object.defineProperty(result, "provider", { get() { throw new Error("private-result-metadata"); } });
+      return result;
+    }, { select: false });
+    const result = await consumeReceipt(receiptConsumer(f.judge));
+    assert.equal(result.receipt?.identity_state, "unavailable", shape);
+    assert.equal(result.receipt.selection_assignment_id, undefined, shape);
+    assert.equal(result.row.verdict, "resolved", "missing attribution cannot change the existing decision");
+    assert.equal(result.row.action, "close");
+    assert.equal(f.requests.length, 1);
+  }
+  for (const [text, state, evidence] of [["private malformed output", "unparseable", "not-assessed"],
+    ["REVALIDATION_VERDICT: resolved\nREVALIDATION_CITATION: none", "parsed", "missing-citation"],
+    ["REVALIDATION_VERDICT: still-true\nREVALIDATION_CITATION: src/widget.ts does not appear", "parsed", "absence-only"]] as const) {
+    const f = revalidationMoneyFixture(t, async args => {
+      receiptSelection(args, RECEIPT_A);
+      return revalidationMoneyResult({ text, selectionAssignmentId: RECEIPT_A });
+    }, { select: false });
+    const r = await consumeReceipt(receiptConsumer(f.judge));
+    assert.equal(r.receipt?.parser_state, state);assert.equal(r.receipt.evidence_state, evidence);
+    assert.equal(r.row.verdict, "unknown");
+  }
+});
+
+test("W1-T10854: legacy and unjudged verdicts remain separate", async () => {
+  const legacy = await consumeReceipt(receiptConsumer(async () => RECEIPT_TEXT));
+  assert.equal(legacy.row.action, "close");
+  assert.equal(legacy.receipt?.source, "legacy");
+  assert.equal(legacy.receipt.identity_state, "unavailable");
+  const plain = ports({ listOpenIssues: async () => [BACKLOG[1]!] });
+  await runIssueRevalidationGarden(plain.ports);
+  assert.equal((verdictRows(plain.rec)[0]!.judge_receipt as Record<string, unknown>).source, "legacy");
+  const cached = ports({ listOpenIssues: async () => [BACKLOG[1]!], priorVerdicts: () => new Map([[2,
+    { verdict: "resolved", at: at(-1), issueUpdatedAt: BACKLOG[1]!.updatedAt, citation: "PR #100 merged" }]]) });
+  await runIssueRevalidationGarden(cached.ports);
+  assert.equal((verdictRows(cached.rec)[0]!.judge_receipt as Record<string, unknown>).source, "cached");
+  assert.deepEqual(cached.rec.judged, []);
+  const deterministic = ports({ listOpenIssues: async () => [BACKLOG[0]!] });
+  await runIssueRevalidationGarden(deterministic.ports);
+  assert.equal((verdictRows(deterministic.rec)[0]!.judge_receipt as Record<string, unknown>).source, "deterministic");
+  const capped = ports({ listOpenIssues: async () => Array.from({ length: MAX_ISSUE_REVALIDATION_JUDGES_PER_PASS + 1 },
+    (_, n) => issue(1000 + n, "hand filed")) });
+  await runIssueRevalidationGarden(capped.ports);
+  assert.equal((verdictRows(capped.rec).at(-1)!.judge_receipt as Record<string, unknown>).source, "unjudged");
+});
+
+test("W1-T10854: receipt metadata preserves failures and money", async t => {
+  const original = new Error("private-provider-failure");
+  const failed = revalidationMoneyFixture(t, async args => { receiptSelection(args, RECEIPT_A);throw original; }, { select: false });
+  await assert.rejects(failed.judge("private-prompt", 2), error => error === original);
+  assert.equal(failed.money()[0]!.selection_assignment_id, RECEIPT_A);
+  const f = revalidationMoneyFixture(t, async args => {
+    receiptSelection(args, RECEIPT_A);return revalidationMoneyResult({ text: RECEIPT_TEXT, selectionAssignmentId: RECEIPT_A });
+  }, { select: false });
+  assert.equal(await (f.judge as (p: string, n: number, observe: () => void) => Promise<string>)("p", 2,
+    () => { throw new Error("private-optional-sink"); }), RECEIPT_TEXT);
+  assert.deepEqual(f.money().map(r => [r.selection_assignment_id, r.total_cost_usd]), [[RECEIPT_A, 0.25]]);
+  const unavailable = ports({ listOpenIssues: async () => [BACKLOG[1]!], judge: async () => {
+    const v = { verdict: "resolved", reason: "repaired", citation: "PR #100 merged" } as RevalidationVerdict;
+    Object.defineProperty(v, "judgeEvidence", { get() { throw new Error("private-metadata"); } });return v;
+  } });
+  await runIssueRevalidationGarden(unavailable.ports);
+  assert.equal(verdictRows(unavailable.rec)[0]!.action, "close");
+  assert.equal((verdictRows(unavailable.rec)[0]!.judge_receipt as Record<string, unknown>).identity_state, "unavailable");
+  const malformed = receiptConsumer((async (_prompt: string, _n: number, observe: (value: unknown) => void) => {
+    observe({ get identity_state() { throw new Error("private-identity-metadata"); } });return RECEIPT_TEXT;
+  }) as never);
+  assert.equal((await consumeReceipt(malformed)).receipt.identity_unavailable_reason, "receipt-build-failed");
+  for (const evidence of [
+    { version: 2 },
+    { version: 1, source: "model", parser_state: "parsed", parsed_verdict: "still-true", evidence_state: "missing-citation" },
+    { version: 1, source: "model", parser_state: "unparseable", evidence_state: "accepted" },
+    { version: 1, source: "model", parser_state: "parsed", parsed_verdict: "unknown", evidence_state: "absence-only" },
+  ]) {
+    const r = await consumeReceipt(async () => ({ verdict: "resolved", reason: "r", citation: "PR #100 merged", judgeEvidence: evidence } as never));
+    assert.equal(r.row.action, "close");assert.equal(r.receipt.identity_unavailable_reason, "receipt-build-failed");
+  }
+  const brokenLog = ports({ listOpenIssues: async () => [BACKLOG[1]!], log: step => {
+    if (step === ISSUE_REVALIDATION_VERDICT_STEP) throw original;
+  } });
+  await assert.rejects(runIssueRevalidationGarden(brokenLog.ports), error => error === original);
+  assert.doesNotMatch(JSON.stringify(verdictRows(unavailable.rec).map(r => r.judge_receipt)), /private-|ANTHROPIC_API_KEY/);
+});
 
 test("W1-T8864: the issue revalidation garden re-judges every open issue", async () => {
   // SHADOW: every open issue of every class gets one verdict row and nothing is written to GitHub.

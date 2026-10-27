@@ -124,7 +124,7 @@ test("a retire pass writes the knowledge-retire case from its own diff and lists
   const criteria = parseYaml(readFileSync(join(root, golden("criteria.yaml")), "utf8")) as AcceptanceCriterion[];
   assert.deepEqual(criteria.map((c) => c.proof), [
     "grep: ^## Pass 2026-10-06T09:21:02.674Z$ in docs/knowledge-garden-log.md",
-    "grep: knowledge gardener: retire stale-ci-lesson$ in learnings/ci.yaml",
+    "grep: lifecycle: superseded$ in learnings/ci.yaml",
   ]);
   assert.equal(readFileSync(join(root, golden("report.md")), "utf8"), `${landing.body}\n`);
   assert.equal(
