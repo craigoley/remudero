@@ -24,6 +24,7 @@
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
 import { systemClock, type Clock } from "./clock.js";
+import { RmdError } from "./errors.js";
 import { securityMergeHead, securityMergeHeadAsync, securityMetadataGhArgs } from "./security-merge-admission.js";
 import { observeSelectedMode, type SelectedModeQualification } from "./instance-mode.js";
 import { createHash } from "node:crypto";
@@ -1479,7 +1480,11 @@ export const REST_MERGE_UNSETTLED_MAX_READS = 3;
 /** W1-T1280 — the short interval between one `UNKNOWN` re-read and the next. */
 export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 
-class OperatorMergeHoldWriteRefused extends Error {}
+class OperatorMergeHoldWriteRefused extends RmdError {
+  constructor(message: string) {
+    super("github", 1, message, { reason: "operator-merge-hold" });
+  }
+}
 
 /** A final write fence, including callers that spent time reading security metadata. */
 export function assertOperatorMergeUnheld(
