@@ -2,7 +2,7 @@
   title: Give the private Daily source validator an unambiguous name
   repo: remudero
   type: implement
-  verify: human
+  verify: auto
   principles:
     tdd: strict
   risk: low
@@ -52,3 +52,13 @@
     populations; no public source overlap. Exact source-walk receipt is preserved in cockpit
     receipts/effects-census-reach.json. Parked at verify human until the configured native filing
     judge records a genuine ruling; no ruling or approval is invented.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "Declared scope is one file (src/lib/daily-progress-contract.ts) and a rename of a private predicate plus its two local references, with body, exports, and behavior stated as preserved."
+      - "The description does not touch secrets, auth, data deletion, merge/deploy/review policy, or irreversible actions. Acceptance is grep-verifiable (function dailyProgressSourceIdentity( present)."
+      - "The family has no track record (0 merged), but the change is mechanical, and qualification, hosted checks, and native review still gate publication."
+    judged_at: "2026-10-27T12:23:55.305Z"
+    pin: "64ecdec98b8b75e35e0e47a6dccaddebcbc89f06b41c0b9b395a1f0d16c8e297"
