@@ -63,6 +63,7 @@ zero_sha="0000000000000000000000000000000000000000"
 push_lines="$(cat 2>/dev/null || true)"
 deleted_refs=""
 dispatch_refs=""
+dispatch_input_known=1
 live_lines=0
 # Dispatch refs publish claim anchors, not source branches. Git validates their
 # names; require both object IDs too, so unknown hook input keeps every gate.
@@ -75,7 +76,13 @@ dispatch_claim_update() {
   dispatch_object_id "$2" && dispatch_object_id "$3"
 }
 while read -r _local_ref _local_sha remote_ref _remote_sha; do
-  [ -n "$_local_sha" ] || continue
+  if [ -z "$_local_sha" ]; then
+    [ -z "$_local_ref" ] || dispatch_input_known=0
+    continue
+  fi
+  if [ -z "$remote_ref" ] || ! dispatch_object_id "$_local_sha" || ! dispatch_object_id "$_remote_sha"; then
+    dispatch_input_known=0
+  fi
   if [ "$_local_sha" = "$zero_sha" ]; then
     deleted_refs="${deleted_refs:+$deleted_refs }${remote_ref:-?}"
   elif dispatch_claim_update "$remote_ref" "$_local_sha" "$_remote_sha"; then
@@ -90,7 +97,7 @@ if [ -n "$deleted_refs" ] && [ "$live_lines" -eq 0 ] && [ -z "$dispatch_refs" ];
   echo "pre-push: deletion-only push of $deleted_refs — no content to gate, every check skipped (a named skip, NOT a pass)" >&2
   exit 0
 fi
-if [ -n "$dispatch_refs" ] && [ "$live_lines" -eq 0 ]; then
+if [ -n "$dispatch_refs" ] && [ "$live_lines" -eq 0 ] && [ "$dispatch_input_known" -eq 1 ]; then
   echo "pre-push: dispatch-claim-only push of $dispatch_refs — no source content to gate, every content check skipped (a named skip, NOT a pass)" >&2
   exit 0
 fi

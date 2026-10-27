@@ -185,6 +185,8 @@ test("a similar ref name or malformed claim update never gains the metadata excl
     `HEAD not-a-sha refs/rmd-dispatch/W1-T10760 ${ZERO}\n`,
     `HEAD ${SHA} refs/rmd-dispatch/W1-T10760 bad-remote-sha\n`,
     `HEAD ${"a".repeat(64)} refs/rmd-dispatch/W1-T10760 ${ZERO}\n`,
+    `HEAD ${SHA} refs/rmd-dispatch/W1-T10760 ${ZERO}\nnot-a-ref-update\n`,
+    `HEAD ${SHA} refs/rmd-dispatch/W1-T10760 ${ZERO}\n(delete) ${ZERO}\n`,
   ]) {
     const { dir, log } = fixture();
     const result = push(dir, log, input);
