@@ -76,6 +76,10 @@ test("W1-T10250: an ambiguous slash after yield is still refused", () => {
     'function* steps(): Steps<string> { const obj = { if() { var yield = 8; return yield / liveCall() /g; } }; }',
     'function* steps() { yield { if() { var yield = 8; return yield / liveCall() /g; } }; }',
     'function* steps() { yield* { if() { var yield = 8; return yield / liveCall() /g; } }; }',
+    'function* steps() { throw { if() { var yield = 8; return yield / liveCall() /g; } }; }',
+    'function* steps() { const kind = typeof { if() { var yield = 8; return yield / liveCall() /g; } }; }',
+    'function* steps() { switch (v) { case { if() { var yield = 8; return yield / liveCall() /g; } }: break; } }',
+    'async function* steps() { await { if() { var yield = 8; return yield / liveCall() /g; } }; }',
     'await / liveCall() /g;', 'if (ready) {} /\x60/.test(value);',
   ]) {
     assert.throws(() => strictMask(source), /lexical context unknown/, source);

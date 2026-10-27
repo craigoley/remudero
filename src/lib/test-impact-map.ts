@@ -34,6 +34,8 @@ export const IMPACT_MAP_FORMAT = "rmd-test-impact-map-v1";
 const REGEX_PRECEDERS = "(,=:[!&|?{};+-*%<>~^";
 const CONSERVATIVE_REGEX_PRECEDERS = "(,=:[!&|?{;+-*%<>~^/";
 const CONTROL_KEYWORDS = /^(?:if|while|for|with|switch|catch)$/;
+/** Keywords after which a `{` opens an object literal, whose keyword-named method a generator must refuse. */
+const OBJECT_KEYWORDS = /^(?:return|yield|await|throw|case|typeof|void|delete|in|of|instanceof|new|extends|default)$/;
 const REGEX_KEYWORDS = new Set(["return", "throw", "case", "delete", "void", "typeof", "instanceof", "in", "else", "do", "new", "extends", "default", "break", "continue", "debugger"]);
 
 /** W1-T5701 — `content` with every comment blanked, STRING-AWARE: a `//` or `/*` inside a string,
@@ -268,7 +270,7 @@ function scanSource(content: string, mask: boolean, keepLines: boolean, conserva
           ? functionBody : last === ")" ? undefined : null;
         const fn = body !== null;
         scopes.push({ fn, generator, arrow: expressionArrow,
-          object: body === null && (/^(?:return|yield)$/.test(last) || (CONSERVATIVE_REGEX_PRECEDERS.includes(last) && last !== "{" && last !== ";")) });
+          object: body === null && (OBJECT_KEYWORDS.test(last) || (CONSERVATIVE_REGEX_PRECEDERS.includes(last) && last !== "{" && last !== ";")) });
         if (body !== null) {
           generator = body;
           expressionArrow = undefined;
