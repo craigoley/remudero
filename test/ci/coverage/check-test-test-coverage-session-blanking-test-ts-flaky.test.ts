@@ -8,8 +8,8 @@ import { test, type TestContext } from "node:test";
 const subject = "#scripts/preflight-author.mjs";
 const { main } = await import(subject);
 
-function fixture(t: TestContext, source: string) {
-  const root = mkdtempSync(join(tmpdir(), "author-coverage-blanking-"));
+function fixture(t: TestContext, source: string, treeStatus = 0) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-author-coverage-blanking-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "test"));
   writeFileSync(join(root, ".nvmrc"), process.versions.node);
@@ -26,6 +26,7 @@ function fixture(t: TestContext, source: string) {
     if (args[0] === "config") return result("", 1);
     if (args[0] === "status" || args[0] === "fetch") return result();
     if (args[0] === "diff") return result(changed.join("\0") + "\0");
+    if (args[0] === "ls-tree") return result(args.at(-1) === "test/deleted.test.ts" ? "" : path + "\0", treeStatus);
     if (args[0] === "rev-parse") {
       if (args[1] === "--is-inside-work-tree") return result("true");
       if (args[1] === "--is-shallow-repository") return result("false");
@@ -89,4 +90,37 @@ test("author blanking precheck refuses unreadable changed tests before selection
   assert.equal(f.run(), 1);
   assert.match(f.receipt().error, /EISDIR/);
   assert.equal(f.selections(), 0);
+});
+
+test("author blanking precheck refuses missing committed tests before selection", t => {
+  const f = fixture(t, "");
+  rmSync(join(f.root, f.path));
+  assert.equal(f.run(["--dry-run"]), 1);
+  const r = f.receipt();
+  assert.match(r.error, /ENOENT/);
+  assert.equal(r.coverageBlankingPrecheck, undefined, "missing evidence cannot certify a clean scan");
+  assert.equal(f.selections(), 0);
+  assert.deepEqual(r.steps, []);
+});
+
+test("author blanking precheck refuses unavailable deletion evidence before selection", t => {
+  const f = fixture(t, "", 128);
+  assert.equal(f.run(["--dry-run"]), 1);
+  const r = f.receipt();
+  assert.match(r.error, /git ls-tree .* failed/);
+  assert.equal(r.coverageBlankingPrecheck, undefined, "failed evidence cannot certify a clean scan");
+  assert.equal(f.selections(), 0);
+  assert.deepEqual(r.steps, []);
+});
+
+test("author blanking precheck preserves changed-test metadata errors before selection", t => {
+  const f = fixture(t, "");
+  rmSync(join(f.root, "test"), { recursive: true });
+  writeFileSync(join(f.root, "test"), "not a directory");
+  assert.equal(f.run(["--dry-run"]), 1);
+  const r = f.receipt();
+  assert.match(r.error, /ENOTDIR/);
+  assert.equal(r.coverageBlankingPrecheck, undefined);
+  assert.equal(f.selections(), 0);
+  assert.deepEqual(r.steps, []);
 });
