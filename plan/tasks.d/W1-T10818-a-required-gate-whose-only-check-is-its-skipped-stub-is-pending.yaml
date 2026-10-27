@@ -1,0 +1,68 @@
+- id: W1-T10818
+  title: "A REQUIRED GATE WHOSE ONLY CHECK IS ITS SKIPPED STUB IS PENDING, NOT CONCLUDED — pendingQualityGateNames reads ci.yml's permanent `if: false` stubs (lint-plan, claims and 13 more) as SKIPPED, which is in REQUIRED_CHECK_OK, so until light-gates posts their real results at the end of its job the progress judge is told none of 15 of the 28 required gates is pending"
+  repo: remudero
+  depends_on: []  # W1-T10067 (merged, #12669) added pendingQualityGateNames; W1-T4399 and W1-T5695 (merged) made the stubs and the posted-name contract
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, which required names the fix-progress judge is told have not reported, spanning the contract read (ci-gate-required.ts), the classifier (sweep.ts) and its one producer (tick-read-worker.ts). It feeds judge input only; no merge, arm or fix decision reads it
+  band_meaning: span
+  priority: 2  # the judge's input is wrong for the length of every light-gates run, but nothing acts on pendingRequiredChecks except the judge prompt
+  status: queued
+  attempts: 0
+  origin: "investigator V62, 2026-10-27, re-verifying a 2026-10-17 lead from agent B59 (#12669 / W1-T10067) at origin/main ab1bf6914"
+  plan_refs: [W1-T10067, W1-T4399, W1-T5695, W1-T5802, W1-T2599]
+  files:
+    - src/lib/sweep.ts
+    - src/lib/tick-read-worker.ts
+    - src/lib/ci-gate-required.ts
+    - test/ci/a-required-gate-whose-only-check-is-its-skipped-stub-is-pending.test.ts
+  rationale: |
+    READ 2026-10-27 on origin/main ab1bf6914, by symbol.
+
+    .github/workflows/ci.yml keeps 15 job keys registered but permanently `if: false` under their original names:
+    leak-grep, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise,
+    containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence,
+    source-size, comment-load-ratchet, baseline-monotonic. Each gate really runs as a step of the `commitlint`
+    job (named `light-gates`, ADVISORY in ci-gate.yml). That job's `report-gates` step posts each result under
+    the gate's own name, with `status=completed` and an external_id of the form `run:<run>:<attempt>:job:<id>`,
+    at the END of the job. All 15 names are in ci-gate.yml's REQUIRED list (28 names, read with
+    readCiGateRequiredChecks). ci-gate.yml itself waits correctly, because it groups by name AND producer class
+    (W1-T5695).
+
+    pendingQualityGateNames (src/lib/sweep.ts) names a required check pending only if its deduped entry is
+    neither in REQUIRED_CHECK_FAIL nor in REQUIRED_CHECK_OK, or if the name is absent from the rollup.
+    REQUIRED_CHECK_OK holds SKIPPED. A stub registers the name (so it is not "unregistered") with a SKIPPED
+    conclusion (so it is not "running"). dedupeRollupByLatestAttempt keeps the stub and the later post apart,
+    keyed by rollupProducerKey ("job" versus "posted"), so once the post exists it is read correctly. Before it
+    exists, the name reads concluded.
+
+    PROBE at ab1bf6914 (tsx): the real 28-name REQUIRED list; every non-stub required check SUCCESS; the 15 stubs
+    SKIPPED; `light-gates` IN_PROGRESS. pendingQualityGateNames returns []. light-gates is advisory, so it is not
+    named either. The judge is told nothing is pending while 15 required gates have not reported.
+
+    The only consumer is buildFixProgressInput's `pendingChecks` (six call sites in sweep.ts), fed from
+    tick-read-worker.ts's `pendingRequiredChecks: pendingQualityGateNames(pr.statusCheckRollup, ciGateRequired)`.
+  design: |
+    A required name whose only entries in the rollup are SKIPPED entries from the "job" producer class, and which
+    the checked-in contract declares as a posted gate, is PENDING until an entry from the "posted" producer for
+    that name exists. Read the posted-gate set once per board build from the checked-in contract, beside
+    readCiGateRequiredChecks (W1-T2599: one contract read per board, never one per PR). It is the set of ci.yml
+    job `name:` values whose job is `if: false` and which ci.yml's report-gates step posts. A required check that
+    is SKIPPED for any other reason (a path-filter or fast-lane skip of a real job) still reads concluded, exactly
+    as today. An unreadable contract yields an empty posted-gate set, which is today's behaviour, never a guess.
+  acceptance:
+    - claim: "a required gate whose only rollup entry is its permanent if:false stub, SKIPPED, is named pending until light-gates posts it, then reads concluded by the posted result's own conclusion"
+      proof: 'grep: test("W1-T10818: a required gate seen only as its skipped stub is pending until its post lands" in test/ci/a-required-gate-whose-only-check-is-its-skipped-stub-is-pending.test.ts'
+    - claim: "a SKIPPED required check that is not a posted-gate stub still reads concluded, and an unreadable ci.yml leaves today's result unchanged"
+      proof: 'grep: test("W1-T10818: a skipped real job and an unreadable contract read as before" in test/ci/a-required-gate-whose-only-check-is-its-skipped-stub-is-pending.test.ts'
+  falsifier: |
+    At base the first case fails: with the real REQUIRED list, the 15 stubs SKIPPED and light-gates running,
+    pendingQualityGateNames returns [].
+    - Treat every SKIPPED required check as pending: a path-filtered real job never concludes, and the second
+      case fails.
+    - Hard-code the 15 names: the case that reads ci.yml from a fixture with a different stub set fails.
+    - Keep naming a gate pending after its posted result lands: the first case's second half fails.
+    GUARDS that held at base and must still hold:
+    - test/the-progress-judge-is-told-which-checks-have-not-reported.test.ts

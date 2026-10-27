@@ -1,0 +1,142 @@
+- id: W1-T10820
+  title: "THE AFFECTED-SUITE GRAPH RESOLVES THE PACKAGE IMPORT ALIASES — buildAffectedSuitesGraph resolves only specifiers that start with `.`, so a suite importing through #src/*, #scripts/* or #test/* has no edges; preflight, coverage-narrow and the CI selection paths skip it, and the reach ratchet never counts it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # the selector graph feeds preflight's affected tests, coverage-narrow and CI narrowing; a wrong edge set skips suites
+  origin: 'operator ruling, Craig, 2026-10-27 ~11:10Z: "Resolve aliases; re-baseline once" — on agent R61''s 2026-10-27 finding; re-measured by filing agent F19 at origin/main f10953f64'
+  plan_refs: [W1-T5702, W1-T10043, W1-T10354, W1-T9864, W1-T4404, W1-T5940, W1-T5705, W1-T9483]
+  files:
+    - src/lib/affected-suites.ts
+    - scripts/affected-reach-baseline.json
+    - test/the-affected-suite-reach-ratchet.test.ts
+    - test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    Every number below was measured at origin/main f10953f64 (2026-10-27) with the module's own
+    exports (buildAffectedSuitesGraph, selectAffectedSuites, readAffectedSuitesInput) and the
+    ratchet's own measureReach, read-only.
+    - THE DEFECT. `resolve` in src/lib/affected-suites.ts returns undefined unless the specifier
+      starts with "." (`if (!spec.startsWith(".")) return undefined;`). package.json "imports" maps
+      "#src/*" -> "./src/*", "#scripts/*" -> "./scripts/*" and "#test/*" -> "./test/*", and nothing
+      in the graph reads that map. R61's probe, reproduced: a fixture suite whose only line is
+      `import { x } from "#src/run-task.js"` gets directImports [], its relative twin gets
+      ["src/run-task.ts"], and selectAffectedSuites(["src/run-task.ts"]) selects only the twin.
+    - THE GAP GROWS ON ITS OWN. Doctrine new-test-imports-use-package-aliases (W1-T9864) REQUIRES
+      the aliases for new tests. Of the tests added since 2026-10-20 that import src/run-task.ts,
+      57 of 58 use "#src/run-task.js". 503 tracked test/ files use an alias specifier today
+      (src 1, scripts 2, bin 0).
+    - WHAT IT MISSES. Rewriting each alias specifier to its relative equivalent and rebuilding the
+      graph: 653 of 682 src modules reach suites the current graph does not, median 143 suites per
+      module and at most 300. A change to src/run-task.ts reaches 1865 suites today and 2007
+      alias-aware.
+    - WHO CONSUMES THE GRAPH (all through the one function, so one fix reaches all):
+      scripts/preflight-author.mjs (affectedSelectionOrFull and buildAffectedSuitesGraph; LIVE
+      before every author push); src/lib/coverage-narrow.ts coverageNarrowSuites (directImports;
+      LIVE in the coverage fix pass, W1-T9483); the merge-group selection, ci.yml step "Select the
+      merge group's suites (W1-T5940)" (~line 293) via scripts/test-tier-manifest.mjs
+      writeMergeGroupSelection, consumed at ~line 352-355 and ~line 915; the PR live selection
+      (~line 365-376) and coverage live selection (~line 1841-1857), both behind
+      RMD_AFFECTED_SUITE_LIVE, which reads "0" today; the selector shadow record (W1-T4404) that
+      decides when that flag may flip; and src/lib/main-health-rung.ts, ci-parity.ts,
+      qualified-symbol-shadow.ts, daemon-closure.ts, run-task.ts and run-task-verb.ts. The brief's
+      ci.yml lines 354 and 1848 are confirmed: 354 copies merge-group-suites.txt into the
+      selection, 1848 imports affected-suites.ts for the coverage selection.
+    - THE SHADOW RECORD ALREADY SHOWS IT. Of the 22 queued selector-shadow-miss tasks, 9 name a suite
+      that imports through an alias, and 8 of the 10 newest do (w1-t10286, w1-t10323, w1-t10505,
+      w1-t10506, w1-t10535, w1-t10546, w1-t10557, w1-t10644). That is a class signal, not a
+      diagnosis of each miss: this task does not close them, and each is re-judged after merge.
+    - THE REACH RATCHET IS A SILENT NO-OP FOR ALIAS IMPORTERS (W1-T5702).
+      test/the-affected-suite-reach-ratchet.test.ts counts suites whose directImports hold
+      src/run-task.ts. Live: 926 relative importers against a recorded ceiling of 933. 83 suites
+      import "#src/run-task.js", 78 of them only through the alias, and the ratchet sees none of
+      them. (The brief said 113 alias importers; this filing measures 83 suites with a literal
+      "#src/run-task.js" specifier, 85 files naming #src/run-task anywhere.) Alias-aware, the
+      projection from the rewrite above is importerCount 1004, largestScc 84, medianReachPercent
+      49.00 (today 926, 84, 45.53, against recorded ceilings 933, 250, 81.47). The old ceiling
+      counted a shrinking subset of importers: each new alias test made it read lower while the
+      real count rose.
+    - SEARCHED FOR COVERAGE. plan/: W1-T10043 (queued) mentions alias resolution in passing ("Package
+      `#src/*` subpath specifiers are resolved like the relative form only if the builder
+      chooses to") and leaves the graph unchanged; W1-T10354 (queued) is the same gap in a
+      different reader, scripts/mutation-ratchet.mjs, and does not touch the selector graph;
+      W1-T5702 (merged) built the ratchet. src/lib/test-placement.ts hand-codes the same three
+      prefixes for its own scan; it is not a graph consumer and is out of scope here. The 9 open
+      PR heads (2026-10-27 11:08Z) touch none of src/lib/affected-suites.ts,
+      scripts/affected-reach-baseline.json, the ratchet or package.json, and add no alias-aware
+      selector work.
+    PRIORITY 1: preflight's affected-test run is live today and the alias share of new tests is
+    ~98%, so each week more of the suite is outside every narrowing path, and the ratchet that should
+    flag it reads lower.
+  design: |
+    1. RESOLVE THE ALIASES AS NODE DOES. The graph resolves a specifier that starts with "#"
+       through the package.json "imports" map, using Node's PACKAGE_IMPORTS_RESOLVE rules: an
+       exact key first, then pattern keys with one "*", the longest matching prefix winning. The
+       substituted target ("./src/run-task.js") then goes through the SAME candidate list a
+       relative specifier uses today, TS's ".js" -> ".ts" included. A "#" specifier that matches no
+       key, or whose target is no known file, gives no edge, the same as an unknown relative path.
+       Fixture text in template strings still produces specifiers, so a throw there would be wrong.
+    2. THE MAP IS READ, NEVER COPIED. The map comes from the package.json of the tree being
+       graphed: readAffectedSuitesInput's repoRoot, coverageNarrowSuites' worktree, the ratchet's
+       ROOT. A caller with no tree of its own falls back to the module's own checkout. Fixtures pass
+       a map explicitly. No "#src" literal is hand-copied into the resolver. An unreadable
+       package.json, or a target shape the resolver does not model (a conditions object, an
+       array, a target outside the package), THROWS and names it. Every live caller already turns a
+       throw into a named FULL run (affectedSelectionOrFull), never a narrower guess.
+    3. EVERY CONSUMER GETS THE ALIAS-AWARE GRAPH through buildAffectedSuitesGraph itself:
+       preflight-author, coverage-narrow, the merge-group and live-PR/coverage CI paths (all via
+       readAffectedSuitesInput + selectAffectedSuites) and the ratchet's measureReach. No consumer
+       keeps a second resolver.
+    4. RE-BASELINE ONCE (the ruling). In the same PR, scripts/affected-reach-baseline.json is
+       re-measured from the alias-aware graph. The recorded importerCount, largestScc,
+       medianReachPercent and importer list EQUAL the measured head tree, with no slack. The record
+       gains the field "resolution": "package-imports", naming the graph's resolution.
+       Its _comment records this as a MEASUREMENT CORRECTION, not a loosening: it names the head sha,
+       the old relative-only counts, the new counts, and that the old ceiling counted a shrinking
+       subset. "the recorded reach baseline may only shrink against origin/main" learns exactly one
+       transition: from a main record with no resolution field to the alias-aware one, the record
+       must equal the live measurement exactly. Any other change of the field, or a re-measurement
+       with slack, is refused. From then on all three metrics only shrink, as before.
+    5. The PR body reports the head-tree numbers it recorded and the before/after of a change to
+       src/run-task.ts (suites selected). No threshold is added anywhere.
+    6. TESTS. test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts
+       (folder from `rmd test-place`: test/ci/suites/, high via ci-parity) imports through
+       "#src/lib/affected-suites.js" and covers fixture trees and the real tree. The real-tree
+       assertion first proves its population is non-empty: at least one tracked suite imports
+       "#src/run-task.js". Then every such suite must be in the graph's importers of
+       src/run-task.ts. The ratchet suite gains the alias-importer and one-transition tests.
+    Out of scope: src/lib/test-placement.ts's own prefix scan; scripts/mutation-ratchet.mjs
+    (W1-T10354, which may reuse the resolver if exported, with no dependency either way); the
+    queued selector-shadow-miss tasks; flipping RMD_AFFECTED_SUITE_LIVE.
+  acceptance:
+    - claim: 'a suite importing #src/run-task.js is selected for a change to src/run-task.ts'
+      proof: 'grep: test("W1-T10820: a suite importing #src/run-task\.js is selected for a change to src/run-task\.ts" in test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts'
+    - claim: 'the alias targets are read from package.json imports, so a new alias key resolves without a code change'
+      proof: 'grep: test("W1-T10820: the alias targets are read from package\.json imports" in test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts'
+    - claim: '#scripts and #test specifiers resolve like #src, .js to .ts included, and an unmatched # specifier gives no edge'
+      proof: 'grep: test("W1-T10820: #scripts and #test specifiers resolve like #src" in test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts'
+    - claim: 'an imports target the resolver does not model throws naming it, and the selection becomes a named full run'
+      proof: 'grep: test("W1-T10820: an imports target the resolver does not model is a named full run" in test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts'
+    - claim: 'coverage-narrow lists a #src importer of a changed module as a direct importer'
+      proof: 'grep: test("W1-T10820: coverage-narrow lists a #src importer as a direct importer" in test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts'
+    - claim: 'on the real tree every suite importing #src/run-task.js is an importer of src/run-task.ts'
+      proof: 'grep: test("W1-T10820: on the real tree every suite importing #src/run-task\.js is an importer of src/run-task\.ts" in test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts'
+    - claim: 'an alias importer of src/run-task.ts counts against the reach ceiling and is named when it is new'
+      proof: 'grep: test("W1-T10820: an alias importer of src/run-task\.ts counts against the reach ceiling" in test/the-affected-suite-reach-ratchet.test.ts'
+    - claim: 'the reach baseline is re-measured once from the alias-aware graph, equal to the measured tree, and any later re-measurement may only shrink'
+      proof: 'grep: test("W1-T10820: the reach baseline is re-measured once from the alias-aware graph" in test/the-affected-suite-reach-ratchet.test.ts'
+    - claim: 'the recorded reach baseline names the alias-aware resolution'
+      proof: 'grep: "resolution": "package-imports" in scripts/affected-reach-baseline.json'
+  falsifier: |
+    At origin/main a fixture suite importing "#src/run-task.js" has directImports [], and
+    selectAffectedSuites(["src/run-task.ts"]) does not select it. At head it is selected. Every new
+    test in the new suite fails at base. The real-tree test is load-bearing only if deleting the
+    code that reads package.json "imports" turns it red, not merely if its population is non-empty.
+    It asserts that population is non-zero before it compares. The one-transition test is
+    load-bearing only if a baseline with +1 slack at the transition is refused, and a second
+    resolution change is refused too.

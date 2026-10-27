@@ -1,8 +1,9 @@
 - **Never fan out update-branch after a main fix: protection is non-strict, and each refresh re-runs
-  ~16 min of CI and voids the review.**
+  CI and voids the review.**
   Main's branch protection is NOT strict (`requiresStrictStatusChecks: false`; the required contexts
   are `remudero-review` and `ci-gate`). GitHub never needs a branch to be up to date before it merges.
   A refresh buys nothing unless the PR's red is base-red and main has since been fixed.
+  *(Headline folded 2026-10-27: "~16 min of CI" became "CI"; the measured cost is below.)*
 
   **WHAT A REFRESH COSTS (MEASURED 2026-10-10, W1-T7735).** Each new head re-runs CI (median start to
   green: 16.4 min) and voids the exact-input review. 37 of 108 head pushes after 09:30Z (34%) were

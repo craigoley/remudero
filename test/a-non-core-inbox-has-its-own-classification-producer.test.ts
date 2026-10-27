@@ -41,7 +41,7 @@ function world(t: Context) {
     tree.git("commit", "-m", "fixture");
     return [instance, { ...root, checkout }];
   }));
-  const deps = { ledgerPath: roots.core.ledgerPath, questionsRoot: roots.core.checkout, assistantRepository: "owner/core",
+  const deps = { ledgerPath: roots.core.ledgerPath, questionsRoot: roots.core.checkout, fleetControlRoot: roots.core.root, assistantRepository: "owner/core",
     instances: { registryPath, stateBase: base } };
   const startProducer = () => {
     let input: ((message: { type?: string }) => void) | undefined;

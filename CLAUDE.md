@@ -62,7 +62,8 @@ ids and moved paths alias in
   `run-<taskId>-*` branch, and a PR's merge state from the API — never ledger verdict lines, a
   shard's `status:` or main's log.** → doctrine/plan-and-task-hygiene/derive-merged-tasks.md
 - **Before building a filed task, check `git ls-remote origin 'refs/rmd-dispatch/<id>' 'refs/heads/run-<id>-*'`
-  (claimed or in flight?) and merged PRs for an exact `^Remudero-Task: <id>$` trailer (shipped?), never commit subjects.** → doctrine/plan-and-task-hygiene/run-both-scope-checks.md
+  (claimed?), merged PRs for an exact `^Remudero-Task: <id>$` trailer, never commit subjects, and
+  `git log origin/main --since=<filing> -- <its files:>`: a `PR-<n>` hand fix leaves the task uncredited.** → doctrine/plan-and-task-hygiene/run-both-scope-checks.md
 - **Before filing, sweep the task's SUBJECT over every open PR head's tree (`git ls-remote --heads
   origin`), not only `origin/main`, counting per head against main.** → doctrine/plan-and-task-hygiene/sweep-open-pr-heads.md
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.** → doctrine/plan-and-task-hygiene/name-the-session-branch.md
@@ -83,14 +84,14 @@ ids and moved paths alias in
   its retro ledger; `rule15-*` names an artifact, not a rule.** → doctrine/plan-and-task-hygiene/decode-rule-citations.md
 - **Take the cheap candidate beside a costly one, and name what the costly one now waits for.** → doctrine/plan-and-task-hygiene/take-the-cheap-candidate.md
 - **Never fan out update-branch after a main fix: protection is non-strict, and each refresh re-runs
-  ~16 min of CI and voids the review.** → doctrine/plan-and-task-hygiene/never-fan-out-update-branch.md
+  CI and voids the review.** → doctrine/plan-and-task-hygiene/never-fan-out-update-branch.md
 - **Leave a red fleet PR to the fix lane while a round is due or in flight — hand pushes out-race it
   and hide its defects.** → doctrine/plan-and-task-hygiene/leave-red-prs-to-the-fix-lane.md
 
 ## CI and merging
 
 - **Read GitHub through `rmd gh -- <gh args>` while a broker is live (the hook says so), never poll;
-  the 180 s floor applies only with no live broker; `gh pr create` may die, git push won't.** → doctrine/ci-and-merging/gh-read-cadence.md
+  the 180 s floor applies only without one; `gh pr create` may die, git push won't.** → doctrine/ci-and-merging/gh-read-cadence.md
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.** → doctrine/ci-and-merging/conflicting-pr-zero-checks.md
 - **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close
@@ -110,7 +111,7 @@ ids and moved paths alias in
 
 - **Grep the ledger with `rmd ledger-grep <pat>`; by hand, `zgrep` THREE globs —
   `state/ledger.*.ndjson.gz state/ledger.*.ndjson state/ledger.ndjson` — with a file count PER
-  FORM as the control, and never delete an archive: each holds history no other file has.** → doctrine/ledger-and-evidence-discipline/read-the-ledger-union.md
+  FORM as the control, and never delete an archive.** → doctrine/ledger-and-evidence-discipline/read-the-ledger-union.md
 - **A ledger line must carry the reason from the DECISION THAT PRODUCED ITS OUTCOME.** → doctrine/ledger-and-evidence-discipline/reason-from-the-decision.md
 - **On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —
   exclude the wrapper by the RELATIVE path, never the absolute one.** → doctrine/ledger-and-evidence-discipline/exclude-the-relative-path.md
@@ -122,11 +123,11 @@ ids and moved paths alias in
 - **When a gate reads the ledger for a record the SAME function writes, check the WRITE ORDER before
   believing the gate's stated reason.** → doctrine/investigation-discipline/check-the-write-order.md
 - **Prove a dispatch change in-process with `assertLintClean`, never `rmd drain --dry-run` — it writes
-  the LIVE ledger and reads origin/main's plan, not your branch.** → doctrine/investigation-discipline/drain-dry-run-writes.md
+  the LIVE ledger and reads origin/main's plan.** → doctrine/investigation-discipline/drain-dry-run-writes.md
 - **A bound that fires on a HEALTHY condition is this repo's recurring defect — before tuning the
   number, check the population it is meant to separate has ever been observed.** → doctrine/investigation-discipline/healthy-condition-bound.md
 - **A ZERO IS NOT A MEASUREMENT until a positive control proves the query saw its corpus — run one on
-  every sweep you will act on. A control proves only that: name the question the query really
+  every sweep you act on. It proves only that: name the question the query really
   answers, check the corpus's newest ts covers the window, and re-run a surprise in another ENVIRONMENT.** → doctrine/investigation-discipline/a-zero-needs-a-positive-control.md
 - **(a) A POSIX REGEX ENGINE HERE SILENTLY DROPS `\s`/`\b` INSTEAD OF ERRORING, AND TWO DIFFERENT
   TOOLS DO IT.** → doctrine/investigation-discipline/posix-drops-escapes.md
