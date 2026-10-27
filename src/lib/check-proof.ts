@@ -322,7 +322,7 @@ export function resolveVitestLeafCandidates(
     .map((entry) => `${root.replace(/\/$/, "")}/${entry}`)
     .filter((file) => {
       try { return readFileSync(join(cwd, file), "utf8").includes(leaf); }
-      catch { return true; } // an unreadable candidate stays in scope, as the executor keeps it
+      catch { return true; /* an unreadable candidate stays in scope, as the executor keeps it */ }
     });
   return files.length > 0 ? { files, leaf } : undefined;
 }
