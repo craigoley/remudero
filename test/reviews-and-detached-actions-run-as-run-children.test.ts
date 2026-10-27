@@ -222,8 +222,9 @@ test("W1-T9114: a terminal review child settles once", async () => {
 });
 
 // Narrowed per the operator (W1-T78): the drain half is proved for REVIEW children only, through the production host factory.
-// Fix-dispatch drain is out of scope for this PR (no production producer spawns a fix child); the test asserts it stays in process.
-test("W1-T9114: a restart does not drain child reviews or fix dispatches — only reviews move, fix dispatch is deferred", async () => {
+// The title is the proof's verbatim grep target. Fix-dispatch drain is out of scope for this PR (no production producer spawns a
+// fix child); the test asserts it stays in process, so only the review child is left running by the restart.
+test("W1-T9114: a restart does not drain child reviews or fix dispatches", async () => {
   const f = fixture();
   try {
     const reviewDir = f.add("work-review-A-3", review);
