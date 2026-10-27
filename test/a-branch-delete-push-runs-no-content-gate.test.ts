@@ -110,8 +110,7 @@ test("W1-T8000: an empty stdin still runs every gate", () => {
 
 test("a real dispatch-claim push runs no source-content gate", () => {
   const { dir, log } = fixture();
-  const remote = join(dir, "remote.git");
-  execFileSync("git", ["init", "--bare", "-q", remote]);
+  const remote = gitRepo({ kind: "dispatch-claim-remote", bare: true }).dir;
   ownHook(dir);
   execFileSync("git", ["config", "core.hooksPath", "hooks"], { cwd: dir });
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
