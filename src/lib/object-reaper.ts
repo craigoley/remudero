@@ -1,7 +1,7 @@
 /** Repository maintenance cadence; legacy reaper exports are unreachable from production dispatch. */
 import { execFileSync, spawn } from "node:child_process";
 import { boundChildByLoopTime } from "./loop-bounded-child.js";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -478,13 +478,19 @@ export async function reclaimOwnerGoneLeftovers(repo: string, deps: ObjectReapDe
 
 let ownBootCache: number | undefined;
 
-/** This PID namespace's start: now minus PID 1's elapsed time. THROWS when `ps` cannot say. */
-function ownBootMs(now: number): number {
+/** Linux's USER_HZ: the unit `/proc/<pid>/stat` field 22 counts in, fixed by the kernel ABI. */
+const PROC_CLOCK_TICKS_PER_SECOND = 100;
+
+/** This PID namespace's start: PID 1's start tick after the kernel's boot time, both read from /proc (no child process). THROWS when /proc cannot say. */
+function ownBootMs(_now: number): number {
   if (ownBootCache === undefined) {
-    const out = execFileSync("ps", ["-o", "etimes=", "-p", "1"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 }).trim();
-    const seconds = Number(out);
-    if (!/^\d+$/.test(out) || !Number.isFinite(seconds)) throw new Error(`PID 1 elapsed time unreadable: ${JSON.stringify(out)}`);
-    ownBootCache = now - seconds * 1000;
+    const stat = readFileSync("/proc/1/stat", "utf8");
+    // field 2 (comm) may hold spaces and parentheses, so count fields from the LAST ")"
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const startTicks = Number(fields[19]); // field 22 overall; fields[0] is field 3
+    const btime = Number(/^btime (\d+)$/m.exec(readFileSync("/proc/stat", "utf8"))?.[1]);
+    if (!Number.isFinite(startTicks) || !Number.isFinite(btime)) throw new Error("PID 1 start time unreadable from /proc");
+    ownBootCache = btime * 1000 + (startTicks / PROC_CLOCK_TICKS_PER_SECOND) * 1000;
   }
   return ownBootCache;
 }
@@ -508,9 +514,18 @@ export function bootEvidenceFor(gitDir: string, opts: { now: number; host: strin
   }
   for (const name of names) {
     if (name === opts.host) continue;
-    const path = join(dir, name);
-    if (opts.now - statSync(path).mtimeMs > opts.freshMs) continue;
-    const boot = Number((JSON.parse(readFileSync(path, "utf8")) as { boot?: unknown }).boot);
+    // one open handle: the freshness and the content come from the same file, never a path tested and then reused
+    const fd = openSync(join(dir, name), "r");
+    let text: string;
+    let mtimeMs: number;
+    try {
+      mtimeMs = fstatSync(fd).mtimeMs;
+      text = readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
+    if (opts.now - mtimeMs > opts.freshMs) continue;
+    const boot = Number((JSON.parse(text) as { boot?: unknown }).boot);
     if (!Number.isFinite(boot)) throw new Error(`boot receipt ${name} unreadable`);
     earliest = Math.min(earliest, boot);
   }

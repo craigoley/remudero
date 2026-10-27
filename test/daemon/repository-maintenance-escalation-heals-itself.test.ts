@@ -5,7 +5,7 @@
  * the leftovers it reclaims are real files.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -161,14 +161,16 @@ test("W1-T10750: the gc prune window is derived from the fleet live state", asyn
   const blob = (text: string) => execFileSync("git", ["-C", store.dir, "hash-object", "-w", "--stdin"],
     { input: text, encoding: "utf8" }).trim();
   const looseFile = (oid: string) => join(store.dir, ".git", "objects", oid.slice(0, 2), oid.slice(2));
+  // Newer git packs a young unreachable object into a cruft pack, so "kept" means the database still has it, not that a loose file does.
+  const inDatabase = (oid: string) => spawnSync("git", ["-C", store.dir, "cat-file", "-e", oid]).status === 0;
   const old = blob("older than every live consumer\n");
   const young = blob("newer than the oldest live consumer\n");
   utimesSync(looseFile(old), new Date(t(1)), new Date(t(1)));
   utimesSync(looseFile(young), new Date(t(20)), new Date(t(20)));
   const real = await maintenance.runMaintenanceGit(store.dir, maintenance.maintenanceArgs("gc", maintenance.pruneExpireFor(t(9))), 120000);
   assert.equal(real.ok, true, real.ok ? "" : real.error);
-  assert.equal(existsSync(looseFile(old)), false, "an object older than the oldest consumer is pruned");
-  assert.equal(existsSync(looseFile(young)), true, "an object newer than the oldest consumer is kept");
+  assert.equal(inDatabase(old), false, "an object older than the oldest consumer is pruned");
+  assert.equal(inDatabase(young), true, "an object newer than the oldest consumer is kept");
 });
 
 test("W1-T10750: a gc-log store under constant load is not starved", async () => {
