@@ -85,6 +85,13 @@ test("a YAML hash inside a quoted scalar or a block scalar is not a comment", ()
   assert.equal(matchedLinesAreAllComments(["5:after: 1 # tail"], ctx("^after")), false);
   assert.equal(matchedLinesAreAllComments(["2:note: it's # a real comment"], ctx("^note.*$")), false);
   assert.equal(matchedLinesAreAllComments(["# displayed comment"], ctx("^#")), true);
+  // Escaped quotes stay inside their scalar; the `#` after the closing quote is a comment.
+  const escapes = ['q: "say \\"#x\\" now" # c1', "s: 'it''s #y' # c2", ""].join("\n");
+  const esc = (pattern: string) => ({ pattern, fileText: escapes, path: "x.yml" });
+  assert.equal(matchedLinesAreAllComments(['1:q: "say \\"#x\\" now" # c1'], esc("#x")), false);
+  assert.equal(matchedLinesAreAllComments(['1:q: "say \\"#x\\" now" # c1'], esc("c1")), true);
+  assert.equal(matchedLinesAreAllComments(["2:s: 'it''s #y' # c2"], esc("#y")), false);
+  assert.equal(matchedLinesAreAllComments(["2:s: 'it''s #y' # c2"], esc("c2")), true);
 });
 
 test("a Markdown file or an unknown extension masks nothing", () => {
