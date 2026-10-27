@@ -14,6 +14,7 @@ import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import { DEFAULT_SWEEP_POLICY, type OpenPrView, buildSweepEffects as libSweepEffects } from "../src/lib/sweep.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { emptyHoldLedger } from "./helpers/empty-hold-ledger.js";
 import { ghExec } from "../src/lib/github-transport.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
@@ -215,8 +216,9 @@ test("the existing synchronous CLI transport preserves guarded arm disarm and qu
   const shim = ghShim([], { kind: "admission-cli-transport" });
   const oldPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${oldPath}`;
+  const holdLedger = emptyHoldLedger();
   try {
-    const deps = realArmDeps();
+    const deps = realArmDeps(holdLedger.config);
     await withLiveWritesAllowed(async () => {
       deps.armAuto(pr().prUrl);
       deps.disableAuto(pr().prUrl);
@@ -224,7 +226,7 @@ test("the existing synchronous CLI transport preserves guarded arm disarm and qu
     });
     assert.deepEqual(shim.calls(), [`pr merge ${pr().prUrl} --auto --squash`,
       `pr merge ${pr().prUrl} --disable-auto`, `pr merge ${pr().prUrl}`]);
-  } finally { process.env.PATH = oldPath; rmSync(shim.dir, { recursive: true, force: true }); }
+  } finally { process.env.PATH = oldPath; rmSync(shim.dir, { recursive: true, force: true }); holdLedger.dispose(); }
 });
 
 test("membership cache is positive-only, expires, and never caches PR heads or other policy versions", async () => {
