@@ -14,6 +14,9 @@ import {
   PRODUCT_BUILD_LIMITS, PRODUCT_BUILD_VERSION, ProductBuildService,
   type ProductBuildCode, type ProductBuildOptions,
 } from "./product-build.js";
+import {
+  PRODUCT_EVALUATION_LIMITS, PRODUCT_EVALUATION_VERSION, ProductEvaluationService, type ProductEvaluationCode, type ProductEvaluationOptions,
+} from "./product-evaluation.js";
 import { PRODUCT_INTENT_LIMITS, PRODUCT_INTENT_VERSION, type ProductStoreCode } from "./product-intent.js";
 import { PRODUCT_RESEARCH_LIMITS, PRODUCT_RESEARCH_VERSION, ProductResearchService, type ProductResearchCode, type ProductResearchProvider } from "./product-research.js";
 
@@ -219,5 +222,30 @@ export function buildProductCaseRoutes(options: ProductBuildOptions): Route[] {
     const result = await service.execute(actor, command);
     if (!result.ok) { reply(codes[result.code], { error: result.code }); return; }
     reply(200, { ...result.value });
+  } }];
+}
+
+const evaluationStatus: Record<ProductEvaluationCode, number> = {
+  ...status, objective_changed: 409, holdout_failed: 409, budget_exceeded: 409,
+};
+
+/** Record a bounded improvement proposal against an unchanged held-out objective. MIDDLE tier: it never builds, spends or deploys. */
+export function buildProductEvaluationRoutes(options: ProductEvaluationOptions): Route[] {
+  const service = new ProductEvaluationService(options);
+  return [{ method: "POST", path: "/v1/products/evaluation", scope: "write", tier: "middle", async handler(req, res) {
+    res.setHeader("Cache-Control", "private, no-store");
+    const reply = (code: number, body: Record<string, unknown>) => sendJson(res, code, { version: PRODUCT_EVALUATION_VERSION, ...body });
+    const actor = verifiedActor(req);
+    if (!actor) { reply(403, { error: "invalid_identity" }); return; }
+    let command: unknown;
+    try { command = JSON.parse(await readBoundedRawBody(req, PRODUCT_EVALUATION_LIMITS.requestBytes)); }
+    catch (error) {
+      const tooLarge = error instanceof RawBodyTooLargeError;
+      reply(tooLarge ? 413 : 400, { error: tooLarge ? "request_too_large" : "invalid_input" });
+      return;
+    }
+    const result = service.execute(actor, command);
+    if (!result.ok) { reply(evaluationStatus[result.code], { error: result.code }); return; }
+    reply(200, result.value);
   } }];
 }
