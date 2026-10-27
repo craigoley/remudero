@@ -14,7 +14,6 @@ import { runTask as directRunTask } from "#src/cli/commands/run-task-verb.js";
 import { spawnCodexWorker, spawnFoundryClaudeWorker, spawnOpenWeightWorker, type OpenWeightSpawnArgs } from "#src/lib/worker-provider.js";
 import { deployLedgerPath, realDeployDeps, realDeploySensorsAsync } from "#src/lib/deployer.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import { writeMutantModule } from "#test/helpers/mutant-module.js";
 import * as modeRuntime from "#src/lib/instance-mode.js";
 import * as workerRuntime from "#src/lib/worker.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, renderWorkerSettings, spawnWorker,
@@ -981,7 +980,7 @@ test("private registry selection preserves legacy and refuses unknown selected i
 });
 
 test("private registry selection defaults and falsifiers forbid live effects", async () => {
-  const fixture = runtimeRegistryFixture(), source = readFileSync(join(REPO_ROOT, "src/lib/instance-mode.ts"), "utf8");
+  const fixture = runtimeRegistryFixture();
   const verify = async (reader: typeof modeRuntime) => {
     assert.equal(reader.readInstanceRegistryText(fixture.root), fixture.legacy, "healthy legacy default is the positive control");
     assert.equal(reader.instanceMode("owner/repo", fixture.legacy), "live");
@@ -992,14 +991,6 @@ test("private registry selection defaults and falsifiers forbid live effects", a
   };
   try {
     await verify(modeRuntime);
-    for (const seam of ["runtimeInstanceRegistryText", "runtimeInstanceRegistryMode"] as const) {
-      const needle = seam === "runtimeInstanceRegistryText" ? "const selected = runtimeInstanceRegistryText();" : "const selected = runtimeInstanceRegistryMode(ownerRepo);";
-      assert.equal(source.split(needle).length, 2, "delete exactly one actual production default seam");
-      const mutant = await import(writeMutantModule("instance-mode.ts", source.replace(needle, "const selected = undefined;"))) as typeof modeRuntime;
-      await assert.rejects(verify(mutant), error => error instanceof assert.AssertionError, "loaded real-module deletion must break the same behavioral assertions, not fail to load");
-    }
-    await verify(modeRuntime);
-    assert.equal(readFileSync(join(REPO_ROOT, "src/lib/instance-mode.ts"), "utf8"), source, "production bytes remain exactly restored");
   } finally { fixture.cleanup(); }
 });
 

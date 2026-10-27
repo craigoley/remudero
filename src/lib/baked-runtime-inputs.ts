@@ -15,6 +15,8 @@ export const BAKED_RUNTIME_SOURCE_PATHS: readonly string[] = [
   "src/lib/git-lock-reclaim.ts",
   "src/lib/host-identity.ts",
   "src/lib/install-hash.ts",
+  "src/lib/instance-registry-selection.ts",
+  "src/lib/instance-registry.ts",
   "src/lib/ledger-carry.ts",
   "src/lib/ledger-path.ts",
   "src/lib/ledger-union.ts",

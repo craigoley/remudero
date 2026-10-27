@@ -324,7 +324,9 @@ export function runtimeInstanceRegistryDigest(): string | undefined { return sel
 export function trustedInstanceRegistryLaunchPacket(target?: string): string {
   const scope = selectedRuntime();
   const instance = target ?? scope?.instanceName;
-  if (!scope?.binding || !instance) throw new InstanceRegistryRuntimeError("instance_missing");
+  if (scope === undefined) throw new InstanceRegistryRuntimeError("instance_missing");
+  if (scope.binding === undefined) throw new InstanceRegistryRuntimeError("instance_missing");
+  if (instance === undefined || instance.length === 0) throw new InstanceRegistryRuntimeError("instance_missing");
   if (!/^[A-Za-z0-9_-]+$/.test(instance) || (scope.instanceName !== undefined && scope.instanceName !== instance)) {
     throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
   }

@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DECLARED_OPERATOR_DEPLOY_SCRIPTS = [
   "deploy/host-update.sh",
   "deploy/recycle-container.sh",
@@ -135,7 +134,7 @@ export function hostMktempSites(script: string): MktempSite[] {
 
 /** The shell variable a `mktemp` site assigns to, or `undefined` when it assigns to none. */
 export function allocatedVar(text: string): string | undefined {
-  return /(?:^|\s|!\s*)([A-Za-z_]\w*)="?\$\(\s*mktemp\b/.exec(text)?.[1] ?? /\blocal\s+(\w+)\b/.exec(text)?.[1];
+  return /(?:^|\s|!\s*)([A-Za-z_]\w*)="?\$\(\s*(?:umask\s+0?[0-7]{3}\s*;\s*)?mktemp\b/.exec(text)?.[1] ?? /\blocal\s+(\w+)\b/.exec(text)?.[1];
 }
 
 /**
@@ -167,17 +166,20 @@ export function trapHandlersBefore(script: string, n: number): string[] {
     .filter((handler): handler is string => handler !== undefined);
 }
 
-export function cleanupFunctionRemovesVar(script: string, name: string, variable: string): boolean {
+export function cleanupFunctionRemovesVar(script: string, name: string, variable: string, directory = false): boolean {
   const body = cleanupFunctionBody(script, name);
   if (body === undefined) return false;
   const ref = new RegExp(`\\$\\{?${variable}\\b`);
-  return body.split("\n").some((text) => /\brm\s+-f/.test(text) && ref.test(text));
+  const remover = directory ? /\brmdir\b/ : /\brm\s+-f/;
+  return body.split("\n").some((text) => remover.test(text) && ref.test(text));
 }
 
 export function siteHasPreInstalledExitTrap(script: string, site: MktempSite): boolean {
   const v = allocatedVar(site.text);
   if (v === undefined) return false;
-  return trapHandlersBefore(script, site.n).some((handler) => cleanupFunctionRemovesVar(script, handler, v));
+  const flags = /\bmktemp\s+((?:-[A-Za-z]+\s*)*)/.exec(site.text)?.[1] ?? "";
+  const directory = flags.trim().split(/\s+/).some((flag) => /^-[A-Za-z]*d[A-Za-z]*$/.test(flag));
+  return trapHandlersBefore(script, site.n).some((handler) => cleanupFunctionRemovesVar(script, handler, v, directory));
 }
 
 // ── the census over the real tree ──────────────────────────────────────────────────────────────
@@ -307,4 +309,24 @@ test("W1-T2915: the container-scope detection is derived, not an allowlist — v
   const raw = src.split("\n").filter((l) => /\bmktemp\b/.test(l) && !/^\s*#/.test(l));
   assert.ok(raw.length >= 2, `verify-image.sh still has the container-side mktemp calls (found ${raw.length})`);
   assert.deepEqual(hostMktempSites(src), [], "and none of them is host-scoped");
+});
+
+
+test("mktemp cleanup census accepts a private directory only with its own preinstalled rmdir trap", () => {
+  const script = ["cleanup() {", '  rmdir "${DIR}"', "}", "trap cleanup EXIT",
+    'DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/rmd-fixture.XXXXXX")"'].join("\n");
+  const site = hostMktempSites(script)[0]!;
+  assert.equal(siteHasPreInstalledExitTrap(script, site), true);
+  for (const changed of [script.replace("trap cleanup EXIT", ""), script.replace('rmdir "${DIR}"', 'rmdir "${OTHER}"'),
+    script.replace('rmdir "${DIR}"', 'rm -f "${DIR}"')]) {
+    assert.equal(siteHasPreInstalledExitTrap(changed, hostMktempSites(changed)[0]!), false);
+  }
+});
+
+test("mktemp cleanup census preserves file cleanup and refuses a directory remover for a file", () => {
+  const script = ["cleanup() {", '  rm -f "${FILE}"', "}", "trap cleanup EXIT",
+    'FILE="$(mktemp "${TMPDIR:-/tmp}/rmd-fixture.XXXXXX")"'].join("\n");
+  assert.equal(siteHasPreInstalledExitTrap(script, hostMktempSites(script)[0]!), true);
+  const wrong = script.replace('rm -f "${FILE}"', 'rmdir "${FILE}"');
+  assert.equal(siteHasPreInstalledExitTrap(wrong, hostMktempSites(wrong)[0]!), false);
 });

@@ -172,52 +172,101 @@ selected_registry_diagnostic_filter() {
     if(!completed){if(pending) line(pending);process.exitCode=2;}
   ' "${SELECTED_REGISTRY_CALLER}" "${SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION}" 2>/dev/null
 }
+selected_registry_cleanup_diagnostics() {
+  local status="${1:-$?}" failed=0
+  [ "${SELECTED_REGISTRY_ACTIVE:-0}" = 1 ] || return 0
+  [ "${BASH_SUBSHELL}" = "${SELECTED_REGISTRY_DIAGNOSTIC_OWNER}" ] || return 0
+  if [ "${SELECTED_REGISTRY_CALLER}" = recycle-container ] && declare -F commission_on_exit >/dev/null; then
+    if [ "${SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED:-0}" = 1 ]; then commission_on_exit;
+    else commission_on_exit >/dev/null 2>&1; fi
+  fi
+  if [ -n "${SELECTED_REGISTRY_DIAGNOSTIC_PID:-}" ]; then
+    if [ "${SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED:-0}" = 1 ]; then
+      selected_registry_finish_diagnostics "$status"
+    else
+      # Only our unreaped filter can exist here; no lifecycle operation has begun.
+      kill "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" 2>/dev/null || true
+      wait "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" 2>/dev/null || true
+      SELECTED_REGISTRY_DIAGNOSTIC_PID=""
+    fi
+  fi
+  if [ "${SELECTED_REGISTRY_DIAGNOSTIC_SAVED_FDS:-0}" = 1 ]; then
+    exec 3>&- 4>&-
+    SELECTED_REGISTRY_DIAGNOSTIC_SAVED_FDS=0
+  fi
+  if [ -n "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO:-}" ] && [ -p "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" ] &&
+     [ ! -L "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" ]; then
+    rm -f "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" 2>/dev/null || failed=1
+  fi
+  if [ -n "${SELECTED_REGISTRY_DIAGNOSTIC_DIR:-}" ]; then
+    # This also owns an allocation returned by mktemp before that command fails.
+    if rmdir "${SELECTED_REGISTRY_DIAGNOSTIC_DIR}" 2>/dev/null; then
+      SELECTED_REGISTRY_DIAGNOSTIC_DIR=""
+      SELECTED_REGISTRY_DIAGNOSTIC_FIFO=""
+    else failed=1; fi
+  fi
+  if [ "$failed" = 1 ]; then
+    echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostic cleanup incomplete; outcome unknown." >&2
+    [ "$status" -ne 0 ] || exit 2
+  fi
+}
 selected_registry_diagnostics() {
   [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
-  exec 3>&1 4>&2
   SELECTED_REGISTRY_DIAGNOSTIC_OWNER="${BASH_SUBSHELL}"
+  SELECTED_REGISTRY_DIAGNOSTIC_DIR=""
+  SELECTED_REGISTRY_DIAGNOSTIC_FIFO=""
+  SELECTED_REGISTRY_DIAGNOSTIC_PID=""
+  SELECTED_REGISTRY_DIAGNOSTIC_SAVED_FDS=0
+  SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED=0
+  trap selected_registry_cleanup_diagnostics EXIT
+  exec 3>&1 4>&2
+  SELECTED_REGISTRY_DIAGNOSTIC_SAVED_FDS=1
   if ! SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')" 2>/dev/null; then
     echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
-    exec 3>&- 4>&-
+    selected_registry_cleanup_diagnostics 2
     return 2
   fi
   # Only the public streams are projected. Captured protocol bytes and explicit file redirects remain unchanged.
   if ! SELECTED_REGISTRY_DIAGNOSTIC_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/rmd-selected-diagnostics.XXXXXX")" 2>/dev/null; then
     echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
-    exec 3>&- 4>&-
+    selected_registry_cleanup_diagnostics 2
     return 2
   fi
   SELECTED_REGISTRY_DIAGNOSTIC_FIFO="${SELECTED_REGISTRY_DIAGNOSTIC_DIR}/stream"
   if ! (umask 077; mkfifo "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}") 2>/dev/null; then
-    rmdir "${SELECTED_REGISTRY_DIAGNOSTIC_DIR}" 2>/dev/null || true
     echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
-    exec 3>&- 4>&-
+    selected_registry_cleanup_diagnostics 2
     return 2
   fi
   selected_registry_diagnostic_filter < "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" >&4 &
   SELECTED_REGISTRY_DIAGNOSTIC_PID=$!
   if ! { exec > "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}"; } 2>/dev/null; then
-    kill "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" 2>/dev/null || true
-    wait "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" 2>/dev/null || true
     echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
-    exec 3>&- 4>&-
+    selected_registry_cleanup_diagnostics 2
     return 2
   fi
+  SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED=1
   exec 2>&1
 }
 selected_registry_finish_diagnostics() {
   local status="$1" failed=0
   [ -n "${SELECTED_REGISTRY_DIAGNOSTIC_PID:-}" ] || return 0
   [ "${BASH_SUBSHELL}" = "${SELECTED_REGISTRY_DIAGNOSTIC_OWNER}" ] || return 0
+  [ "${SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED:-0}" = 1 ] || return 0
   # Complete the owned stream explicitly; inherited writer descriptors are not an EOF protocol.
   printf '\n%s\n' "${SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION}" || failed=1
   exec 1>&3 2>&4
   exec 3>&- 4>&-
+  SELECTED_REGISTRY_DIAGNOSTIC_SAVED_FDS=0
+  SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED=0
   wait "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" 2>/dev/null || failed=1
   SELECTED_REGISTRY_DIAGNOSTIC_PID=""
   if [ -p "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" ]; then
     rm -f "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" 2>/dev/null || failed=1
-    rmdir "${SELECTED_REGISTRY_DIAGNOSTIC_DIR}" 2>/dev/null || failed=1
+    if rmdir "${SELECTED_REGISTRY_DIAGNOSTIC_DIR}" 2>/dev/null; then
+      SELECTED_REGISTRY_DIAGNOSTIC_DIR=""
+      SELECTED_REGISTRY_DIAGNOSTIC_FIFO=""
+    else failed=1; fi
   else
     failed=1
   fi
@@ -422,9 +471,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 DEFAULT_INSTANCE_REGISTRY="${SCRIPT_DIR%/deploy}/.remudero/daemon-instances.yaml"
 selected_registry_init "${SCRIPT_DIR%/deploy}" "${INSTANCE_NAME}" recycle-container
 selected_registry_diagnostics
-if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
-  trap 'selected_exit=$?; commission_on_exit; selected_registry_finish_diagnostics "$selected_exit"' EXIT
-fi
 
 validate_instance_name() {
   case "$1" in
@@ -1541,7 +1587,7 @@ recycle_cleanup_tmp() {
   [ -n "${COMMISSION_PROBE_FILE}" ] && rm -f "${COMMISSION_PROBE_FILE}"
   release_host_recycle_lock
   commission_on_exit
-  selected_registry_finish_diagnostics "${exit_status}"
+  selected_registry_cleanup_diagnostics "${exit_status}"
   return 0
 }
 # W1-T6160: the cleanup also emits the commissioning receipt (a no-op unless --commission-git-author).
