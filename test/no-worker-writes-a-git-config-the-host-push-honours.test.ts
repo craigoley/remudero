@@ -385,8 +385,10 @@ function codexChild(onStart: () => void, text: string) {
         { type: "item.completed", item: { type: "agent_message", text } }, { type: "turn.completed", usage: {} }]) {
         stdout.write(`${JSON.stringify(event)}\n`);
       }
+      // `exit` follows the stream's own `end`: the provider attaches its stdout reader after `spawn` returns, so an exit
+      // queued ahead of that read would settle the run before the final message (and its COMMIT_MESSAGE) was parsed.
+      stdout.once("end", () => proc.emit("exit", 0));
       stdout.end();
-      queueMicrotask(() => proc.emit("exit", 0));
     },
   };
 }
