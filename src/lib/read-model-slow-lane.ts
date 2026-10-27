@@ -45,6 +45,8 @@ import type { TraceGithub } from "./trace.js";
 import type { ViewSource } from "./views.js";
 import { startWorker } from "./child-entry-argv.js";
 import { NO_INSTANCE_RATIFY } from "./instance-gateway.js";
+import { collectDailyProgress, type DailyProgressCollectionConfig } from "./daily-progress-collector.js";
+import type { DailyProgressPublication } from "./daily-progress-store.js";
 
 const SLOW_LANE_KIND = "remudero-read-model-slow-lane" as const;
 /** BACKSTOP: the lane's heap; a unit that outgrows it kills this thread, never serve's. */
@@ -54,6 +56,8 @@ export const SLOW_LANE_MAX_RESPAWN_MS = 30 * 60_000;
 
 /** What the lane needs, all serializable: `workerData` cannot carry a closure. */
 export interface SlowLaneConfig {
+  /** Daily collection is independent of view switches and reader demand. */
+  dailyProgress?: DailyProgressCollectionConfig;
   /** The inbox unit's inputs; absent, the lane has no inbox unit. */
   inbox?: { root: string; planPath: string; ledgerPath: string; inboxRoot: string; repository: string };
   instanceInboxes?: Array<NonNullable<SlowLaneConfig["inbox"]> & { instance: string }>;
@@ -75,6 +79,7 @@ export interface SlowLaneBodies {
 }
 
 export type SlowLaneMessage =
+  | { type: "daily_progress"; publication: DailyProgressPublication; ownershipEpoch: number }
   | { type: "log"; step: string; extra: Record<string, unknown> }
   /** Posted BEFORE a unit's work starts, so a thread that dies inside it is attributed by its parent. */
   | { type: "begin"; work: SlowLaneWork }
@@ -357,7 +362,37 @@ function analyticsUnit(
 /** A view switch mode under which the view is built: the analytics unit runs only then. */
 const BUILT_MODES: ReadonlySet<unknown> = new Set(["shadow", "serve", "auto"]);
 
-type Port = { on(event: "message", run: (msg: { type?: string; held?: unknown; modes?: unknown; instances?: unknown }) => void): unknown; postMessage(value: unknown): void };
+type Port = { on(event: "message", run: (msg: { type?: string; held?: unknown; modes?: unknown; instances?: unknown; ownershipEpoch?: unknown }) => void): unknown; postMessage(value: unknown): void };
+
+function dailyProgressUnit(config: DailyProgressCollectionConfig, clock: Clock, post: (message: SlowLaneMessage) => void,
+  epoch: () => number, mayRun: () => boolean, ownsInstance: (name: string) => boolean,
+  log: (step: string, extra?: Record<string, unknown>) => void): SlowLaneUnit {
+  let active: AbortController | undefined;
+  return { name: "daily-progress", cancel: () => active?.abort(), run: async () => {
+    if (active || !mayRun()) return { views: [] };
+    const controller = new AbortController(), startedEpoch = epoch();
+    active = controller;
+    const work = { unit: "daily-progress-collection", phase: "cached-sources" };
+    post({ type: "begin", work });
+    // BACKSTOP: use the existing slow-source deadline; no second unbounded worker class.
+    const deadline = setTimeout(() => controller.abort(), ANALYTICS_REFRESH_TIMEOUT_MS);
+    deadline.unref();
+    void (async () => {
+      try {
+        const built = await collectDailyProgress({ ...config, ownedInstanceNames: config.instances.filter(i => ownsInstance(i.name)).map(i => i.name) }, clock, controller.signal);
+        if (built && !controller.signal.aborted && mayRun() && epoch() === startedEpoch) {
+          post({ type: "daily_progress", publication: built.publication, ownershipEpoch: startedEpoch });
+          log("read_model.daily_staged", { generation: built.manifest.generation });
+        }
+      } catch (error) {
+        log(controller.signal.aborted ? "read_model.daily_cancelled" : "read_model.daily_failed", {
+          reason: controller.signal.aborted ? "ownership changed or collection deadline elapsed" : String((error as Error).message).slice(0, 2048),
+        });
+      } finally { clearTimeout(deadline); active = undefined; post({ type: "end", work }); }
+    })();
+    return { views: [] };
+  } };
+}
 
 /**
  * The thread's body: run every unit each interval while the lease is held. A lease newly held runs a
@@ -390,6 +425,8 @@ export function runSlowLaneWorker(
       return () => !stopped && held && leaseEpoch === leaseAtStart && analyticsEpoch === viewAtStart && BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]);
     }, opts.analyticsRefresh ?? scanAnalyticsLedger, name => ownedInstances.has(name))]
     : [];
+  const daily = data.dailyProgress ? [dailyProgressUnit(data.dailyProgress, clock, post, () => leaseEpoch,
+    () => !stopped && held, name => ownedInstances.has(name), log)] : [];
   const codeHealth = data.codeHealth ? createCodeHealthCollectionUnit(data.codeHealth, { clock, log, ownsInstance: name => ownedInstances.has(name), captureOwnership: () => {
     const epoch = leaseEpoch, viewEpoch = codeHealthEpoch;
     return () => !stopped && held && leaseEpoch === epoch && codeHealthEpoch === viewEpoch && BUILT_MODES.has(modes[CODE_HEALTH_VIEW_NAME]);
@@ -399,7 +436,7 @@ export function runSlowLaneWorker(
       const startedEpoch = leaseEpoch;
       return () => !stopped && held && ownedInstances.has(config.instance) && leaseEpoch === startedEpoch;
     }, log)),
-    ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : []), ...analytics, ...(codeHealth ? [codeHealth] : [])];
+    ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : []), ...analytics, ...daily, ...(codeHealth ? [codeHealth] : [])];
   let cancel: () => void = () => {};
   const pass = async (): Promise<void> => {
     cancel = () => {};
@@ -439,9 +476,11 @@ export function runSlowLaneWorker(
     const previous = [...ownedInstances].join("|");
     ownedInstances = new Set(Array.isArray(msg.instances) ? msg.instances.filter((id): id is string => typeof id === "string") : []);
     held = msg.held === true;
-    if (was !== held || previous !== [...ownedInstances].join("|")) {
-      leaseEpoch += 1;
-      for (const unit of analytics) unit.cancel?.();
+    const suppliedEpoch = typeof msg.ownershipEpoch === "number" && Number.isSafeInteger(msg.ownershipEpoch) && msg.ownershipEpoch >= 0 ? msg.ownershipEpoch : undefined;
+    const epochChanged = suppliedEpoch !== undefined && suppliedEpoch !== leaseEpoch;
+    if (was !== held || previous !== [...ownedInstances].join("|") || epochChanged) {
+      leaseEpoch = suppliedEpoch ?? leaseEpoch + 1;
+      for (const unit of [...analytics, ...daily]) unit.cancel?.();
     }
     if (held && (!was || previous !== [...ownedInstances].join("|")) && !running) {
       cancel();
@@ -452,7 +491,7 @@ export function runSlowLaneWorker(
   return {
     stop: () => {
       stopped = true;
-      for (const unit of analytics) unit.cancel?.();
+      for (const unit of [...analytics, ...daily]) unit.cancel?.();
       cancel();
     },
   };
@@ -464,7 +503,7 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === SL
 
 export interface SlowLane {
   /** Whether this serve holds the home lease; the thread is spawned the first time it does. */
-  lease(held: boolean, instances?: readonly string[]): void;
+  lease(held: boolean, instances?: readonly string[], ownershipEpoch?: number): void;
   /** The view switches as the worker last read them: a unit whose view is off does not run. */
   views(modes: Record<string, string>): void;
   close(): void;
@@ -479,6 +518,7 @@ export function threadSlowLane(opts: {
   onBodies?: (built: SlowLaneBodies) => void;
   /** Each instance's analytics refresh, finished or failed. */
   onSnapshot?: (write: SourceSnapshotWrite) => void;
+  onDailyProgress?: (publication: DailyProgressPublication, ownershipEpoch: number) => void;
   /** Times the work in flight when the thread dies. */
   clock?: Clock;
 }): SlowLane {
@@ -487,6 +527,7 @@ export function threadSlowLane(opts: {
   let worker: Worker | undefined;
   let held = false;
   let ownedInstances: readonly string[] = [];
+  let ownershipEpoch: number | undefined;
   let modes: Record<string, string> = {};
   let deaths = 0;
   let closed = false;
@@ -509,6 +550,9 @@ export function threadSlowLane(opts: {
       else if (msg.type === "log") opts.log(msg.step, msg.extra);
       else if (msg.type === "bodies") opts.onBodies?.({ view: msg.view, version: msg.version, bodies: msg.bodies });
       else if (msg.type === "source_snapshot") opts.onSnapshot?.(msg.snapshot);
+      else if (msg.type === "daily_progress") {
+        if (worker === spawned && held && msg.ownershipEpoch === ownershipEpoch) opts.onDailyProgress?.(msg.publication, msg.ownershipEpoch);
+      }
       else if (msg.ok) deaths = 0;
     });
     spawned.on("error", (error: Error & { code?: unknown }) => {
@@ -526,18 +570,21 @@ export function threadSlowLane(opts: {
         respawn = undefined;
         if (closed) return;
         spawn();
-        worker?.postMessage({ type: "lease", held, instances: ownedInstances });
+        worker?.postMessage({ type: "lease", held, instances: ownedInstances, ...(ownershipEpoch === undefined ? {} : { ownershipEpoch }) });
       }, delayMs);
       respawn.unref();
     });
   };
   return {
-    lease: (now, instances = []) => {
-      if (closed || now === held && JSON.stringify(instances) === JSON.stringify(ownedInstances)) return;
+    lease: (now, instances = [], nextEpoch) => {
+      const sameOwners = now === held && JSON.stringify(instances) === JSON.stringify(ownedInstances);
+      const incomingEpoch = nextEpoch ?? (opts.config.dailyProgress ? sameOwners ? ownershipEpoch : (ownershipEpoch ?? 0) + 1 : undefined);
+      if (closed || sameOwners && incomingEpoch === ownershipEpoch) return;
       held = now;
       ownedInstances = [...instances];
+      ownershipEpoch = incomingEpoch;
       if (held && !worker && respawn === undefined) spawn();
-      worker?.postMessage({ type: "lease", held, instances: ownedInstances });
+      worker?.postMessage({ type: "lease", held, instances: ownedInstances, ...(ownershipEpoch === undefined ? {} : { ownershipEpoch }) });
     },
     views: (next) => {
       if (closed || JSON.stringify(next) === JSON.stringify(modes)) return;

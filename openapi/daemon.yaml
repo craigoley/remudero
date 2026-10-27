@@ -85,6 +85,146 @@ components:
         every other route.
 
   schemas:
+    DailyProgressCount:
+      type: object
+      additionalProperties: false
+      required: [value, precision]
+      properties:
+        value: {type: [integer, "null"], minimum: 0}
+        precision: {type: string, enum: [exact, at_least, unavailable]}
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [value, precision]
+          properties: {precision: {type: string, enum: [unavailable]}, value: {type: "null"}}
+        - type: object
+          additionalProperties: false
+          required: [value, precision]
+          properties: {precision: {type: string, enum: [exact, at_least]}, value: {type: integer, minimum: 0}}
+    ExpectedDailyProgressSource:
+      type: object
+      additionalProperties: false
+      required: [id, repository, kind, instanceId, required]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 256}
+        repository: {type: string, minLength: 3, maxLength: 140}
+        kind: {type: string, enum: [pull_requests, ledger_activity, deployments]}
+        instanceId: {type: [string, "null"], minLength: 1, maxLength: 128}
+        required: {type: boolean}
+    DailyProgressSource:
+      type: object
+      additionalProperties: false
+      required: [id, repository, kind, instanceId, required, state, lastAttemptAt, lastSuccessAt, coverageStart, coverageThrough, nextDueAt, reason]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 256}
+        repository: {type: string, minLength: 3, maxLength: 140}
+        kind: {type: string, enum: [pull_requests, ledger_activity, deployments]}
+        instanceId: {type: [string, "null"], minLength: 1, maxLength: 128}
+        required: {type: boolean}
+        state: {type: string, enum: [complete, partial, stale, not_collected, unavailable, unauthorized]}
+        lastAttemptAt: {type: [string, "null"], format: date-time}
+        lastSuccessAt: {type: [string, "null"], format: date-time}
+        coverageStart: {type: [string, "null"], format: date-time}
+        coverageThrough: {type: [string, "null"], format: date-time}
+        nextDueAt: {type: [string, "null"], format: date-time}
+        reason: {type: [string, "null"], maxLength: 2048}
+    DailyProgressEvent:
+      type: object
+      additionalProperties: false
+      required: [id, repository, kind, sourceId, occurredAt, observedAt, fleetAttribution, taskIds, title, url]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 256}
+        repository: {type: string, minLength: 3, maxLength: 140}
+        kind: {type: string, enum: [merged, activity, deployment]}
+        sourceId: {type: string, minLength: 1, maxLength: 256}
+        occurredAt: {type: string, format: date-time}
+        observedAt: {type: string, format: date-time}
+        fleetAttribution: {type: string, enum: [confirmed, unknown, non_fleet]}
+        taskIds: {type: array, maxItems: 256, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 128}}
+        title: {type: string, minLength: 1, maxLength: 2048}
+        url: {type: [string, "null"], format: uri, maxLength: 2048}
+    DailyProgressReport:
+      type: object
+      additionalProperties: false
+      description: >
+        daily-progress-v1. Counts use the retained population, independently of this bounded evidence
+        page. Missing evidence is unavailable, not a measured zero. Merges, observed activity,
+        independent deployment evidence and present open work retain separate meanings and clocks.
+      required: [version, scope, reportDate, timeZone, windowStart, windowEnd, revision, correctionReason, generatedAt, phase, coverage, totals, events, page, currentWork]
+      properties:
+        version: {type: string, enum: [daily-progress-v1]}
+        scope:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [kind]
+              properties: {kind: {type: string, enum: [all]}}
+            - type: object
+              additionalProperties: false
+              required: [kind, repository]
+              properties: {kind: {type: string, enum: [repository]}, repository: {type: string, maxLength: 140}}
+        reportDate: {type: string, format: date}
+        timeZone: {type: string, minLength: 1, maxLength: 128}
+        windowStart: {type: string, format: date-time}
+        windowEnd: {type: string, format: date-time}
+        revision: {type: integer, minimum: 1}
+        correctionReason: {type: [string, "null"], maxLength: 2048}
+        generatedAt: {type: string, format: date-time}
+        phase: {type: string, enum: [provisional, finalizing, complete, corrected]}
+        coverage:
+          type: object
+          additionalProperties: false
+          required: [state, expectedRepositories, includedRepositories, expectedSources, sources]
+          properties:
+            state: {type: string, enum: [complete, partial, stale, not_collected, unavailable, unauthorized]}
+            expectedRepositories: {type: array, maxItems: 256, uniqueItems: true, items: {type: string, maxLength: 140}}
+            includedRepositories: {type: array, maxItems: 256, uniqueItems: true, items: {type: string, maxLength: 140}}
+            expectedSources: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/ExpectedDailyProgressSource"}}
+            sources: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/DailyProgressSource"}}
+        totals:
+          type: object
+          additionalProperties: false
+          required: [mergedChanges, completedTasks]
+          properties:
+            mergedChanges: {$ref: "#/components/schemas/DailyProgressCount"}
+            completedTasks: {$ref: "#/components/schemas/DailyProgressCount"}
+        events: {type: array, maxItems: 200, items: {$ref: "#/components/schemas/DailyProgressEvent"}}
+        page:
+          type: object
+          additionalProperties: false
+          required: [totalEvents, nextCursor]
+          properties:
+            totalEvents: {type: integer, minimum: 0}
+            nextCursor: {type: [string, "null"], maxLength: 1024}
+        currentWork:
+          type: [object, "null"]
+          additionalProperties: false
+          required: [asOf, items]
+          properties:
+            asOf: {type: string, format: date-time}
+            items:
+              type: array
+              maxItems: 200
+              items:
+                type: object
+                additionalProperties: false
+                required: [repository, id, title, url]
+                properties:
+                  repository: {type: string, maxLength: 140}
+                  id: {type: string, minLength: 1, maxLength: 256}
+                  title: {type: string, minLength: 1, maxLength: 2048}
+                  url: {type: [string, "null"], format: uri, maxLength: 2048}
+    DailyProgressView:
+      type: object
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view: {type: string, enum: [daily-progress]}
+        version: {type: integer, enum: [1]}
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"], format: date-time}
+        stale: {type: boolean}
+        sources: {type: array, items: {$ref: "#/components/schemas/ViewSource"}}
+        data: {$ref: "#/components/schemas/DailyProgressReport"}
     ImprovementThreadRequest:
       type: object
       additionalProperties: false
@@ -1125,6 +1265,289 @@ components:
         error:
           type: string
           enum: [invalid_identity, invalid_input, not_found, project_not_found, repository_required, repository_mismatch, team_mismatch, project_conflict, idempotency_conflict, stale_revision, capacity, creation_denied, not_configured, busy, corrupt, unavailable, provider_unreadable, outcome_unknown, recovery_required, request_too_large]
+    ProductCaseImport:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - requestId
+        - expectedRevision
+        - brief
+      properties:
+        version:
+          type: string
+          enum:
+            - product-intent-v1
+        requestId:
+          $ref: "#/components/schemas/ProductRequestId"
+        expectedRevision:
+          type: integer
+          enum:
+            - 0
+        brief:
+          $ref: "#/components/schemas/ProductBrief"
+    ProductCaseAdopt:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - requestId
+        - productId
+        - action
+        - owner
+        - name
+        - visibility
+        - expectedRevision
+        - expectedObjectiveRevision
+        - repositoryId
+      properties:
+        version:
+          type: string
+          enum:
+            - product-repository-v1
+        requestId:
+          $ref: "#/components/schemas/ProductRequestId"
+        productId:
+          $ref: "#/components/schemas/ProductId"
+        action:
+          type: string
+          enum:
+            - adopt
+        owner:
+          type: string
+          minLength: 1
+          maxLength: 39
+          pattern: ^[A-Za-z0-9][A-Za-z0-9-]*$
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          pattern: ^(?!\.{1,2}$)[A-Za-z0-9_.-]+$
+        visibility:
+          type: string
+          enum:
+            - public
+            - private
+        repositoryId:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        expectedRevision:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        expectedObjectiveRevision:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+    ProductCasePlan:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - productId
+        - expectedRevision
+        - expectedObjectiveRevision
+        - planEvidenceId
+        - taskId
+        - pullRequest
+      properties:
+        requestId:
+          $ref: "#/components/schemas/ProductRequestId"
+        productId:
+          $ref: "#/components/schemas/ProductId"
+        expectedRevision: &a1
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        expectedObjectiveRevision: *a1
+        planEvidenceId:
+          type: string
+          minLength: 1
+          maxLength: 80
+          pattern: ^[A-Za-z0-9_-]+$
+        taskId:
+          type: string
+          minLength: 1
+          maxLength: 64
+        pullRequest: *a1
+    ProductCaseCommand:
+      description: At most 65536 raw bytes. Import an approved brief, adopt its existing repository,
+        verify a merged reviewed plan, or request one guarded build. Client evidence and verification
+        fields are rejected.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required:
+            - version
+            - action
+            - command
+          properties:
+            version:
+              type: string
+              enum:
+                - product-case-v1
+            action:
+              type: string
+              enum:
+                - import
+            command:
+              $ref: "#/components/schemas/ProductCaseImport"
+        - type: object
+          additionalProperties: false
+          required:
+            - version
+            - action
+            - command
+          properties:
+            version:
+              type: string
+              enum:
+                - product-case-v1
+            action:
+              type: string
+              enum:
+                - adopt
+            command:
+              $ref: "#/components/schemas/ProductCaseAdopt"
+        - type: object
+          additionalProperties: false
+          required:
+            - version
+            - action
+            - command
+          properties:
+            version:
+              type: string
+              enum:
+                - product-case-v1
+            action:
+              type: string
+              enum:
+                - plan
+            command:
+              $ref: "#/components/schemas/ProductCasePlan"
+        - type: object
+          additionalProperties: false
+          required:
+            - version
+            - action
+            - command
+          properties:
+            version:
+              type: string
+              enum:
+                - product-case-v1
+            action:
+              type: string
+              enum:
+                - build
+            command:
+              $ref: "#/components/schemas/ProductBuildCommand"
+    ProductCaseResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - productId
+        - revision
+        - objectiveRevision
+        - replayed
+        - evidence
+      properties:
+        version:
+          type: string
+          enum:
+            - product-case-v1
+        productId:
+          $ref: "#/components/schemas/ProductId"
+        revision: *a1
+        objectiveRevision: *a1
+        replayed:
+          type: boolean
+        evidence:
+          type: object
+          additionalProperties: false
+          required:
+            - source
+            - local
+            - hosted
+            - review
+            - merge
+            - deploy
+            - mobile
+          properties:
+            source: &a2
+              type: array
+              maxItems: 128
+              items:
+                type: object
+                additionalProperties: false
+                required:
+                  - id
+                  - reference
+                properties:
+                  id:
+                    type: string
+                    minLength: 1
+                    maxLength: 128
+                  reference:
+                    type: string
+                    minLength: 1
+                    maxLength: 2048
+            local: *a2
+            hosted: *a2
+            review: *a2
+            merge: *a2
+            deploy: *a2
+            mobile: *a2
+        build:
+          $ref: "#/components/schemas/ProductBuildReceipt"
+    ProductCaseError:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - error
+      properties:
+        version:
+          type: string
+          enum:
+            - product-case-v1
+        error:
+          type: string
+          enum:
+            - invalid_identity
+            - invalid_input
+            - not_found
+            - stale_revision
+            - idempotency_conflict
+            - capacity
+            - busy
+            - corrupt
+            - unavailable
+            - outcome_unknown
+            - recovery_required
+            - request_too_large
+            - repository_missing
+            - repository_not_found
+            - repository_conflict
+            - provider_unreadable
+            - plan_not_approved
+            - target_not_enrolled
+            - target_unreadable
+            - target_daemon_missing
+            - runner_missing
+            - bootstrap_unverified
+            - task_not_found
+            - task_unreadable
+            - task_stale
+            - task_claimed
+            - task_merged
+            - budget_exceeded
+            - fleet_halted
+            - kick_failed
+            - creation_denied
     ProductBuildCommand:
       type: object
       additionalProperties: false
@@ -16001,6 +16424,94 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductDeploymentError" }
+  /v1/products/case:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema:
+          type: string
+          minLength: 1
+      - name: x-confirm-nonce
+        in: header
+        required: true
+        description: Server-issued HIGH-tier confirmation bound to this exact method, path and body.
+        schema:
+          type: string
+          minLength: 1
+    post:
+      security:
+        - bearerWrite: []
+      summary: Resume an imported product through adoption, verified planning and a guarded build request.
+      description: The verified operator, write scope, high tier and exact confirmation are required.
+        Import saves the approved brief with provenance. Adoption never creates a repository. Planning
+        verifies enrollment, runner and bootstrap, then reads the complete approved brief in a
+        reviewed merged target task at both its merge and current head. Build rechecks that plan and
+        delegates to the existing guarded builder. Evidence channels stay separate; empty channels
+        mean not observed. A queued receipt never proves execution, deployment or mobile playability.
+        Responses use private, no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductCaseCommand"
+      responses:
+        "200":
+          description: The durable receipt, or the same original receipt on an identical retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCaseResponse"
+        "400":
+          description: Malformed JSON or an invalid command.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCaseError"
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductBuildAccessError"
+        "403":
+          description: The verified operator identity, write grant, high tier or confirmation is missing.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductCaseError"
+                  - $ref: "#/components/schemas/ProductBuildAccessError"
+        "404":
+          description: The product, repository or task does not exist for this operator.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCaseError"
+        "409":
+          description: A refused precondition - stale revision or ownership, unapproved plan, missing runner,
+            target daemon or bootstrap, claimed or merged task, budget, or halted fleet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCaseError"
+        "413":
+          description: The raw request exceeds 65536 bytes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCaseError"
+        "503":
+          description: busy, corrupt, unavailable or an unreadable provider, target or task; no success is
+            fabricated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCaseError"
   /v1/products/build:
     parameters:
       - name: x-rmd-operator-session
@@ -19637,6 +20148,52 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /v1/views/daily-progress:
+    get:
+      summary: Work observed for one reporting day, for a repository or the authorized fleet.
+      description: >
+        Cached daily-progress-v1. Collection runs hourly and at civil midnight without browser
+        demand or Analytics activation. Today and Yesterday resolve in the reporting IANA zone
+        before a held body or ETag can answer. Response evidence is capped at 200 events and
+        1 MiB; totals cover retained populations. A page cursor pins scope, date, zone and revision.
+        The native read-model off/shadow/activation policy still applies. No request fetches GitHub
+        or scans the ledger. Source merge does not establish served adoption or deployment.
+      security:
+        - bearerRead: []
+      parameters:
+        - in: query
+          name: repository
+          schema: {type: string, default: all, maxLength: 140}
+          description: A server-known owner/repository, or all for the authorized fleet.
+        - in: query
+          name: date
+          schema: {type: string, default: today, maxLength: 10}
+          description: today, yesterday, or an ISO civil date in the reporting zone.
+        - in: query
+          name: timeZone
+          schema: {type: string, maxLength: 128}
+          description: IANA zone; defaults to the server reporting zone, initially America/New_York.
+        - in: query
+          name: revision
+          schema: {type: integer, minimum: 1, maximum: 999999999999999}
+          description: An immutable repository revision or consolidated publication generation.
+        - in: query
+          name: page
+          schema: {type: string, maxLength: 512}
+          description: The preceding page's opaque nextCursor. Unknown or repeated parameters are refused.
+      responses:
+        "200":
+          description: Report with independent source clocks and coverage.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DailyProgressView"}
+        "304": {description: The request's If-None-Match matches the held report.}
+        "400": {description: Invalid scope, reporting day, zone, revision or page.}
+        "404": {description: The view is off, in shadow, or the requested retained revision is not ready.}
+        "503": {description: Current reporting-day or repository-scope evidence is not ready.}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /v1/views/analytics:
     get:

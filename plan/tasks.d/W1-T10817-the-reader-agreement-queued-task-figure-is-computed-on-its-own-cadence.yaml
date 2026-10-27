@@ -1,0 +1,71 @@
+- id: W1-T10817
+  title: "THE READER-AGREEMENT QUEUED-TASK FIGURE IS COMPUTED ON ITS OWN CADENCE — independentFigures fires the independent queue gateway's warm() and reads factsStale() on the same line; only this 15-minute check warms that gateway and its TTL is max(15 s, walk), so the facts are always stale when read and the queued figure has not been compared once since W1-T6246 (#9908) merged on 2026-10-07"
+  repo: remudero
+  depends_on: []  # W1-T6246 (merged, #9908) added the off-loop gateway and the staleness gate; W1-T9981 (merged, #12645) added the reader.agreement row
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 10.00
+  risk: medium  # Rule 19: one concern, the queue figure of one cross-check. It must stay off the daemon loop (W1-T6246's guard), and a figure computed from facts older than the board's own snapshot is not a comparison
+  band_meaning: span
+  priority: 2  # an observability cross-check reads nothing and says nothing about it; no PR or dispatch decision depends on it
+  status: queued
+  attempts: 0
+  origin: "investigator V62, 2026-10-27, re-verifying a 2026-10-17 lead from agent B51 (#12645 / W1-T9981) at origin/main ab1bf6914"
+  plan_refs: [W1-T6246, W1-T9981, W1-T4841, W1-T2440]
+  files:
+    - src/lib/reader-agreement.ts
+    - test/review/the-reader-agreement-queued-task-figure-is-computed-on-its-own-cadence.test.ts
+  rationale: |
+    READ 2026-10-27 on origin/main ab1bf6914, by symbol.
+
+    independentFigures (src/lib/reader-agreement.ts) computes queuedTaskCount only when status.json exists beside
+    the ledger (it does on the host: state/status.json, written 2026-10-27T10:41Z) and the gateway's facts are
+    fresh. It calls `github.warm?.()` and on the next line returns with no queue figure unless
+    `github.factsStale?.() === false`. warm() is fire-and-forget and walks on a worker (W1-T2440), so on the pass
+    that starts a walk the facts cannot be fresh yet. independentQueueGateway is built once per repository and
+    is used by nothing else (git grep: reader-agreement.ts and one test). Nothing keeps it warm between passes, and
+    sweep.ts runs the check at most once per READER_AGREEMENT_INTERVAL_MS (15 min). buildBatchedGithub's factsStale
+    (src/lib/status.ts) is true once either half is older than max(ttlMs, that half's walk duration), with
+    ttlMs 15 s. So every pass finds the facts the previous pass started, about 15 minutes old, reads them stale,
+    and starts another walk.
+
+    LEDGER, the host union (every gz rotation from 2026-09-07 on plus the live file, niced). Positive control:
+    run.start rows span 2026-09-07T00:40Z to 2026-10-27T10:41Z; 425 reader.agreement rows span
+    2026-10-17T21:16Z to 2026-10-27T10:29Z.
+    - reader.disagreement rows by figure: dispatch_streak 1834, open_pr_count 68 (the newest on
+      2026-10-27T08:59Z), queued_task_count 122. All 122 queued_task_count rows fall between
+      2026-10-06T17:19Z and 2026-10-07T18:08Z; #9908 merged at 19:56Z that day, and there is not one after it.
+      Before the gate the figure was computed and disagreed 98 times in one day. After it, not once in 20 days,
+      while the other figures kept disagreeing.
+    - reader.agreement rows_kept: the projection's own read (PROJECTION_STEP_READS plus every plan task's rows)
+      would add thousands of rows to rows_kept.independent. Independent equals board in 423 of 425 rows, and the
+      other 2 differ by 3 and 5 (the halted-task reads), so the projection read never ran.
+    - The reader.agreement row does not say whether the queue figure was compared, which is why this hid.
+  design: |
+    Two changes, both in reader-agreement.ts.
+    1. The queue figure is compared on the pass the check runs. Pick one; the test decides between them by
+       outcome, not mechanism.
+       - (preferred) Await the gateway's own off-loop walk before reading factsStale: the walk already runs on a
+         worker thread, so awaiting its settlement does not block the daemon loop (W1-T6246's measured problem was
+         a SYNCHRONOUS walk on the loop). This needs a settle signal on the GitHub seam if none exists; reuse
+         warmTelemetry's in-flight state rather than adding a timer.
+       - or keep this gateway warm between passes with the existing prewarm lead (prewarmLeadMs) or the keep-warm
+         pacer (github-refresh-pacer.ts), so its facts are fresh when the 15-minute pass reads them.
+       No fixed wait and no new TTL literal.
+    2. The reader.agreement row names the queue figure's outcome: `queued_figure: "compared" | "stale-facts" |
+       "no-status-cache" | "no-plan"`, so a figure that stops being computed is visible in the next row.
+  acceptance:
+    - claim: "on passes 15 minutes apart, through the real off-loop gateway seam with a fast walk, the independent queue figure is computed from the second pass on and a disagreement with the board's status cache is reported"
+      proof: 'grep: test("W1-T10817: on a 15-minute cadence the independent queue figure is compared" in test/review/the-reader-agreement-queued-task-figure-is-computed-on-its-own-cadence.test.ts'
+    - claim: "the reader.agreement row names whether the queue figure was compared, and names why when it was not"
+      proof: 'grep: test("W1-T10817: the agreement row names the queue figure outcome" in test/review/the-reader-agreement-queued-task-figure-is-computed-on-its-own-cadence.test.ts'
+  falsifier: |
+    At base both cases fail. With a gateway whose warm() settles on a worker, every pass reads factsStale() true and
+    returns no queuedTaskCount, so no queued_task_count disagreement is ever reported, and the agreement row has no
+    queued_figure field.
+    - Compute the figure from stale facts: the row says "compared" while the facts are older than the walk the pass
+      started; the first case pins that the compared value comes from the settled walk.
+    - Make the walk synchronous on the calling thread: W1-T6246's off-loop guard fails.
+    GUARDS that held at base and must still hold:
+    - test/the-reader-agreement-check-projects-the-plan-off-the-loop.test.ts

@@ -1,0 +1,150 @@
+- id: W1-T10799
+  title: "A managed target with no daemon of its own runs its one reviewed
+    frontier task as a bounded job the core daemon owns"
+  repo: remudero
+  depends_on:
+    - W1-T10797
+    - W1-T10615
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 30
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs:
+    - W1-T10614
+    - W1-T10615
+    - W1-T10618
+    - W1-T10797
+    - W1-T988
+  files:
+    - src/lib/product-build.ts
+    - src/cli/commands/daemon.ts
+    - src/lib/daemon.ts
+    - src/lib/drain.ts
+    - test/infra/bounded-target-job.test.ts
+    - test/infra/product-build.test.ts
+  status: queued
+  attempts: 0
+  rationale: >-
+    Functional prerequisite for W1-T10618 (Core18). Its worker refused criterion
+    1 with needs-operator-input: "No shipped daemon serves Wreckterra; verified
+    delivery requires an approved execution binding". This task is that binding.
+    It is filed as a plan-only operation (run PLAN-clarify-1793095322512). It
+    edits no source and releases no hold. OBSERVED CODE (worktree base at
+    filing): ProductBuildService (src/lib/product-build.ts) defaults daemonRoot
+    to registryDaemonRoot. That function returns "absent" when no live registry
+    instance names the repository, and start() then throws
+    target_daemon_missing. The only kick consumer is daemonKickPort
+    (src/cli/commands/daemon.ts), and it offers a repo-scoped marker only to the
+    daemon whose target names that repository. drainCommand (src/run-task.ts)
+    accepts only --until, --max, --repo, --curated, --dry-run and --allow-stale.
+    It always reads THIS checkout's plan; per its own comment, --repo "only the
+    status gateway moves". So no existing drain reads a target repository's
+    plan. resolveDaemonTarget (src/run-task.ts) is the only existing composition
+    that derives a target clone's plan path (reposDir/<repo>/plan). It is
+    reachable only through rmd daemon, which is persistent. runTask
+    (src/cli/commands/run-task-verb.ts) already refreshes and works in the
+    managed checkout of task.repo. The worker side therefore already supports a
+    target-repo task. taskTargetsRepo (src/lib/drain.ts, W1-T988) states that
+    the single-target daemon guard is "not multi-repo support". INFERENCE (by
+    elimination, not observed wiring): the operator's constraints forbid a new
+    persistent service, an alternate launcher, a detached fallback and any
+    environment change. They also forbid importing CLI composition into a
+    library. Under those constraints, the only existing process that owns kick
+    consumption, lane supervision and every admission governor is the core
+    daemon (runDaemon). It is therefore the native lifetime owner. The narrow
+    exception to W1-T988 is bounded: one job, one task, one lane. It never makes
+    the daemon a multi-repo scheduler. POLICY SOURCE vs RUNTIME:
+    .remudero/managed-repos.json (reviewed source) enrolls craigoley/wreckterra.
+    The live instance registry under the state dir is runtime configuration, and
+    this filing did not read it. The retained W1-T10797 tail
+    (state/runs/W1-T10797-1793093826672.tail) lies outside this worktree's
+    file-tool confinement and was not read. Its reported call sites are
+    therefore unqualified input, which is why W1-T10797 is a dependency. Settled
+    by lookup: is this already filed or already decided? -> no. No plan shard,
+    DECISIONS.md, LEARNINGS.md or MASTER-PLAN.md entry gives a daemonless
+    managed target an execution path. W1-T10797 is mapping-only recon
+    (plan/tasks.d/W1-T10797-*.yaml). W1-T10615 built the daemon-backed kick path
+    only (src/lib/product-build.ts). Settled by lookup: does an "existing
+    bounded target-repo drain" (W1-T10614 design) exist? -> no. drainCommand
+    cannot select a target plan. Only rmd daemon --repo can, and it is
+    persistent (src/run-task.ts resolveDaemonTarget, drainCommand). Settled by
+    lookup: can a worker build a target-repo task once dispatched? -> yes.
+    runTask uses the repos/<task.repo> managed checkout under its lock
+    (src/cli/commands/run-task-verb.ts refreshManagedCheckout). Settled by
+    lookup: are daemon-backed targets affected? -> they must not be.
+    daemonKickPort addressing and registryDaemonRoot "found" stay as they are
+    (src/cli/commands/daemon.ts, src/lib/product-build.ts). Settled by lookup:
+    do WRECK-T1..6 or Console149/150 need re-filing? -> no. They are held in
+    their own plan, their holds are untouched, and this task duplicates none of
+    their foundation work (plan/feedback/fb-1793059243092-5bfa75.yaml).
+  design: >-
+    This task does not decide module API names. Derive the call sites from
+    W1-T10797's qualified report, and reuse only existing functions. (1)
+    Routing. When the registry is readable, names no live instance for an
+    enrolled managed target, and the core daemon's own root is readable and not
+    halted, ProductBuildService writes the existing repo-scoped requestKick
+    marker under the CORE root. It does not throw target_daemon_missing. These
+    remain explicit refusals: an unreadable registry or managed set
+    (target_unreadable), an unenrolled target, and a halted or unreadable core
+    root. A live target instance keeps its own kick path unchanged. (2)
+    Ownership. The core daemon admits such a marker only for an enrolled managed
+    target that has no live instance of its own. It runs ONE bounded job, and
+    only through the maintained drain. The steps are: derive the target clone
+    plan path exactly as resolveDaemonTarget does; sync it from origin/main
+    through the existing plan-sync refusal; apply applyCuratedSelection with
+    exactly the one kicked task id, depth 1, max 1 and one lane; and run
+    runDrain with the core daemon's own dispatch-claim, merged/open-PR, hold,
+    budget, WIP, memory/headroom and review deps. It never raises any ceiling.
+    The job never re-enters the target plan's other tasks, and it ends when that
+    one dispatch reaches a terminal verdict. (3) Durability. The job is keyed by
+    the kick origin that ProductBuildService already mints. Re-delivering the
+    same request resumes or reports the same job and never spends twice. A
+    daemon restart or lost response recovers the job from its durable record and
+    from the dispatch claim. It never infers recovery from a marker or a branch.
+    (4) Evidence. queued, admitted and running come only from correlated native
+    receipts in the core ledger that readTargetExecution reads for that origin.
+    refused, unknown and capacity-deferred are explicit outcomes. A marker, a
+    fixture, free capacity or a managed profile alone never reads as admitted or
+    running. Out of scope: browser commands, a new process or unit, a new
+    instance registration, environment or access changes, cap increases, hold
+    releases, manual claim deletion, and the Core18 plan producer, native-review
+    protocol or evidence collectors (W1-T10618). Bind plan, merged/open-PR reads
+    and dispatch claims to the verified TARGET owner, repository identity and
+    target plan revision; reuse the Core host capacity services without
+    inheriting Core-repository-specific query closures. Reserve the bounded job
+    within the existing shared Core lane and WIP accounting before entering the
+    maintained drain: simultaneous product requests with one available slot must
+    admit at most one job, and defer the other explicitly. This adds no capacity
+    or parallel scheduler.
+  acceptance:
+    - claim: "a request for an enrolled managed target with no live instance of its
+        own reaches exactly one bounded native job (one task, one lane) through
+        the maintained drain and the core daemon's existing admission gates"
+      proof: "unit test: W1-T10799: one managed target without a daemon reaches one
+        bounded native job"
+    - claim: "re-delivering the same request after a restart or lost response resumes
+        the same durable job without a second dispatch or spend"
+      proof: "unit test: W1-T10799: replay after restart or lost response resumes the
+        same native job"
+    - claim: "queued, admitted and running are recorded only from correlated native
+        receipts; a marker, fixture, free capacity or managed profile alone
+        stays queued, unknown or refused"
+      proof: "unit test: W1-T10799: native receipts distinguish queued admitted
+        running and refused jobs"
+    - claim: "an unreadable registry or managed set, an unenrolled target and a halted
+        or unreadable core root still refuse explicitly, and a target with its
+        own live instance keeps its own kick path"
+      proof: "unit test: W1-T10799: unreadable or halted routing refuses and live
+        instances retain their own path"
+  falsifier: >-
+    Independently remove each of these: the one-task/one-lane curation, the
+    durable origin key, the native-receipt correlation, the live-instance
+    precedence, and the unreadable-registry refusal. The corresponding test must
+    fail against the same real-durable-file fixture and pass once the removed
+    piece is restored. Fixture receipts never stand in for a live Wreckterra
+    run.
