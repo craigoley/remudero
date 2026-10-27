@@ -25,7 +25,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, materializeFeedbackView } from "./feedback-view.js";
 import { INBOX_CLASSIFY_INTERVAL_MS, INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification, type InboxRefreshMemo } from "./inbox-view.js";
-import { acceptMergedFeedback, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
+import { acceptMergedFeedback, proposeHandRouteFeedback, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { recordCreditStateEdge } from "./account-usage.js";
 import {
   ANALYTICS_REFRESH_INTERVAL_MS,
@@ -184,6 +184,14 @@ function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, l
       const github = githubSource();
       const accepted = acceptMergedFeedback(deps.root, deps.statusGithub, deps.feedbackLand ?? {});
       if (accepted.length > 0) log("feedback.accepted_merged", { ids: accepted });
+      if (github.some(source => source.state !== "fresh")) {
+        log("feedback.hand_route_deferred", { reason: "snapshot_not_fresh" });
+      } else {
+        const outcomes = proposeHandRouteFeedback(deps.root, deps.statusGithub, config.repository, { ...deps.feedbackLand, stateRoot: deps.feedbackLand?.stateRoot ?? config.inboxRoot });
+        const proposed = outcomes.filter(outcome => outcome.outcome === "proposed");
+        const unknown = outcomes.filter(outcome => outcome.outcome === "unknown");
+        if (proposed.length || unknown.length) log("feedback.hand_route_reconciled", { proposed, unknown: unknown.length, reasons: [...new Set(unknown.map(outcome => outcome.reason))] });
+      }
       return { views: [{ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: withSource(materializeFeedbackView({ root: deps.root, planPath: deps.planPath, stateRoot: deps.inboxRoot }, deps.statusGithub, clock), github) }] };
     },
   };
