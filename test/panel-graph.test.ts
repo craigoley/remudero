@@ -1852,6 +1852,7 @@ function handRouteWorld(t: { after: (fn: () => void) => void }) {
 
 test("a verified hand-route closure reaches the existing gardener and reviewed feedback landing", (t) => {
   const w = handRouteWorld(t);
+  assert.equal(projectReconciledFeedback([w.entry], w.github)[0]?.status, "new", "a read never turns the source marker into a live decision");
   const result = w.run();
   assert.equal(result[0]?.outcome, "proposed");
   assert.equal(readFeedbackEntry(w.root, w.entry.id).status, "new", "the candidate never edits the checkout or implies operator acceptance");
