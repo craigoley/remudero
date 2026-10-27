@@ -12,7 +12,7 @@ import { productRequestIdSchema, productIdSchema, productTransitionSchema, type 
 import { ProductIntentStore, productStatePaths } from "./product-intent-store.js";
 import type { Config } from "./config.js";
 import type { Mount } from "./mounts.js";
-import { spawnWorker, SubscriptionOnlyRefusedError } from "./worker.js";
+import { ClaudeToolchainBlockedError, spawnWorker, SubscriptionOnlyRefusedError } from "./worker.js";
 import { ProviderCapacityBlockedError } from "./worker-provider.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
@@ -71,7 +71,8 @@ export function realProductResearchProvider(options: {
         tools: ["WebSearch"], signal: input.signal, runId: input.requestId, taskId: "PRODUCT-RESEARCH",
       }); }
       catch (error) {
-        if (error instanceof ProviderCapacityBlockedError || error instanceof SubscriptionOnlyRefusedError) throw new ResearchProviderUnavailable();
+        if (error instanceof ProviderCapacityBlockedError || error instanceof SubscriptionOnlyRefusedError ||
+          error instanceof ClaudeToolchainBlockedError) throw new ResearchProviderUnavailable();
         throw error;
       }
       if (result.notStarted) throw new ResearchProviderUnavailable();

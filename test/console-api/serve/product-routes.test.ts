@@ -211,6 +211,8 @@ if (!context.acceptedAnswers.some(answer => answer.questionId === 'q_audience' &
 writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmish needs zone boundaries.', questions: [{ text: 'Which park zones are in scope?' }] }));
 `);
   let calls = 0;
+  let toolchainReady = false;
+  let queries = 0;
   const provider = realProductResearchProvider({
     mount: { model: "haiku", effort: "medium", maxTurns: 1, contextBudget: 1000, provider: "claude" },
     config: { root: fixture } as Config, cwd: fixture, settingsFile,
@@ -220,6 +222,7 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
       assert.equal(args.maxBudgetUsd, 1);
       assert.ok(args.signal, "the route's deadline reaches the worker transport");
       const queryFn = ((params: { options: { env: Record<string, string>; spawnClaudeCodeProcess?: (opts: unknown) => unknown } }) => {
+        queries++;
         // Exercise spawnWorker's real contained child hook; only the SDK stream is a fixture.
         params.options.spawnClaudeCodeProcess?.({ command: process.execPath,
           args: [worker, JSON.stringify({ prompt: args.prompt, tools: args.tools }), output],
@@ -234,7 +237,7 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
       }) as unknown as NonNullable<SpawnWorkerArgs["queryFn"]>;
       return spawnWorker({ ...args, queryFn,
         claudeExecutable: { cache: createClaudeExecutableCache(), deps: { env: { [CLAUDE_BIN_ENV_OVERRIDE]: "/fake/claude" },
-          home: fixture, exists: () => true, canExecute: () => true, locations: [] } },
+          home: fixture, exists: () => toolchainReady, which: () => undefined, canExecute: () => true, locations: [] } },
         keychain: { platform: "linux", readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "stub", expiresAt: 4102444800000 } }) },
       });
     }) as typeof import("#src/lib/worker.js").spawnWorker,
@@ -258,20 +261,46 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
     assert.deepEqual(violations(await invalid.json(), declaredBody("/v1/products/research", "POST", 400)), []);
     assert.equal(calls, 0, "an invalid first research request cannot start the real transport");
     assert.equal(existsSync(output), false, "question validation precedes the transport process boundary");
-    const response = await post("alice");
+    const blocked = await post("alice");
+    const blockedReply = await blocked.json() as { run: { id: string; outcome: string; failure?: string; summary?: string; spendUsd: number };
+      replayed: boolean; accepted: { questionId: string; answer: string }[] };
+    assert.equal(blocked.status, 200);
+    assert.deepEqual(violations(blockedReply, declaredBody("/v1/products/research", "POST", 200)), []);
+    assert.deepEqual([blockedReply.run.outcome, blockedReply.run.failure, blockedReply.run.summary, blockedReply.run.spendUsd],
+      ["unavailable", undefined, undefined, 0], "a pre-invocation toolchain refusal remains recoverable");
+    assert.equal(calls, 1);
+    assert.equal(queries, 0, "the real toolchain preflight refuses before invoking the SDK");
+    assert.equal(existsSync(output), false, "a blocked toolchain starts no research child");
+    assert.deepEqual(blockedReply.accepted.map((item) => [item.questionId, item.answer]), [["q_audience", "commuters"]]);
+    toolchainReady = true;
+    const blockedReplay = await post("alice");
+    const replayedBlock = await blockedReplay.json() as typeof blockedReply;
+    assert.equal(blockedReplay.status, 200);
+    assert.equal(replayedBlock.replayed, true);
+    assert.deepEqual(replayedBlock.run, blockedReply.run, "restoring capability preserves the original unavailable receipt");
+    assert.equal(calls, 1, "replaying a refused request never starts a worker");
+    const resumedBody = { ...body, requestId: "research-process-0002", answers: [] };
+    const response = await post("alice", resumedBody);
     const reply = await response.json() as { run: { id: string; outcome: string; provider: string; spendUsd: number }; replayed: boolean; accepted: { questionId: string; answer: string }[] };
     assert.equal(response.status, 200);
     assert.deepEqual(violations(reply, declaredBody("/v1/products/research", "POST", 200)), []);
     assert.deepEqual([reply.run.outcome, reply.run.provider, reply.run.spendUsd], ["completed", "claude:haiku", 0.02]);
     assert.deepEqual(reply.accepted.map((item) => [item.questionId, item.answer]), [["q_audience", "commuters"]]);
-    assert.equal(calls, 1);
+    assert.notEqual(reply.run.id, blockedReply.run.id);
+    assert.equal(calls, 2, "a new request resumes the same objective after capability restoration");
+    assert.equal(queries, 1);
     const receipts = () => readFileSync(join(fixture, "state", "ledger.ndjson"), "utf8").trim().split("\n")
       .map((line) => JSON.parse(line) as { step: string; lane?: string; run_id: string; task_id: string;
         worker_assignment?: { id: string; requested: { model: string }; selected: { provider: string; model: string } };
         selection_assignment_id?: string; success?: boolean;
         benchmark_run?: { assignmentJoin?: { state: string; value?: boolean } } })
       .filter((row) => row.lane === "serve-product-research");
-    const rows = receipts();
+    const allRows = receipts();
+    const blockedRows = allRows.filter((row) => row.run_id === blockedReply.run.id);
+    assert.deepEqual(blockedRows.map((row) => row.step), ["worker.attempt"],
+      "the pre-invocation refusal retains a terminal receipt without an execution assignment");
+    assert.equal(blockedRows[0].success, false);
+    const rows = allRows.filter((row) => row.run_id === reply.run.id);
     assert.deepEqual(rows.map((row) => row.step), ["worker.assignment", "worker.attempt"],
       "the real worker writes exactly one assignment and one terminal receipt");
     assert.ok(rows[0].worker_assignment?.id);
@@ -282,10 +311,10 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
     assert.deepEqual(rows[1].benchmark_run?.assignmentJoin, { state: "observed", value: true });
     assert.equal(rows[1].success, true);
     assert.ok(rows.every((row) => row.run_id === reply.run.id && row.task_id === "PRODUCT-RESEARCH"));
-    const retry = await post("alice");
+    const retry = await post("alice", resumedBody);
     assert.equal((await retry.json() as { replayed: boolean }).replayed, true);
-    assert.equal(calls, 1, "a durable receipt does not start another worker");
-    assert.deepEqual(receipts(), rows, "replaying research never duplicates worker receipts");
+    assert.equal(calls, 2, "a durable receipt does not start another worker");
+    assert.deepEqual(receipts(), allRows, "replaying research never duplicates worker receipts");
   } finally { await app.close(); }
 });
 
