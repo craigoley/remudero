@@ -52,13 +52,30 @@ test("W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.t
   assert.match(taggedResult.unresolved[0], /raw spelling/);
   assert.equal(runInNewContext(taggedResult.text), runInNewContext(tagged));
 
-  const forOf = "const values = []; for (const value of `" + fixtureImport("./fixture.js")
-    + "`) values.push(value); values.join('');";
-  const forOfResult = rewriteSource(forOf, "test/ci/suites/fixture.test.ts");
-  assert.equal(forOfResult.rewritten, 1);
-  assert.deepEqual(forOfResult.unresolved, []);
-  assert.equal(census(forOfResult.text).status, 1);
-  assert.equal(runInNewContext(forOfResult.text), runInNewContext(forOf));
+  for (const binding of ["value", "of"]) {
+    const forOf = `const values = []; for (const ${binding} of \`` + fixtureImport("./fixture.js")
+      + `\`) values.push(${binding}); values.join('');`;
+    const forOfResult = rewriteSource(forOf, "test/ci/suites/fixture.test.ts");
+    assert.equal(forOfResult.rewritten, 1);
+    assert.deepEqual(forOfResult.unresolved, []);
+    assert.equal(census(forOfResult.text).status, 1);
+    assert.equal(runInNewContext(forOfResult.text), runInNewContext(forOf));
+
+    for (const trivia of [" ", " /* raw tag */ "]) {
+      const declaration = binding === "of" ? "var" : "const";
+      const rawLoop = `${declaration} of = String.raw; const values = []; for (${declaration} ${binding} of of${trivia}\``
+        + fixtureImport("./fixture.js") + `\`) values.push(${binding}); values.join('');`;
+      assert.equal(census(rawLoop).status, 0, "control: the census sees the raw fixture import");
+      const rawResult = rewriteSource(rawLoop, "test/ci/suites/fixture.test.ts");
+      assert.equal(runInNewContext(rawLoop), fixtureImport("./fixture.js"));
+      assert.equal(runInNewContext(rawResult.text), fixtureImport("./fixture.js"));
+      assert.equal(rawResult.text, rawLoop);
+      assert.equal(rawResult.rewritten, 0);
+      assert.equal(rawResult.unresolved.length, 1);
+      assert.match(rawResult.unresolved[0], /raw spelling/);
+      assert.equal(census(rawResult.text).status, 0);
+    }
+  }
 });
 
 test("fixture-only files are written by the codemod CLI", (t) => {

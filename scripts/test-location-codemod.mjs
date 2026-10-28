@@ -132,14 +132,17 @@ export function stringLiteralMask(text) {
           i += point.length;
         }
         const word = text.slice(start, i);
+        // A for header has one `of` operator; an `of` on its right can be a template tag.
+        const loopOperator = word === "of" && parens.at(-1) === true
+          && !["(", "const", "let", "var", "."].includes(prev);
+        if (loopOperator) parens[parens.length - 1] = false;
         beforePrev = prev;
-        prev = prev === "." ? `.${word}` : word;
+        prev = loopOperator ? "<for-of>" : prev === "." ? `.${word}` : word;
         continue;
       }
       if (c === '"' || c === "'") { quoted(c); prev = c; continue; }
       if (c === "`") {
-        const contextualOf = prev === "of" && parens.at(-1) === true && beforePrev !== "(";
-        const keyword = /^(return|throw|yield|await|case|typeof|void|delete|new|in)$/.test(prev) || contextualOf;
+        const keyword = /^(return|throw|yield|await|case|typeof|void|delete|new|in)$/.test(prev);
         const tail = Array.from(prev).at(-1) ?? "";
         const tagged = (IDENT_PART.test(tail) || tail === ")" || tail === "]" || tail === "`") && !keyword;
         i += 1;
@@ -147,7 +150,7 @@ export function stringLiteralMask(text) {
         prev = "`";
         continue;
       }
-      if (c === "/" && (prev === "" || "(,=:[!&|?{};<>+-*%~^".includes(prev) || /^(return|typeof|case|in|of|delete|void|throw|new|else|do)$/.test(prev))) {
+      if (c === "/" && (prev === "" || "(,=:[!&|?{};<>+-*%~^".includes(prev) || /^(return|typeof|case|in|of|<for-of>|delete|void|throw|new|else|do)$/.test(prev))) {
         regex();
         prev = "/";
         continue;
