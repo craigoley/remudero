@@ -29,11 +29,17 @@ interface Reach {
 
 interface Baseline extends Reach {
   importers: string[];
+  /** W1-T10820: how the graph resolved specifiers. Absent on a record measured from relative imports only. */
+  resolution?: string;
 }
+
+/** The one resolution the recorded baseline may name: `#` specifiers resolved through package.json `imports`. */
+const RESOLUTION = "package-imports";
 
 function graph(files: ReadonlyMap<string, string>): Graph {
   assert.ok("buildAffectedSuitesGraph" in selector, "the selector must export its graph builder");
-  return (selector.buildAffectedSuitesGraph as (files: ReadonlyMap<string, string>) => Graph)(files);
+  // The alias map is the tree's own package.json, the same tree the census reads.
+  return (selector.buildAffectedSuitesGraph as (files: ReadonlyMap<string, string>, extra: string[], aliases: { root: string }) => Graph)(files, [], { root: ROOT });
 }
 
 function reachable(start: string, edges: ReadonlyMap<string, ReadonlySet<string>>): Set<string> {
@@ -101,6 +107,24 @@ export function reachVerdict(actual: Baseline, baseline: Baseline): { refused: s
   return { refused, tighter };
 }
 
+/** W1-T10820 — the verdict on `recorded` against main's `previous` record. The ONE transition: a main record with no
+ *  `resolution` to the alias-aware record, which must EQUAL the live measurement (it is a measurement correction, so
+ *  the shrink-only comparison cannot apply across it). Any other change of the field is refused; with the field
+ *  unchanged the metrics only shrink, as before. `live` is read lazily: only the transition needs it. */
+export function recordedVerdict(previous: Baseline, recorded: Baseline, live: () => Baseline): string[] {
+  if (previous.resolution === undefined && recorded.resolution === RESOLUTION) {
+    const measured = live();
+    const same = recorded.importerCount === measured.importerCount && recorded.largestScc === measured.largestScc &&
+      recorded.medianReachPercent === measured.medianReachPercent &&
+      JSON.stringify(recorded.importers) === JSON.stringify(measured.importers);
+    return same ? [] : [`the re-measured record must equal the live measurement exactly, with no slack: recorded ${recorded.importerCount}/${recorded.largestScc}/${recorded.medianReachPercent}, measured ${measured.importerCount}/${measured.largestScc}/${measured.medianReachPercent}`];
+  }
+  if (previous.resolution !== recorded.resolution) {
+    return [`resolution may change only from none to "${RESOLUTION}", once: main has ${JSON.stringify(previous.resolution)}, recorded ${JSON.stringify(recorded.resolution)}`];
+  }
+  return reachVerdict(recorded, previous).refused;
+}
+
 export function readCodeTree(): Map<string, string> {
   const paths: string[] = (SNAPSHOT ? censusSnapshotPaths(SNAPSHOT) :
     execFileSync("git", ["ls-files", "--", "src", "scripts", "bin", "test"], { cwd: ROOT, encoding: "utf8" })
@@ -149,7 +173,42 @@ test("the recorded reach baseline may only shrink against origin/main", () => {
   const previous = JSON.parse(SNAPSHOT ? SNAPSHOT.mainBlobs[path] :
     execFileSync("git", ["show", `origin/main:${path}`], { cwd: ROOT, encoding: "utf8" })) as Baseline;
   const recorded = JSON.parse(readFileSync(BASELINE, "utf8")) as Baseline;
-  assert.deepEqual(reachVerdict(recorded, previous).refused, [], "a recorded reach ceiling may only shrink");
+  assert.deepEqual(recordedVerdict(previous, recorded, () => measureReach(readCodeTree())), [], "a recorded reach ceiling may only shrink");
+});
+
+test("W1-T10820: the reach baseline is re-measured once from the alias-aware graph", () => {
+  const measured: Baseline = { importerCount: 3, largestScc: 5, medianReachPercent: 40, importers: ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"] };
+  const before: Baseline = { importerCount: 2, largestScc: 5, medianReachPercent: 45, importers: ["test/a.test.ts", "test/b.test.ts"] };
+  const after: Baseline = { ...measured, resolution: RESOLUTION };
+  const live = () => measured;
+  assert.deepEqual(recordedVerdict(before, after, live), [], "the one transition: equal to the live measurement, even though importers grew");
+  for (const slack of [{ importerCount: 4 }, { largestScc: 6 }, { medianReachPercent: 41 }, { importers: [...measured.importers, "test/d.test.ts"] }]) {
+    assert.match(recordedVerdict(before, { ...after, ...slack }, live)[0]!, /must equal the live measurement exactly/, JSON.stringify(slack));
+  }
+  assert.match(recordedVerdict(before, { ...after, importerCount: 2 }, live)[0]!, /exactly/, "a lower record than the measurement is no measurement either");
+  // After the transition: a second resolution change is refused, and the metrics only shrink.
+  assert.match(recordedVerdict(after, { ...after, resolution: "other" }, live)[0]!, /resolution may change only from none/);
+  assert.match(recordedVerdict(after, { ...after, resolution: undefined }, live)[0]!, /resolution may change only from none/);
+  assert.match(recordedVerdict(before, { ...before, resolution: "other" }, live)[0]!, /resolution may change only from none/);
+  assert.deepEqual(recordedVerdict(after, { ...after, importerCount: 2 }, live), []);
+  assert.match(recordedVerdict(after, { ...after, importerCount: 4 }, live)[0]!, /^importerCount: 4 > 3/);
+  assert.match(recordedVerdict(before, { ...before, importerCount: 3 }, live)[0]!, /^importerCount: 3 > 2/, "no field on either side keeps the shrink-only rule");
+  const recorded = JSON.parse(readFileSync(BASELINE, "utf8")) as Baseline;
+  assert.equal(recorded.resolution, RESOLUTION, "the committed record names the alias-aware resolution");
+});
+
+test("W1-T10820: an alias importer of src/run-task.ts counts against the reach ceiling", () => {
+  const baseline = measureReach(FIXTURE);
+  const grown = new Map(FIXTURE).set("test/aliased.test.ts", 'import "#src/run-task.js";');
+  const actual = measureReach(grown);
+  assert.deepEqual(actual.importers, ["test/aliased.test.ts", "test/old.test.ts"]);
+  assert.equal(actual.importerCount, baseline.importerCount + 1);
+  const verdict = reachVerdict(actual, baseline);
+  assert.ok(verdict.refused.some((r) => r.startsWith("importerCount: 2 > 1") && r.includes("test/aliased.test.ts")), verdict.refused.join("\n"));
+  const recorded = JSON.parse(readFileSync(BASELINE, "utf8")) as Baseline;
+  const withAlias = readCodeTree();
+  assert.ok([...withAlias.entries()].some(([f, text]) => /^test\//.test(f) && /from\s*["']#src\/run-task\.js["']/.test(text)), "control: the tree has an alias importer");
+  assert.ok(recorded.importers.some((f) => /from\s*["']#src\/run-task\.js["']/.test(withAlias.get(f) ?? "")), "the recorded ceiling counts the alias importers");
 });
 
 test("reach ratchet refuses SCC and median growth and prints shrink-only measurements", () => {

@@ -64,7 +64,8 @@ export async function coverageNarrowSuites(wt: string, changed: string[]): Promi
     if (!TEST_FILE.test(f) || !existsSync(join(wt, f))) continue;
     files.set(f, readFileSync(join(wt, f), "utf8"));
   }
-  const { directImports } = buildAffectedSuitesGraph(files, srcChanged);
+  // W1-T10820: the aliases come from the measured worktree's own package.json, never this module's checkout.
+  const { directImports } = buildAffectedSuitesGraph(files, srcChanged, { root: wt });
   const importers = new Map(srcChanged.map((s) => [s, [...files.keys()].filter((f) => directImports.get(f)?.has(s)).sort()]));
   return narrowListing({ own, importers });
 }
