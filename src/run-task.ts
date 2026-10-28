@@ -181,7 +181,7 @@ import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapability
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { revisionedRead, type ReadGeneration } from "./lib/read-plane.js";
 import { LightPassPreReviewTiming, observeLightPassReviewEligibility } from "./lib/sweep.js";
-import { distanceRefreshProbeTargets } from "./lib/tick-read-worker.js";
+import { createDistanceProbeSequence, distanceRefreshProbeTargets } from "./lib/tick-read-worker.js";
 import { GITHUB_COMPARE_FILES_LISTED } from "./lib/base-reproduction.js";
 import { readPlaneWorkerInput } from "./lib/read-plane.worker.js";
 import { globSync, renameSync } from "node:fs";
@@ -32799,6 +32799,7 @@ interface LightPassReadPorts {
 function createLightPassCompareReader(owner: string, repo: string, read: (args: string[]) => Promise<unknown>) {
   type Facts = { behindBy: number; baseFiles?: BaseChangedFiles };
   const memo = new Map<number, { head: string; main: string | undefined; value: Promise<Facts | undefined> }>();
+  const nextDistanceProbe = createDistanceProbeSequence();
   return {
     retain: (prs: readonly OpenPrView[]) => {
       const heads = new Map(prs.map((pr) => [pr.prNumber, pr.headSha]));
@@ -32807,7 +32808,7 @@ function createLightPassCompareReader(owner: string, repo: string, read: (args: 
     read: async (prs: readonly OpenPrView[], main: string | undefined, timing: LightPassPreReviewTiming) => {
       const behindMainByPr = new Map<number, number>();
       const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
-      await timing.measure("compare", () => Promise.all(distanceRefreshProbeTargets(prs).map(async (pr) => {
+      await timing.measure("compare", () => Promise.all(distanceRefreshProbeTargets(prs, nextDistanceProbe()).map(async (pr) => {
         const start = timing.clock.now();
         let entry = memo.get(pr.prNumber);
         const cacheHit = main !== undefined && entry?.head === pr.headSha && entry.main === main;
