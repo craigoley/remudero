@@ -1167,7 +1167,6 @@ const armVerdictCases = [
   { mode: "shadow", title: "W1-T975: a shadow run records its verdict and does not arm auto-merge" },
 ] as const;
 for (const { mode, title } of armVerdictCases) test(title, async (t) => runArmVerdictFixture(t, mode));
-test("legacy arm uses its ledger when HOME has no Remudero configuration", async (t) => runArmVerdictFixture(t, "live"));
 
 async function runArmVerdictFixture(t: TestContext, mode: "live" | "shadow") {
   const root = mkdtempSync(join(tmpdir(), "arm-verdict-merged-root-"));
