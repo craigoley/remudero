@@ -1055,12 +1055,12 @@ export interface LearnedCashCapacity {
   readonly observedAt: string;
 }
 
-export const CASH_CAPACITY_FILENAME = "cash-capacity.json";
-export const CASH_CAPACITY_LEDGER_STEP = "cash.capacity.observed";
+export const CASH_TPM_STATE_FILE = "cash-capacity.json";
+export const CASH_TPM_OBSERVED_STEP = "cash.capacity.observed";
 const LEARNED_CASH_CAPACITY = new Map<string, LearnedCashCapacity>();
 
 export function cashCapacityPath(config: Pick<Config, "root">): string {
-  return join(config.root, "state", CASH_CAPACITY_FILENAME);
+  return join(config.root, "state", CASH_TPM_STATE_FILE);
 }
 
 /** The bounded unsigned-integer parse every cash header read shares: digits only, safe integer. */
@@ -1146,7 +1146,7 @@ export function recordCashCapacity(
   appendLedger(ledgerPathFor(config), {
     run_id: ctx.runId ?? "unattributed",
     task_id: ctx.taskId ?? "unattributed",
-    step: CASH_CAPACITY_LEDGER_STEP,
+    step: CASH_TPM_OBSERVED_STEP,
     deployment,
     limit_tokens: limitTokens,
     renewal_seconds: renewalSeconds,

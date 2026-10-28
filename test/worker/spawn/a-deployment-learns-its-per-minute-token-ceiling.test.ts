@@ -13,8 +13,8 @@ import type { Config } from "#src/lib/config.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import {
-  CASH_CAPACITY_FILENAME,
-  CASH_CAPACITY_LEDGER_STEP,
+  CASH_TPM_STATE_FILE,
+  CASH_TPM_OBSERVED_STEP,
   cashCapacityReadiness,
   learnedCashLimit,
   openWeightDeploymentHolds,
@@ -66,9 +66,9 @@ test("W1-T10856: a response teaches the deployment its per-minute token ceiling"
   const first = await spawnCash(dir, "p", async () => completion(limitHeaders("20000")));
   assert.equal(first.isError, false, first.stderr);
   assert.equal(learnedCashLimit(DEPLOYMENT), 20000);
-  const state = JSON.parse(readFileSync(join(dir, "state", CASH_CAPACITY_FILENAME), "utf8")) as Record<string, Record<string, unknown>>;
+  const state = JSON.parse(readFileSync(join(dir, "state", CASH_TPM_STATE_FILE), "utf8")) as Record<string, Record<string, unknown>>;
   assert.deepEqual(state[DEPLOYMENT], { limitTokens: 20000, renewalSeconds: 60, observedAt: AT_ISO });
-  const rows = () => ledgerRows(dir).filter((row) => row.step === CASH_CAPACITY_LEDGER_STEP);
+  const rows = () => ledgerRows(dir).filter((row) => row.step === CASH_TPM_OBSERVED_STEP);
   assert.equal(rows().length, 1);
   assert.deepEqual({ d: rows()[0]!.deployment, l: rows()[0]!.limit_tokens, r: rows()[0]!.renewal_seconds, p: rows()[0]!.previous_limit_tokens },
     { d: DEPLOYMENT, l: 20000, r: 60, p: null });
@@ -86,8 +86,8 @@ test("W1-T10856: a response teaches the deployment its per-minute token ceiling"
   resetLearnedCashCapacity();
   await spawnCash(other, "p", async () => completion(limitHeaders("20000 tokens; drop table", "sixty")));
   assert.equal(learnedCashLimit(DEPLOYMENT), undefined);
-  assert.equal(existsSync(join(other, "state", CASH_CAPACITY_FILENAME)), false);
-  assert.equal(ledgerRows(other).filter((row) => row.step === CASH_CAPACITY_LEDGER_STEP).length, 0);
+  assert.equal(existsSync(join(other, "state", CASH_TPM_STATE_FILE)), false);
+  assert.equal(ledgerRows(other).filter((row) => row.step === CASH_TPM_OBSERVED_STEP).length, 0);
 
   // A restart re-reads the file: a fresh process table is hydrated from it on the next cash spawn.
   resetLearnedCashCapacity();
