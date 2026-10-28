@@ -795,6 +795,7 @@ function nativeFixture(t: TestContext, registry = CORE_ONLY) {
   };
   const record = (origin: string) => fileTargetJobStore(core).read(origin);
   return { root, core, checkout, registryPath, stateBase, store, productId, inspection, options, service, command, ledgerPath, calls, state, drive, record, log, targetPlanFile: planFile,
+    targetDrive: (origin: string) => runner({ taskId: "W9-T1", origin, repo: "wreckterra" }, state.daemonDeps as DaemonDeps),
     restart: () => { runner = makeRunner(); } };
 }
 const nativeStarted = async (f: ReturnType<typeof nativeFixture>) => {
@@ -1311,12 +1312,13 @@ test("W1-T10799: a Core PR cannot clear the target repository's dispatch breaker
 
 });
 
-test("W1-T10799: repository decisions join only the target's native run and keep shared host gates", async (t) => {
+test("W1-T10799: one managed target without a daemon reaches one bounded native job with target-local decisions and shared gates", async (t) => {
   const f = nativeFixture(t);
   let coreQueries = 0;
   f.state.daemonDeps.isCircuitTripped = () => { coreQueries++; throw new Error("Core repository query leaked"); };
-  await nativeStarted(f);
-  await f.drive();
+  const request = await nativeStarted(f);
+  const outcome = await f.targetDrive(request.origin);
+  assert.equal(outcome.state, "ended");
   assert.deepEqual(f.calls.runTask, ["W9-T1"], "the maintained target drain uses its own repository predicates");
   assert.equal(coreQueries, 0);
   const nativeRun = JSON.parse(readFileSync(f.ledgerPath, "utf8").trim().split("\n")
@@ -1333,9 +1335,10 @@ test("W1-T10799: repository decisions join only the target's native run and keep
   assert.equal(own.governors.breakerDetail?.("W9-T1").freshCount, 1, "Core's same-task native start and untagged PR cannot reset the target");
   assert.equal(typeof nativeRun.run_id, "string");
   const held = nativeFixture(t);
-  await nativeStarted(held);
+  const heldRequest = await nativeStarted(held);
   held.state.daemonDeps.checkQuietHours = () => ({ deferred: true, detail: "shared Core quiet-hours hold" });
-  await held.drive();
+  const heldOutcome = await held.targetDrive(heldRequest.origin);
+  assert.equal(heldOutcome.state, "held");
   assert.deepEqual(held.calls.runTask, [], "target-specific decisions still obey the shared host's admission");
 
 });
