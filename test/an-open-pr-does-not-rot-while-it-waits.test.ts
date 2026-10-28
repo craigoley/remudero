@@ -347,14 +347,14 @@ test("distance refresh ledger rows name the commit distance for updated and decl
 });
 
 test("distance probes rotate by scheduler pass when wall-clock passes alias", () => {
-  let now = 0;
-  const next = createDistanceProbeSequence(() => now);
+  const next = createDistanceProbeSequence();
   const candidates = Array.from({ length: 9 }, (_, i) => pr({
     prNumber: 4900 + i, headSha: `head${i}`, lastActivityAt: `2026-09-09T0${i}:00:00Z`,
   }));
   const visited = new Set<number>();
   for (let pass = 0; pass < 3; pass++) {
-    now = pass * 15 * 60_000;
+    const clockSelected = distanceRefreshProbeTargets(candidates, pass * 15 * 60_000);
+    assert.deepEqual(clockSelected.map((subject) => subject.prNumber), [4900, 4901, 4902]);
     const selected = distanceRefreshProbeTargets(candidates, next());
     assert.equal(selected.length, 3);
     for (const subject of selected) visited.add(subject.prNumber);

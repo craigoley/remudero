@@ -549,13 +549,10 @@ export const DISTANCE_REFRESH_PROBE_LIMIT = 3;
 export const DISTANCE_REFRESH_ROTATION_MS = 5 * 60_000;
 
 /** Advance once per producer pass so wall-clock cadence cannot repeatedly select the same slice.
- * The first pass retains the existing time-based starting point; this state is local to its scheduler. */
-export function createDistanceProbeSequence(now: () => number = () => systemClock.now()): () => number {
-  let window: number | undefined;
-  return () => {
-    window ??= Math.floor(now() / DISTANCE_REFRESH_ROTATION_MS);
-    return window++ * DISTANCE_REFRESH_ROTATION_MS;
-  };
+ * Each scheduler starts with the oldest eligible heads and keeps its own bounded rotation. */
+export function createDistanceProbeSequence(): () => number {
+  let window = 0;
+  return () => window++ * DISTANCE_REFRESH_ROTATION_MS;
 }
 
 /** W1-T3277 — choose a small, fair rotating slice of PRs for direct graph comparison. A draft or
