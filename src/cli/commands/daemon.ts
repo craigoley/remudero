@@ -270,6 +270,12 @@ export function daemonKickPort(root: string, target: { repo: string; isSelf: boo
   };
 }
 
+/** W1-T10897: the checkout whose `origin` is the target repo — this engine checkout for a self-targeting
+ *  daemon, else the target's clone under the config root's `repos/`. */
+export function daemonTargetCheckoutRoot(target: { repo: string; isSelf: boolean }, configRoot: string, selfRoot: string = repoRoot): string {
+  return target.isSelf ? selfRoot : join(configRoot, "repos", target.repo);
+}
+
 /** Render a {@link DaemonSummary} — "what happened, or is happening" — at a glance. */
 function renderDaemonSummary(s: DaemonSummary): string {
   return [
@@ -695,7 +701,7 @@ export async function daemonCommand(
   let lastProj: Map<string, StatusProjection> | undefined;
   let tickReadGeneration: ReadGeneration<TickReadFacts> | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
-  const targetCheckoutRoot = target.isSelf ? repoRoot : join(config.root, "repos", target.repo);
+  const targetCheckoutRoot = daemonTargetCheckoutRoot(target, config.root);
   const targetCommitTrailerIndex = () =>
     buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot })();
   const gatewayFor = createDaemonGatewayFactory(config.root, log, {
@@ -1405,7 +1411,8 @@ export async function daemonCommand(
         //
         // FAIL OPEN, DELIBERATELY: a failed read (network blip, auth) refuses no task. W1-T5805: the
         // daemon awaits it, at each tick and lane refill, and ledgers the failure.
-        readPushedRunBranches: () => readPushedRunBranchesOutputAsync(),
+        // W1-T10897: the TARGET repo's origin — the engine checkout's lists only the engine's run branches.
+        readPushedRunBranches: () => readPushedRunBranchesOutputAsync(targetCheckoutRoot),
         readOrphanRunBranchEvidence: orphanRunBranchEvidenceReader(
           join(config.root, "state", automaticBranchReapStateFileName(target.repo)),
           () => liveInflightRuns(inflightDir).map((r) => r.taskId),
