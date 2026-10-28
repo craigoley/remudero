@@ -1328,7 +1328,10 @@ test("W1-T10799: one managed target without a daemon reaches one bounded native 
   assert.equal(repositoryFor("CraigOley", "Wreckterra"), own, "case aliases preserve the same target decision history");
   assert.notEqual(repositoryFor("craigoley", "other-game"), own, "another target cannot share that history");
   assert.equal(own.governors.isLifetimeCapExceeded?.("W9-T1"), false);
-  assert.equal(own.governors.breakerDetail?.("W9-T1").freshCount, 1, "the untagged native verdict joins its own start");
+  assert.equal(own.governors.breakerDetail?.("W9-T1").freshCount, 0, "the untagged native merged verdict resolves its own start");
+  appendLedger(f.ledgerPath, { step: "run.start", run_id: "W9-T1-1001", task_id: "W9-T1", lane: "run-task", repo: "wreckterra" });
+  own.governors.beginSelectionPass?.();
+  assert.equal(own.governors.breakerDetail?.("W9-T1").freshCount, 1, "positive control: an unresolved target run is counted");
   appendLedger(f.ledgerPath, { step: "run.start", run_id: "W9-T1-999", task_id: "W9-T1", lane: "run-task", repo: "remudero" });
   appendLedger(f.ledgerPath, { step: "pr.opened", run_id: "W9-T1-999", task_id: "W9-T1", lane: "run-task", pr_url: "https://github.com/craigoley/remudero/pull/99" });
   own.governors.beginSelectionPass?.();
