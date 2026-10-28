@@ -20,7 +20,8 @@ const fixtures = () => {
     "const template = `" + data + "\n" + data + "`;",
     `const dynamic = ${JSON.stringify(`import('${dynamicPath}')`)};`,
     `const sideEffect = ${JSON.stringify(`import '${setupPath}';`)};`,
-    "[double, single, template, dynamic, sideEffect];",
+    "const returned = (() => { return /* fixture source */ `" + data + "`; })();",
+    "[double, single, template, dynamic, sideEffect, returned];",
   ].join("\n");
 };
 
@@ -32,7 +33,7 @@ test("W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.t
   const source = fixtures();
   assert.equal(census(source).status, 0, "control: the census sees the original fixture imports");
   const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
-  assert.equal(result.rewritten, 6);
+  assert.equal(result.rewritten, 7);
   assert.deepEqual(result.unresolved, []);
   assert.equal(hasLocationRelativeSpecifier(result.text), false);
   const checked = census(result.text);
@@ -76,9 +77,27 @@ test("tagged templates retain observable raw spelling and report unresolved impo
 
 
 test("returned templates keep their values while becoming location-free", () => {
-  const source = "(() => { return `" + fixtureImport("../fixture.js") + "`; })();";
-  const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
-  assert.equal(result.rewritten, 1);
-  assert.equal(census(result.text).status, 1);
-  assert.equal(runInNewContext(result.text), runInNewContext(source));
+  for (const trivia of [" ", " /* fixture */ ", " /* a comment longer than the old lookbehind window */ /* next */ "]) {
+    const source = "(() => { return" + trivia + "`" + fixtureImport("../fixture.js") + "`; })();";
+    assert.equal(census(source).status, 0);
+    const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
+    assert.equal(result.rewritten, 1);
+    assert.deepEqual(result.unresolved, []);
+    assert.equal(census(result.text).status, 1);
+    assert.equal(runInNewContext(result.text), runInNewContext(source));
+  }
+});
+
+test("chained and keyword-named tags preserve their observable raw values", () => {
+  for (const tag of ["tag`first`", "tag`first` /* next tag */", "tags.return /* property tag */"]) {
+    const source = "const tag = () => String.raw; const tags = { return: String.raw }; "
+      + tag + "`" + fixtureImport("./fixture.js") + "`;";
+    const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
+    assert.equal(result.text, source);
+    assert.equal(result.rewritten, 0);
+    assert.equal(result.unresolved.length, 1);
+    assert.match(result.unresolved[0], /raw spelling/);
+    assert.equal(census(result.text).status, 0);
+    assert.equal(runInNewContext(result.text), runInNewContext(source));
+  }
 });

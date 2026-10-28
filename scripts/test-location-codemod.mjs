@@ -119,16 +119,23 @@ export function stringLiteralMask(text) {
       const d = text[i + 1];
       if (c === "/" && d === "/") { while (i < n && text[i] !== "\n") i += 1; continue; }
       if (c === "/" && d === "*") { const end = text.indexOf("*/", i + 2); i = end < 0 ? n : end + 2; continue; }
+      if (/[a-zA-Z_$]/.test(c)) {
+        const start = i;
+        while (i < n && /[\w$]/.test(text[i])) i += 1;
+        const word = text.slice(start, i);
+        prev = prev === "." ? `.${word}` : word;
+        continue;
+      }
       if (c === '"' || c === "'") { quoted(c); prev = c; continue; }
       if (c === "`") {
-        const keyword = /\b(return|throw|yield|await|case|typeof|void|delete|new|in|of)\s*$/.test(text.slice(Math.max(0, i - 24), i));
-        const tagged = /[\w)$\]]/.test(prev) && !keyword;
+        const keyword = /^(return|throw|yield|await|case|typeof|void|delete|new|in|of)$/.test(prev);
+        const tagged = /[\w)$\]`]$/.test(prev) && !keyword;
         i += 1;
         template(tagged ? 2 : 1);
         prev = "`";
         continue;
       }
-      if (c === "/" && (prev === "" || "(,=:[!&|?{};<>+-*%~^".includes(prev) || /\b(return|typeof|case|in|of|delete|void|throw|new|else|do)\s*$/.test(text.slice(Math.max(0, i - 12), i)))) {
+      if (c === "/" && (prev === "" || "(,=:[!&|?{};<>+-*%~^".includes(prev) || /^(return|typeof|case|in|of|delete|void|throw|new|else|do)$/.test(prev))) {
         regex();
         prev = "/";
         continue;
