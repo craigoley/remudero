@@ -3,12 +3,12 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildSweepEffects, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import type { ArmReprobeFacts } from "../src/lib/arm-auto-merge.js";
-import type { Config } from "../src/lib/config.js";
-import type { Plan } from "../src/lib/plan.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
+import { buildSweepEffects, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import type { ArmReprobeFacts } from "#src/lib/arm-auto-merge.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan } from "#src/lib/plan.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 const now = Date.parse("2026-10-04T12:00:00Z");
 const pr: OpenPrView = {

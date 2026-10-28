@@ -16,16 +16,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { attemptArm, type ArmDeps } from "../src/lib/arm-auto-merge.js";
-import type { PlanMergeSafetyReadings } from "../src/lib/plan-pr-merge-safety.js";
-import { readLedgerLines } from "../src/lib/status.js";
+import { attemptArm, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import type { PlanMergeSafetyReadings } from "#src/lib/plan-pr-merge-safety.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweepLightPass,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { lightPassActionable } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { lightPassActionable } from "#src/run-task.js";
 
 const NOW = Date.parse("2026-10-05T12:00:00Z");
 

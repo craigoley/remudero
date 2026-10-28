@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { loadPlan } from "../src/lib/plan.js";
-import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createService } from "../src/lib/service.js";
-import { planSourceLoaded, type PlanSourceHolder } from "../src/lib/serve-plan-reload.js";
-import { proposalFromJudgedShard } from "../src/lib/verify-human-judge.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createService } from "#src/lib/service.js";
+import { planSourceLoaded, type PlanSourceHolder } from "#src/lib/serve-plan-reload.js";
+import { proposalFromJudgedShard } from "#src/lib/verify-human-judge.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 // W1-T5639: a plan that LOADS is trusted exactly as before, whatever it holds. The qualified outcome
 // separates "read and empty" from "never read"; it must not turn a valid empty or populated plan into a refusal.

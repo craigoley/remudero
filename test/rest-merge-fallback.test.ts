@@ -10,9 +10,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mergeDirectViaRestAsync } from "#src/lib/arm-auto-merge.js";
-import { stripComments } from "./helpers/daemon-loop-walk.js";
+import { stripComments } from "#test/helpers/daemon-loop-walk.js";
 
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 
 import {
   attemptArm,
@@ -22,7 +22,7 @@ import {
   mergeTargetFromPrUrl,
   mergeDirectViaRest,
   realArmDeps,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/2598";
 const RATE_LIMIT = "GraphQL: API rate limit already exceeded for user ID 4397075.";

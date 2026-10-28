@@ -15,15 +15,15 @@ import {
   createLiveAnalyticsSnapshotCache,
   HEADROOM_FALLBACK_REASON,
   readDaemonHeadroomSnapshot,
-} from "../src/lib/live-analytics-snapshot-cache.js";
+} from "#src/lib/live-analytics-snapshot-cache.js";
 import {
   providerRoutingStatusPath,
   readProviderRoutingStatus,
   writeProviderRoutingStatus,
-} from "../src/lib/provider-routing-status.js";
-import type { ProviderCapacity } from "../src/lib/worker-provider.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#src/lib/provider-routing-status.js";
+import type { ProviderCapacity } from "#src/lib/worker-provider.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const NOW = Date.parse("2026-09-24T12:00:00.000Z");
 

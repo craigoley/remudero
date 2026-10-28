@@ -17,20 +17,20 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import type { Worker } from "node:worker_threads";
 
-import { BOARD_UNREAD_STEPS, createBoardProjection, type BoardProjection } from "../src/lib/board-projection.js";
-import type { Clock } from "../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { createNowView, type NowViewContext, type NowViewOptions } from "../src/lib/now-view.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
+import { BOARD_UNREAD_STEPS, createBoardProjection, type BoardProjection } from "#src/lib/board-projection.js";
+import type { Clock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { createNowView, type NowViewContext, type NowViewOptions } from "#src/lib/now-view.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
 import {
   createReadModelTicker, threadViews, type ReadModelInstanceState, type ReadModelViewFactory, type ReadModelViewLane, type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import * as memory from "../src/lib/serve-memory.js";
-import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { answerThreadHeaps, readWorkerHeaps, THREAD_HEAPS_ANSWER, THREAD_HEAPS_REQUEST, type WorkerThread } from "../src/lib/worker-heaps.js";
-import { switchViewsOn } from "./helpers/read-model-switches.js";
+} from "#src/lib/read-model-worker.js";
+import * as memory from "#src/lib/serve-memory.js";
+import type { GitHub } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { answerThreadHeaps, readWorkerHeaps, THREAD_HEAPS_ANSWER, THREAD_HEAPS_REQUEST, type WorkerThread } from "#src/lib/worker-heaps.js";
+import { switchViewsOn } from "#test/helpers/read-model-switches.js";
 
 type Part = { entries: number; bytes: number; used_bytes?: number; holds?: Record<string, { entries: number; bytes: number }>; holds_age_ms?: number };
 type Reading = memory.HolderReading & { used_bytes?: number; parts?: Record<string, Part> };

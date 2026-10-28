@@ -3,12 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { Config } from "../src/lib/config.js";
-import { buildSweepEffects, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { Config } from "#src/lib/config.js";
+import { buildSweepEffects, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const HEAD = "5492549254925492549254925492549254925492";
 const NEXT_HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

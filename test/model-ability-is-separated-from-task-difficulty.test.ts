@@ -13,8 +13,8 @@ import {
   fitAbilityMap,
   type AbilityCell,
   type AbilityObservation,
-} from "../src/lib/ability-map.js";
-import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
+} from "#src/lib/ability-map.js";
+import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;

@@ -13,8 +13,8 @@ import {
   stampGhRead,
   withDaemonGhTransportFloor,
   withGhTransportFloor,
-} from "../src/lib/github-transport.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/github-transport.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // `withGhTransportFloor`'s own doc calls it a "standalone" command wrapper, and the per-read floor
 // only makes sense under that assumption: one invocation, one read. `rmd review` — the ONLY command

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { existsSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
-import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, type AsyncGitRunner, type GitRunner } from "../src/lib/git-fetch-retry.js";
-import { checkCliFreshness, checkServiceFreshness, checkServiceFreshnessAsync, checkReviewerCodeFreshness, checkReviewerCodeFreshnessAsync, daemonFreshnessFromService } from "../src/lib/self-sync.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, type AsyncGitRunner, type GitRunner } from "#src/lib/git-fetch-retry.js";
+import { checkCliFreshness, checkServiceFreshness, checkServiceFreshnessAsync, checkReviewerCodeFreshness, checkReviewerCodeFreshnessAsync, daemonFreshnessFromService } from "#src/lib/self-sync.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const MAIN_FETCH = ["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"];
 const FULL_FETCH = ["fetch", "--quiet", "origin"];

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deriveStatus, projectPlan, type DeriveDeps } from "../src/lib/status.js";
-import { FIXED_NOW_ISO, corpusLedgerPath, loadCorpusGithub, loadCorpusPlan } from "./fixtures/w1-t187/load.js";
+import { deriveStatus, projectPlan, type DeriveDeps } from "#src/lib/status.js";
+import { FIXED_NOW_ISO, corpusLedgerPath, loadCorpusGithub, loadCorpusPlan } from "#test/fixtures/w1-t187/load.js";
 
 /**
  * W1-T187 acceptance criterion 4 — "deriveStatus still works standalone, with no pre-read

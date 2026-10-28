@@ -3,9 +3,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { gardenSchedule, issueRevalidationGardenPass, REGISTERED_GARDEN_NAMES, gardenPacingPath } from "../src/lib/garden-registry.js";
-import { overseerStatePath } from "../src/lib/gardener-overseer.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { gardenSchedule, issueRevalidationGardenPass, REGISTERED_GARDEN_NAMES, gardenPacingPath } from "#src/lib/garden-registry.js";
+import { overseerStatePath } from "#src/lib/gardener-overseer.js";
 import {
   classifyIssue, decideAction, evidenceNames, ISSUE_REVALIDATION_FAILED_STEP, ISSUE_REVALIDATION_PASS_STEP,
   ISSUE_REVALIDATION_VERDICT_STEP, issueRevalidationJudgeText, livenessVerdictFromOverseerState, loadIssueRevalidationPolicy,
@@ -14,10 +14,10 @@ import {
   READ_MODEL_CLEAN_RUNS, runIssueRevalidationGarden, STILL_TRUE_REFRESH_MS, buildIssueRevalidationPrompt,
   type IssueRevalidationPorts, type IssueRevalidationPolicy, type PriorVerdict, type RevalidationComment, type RevalidationIssue,
   type RevalidationVerdict,
-} from "../src/lib/issue-revalidation-garden.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { issueRevalidationRunTaskPorts } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/issue-revalidation-garden.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { issueRevalidationRunTaskPorts } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { benchmarkNonDispatchSpawn, receiptIdentity } from "#src/lib/benchmark-run.js";
 import type { Config } from "#src/lib/config.js";
 import { readLedgerLines } from "#src/lib/status.js";

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { stackPrerequisiteFromRest, type StackPrerequisiteCheck } from "../src/lib/arm-auto-merge.js";
+import { stackPrerequisiteFromRest, type StackPrerequisiteCheck } from "#src/lib/arm-auto-merge.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweep,
@@ -12,8 +12,8 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 const CONFLICT_POLICY = { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: true };
 const NOW = Date.parse("2026-09-30T12:00:00.000Z");

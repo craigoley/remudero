@@ -3,14 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
+import type { Task } from "#src/lib/plan.js";
 import {
   defaultCreditStorePath,
   deriveStatus,
   loadCreditStore,
   persistVerifiedCredit,
   type GitHub,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 
 // MEASURED 2026-09-22 on the fleet: W1-T3990 (4 runs, $526) and W1-T3991 (4 runs, $42) were each
 // re-dispatched as `already_satisfied` — the worker's verifier credited the merged PR, the

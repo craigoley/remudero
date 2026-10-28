@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mock, test } from "node:test";
 
-import { readNamedInSource } from "../src/lib/branch-reaper.js";
-import { reapBranchesCommand } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { readNamedInSource } from "#src/lib/branch-reaper.js";
+import { reapBranchesCommand } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function gitGrepFailure(status: number | null, message: string): Error {
   return Object.assign(new Error(message), { status });

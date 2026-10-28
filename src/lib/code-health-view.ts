@@ -1,14 +1,15 @@
 import { CODE_HEALTH_POLICY_VERSION } from "./code-health-collector.js";
 import { fixedClock } from "./clock.js";
 import { createHash } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { projectCodeHealth, type CodeHealthProjectionInput } from "./code-health-projection.js";
 import type { CodeHealthAssessment } from "./code-health-contract.js";
 import { buildCodeHealthOpportunities, qualifiedCodeHealthPlanningSource, type CodeHealthImprovementOpportunity } from "./codeql-quality-intake.js";
-import { CODE_HEALTH_INTERVAL_MS, readCodeHealthInventory, readCodeHealthRelatedWork, isCodeHealthRepository as qualifiedRepo, codeHealthRepositoryStateDir, readCodeHealthCollectionFailure, readCodeHealthSnapshot, type CodeHealthCollectionFailureRead } from "./code-health-store.js";
+import { CODE_HEALTH_INTERVAL_MS, readCodeHealthInventory, readCodeHealthRelatedWork, isCodeHealthRepository as qualifiedRepo, codeHealthRepositoryStateDir, improvementOutcomeStateDir, readCodeHealthArtifactJson, readCodeHealthCollectionFailure, readCodeHealthSnapshot, type CodeHealthCollectionFailureRead } from "./code-health-store.js";
 import type { RepositoryEvidenceInventory } from "./daily-progress-contract.js";
 import { readModelSidecarDir, type ReadModelDb } from "./read-model-db.js";
+import { OPPORTUNITY_EVIDENCE_FILE, OPPORTUNITY_EVIDENCE_MAX_BYTES, projectGardenerOpportunityEvidence, projectCodeHealthImprovementFollowUp, unavailableOpportunityEvidence, type CodeHealthImprovementFollowUp, type GardenerOpportunityEvidence } from "./gardener-opportunity-evidence.js";
 import { judgeSource } from "./view-freshness.js";
 import { viewKey, type ViewBodySource, type ViewRequestFailure, type ViewSource } from "./views.js";
 
@@ -55,6 +56,7 @@ interface RepositorySummary {
 export interface CodeHealthViewData {
   version: "code-health-view-v1"; repository: string; expectedRepositories: string[]; unresolvedInstances: string[];
   repositories: RepositorySummary[]; snapshotId: string | null; isCurrentSnapshot: boolean | null; assessment: CodeHealthAssessment | null;
+  improvementFollowUp: CodeHealthImprovementFollowUp | null;
   findingCount: number | null; urgentFindings: UrgentCount; opportunities: CodeHealthImprovementOpportunity[];
   relatedWorkState: "reported" | "partial" | "stale" | "unavailable" | "not_collected"; relatedWorkAsOf: string | null; relatedWorkReason: string | null; planningAvailable: boolean; freshness: "fresh" | "stale" | "unavailable";
   page: { nextCursor: string | null };
@@ -100,6 +102,7 @@ export function readCodeHealthReport(opts: { stateDir: string; params: URLSearch
   const data: CodeHealthViewData = { version: "code-health-view-v1", repository: input.repository, expectedRepositories: expected, unresolvedInstances: inventory.unresolvedInstances,
     repositories: reports.map(value => value.summary), snapshotId: report?.summary.snapshotId ?? null, isCurrentSnapshot: report?.isCurrentSnapshot ?? null, assessment: report?.assessment ? { ...report.assessment, findings: [] } : null,
     findingCount: report?.assessment?.findings.length ?? null, urgentFindings: report?.summary.urgentFindings ?? unknownUrgent(), opportunities: [], relatedWorkState: "not_collected", relatedWorkAsOf: null, relatedWorkReason: "Saved related work has not been collected for this view.",
+    improvementFollowUp: input.repository === "all" ? null : readCodeHealthImprovementFollowUp(opts.stateDir, inventory, input.repository, opts.now),
     planningAvailable: false, freshness: report?.summary.freshness ?? (reports.every(value => value.summary.freshness === "fresh") && !inventory.unresolvedInstances.length ? "fresh" : "unavailable"), page: { nextCursor: null } };
   if (report?.assessment && data.assessment) {
     const related = readCodeHealthRelatedWork(opts.stateDir, inventory, input.repository, opts.now);
@@ -167,4 +170,31 @@ export function createCodeHealthView(opts: { stateDir?: string; keys?: () => str
       catch (error) { if (error instanceof CodeHealthNotReady || error instanceof RangeError || error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
     });
   } };
+}
+
+/** Cached evidence only. Scope is the configured roster; page loads never remeasure or file work. */
+export function readCodeHealthImprovementFollowUp(stateDir: string, inventory: RepositoryEvidenceInventory, repository: string, now: number): CodeHealthImprovementFollowUp {
+  const member = inventory.repositories.find(value => value.repository === repository);
+  if (!member) throw new RangeError("Unknown improvement repository.");
+  if (member.instanceIds.length > 256) throw new CodeHealthNotReady("The configured improvement sources exceed this read's bound.");
+  const clock = fixedClock(now), repoState = codeHealthRepositoryStateDir(stateDir, repository), latest = readCodeHealthSnapshot(repoState, repository);
+  const failed = readCodeHealthCollectionFailure(repoState, repository);
+  function* scopes(): Generator<{ instance: string; evidence: GardenerOpportunityEvidence }> {
+    for (const instance of member!.instanceIds) {
+      let evidence: GardenerOpportunityEvidence;
+      try { evidence = projectGardenerOpportunityEvidence(readCodeHealthArtifactJson(join(improvementOutcomeStateDir(stateDir, repository, instance), OPPORTUNITY_EVIDENCE_FILE), OPPORTUNITY_EVIDENCE_MAX_BYTES), repository, clock); }
+      catch (error) {
+        // Preserve absent versus malformed/unreadable source status; neither becomes a measured zero.
+        evidence = unavailableOpportunityEvidence(repository, clock, (error as NodeJS.ErrnoException).code === "ENOENT" ? "not_collected" : error instanceof SyntaxError ? "malformed" : "unreadable");
+      }
+      yield { instance, evidence };
+    }
+  }
+  return projectCodeHealthImprovementFollowUp(scopes(), member.instanceIds.length, {
+    snapshotId: latest.state === "observed" ? latest.snapshot.snapshotId : null,
+    analyzedSha: latest.state === "observed" ? latest.snapshot.input.analyzedSha : null,
+    currentSha: latest.state === "observed" ? latest.snapshot.input.currentSha : null,
+    collectionUnavailable: failed.state === "unavailable",
+    collectionFailed: failed.state === "failed" || latest.state === "observed" && latest.snapshot.input.scans.some(scan => scan.failureKind !== undefined),
+  });
 }

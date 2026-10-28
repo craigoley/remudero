@@ -1,0 +1,71 @@
+- id: W1-T10897
+  title: "A CONSUMER-REPO DAEMON'S DUPLICATE-BUILD GUARD LISTS THE ENGINE'S RUN BRANCHES — readPushedRunBranchesOutputAsync runs `git ls-remote --heads origin run-*` in the engine checkout, whose origin is craigoley/remudero, so the site and console daemons never see their own pushed run branches and PORTAL-T45 was rebuilt on five fresh branches until the circuit breaker tripped; the read lists the TARGET repo's run branches"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: the reader (run-task.ts) and its daemon wiring (daemon.ts); a wrong listing either duplicates builds or blocks every consumer task
+  band_meaning: blast-radius
+  origin: "wedge investigation for the operator session, 2026-10-28, after site task PORTAL-T45 pushed five run branches in 31 minutes with no PR; read-only host evidence"
+  plan_refs: [W1-T534, W1-T1207, W1-T4002, W1-T5805, W1-T9819, W1-T10896]
+  files:
+    - src/run-task.ts
+    - src/cli/commands/daemon.ts
+    - test/daemon/a-consumer-daemon-reads-its-own-repos-run-branches.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-28 ~03:15Z, read-only, at origin/main b3eae3fcf.
+    - readPushedRunBranchesOutputAsync (src/run-task.ts) runs `git ls-remote --heads origin run-*` with
+      `cwd: repoRoot`. repoRoot (src/lib/repo-location.ts) is the toplevel of the daemon's cwd. The
+      remudero-site-daemon process (`./bin/rmd daemon --repo remudero-site`) has cwd
+      /home/node/Remudero/remudero (from /proc/<pid>/cwd), the ENGINE checkout, whose origin is
+      https://github.com/craigoley/remudero.git.
+    - Run from that checkout inside the site container, the read returns 434 run-* refs and 0 run-PORTAL-* refs.
+    - hasPushedRunBranch is therefore never true for a site or console task. The rest of the same pass is
+      target-aware: the orphan evidence reads branch-reap-state.<target>.json, and the boot claim sweep uses
+      join(config.root, "repos", target.repo). daemon.ts already computes targetCheckoutRoot
+      (`target.isSelf ? repoRoot : join(config.root, "repos", target.repo)`).
+    - CONSEQUENCE on the site ledger (~/rmd-site-state/state): PORTAL-T45 started runs at 19:07, 19:18, 19:26,
+      19:33 and 19:37Z on 2026-10-27. Each pushed a new run-PORTAL-T45-* branch, each was refused at PR open
+      (`pr.open_refused`, the proof did not pass against the merge base), and each released its claim. Nothing
+      saw the earlier branches. `dispatch.circuit_broken` (freshCount 5, maxDispatches 5) has held the task since,
+      and PORTAL-T46/T47 wait behind it. In core, the same refusal shape skips the task as
+      run-branch-already-pushed after one build.
+    - That proof failed because the run's base predated PORTAL-T44 (#213, 19:56Z), which widened vitest.config.mjs
+      to include *.test.tsx, so vitest collected zero tests ("1..0"). That cause is NOT in this task's scope: it is
+      a retry-policy question about a proof that collects nothing, reported separately.
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d on origin/main and the plan changes of all 9 open PR heads at
+    03:20Z for readPushedRunBranches, `ls-remote --heads origin run-*` and consumer-repo run-branch subjects. W1-T1207,
+    W1-T2429 and W1-T4002 (merged) refine what the listing MEANS. None changes which repo it is read from.
+  design: |
+    1. The pushed-run-branch read takes the checkout it lists from. The daemon's tick and lane-refill reads pass
+       targetCheckoutRoot, so a consumer daemon lists its target repo's origin and a self-targeting daemon lists
+       exactly what it lists today. The sync readPushedRunBranchesOutput used by drain takes the same argument
+       from its caller's target.
+    2. Fail-open stays as it is (W1-T5805). The existing read-failure ledger row names the repo the listing was
+       read for, so a failure in a consumer daemon is attributable.
+    3. The test really shells out (doctrine cover-the-real-default): two bare remotes, an engine checkout and a
+       target checkout under a fixture config root. Only the target holds run-PORTAL-T999-1793000000000, and the
+       fixture sets its own git identity.
+  acceptance:
+    - claim: "a consumer-repo daemon's run-branch listing is its target repo's, not the engine's"
+      proof: 'grep: test("W1-T10897: a consumer daemon lists its target repo run branches, not the engine" in test/daemon/a-consumer-daemon-reads-its-own-repos-run-branches.test.ts'
+    - claim: "a self-targeting daemon's listing is unchanged"
+      proof: 'grep: test("W1-T10897: a self-targeting daemon listing is unchanged" in test/daemon/a-consumer-daemon-reads-its-own-repos-run-branches.test.ts'
+    - claim: "a pushed run branch in the target repo blocks redispatch of its task"
+      proof: 'grep: test("W1-T10897: a target repo pushed run branch blocks redispatch" in test/daemon/a-consumer-daemon-reads-its-own-repos-run-branches.test.ts'
+    - claim: "the daemon wires the target checkout into the run-branch read"
+      proof: 'grep: readPushedRunBranchesOutputAsync(targetCheckoutRoot in src/cli/commands/daemon.ts'
+  falsifier: |
+    At base the reader always lists from repoRoot, so in the fixture it returns the engine remote's refs, and the
+    first and third cases fail (no run-PORTAL-T999 ref, the task dispatches again).
+    - Hard-code join(config.root, "repos", target.repo) for every daemon, including a self-targeting one: the
+      self-targeting case fails, because that daemon's checkout is repoRoot.
+    - Pass the target path but keep `cwd: repoRoot` inside the reader: the first case fails.
+    - Mock exec instead of shelling out: the real-default case is unreachable and the coverage gate names it.
+    GUARD that held at base and must still hold: test/a-lane-refill-reads-the-run-branches-pushed-since-the-tick-began.test.ts
+    passes unchanged.

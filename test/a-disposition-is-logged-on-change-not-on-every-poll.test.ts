@@ -5,15 +5,15 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { DECISION_RELEVANT_LEDGER_STEPS, MAX_RETAINED_LINES_PER_STEP } from "../src/lib/ledger.js";
+import { DECISION_RELEVANT_LEDGER_STEPS, MAX_RETAINED_LINES_PER_STEP } from "#src/lib/ledger.js";
 import {
   DEFAULT_SWEEP_POLICY,
   repeatDispositionStreaksFromLedger,
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 // ── W1-T3359: the repeat-disposition bound could not reach its own threshold ─────────────────────
 //

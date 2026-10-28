@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService, createConfirmNonceStore, makeConfirmNonceRoute, type IdentityProvider, type Route } from "../src/lib/service.js";
+import { createService, createConfirmNonceStore, makeConfirmNonceRoute, type IdentityProvider, type Route } from "#src/lib/service.js";
 
 // ── W1-T404 acceptance 6: "the second factor is checked by the server, so a request made
 // outside the console cannot skip it" ──

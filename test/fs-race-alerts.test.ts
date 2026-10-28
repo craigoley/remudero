@@ -4,9 +4,9 @@ import { closeSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { createOrReadExclusive, readFileIfExists } from "../src/lib/fs-race-safe.js";
-import { configPath, loadConfig, type Config } from "../src/lib/config.js";
-import { resolveServiceTokens, serviceTokensPath } from "../src/lib/serve.js";
+import { createOrReadExclusive, readFileIfExists } from "#src/lib/fs-race-safe.js";
+import { configPath, loadConfig, type Config } from "#src/lib/config.js";
+import { resolveServiceTokens, serviceTokensPath } from "#src/lib/serve.js";
 
 // ── W1-T286: closes CodeQL js/file-system-race alerts #60 (src/lib/config.ts:402) and #61
 // (src/lib/serve.ts:3940). Both alerts were, per the code-scanning API, already `state:

@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { resolveConsoleSha } from "../src/lib/serve.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { resolveConsoleSha } from "#src/lib/serve.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "serve-container.sh");

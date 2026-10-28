@@ -30,13 +30,13 @@ import {
   removeAbandonedFixWorktreeOwner,
   resetTrackedDirtyFixOwner,
   type BuildSweepEffectsDeps,
-} from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, FIX_CLAIM_DECLINE_BACKSTOP, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/run-task.js";
+import { DEFAULT_SWEEP_POLICY, FIX_CLAIM_DECLINE_BACKSTOP, runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const TASK = "W1-T600";
 const PR = 10041;

@@ -5,10 +5,10 @@ import { join } from "node:path";
 import { describe, test, type TestContext } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { ledgerCompactCommand, LEDGER_COLD_STORE_DIRNAME, selectLedgerCompactionSources } from "../src/lib/ledger-compact.js";
-import { compactedArchiveName } from "../src/lib/ledger.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { ledgerCompactCommand, LEDGER_COLD_STORE_DIRNAME, selectLedgerCompactionSources } from "#src/lib/ledger-compact.js";
+import { compactedArchiveName } from "#src/lib/ledger.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = Date.parse("2026-10-08T12:00:00.000Z");
 const row = (ts: string, id: string) => JSON.stringify({ ts, step: "run.start", run_id: id });

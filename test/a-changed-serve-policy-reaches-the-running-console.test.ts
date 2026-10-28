@@ -14,9 +14,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { IMAGE_RECYCLE_FAILURE_BACKOFF_MS, MEMORY_HIGH_ANNOTATION, type DeployDeps, type ResourcePolicyDrift } from "../src/lib/deployer.js";
-import type { Escalation, IssueGateway } from "../src/lib/escalate.js";
-import { loadHostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
+import { IMAGE_RECYCLE_FAILURE_BACKOFF_MS, MEMORY_HIGH_ANNOTATION, type DeployDeps, type ResourcePolicyDrift } from "#src/lib/deployer.js";
+import type { Escalation, IssueGateway } from "#src/lib/escalate.js";
+import { loadHostMemoryBudgetPolicy } from "#src/lib/host-memory-shadow.js";
 import {
   SERVE_POLICY_CONTAINER,
   SERVE_POLICY_FAILED_FILE,
@@ -25,8 +25,8 @@ import {
   serveReplaceAdmissionEnv,
   runServePolicyCycle,
   serveHandoffOpen,
-} from "../src/lib/serve-policy-convergence.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/serve-policy-convergence.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const NOW = Date.parse("2026-10-02T12:00:00.000Z");

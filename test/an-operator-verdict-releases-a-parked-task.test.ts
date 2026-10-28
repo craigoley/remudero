@@ -2,15 +2,15 @@ import { operatorReleasePin } from "#src/lib/operator-release.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { RELEASE_LEDGER_STEP, assertRunnable, parseTasksFromYaml, releasedTaskIds as readReleasedTaskIds } from "../src/lib/plan.js";
-import { nextRunnable, resolveReleasedIds, runDrain } from "../src/lib/drain.js";
+import { RELEASE_LEDGER_STEP, assertRunnable, parseTasksFromYaml, releasedTaskIds as readReleasedTaskIds } from "#src/lib/plan.js";
+import { nextRunnable, resolveReleasedIds, runDrain } from "#src/lib/drain.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ledgerPathFor } from "../src/lib/ledger-path.js";
-import { approveCommand, approveParkedTask, namesATask } from "../src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ledgerPathFor } from "#src/lib/ledger-path.js";
+import { approveCommand, approveParkedTask, namesATask } from "#src/run-task.js";
 
 /**
  * W1-T3206 — `verify: human` WAS A ONE-WAY PARK WITH NO RELEASE.

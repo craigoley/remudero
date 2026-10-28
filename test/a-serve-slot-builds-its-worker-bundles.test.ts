@@ -9,13 +9,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { hashInstallInputs, installHashMarkerPath } from "../src/lib/install-hash.js";
-import { buildSlotChildEntries, CHILD_ENTRY_BUILD_SCRIPT, createSlotPreparer, runCommand, type RunCommand } from "../src/lib/serve-slots.js";
-import type { ServeSupervisor } from "../src/lib/serve-supervisor.js";
-import { runServeSupervisor } from "../src/lib/serve-supervisor-main.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { hashInstallInputs, installHashMarkerPath } from "#src/lib/install-hash.js";
+import { buildSlotChildEntries, CHILD_ENTRY_BUILD_SCRIPT, createSlotPreparer, runCommand, type RunCommand } from "#src/lib/serve-slots.js";
+import type { ServeSupervisor } from "#src/lib/serve-supervisor.js";
+import { runServeSupervisor } from "#src/lib/serve-supervisor-main.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const BUILDS = [
   'import { mkdirSync, writeFileSync } from "node:fs";',

@@ -7,12 +7,12 @@ import {
   ACTION_RESULTS_CONTRACT_VERSION,
   buildActionResultsProjection,
   buildActionResultsRoute,
-} from "../src/lib/action-results.js";
-import type { ExternalEffectResult } from "../src/lib/action-reconciliation.js";
-import { readLedgerUnionBounded, type LedgerLines } from "../src/lib/status.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { buildPanelReadRoutes } from "../src/lib/panel-graph.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/action-results.js";
+import type { ExternalEffectResult } from "#src/lib/action-reconciliation.js";
+import { readLedgerUnionBounded, type LedgerLines } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { buildPanelReadRoutes } from "#src/lib/panel-graph.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const STATES = ["applied", "refused", "pending", "partially-applied", "drifted", "stale", "unobservable"] as const;
 

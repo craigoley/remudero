@@ -7,16 +7,16 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
-import { systemClock } from "../src/lib/clock.js";
-import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
-import { INSTANCE_WRITES } from "../src/lib/instances-view.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { createNowView, type NowViewContext, type NowViewData } from "../src/lib/now-view.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { acquireLease } from "../src/lib/read-model-db.js";
-import { buildServeRoutes, buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { systemClock } from "#src/lib/clock.js";
+import { daemonInstanceRegistryPath } from "#src/lib/deployer.js";
+import { INSTANCE_WRITES } from "#src/lib/instances-view.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { createNowView, type NowViewContext, type NowViewData } from "#src/lib/now-view.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { acquireLease } from "#src/lib/read-model-db.js";
+import { buildServeRoutes, buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import type { GitHub } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 // The routes stamp rows at real time, and the projector quarantines a row ahead of its clock: so the clock is real.
 const T0 = systemClock.now();

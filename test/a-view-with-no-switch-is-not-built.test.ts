@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
-import { NAV_BADGE_VIEW_NAME } from "../src/lib/nav-badge-view.js";
-import { NEEDS_YOU_VIEW_NAME } from "../src/lib/needs-you-view.js";
-import { NOW_VIEW_NAME } from "../src/lib/now-view.js";
-import { OPERATOR_AGENT_ROWS_VIEW } from "../src/lib/operator-agent-read-model.js";
+import type { Clock } from "#src/lib/clock.js";
+import { NAV_BADGE_VIEW_NAME } from "#src/lib/nav-badge-view.js";
+import { NEEDS_YOU_VIEW_NAME } from "#src/lib/needs-you-view.js";
+import { NOW_VIEW_NAME } from "#src/lib/now-view.js";
+import { OPERATOR_AGENT_ROWS_VIEW } from "#src/lib/operator-agent-read-model.js";
 import {
   createReadModelTicker,
   READ_MODEL_VIEW_READERS,
@@ -16,9 +16,9 @@ import {
   type ReadModelView,
   type ReadModelViewReaders,
   type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { READ_MODEL_STATUS_VIEW } from "../src/lib/views.js";
+} from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { READ_MODEL_STATUS_VIEW } from "#src/lib/views.js";
 
 const T0 = Date.parse("2026-10-05T12:00:00.000Z");
 

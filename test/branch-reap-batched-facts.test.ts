@@ -13,9 +13,9 @@ import {
   readTipInMainMembership,
   tipInMainFor,
   writeAutomaticBranchReapState,
-} from "../src/lib/branch-reaper.js";
-import { reapBranchesCommand } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/branch-reaper.js";
+import { reapBranchesCommand } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 test("a restart with an unchanged branch set does not rerun the branch reap", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reap-state-`));

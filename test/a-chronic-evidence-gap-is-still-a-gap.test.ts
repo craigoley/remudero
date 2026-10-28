@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { systemClock, type Clock } from "../src/lib/clock.js";
+import { systemClock, type Clock } from "#src/lib/clock.js";
 import {
   EVIDENCE_COVERAGE_DROP_TOLERANCE,
   EVIDENCE_COVERAGE_FIELDS,
@@ -28,8 +28,8 @@ import {
   runEvidenceCoverageGardener,
   type EvidenceCoverageFollowup,
   type EvidenceCoverageInput,
-} from "../src/lib/evidence-coverage-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/evidence-coverage-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 type Row = Record<string, unknown>;
 

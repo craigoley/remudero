@@ -7,12 +7,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "../src/lib/closing-reference-guard.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghPrMergeSquash } from "../src/lib/worker.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { buildSweepEffects, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "#src/lib/closing-reference-guard.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghPrMergeSquash } from "#src/lib/worker.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { buildSweepEffects, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-10-12T03:00:00Z");
 

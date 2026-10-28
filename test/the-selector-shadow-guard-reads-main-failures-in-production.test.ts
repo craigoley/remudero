@@ -9,10 +9,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 // Namespace imports: the pass and the reader are new, so this suite still loads (and fails) at the base sha.
-import * as registry from "../src/lib/garden-registry.js";
-import * as gardener from "../src/lib/selector-shadow-gardener.js";
-import { clockFromMillisFn, systemClock } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as registry from "#src/lib/garden-registry.js";
+import * as gardener from "#src/lib/selector-shadow-gardener.js";
+import { clockFromMillisFn, systemClock } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const RED = ["test/red-on-main-a.test.ts", "test/red-on-main-b.test.ts"];
 

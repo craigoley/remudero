@@ -25,7 +25,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildReceipt } from "../src/lib/receipt.js";
+import { buildReceipt } from "#src/lib/receipt.js";
 
 const TASK_ID = "W1-T4100";
 const PR_URL = "https://github.com/craigoley/remudero/pull/1";

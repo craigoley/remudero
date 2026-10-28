@@ -4,14 +4,14 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { OPERATOR_ACTIVITY_CONTRACT_VERSION } from "../src/lib/panel-graph.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { captureFeedback } from "../src/lib/feedback.js";
-import { buildFeedbackInboxRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { COMPUTE_DUTY_DIVISOR, createConsoleSnapshotCache, ifNoneMatchHits, snapshotEtag, type ConsoleResponseStaleness } from "../src/lib/console-snapshot-cache.js";
-import { boundConsoleReadRoutes, type ServeDeps } from "../src/lib/serve.js";
-import type { Route } from "../src/lib/service.js";
-import type { GitHub } from "../src/lib/status.js";
+import { OPERATOR_ACTIVITY_CONTRACT_VERSION } from "#src/lib/panel-graph.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { captureFeedback } from "#src/lib/feedback.js";
+import { buildFeedbackInboxRoute, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { COMPUTE_DUTY_DIVISOR, createConsoleSnapshotCache, ifNoneMatchHits, snapshotEtag, type ConsoleResponseStaleness } from "#src/lib/console-snapshot-cache.js";
+import { boundConsoleReadRoutes, type ServeDeps } from "#src/lib/serve.js";
+import type { Route } from "#src/lib/service.js";
+import type { GitHub } from "#src/lib/status.js";
 
 class Capture {
   status = 0;

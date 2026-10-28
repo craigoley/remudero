@@ -12,7 +12,7 @@ import {
   attemptArm,
   logArmAttribution,
   type ArmDeps,
-} from "../src/lib/arm-auto-merge.js";
+} from "#src/lib/arm-auto-merge.js";
 
 type PlanTouch = "touched" | "untouched" | "unreadable";
 interface Facts {

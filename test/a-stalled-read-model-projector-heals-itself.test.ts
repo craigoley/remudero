@@ -3,11 +3,11 @@ import { appendFileSync, mkdirSync, rmSync, statSync, utimesSync, writeFileSync 
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { Clock } from "../src/lib/clock.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import { DIR_GATE_RELIST_MS, MIN_TRANSACTION_LINES, createLedgerProjector, openProjectorReadModel, type LedgerProjectorOptions } from "../src/lib/ledger-projector.js";
-import { acquireLease } from "../src/lib/read-model-db.js";
-import { READ_MODEL_STALL_MS, createReadModelTicker, createReadModelWorker, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
+import type { Clock } from "#src/lib/clock.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import { DIR_GATE_RELIST_MS, MIN_TRANSACTION_LINES, createLedgerProjector, openProjectorReadModel, type LedgerProjectorOptions } from "#src/lib/ledger-projector.js";
+import { acquireLease } from "#src/lib/read-model-db.js";
+import { READ_MODEL_STALL_MS, createReadModelTicker, createReadModelWorker, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { closeReadModelFixture, readModelFixtureDir, type ReadModelFixtureScope } from "#test/helpers/read-model-fixture.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");

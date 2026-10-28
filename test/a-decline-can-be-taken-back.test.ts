@@ -23,12 +23,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createService } from "../src/lib/service.js";
-import { declinedReasonInLedger } from "../src/lib/inbox.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import { buildPanelGraphRoutes, type PanelGraphDeps, type RatifyCliGateway } from "../src/lib/panel-graph.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { TraceGithub } from "../src/lib/trace.js";
+import { createService } from "#src/lib/service.js";
+import { declinedReasonInLedger } from "#src/lib/inbox.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import { buildPanelGraphRoutes, type PanelGraphDeps, type RatifyCliGateway } from "#src/lib/panel-graph.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { TraceGithub } from "#src/lib/trace.js";
 
 const ID = "proof-debt:W1-T965";
 const decline = (reason: string, task_id = ID) => ({ step: "panel.proposal_declined", task_id, reason });

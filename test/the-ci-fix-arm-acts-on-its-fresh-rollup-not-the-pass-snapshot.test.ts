@@ -10,8 +10,8 @@ import {
   type OpenPrView,
   type RollupCheckEntry,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 const NOW = Date.parse("2026-10-04T16:57:27.376Z");
 const OLD_START = "2026-10-04T16:54:04Z";

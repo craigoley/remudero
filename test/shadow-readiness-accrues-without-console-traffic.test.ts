@@ -3,11 +3,11 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { Clock } from "../src/lib/clock.js";
-import { createReadModelWorker, READ_MODEL_SWITCH_RECHECK_MS, readModelStatusView, readModelSwitchesPath, type ReadModelBodyEntry } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { createShadowSampler, VIEW_SHADOW_DIFF_STEP, VIEW_SHADOW_SAMPLE_MS, withViewShadow } from "../src/lib/view-shadow.js";
-import type { ViewDefinition } from "../src/lib/views.js";
+import type { Clock } from "#src/lib/clock.js";
+import { createReadModelWorker, READ_MODEL_SWITCH_RECHECK_MS, readModelStatusView, readModelSwitchesPath, type ReadModelBodyEntry } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { createShadowSampler, VIEW_SHADOW_DIFF_STEP, VIEW_SHADOW_SAMPLE_MS, withViewShadow } from "#src/lib/view-shadow.js";
+import type { ViewDefinition } from "#src/lib/views.js";
 
 const T0 = Date.parse("2026-10-01T03:00:00.000Z");
 /** The prefix test/the-shadow-readiness-test-stops-its-worker-before-cleanup.test.ts reads the cleanup order by. */

@@ -3,8 +3,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger } from "../src/lib/analytics-route.js";
-import { fixedClock } from "../src/lib/clock.js";
+import { deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger } from "#src/lib/analytics-route.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 const NOW = "2026-10-11T20:20:00.000Z";
 const CLOCK = fixedClock(Date.parse(NOW));

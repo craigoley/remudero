@@ -3,10 +3,10 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
-import { deriveStatus } from "../src/lib/status.js";
-import { applyCorrection } from "../src/lib/correct.js";
+import type { Task } from "#src/lib/plan.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
+import { deriveStatus } from "#src/lib/status.js";
+import { applyCorrection } from "#src/lib/correct.js";
 
 /** A minimal task; fields not under test get sensible defaults. */
 function task(over: Partial<Task> = {}): Task {

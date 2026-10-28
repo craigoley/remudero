@@ -10,8 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   DEFAULT_SWEEP_POLICY,
   ciTimeoutNotReadyChecks,
@@ -20,7 +20,7 @@ import {
   type OpenPrView,
   type RollupCheckEntry,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const TIMEOUT_LINE =
   "ci-gate: TIMED OUT waiting for required check(s) to complete (this is NOT a check failure -- a NEW sha " +

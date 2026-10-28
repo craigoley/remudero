@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import * as wip from "../src/lib/adaptive-wip.js";
-import * as incidents from "../src/lib/incident-invariants.js";
-import { BLOCKER_SLO_MS, PR_BLOCKERS } from "../src/lib/pr-blocker.js";
+import * as wip from "#src/lib/adaptive-wip.js";
+import * as incidents from "#src/lib/incident-invariants.js";
+import { BLOCKER_SLO_MS, PR_BLOCKERS } from "#src/lib/pr-blocker.js";
 
 /**
  * W1-T9673 — W1-T9633 (#12044) added security-alert-hold and security-unknown-hold to pr-blocker.ts, for a

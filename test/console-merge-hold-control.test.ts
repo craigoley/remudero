@@ -5,11 +5,11 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { computeBoardSnapshot, type BoardDeps } from "../src/lib/board.js";
-import { buildMergeHoldRoute } from "../src/lib/panel-actions.js";
-import { automergeHoldFromLedger } from "../src/lib/review.js";
-import { buildServeRoutes, buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { readLedgerLines } from "../src/lib/status.js";
+import { computeBoardSnapshot, type BoardDeps } from "#src/lib/board.js";
+import { buildMergeHoldRoute } from "#src/lib/panel-actions.js";
+import { automergeHoldFromLedger } from "#src/lib/review.js";
+import { buildServeRoutes, buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 const READ_TOKEN = "merge-hold-read-token";
 const WRITE_TOKEN = "merge-hold-write-token";

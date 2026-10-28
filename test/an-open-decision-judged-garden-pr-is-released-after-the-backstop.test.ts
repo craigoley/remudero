@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   gardenNeedsInventory,
   gardenStatePath,
@@ -15,8 +15,8 @@ import {
   type GardenCheckout,
   type GardenSpec,
   type PrState,
-} from "../src/lib/gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const PROOF = "test/an-open-decision-judged-garden-pr-is-released-after-the-backstop.test.ts";
 const AT = Date.parse("2026-10-06T00:00:00Z");

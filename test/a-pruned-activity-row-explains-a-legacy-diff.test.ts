@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { acquireLease } from "../src/lib/read-model-db.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { classifyShadowDiff, legacyRowIndex, readShadowEvidence } from "../src/lib/view-shadow.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { acquireLease } from "#src/lib/read-model-db.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { classifyShadowDiff, legacyRowIndex, readShadowEvidence } from "#src/lib/view-shadow.js";
 
 // Site, 2026-10-14: LIVE-EDITS-daemon-checkout's lastActivityAt read 01:52:47Z on legacy and 04:08:00Z on the view.
 // The 04:08 row is live_edits.escalated, a non-fact step kept only as the run's run_activity row; the 21:18Z full

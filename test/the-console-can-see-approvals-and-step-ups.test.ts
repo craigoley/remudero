@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { projectConsoleStatusResponse } from "../src/lib/serve.js";
+import { deriveAnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { projectConsoleStatusResponse } from "#src/lib/serve.js";
 
 const NOW = Date.parse("2026-09-22T20:00:00.000Z");
 

@@ -4,18 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { declaredConsoleRoutes, type DeclaredRoute } from "./helpers/declared-routes.js";
-import { skipInMutationSandbox } from "./helpers/mutation-sandbox.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { buildPanelActionRoutes, type IssueCloser } from "../src/lib/panel-actions.js";
-import { createService } from "../src/lib/service.js";
-import type { Route } from "../src/lib/service.js";
-import type { Plan } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
-import { buildInstanceProposalRoutes } from "../src/lib/instance-inbox-proposal.js";
+import { declaredConsoleRoutes, type DeclaredRoute } from "#test/helpers/declared-routes.js";
+import { skipInMutationSandbox } from "#test/helpers/mutation-sandbox.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { buildPanelActionRoutes, type IssueCloser } from "#src/lib/panel-actions.js";
+import { createService } from "#src/lib/service.js";
+import type { Route } from "#src/lib/service.js";
+import type { Plan } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
+import { buildInstanceProposalRoutes } from "#src/lib/instance-inbox-proposal.js";
 
 // ── recon-ER: the console has TWO ways to declare a route and only ONE that mounts it. A
 // builder can be aggregated into a `build*Routes` plural, or imported and called individually

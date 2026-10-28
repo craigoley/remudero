@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { refreshInstallationToken } from "../src/lib/github-app.js";
+import { refreshInstallationToken } from "#src/lib/github-app.js";
 
 /**
  * THE GITHUB APP IS THE FLEET HOST'S ONLY CREDENTIAL. `gh auth login` is never run there and the
@@ -60,7 +60,7 @@ test("CLI entry MINTS before dispatch — observed by running main(), not by rea
   const { mkdtempSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const { RMD_TMP_PREFIX } = await import("../src/lib/tmp.js");
+  const { RMD_TMP_PREFIX } = await import("#src/lib/tmp.js");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cli-mint-`));
   // A syntactically valid RSA key is not needed: the exchange itself is stubbed below, and the
   // signing step reads this file only for its bytes.
@@ -88,7 +88,7 @@ test("CLI entry MINTS before dispatch — observed by running main(), not by rea
     process.env.GH_APP_PRIVATE_KEY_PATH = keyPath;
     delete process.env.GH_TOKEN;
     process.argv = ["node", "run-task.js", "--no-such-verb"];
-    const { main } = await import("../src/run-task.js");
+    const { main } = await import("#src/run-task.js");
     await main().catch(() => {}); // the unknown verb exits; the mint runs BEFORE dispatch either way
     // THE DISCRIMINATOR is that the ATTEMPT is observable. Asserting only "GH_TOKEN is unset" would
     // pass identically when no mint ran at all — measured: with the mint deleted that assertion
@@ -124,7 +124,7 @@ test("CLI entry mints before dispatch, and only when GH_TOKEN is absent — the 
   const { mkdtempSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const { RMD_TMP_PREFIX } = await import("../src/lib/tmp.js");
+  const { RMD_TMP_PREFIX } = await import("#src/lib/tmp.js");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cli-mint-guard-`));
   const keyPath = join(dir, "key.pem");
   writeFileSync(keyPath, ["-----BEGIN", "RSA PRIVATE KEY-----"].join(" ") + "\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n");
@@ -145,7 +145,7 @@ test("CLI entry mints before dispatch, and only when GH_TOKEN is absent — the 
     process.env.GH_APP_INSTALLATION_ID = "2";
     process.env.GH_APP_PRIVATE_KEY_PATH = keyPath;
     process.argv = ["node", "run-task.js", "--no-such-verb"];
-    const { main } = await import("../src/run-task.js");
+    const { main } = await import("#src/run-task.js");
 
     // ── GUARDED: a token the operator exported is left exactly alone ──────────────────────────
     process.env.GH_TOKEN = OPERATOR_TOKEN;
@@ -214,7 +214,7 @@ async function stderrOfMain(t: { mock: { method: Function } }, argv: string[]): 
   const { mkdtempSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const { RMD_TMP_PREFIX } = await import("../src/lib/tmp.js");
+  const { RMD_TMP_PREFIX } = await import("#src/lib/tmp.js");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t3071-`));
   const keyPath = join(dir, "key.pem");
   writeFileSync(keyPath, ["-----BEGIN", "RSA PRIVATE KEY-----"].join(" ") + "\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n");
@@ -235,7 +235,7 @@ async function stderrOfMain(t: { mock: { method: Function } }, argv: string[]): 
     process.env.GH_APP_PRIVATE_KEY_PATH = keyPath;
     delete process.env.GH_TOKEN;
     process.argv = ["node", "run-task.js", ...argv];
-    const { main } = await import("../src/run-task.js");
+    const { main } = await import("#src/run-task.js");
     await main().catch(() => {}); // the help arms exit; an unknown verb exits too
     return stderr;
   } finally {

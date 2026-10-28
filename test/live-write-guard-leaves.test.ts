@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { ghPrMergeSquash } from "../src/lib/worker.js";
-import { ghPrCreateFillCommand, lastCommitSubject } from "../src/run-task.js";
-import { ghIssueGateway } from "../src/lib/escalate.js";
-import { defaultGitCapture, defaultPushExec, gitPushRunBranch } from "../src/lib/git-push.js";
-import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { ghPrMergeSquash } from "#src/lib/worker.js";
+import { ghPrCreateFillCommand, lastCommitSubject } from "#src/run-task.js";
+import { ghIssueGateway } from "#src/lib/escalate.js";
+import { defaultGitCapture, defaultPushExec, gitPushRunBranch } from "#src/lib/git-push.js";
+import { LiveWriteBlockedError, withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 
 /** ghPrMergeSquash requires the closing-reference guard; these tests are about the merge call itself. */
 const CLEAN_GUARD = () => ({ state: "clean" as const, defused: [] });

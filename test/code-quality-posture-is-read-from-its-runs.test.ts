@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, rmSync } from "node:fs";
 import { test } from "node:test";
-import { ghShim } from "./helpers/gh-shim.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 import {
   checkGithubPosture,
@@ -10,7 +10,7 @@ import {
   readGithubPosture,
   type GithubPostureBaseline,
   type GithubPostureGateway,
-} from "../src/lib/github-posture.js";
+} from "#src/lib/github-posture.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";

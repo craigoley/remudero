@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   freezeReadGeneration, freshReadGeneration, TICK_READ_MAX_AGE_MS, type ReadGeneration,
-} from "../src/lib/read-plane.js";
+} from "#src/lib/read-plane.js";
 
 test("test/one-stale-board-generation-logs-one-row.test.ts", () => {
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];

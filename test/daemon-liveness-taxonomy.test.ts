@@ -26,11 +26,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { deriveDaemonLiveness, type IssueCloser } from "../src/lib/panel-actions.js";
-import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type GitHub } from "../src/lib/status.js";
-import type { Plan } from "../src/lib/plan.js";
-import type { TraceGithub } from "../src/lib/trace.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { deriveDaemonLiveness, type IssueCloser } from "#src/lib/panel-actions.js";
+import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type GitHub } from "#src/lib/status.js";
+import type { Plan } from "#src/lib/plan.js";
+import type { TraceGithub } from "#src/lib/trace.js";
 
 const NOW = Date.parse("2026-08-07T12:00:00.000Z");
 const READ_TOKEN = "liveness-read-token";
