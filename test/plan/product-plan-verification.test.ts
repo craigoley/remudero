@@ -275,7 +275,12 @@ test("W1-T10823: a product build refuses more active builds than its envelope al
         task_id: "W9-T1", step: "run.start", lane: "run-task", repo: "wreckterra" });
       if (nativeState === "ended") rows.push({ ts: requestedAt, run_id: runId, task_id: "W9-T1", step: "verdict",
         lane: "run-task", verdict: "pass" });
-      writeLedger(rows, { dir: state });
+      const ledger = writeLedger(rows, { dir: state });
+      if (["running", "silent", "ended"].includes(nativeState)) {
+        assert.deepEqual(readTargetExecution(state, { taskId: "W9-T1", origin, repo: "wreckterra", requestedAt, nowMs }),
+          { state: "dispatched" }, "a same-task run without this request's native binding remains dispatched");
+        ledger.append([{ ...rows[0], native_run_id: runId }]);
+      }
       if (nativeState === "silent") nowMs += DEFAULT_LIVENESS_BOUND_MS + 1;
     }
     assert.deepEqual(readTargetExecution(state, { taskId: "W9-T1", origin, repo: "wreckterra", requestedAt, nowMs }),
