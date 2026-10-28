@@ -305,7 +305,7 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
   const gatewaySources = new Map<string, Omit<ViewSource, "name">>();
   /** Keyed by the very `data` object a body published, as now-view's `shown`. */
   const shown = new WeakMap<WorkstreamsData, { builtMs: number; entries: Map<string, Built> }>();
-  const legacyMemos = new Map<string, LedgerRotationMemo>();
+  const legacyMemos = new Map<string, { cutoff: number; memo: LedgerRotationMemo }>();
   const liveLedgerTail = new Map(opts.instances.map((i) => [i.name, createLiveLedgerTail(join(i.ledgerDir, LEDGER_FILENAME))]));
   const projectionReuse = createWorkstreamsProjectionReuse();
   /** When each instance's reuse was last audited (or first held), on the build clock. */
@@ -483,8 +483,16 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
       const instances = view.instances.map(({ instance, activity }) => {
         const b = built.entries.get(instance);
         if (!b) return { instance, activity };
-        const memo = legacyMemos.get(instance) ?? createLedgerRotationMemo(operatorActivityCandidates);
-        legacyMemos.set(instance, memo);
+        // Reduce only after the frozen cutoff is applied. A top-candidate reduction first can
+        // discard every eligible row when an archive contains newer, not-yet-compared activity.
+        // Retain one cutoff memo per instance; the closure keeps only its primitive cutoff,
+        // while the existing memo still keys each bounded reduction by archive identity.
+        const cutoff = b.ringNewestMs;
+        const previous = legacyMemos.get(instance);
+        const memo = previous && Object.is(previous.cutoff, cutoff)
+          ? previous.memo
+          : createLedgerRotationMemo((rows) => operatorActivityCandidates(rows.filter((row) => !(Date.parse(String(row.ts)) > cutoff))));
+        legacyMemos.set(instance, { cutoff, memo });
         const pass = memo.pass({ parseMissing: true });
         const livePath = join(b.instance.ledgerDir, LEDGER_FILENAME);
         const union = readLedgerUnionBounded(livePath, { rotationRecords: pass.rotationRecords, ...(b.liveApplied ? { ledgerFs: appliedLedgerFs(livePath, b.liveApplied) } : {}) });

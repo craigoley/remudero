@@ -6,7 +6,7 @@ import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "no
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
-import { isFactStep } from "#src/lib/ledger-projector.js";
+import { ACTIVITY_RING_PROJECTION, isFactStep, ledgerLineIdentity } from "#src/lib/ledger-projector.js";
 import { snapshotGithub } from "#src/lib/now-view.js";
 import { buildOperatorActivityProjection, buildOperatorActivityRoute, OPERATOR_ACTIVITY_MAX_ITEMS, type OperatorActivityEnvelope, type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import type { ReadModelDb } from "#src/lib/read-model-db.js";
@@ -432,4 +432,105 @@ test("unit test: a live file rotated after the ring was read is read whole by th
   assert.ok(legacy);
   const sources = capped(legacy.data as WorkstreamsData).map((i) => (i as { source?: string }).source);
   assert.ok(sources.includes("rmd:ledger:pr.stuck"), "the new live file is read whole, up to the ring's newest ts");
+});
+
+/** A real projected body stays frozen while ordinary newer activity rotates into an archive. */
+function frozenCutoffArchive(t: TestCtx, loseAppliedRow = false) {
+  const cleanups: Array<() => void> = [];
+  const f = fixture({ after: (fn) => cleanups.push(fn) });
+  let ticker: ReturnType<typeof createReadModelTicker> | undefined;
+  t.after(() => { try { ticker?.release(); } finally { for (const fn of cleanups) fn(); } });
+  fullLedger(f);
+  const view = createWorkstreamsView<ReadModelInstanceState>({ instances: f.instances, ledgerSource, debounceMs: 0 });
+  const posted: ReadModelWorkerMessage[] = [];
+  let context: Parameters<typeof view.materialize>[0] | undefined;
+  const observed = { ...view, prepare: (...args: Parameters<NonNullable<typeof view.prepare>>) => {
+    // The ticker prepares before materializing: remove the applied row before its ring read.
+    if (loseAppliedRow) for (const { db } of args[0].instances) db?.prepare("DELETE FROM activity_ring WHERE body LIKE '%\"n\":205%'").run();
+    return view.prepare!(...args);
+  }, materialize: (ctx: Parameters<typeof view.materialize>[0]) => {
+    context = ctx;
+    if (loseAppliedRow) for (const { db } of ctx.instances) db?.prepare("DELETE FROM activity_ring WHERE body LIKE '%\"n\":205%'").run();
+    return view.materialize(ctx);
+  } };
+  switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
+  ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [observed], clock: movingClock(NOW), holder: "workstreams-cutoff", oracle: "off", post: (m) => posted.push(m) });
+  ticker.start(); ticker.tick();
+  const data = bodiesOf(posted).at(-1)!.body.data as WorkstreamsData;
+  assert.ok(context?.instances[0]?.db, "the actual ticker supplies the projected store");
+  const activityIds = (value: WorkstreamsData) => (value.instances[0]!.activity as unknown as { items: Array<{ id: string; kind: string }> }).items.filter((item) => item.kind === "activity").map((item) => item.id);
+  assert.ok(activityIds(data).length > 190, "a real nonempty near-cap population is projected");
+  const later = Array.from({ length: 391 }, (_, n) => ({ ts: iso(NOW + n + 1), step: "worker.activity", run_id: "r2", task_id: "D", cutoffLater: n }));
+  assert.ok(later.every((row) => Date.parse(row.ts) > NOW - 1_000 && Date.parse(row.ts) < NOW + 60_000), "later rows are ordinary appends after the frozen newest but before comparison time");
+  appendFileSync(f.ledgerPath, later.map((row) => `${JSON.stringify(row)}\n`).join(""));
+  const archive = join(f.stateDir, "ledger.2026-09-30T12-00-01-000Z.ndjson");
+  renameSync(f.ledgerPath, archive); writeFileSync(f.ledgerPath, "");
+  return { f, view, data, context: context!, archive, later, activityIds };
+}
+
+for (const mode of ["cold", "warm"] as const) {
+  test(mode === "cold"
+    ? "W1-T10942: cold archives retain the frozen eligible activity population"
+    : "W1-T10942: warm archive reuse retains the same frozen population", (t) => {
+    const f = frozenCutoffArchive(t);
+    const started = performance.now();
+    const first = f.view.legacy("", NOW + 60_000, f.data);
+    const coldMs = performance.now() - started;
+    assert.ok(first);
+    const warmed = performance.now();
+    const result = mode === "warm" ? f.view.legacy("", NOW + 60_000, f.data) : first;
+    assert.ok(result);
+    t.diagnostic(JSON.stringify({ mode, coldMs, comparisonMs: performance.now() - warmed, expected: f.activityIds(f.data).length, actual: f.activityIds(result.data as WorkstreamsData).length, laterAppends: 391 }));
+    assert.deepEqual(f.activityIds(result.data as WorkstreamsData), f.activityIds(f.data), "the cap must follow cutoff qualification, on cold and warm default paths");
+    assert.deepEqual(result.data, f.data, "the complete independently read body matches the frozen body");
+    const held = f.view.heldSizes();
+    assert.ok(held["workstreams:legacy-rows@core"]!.entries <= OPERATOR_ACTIVITY_MAX_ITEMS, "one archive retains bounded candidates");
+    assert.ok(held["workstreams:legacy-rows@core"]!.bytes! > 0, "retained row bytes stay measured");
+    assert.equal(held["workstreams:legacy-memo-index"]!.entries, 1, "one active cutoff memo per instance");
+  });
+}
+
+test("W1-T10942: a changed cutoff or archive identity requalifies its candidates", (t) => {
+  const f = frozenCutoffArchive(t);
+  const first = f.view.legacy("", NOW + 60_000, f.data);
+  assert.ok(first);
+  assert.deepEqual(first.data, f.data);
+  // Advance only the actual ring projection using rows already present in the unchanged archive.
+  // This exercises a new frozen cutoff without changing its archive identity or reparsing a fake.
+  const db = f.context.instances[0]!.db!;
+  for (const row of f.later) {
+    const line = JSON.stringify(row);
+    ACTIVITY_RING_PROJECTION.apply(db, line, ledgerLineIdentity(line), () => row);
+  }
+  ACTIVITY_RING_PROJECTION.settle?.(db);
+  const [newer] = f.view.materialize({ ...f.context, now: NOW + 90_000 });
+  const newData = newer!.data as WorkstreamsData;
+  assert.notDeepEqual(f.activityIds(newData), f.activityIds(f.data), "positive control: the projected cutoff and population advanced");
+  const current = f.view.legacy("", NOW + 90_000, newData);
+  assert.ok(current);
+  assert.deepEqual(current.data, newData, "a new cutoff cannot reuse candidates reduced for the earlier cutoff");
+  const historical = f.view.legacy("", NOW + 90_000, f.data);
+  assert.ok(historical);
+  assert.deepEqual(historical.data, f.data, "revisiting the older frozen body requalifies its cutoff too");
+  renameSync(f.archive, `${f.archive}.retained`);
+  const changed = { ts: iso(NOW - 1_500), step: "pr.stuck", run_id: "DAEMON-1", task_id: "SWEEP", blocker: "changed-archive" };
+  const original = Array.from({ length: 210 }, (_, n) => ({ ts: iso(NOW - (210 - n) * 1_000), step: "worker.activity", run_id: "r2", task_id: "D", n }));
+  writeFileSync(f.archive, [...ROWS, ...original, ...f.later, changed].map((row) => `${JSON.stringify(row)}\n`).join(""));
+  const replacement = f.view.legacy("", NOW + 90_000, f.data);
+  assert.ok(replacement);
+  const items = (replacement.data as WorkstreamsData).instances[0]!.activity as unknown as { items: Array<{ source?: string }> };
+  assert.ok(items.items.some((item) => item.source === "rmd:ledger:pr.stuck"), "the replacement inode contributes its independently read evidence");
+  assert.notDeepEqual(replacement.data, f.data, "a real archive change remains a real difference");
+  const held = f.view.heldSizes();
+  assert.equal(held["workstreams:legacy-memo-index"]!.entries, 1);
+  assert.ok(held["workstreams:legacy-rows@core"]!.entries <= OPERATOR_ACTIVITY_MAX_ITEMS);
+});
+
+test("W1-T10942: archive cutoff repair preserves independent real-loss controls", (t) => {
+  const f = frozenCutoffArchive(t, true);
+  const legacy = f.view.legacy("", NOW + 60_000, f.data);
+  assert.ok(legacy);
+  const shown = new Set(f.activityIds(f.data));
+  assert.equal(f.activityIds(legacy.data as WorkstreamsData).filter((id) => !shown.has(id)).length, 1, "the applied row missing from the ring still appears independently in the ledger side");
+  assert.notDeepEqual(legacy.data, f.data, "repairing cap order cannot conceal genuine applied-ring loss");
 });
