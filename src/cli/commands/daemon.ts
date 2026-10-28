@@ -16,7 +16,7 @@ import { recyclePauseDetail } from "../../lib/recycle-yield.js";
 import { judgeDiskHeadroom, readDiskFreeBytes } from "../../lib/doctor.js";
 import { execFileSync } from "node:child_process";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
-import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
+import { ghExec, ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -1756,7 +1756,7 @@ export async function daemonCommand(
               const repoDir = join(reposDir, repo);
               if (!existsSync(repoDir)) {
                 mkdirSync(dirname(repoDir), { recursive: true });
-                ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+                await ghTextAsync(["repo", "clone", `${owner}/${repo}`, repoDir], { timeout: 300_000 });
               }
               const synced = await syncPlanOrRefuseAsync(planPath, { allowStale: false, log, say: (msg: string) => writeSyncLine(2, `### rmd daemon — ${msg}`), quarantine: reportPlanQuarantine });
               return "error" in synced ? { error: String(synced.error) } : { plan: synced.plan };
@@ -1770,9 +1770,9 @@ export async function daemonCommand(
               planPath: job.planPath, config, allowStale: false, pairedTrialHost: "daemon", owner: job.owner, githubFor: laneGithubFor, handOffAtPrOpen: true,
               ...(gitCredentialSocket ? { gitCredentialSocketPath: gitCredentialSocket.socketPath } : {}),
             }),
-            claimHeld: (taskId, repo) => {
+            claimHeld: async (taskId, repo) => {
               try {
-                return execFileSync("git", ["-C", join(reposDir, repo), "ls-remote", "origin", dispatchClaimRef(taskId)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 30_000 }).trim() !== "";
+                return (await hostWorktreeGitAsync(join(reposDir, repo), ["ls-remote", "origin", dispatchClaimRef(taskId)])).trim() !== "";
               } catch (error) {
                 // An unreachable remote is an unknown claim, which a job treats as held; it is never "free".
                 void error; return undefined;

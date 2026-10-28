@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import type { TargetJobAdmission, TargetJobRead, TargetJobRecord } from "./daemon.js";
+import type { TargetJobAdmission, TargetJobRead, TargetJobRecord } from "./drain.js";
 import { systemClock, type Clock } from "./clock.js";
 import { daemonInstanceRegistryPath } from "./deployer.js";
 import { dispatchClaimRef } from "./dispatch-claim.js";

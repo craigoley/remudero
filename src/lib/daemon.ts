@@ -79,6 +79,10 @@ import {
   type DrainOpts,
   type DrainSummary,
   type StopReason,
+  type TargetJobAdmission,
+  type TargetJobRead,
+  type TargetJobRecord,
+  type TargetJobStatus,
 } from "./drain.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 // Why: drain.ts already owns the overlap partition, so it is reused rather than re-derived (W1-T343).
@@ -7999,19 +8003,6 @@ export function reconstructOrphan(
  * PURE: every read and write is a seam the caller wires (the durable record, the registry, the plan sync, the
  * dispatch claim, the drain's own deps), so this module keeps its no-filesystem contract.
  */
-export type TargetJobStatus = "queued" | "admitted" | "ended" | "refused";
-/** The durable record of ONE job, keyed by the kick origin `ProductBuildService` mints for the request. */
-export interface TargetJobRecord {
-  origin: string; taskId: string; repo: string; status: TargetJobStatus;
-  /** How many times the drain was entered for this job; a replay never raises it past a dispatch that happened. */
-  attempts: number; updatedAt: string; reason?: string; stopReason?: string;
-}
-/** `unreadable` is its own state: a record this process cannot read is never "no job", so it can never respend. */
-export type TargetJobRead = { state: "found"; record: TargetJobRecord } | { state: "absent" } | { state: "unreadable" };
-/** Who may run a target repository's task: this daemon natively, its own live instance, or nobody. */
-export type TargetJobAdmission =
-  | { state: "native"; owner: string } | { state: "own_instance"; instance: string } | { state: "not_enrolled" } | { state: "unreadable" };
-
 export interface BoundedTargetJobKick { taskId: string; origin: string; repo: string }
 export interface BoundedTargetJobDeps {
   readJob: (origin: string) => TargetJobRead;
@@ -8020,7 +8011,7 @@ export interface BoundedTargetJobDeps {
   /** The target clone's plan, synced from origin/main through the existing plan-sync refusal. */
   syncPlan: (owner: string, repo: string) => Promise<{ plan: Plan } | { error: string }>;
   /** Whether the target's dispatch claim for the task is held; `undefined` is an unreadable remote, never "free". */
-  claimHeld: (taskId: string, repo: string) => boolean | undefined;
+  claimHeld: (taskId: string, repo: string) => Promise<boolean | undefined>;
   /** The native receipts the CORE ledger holds for this job's origin (`readTargetExecution`). */
   execution: (record: TargetJobRecord) => { state: string };
   /** The maintained drain. `onDispatch` runs immediately before the drain's one `runOne` and may throw to refuse it. */
@@ -8078,7 +8069,7 @@ export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: Boun
     // A restart or a lost response: recover from the durable record, the native receipts and the dispatch claim.
     const seen = deps.execution(prior);
     if (seen.state === "ended") return close({ ...prior, status: "ended", updatedAt: deps.now() }, "terminal verdict recorded", false);
-    const claim = deps.claimHeld(taskId, repo);
+    const claim = await deps.claimHeld(taskId, repo);
     if (claim !== false || seen.state === "running") {
       if (prior.reason !== "resumed") {
         // `updatedAt` stays the dispatch time: the native receipts are correlated from it.
