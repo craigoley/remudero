@@ -8,7 +8,7 @@ import {
   fileTargetJobStore, readTargetExecution, registryDaemonRoot, starterEvidenceId,
   type BootstrapRead, type BuildObservation, type BuildTask, type ExecutionQuery, type ProductBuildOptions, type ProductBuildTarget, type TargetInspection, type TaskRead,
 } from "#src/lib/product-build.js";
-import { createNativeTargetRepository, createNativeTargetJobRunner, daemonKickPort, daemonTargetJobPort } from "#src/cli/commands/daemon.js";
+import { nativeTargetRepositoryResolver, createNativeTargetRepository, createNativeTargetJobRunner, daemonKickPort, daemonTargetJobPort } from "#src/cli/commands/daemon.js";
 import { runDrain, type DrainOpts, type TargetJobRecord } from "#src/lib/drain.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import { runDaemon, type DaemonDeps, type DaemonOpts } from "#src/lib/daemon.js";
@@ -744,12 +744,13 @@ function nativeFixture(t: TestContext, registry = CORE_ONLY) {
   const state = { claimHeld: false as boolean | undefined, syncError: undefined as string | undefined, daemonDeps: {} as Partial<DaemonDeps>, daemonOpts: {} as DaemonOpts,
     drainThrows: undefined as "before" | "after" | "during" | undefined, silentRun: false, elapsedMs: 0, held: false,
     observation: { state: "none", branches: [] } as BuildObservation };
+  const repositoryFor = nativeTargetRepositoryResolver(core, (owner, repo) => buildBatchedGithub(owner, repo, { fetchAll: () => [], commitTrailerIndex: () => new Map() }));
   const makeRunner = () => createNativeTargetJobRunner({
     root: core, repoRoot: checkout, log, nowMs: () => Date.now() + state.elapsedMs, instances: { registryPath },
     planPathFor: (_owner, repo) => (repo === "wreckterra" ? planFile : undefined),
     syncPlan: async (path) => (state.syncError === undefined ? { plan: loadPlan(path) } : { error: state.syncError }),
     project: () => new Map([["W9-T1", { independentFailureBlocked: state.held } as StatusProjection]]),
-    repositoryDeps: (owner, repo, coreDeps) => createNativeTargetRepository(core, owner, repo, buildBatchedGithub(owner, repo, { fetchAll: () => [], commitTrailerIndex: () => new Map() }), coreDeps).governors,
+    repositoryDeps: (owner, repo) => repositoryFor(owner, repo).governors,
     runTask: async (taskId, target) => {
       assert.equal(target.owner, "craigoley");
       assert.equal(target.repo, "wreckterra");
@@ -1287,4 +1288,41 @@ test("W1-T10799: a Core PR cannot clear the target repository's dispatch breaker
   assert.equal(scope.governors.isCircuitTripped?.("W9-T1"), true, "only a target PR may corroborate the target's tripped breaker");
   assert.equal(coreReads, 0, "target admission does not call Core's repository closure");
   assert.equal(targetReads, 1, "the target gateway is queried for its own evidence");
+  assert.equal(scope.governors.breakerDetail?.("W9-T1").freshCount, DEFAULT_MAX_TASK_DISPATCHES, "the detail is the same target-only decision");
+  target.listOpenHeadBranches = () => null;
+  const unavailable = createNativeTargetRepository(f.core, "craigoley", "wreckterra", target);
+  assert.equal(unavailable.governors.isCircuitTripped?.("W9-T1"), true, "an unreadable target gateway keeps its breaker tripped");
+  target.listOpenHeadBranches = () => [{ number: 8, url: "https://github.com/craigoley/wreckterra/pull/8", state: "OPEN", headRefName: "run-W9-T1-12345" }];
+  const progressed = createNativeTargetRepository(f.core, "craigoley", "wreckterra", target);
+  assert.equal(progressed.governors.isCircuitTripped?.("W9-T1"), false, "a real target PR still corroborates its own progress");
+
+});
+
+test("W1-T10799: repository decisions join only the target's native run and keep shared host gates", async (t) => {
+  const f = nativeFixture(t);
+  let coreQueries = 0;
+  f.state.daemonDeps.isCircuitTripped = () => { coreQueries++; throw new Error("Core repository query leaked"); };
+  await nativeStarted(f);
+  await f.drive();
+  assert.deepEqual(f.calls.runTask, ["W9-T1"], "the maintained target drain uses its own repository predicates");
+  assert.equal(coreQueries, 0);
+  const nativeRun = JSON.parse(readFileSync(join(f.core, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+    .find((line) => JSON.parse(line).step === "run.start")!);
+  const repositoryFor = nativeTargetRepositoryResolver(f.core, (owner, repo) => buildBatchedGithub(owner, repo, { fetchAll: () => [], commitTrailerIndex: () => new Map() }));
+  const own = repositoryFor("craigoley", "wreckterra");
+  assert.equal(repositoryFor("CraigOley", "Wreckterra"), own, "case aliases preserve the same target decision history");
+  assert.notEqual(repositoryFor("craigoley", "other-game"), own, "another target cannot share that history");
+  assert.equal(own.governors.isLifetimeCapExceeded?.("W9-T1"), false);
+  assert.equal(own.governors.breakerDetail?.("W9-T1").freshCount, 1, "the untagged native verdict joins its own start");
+  appendLedger(f.ledgerPath, { step: "run.start", run_id: "W9-T1-999", task_id: "W9-T1", lane: "run-task", repo: "remudero" });
+  appendLedger(f.ledgerPath, { step: "pr.opened", run_id: "W9-T1-999", task_id: "W9-T1", lane: "run-task", pr_url: "https://github.com/craigoley/remudero/pull/99" });
+  own.governors.beginSelectionPass?.();
+  assert.equal(own.governors.breakerDetail?.("W9-T1").freshCount, 1, "Core's same-task native start and untagged PR cannot reset the target");
+  assert.equal(typeof nativeRun.run_id, "string");
+  const held = nativeFixture(t);
+  await nativeStarted(held);
+  held.state.daemonDeps.checkQuietHours = () => ({ deferred: true, detail: "shared Core quiet-hours hold" });
+  await held.drive();
+  assert.deepEqual(held.calls.runTask, [], "target-specific decisions still obey the shared host's admission");
+
 });

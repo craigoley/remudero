@@ -78,7 +78,7 @@ import { loadPolicy, policyPath } from "../../lib/policy.js";
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
 import { dispatchClaimRef, findClaimMintRow, releaseReplacedContainerClaims, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
-import { buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
+import { buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
@@ -293,23 +293,83 @@ export function daemonTargetJobPort(root: string, self: { repo: string }): {
   };
 }
 
-/** The governors and ledger readers a bounded target job takes from the CORE daemon's own deps, never a second wiring. */
+/** Host governors and contract-pinned releases remain shared; repository decision reads are target-scoped. */
 const TARGET_JOB_DAEMON_DEPS = [
   "checkStop", "checkPause", "checkCostGovernor", "checkQueueGovernor", "checkMemoryGovernor", "memoryReadTracker", "readMemoryStoreFailure",
-  "checkQuietHours", "checkHeavyNewBuild", "readUsage", "beginSelectionPass", "isCircuitTripped", "breakerDetail", "isLifetimeCapExceeded",
-  "readLedgerLines", "readDurableReleases",
+  "checkQuietHours", "checkHeavyNewBuild", "readUsage", "readLedgerLines", "readDurableReleases",
 ] as const satisfies readonly (keyof DrainDeps & keyof DaemonDeps)[];
 
 /** Repository reads for one bounded target; host capacity still belongs to the Core daemon. */
-export function createNativeTargetRepository(root: string, owner: string, repo: string, github: GitHub, core: Partial<DaemonDeps> = {}) {
+export function createNativeTargetRepository(root: string, owner: string, repo: string, github: GitHub, _core: Partial<DaemonDeps> = {}) {
   const ledgerPath = ledgerPathFor({ root });
-  const governors = Object.fromEntries(TARGET_JOB_DAEMON_DEPS.flatMap((key) => core[key] === undefined ? [] : [[key, core[key]]])) as Partial<DrainDeps>;
+  const state = join(root, "state", "target-repositories", encodeURIComponent(owner.toLowerCase()), encodeURIComponent(repo.toLowerCase()));
+  const cache = createDispatchBreakerCache();
+  let snapshot: Pick<LedgerSnapshot, "lines" | "index"> | undefined;
+  let details = new Map<string, DispatchBreakerDetail>();
+  let branches: ReturnType<NonNullable<GitHub["listOpenHeadBranches"]>> | undefined;
+  let branchesRead = false;
+  const current = () => {
+    if (snapshot !== undefined) return snapshot;
+    const source = readLedgerSnapshot(ledgerPath);
+    const runRepos = new Map<string, Set<string>>();
+    for (const row of source.lines) {
+      if (row.step !== "run.start" || typeof row.run_id !== "string" || typeof row.repo !== "string") continue;
+      const repos = runRepos.get(row.run_id) ?? new Set<string>();
+      repos.add(row.repo.toLowerCase());
+      runRepos.set(row.run_id, repos);
+    }
+    const rows = source.lines.filter((row) => {
+      if (typeof row.repo === "string") return row.repo.toLowerCase() === repo.toLowerCase();
+      const repos = typeof row.run_id === "string" ? runRepos.get(row.run_id) : undefined;
+      return repos?.size === 1 && repos.has(repo.toLowerCase());
+    });
+    const lines = Object.defineProperties(rows, {
+      torn: { value: source.lines.torn }, present: { value: source.lines.present },
+    }) as LedgerLines;
+    snapshot = { lines, index: buildLedgerIndex(lines) };
+    return snapshot;
+  };
+  const detailFor = (id: string) => {
+    let detail = details.get(id);
+    if (detail === undefined) {
+      detail = evaluateDispatchBreakerCorroboratedDetailed(ledgerPath, id, cache, () => {
+        if (!branchesRead) { branches = github.listOpenHeadBranches?.(); branchesRead = true; }
+        return branches;
+      }, { snapshot: current() });
+      details.set(id, detail);
+    }
+    return detail;
+  };
+  const governors = {
+    beginSelectionPass: () => { snapshot = undefined; details = new Map(); branchesRead = false; },
+    isCircuitTripped: (id: string) => detailFor(id).state === "tripped",
+    isIndeterminate: (id: string) => detailFor(id).state === "indeterminate",
+    breakerDetail: (id: string) => ({ ...detailFor(id) }),
+    isLifetimeCapExceeded: (id: string) => hasRepeatedTaskAttributableLifetimeDispatches(current().lines, id),
+  } satisfies Partial<DrainDeps>;
   return {
     project: (plan: Plan) => {
+      governors.beginSelectionPass();
       github.resetFailureFlags?.();
-      return projectPlan(plan, { ledgerPath, github, skipUncreditedBuildWarning: true }, join(root, "state", "status.json"));
+      return projectPlan(plan, { ledgerPath, github, readLedger: () => current().lines,
+        creditStorePath: join(state, "credits.json"), creditOverridePath: join(state, "credit-overrides.yaml"),
+        skipUncreditedBuildWarning: true }, join(state, "status.json"));
     },
     governors,
+  };
+}
+
+/** Keep each target's decision cache for this daemon lifetime, with no cross-repository aliasing. */
+export function nativeTargetRepositoryResolver(root: string, githubFor: (owner: string, repo: string) => GitHub) {
+  const scopes = new Map<string, ReturnType<typeof createNativeTargetRepository>>();
+  return (owner: string, repo: string) => {
+    const key = `${owner.toLowerCase()}/${repo.toLowerCase()}`;
+    let scope = scopes.get(key);
+    if (scope === undefined) {
+      scope = createNativeTargetRepository(root, owner, repo, githubFor(owner, repo));
+      scopes.set(key, scope);
+    }
+    return scope;
   };
 }
 
@@ -327,7 +387,7 @@ export interface NativeTargetJobContext {
   syncPlan: (planPath: string, owner: string, repo: string) => Promise<{ plan: Plan } | { error: string }>;
   /** The merged/open-PR projection bound to the TARGET owner and repository, never the core repository's closures. */
   project: (plan: Plan, owner: string, repo: string) => Map<string, StatusProjection>;
-  repositoryDeps?: (owner: string, repo: string, core: DaemonDeps) => Partial<DrainDeps>;
+  repositoryDeps: (owner: string, repo: string, core: DaemonDeps) => Partial<DrainDeps>;
   runTask: (taskId: string, target: { planPath: string; owner: string; repo: string; plan: Plan; onRunCreated: (runId: string) => void }) => Promise<RunResult>;
   claimHeld: BoundedTargetJobPorts["claimHeld"];
   runDrain?: typeof runDrain;
@@ -369,15 +429,18 @@ export function createNativeTargetJobRunner(ctx: NativeTargetJobContext): (kick:
         // The core ledger's own receipts for THIS origin, read from the dispatch time the durable record kept.
         execution: (record) => readTargetExecution(stateDir, { taskId: record.taskId, origin: record.origin, repo: record.repo,
           requestedAt: fixedClock(Date.parse(record.updatedAt) - 60_000).iso(), nowMs: ctx.nowMs(), runId: record.runId }),
-        drain: (plan, opts, onDispatch) => (ctx.runDrain ?? runDrain)(plan, {
+        drain: (plan, opts, onDispatch) => {
+          const repository = ctx.repositoryDeps(owner, kick.repo, daemonDeps);
+          return (ctx.runDrain ?? runDrain)(plan, {
           ...governors,
+          ...repository,
           refreshMerged: () => {
             projection = ctx.project(plan, owner, kick.repo);
             return (id) => projection.get(id)?.merged ?? false;
           },
           isOpenPr: (id) => { const row = projection.get(id); return row?.prState === "OPEN" ? row.prNumber : undefined; },
           isCreditIndeterminate: (id) => projection.get(id)?.indeterminate === true,
-          isIndeterminate: (id) => projection.get(id)?.indeterminate === true,
+          isIndeterminate: (id) => projection.get(id)?.indeterminate === true || repository.isIndeterminate?.(id) === true,
           isIndependentFailureBlocked: (id) => projection.get(id)?.independentFailureBlocked === true,
           runOne: async (id) => {
             onDispatch();
@@ -389,8 +452,9 @@ export function createNativeTargetJobRunner(ctx: NativeTargetJobContext): (kick:
               ctx.log("console.kick_dispatched", { task: id, origin: kick.origin, repo: kick.repo, native_run_id: runId });
             } });
           },
-          log: ctx.log,
-        }, opts),
+          log: (step, extra) => ctx.log(step, { ...extra, owner, repo: kick.repo }),
+        }, opts);
+        },
         clearKick: (taskId, repo) => { clearKick(ctx.root, taskId, repo); },
         log: ctx.log,
         nowIso: () => clockFromMillisFn(ctx.nowMs).iso(),
@@ -907,6 +971,7 @@ export async function daemonCommand(
   // gateway still refetches every poll — warming changes a fetch's SHAPE, never whether one
   // happens (`buildInboxDraftHook`'s doc makes the identical argument, with measurements).
   const laneGithubFor = memoiseGatewayByRepo((o: string, r: string) => (deps.githubFactory ? deps.githubFactory(o, r) : gatewayFor(o, r)));
+  const targetRepositoryFor = nativeTargetRepositoryResolver(config.root, laneGithubFor);
   // W1-T9647/W1-T9763: the plans held are counted on `daemon.memory`; one revision is one instance there.
   const daemonPlanCopies = createPlanCopyBook({ refs: () => [plan, activePlanRef.current, tickReadGeneration?.facts.plan] });
   const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, observedPlanSync(planReaders.sync, daemonPlanCopies.observe));
@@ -1890,9 +1955,8 @@ export async function daemonCommand(
               const synced = await syncPlanOrRefuseAsync(planPath, { allowStale: false, log, say: (msg: string) => writeSyncLine(2, `### rmd daemon — ${msg}`), quarantine: reportPlanQuarantine });
               return "error" in synced ? { error: String(synced.error) } : { plan: synced.plan };
             },
-            project: (jobPlan, owner, repo) => {
-              return createNativeTargetRepository(config.root, owner, repo, laneGithubFor(owner, repo)).project(jobPlan);
-            },
+            project: (jobPlan, owner, repo) => targetRepositoryFor(owner, repo).project(jobPlan),
+            repositoryDeps: (owner, repo) => targetRepositoryFor(owner, repo).governors,
             runTask: (taskId, job) => runTaskFn(taskId, {
               planPath: job.planPath, config, allowStale: false, pairedTrialHost: "daemon", owner: job.owner, githubFor: laneGithubFor, handOffAtPrOpen: true,
               planSnapshot: async () => ({ plan: job.plan, staleDispatch: false }),
