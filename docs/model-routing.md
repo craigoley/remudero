@@ -321,7 +321,8 @@ chat-completions and Responses reply, success or failure, carries `x-ratelimit-l
 `x-ratelimit-renewalperiod-tokens`.
 
 - **Where it is learned.** `recordCashCapacity` in `src/lib/worker-provider.ts` keeps the two
-  integers per deployment in `state/cash-capacity.json` (an atomic, owner-only file). A changed
+  integers per resolved endpoint and deployment in `state/cash-capacity.json` (an atomic, owner-only
+  file). Changing a deployment's endpoint starts unlearned at that endpoint. A changed
   limit replaces the old one and writes one `cash.capacity.observed` ledger row; an unchanged limit
   writes nothing. No number is declared in code or config: the ceiling is whatever the deployment
   last reported.
@@ -329,10 +330,13 @@ chat-completions and Responses reply, success or failure, carries `x-ratelimit-l
   deployment's context window and its learned limit, using the same prompt estimate plus the
   completion allowance. A deployment that has not answered yet is gated by its context window
   alone, so its first request teaches the limit. A candidate skipped for the learned limit is
-  reported as a `capacity_shortfall` naming the deployment, the request's estimate and the limit.
+  recorded in a `cash.capacity.shortfall` ledger row with reason `capacity_shortfall`, naming the
+  deployment, the request's estimate and the limit. Persisted limits are loaded before selection,
+  including the first selection after a restart.
 - **An oversized 429 is not transient.** A 429 whose request estimate exceeds the limit reported by
   that same response is a `capacity_shortfall`: it is never retried after `retry-after`, and the
-  limit it reported is recorded so the next request skips the deployment before transport. A 429
+  same run walks to the next alternative. The limit it reported is recorded so the next request
+  skips the deployment before transport. A 429
   under the limit keeps the ordinary cooldown retry.
 - **Lane readiness.** `cashCapacityReadiness(learnedLimitTokens, needTokens)` is a pure answer
   (`unlearned`, `covered`, or `shortfall` with the missing tokens) for a lane to call with its

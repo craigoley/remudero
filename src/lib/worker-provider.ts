@@ -1045,8 +1045,7 @@ export function openWeightEstimatedTokens(requestBodyBytes: number): number {
  * -- so this table is FILLED BY RESPONSES. NO NUMBER IS DECLARED HERE: a deployment that has not yet
  * answered has no row and is gated by its context window alone, so its first request teaches it.
  *
- * Keyed by deployment id, as {@link OPENWEIGHT_PRICES}. `cashDeploymentEndpoints` maps one deployment
- * id to one endpoint, so a deployment-keyed row is already per endpoint.
+ * Keyed by resolved endpoint AND deployment id: moving a deployment must not carry its old quota.
  */
 export interface LearnedCashCapacity {
   readonly limitTokens: number;
@@ -1069,9 +1068,13 @@ function cashUnsignedHeader(headers: Headers, name: string): number | undefined 
   return value !== null && /^[0-9]{1,16}$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : undefined;
 }
 
-/** The limit the deployment last reported, or undefined when it has not answered yet. */
-export function learnedCashLimit(deployment: string): number | undefined {
-  return LEARNED_CASH_CAPACITY.get(deployment)?.limitTokens;
+function cashCapacityKey(deployment: string, endpoint: string): string {
+  return JSON.stringify([endpoint.replace(/\/+$/, ""), deployment]);
+}
+
+/** The limit this endpoint's deployment last reported; an unresolved endpoint teaches nothing. */
+export function learnedCashLimit(deployment: string, endpoint: string | undefined): number | undefined {
+  return endpoint === undefined ? undefined : LEARNED_CASH_CAPACITY.get(cashCapacityKey(deployment, endpoint))?.limitTokens;
 }
 
 /** Forget every in-process reading (the state file is untouched). */
@@ -1093,35 +1096,39 @@ function parseCashCapacityFile(raw: string | undefined): Record<string, LearnedC
   for (const [deployment, row] of Object.entries(parsed as Record<string, unknown>)) {
     const r = row as Partial<Record<keyof LearnedCashCapacity, unknown>> | null;
     if (r === null || typeof r !== "object" || typeof r.limitTokens !== "number" || !Number.isSafeInteger(r.limitTokens) ||
-        r.limitTokens <= 0 || typeof r.observedAt !== "string") continue;
+        r.limitTokens < 0 || typeof r.observedAt !== "string") continue;
     rows[deployment] = { limitTokens: r.limitTokens, observedAt: r.observedAt,
       renewalSeconds: typeof r.renewalSeconds === "number" && Number.isSafeInteger(r.renewalSeconds) ? r.renewalSeconds : null };
   }
   return rows;
 }
 
-/** Merge the state file into the in-process table, the newer reading winning. Called before a cash spawn. */
+/** Load persisted observations before selection and cash spawns, including other processes' updates. */
 export function hydrateCashCapacity(config: Pick<Config, "root">): void {
-  const rows = parseCashCapacityFile(readFileIfExists(cashCapacityPath(config)));
-  for (const [deployment, row] of Object.entries(rows)) {
-    const held = LEARNED_CASH_CAPACITY.get(deployment);
-    if (held === undefined || held.observedAt < row.observedAt) LEARNED_CASH_CAPACITY.set(deployment, row);
+  let rows: Record<string, LearnedCashCapacity>;
+  try { rows = parseCashCapacityFile(readFileIfExists(cashCapacityPath(config))); }
+  catch (error) {
+    console.error(JSON.stringify({ event: "cash.capacity.state_unreadable", reason: String(error) }));
+    return;
   }
+  for (const [key, row] of Object.entries(rows)) LEARNED_CASH_CAPACITY.set(key, row);
 }
 
 /**
  * Read the two integers a response carries and keep them. A changed limit replaces the old one and
- * writes ONE ledger row; an unchanged limit writes nothing. Only the two parsed integers and the
- * deployment id ever reach the file or the ledger -- never a header's raw text.
+ * writes ONE ledger row; an unchanged limit writes nothing. Raw header text never reaches storage.
  */
 export function recordCashCapacity(
-  config: Pick<Config, "root">,
+  config: Pick<Config, "root" | "workerProviders">,
   deployment: string,
   headers: Headers,
-  ctx: { clock: Pick<Clock, "iso">; runId?: string; taskId?: string },
+  ctx: { clock: Pick<Clock, "iso">; runId?: string; taskId?: string; endpoint?: string },
 ): boolean {
+  const endpoint = ctx.endpoint ?? cashDeploymentEndpoint(config, deployment);
+  if (endpoint === undefined) return false;
+  const key = cashCapacityKey(deployment, endpoint);
   const limitTokens = cashUnsignedHeader(headers, "x-ratelimit-limit-tokens");
-  if (limitTokens === undefined || limitTokens <= 0) return false;
+  if (limitTokens === undefined) return false;
   const renewalSeconds = cashUnsignedHeader(headers, "x-ratelimit-renewalperiod-tokens") ?? null;
   const path = cashCapacityPath(config);
   const observedAt = ctx.clock.iso();
@@ -1130,24 +1137,25 @@ export function recordCashCapacity(
   for (let attempt = 1; ; attempt++) {
     const snapshot = readFileIfExists(path);
     const rows = parseCashCapacityFile(snapshot);
-    previous = rows[deployment];
+    previous = rows[key];
     if (previous !== undefined && previous.limitTokens === limitTokens && previous.renewalSeconds === renewalSeconds) {
-      LEARNED_CASH_CAPACITY.set(deployment, previous);
+      LEARNED_CASH_CAPACITY.set(key, previous);
       return false;
     }
-    rows[deployment] = learned;
+    rows[key] = learned;
     if (writeAtomic(path, `${JSON.stringify(rows)}\n`, {
       mode: 0o600, tmpTag: "cash-capacity", beforeRename: () => readFileIfExists(path) === snapshot,
     })) break;
     if (attempt >= 5) throw new Error(`cash capacity contention: 5 compare-and-swap attempts lost at ${path}`);
   }
-  LEARNED_CASH_CAPACITY.set(deployment, learned);
+  LEARNED_CASH_CAPACITY.set(key, learned);
   if (previous?.limitTokens === limitTokens) return false;
   appendLedger(ledgerPathFor(config), {
     run_id: ctx.runId ?? "unattributed",
     task_id: ctx.taskId ?? "unattributed",
     step: CASH_TPM_OBSERVED_STEP,
     deployment,
+    endpoint,
     limit_tokens: limitTokens,
     renewal_seconds: renewalSeconds,
     previous_limit_tokens: previous?.limitTokens ?? null,
@@ -1173,7 +1181,7 @@ export function cashCapacityReadiness(learnedLimitTokens: number | undefined, ne
 }
 
 /** The window a request must fit: the smaller of the context window and the learned limit. */
-export function openWeightEffectiveWindow(deployment: string, learnedLimitTokens: number | undefined = learnedCashLimit(deployment)): number | undefined {
+export function openWeightEffectiveWindow(deployment: string, learnedLimitTokens?: number): number | undefined {
   const window = OPENWEIGHT_CONTEXT_WINDOWS[deployment];
   if (window === undefined) return undefined;
   return learnedLimitTokens === undefined ? window.totalTokens : Math.min(window.totalTokens, learnedLimitTokens);
@@ -1188,10 +1196,11 @@ export function openWeightEffectiveWindow(deployment: string, learnedLimitTokens
  *  should be readable from the error text alone. W1-T10856 adds the learned per-minute limit. */
 export class OpenWeightRequestTooLargeError extends RmdError {
   readonly estimatedTokens: number;
-  constructor(detail: { estimatedTokens: number; capability: string; considered: readonly string[] }) {
+  constructor(detail: { estimatedTokens: number; capability: string; considered: readonly string[];
+    learnedLimit?: (deployment: string) => number | undefined }) {
     const consideredWithWindows = detail.considered.map((id) => {
       const window = OPENWEIGHT_CONTEXT_WINDOWS[id];
-      const learned = learnedCashLimit(id);
+      const learned = detail.learnedLimit?.(id);
       const limit = learned === undefined ? "" : `, learned per-minute limit ${learned}`;
       return window ? `${id} (context window ${window.totalTokens}${limit})` : `${id} (no declared context window)`;
     });
@@ -1200,7 +1209,7 @@ export class OpenWeightRequestTooLargeError extends RmdError {
       1,
       `openweight request is ~${detail.estimatedTokens} tokens and no '${detail.capability}' deployment can hold it ` +
         `(considered: ${consideredWithWindows.join(", ") || "none"}). Refusing before the request reserves, so it costs nothing. ` +
-        `Shrink the prompt or declare a deployment with a larger context window.`,
+        `Shrink the prompt, raise the deployment quota in the portal, or use a larger deployment.`,
       { estimatedTokens: detail.estimatedTokens, capability: detail.capability, considered: [...detail.considered] },
     );
     this.estimatedTokens = detail.estimatedTokens;
@@ -1214,7 +1223,7 @@ export class OpenWeightRequestTooLargeError extends RmdError {
 export function openWeightDeploymentHolds(
   deployment: string,
   estimatedTokens: number,
-  learnedLimitTokens: number | undefined = learnedCashLimit(deployment),
+  learnedLimitTokens?: number,
 ): boolean {
   const window = openWeightEffectiveWindow(deployment, learnedLimitTokens);
   if (window === undefined) return false;
@@ -1227,6 +1236,19 @@ export interface CapacityShortfall {
   deployment: string;
   estimatedTokens: number;
   limitTokens: number;
+}
+
+export function recordCashCapacityShortfall(
+  config: Pick<Config, "root" | "workerProviders">,
+  shortfall: CapacityShortfall,
+  ctx: { runId?: string; taskId?: string },
+): void {
+  appendLedger(ledgerPathFor(config), {
+    run_id: ctx.runId ?? "unattributed", task_id: ctx.taskId ?? "unattributed",
+    step: "cash.capacity.shortfall", reason: shortfall.reason, deployment: shortfall.deployment,
+    endpoint: cashDeploymentEndpoint(config, shortfall.deployment),
+    estimated_tokens: shortfall.estimatedTokens, limit_tokens: shortfall.limitTokens,
+  });
 }
 
 export interface OpenWeightModelSelection {
@@ -1253,6 +1275,9 @@ export interface OpenWeightModelSelection {
 }
 
 export interface OpenWeightSelectionOptions {
+  config?: Pick<Config, "root" | "workerProviders">;
+  runId?: string;
+  taskId?: string;
   /** Called once per {@link CapacityShortfall}, as selection walks past the candidate. */
   onCapacityShortfall?: (shortfall: CapacityShortfall) => void;
   /** Promote Luna only for the cash request reached after the subscription auction blocks. */
@@ -1291,6 +1316,9 @@ export function selectOpenWeightModel(
   promptBytes?: number,
   options: OpenWeightSelectionOptions = {},
 ): OpenWeightModelSelection {
+  if (options.config) hydrateCashCapacity(options.config);
+  const learnedLimit = (deployment: string) => learnedCashLimit(deployment,
+    options.config ? cashDeploymentEndpoint(options.config, deployment) : undefined);
   const capability = openWeightCapabilityForRequestedModel(capabilities, requestedModel);
   const rowCandidates = openWeightCandidatesForCapability(capabilities, capability, requestedEffort);
   const configured = options.only ? rowCandidates.filter((candidate) => options.only!.includes(candidate)) : rowCandidates;
@@ -1315,18 +1343,19 @@ export function selectOpenWeightModel(
   const estimatedTokens = openWeightEstimatedTokens(promptBytes);
   const capacityShortfalls: CapacityShortfall[] = [];
   const holds = safe.filter((candidate) => {
-    if (openWeightDeploymentHolds(candidate, estimatedTokens)) return true;
-    const learned = learnedCashLimit(candidate);
+    const learned = learnedLimit(candidate);
+    if (openWeightDeploymentHolds(candidate, estimatedTokens, learned)) return true;
     // The learned limit is to blame only when the context window alone would have held the request.
     if (learned !== undefined && openWeightDeploymentHolds(candidate, estimatedTokens, Number.POSITIVE_INFINITY)) {
       const shortfall: CapacityShortfall = { reason: "capacity_shortfall", deployment: candidate, estimatedTokens, limitTokens: learned };
       capacityShortfalls.push(shortfall);
+      if (options.config) recordCashCapacityShortfall(options.config, shortfall, options);
       options.onCapacityShortfall?.(shortfall);
     }
     return false;
   });
   const model = holds[0];
-  if (!model) throw new OpenWeightRequestTooLargeError({ estimatedTokens, capability, considered: safe });
+  if (!model) throw new OpenWeightRequestTooLargeError({ estimatedTokens, capability, considered: safe, learnedLimit });
   // The tail is every OTHER candidate that also holds this prompt — the fit gate has already
   // removed the ones that cannot, so a caller walking this list can never widen the context rule.
   return { model, effort: requestedEffort ?? "default", capability, estimatedTokens, alternatives: holds.slice(1),
@@ -4191,6 +4220,7 @@ export interface OpenWeightWorkerResult {
   provider: "cash";
   /** W1-T4079: the deployment this attempt found absent (HTTP 404). */
   openWeightDeploymentAbsent?: string;
+  openWeightCapacityShortfall?: CapacityShortfall;
   sessionId: string;
   costUsd: number;
   numTurns: number;
@@ -5108,6 +5138,10 @@ function openWeightResult(input: {
     budgetRefused: input.budgetRefused ?? false,
     ...(input.error instanceof OpenWeightAllowanceExhaustedError ? { cashAllowanceResetAt: input.error.resetAt, cashAllowanceLimit: input.error.limit } : {}),
     ...(input.deploymentAbsent ? { openWeightDeploymentAbsent: input.deploymentAbsent } : {}),
+    ...(input.error instanceof CashCapacityShortfallFailure ? { openWeightCapacityShortfall: {
+      reason: "capacity_shortfall" as const, deployment: input.model,
+      estimatedTokens: input.error.estimatedTokens, limitTokens: input.error.limitTokens!,
+    } } : {}),
     webSearchAttempted: input.webSearchAttempted ?? 0,
     webSearchAccepted: input.webSearchAccepted ?? 0,
     webSearchRefused: input.webSearchRefused ?? 0,
@@ -5430,6 +5464,7 @@ export async function spawnOpenWeightWorker(
     // request refuses before the first reservation rather than once per turn.
     const responseFormatField = openWeightResponseFormatField(selection.model, args.responseFormat);
     const endpoint = openWeightEndpoint(config, selection.model);
+    const capacityEndpoint = cashDeploymentEndpoint(config, selection.model);
     azureOpenAi429Unbilled = unbilledAzureOpenAi429Policy(selection.model, endpoint);
     hydrateCashCapacity(config);
     for (;;) {
@@ -5448,7 +5483,7 @@ export async function spawnOpenWeightWorker(
         args, deployment: selection.model, source: "openweight", endpoint, body,
         headers: { "content-type": "application/json", "api-key": key },
         observeHeaders: (headers) => {
-          try { recordCashCapacity(config, selection.model, headers, { clock, runId: args.runId, taskId: args.taskId }); }
+          try { recordCashCapacity(config, selection.model, headers, { clock, runId: args.runId, taskId: args.taskId, endpoint: capacityEndpoint }); }
           catch (error) {
             // Learning is advisory: a state file that cannot be written never fails the request it rode on.
             console.error(JSON.stringify({ event: "cash.capacity.record_failed", deployment: selection.model,
@@ -5607,6 +5642,10 @@ export async function spawnOpenWeightWorker(
     // request produced no completion, so it must not be charged for the
     // `OPENWEIGHT_MAX_COMPLETION_TOKENS` ceiling the reservation assumed it might. `reason` is the
     // failure's own message, so the ledger row itself says which failure settled it.
+    if (error instanceof CashCapacityShortfallFailure) recordCashCapacityShortfall(config, {
+      reason: "capacity_shortfall", deployment: selection.model,
+      estimatedTokens: error.estimatedTokens, limitTokens: error.limitTokens!,
+    }, args);
     if (pendingReservation !== undefined) {
       // Only a definite unbilled refusal releases this request's reservation. Unknown outcomes stay charged.
       const inputOnlyUsd = unbilledCashRefusal(error, azureOpenAi429Unbilled)

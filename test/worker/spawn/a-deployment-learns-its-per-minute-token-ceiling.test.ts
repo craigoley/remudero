@@ -6,7 +6,7 @@
  * exceeds the limit that same response reported is a capacity shortfall that is never retried.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import type { Config } from "#src/lib/config.js";
@@ -15,6 +15,8 @@ import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import {
   CASH_TPM_STATE_FILE,
   CASH_TPM_OBSERVED_STEP,
+  OPENWEIGHT_MAX_COMPLETION_TOKENS,
+  OpenWeightRequestTooLargeError,
   cashCapacityReadiness,
   learnedCashLimit,
   openWeightDeploymentHolds,
@@ -22,6 +24,8 @@ import {
   selectOpenWeightModel,
   spawnOpenWeightWorker,
 } from "#src/lib/worker-provider.js";
+import { runOpenWeightWalkingLadder, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const AT_ISO = "2026-10-27T12:00:00.000Z";
@@ -44,11 +48,11 @@ function completion(headers: Record<string, string>): Response {
   }), { status: 200, headers });
 }
 
-async function spawnCash(root: string, prompt: string, fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response>, maxTurns = 1) {
+async function spawnCash(root: string, prompt: string, fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response>, maxTurns = 1, config = configFor(root), model = DEPLOYMENT) {
   return spawnOpenWeightWorker({
     cwd: root, workerHome: root, prompt, tools: [], maxTurns, env: { RMD_OPENWEIGHT_API_KEY: KEY },
     clock: fixedClock(Date.parse(AT_ISO)), fetchImpl,
-  } as never, configFor(root), { model: DEPLOYMENT, effort: "low" });
+  } as never, config, { model, effort: "low" });
 }
 
 function observedRows(root: string): Array<Record<string, unknown>> {
@@ -61,13 +65,13 @@ test("W1-T10856: a response teaches the deployment its per-minute token ceiling"
   resetLearnedCashCapacity();
   t.after(resetLearnedCashCapacity);
   const { dir } = ownedFixtureDir(t, "cash-capacity-learn");
-  assert.equal(learnedCashLimit(DEPLOYMENT), undefined, "nothing is declared: a deployment starts with no learned limit");
+  assert.equal(learnedCashLimit(DEPLOYMENT, ENDPOINT), undefined, "nothing is declared: a deployment starts with no learned limit");
 
   const first = await spawnCash(dir, "p", async () => completion(limitHeaders("20000")));
   assert.equal(first.isError, false, first.stderr);
-  assert.equal(learnedCashLimit(DEPLOYMENT), 20000);
+  assert.equal(learnedCashLimit(DEPLOYMENT, ENDPOINT), 20000);
   const state = JSON.parse(readFileSync(join(dir, "state", CASH_TPM_STATE_FILE), "utf8")) as Record<string, Record<string, unknown>>;
-  assert.deepEqual(state[DEPLOYMENT], { limitTokens: 20000, renewalSeconds: 60, observedAt: AT_ISO });
+  assert.deepEqual(state[JSON.stringify([ENDPOINT.replace(/\/+$/, ""), DEPLOYMENT])], { limitTokens: 20000, renewalSeconds: 60, observedAt: AT_ISO });
   const rows = () => observedRows(dir).filter((row) => row.step === CASH_TPM_OBSERVED_STEP);
   assert.equal(rows().length, 1);
   assert.deepEqual({ d: rows()[0]!.deployment, l: rows()[0]!.limit_tokens, r: rows()[0]!.renewal_seconds, p: rows()[0]!.previous_limit_tokens },
@@ -77,22 +81,66 @@ test("W1-T10856: a response teaches the deployment its per-minute token ceiling"
   assert.equal(rows().length, 1, "an unchanged limit writes no ledger row");
 
   await spawnCash(dir, "p", async () => completion(limitHeaders("450000")));
-  assert.equal(learnedCashLimit(DEPLOYMENT), 450000, "a changed limit replaces the old one");
+  assert.equal(learnedCashLimit(DEPLOYMENT, ENDPOINT), 450000, "a changed limit replaces the old one");
   assert.equal(rows().length, 2);
   assert.equal(rows()[1]!.previous_limit_tokens, 20000);
+
+  const movedEndpoint = "https://another-foundry.cognitiveservices.azure.com/";
+  const moved = configFor(dir);
+  moved.workerProviders!.cashDeploymentEndpoints = { [DEPLOYMENT]: { endpoint: movedEndpoint, keyEnv: "RMD_OPENWEIGHT_API_KEY" } };
+  assert.equal(learnedCashLimit(DEPLOYMENT, movedEndpoint), undefined);
+  assert.equal(selectOpenWeightModel(undefined, "sonnet", "low", 400_000, { config: moved, ready: () => true }).model, DEPLOYMENT,
+    "the new endpoint cannot inherit the old endpoint's quota");
+  await spawnCash(dir, "p", async () => completion(limitHeaders("20000")), 1, moved);
+  assert.equal(rows().length, 3);
+  assert.equal(rows()[2]!.endpoint, movedEndpoint);
+  assert.equal(rows()[2]!.previous_limit_tokens, null, "first observation belongs to the new endpoint");
+  assert.equal(learnedCashLimit(DEPLOYMENT, ENDPOINT), 450000);
+  assert.equal(learnedCashLimit(DEPLOYMENT, movedEndpoint), 20000);
+  resetLearnedCashCapacity();
+  assert.equal(selectOpenWeightModel(undefined, "sonnet", "low", 400_000, { config: moved, ready: () => true }).model, "gpt-oss-120b");
+  assert.equal(selectOpenWeightModel(undefined, "sonnet", "low", 400_000, { config: configFor(dir), ready: () => true }).model, DEPLOYMENT);
+  assert.equal(Object.keys(JSON.parse(readFileSync(join(dir, "state", CASH_TPM_STATE_FILE), "utf8"))).length, 2);
 
   // A header that is not a bare integer teaches nothing and never reaches the file or the ledger.
   const { dir: other } = ownedFixtureDir(t, "cash-capacity-junk");
   resetLearnedCashCapacity();
   await spawnCash(other, "p", async () => completion(limitHeaders("20000 tokens; drop table", "sixty")));
-  assert.equal(learnedCashLimit(DEPLOYMENT), undefined);
+  assert.equal(learnedCashLimit(DEPLOYMENT, ENDPOINT), undefined);
   assert.equal(existsSync(join(other, "state", CASH_TPM_STATE_FILE)), false);
   assert.equal(observedRows(other).filter((row) => row.step === CASH_TPM_OBSERVED_STEP).length, 0);
 
   // A restart re-reads the file: a fresh process table is hydrated from it on the next cash spawn.
   resetLearnedCashCapacity();
   await spawnCash(dir, "p", async () => completion({ "content-type": "application/json" }));
-  assert.equal(learnedCashLimit(DEPLOYMENT), 450000);
+  assert.equal(learnedCashLimit(DEPLOYMENT, ENDPOINT), 450000);
+});
+
+test("cash chat and Responses learn on success and failure using bounded unsigned headers", async t => {
+  resetLearnedCashCapacity();
+  t.after(resetLearnedCashCapacity);
+  for (const model of [DEPLOYMENT, "gpt-6.1-sol"]) {
+    const { dir } = ownedFixtureDir(t, "cash-capacity-apis");
+    const ok = await spawnCash(dir, "p", async () => model === DEPLOYMENT ? completion(limitHeaders("30000"))
+      : Response.json({ id: "response", model, status: "completed", usage: { input_tokens: 10, output_tokens: 2 },
+        output: [{ type: "message", content: [{ type: "output_text", text: "DONE" }] }] }, { headers: limitHeaders("30000") }),
+    1, configFor(dir), model);
+    assert.equal(ok.isError, false, ok.stderr);
+    assert.equal(learnedCashLimit(model, ENDPOINT), 30000);
+    const failed = await spawnCash(dir, "p", async () => new Response("{}", { status: 503, headers: limitHeaders("25000", "120") }),
+      1, configFor(dir), model);
+    assert.equal(failed.isError, true);
+    assert.equal(learnedCashLimit(model, ENDPOINT), 25000);
+    assert.equal(observedRows(dir).filter(row => row.step === CASH_TPM_OBSERVED_STEP).length, 2);
+    await spawnCash(dir, "p", async () => completion(limitHeaders("25000", "60")), 1, configFor(dir), model);
+    assert.equal(observedRows(dir).filter(row => row.step === CASH_TPM_OBSERVED_STEP).length, 2, "renewal alone emits no quota change");
+    for (const invalid of ["-1", "1.5", "9007199254740992", "12345678901234567"]) {
+      await spawnCash(dir, "p", async () => completion(limitHeaders(invalid)), 1, configFor(dir), model);
+      assert.equal(learnedCashLimit(model, ENDPOINT), 25000);
+    }
+    await spawnCash(dir, "p", async () => completion(limitHeaders("0")), 1, configFor(dir), model);
+    assert.equal(learnedCashLimit(model, ENDPOINT), 0, "zero is a valid unsigned quota cut");
+  }
 });
 
 test("W1-T10856: a state file that cannot be read or written never fails the request it rode on", async (t) => {
@@ -108,64 +156,123 @@ test("W1-T10856: a state file that cannot be read or written never fails the req
     return completion(limitHeaders("20000"));
   });
   assert.equal(result.isError, false, result.stderr);
-  assert.equal(learnedCashLimit(DEPLOYMENT), undefined, "nothing was learned from the unrecordable response");
+  assert.equal(learnedCashLimit(DEPLOYMENT, ENDPOINT), undefined, "nothing was learned from the unrecordable response");
   const failures = logged.map((line) => JSON.parse(line) as Record<string, unknown>).filter((row) => row.event === "cash.capacity.record_failed");
   assert.equal(failures.length, 1);
   assert.equal(failures[0]!.deployment, DEPLOYMENT);
   assert.equal(typeof failures[0]!.reason, "string");
   assert.match(String(failures[0]!.reason), /EISDIR/);
+  const selected = selectOpenWeightModel(undefined, "sonnet", "low", 400_000, { config: configFor(dir), ready: () => true });
+  assert.equal(selected.model, DEPLOYMENT, "unreadable persisted state leaves the context-only gate usable");
+  assert.ok(logged.some(line => {
+    const row = JSON.parse(line);
+    return row.event === "cash.capacity.state_unreadable" && /EISDIR/.test(row.reason);
+  }));
+  const { dir: corrupt } = ownedFixtureDir(t, "cash-capacity-corrupt");
+  mkdirSync(join(corrupt, "state"));
+  writeFileSync(join(corrupt, "state", CASH_TPM_STATE_FILE), "{torn");
+  assert.equal(selectOpenWeightModel(undefined, "sonnet", "low", 400_000, { config: configFor(corrupt), ready: () => true }).model, DEPLOYMENT);
+  const repaired = await spawnCash(corrupt, "p", async () => completion(limitHeaders("30000")));
+  assert.equal(repaired.isError, false, repaired.stderr);
+  assert.equal(learnedCashLimit(DEPLOYMENT, ENDPOINT), 30000);
+  assert.equal(Object.keys(JSON.parse(readFileSync(join(corrupt, "state", CASH_TPM_STATE_FILE), "utf8"))).length, 1);
 });
 
-test("W1-T10856: a request above the learned ceiling walks the ladder before transport", (t) => {
+async function driveCash(root: string, prompt: string, fetchImpl: NonNullable<Parameters<typeof spawnOpenWeightWorker>[0]["fetchImpl"]>,
+  onFallbackAttempt?: SpawnWorkerArgs["onModelFallbackAttempt"]) {
+  const models: string[] = [];
+  const estimates: number[] = [];
+  const result = await spawnWorker({
+    cwd: root, settingsFile: join(REPO_ROOT, "settings/worker.json"), permissionMode: "bypassPermissions",
+    config: configFor(root), model: "sonnet", effort: "low", mountProvider: "cash", prompt, tools: [], maxTurns: 3,
+    runId: "capacity-run", taskId: "W1-T10856", onModelFallbackAttempt: onFallbackAttempt,
+    providerRouting: { spawnOpenWeight: async (args, config, selection) => {
+      models.push(selection.model);
+      estimates.push(Math.ceil(Buffer.byteLength(args.prompt, "utf8") / 4));
+      return await spawnOpenWeightWorker({ ...args, env: { RMD_OPENWEIGHT_API_KEY: KEY },
+        clock: fixedClock(Date.parse(AT_ISO)), fetchImpl } as never, config, selection) as WorkerResult;
+    } },
+  });
+  return { result, models, estimates };
+}
+
+test("W1-T10856: a request above the learned ceiling walks the ladder before transport", async (t) => {
   resetLearnedCashCapacity();
   t.after(resetLearnedCashCapacity);
-  const estimatedTokens = 100_000;
-  const promptBytes = estimatedTokens * 4;
-  const options = { ready: () => true };
-
-  // Control: with no learned limit the deployment is gated by its context window alone.
-  const before = selectOpenWeightModel(undefined, "sonnet", "low", promptBytes, options);
-  assert.equal(before.model, DEPLOYMENT);
-  assert.equal(before.capacityShortfalls, undefined);
-
   const { dir } = ownedFixtureDir(t, "cash-capacity-walk");
-  // The deployment answers once, at a 20,000 TPM ceiling.
-  const reported: unknown[] = [];
-  return spawnCash(dir, "p", async () => completion(limitHeaders("20000"))).then(() => {
-    assert.equal(openWeightDeploymentHolds(DEPLOYMENT, estimatedTokens), false, "the learned limit is the smaller ceiling");
-    assert.equal(openWeightDeploymentHolds(DEPLOYMENT, 1_000), true, "a small request still fits");
-    const after = selectOpenWeightModel(undefined, "sonnet", "low", promptBytes, {
-      ...options, onCapacityShortfall: (row) => reported.push(row),
-    });
-    assert.notEqual(after.model, DEPLOYMENT, "selection walks to the next candidate");
-    assert.equal(after.model, "gpt-oss-120b");
-    const expected = { reason: "capacity_shortfall", deployment: DEPLOYMENT, estimatedTokens, limitTokens: 20000 };
-    assert.deepEqual(after.capacityShortfalls, [expected]);
-    assert.deepEqual(reported, [expected]);
-    // The readiness seam answers from the same learned limit.
-    assert.deepEqual(cashCapacityReadiness(learnedCashLimit(DEPLOYMENT), 108_000),
-      { state: "shortfall", limitTokens: 20000, shortfallTokens: 88_000 });
-    assert.deepEqual(cashCapacityReadiness(20000, 20000), { state: "covered", limitTokens: 20000 });
-    assert.deepEqual(cashCapacityReadiness(undefined, 1), { state: "unlearned" });
+  const estimatedTokens = 100_000;
+  const prompt = "x".repeat(estimatedTokens * 4);
+  const options = { ready: () => true, config: configFor(dir), runId: "capacity-run", taskId: "W1-T10856" };
+  assert.equal(selectOpenWeightModel(undefined, "sonnet", "low", prompt.length, options).model, DEPLOYMENT);
+  await spawnCash(dir, "p", async () => completion(limitHeaders("20000")));
+  resetLearnedCashCapacity();
+  const transported: string[] = [];
+  const { result, models, estimates } = await driveCash(dir, prompt, async (url) => {
+    transported.push(String(url));
+    return completion({ "content-type": "application/json" });
   });
+  assert.equal(result.isError, false, result.stderr);
+  assert.deepEqual(models, ["gpt-oss-120b"], "the first production selection after restart skips nano");
+  assert.equal(transported.length, 1);
+  assert.match(transported[0]!, /gpt-oss-120b/);
+  const rows = observedRows(dir).filter(row => row.reason === "capacity_shortfall");
+  assert.equal(rows.length, 1, "production selection records the reason without an injected callback");
+  assert.equal(rows[0]!.deployment, DEPLOYMENT);
+  assert.equal(rows[0]!.estimated_tokens, estimates[0], "the event uses the prepared production prompt's estimate");
+  assert.ok(estimates[0]! >= estimatedTokens);
+  assert.equal(rows[0]!.limit_tokens, 20000);
+  assert.equal(rows[0]!.run_id, "capacity-run");
+  assert.equal(rows[0]!.task_id, "W1-T10856");
+  const limit = learnedCashLimit(DEPLOYMENT, ENDPOINT);
+  assert.equal(openWeightDeploymentHolds(DEPLOYMENT, estimatedTokens, limit), false);
+  assert.equal(openWeightDeploymentHolds(DEPLOYMENT, 1_000, limit), true);
+  const remainingPromptTokens = limit! - OPENWEIGHT_MAX_COMPLETION_TOKENS;
+  assert.equal(openWeightDeploymentHolds(DEPLOYMENT, remainingPromptTokens, limit), true, "completion allowance is included exactly");
+  assert.equal(openWeightDeploymentHolds(DEPLOYMENT, remainingPromptTokens + 1, limit), false);
+  assert.throws(() => selectOpenWeightModel(undefined, "sonnet", "low", prompt.length, { ...options, only: [DEPLOYMENT] }),
+    (error: unknown) => error instanceof OpenWeightRequestTooLargeError && /learned per-minute limit 20000/.test(error.message));
+  assert.deepEqual(cashCapacityReadiness(limit, 108_000),
+    { state: "shortfall", limitTokens: 20000, shortfallTokens: 88_000 });
+  assert.deepEqual(cashCapacityReadiness(20000, 20000), { state: "covered", limitTokens: 20000 });
+  assert.deepEqual(cashCapacityReadiness(undefined, 1), { state: "unlearned" });
 });
 
 test("W1-T10856: an oversized 429 is a capacity shortfall and is never retried", async (t) => {
   resetLearnedCashCapacity();
   t.after(resetLearnedCashCapacity);
   const { dir } = ownedFixtureDir(t, "cash-capacity-429");
-  let calls = 0;
-  const oversized = await spawnCash(dir, "x".repeat(400_000), async () => {
-    calls += 1;
-    return new Response(JSON.stringify({ error: { code: "RateLimitReached" } }), {
-      status: 429, headers: { ...limitHeaders("20000"), "retry-after-ms": "1" },
-    });
-  }, 3);
-  assert.equal(calls, 1, "the request can never fit, so it is not retried after retry-after");
-  assert.equal(oversized.isError, true);
-  assert.match(oversized.stderr, /capacity_shortfall/);
-  assert.equal(learnedCashLimit(DEPLOYMENT), 20000, "the limit it reported is recorded for the next request");
-  assert.equal(openWeightDeploymentHolds(DEPLOYMENT, 100_000), false, "the next request skips the deployment pre-transport");
+  const transported: string[] = [];
+  const attempts: NonNullable<WorkerResult["openWeightCapacityShortfall"]>[] = [];
+  const reasons: string[] = [];
+  let failedEstimate = 0;
+  const { result: oversized, models } = await driveCash(dir, "x".repeat(400_000), async (url, init) => {
+    transported.push(String(url));
+    if (String(url).includes(DEPLOYMENT)) {
+      failedEstimate = Math.ceil(Buffer.byteLength(String(init?.body), "utf8") / 4);
+      return new Response(JSON.stringify({ error: { code: "RateLimitReached" } }), {
+        status: 429, headers: { ...limitHeaders("20000"), "retry-after-ms": "1" },
+      });
+    }
+    return completion({ "content-type": "application/json" });
+  }, attempt => {
+    reasons.push(attempt.reason);
+    if (attempt.result?.openWeightCapacityShortfall) attempts.push(attempt.result.openWeightCapacityShortfall);
+  });
+  assert.deepEqual(models, [DEPLOYMENT, "gpt-oss-120b"], "the same production run advances to its next alternative");
+  assert.equal(transported.length, 2, "one failed request and one alternative, without retrying the oversized request");
+  assert.equal(oversized.isError, false, oversized.stderr);
+  assert.equal(oversized.routedModel, "gpt-oss-120b");
+  assert.deepEqual(reasons, ["capacity_shortfall"]);
+  assert.deepEqual(attempts, [{ reason: "capacity_shortfall", deployment: DEPLOYMENT, estimatedTokens: failedEstimate, limitTokens: 20000 }]);
+  const rows = observedRows(dir).filter(row => row.reason === "capacity_shortfall");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.estimated_tokens, failedEstimate);
+  assert.equal(rows[0]!.limit_tokens, 20000);
+  assert.equal(learnedCashLimit(DEPLOYMENT, ENDPOINT), 20000);
+  assert.equal(openWeightDeploymentHolds(DEPLOYMENT, 100_000, learnedCashLimit(DEPLOYMENT, ENDPOINT)), false);
+  const next = await driveCash(dir, "x".repeat(400_000), async () => completion({ "content-type": "application/json" }));
+  assert.deepEqual(next.models, ["gpt-oss-120b"], "the next request skips the deployment before transport");
+  assert.equal(next.result.isError, false, next.result.stderr);
 
   // Control: a 429 under the limit keeps today's transient handling and retries after retry-after.
   const { dir: small } = ownedFixtureDir(t, "cash-capacity-429-small");
@@ -178,4 +285,32 @@ test("W1-T10856: an oversized 429 is a capacity shortfall and is never retried",
   }, 3);
   assert.equal(smallCalls, 2);
   assert.equal(retried.isError, false, retried.stderr);
+});
+
+test("a capacity-shortfall walk survives a failed fallback telemetry sink and retains an exhausted result", async t => {
+  resetLearnedCashCapacity();
+  t.after(resetLearnedCashCapacity);
+  const { dir } = ownedFixtureDir(t, "cash-capacity-walk-telemetry");
+  const logs: string[] = [];
+  t.mock.method(console, "error", (line: unknown) => { logs.push(String(line)); });
+  const calls: string[] = [];
+  const run = async ({ model }: { model: string }) => {
+    calls.push(model);
+    return await spawnCash(dir, "x".repeat(400_000), async () => model === DEPLOYMENT
+      ? new Response("{}", { status: 429, headers: { ...limitHeaders("20000"), "retry-after-ms": "1" } })
+      : completion({ "content-type": "application/json" }), 3, configFor(dir), model) as WorkerResult;
+  };
+  const selection = { model: DEPLOYMENT, effort: "low", capability: "balanced" as const, alternatives: ["gpt-oss-120b"] };
+  const result = await runOpenWeightWalkingLadder(run, selection, () => { throw new Error("fixture telemetry unavailable"); });
+  assert.equal(result.isError, false, result.stderr);
+  assert.deepEqual(calls, [DEPLOYMENT, "gpt-oss-120b"]);
+  assert.ok(logs.some(line => {
+    const row = JSON.parse(line);
+    return row.event === "worker.openweight.rung_telemetry_unavailable" && /fixture telemetry unavailable/.test(row.reason);
+  }));
+  const exhausted = await runOpenWeightWalkingLadder(run, { ...selection, alternatives: [] });
+  assert.equal(exhausted.isError, true);
+  assert.equal(exhausted.openWeightCapacityShortfall?.deployment, DEPLOYMENT);
+  assert.equal(exhausted.openWeightCapacityShortfall?.limitTokens, 20000);
+  assert.match(exhausted.stderr, /capacity_shortfall/);
 });
