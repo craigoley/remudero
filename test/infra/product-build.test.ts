@@ -16,7 +16,7 @@ import { requestKick } from "#src/lib/fleet-control.js";
 import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
 import { DEFAULT_LIVENESS_BOUND_MS } from "#src/lib/non-worker-verdict.js";
 import { loadPlan } from "#src/lib/plan.js";
-import { buildBatchedGithub, defaultCreditStorePath, saveCreditStore, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, type StatusProjection } from "#src/lib/status.js";
+import { buildBatchedGithub, DEFAULT_MAX_TASK_DISPATCHES, defaultCreditStorePath, saveCreditStore, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, type StatusProjection } from "#src/lib/status.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -1268,7 +1268,7 @@ test("W1-T10799: target admission never inherits Core credit or status for the s
 
 test("W1-T10799: a Core PR cannot clear the target repository's dispatch breaker", (t) => {
   const f = nativeFixture(t);
-  for (let i = 0; i < 4; i++) appendLedger(f.ledgerPath, {
+  for (let i = 0; i < DEFAULT_MAX_TASK_DISPATCHES; i++) appendLedger(f.ledgerPath, {
     step: "run.start", run_id: `W9-T1-${Date.now() + i}`, task_id: "W9-T1", lane: "run-task", repo: "wreckterra",
   });
   let coreReads = 0, targetReads = 0;
