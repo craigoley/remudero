@@ -20,7 +20,7 @@
 import { ciRemedyExecutionOf, ciRemedyExecutionReport, type CiRemedyExecution } from "./ci-remedy-execution.js";
 import { importedModuleOf, preventionRegistrationsOf, preventionAdoption, type ImportedModuleEvidence, type PreventionSourceRegistration } from "./prevention-source-evidence.js";
 import { servedTrialCohorts, trialRevisionPins, type TrialRevisionPins } from "./field-trials-cohorts.js";
-import { buildControlledFieldTrialsRelease, deriveRegisteredEpoch, type ControlledReleaseInput,
+import { buildControlledFieldTrialsRelease, deriveRegisteredEpoch, SITE_SECONDARY_COMMIT, type ControlledReleaseInput,
   type ControlledReleaseResult, type LedgerEpochFacts } from "./field-trials-controlled-release.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { projectRepairCostContext, repairCostCells, repairCostsByPull, type RepairCostContext, type RepairCostReport } from "./repair-cost-evidence.js";
@@ -30,6 +30,8 @@ import { parseArgs } from "node:util";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
+import { ghInteractiveRead } from "./github-transport.js";
+import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol } from "./benchmark-paid-pilot.js";
 import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, observedCurrentHeadGreen, parseGithubStore, RUN_BRANCH_RE,
   type FieldTrialsGithubPass, type FieldTrialsGithubStore, type GithubCursor, type GithubPageFetch,
   type GithubPull, type GithubRepoStore } from "./field-trials-github.js";
@@ -895,8 +897,9 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
 
 export interface FieldTrialsConsent {
   version: typeof FIELD_TRIALS_CONSENT_VERSION;
+  consentRegistryRevision?: string;
   repos: { repo: string; rights: "private" | "aggregate-opt-in" | "public-benchmark"; receipt: string; revoked?: boolean;
-    publicSourceUrl?: string }[];
+    publicSourceUrl?: string; sourceId?: string }[];
 }
 
 export function parseFieldTrialsConsent(value: unknown): FieldTrialsConsent | string {
@@ -1238,9 +1241,9 @@ function persistControlled(outDir: string, result: ControlledReleaseResult): { s
 }
 
 /**
- * PRODUCTION SOURCE of a registered epoch (W1-T10843): derive the epoch's assignments, outcomes and pinned
- * revisions from the ledger's routing assignments, the merged `Remudero-Task` pulls and the fix lane's rows,
- * then build. A registered epoch needs no operator-supplied epoch file.
+ * PRODUCTION SOURCE of a registered epoch (W1-T10843): derive assignments and outcomes from the ledger,
+ * merged `Remudero-Task` pulls and fix rows; take revisions from the registered protocol, then build.
+ * The command reads the existing paid-pilot protocol (or --controlled-protocol envelope), never receipt pins.
  */
 export function writeRegisteredControlledCandidate(outDir: string, epochId: string, facts: LedgerEpochFacts,
   consent: FieldTrialsConsent | string | null, nowIso: string, siteAcceptsSecondary: boolean,
@@ -1290,15 +1293,15 @@ export interface FieldTrialsCommandInput {
   fetch?: GithubPageFetch;
   readLedger?: (stateDir: string) => Promise<FieldTrialsLedgerRead>;
   resolveConfig?: () => { root: string; fleetRepos?: string[] };
-  /** W1-T10843: overrides whether the site parser is known to accept `adherence` and `secondary`. */
-  siteAcceptsSecondary?: boolean;
+  /** Read the GitHub comparison proving that the vendored accepting parser commit is on site main. */
+  readSiteEvidence?: (path: string) => Promise<unknown>;
   /** W1-T10843: the raw ledger-union rows of one state dir, read for a registered controlled epoch. */
   readRows?: (stateDir: string) => Promise<Record<string, unknown>[]>;
 }
 
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
   + "[--consent <file>] [--case-files <file>] [--finding-evidence <file>] [--finding-evidence-keys <file>] "
-  + "[--controlled-registered <epoch-id> | --controlled-epoch <file>] [--site-parser-commit <sha>] "
+  + "[--controlled-registered <epoch-id> | --controlled-epoch <file>] [--controlled-protocol <file>] [--site-parser-commit <sha>] "
   + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--json]";
 
 function labelOf(repo: string): string {
@@ -1314,6 +1317,20 @@ function pairs(values: string[] | undefined): Map<string, string> | string {
     out.set(value.slice(0, at), value.slice(at + 1));
   }
   return out;
+}
+
+/** Only the vendored parser revision is supported; its presence on site main is verified at release time. */
+export async function verifySiteSecondarySupport(commit: string | undefined, read: (path: string) => Promise<unknown>):
+  Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (commit !== SITE_SECONDARY_COMMIT) return { ok: false, reason: "parser-commit-not-vendored" };
+  try {
+    const comparison = record(await read(`repos/craigoley/remudero-site/compare/${commit}...main?per_page=1`));
+    const onMain = (comparison?.status === "ahead" || comparison?.status === "identical")
+      && record(comparison.base_commit)?.sha === commit && record(comparison.merge_base_commit)?.sha === commit;
+    return onMain ? { ok: true } : { ok: false, reason: "parser-commit-not-on-main" };
+  } catch (err) {
+    return { ok: false, reason: `site-evidence-read-failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 /**
@@ -1332,7 +1349,7 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
       source: { type: "string", multiple: true }, ledger: { type: "string", multiple: true }, "out-dir": { type: "string" },
       consent: { type: "string" }, "case-files": { type: "string" }, "max-pages": { type: "string" },
       "finding-evidence": { type: "string" }, "finding-evidence-keys": { type: "string" }, "controlled-epoch": { type: "string" },
-      "controlled-registered": { type: "string" }, "site-parser-commit": { type: "string" },
+      "controlled-registered": { type: "string" }, "controlled-protocol": { type: "string" }, "site-parser-commit": { type: "string" },
       offline: { type: "boolean" }, revoke: { type: "string" }, json: { type: "boolean" } } }).values;
   } catch {
     const reason = "arguments-invalid";
@@ -1428,15 +1445,30 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
   writeJsonAtomically(manifestPath, manifest);
   let controlled: ReturnType<typeof writeControlledCandidate> | null = null;
   if (typeof values["controlled-epoch"] === "string" || registeredEpoch !== undefined) {
-    // The site parser accepts adherence and secondary only after PORTAL-T43 merges: until the operator names the
-    // site main commit that does (--site-parser-commit), the builder withholds with site-secondary-unavailable.
-    const siteAccepts = input.siteAcceptsSecondary ?? siteCommit !== undefined;
+    const siteEvidence = values.offline === true && input.readSiteEvidence === undefined ? { ok: false as const, reason: "site-evidence-unavailable-offline" }
+      : await verifySiteSecondarySupport(siteCommit, input.readSiteEvidence ?? (async (path) =>
+        JSON.parse(String(await ghInteractiveRead(["api", path], { encoding: "utf8" })))));
+    const siteAccepts = siteEvidence.ok;
     if (registeredEpoch === undefined) {
       controlled = writeControlledCandidate(outDir, readJson(values["controlled-epoch"] as string), consent, nowIso, siteAccepts, siteCommit);
     } else {
       const facts = await controlledEpochFacts(repos, defaultLedgers, github, input.readRows ?? ((dir) => readLedgerUnionRecords(dir)));
+      if (typeof facts !== "string") {
+        const stateDir = defaultLedgers.values().next().value ?? join(config.root, "state");
+        const loaded = typeof values["controlled-protocol"] === "string" ? record(readJson(values["controlled-protocol"]))
+          : record(loadPaidPilotProtocol(stateDir, registeredEpoch));
+        const protocol = record(loaded?.protocol);
+        const revisions = record(protocol?.revisions);
+        if (protocol?.version === BENCHMARK_PAID_PILOT_VERSION && protocol.pilotId === registeredEpoch && revisions !== undefined) {
+          const stack = Object.fromEntries(Object.entries(revisions).map(([key, value]) => [key, { state: "observed", value }]));
+          facts.protocol = { epochId: registeredEpoch, stack };
+        }
+      }
       controlled = typeof facts === "string" ? { state: "refused", reason: facts }
         : writeRegisteredControlledCandidate(outDir, registeredEpoch, facts, consent, nowIso, siteAccepts, siteCommit);
+    }
+    if (controlled.state === "refused" && controlled.reason.startsWith("site-secondary-unavailable") && !siteEvidence.ok) {
+      controlled.reason += `; ${siteEvidence.reason}`;
     }
     if (values.json !== true) print(controlled.state === "candidate" ? `  controlled candidate: ${controlled.file} (never published; reviewed import only)`
       : `  controlled release refused (${controlled.reason})`);

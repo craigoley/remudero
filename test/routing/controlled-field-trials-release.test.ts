@@ -9,76 +9,223 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  buildControlledFieldTrialsRelease, crossoverBucket, deriveRegisteredEpoch, type ControlledEpoch, type ControlledReleaseInput, type EpochAssignment,
+  buildControlledFieldTrialsRelease, crossoverBucket, deriveRegisteredEpoch, siteParserViolation, SITE_SECONDARY_COMMIT, type ControlledEpoch, type ControlledReleaseInput, type EpochAssignment,
   type EpochTaskOutcome,
 } from "#src/lib/field-trials-controlled-release.js";
-import { fieldTrialsCommand, unavailableLedger, writeControlledCandidate, buildFieldTrialsFlowSnapshot, type FieldTrialsConsent }
+import { fieldTrialsCommand, verifySiteSecondarySupport, unavailableLedger, writeControlledCandidate, buildFieldTrialsFlowSnapshot, type FieldTrialsConsent }
   from "#src/lib/field-trials-flow.js";
 import { FIELD_TRIALS_GITHUB_VERSION } from "#src/lib/field-trials-github.js";
 import { ROUTING_DRAW_METHOD } from "#src/lib/worker-provider.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
-/**
- * The site's parser, VENDORED for the contract. Source: craigoley/remudero-site lib/field-trials-release.ts
- * `parseFieldTrialsRelease` at site commit b80fbbb (the base keys), extended with the optional `adherence` and
- * `secondary` keys of PORTAL-T43 (remudero-site PR #205). Transcribed from the task record's reading of that
- * parser: exact key set, exactly two arms, distinct ids, 0 < observed <= assigned, 0 <= successes <= observed,
- * ciLower <= rate <= ciUpper within [0, 1].
+/** Vendored verbatim (imports removed) from craigoley/remudero-site at
+ * eae03ec12a76227b4bf100d3d318111f43bf573c (PORTAL-T43, PR #207); base contract b80fbbb.
+ * https://github.com/craigoley/remudero-site/blob/eae03ec12a76227b4bf100d3d318111f43bf573c/lib/field-trials-release.ts
  */
-const ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
+/** Owner-approved scope for reviewed, de-identified aggregates only. Not telemetry upload consent. */
+export interface FieldTrialsConsentRegistry {
+  revision: string;
+  entries: readonly {
+    repository: string;
+    state: "active" | "revoked";
+    scope: "aggregate-public";
+    approvedOn: string;
+    approvedBy: "owner";
+  }[];
+}
+
+export const fieldTrialsConsentRegistry: FieldTrialsConsentRegistry = {
+  revision: "owner-2026-09-25-v1",
+  entries: [
+    { repository: "remudero", state: "active", scope: "aggregate-public", approvedOn: "2026-09-25", approvedBy: "owner" },
+    { repository: "remudero-console", state: "active", scope: "aggregate-public", approvedOn: "2026-09-25", approvedBy: "owner" },
+    { repository: "remudero-site", state: "active", scope: "aggregate-public", approvedOn: "2026-09-25", approvedBy: "owner" },
+  ],
+};
+
+export function fieldTrialsConsentAllows(
+  contributors: readonly string[],
+  revision: string,
+  registry: FieldTrialsConsentRegistry = fieldTrialsConsentRegistry,
+): boolean {
+  if (revision !== registry.revision || contributors.length === 0 || new Set(contributors).size !== contributors.length) return false;
+  const byRepo = new Map(registry.entries.map((entry) => [entry.repository, entry]));
+  return contributors.every((repo) => byRepo.get(repo)?.state === "active" && byRepo.get(repo)?.scope === "aggregate-public");
+}
+
+/** A deliberately narrow public artifact; private telemetry is never accepted here. */
+
+export interface FieldTrialsArm {
+  modelId: string;
+  assigned: number;
+  observed: number;
+  successes: number;
+  ciLower: number;
+  ciUpper: number;
+}
+
+export interface FieldTrialsRelease {
+  schema: "field-trials-v1";
+  releaseId: string;
+  status: "published";
+  publicationScope: "public-opt-in";
+  publishedAt: string;
+  evidence: "controlled";
+  randomizationUnit: "task";
+  metric: "verified_completion";
+  intervalMethod: "bootstrap-95-task";
+  corpusRevision: string;
+  harnessRevision: string;
+  scorerRevision: string;
+  assignmentAudit: "pass";
+  sourceRepos: string[];
+  consentRegistryRevision: string;
+  arms: [FieldTrialsArm, FieldTrialsArm];
+  adherence?: FieldTrialsAdherence;
+  secondary?: FieldTrialsSecondary[];
+}
+
+export const crossoverPctBuckets = ["<5%", "5-15%", "15-30%", ">30%"] as const;
+
+export interface FieldTrialsAdherence {
+  crossoverPctBucket: (typeof crossoverPctBuckets)[number];
+  analysis: "intent-to-treat";
+}
+
+export type FieldTrialsSecondaryMetric = "first_pass_success" | "repair_rounds_mean";
+
+export interface FieldTrialsInterval {
+  arm: string;
+  value: number;
+  ciLower: number;
+  ciUpper: number;
+}
+
+export interface FieldTrialsSecondary {
+  metric: FieldTrialsSecondaryMetric;
+  arms: [FieldTrialsInterval, FieldTrialsInterval];
+  intervalMethod: "bootstrap-95-task";
+}
+
+const releaseKeys = [
+  "schema", "releaseId", "status", "publicationScope", "publishedAt", "evidence",
+  "randomizationUnit", "metric", "intervalMethod", "corpusRevision", "harnessRevision", "scorerRevision",
+  "assignmentAudit", "sourceRepos", "consentRegistryRevision", "arms",
+];
+const optionalReleaseKeys = ["adherence", "secondary"];
+const adherenceKeys = ["crossoverPctBucket", "analysis"];
+const secondaryKeys = ["metric", "arms", "intervalMethod"];
+const intervalKeys = ["arm", "value", "ciLower", "ciUpper"];
+const armKeys = ["modelId", "assigned", "observed", "successes", "ciLower", "ciUpper"];
+const safeId = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
+  return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+/** Every required key present; nothing beyond required and the named optional keys. */
+function exactKeysWithOptional(value: Record<string, unknown>, keys: string[], optional: string[]): boolean {
+  return keys.every((key) => Object.hasOwn(value, key)) &&
+    Object.keys(value).every((key) => keys.includes(key) || optional.includes(key));
+}
+
+function isSafeId(value: unknown): value is string {
+  return typeof value === "string" && safeId.test(value);
+}
+
+function isArm(value: unknown): value is FieldTrialsArm {
+  if (!isRecord(value) || !exactKeys(value, armKeys) || !isSafeId(value.modelId)) return false;
+  const { assigned, observed, successes, ciLower, ciUpper } = value;
+  if (![assigned, observed, successes].every(Number.isSafeInteger)) return false;
+  if (typeof assigned !== "number" || typeof observed !== "number" || typeof successes !== "number") return false;
+  if (assigned <= 0 || observed <= 0 || observed > assigned || successes < 0 || successes > observed) return false;
+  if (typeof ciLower !== "number" || typeof ciUpper !== "number") return false;
+  const rate = successes / observed;
+  return Number.isFinite(ciLower) && Number.isFinite(ciUpper) &&
+    ciLower >= 0 && ciLower <= rate && rate <= ciUpper && ciUpper <= 1;
+}
+
+function isAdherence(value: unknown): value is FieldTrialsAdherence {
+  return isRecord(value) && exactKeys(value, adherenceKeys) &&
+    (crossoverPctBuckets as readonly unknown[]).includes(value.crossoverPctBucket) &&
+    value.analysis === "intent-to-treat";
+}
+
+function isSecondaryValue(metric: unknown, value: number): boolean {
+  if (metric === "first_pass_success") return Number.isSafeInteger(value) && value >= 0 && value <= 100;
+  if (metric === "repair_rounds_mean") return value >= 0 && Number(value.toFixed(1)) === value;
+  return false;
+}
+
+function isSecondaryInterval(value: unknown, metric: unknown, modelId: string): boolean {
+  if (!isRecord(value) || !exactKeys(value, intervalKeys) || value.arm !== modelId) return false;
+  const { value: point, ciLower, ciUpper } = value;
+  if (typeof point !== "number" || typeof ciLower !== "number" || typeof ciUpper !== "number") return false;
+  if (![point, ciLower, ciUpper].every(Number.isFinite)) return false;
+  if (ciLower < 0 || ciLower > point || point > ciUpper) return false;
+  if (metric === "first_pass_success" && ciUpper > 100) return false;
+  return isSecondaryValue(metric, point);
+}
+
+function isSecondary(value: unknown, arms: [FieldTrialsArm, FieldTrialsArm]): value is FieldTrialsSecondary {
+  if (!isRecord(value) || !exactKeys(value, secondaryKeys) || value.intervalMethod !== "bootstrap-95-task") return false;
+  if (value.metric !== "first_pass_success" && value.metric !== "repair_rounds_mean") return false;
+  return Array.isArray(value.arms) && value.arms.length === arms.length &&
+    value.arms.every((entry, index) => isSecondaryInterval(entry, value.metric, arms[index].modelId));
+}
+
+function isSecondaryList(value: unknown, arms: [FieldTrialsArm, FieldTrialsArm]): value is FieldTrialsSecondary[] {
+  if (!Array.isArray(value) || value.length > 3 || !value.every((entry) => isSecondary(entry, arms))) return false;
+  const metrics = value.map((entry: FieldTrialsSecondary) => entry.metric);
+  return new Set(metrics).size === metrics.length;
+}
+
+export function parseFieldTrialsRelease(
+  input: unknown,
+  registry: FieldTrialsConsentRegistry = fieldTrialsConsentRegistry,
+): FieldTrialsRelease | null {
+  if (!isRecord(input) || !exactKeysWithOptional(input, releaseKeys, optionalReleaseKeys)) return null;
+  if (input.schema !== "field-trials-v1" || input.status !== "published" ||
+    input.publicationScope !== "public-opt-in" || input.evidence !== "controlled" ||
+    input.randomizationUnit !== "task" || input.metric !== "verified_completion" ||
+    input.intervalMethod !== "bootstrap-95-task" ||
+    input.assignmentAudit !== "pass") return null;
+  if (![input.releaseId, input.corpusRevision, input.harnessRevision, input.scorerRevision, input.consentRegistryRevision].every(isSafeId)) return null;
+  if (!Array.isArray(input.sourceRepos) || !input.sourceRepos.every(isSafeId) ||
+    !fieldTrialsConsentAllows(input.sourceRepos, input.consentRegistryRevision as string, registry)) return null;
+  if (typeof input.publishedAt !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(input.publishedAt) ||
+    !Number.isFinite(Date.parse(input.publishedAt)) ||
+    new Date(input.publishedAt).toISOString() !== input.publishedAt) return null;
+  if (!Array.isArray(input.arms) || input.arms.length !== 2 ||
+    !input.arms.every(isArm) || input.arms[0].modelId === input.arms[1].modelId) return null;
+  const arms = input.arms as [FieldTrialsArm, FieldTrialsArm];
+  if (Object.hasOwn(input, "adherence") && !isAdherence(input.adherence)) return null;
+  if (Object.hasOwn(input, "secondary") && !isSecondaryList(input.secondary, arms)) return null;
+  return input as unknown as FieldTrialsRelease;
+}
+
 const BASE_KEYS = ["schema", "releaseId", "status", "publicationScope", "publishedAt", "evidence", "randomizationUnit", "metric",
   "intervalMethod", "corpusRevision", "harnessRevision", "scorerRevision", "assignmentAudit", "sourceRepos",
   "consentRegistryRevision", "arms"];
 const OPTIONAL_KEYS = ["adherence", "secondary"];
-function siteParse(value: unknown, allowedRepos: readonly string[]): { ok: true } | { ok: false; reason: string } {
-  const bad = (reason: string) => ({ ok: false as const, reason });
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return bad("not-object");
-  const r = value as Record<string, any>;
-  const keys = Object.keys(r);
-  if (BASE_KEYS.some((key) => !keys.includes(key)) || keys.some((key) => ![...BASE_KEYS, ...OPTIONAL_KEYS].includes(key))) return bad("keys");
-  const literal: Record<string, string> = { schema: "field-trials-v1", status: "published", publicationScope: "public-opt-in",
-    evidence: "controlled", randomizationUnit: "task", metric: "verified_completion", intervalMethod: "bootstrap-95-task", assignmentAudit: "pass" };
-  for (const [key, expected] of Object.entries(literal)) if (r[key] !== expected) return bad(key);
-  if (!ID.test(r.releaseId)) return bad("releaseId");
-  if (typeof r.publishedAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(r.publishedAt)
-    || new Date(r.publishedAt).toISOString() !== r.publishedAt) return bad("publishedAt");
-  for (const key of ["corpusRevision", "harnessRevision", "scorerRevision", "consentRegistryRevision"]) if (!ID.test(r[key])) return bad(key);
-  if (!Array.isArray(r.sourceRepos) || r.sourceRepos.length === 0 || r.sourceRepos.some((repo: string) => !allowedRepos.includes(repo))) return bad("sourceRepos");
-  if (!Array.isArray(r.arms) || r.arms.length !== 2) return bad("arms");
-  const armKeys = ["modelId", "assigned", "observed", "successes", "ciLower", "ciUpper"];
-  for (const arm of r.arms) {
-    if (Object.keys(arm).sort().join() !== [...armKeys].sort().join() || !ID.test(arm.modelId)) return bad("arm-shape");
-    if (!Number.isInteger(arm.assigned) || !Number.isInteger(arm.observed) || !Number.isInteger(arm.successes)) return bad("arm-integers");
-    if (!(arm.observed > 0 && arm.observed <= arm.assigned && arm.successes >= 0 && arm.successes <= arm.observed)) return bad("arm-counts");
-    const rate = arm.successes / arm.observed;
-    if (!(arm.ciLower >= 0 && arm.ciUpper <= 1 && arm.ciLower <= rate && rate <= arm.ciUpper)) return bad("arm-interval");
-  }
-  if (r.arms[0].modelId === r.arms[1].modelId) return bad("arms-distinct");
-  if (r.adherence !== undefined) {
-    if (!["<5%", "5-15%", "15-30%", ">30%"].includes(r.adherence.crossoverPctBucket) || r.adherence.analysis !== "intent-to-treat") return bad("adherence");
-  }
-  if (r.secondary !== undefined) {
-    if (!Array.isArray(r.secondary) || r.secondary.length > 3) return bad("secondary");
-    for (const entry of r.secondary) {
-      if (!["first_pass_success", "repair_rounds_mean"].includes(entry.metric) || entry.intervalMethod !== "bootstrap-95-task"
-        || !Array.isArray(entry.arms) || entry.arms.length !== 2) return bad("secondary-entry");
-      for (const arm of entry.arms) {
-        if (!r.arms.some((a: { modelId: string }) => a.modelId === arm.arm) || !(arm.ciLower <= arm.value && arm.value <= arm.ciUpper) || arm.ciLower < 0) return bad("secondary-arm");
-      }
-    }
-  }
-  return { ok: true };
-}
+const siteParse = (value: unknown, _repos: readonly string[]) => ({ ok: parseFieldTrialsRelease(value) !== null });
 
 const SOL = "gpt-6.1-sol";
 const SON = "claude-sonnet-5.5";
 const REPO = "craigoley/remudero";
 const HEX = (c: string) => c.repeat(40);
 const PINS = { harness: HEX("a"), prompt: HEX("b"), tool: HEX("c"), scorer: HEX("d"), environment: HEX("e") };
-const CONSENT: FieldTrialsConsent = { version: "field-trials-consent-v1", repos: [{ repo: REPO, rights: "aggregate-opt-in", receipt: "receipt-1" }] };
+const CONSENT: FieldTrialsConsent = { version: "field-trials-consent-v1", consentRegistryRevision: "owner-2026-09-25-v1",
+  repos: [{ repo: REPO, sourceId: "remudero", rights: "aggregate-opt-in", receipt: "receipt-1" }] };
 const EPOCH: ControlledEpoch = { epochId: "sol61-vs-sonnet55", arms: [SOL, SON], randomizationUnit: "task", drawMethod: ROUTING_DRAW_METHOD,
   drawProbability: 0.5, window: { start: "2026-09-27T00:00:00.000Z", end: "2026-10-24T23:59:59.000Z" },
   stopping: { afterIso: "2026-10-27T00:00:00.000Z", minObservedPerArm: 10 }, seed: "seed-1", corpusRevision: HEX("f"), sourceRepos: [REPO] };
+const siteMainEvidence = { status: "ahead", base_commit: { sha: SITE_SECONDARY_COMMIT }, merge_base_commit: { sha: SITE_SECONDARY_COMMIT } };
 const AS_OF = "2026-10-28T00:00:00.000Z";
 const START = Date.UTC(2026, 8, 28);
 
@@ -117,10 +264,17 @@ test("W1-T10843: the controlled release passes the site field-trials-v1 parser",
   assert.deepEqual([release.evidence, release.randomizationUnit, release.metric, release.intervalMethod, release.assignmentAudit],
     ["controlled", "task", "verified_completion", "bootstrap-95-task", "pass"]);
   assert.deepEqual(release.arms.map((arm) => arm.modelId), [SOL, SON]);
+  for (const fixRounds of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    const data = fixture();
+    data.outcomes[0]!.fixRounds = fixRounds;
+    const result = buildControlledFieldTrialsRelease(input({}, data));
+    assert.equal(result.state, "refused", String(fixRounds));
+    assert.equal("release" in result, false);
+  }
   assert.equal(release.publishedAt, AS_OF);
-  assert.deepEqual(siteParse({ ...release, evidence: "observational" }, [REPO]), { ok: false, reason: "evidence" }, "the vendored parser is not vacuous");
-  assert.deepEqual(siteParse({ ...release, arms: [release.arms[0]] }, [REPO]), { ok: false, reason: "arms" });
-  assert.deepEqual(siteParse({ ...release, nBucket: "10-20" }, [REPO]), { ok: false, reason: "keys" });
+  assert.deepEqual(siteParse({ ...release, evidence: "observational" }, [REPO]), { ok: false }, "the vendored parser is not vacuous");
+  assert.deepEqual(siteParse({ ...release, arms: [release.arms[0]] }, [REPO]), { ok: false });
+  assert.deepEqual(siteParse({ ...release, nBucket: "10-20" }, [REPO]), { ok: false });
   // a registered-but-malformed revision is refused here, before the site would reject it
   const refused = buildControlledFieldTrialsRelease(input({ pins: { ...PINS, scorer: null } }));
   assert.deepEqual([refused.state, (refused as { reason: string }).reason], ["refused", "revision-unavailable"]);
@@ -143,11 +297,16 @@ test("W1-T10843: a failing assignment audit or an unreached horizon emits no rel
     "arm-balance");
   assert.equal(refusedWith({}, { ...data, assignments: data.assignments.map((row, i) => i === 4 ? { ...row, assignedArm: "gpt-6.1-terra" } : row) }).detail,
     "assigned-arm-outside-registered-arms");
+  assert.equal(refusedWith({}, { ...data, assignments: data.assignments.map((row) => ({ ...row, servedArm: "gpt-6.1-terra" })) }).detail,
+    "served-arm-outside-registered-arms");
   assert.equal(refusedWith({}, { assignments: [], outcomes: [] }).detail, "no-assignments-in-window");
   assert.equal(refusedWith({ asOf: "2026-10-26T00:00:00.000Z" }).reason, "horizon-not-reached", "inside the 72 h censoring margin");
   assert.equal(refusedWith({ epoch: { ...EPOCH, stopping: { ...EPOCH.stopping, minObservedPerArm: 500 } } }).reason, "horizon-not-reached");
   assert.equal(refusedWith({ epoch: { ...EPOCH, stopping: { ...EPOCH.stopping, afterIso: "2026-11-30T00:00:00.000Z" } } }).reason, "horizon-not-reached");
   assert.equal(refusedWith({ consent: null }).reason, "no-consent-receipt");
+  assert.equal(refusedWith({ consent: { ...CONSENT, consentRegistryRevision: undefined } }).reason, "site-parser-would-reject");
+  assert.equal(refusedWith({ consent: { ...CONSENT, repos: [{ ...CONSENT.repos[0]!, sourceId: undefined }] } }).reason, "site-parser-would-reject");
+  assert.equal(refusedWith({ consent: { ...CONSENT, repos: [{ ...CONSENT.repos[0]!, sourceId: "unregistered" }] } }).reason, "site-parser-would-reject");
   assert.equal(refusedWith({ consent: "consent-invalid" }).reason, "consent-invalid");
   assert.equal(refusedWith({ consent: { ...CONSENT, repos: [{ ...CONSENT.repos[0]!, revoked: true }] } }).reason, "source-consent-missing");
   assert.equal(refusedWith({ consent: { ...CONSENT, repos: [{ ...CONSENT.repos[0]!, rights: "private" }] } }).reason, "source-consent-missing");
@@ -166,7 +325,7 @@ test("W1-T10843: a failing assignment audit or an unreached horizon emits no rel
 test("W1-T10843: arm counts and intervals come from task-level outcomes", () => {
   const data = fixture();
   const { release } = built({}, data);
-  const cutoff = Date.parse(EPOCH.window.end) + 72 * 3_600_000;
+  const cutoff = Date.parse(EPOCH.window.end);
   for (const arm of release.arms) {
     const tasks = data.assignments.filter((row) => row.assignedArm === arm.modelId && row.taskId === `t${row.taskId.slice(1)}`)
       .map((row) => row.taskId).filter((id, i, all) => all.indexOf(id) === i);
@@ -187,6 +346,10 @@ test("W1-T10843: arm counts and intervals come from task-level outcomes", () => 
   // a merge after the 72 h margin is read as not merged
   const late = built({}, { ...data, outcomes: data.outcomes.map((o) => o.taskId === "t4" ? { ...o, mergedAt: "2026-11-20T00:00:00.000Z" } : o) });
   assert.equal(late.release.arms[0].successes, release.arms[0].successes - 1);
+  const waitingPeriod = built({}, { ...data, outcomes: data.outcomes.map((o) => ({ ...o, outcome: "merged", mergedAt: "2026-10-26T00:00:00.000Z" })) });
+  assert.deepEqual(waitingPeriod.release.arms.map((a) => a.successes), [0, 0], "the censoring margin grants no extra outcome time");
+  const boundary = built({}, { ...data, outcomes: data.outcomes.map((o) => ({ ...o, outcome: "merged", mergedAt: EPOCH.window.end })) });
+  assert.deepEqual(boundary.release.arms.map((a) => a.successes), [40, 40], "the window end is inclusive");
   // the interval is reproducible from the registered seed; the seed moves no count
   assert.deepEqual(built({}, data).release, release);
   const reseeded = built({ epoch: { ...EPOCH, seed: "seed-2" } }, data).release;
@@ -225,18 +388,18 @@ test("W1-T10843: the controlled release is a candidate and is never published au
       ["--source", "core=craigoley/remudero", "--ledger", `core=${root}`, "--out-dir", dir, "--consent", consentPath, "--offline", ...extra],
       buildFieldTrialsFlowSnapshot, { nowIso: AS_OF, print: (l) => printed.push(l), printError: () => undefined,
         readLedger: async () => unavailableLedger("fixture"), resolveConfig: () => ({ root }),
-        ...(siteAcceptsSecondary === undefined ? {} : { siteAcceptsSecondary }) });
+        ...(siteAcceptsSecondary === undefined ? {} : { readSiteEvidence: async () => siteMainEvidence }) });
     assert.equal(await run(["--controlled-epoch", epochPath]), 1);
     assert.match(printed.join("\n"), /controlled release refused \(site-secondary-unavailable/);
     assert.equal(existsSync(join(dir, "controlled")), false, "a refusal emits no candidate");
-    await run(["--controlled-epoch", epochPath], true);
+    await run(["--controlled-epoch", epochPath, "--site-parser-commit", SITE_SECONDARY_COMMIT], true);
     assert.match(printed.join("\n"), /controlled candidate: controlled\/controlled-[0-9a-f]{16}\.candidate\.json \(never published/);
     assert.equal(readdirSync(join(dir, "controlled")).length, 2);
     assert.equal(existsSync(join(dir, "releases")), false, "no observational release rode along");
     await run(["--controlled-epoch", join(root, "missing.json")], true);
     assert.match(printed.join("\n"), /controlled release refused \(controlled-epoch-invalid\)/);
     printed.length = 0;
-    await run(["--controlled-epoch", epochPath, "--json"], true);
+    await run(["--controlled-epoch", epochPath, "--site-parser-commit", SITE_SECONDARY_COMMIT, "--json"], true);
     assert.equal(JSON.parse(printed[0]!).controlled.state, "candidate");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -272,7 +435,7 @@ test("W1-T10843: the Sol x Sonnet release carries pre-registered secondaries and
     const observed = rows.filter((o) => o.outcome !== "unobserved");
     const clean = observed.filter((o) => o.outcome === "merged" && o.fixRounds === 0).length;
     assert.equal(firstPass!.arms[index]!.arm, arm.modelId);
-    assert.ok(Math.abs(firstPass!.arms[index]!.value - clean / observed.length) < 1e-9);
+    assert.ok(firstPass!.arms[index]!.value === Math.round(100 * clean / observed.length));
     assert.ok(clean < arm.successes, "repair rounds make first-pass strictly lower than the merge rate");
     const mean = rows.reduce((sum, o) => sum + o.fixRounds, 0) / rows.length;
     assert.equal(repair!.arms[index]!.value, Math.round(mean * 10) / 10, "one decimal, over every assigned task");
@@ -302,8 +465,7 @@ function productionFixture() {
   const task = (i: number) => `W1-T${1000 + i}`;
   const at = (i: number) => Date.UTC(2026, 8, 28) + i * 3_600_000;
   const iso = (ms: number) => new Date(ms).toISOString();
-  const stack = Object.fromEntries(["harness", "prompt", "tool", "scorer", "environment"].map((f, k) =>
-    [`${f}Revision`, { state: "observed", value: "abcde".charAt(k).repeat(40) }]));
+  const stack = { harnessRevision: { state: "observed", value: HEX("9") } };
   const rows: Record<string, unknown>[] = [];
   const pulls: Record<string, unknown> = {};
   const pull = (n: number, ids: string[], mergedAt: number) => {
@@ -344,24 +506,37 @@ test("W1-T10843: the registered sol61-vs-sonnet55 epoch is read from the ledger,
   try {
     const consentPath = join(root, "consent.json");
     writeFileSync(consentPath, JSON.stringify(CONSENT));
-    const SITE_COMMIT = "b".repeat(40);
+    const SITE_COMMIT = SITE_SECONDARY_COMMIT;
     const printed: string[] = [];
-    const run = async (name: string, extra: string[], opts: { store?: string; rows?: Record<string, unknown>[] } = {}) => {
+    const run = async (name: string, extra: string[], opts: { store?: string; rows?: Record<string, unknown>[]; protocol?: unknown; evidence?: unknown } = {}) => {
       const dir = join(root, name);
       mkdirSync(dir);
       writeFileSync(join(dir, "field-trials-github-v1.json"), JSON.stringify(fx.store(opts.store ?? "complete")));
+      writeFileSync(join(root, "benchmark-paid-pilot-v1.sol61-vs-sonnet55.protocol.json"), JSON.stringify({ protocol: opts.protocol ?? {
+        version: "benchmark-paid-pilot-v1", pilotId: "sol61-vs-sonnet55",
+        revisions: Object.fromEntries(Object.entries(PINS).map(([k, v]) => [`${k}Revision`, v])) } }));
       printed.length = 0;
       const code = await fieldTrialsCommand(["--source", "core=craigoley/remudero", "--ledger", `core=${root}`, "--out-dir", dir, "--consent", consentPath,
         "--offline", ...extra], buildFieldTrialsFlowSnapshot, { nowIso: AS_OF, print: (l) => printed.push(l), printError: () => undefined,
-        readLedger: async () => unavailableLedger("fixture"), resolveConfig: () => ({ root }), readRows: async () => opts.rows ?? fx.rows });
+        readLedger: async () => unavailableLedger("fixture"), resolveConfig: () => ({ root }), readRows: async () => opts.rows ?? fx.rows, readSiteEvidence: async () => opts.evidence ?? siteMainEvidence });
       return { dir, code, out: printed.join("\n") };
     };
     // the production path: no site commit named -> withheld, nothing emitted, never a merge-only release
     const withheld = await run("withheld", ["--controlled-registered", "sol61-vs-sonnet55"]);
     assert.match(withheld.out, /controlled release refused \(site-secondary-unavailable/);
     assert.equal(existsSync(join(withheld.dir, "controlled")), false);
-    // the site commit that accepts the keys is named: the epoch is derived from the ledger and built
-    const ok = await run("ok", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT]);
+    const unrelated = await run("unrelated", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", HEX("b")]);
+    assert.match(unrelated.out, /site-secondary-unavailable/);
+    assert.equal(existsSync(join(unrelated.dir, "controlled")), false);
+    const unmerged = await run("unmerged", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { evidence: { ...siteMainEvidence, status: "diverged" } });
+    assert.match(unmerged.out, /site-secondary-unavailable/);
+    assert.equal(existsSync(join(unmerged.dir, "controlled")), false);
+    const missingPins = await run("missing-pins", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { protocol: { pilotId: "different", revisions: {} } });
+    assert.match(missingPins.out, /revision-unavailable/);
+    assert.equal(existsSync(join(missingPins.dir, "controlled")), false);
+    // The accepting commit is on site main; revisions come from the registered protocol, not assignment receipts.
+    const ok = await run("ok", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT,
+      "--controlled-protocol", join(root, "benchmark-paid-pilot-v1.sol61-vs-sonnet55.protocol.json")]);
     assert.match(ok.out, /controlled candidate: controlled\/controlled-[0-9a-f]{16}\.candidate\.json \(never published/);
     const files = readdirSync(join(ok.dir, "controlled"));
     const candidate = JSON.parse(readFileSync(join(ok.dir, "controlled", files.find((f) => f.endsWith(".candidate.json"))!), "utf8"));
@@ -380,7 +555,7 @@ test("W1-T10843: the registered sol61-vs-sonnet55 epoch is read from the ledger,
       const want = expect(label);
       const arm = candidate.arms[index];
       assert.deepEqual([arm.assigned, arm.observed, arm.successes], [want.assigned, want.observed, want.successes], label);
-      assert.ok(Math.abs(candidate.secondary[0].arms[index].value - want.clean / want.observed) < 1e-9, `${label}: first-pass success`);
+      assert.ok(candidate.secondary[0].arms[index].value === Math.round(100 * want.clean / want.observed), `${label}: first-pass success`);
       assert.equal(candidate.secondary[1].arms[index].value, Math.round((want.rounds / want.assigned) * 10) / 10, `${label}: repair rounds per assigned task`);
     }
     assert.deepEqual(candidate.secondary.map((s: { metric: string }) => s.metric), ["first_pass_success", "repair_rounds_mean"]);
@@ -390,10 +565,15 @@ test("W1-T10843: the registered sol61-vs-sonnet55 epoch is read from the ledger,
     assert.equal(sidecar.repairedBy[fx.task(3)], fx.PROD_SON, "the repairing model is private sidecar data");
     assert.equal(sidecar.seed, "W1-T10843:sol61-vs-sonnet55:2026-10-27");
     assert.equal(JSON.stringify(candidate).includes(sidecar.seed), false);
-    assert.deepEqual(candidate.sourceRepos, [REPO]);
+    assert.deepEqual(candidate.sourceRepos, ["remudero"]);
     assert.equal(candidate.harnessRevision, "a".repeat(40));
     assert.equal(candidate.scorerRevision, "d".repeat(40));
     // an incomplete pull history observed no outcomes: the epoch refuses rather than count unread merges as failures
+    const lateRows = [...fx.rows, { step: "fix.dispatch", task_id: fx.task(4), ts: "2026-10-26T00:00:00.000Z", round_id: "late" }];
+    const lateDerived = deriveRegisteredEpoch("sol61-vs-sonnet55", { rows: lateRows,
+      merged: [{ trailerTaskIds: [fx.task(4)], mergedAt: "2026-10-26T00:00:00.000Z" }], mergesObservedThrough: AS_OF, sourceRepos: [REPO] })!;
+    assert.equal(lateDerived.outcomes.find((o) => o.taskId === fx.task(4))!.outcome, "not-merged");
+    assert.equal(lateDerived.outcomes.find((o) => o.taskId === fx.task(4))!.fixRounds, 0);
     const partial = await run("partial", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { store: "partial" });
     assert.match(partial.out, /controlled release refused \(horizon-not-reached/);
     assert.equal(existsSync(join(partial.dir, "controlled")), false);
@@ -402,6 +582,10 @@ test("W1-T10843: the registered sol61-vs-sonnet55 epoch is read from the ledger,
       ? { ...row, worker_assignment: { ...(row.worker_assignment as object), routing: { ...(row.worker_assignment as { routing: object }).routing, propensity: { method: "unavailable" } } } } : row);
     const audit = await run("audit", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { rows: unrecorded });
     assert.match(audit.out, /controlled release refused \(assignment-audit-failed: propensity-missing/);
+    const unknownServed = fx.rows.map((row) => row.step === "worker.attempt" ? { ...row, served_model: "gpt-6.1-terra" } : row);
+    const unknown = await run("unknown-served", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { rows: unknownServed });
+    assert.match(unknown.out, /served-arm-outside-registered-arms/);
+    assert.equal(existsSync(join(unknown.dir, "controlled")), false);
     // an empty ledger has no assignments; an unregistered epoch and a malformed site commit are refused
     assert.match((await run("empty", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { rows: [] })).out,
       /assignment-audit-failed: no-assignments-in-window/);
@@ -443,4 +627,60 @@ test("W1-T10843: no merge-only release before the site accepts secondaries", () 
     assert.equal("release" in result, false, "no merge-only release is emitted");
   }
   assert.equal(buildControlledFieldTrialsRelease(input()).state, "candidate", "the same input releases once the site accepts the keys");
+});
+
+test("W1-T10843: site support requires the vendored accepting commit on main", async () => {
+  const read = async () => siteMainEvidence;
+  assert.deepEqual(await verifySiteSecondarySupport(SITE_SECONDARY_COMMIT, async (path) => {
+    assert.equal(path, `repos/craigoley/remudero-site/compare/${SITE_SECONDARY_COMMIT}...main?per_page=1`);
+    return siteMainEvidence;
+  }), { ok: true });
+  for (const evidence of [null, { ...siteMainEvidence, base_commit: { sha: HEX("f") } }, { ...siteMainEvidence, merge_base_commit: null }]) {
+    assert.deepEqual(await verifySiteSecondarySupport(SITE_SECONDARY_COMMIT, async () => evidence), { ok: false, reason: "parser-commit-not-on-main" });
+  }
+  for (const status of ["behind", "diverged", "unknown"]) {
+    assert.deepEqual(await verifySiteSecondarySupport(SITE_SECONDARY_COMMIT, async () => ({ ...siteMainEvidence, status })),
+      { ok: false, reason: "parser-commit-not-on-main" });
+  }
+  assert.deepEqual(await verifySiteSecondarySupport(HEX("f"), read), { ok: false, reason: "parser-commit-not-vendored" });
+  assert.deepEqual(await verifySiteSecondarySupport(SITE_SECONDARY_COMMIT, async () => { throw new Error("offline"); }),
+    { ok: false, reason: "site-evidence-read-failed: offline" });
+});
+
+test("W1-T10843: secondary validation agrees with the real site parser", () => {
+  const release = built().release;
+  assert.equal(siteParserViolation(null), "keys");
+  const invalid = [
+    (r: typeof release) => { Object.assign(r, { extra: true }); },
+    (r: typeof release) => { Object.assign(r, { evidence: "observational" }); },
+    (r: typeof release) => { r.releaseId = "bad id"; },
+    (r: typeof release) => { r.publishedAt = "2026-02-30T00:00:00.000Z"; },
+    (r: typeof release) => { r.sourceRepos = []; },
+    (r: typeof release) => { r.sourceRepos.push(r.sourceRepos[0]!); },
+    (r: typeof release) => { r.consentRegistryRevision = "unregistered"; },
+    (r: typeof release) => { r.arms.pop(); },
+    (r: typeof release) => { Object.assign(r.arms[0]!, { extra: true }); },
+    (r: typeof release) => { r.arms[0]!.assigned = 0.5; },
+    (r: typeof release) => { r.arms[0]!.ciUpper = Infinity; },
+    (r: typeof release) => { r.arms[1]!.modelId = r.arms[0]!.modelId; },
+    (r: typeof release) => { r.secondary.push(r.secondary[0]!, r.secondary[0]!); },
+    (r: typeof release) => { r.adherence.analysis = "as-served" as never; },
+    (r: typeof release) => { r.secondary[0]!.arms[0]!.value = -1; },
+    (r: typeof release) => { r.secondary[0]!.arms[0]!.value = 0.5; },
+    (r: typeof release) => { r.secondary[0]!.arms[0]!.ciUpper = 101; },
+    (r: typeof release) => { r.secondary[1]!.arms[0]!.value = Infinity; },
+    (r: typeof release) => { r.secondary[1]!.arms[0]!.value = 0.55; },
+    (r: typeof release) => { r.secondary[1]!.arms[0]!.ciLower = -1; },
+    (r: typeof release) => { r.secondary[1]!.arms[0]!.arm = "outside"; },
+    (r: typeof release) => { r.secondary[1]!.arms.reverse(); },
+    (r: typeof release) => { r.secondary.push(r.secondary[0]!); },
+    (r: typeof release) => { Object.assign(r.secondary[0]!, { extra: true }); },
+    (r: typeof release) => { Object.assign(r.adherence, { extra: true }); },
+  ];
+  for (const mutate of invalid) {
+    const changed = structuredClone(release);
+    mutate(changed);
+    assert.equal(parseFieldTrialsRelease(changed), null);
+    assert.notEqual(siteParserViolation(changed), null);
+  }
 });

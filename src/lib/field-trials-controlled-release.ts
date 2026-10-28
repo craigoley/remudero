@@ -9,7 +9,7 @@
  *
  * PRE-REGISTERED ANALYSIS. The unit is the task; analysis is intention to treat by FIRST assignment (a
  * task served by the other arm stays in its assigned arm). Primary verified_completion = merged on
- * main by the exact `Remudero-Task` trailer by the window's end plus a 72 h censoring margin, which
+ * main by the exact `Remudero-Task` trailer by the window's end, with a 72 h censoring margin which
  * must have elapsed before any outcome is read. Secondaries: first_pass_success (merged with zero
  * fix-lane rounds) and repair_rounds_mean (fix-lane rounds per assigned task). Intervals resample TASKS,
  * 95 percent, from a fixed seed kept in the PRIVATE sidecar. Adherence is the crossover share of all
@@ -26,6 +26,8 @@ import { experimentArmForTask, experimentTaskIdentity, ROUTING_EXPERIMENTS } fro
 import { ROUTING_DRAW_METHOD } from "./worker-provider.js";
 
 export const CONTROLLED_RELEASE_SCHEMA = "field-trials-v1" as const;
+/** PORTAL-T43's accepting parser, vendored in the contract test (site PR #207). */
+export const SITE_SECONDARY_COMMIT = "eae03ec12a76227b4bf100d3d318111f43bf573c";
 /** The censoring margin after the window's end before any outcome is read. */
 export const CENSORING_MARGIN_MS = 72 * 3_600_000;
 export const BOOTSTRAP_RESAMPLES = 2000;
@@ -38,7 +40,8 @@ export const MISSINGNESS_MAX = 0.05;
 
 /** The consent registry's shape this builder reads; the flow's FieldTrialsConsent satisfies it (no import, so no cycle). */
 export interface ControlledConsent {
-  repos: { repo: string; rights: string; receipt: string; revoked?: boolean }[];
+  consentRegistryRevision?: string;
+  repos: { repo: string; sourceId?: string; rights: string; receipt: string; revoked?: boolean }[];
 }
 
 /** A registered randomized epoch: fixed before any outcome is read. */
@@ -167,6 +170,7 @@ export function assignmentAuditFailures(epoch: ControlledEpoch, windowRows: read
   const failures: string[] = [];
   if (windowRows.length === 0) return ["no-assignments-in-window"];
   if (windowRows.some((row) => !epoch.arms.includes(row.assignedArm))) failures.push("assigned-arm-outside-registered-arms");
+  if (windowRows.some((row) => row.servedArm !== null && !epoch.arms.includes(row.servedArm))) failures.push("served-arm-outside-registered-arms");
   if (windowRows.some((row) => row.propensity === "unavailable")) failures.push("propensity-missing");
   else if (windowRows.some((row) => row.propensity !== epoch.drawProbability)) failures.push("propensity-differs-from-registered-draw");
   const missing = windowRows.filter((row) => row.servedArm === null).length;
@@ -206,22 +210,58 @@ function interval(values: readonly number[], rng: () => number, places: number):
 }
 
 /** Everything the site's parser would reject, found here first. Returns the first violation or null. */
-export function siteParserViolation(release: ControlledFieldTrialsRelease): string | null {
-  const arms = release.arms;
-  if (!SITE_ID_PATTERN.test(release.releaseId)) return "releaseId";
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(release.publishedAt) || Number.isNaN(ms(release.publishedAt))) return "publishedAt";
-  for (const key of ["corpusRevision", "harnessRevision", "scorerRevision", "consentRegistryRevision"] as const) {
-    if (!SITE_ID_PATTERN.test(release[key])) return key;
+export function siteParserViolation(value: unknown): string | null {
+  const r = rec(value);
+  const exact = (obj: Record<string, unknown>, keys: readonly string[]) =>
+    Object.keys(obj).length === keys.length && keys.every((key) => Object.hasOwn(obj, key));
+  const base = ["schema", "releaseId", "status", "publicationScope", "publishedAt", "evidence", "randomizationUnit", "metric",
+    "intervalMethod", "corpusRevision", "harnessRevision", "scorerRevision", "assignmentAudit", "sourceRepos", "consentRegistryRevision", "arms"];
+  if (!r || base.some((key) => !Object.hasOwn(r, key)) || Object.keys(r).some((key) => ![...base, "adherence", "secondary"].includes(key))) return "keys";
+  const literals = { schema: "field-trials-v1", status: "published", publicationScope: "public-opt-in", evidence: "controlled",
+    randomizationUnit: "task", metric: "verified_completion", intervalMethod: "bootstrap-95-task", assignmentAudit: "pass" };
+  for (const [key, expected] of Object.entries(literals)) if (r[key] !== expected) return key;
+  for (const key of ["releaseId", "corpusRevision", "harnessRevision", "scorerRevision", "consentRegistryRevision"]) {
+    if (typeof r[key] !== "string" || !SITE_ID_PATTERN.test(r[key])) return key;
   }
-  if (release.sourceRepos.length === 0) return "sourceRepos";
-  if (arms.length !== 2 || arms[0].modelId === arms[1].modelId) return "arms";
+  if (typeof r.publishedAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(r.publishedAt)
+    || !Number.isFinite(ms(r.publishedAt)) || fixedClock(ms(r.publishedAt)).iso() !== r.publishedAt) return "publishedAt";
+  // Consent registry at the vendored parser commit; a new registry requires a reviewed contract update.
+  if (r.consentRegistryRevision !== "owner-2026-09-25-v1") return "consentRegistryRevision";
+  if (!Array.isArray(r.sourceRepos) || r.sourceRepos.length === 0 || new Set(r.sourceRepos).size !== r.sourceRepos.length
+    || r.sourceRepos.some((repo) => !["remudero", "remudero-console", "remudero-site"].includes(repo))) return "sourceRepos";
+  if (!Array.isArray(r.arms) || r.arms.length !== 2) return "arms";
+  const arms = r.arms.map(rec);
   for (const arm of arms) {
-    const rate = arm.successes / arm.observed;
-    if (!SITE_ID_PATTERN.test(arm.modelId) || !(arm.observed > 0 && arm.observed <= arm.assigned)
-      || !(arm.successes >= 0 && arm.successes <= arm.observed) || !Number.isInteger(arm.assigned) || !Number.isInteger(arm.successes)
-      || !(arm.ciLower >= 0 && arm.ciUpper <= 1 && arm.ciLower <= rate && rate <= arm.ciUpper)) return `arm:${arm.modelId}`;
+    if (!arm || !exact(arm, ["modelId", "assigned", "observed", "successes", "ciLower", "ciUpper"])
+      || typeof arm.modelId !== "string" || !SITE_ID_PATTERN.test(arm.modelId)) return "arm-shape";
+    const { assigned, observed, successes, ciLower, ciUpper } = arm;
+    if (![assigned, observed, successes].every(Number.isSafeInteger) || typeof assigned !== "number" || typeof observed !== "number"
+      || typeof successes !== "number" || !(observed > 0 && observed <= assigned && successes >= 0 && successes <= observed)) return "arm-counts";
+    if (typeof ciLower !== "number" || typeof ciUpper !== "number" || ![ciLower, ciUpper].every(Number.isFinite)
+      || !(ciLower >= 0 && ciLower <= successes / observed && successes / observed <= ciUpper && ciUpper <= 1)) return "arm-interval";
   }
-  if (release.secondary.length === 0 || release.secondary.length > 3) return "secondary";
+  if (arms[0]!.modelId === arms[1]!.modelId) return "arms-distinct";
+  const adherence = rec(r.adherence);
+  if (!adherence || !exact(adherence, ["crossoverPctBucket", "analysis"]) || adherence.analysis !== "intent-to-treat"
+    || !["<5%", "5-15%", "15-30%", ">30%"].includes(String(adherence.crossoverPctBucket))) return "adherence";
+  if (!Array.isArray(r.secondary) || r.secondary.length === 0 || r.secondary.length > 3) return "secondary";
+  const metrics = new Set();
+  for (const entry of r.secondary) {
+    const secondary = rec(entry);
+    if (!secondary || !exact(secondary, ["metric", "arms", "intervalMethod"]) || secondary.intervalMethod !== "bootstrap-95-task"
+      || !["first_pass_success", "repair_rounds_mean"].includes(String(secondary.metric)) || metrics.has(secondary.metric)
+      || !Array.isArray(secondary.arms) || secondary.arms.length !== 2) return "secondary-entry";
+    metrics.add(secondary.metric);
+    for (const [index, raw] of secondary.arms.entries()) {
+      const arm = rec(raw);
+      if (!arm || !exact(arm, ["arm", "value", "ciLower", "ciUpper"]) || arm.arm !== arms[index]!.modelId) return "secondary-arm";
+      const { value: point, ciLower, ciUpper } = arm;
+      if (typeof point !== "number" || typeof ciLower !== "number" || typeof ciUpper !== "number"
+        || ![point, ciLower, ciUpper].every(Number.isFinite) || !(0 <= ciLower && ciLower <= point && point <= ciUpper)) return "secondary-arm";
+      if (secondary.metric === "first_pass_success" ? !Number.isSafeInteger(point) || ciUpper > 100
+        : Number(point.toFixed(1)) !== point) return "secondary-value";
+    }
+  }
   return null;
 }
 
@@ -243,10 +283,13 @@ export function buildControlledFieldTrialsRelease(input: ControlledReleaseInput)
   if (typeof input.consent === "string") return refuse("consent-invalid", input.consent);
   const consent = input.consent;
   const receipts: string[] = [];
+  const sourceIds: string[] = [];
   for (const repo of epoch.sourceRepos) {
     const grant = consent.repos.find((entry) => entry.repo.toLowerCase() === repo.toLowerCase() && entry.revoked !== true
       && (entry.rights === "aggregate-opt-in" || entry.rights === "public-benchmark"));
     if (grant === undefined) return refuse("source-consent-missing", repo);
+    if (typeof grant.sourceId !== "string" || !SITE_ID_PATTERN.test(grant.sourceId)) return refuse("site-parser-would-reject", "sourceRepos: consent sourceId missing or invalid");
+    sourceIds.push(grant.sourceId);
     receipts.push(createHash("sha256").update(grant.receipt).digest("hex"));
   }
   if (epoch.sourceRepos.length === 0) return refuse("source-consent-missing", "no source repo registered");
@@ -259,10 +302,16 @@ export function buildControlledFieldTrialsRelease(input: ControlledReleaseInput)
   const first = firstAssignments(epoch, input.assignments);
   const failures = assignmentAuditFailures(epoch, windowRows, first);
   if (failures.length > 0) return refuse("assignment-audit-failed", failures.join(","));
+  if (input.outcomes.some((row) => first.has(row.taskId) && (!Number.isSafeInteger(row.fixRounds) || row.fixRounds < 0
+    || !["merged", "not-merged", "unobserved"].includes(row.outcome)
+    || (row.outcome === "merged" && (typeof row.mergedAt !== "string" || !Number.isFinite(ms(row.mergedAt))))))) {
+    return refuse("site-parser-would-reject", "outcome-invalid: repair rounds must be nonnegative integers and merges must be dated");
+  }
+  if (new Set(input.outcomes.map((row) => row.taskId)).size !== input.outcomes.length) return refuse("site-parser-would-reject", "outcome-duplicated");
   const outcomeOf = new Map(input.outcomes.map((row) => [row.taskId, row]));
   const tasks = [...first.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([taskId, row]) => {
     const outcome = outcomeOf.get(taskId);
-    const merged = outcome?.outcome === "merged" && typeof outcome.mergedAt === "string" && ms(outcome.mergedAt) <= cutoff;
+    const merged = outcome?.outcome === "merged" && typeof outcome.mergedAt === "string" && ms(outcome.mergedAt) >= ms(row.at) && ms(outcome.mergedAt) <= ms(epoch.window.end);
     return { taskId, arm: row.assignedArm, observed: outcome !== undefined && outcome.outcome !== "unobserved", merged,
       fixRounds: outcome?.fixRounds ?? 0, repairedBy: outcome?.repairedBy ?? null };
   });
@@ -287,19 +336,19 @@ export function buildControlledFieldTrialsRelease(input: ControlledReleaseInput)
     const primary = interval(success, rng, 6);
     arms.push({ modelId, assigned: assignedTasks.length, observed: observed.length, successes: success.reduce((a, b) => a + b, 0),
       ciLower: primary.ciLower, ciUpper: primary.ciUpper });
-    const pass = interval(observed.map((task) => Number(task.merged && task.fixRounds === 0)), rng, 6);
-    firstPass.push({ arm: modelId, value: pass.value, ciLower: pass.ciLower, ciUpper: pass.ciUpper });
+    const pass = interval(observed.map((task) => 100 * Number(task.merged && task.fixRounds === 0)), rng, 0);
+    firstPass.push({ arm: modelId, value: Math.round(pass.value), ciLower: pass.ciLower, ciUpper: pass.ciUpper });
     const rounds = interval(assignedTasks.map((task) => task.fixRounds), rng, 1);
     repair.push({ arm: modelId, value: Math.round(rounds.value * 10) / 10, ciLower: rounds.ciLower,
       ciUpper: Math.max(rounds.ciUpper, Math.round(rounds.value * 10) / 10) });
   }
-  const crossed = windowRows.filter((row) => row.servedArm !== row.assignedArm).length;
+  const crossed = windowRows.filter((row) => row.servedArm !== null && row.servedArm !== row.assignedArm).length;
   const body = {
     schema: CONTROLLED_RELEASE_SCHEMA, releaseId: "", status: "published" as const, publicationScope: "public-opt-in" as const,
     publishedAt: fixedClock(asOf).iso(), evidence: "controlled" as const, randomizationUnit: "task" as const,
     metric: "verified_completion" as const, intervalMethod: "bootstrap-95-task" as const, corpusRevision: epoch.corpusRevision,
     harnessRevision: pins.harness!, scorerRevision: pins.scorer!, assignmentAudit: "pass" as const,
-    sourceRepos: [...epoch.sourceRepos], consentRegistryRevision: createHash("sha256").update(JSON.stringify(consent)).digest("hex"),
+    sourceRepos: sourceIds, consentRegistryRevision: consent.consentRegistryRevision ?? "",
     arms: arms as [ControlledArm, ControlledArm],
     adherence: { crossoverPctBucket: crossoverBucket(crossed, windowRows.length), analysis: "intent-to-treat" as const },
     secondary: [
@@ -344,6 +393,8 @@ const REGISTERED_EPOCHS: readonly EpochRegistration[] = [{
 /** What the flow read: the raw ledger union rows and the merged pulls (by exact trailer) of the epoch's source repos. */
 export interface LedgerEpochFacts {
   rows: Iterable<Record<string, unknown>>;
+  /** Registered protocol's pinned stack, independent of per-assignment receipt completeness. */
+  protocol?: { epochId: string; stack: Record<string, unknown> };
   merged: readonly { trailerTaskIds: readonly string[]; mergedAt: string | null }[];
   /** The time through which every source repo's pull history was read to completion, or null when any is incomplete. */
   mergesObservedThrough: string | null;
@@ -367,20 +418,19 @@ const nonEmpty = (value: unknown): string | undefined => typeof value === "strin
  * was recorded through selectionPropensity with ROUTING_DRAW_METHOD); the served arm is the receipt's served
  * model, else the decision's served arm. Outcomes: merged = a merged pull naming the task as its ONLY
  * `Remudero-Task` trailer, at or after the task's first assignment; repair rounds = the fix lane's distinct
- * `fix.dispatch` rounds for the task up to the censoring cutoff. Returns null for an unregistered epoch.
+ * `fix.dispatch` rounds for the task within the outcome window. Returns null for an unregistered epoch.
  */
 export function deriveRegisteredEpoch(epochId: string, facts: LedgerEpochFacts): DerivedEpoch | null {
   const reg = REGISTERED_EPOCHS.find((entry) => entry.epochId === epochId);
   const experiment = ROUTING_EXPERIMENTS.find((entry) => entry.id === reg?.experimentId);
   if (reg === undefined || experiment === undefined) return null;
   const modelIds = Object.values(reg.models);
-  const armOf = (model: string | undefined) => model === undefined ? null : modelIds.find((id) => model === id || model.startsWith(`${id}-`)) ?? null;
+  const armOf = (model: string | undefined) => model === undefined ? null : modelIds.find((id) => model === id || model.startsWith(`${id}-`)) ?? model;
   const assignments: EpochAssignment[] = [];
   const assignmentIds = new Map<EpochAssignment, string>();
   const served = new Map<string, string>();
   const fixRounds: { taskId: string; at: number; roundId: string | undefined }[] = [];
   const fixModel = new Map<string, string>();
-  const pinSeen: Record<string, Set<string>> = { harness: new Set(), prompt: new Set(), tool: new Set(), scorer: new Set(), environment: new Set() };
   for (const row of facts.rows) {
     const step = nonEmpty(row.step);
     const taskId = nonEmpty(row.task_id);
@@ -406,8 +456,6 @@ export function deriveRegisteredEpoch(epochId: string, facts: LedgerEpochFacts):
       assignments.push(entry);
       const id = nonEmpty(assignment?.id);
       if (id !== undefined) assignmentIds.set(entry, id);
-      const pins = trialRevisionPins(rec(rec(row.benchmark_run)?.stack));
-      for (const field of Object.keys(pinSeen)) if (pins[field as keyof TrialRevisionPins] !== null) pinSeen[field]!.add(pins[field as keyof TrialRevisionPins]!);
     } else if (receiptId !== undefined && (step === "worker.attempt" || step === "verdict") && nonEmpty(row.served_model) !== undefined) {
       served.set(receiptId, row.served_model as string);
     } else if (step === "fix.dispatch" && taskId !== undefined && at !== undefined && row.kind !== "proof_amendment" && Number.isFinite(ms(at))) {
@@ -437,16 +485,16 @@ export function deriveRegisteredEpoch(epochId: string, facts: LedgerEpochFacts):
   const outcomes = [...first.entries()].map(([taskId, row]): EpochTaskOutcome => {
     const start = ms(row.at);
     const rounds = new Map<string, string | undefined>();
-    for (const [index, round] of fixRounds.filter((r) => r.taskId === taskId && r.at >= start && r.at <= cutoff).entries()) {
+    for (const [index, round] of fixRounds.filter((r) => r.taskId === taskId && r.at >= start && r.at <= ms(reg.window.end)).entries()) {
       rounds.set(round.roundId ?? `unnamed:${index}`, round.roundId);
     }
     const repaired = [...new Set([...rounds.values()].flatMap((id) => id === undefined || !fixModel.has(id) ? [] : [fixModel.get(id)!]))];
     const base = { taskId, fixRounds: rounds.size, ...(repaired.length > 0 ? { repairedBy: repaired.join(",") } : {}) };
     if (!readThrough) return { ...base, outcome: "unobserved" };
-    const merge = (mergesOf.get(taskId) ?? []).filter((at) => at >= start).sort((a, b) => a - b)[0];
+    const merge = (mergesOf.get(taskId) ?? []).filter((at) => at >= start && at <= ms(reg.window.end)).sort((a, b) => a - b)[0];
     return merge === undefined ? { ...base, outcome: "not-merged", mergedAt: null } : { ...base, outcome: "merged", mergedAt: fixedClock(merge).iso() };
   });
-  const pins = Object.fromEntries(Object.entries(pinSeen).map(([field, seen]) => [field, seen.size === 1 ? [...seen][0]! : null])) as TrialRevisionPins;
+  const pins = trialRevisionPins(facts.protocol?.epochId === epochId ? facts.protocol.stack : undefined);
   return { epoch, assignments, outcomes, pins };
 }
 
