@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { stringify } from "yaml";
 import { fixedClock } from "#src/lib/clock.js";
-import { ProductBuildService, type BuildTask, type ProductBuildTarget, type TargetInspection, type TaskRead } from "#src/lib/product-build.js";
+import { ProductBuildService, productBuildKickOrigin, readTargetExecution, type BuildTask, type ProductBuildTarget, type TargetInspection, type TaskRead } from "#src/lib/product-build.js";
 import { ProductCaseService } from "#src/lib/product-case.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import type { StoredProduct } from "#src/lib/product-intent.js";
@@ -12,6 +12,7 @@ import { productCasePlanText, productPlanOrigin, verifyProductPlanEvidence, type
 import type { ProductRepositoryProvider } from "#src/lib/product-repository.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const actor = "clerk:alice";
 const REVIEWED = "1".repeat(40);
@@ -227,7 +228,10 @@ class FakeTarget implements ProductBuildTarget {
 }
 
 test("W1-T10823: a product build refuses more active builds than its envelope allows", async (t) => {
-  for (const [allowed, second] of [[1, "concurrency_exceeded"], [2, undefined]] as const) {
+  for (const [allowed, nativeState, second] of [
+    [1, "unknown", "concurrency_exceeded"], [2, "unknown", undefined],
+    [1, "dispatched", "concurrency_exceeded"], [2, "dispatched", undefined],
+  ] as const) {
     const root = ownedFixtureDir(t, "product-plan-envelope").dir;
     const store = new ProductIntentStore({ root });
     const saved = store.write(actor, { version: "product-intent-v1", requestId: "seed-product-00001", expectedRevision: 0,
@@ -252,8 +256,17 @@ test("W1-T10823: a product build refuses more active builds than its envelope al
       planEvidenceId: plan.id, taskId, expectedRevision, expectedObjectiveRevision: 1 });
     const first = await start("W9-T1", "build-request-0001", 2);
     assert.ok(first.ok, JSON.stringify(first));
+    if (nativeState === "dispatched") {
+      const state = join(stateBase, "wreckterra", "state");
+      const origin = productBuildKickOrigin(productId, first.value.receipt.operationId);
+      const requestedAt = "2026-10-26T01:00:00.000Z";
+      writeLedger([{ ts: requestedAt, run_id: "DAEMON-1", task_id: "DAEMON", step: "console.kick_dispatched",
+        lane: "daemon", task: "W9-T1", origin, repo: "wreckterra" }], { dir: state });
+      assert.deepEqual(readTargetExecution(state, { taskId: "W9-T1", origin, repo: "wreckterra", requestedAt,
+        nowMs: Date.parse(requestedAt) }), { state: "dispatched" }, "the real ledger reader sees this request before run.start");
+    }
     const next = await start("W9-T2", "build-request-0002", 3);
-    assert.equal(next.ok ? undefined : next.code, second, `maxConcurrentBuilds ${allowed}`);
+    assert.equal(next.ok ? undefined : next.code, second, `maxConcurrentBuilds ${allowed}, native state ${nativeState}`);
   }
 });
 

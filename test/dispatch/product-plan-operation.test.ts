@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, fstatSync, fsyncSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { createHash } from "node:crypto";
@@ -71,10 +71,11 @@ function fixture(t: TestContext, over: { planned?: "clarify" | "create" | "unrea
     return JSON.stringify([{ name: "WRECK-T1-first.yaml" }]);
   };
   const checkout = join(root, "repos", "wreckterra");
-  const service = (options: { alive?: boolean; head?: string; gateway?: boolean } = {}) => new ProductPlanOperationService({
+  const service = (options: { alive?: boolean; head?: string; gateway?: boolean; sync?: (fd: number) => void } = {}) => new ProductPlanOperationService({
     root, store, provider, target, bootstrapConfirmed, ledgerPath, text, checkout: (repo: PlanRepository) => repo.name === "wreckterra" ? checkout : undefined,
     clock: fixedClock(Date.parse(REQUESTED)), isAlive: () => options.alive ?? true,
     ...(options.gateway === false || over.gateway === false ? {} : { gateway }),
+    ...(options.sync === undefined ? {} : { sync: options.sync }),
   });
   let ledger: LedgerFixture | undefined;
   const row = (atMs: number, line: Record<string, unknown>) => {
@@ -496,4 +497,79 @@ test("W1-T10823: native identity survives the child starting before its gateway 
   f.row(at(2_000), { task_id: productPlanLedgerTaskId(first.observation.operationId), step: "ratify.cli_started", pid: 4242 });
   f.row(at(3_000), { run_id: "PLAN-clarify-early", task_id: "PLAN-clarify", step: "pr.opened", pr_url: PR_URL });
   assert.equal((await ok(f.service({ gateway: false }).execute(actor, f.command()))).observation.state, "proposed");
+});
+
+
+test("W1-T10823: an unreadable live target on replay preserves its native pending operation", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  nativeRun(f, first.observation.operationId);
+  f.target.inspect = async () => { throw new Error("target read interrupted"); };
+  const replayed = await ok(f.service().execute(actor, f.command()));
+  assert.equal(replayed.replayed, true);
+  assert.equal(replayed.observation.operationId, first.observation.operationId);
+  assert.equal(replayed.observation.state, "pending", "an unreadable head is not a stale target or another hand-off");
+  assert.equal(f.calls.length, 1);
+});
+
+test("W1-T10823: a blocked journal directory refuses before any plan hand-off", async (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.journalDirectory, ".."), { recursive: true });
+  writeFileSync(f.journalDirectory, "existing file blocks the directory");
+  assert.equal(await refused(f.service().execute(actor, f.command())), "unavailable");
+  assert.equal(readFileSync(f.journalDirectory, "utf8"), "existing file blocks the directory");
+  assert.equal(f.calls.length, 0);
+  assert.equal(revisionOf(f), 2);
+});
+
+test("W1-T10823: a journal flush failure removes its uncommitted stage and launches nothing", async (t) => {
+  const f = fixture(t);
+  const service = f.service({ sync: () => { throw new Error("file flush failed"); } });
+  assert.equal(await refused(service.execute(actor, f.command())), "unavailable");
+  assert.equal(f.calls.length, 0);
+  assert.equal(revisionOf(f), 2);
+  assert.deepEqual(readdirSync(f.journalDirectory).filter((name) => name.endsWith(".pending") || name.endsWith(".json")), [],
+    "failure before rename leaves neither a stage nor a committed operation");
+});
+
+test("W1-T10823: a journal cleanup failure retains its stage while refusing the hand-off", async (t) => {
+  const f = fixture(t);
+  let retained: string | undefined;
+  const service = f.service({ sync: () => {
+    const name = readdirSync(f.journalDirectory).find((entry) => entry.endsWith(".pending"));
+    assert.ok(name, "the default writer staged its actual journal bytes");
+    retained = join(f.journalDirectory, name);
+    renameSync(retained, retained + ".original");
+    mkdirSync(retained);
+    throw new Error("flush failed; staged path is now a directory");
+  } });
+  assert.equal(await refused(service.execute(actor, f.command())), "unavailable");
+  assert.ok(retained && statSync(retained).isDirectory(), "failed unlink is retained for the owned fixture cleanup");
+  assert.equal(readdirSync(f.journalDirectory).filter((name) => name.endsWith(".json")).length, 0);
+  assert.equal(f.calls.length, 0);
+  assert.equal(revisionOf(f), 2);
+});
+
+test("W1-T10823: a directory flush failure preserves an unknown committed operation without relaunch", async (t) => {
+  const f = fixture(t);
+  let fileFlushes = 0, directoryFlushes = 0;
+  const service = f.service({ sync: (fd) => {
+    if (fstatSync(fd).isDirectory()) { directoryFlushes += 1; throw new Error("directory flush failed"); }
+    fsyncSync(fd);
+    fileFlushes += 1;
+  } });
+  assert.equal(await refused(service.execute(actor, f.command())), "outcome_unknown");
+  assert.equal(fileFlushes, 1);
+  assert.equal(directoryFlushes, 1);
+  const files = readdirSync(f.journalDirectory).filter((name) => name.endsWith(".json"));
+  assert.equal(files.length, 1);
+  const journal = JSON.parse(readFileSync(join(f.journalDirectory, files[0]!), "utf8"));
+  const operations = Object.values(journal.operations) as { operationId: string }[];
+  assert.equal(operations.length, 1);
+  assert.equal(f.calls.length, 0, "no hand-off preceded durable directory confirmation");
+  const replayed = await ok(f.service().execute(actor, f.command()));
+  assert.equal(replayed.replayed, true);
+  assert.equal(replayed.observation.operationId, operations[0]!.operationId);
+  assert.equal(replayed.observation.state, "unknown");
+  assert.equal(f.calls.length, 0, "a lost durable outcome never retries the planner");
 });
