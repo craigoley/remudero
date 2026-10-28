@@ -18,6 +18,9 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fixedClock } from "./clock.js";
+import type { PreflightFastDeps } from "./ci-parity.js";
+import { hostWorktreeGit, hostWorktreeGitEnv } from "./worktree-git.js";
 import { ghJson } from "./github-transport.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
 import { createPlanPrRest, probeExistingPlanPr } from "./plan-pr-emitter.js";
@@ -52,13 +55,6 @@ export type SiteImportOutcome =
 
 export interface SiteImportRun { status: number | null; stdout: string; stderr: string }
 
-export interface SiteImportDeps {
-  fetch?: GhApiFetcher;
-  /** Clone source for site main; a test passes a local repository. */
-  siteUrl?: string;
-  run?: (file: string, args: string[], cwd: string) => SiteImportRun;
-}
-
 export interface SiteImportInput {
   /** Private scratch parent; the pass's own directory under it is removed afterwards. */
   workRoot: string;
@@ -67,9 +63,18 @@ export interface SiteImportInput {
   exportCandidate: (released: readonly SiteRelease[]) => FieldNoteExport;
 }
 
-function defaultRun(file: string, args: string[], cwd: string): SiteImportRun {
-  const result = spawnSync(file, args, { cwd, encoding: "utf8", timeout: 180_000, maxBuffer: 16 * 1024 * 1024 });
+const defaultStageSpawn: NonNullable<PreflightFastDeps["spawn"]> = (file, args, opts) => {
+  const result = spawnSync(file, args, { cwd: opts?.cwd, env: opts?.env, encoding: "utf8", timeout: 180_000, maxBuffer: 16 * 1024 * 1024 });
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.error ? String(result.error) : result.stderr ?? "" };
+};
+
+function runGit(args: string[], cwd: string): SiteImportRun {
+  try {
+    return { status: 0, stdout: hostWorktreeGit(cwd, args, { timeout: 180_000, maxBuffer: 16 * 1024 * 1024 }), stderr: "" };
+  } catch (error) {
+    const failed = error as { status?: number; stdout?: string | Buffer; stderr?: string | Buffer };
+    return { status: failed.status ?? null, stdout: String(failed.stdout ?? ""), stderr: String(failed.stderr ?? error) };
+  }
 }
 
 function readReleases(siteDir: string): SiteRelease[] | string {
@@ -83,8 +88,8 @@ function readReleases(siteDir: string): SiteRelease[] | string {
 }
 
 /** The changed paths of the staged checkout; anything outside data/ or any deletion is a refusal. */
-function stagedFiles(run: NonNullable<SiteImportDeps["run"]>, siteDir: string): string[] | string {
-  const status = run("git", ["status", "--porcelain=v1", "--untracked-files=all"], siteDir);
+function stagedFiles(siteDir: string): string[] | string {
+  const status = runGit(["status", "--porcelain=v1", "--untracked-files=all"], siteDir);
   if (status.status !== 0) return `git-status-failed: ${status.stderr.trim()}`;
   const files: string[] = [];
   for (const line of status.stdout.split("\n").filter(Boolean)) {
@@ -96,9 +101,9 @@ function stagedFiles(run: NonNullable<SiteImportDeps["run"]>, siteDir: string): 
 }
 
 /** Write the staged files onto ONE branch over REST and keep ONE ready PR open for it. */
-function publish(fetch: GhApiFetcher, siteDir: string, run: NonNullable<SiteImportDeps["run"]>, workDir: string,
+function publish(fetch: GhApiFetcher, siteDir: string, workDir: string,
   releaseId: string, files: string[], summary: string): Extract<SiteImportOutcome, { state: "staged" }> {
-  const head = run("git", ["rev-parse", "HEAD", "HEAD^{tree}"], siteDir);
+  const head = runGit(["rev-parse", "HEAD", "HEAD^{tree}"], siteDir);
   const [baseSha, baseTree] = head.stdout.trim().split("\n");
   if (head.status !== 0 || !baseSha || !baseTree) throw new Error(`git-rev-parse-failed: ${head.stderr.trim()}`);
   const repo = `repos/${SITE_IMPORT_OWNER}/${SITE_IMPORT_REPO}`;
@@ -136,14 +141,19 @@ function publish(fetch: GhApiFetcher, siteDir: string, run: NonNullable<SiteImpo
  * One pass of the daily site import: fresh site main, the exporter after its released windows, the site's
  * own stage mode, and — only on `staged` — one open import PR. Every outcome is a value, never a throw.
  */
-export function syncFieldNoteSiteImport(input: SiteImportInput, deps: SiteImportDeps = {}): SiteImportOutcome {
-  const run = deps.run ?? defaultRun;
+export function syncFieldNoteSiteImport(input: SiteImportInput,
+  deps: Pick<PreflightFastDeps, "spawn"> & { fetch?: GhApiFetcher; siteUrl?: string } = {}): SiteImportOutcome {
+  const spawn = deps.spawn ?? defaultStageSpawn;
   mkdirSync(input.workRoot, { recursive: true, mode: 0o700 });
   const workDir = mkdtempSync(join(input.workRoot, "site-import-"));
   try {
     const siteDir = join(workDir, "site");
     const url = deps.siteUrl ?? `https://github.com/${SITE_IMPORT_OWNER}/${SITE_IMPORT_REPO}.git`;
-    const clone = run("git", ["clone", "--quiet", "--single-branch", "--branch", SITE_IMPORT_BASE, url, siteDir], workDir);
+    // No repository exists to pin before clone. Keep the leaf's config hardening, without its pin.
+    const { GIT_DIR: _gitDir, GIT_WORK_TREE: _workTree, ...cloneEnv } = hostWorktreeGitEnv({
+      worktree: workDir, gitDir: join(workDir, ".git"), source: "git-directory" });
+    const clone = spawn("git", ["clone", "--quiet", "--single-branch", "--branch", SITE_IMPORT_BASE, url, siteDir],
+      { cwd: workDir, env: cloneEnv });
     if (clone.status !== 0) return { state: "site-checkout-failed", reason: `git-clone-exit-${clone.status}: ${clone.stderr.trim()}` };
     const released = readReleases(siteDir);
     if (typeof released === "string") return { state: "site-checkout-failed", reason: released };
@@ -162,11 +172,11 @@ export function syncFieldNoteSiteImport(input: SiteImportInput, deps: SiteImport
     }
     if (!script.includes("--daily-stage")) return { state: "site-stage-mode-unavailable", releaseId };
     // The site's collector-staged shape: the note plus the staging stamps. No review field, ever.
-    const stampedAt = new Date(Date.parse(input.nowIso)).toISOString();
+    const stampedAt = fixedClock(Date.parse(input.nowIso)).iso();
     const candidatePath = join(workDir, "candidate.json"), summaryPath = join(workDir, "summary.md");
     writeFileSync(candidatePath, JSON.stringify({ ...exported.note, publishedAt: stampedAt,
       stagedBy: "field-trials-collector", stagedAt: stampedAt }), { mode: 0o600 });
-    const stage = run(process.execPath, ["--experimental-strip-types", SITE_STAGE_SCRIPT, "--daily-stage", candidatePath, summaryPath], siteDir);
+    const stage = spawn(process.execPath, ["--experimental-strip-types", SITE_STAGE_SCRIPT, "--daily-stage", candidatePath, summaryPath], { cwd: siteDir });
     const line = stage.stdout.trim().split("\n").at(-1) ?? "";
     let reported: { outcome?: string; reason?: string } = {};
     try { reported = JSON.parse(line) as typeof reported; }
@@ -181,10 +191,10 @@ export function syncFieldNoteSiteImport(input: SiteImportInput, deps: SiteImport
     if (stage.status !== SITE_STAGE_EXIT.staged || reported.outcome !== "staged") {
       return { state: "stage-failed", releaseId, reason: `stage-exit-${stage.status}: ${stage.stderr.trim() || line}` };
     }
-    const files = stagedFiles(run, siteDir);
+    const files = stagedFiles(siteDir);
     if (typeof files === "string") return { state: "stage-failed", releaseId, reason: files };
     const summary = readFileSync(summaryPath, "utf8");
-    try { return publish(deps.fetch ?? ghJson, siteDir, run, workDir, releaseId, files, summary); }
+    try { return publish(deps.fetch ?? ghJson, siteDir, workDir, releaseId, files, summary); }
     catch (error) {
       const reason = String(error instanceof Error ? error.message : error);
       return { state: "publish-failed", releaseId, reason, grant: SITE_IMPORT_GRANT };

@@ -34,7 +34,7 @@ import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-v
 import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { ghInteractiveRead } from "./github-transport.js";
-import { syncFieldNoteSiteImport, type FieldNoteExport, type SiteImportDeps, type SiteImportOutcome, type SiteRelease } from "./field-trials-site-import.js";
+import { syncFieldNoteSiteImport, type FieldNoteExport, type SiteImportOutcome, type SiteRelease } from "./field-trials-site-import.js";
 import { appendLedger } from "./ledger.js";
 import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol } from "./benchmark-paid-pilot.js";
 import { parseRefreshSteps, recordFieldTrialsRefresh, refreshSection, type FieldTrialsRefresh, type RefreshStep } from "./field-trials-refresh.js";
@@ -1350,7 +1350,7 @@ export interface FieldTrialsCommandInput {
   /** W1-T10843: the raw ledger-union rows of one state dir, read for a registered controlled epoch. */
   readRows?: (stateDir: string) => Promise<Record<string, unknown>[]>;
   /** W1-T10832: the site import's git, stage and REST seams. */
-  siteImport?: SiteImportDeps;
+  siteImport?: Parameters<typeof syncFieldNoteSiteImport>[1];
 }
 
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
@@ -1411,7 +1411,7 @@ function fieldNoteMode(args: { outDir: string; out: string; nowIso: string; json
  * the pass's field-trials.refresh row; it never changes the refresh's exit code.
  */
 function siteImportPass(args: { outDir: string; nowIso: string; consent: FieldTrialsConsent | string | null; offline: boolean;
-  ledgerPath: string; scriptBlob: string; deps: SiteImportDeps | undefined }): SiteImportOutcome {
+  ledgerPath: string; scriptBlob: string; deps: Parameters<typeof syncFieldNoteSiteImport>[1] | undefined }): SiteImportOutcome {
   const outcome: SiteImportOutcome = args.consent === null ? { state: "withheld", reason: "no-consent-receipt" }
     : typeof args.consent === "string" ? { state: "withheld", reason: args.consent }
     : args.offline ? { state: "withheld", reason: "offline-pass" }

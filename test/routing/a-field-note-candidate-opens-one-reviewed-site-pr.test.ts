@@ -8,20 +8,20 @@
  * one JSON stdout line, the two data files plus an outside summary); GitHub is an in-memory REST fake.
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand, readFieldTrialsLedger } from "#src/lib/field-trials-flow.js";
-import { SITE_IMPORT_BRANCH, SITE_IMPORT_GRANT, syncFieldNoteSiteImport, type FieldNoteExport, type SiteImportDeps } from "#src/lib/field-trials-site-import.js";
+import { SITE_IMPORT_BRANCH, SITE_IMPORT_GRANT, syncFieldNoteSiteImport, type FieldNoteExport } from "#src/lib/field-trials-site-import.js";
 import type { ModelFieldNoteBody } from "#src/lib/field-trials-field-note.js";
-import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
 import { taskIdFromHeadRef } from "#src/lib/body-repair.js";
 import { taskIdFromRunBranch, taskIdFromSlugBranch } from "#src/lib/status.js";
 import { isDispatchedRunBranch } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { recordingGitHubApi } from "#test/helpers/fake-github.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const DAY = (day: number, hour = 0) => new Date(Date.UTC(2026, 8, day, hour)).toISOString();
@@ -29,17 +29,14 @@ const BLOB = "b".repeat(40);
 // The site's collector-staged key set (remudero-site lib/model-field-note.ts collectorStagedKeys, read 2026-10-28).
 const SITE_STAGED_KEYS = ["schema", "releaseId", "status", "publicationScope", "evidence", "publishedAt", "windowStart",
   "windowEnd", "asOf", "sourceDigest", "sourceRepos", "consentRegistryRevision", "rows", "stagedBy", "stagedAt"].sort();
+type SiteImportOptions = NonNullable<Parameters<typeof syncFieldNoteSiteImport>[1]>;
 type Mode = "staged" | "unchanged" | "refused" | "no-daily-stage" | "absent" | "outside-data" | "garbled" | "usage"
-  | "staged-nothing" | "dir-script";
-
-function git(cwd: string, ...args: string[]) {
-  const result = spawnSync("git", ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", ...args], { cwd, encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr);
-}
+  | "staged-nothing" | "dir-script" | "git-hook" | "git-config-refused";
 
 /** A real site repository on `main` with the history it has released and a stage stub in `mode`. */
-function siteRepository(root: string, mode: Mode, released: Record<string, unknown>[] = []) {
-  const dir = join(root, `site-origin-${mode}-${released.length}-${Math.random().toString(36).slice(2)}`);
+function stageFixture(scope: Pick<TestContext, "after">, root: string, mode: Mode, released: Record<string, unknown>[] = []) {
+  const repo = gitRepo({ scope, seedCommit: false, kind: "site-origin" });
+  const dir = repo.dir;
   const seen = join(root, "seen-candidates.ndjson");
   mkdirSync(join(dir, "data"), { recursive: true });
   mkdirSync(join(dir, "scripts"));
@@ -68,26 +65,29 @@ history.releases.push({ releaseId: note.releaseId, windowStart: note.windowStart
   sourceRepos: note.sourceRepos, lineageDigest: "fixture", publishedAt: note.publishedAt });
 writeFileSync("data/model-field-note-history.json", JSON.stringify(history, null, 2));
 writeFileSync("data/model-field-note.json", JSON.stringify(note, null, 2));
+if (mode === "git-hook") {
+  writeFileSync(".git/fsmonitor-hook", "#!" + process.execPath + "\\nrequire('node:fs').writeFileSync("
+    + ${JSON.stringify(JSON.stringify(join(root, "git-hook-ran")))} + ", 'ran');\\n", { mode: 0o700 });
+  appendFileSync(".git/config", "\\n[core]\\nfsmonitor = .git/fsmonitor-hook\\n");
+}
+if (mode === "git-config-refused") appendFileSync(".git/config", "\\n[core]\\neditor = untrusted-editor\\n");
 if (mode === "outside-data") writeFileSync("README.md", "edited");
 writeFileSync(summaryPath, "## Daily field note candidate: " + note.releaseId + "\\n\\n- UTC window: " + note.windowStart + " – "
   + note.windowEnd + " UTC\\n- Review: the owner merge of this PR is the review.\\n");
 console.log(JSON.stringify({ outcome: "staged", releaseId: note.releaseId }));
 `);
-  git(dir, "init", "-q", "-b", "main");
-  git(dir, "add", "-A");
-  git(dir, "commit", "-q", "-m", "site main");
+  repo.git("add", "-A");
+  repo.git("commit", "-q", "-m", "site main");
   return { url: pathToFileURL(dir).href, seen };
 }
 
 /** In-memory GitHub REST for craigoley/remudero-site: git data, refs, and pulls. Records every call. */
-function fakeGithub(opts: { failWrites?: boolean } = {}) {
-  const calls: string[][] = [];
+function siteRest(opts: { failWrites?: boolean } = {}) {
   const state = { branch: false, head: "", trees: [] as { base_tree: string; tree: { path: string; content: string }[] }[],
     commits: [] as { parents: string[]; tree: string }[],
     prs: [] as { number: number; html_url: string; title: string; body: string; head: string; base: string; open: boolean; draft: boolean }[] };
   const field = (args: string[], name: string) => args.find((arg) => arg.startsWith(`${name}=`))?.slice(name.length + 1);
-  const fetch: GhApiFetcher = (args) => {
-    calls.push(args);
+  const api = recordingGitHubApi((args) => {
     const method = args[1] === "--method" ? args[2]! : "GET";
     const path = method === "GET" ? args[1]! : args[3]!;
     const input = args.includes("--input") ? JSON.parse(readFileSync(args[args.indexOf("--input") + 1]!, "utf8")) : undefined;
@@ -114,8 +114,8 @@ function fakeGithub(opts: { failWrites?: boolean } = {}) {
       pr.title = field(args, "title")!; pr.body = field(args, "body")!; return pr;
     }
     throw new Error(`unexpected GitHub call: ${args.join(" ")}`);
-  };
-  return { fetch, calls, state };
+  });
+  return { ...api, state };
 }
 
 /** The ledger rows of one day: 20 served assignments of one model on each given day. */
@@ -131,7 +131,7 @@ function rowsFor(days: number[]): Record<string, unknown>[] {
 }
 
 /** One full daily `rmd field-trials` refresh pass, online against fakes, with the owner's consent file. */
-async function dailyPass(root: string, nowIso: string, days: number[], siteImport: SiteImportDeps) {
+async function dailyPass(root: string, nowIso: string, days: number[], siteImport: SiteImportOptions) {
   const stateDir = join(root, "state"), outDir = join(stateDir, "field-trials");
   mkdirSync(outDir, { recursive: true });
   const consent = join(root, "consent.json");
@@ -169,7 +169,7 @@ async function withheldPass(root: string, consent: string | null, offline: boole
       try { return await readFieldTrialsLedger(fixture.dir, Date.parse(DAY(4, 7))); }
       finally { rmSync(fixture.dir, { recursive: true, force: true }); }
     },
-    siteImport: { run: () => { throw new Error("no site checkout expected"); } } });
+    siteImport: { spawn: () => { throw new Error("no site stage expected"); } } });
   const rows = readFileSync(join(stateDir, "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   return { code, row: rows.find((row) => row.step === "field-trials.site-import") };
 }
@@ -183,11 +183,11 @@ const ALLOWED_ENDPOINT = new RegExp("^(POST repos/craigoley/remudero-site/git/(t
   + "|GET repos/craigoley/remudero-site/pulls\\?head=craigoley:[^&]+&state=open"
   + "|POST repos/craigoley/remudero-site/pulls|PATCH repos/craigoley/remudero-site/pulls/\\d+)$");
 
-test("W1-T10832: a field-note candidate keeps exactly one site import PR open", async () => {
+test("W1-T10832: a field-note candidate keeps exactly one site import PR open", async (t) => {
   const root = tempRoot("one-pr");
   try {
-    const site = siteRepository(root, "staged");
-    const github = fakeGithub();
+    const site = stageFixture(t, root, "staged");
+    const github = siteRest();
     const first = await dailyPass(root, DAY(4, 7), [1, 2, 3], { fetch: github.fetch, siteUrl: site.url });
     assert.equal(first.code, 0, first.lines.join("\n"));
     assert.equal(first.row.state, "staged", JSON.stringify(first.row));
@@ -226,7 +226,7 @@ test("W1-T10832: a field-note candidate keeps exactly one site import PR open", 
 
     // The owner merged day two's release: the next candidate starts at its end and opens a fresh PR.
     github.state.prs[0]!.open = false;
-    const merged = siteRepository(root, "staged", [{ releaseId: String(replaced.releaseId), windowStart: DAY(1), windowEnd: DAY(5),
+    const merged = stageFixture(t, root, "staged", [{ releaseId: String(replaced.releaseId), windowStart: DAY(1), windowEnd: DAY(5),
       sourceRepos: ["remudero"], lineageDigest: "fixture", publishedAt: String(replaced.publishedAt) }]);
     const third = await dailyPass(root, DAY(6, 7), [1, 2, 3, 4, 5], { fetch: github.fetch, siteUrl: merged.url });
     assert.equal(third.row.pr, "opened", JSON.stringify(third.row));
@@ -238,11 +238,11 @@ test("W1-T10832: a field-note candidate keeps exactly one site import PR open", 
   }
 });
 
-test("W1-T10832: core stamps no review fields and nothing merges the site PR", async () => {
+test("W1-T10832: core stamps no review fields and nothing merges the site PR", async (t) => {
   const root = tempRoot("no-stamp");
   try {
-    const site = siteRepository(root, "staged");
-    const github = fakeGithub();
+    const site = stageFixture(t, root, "staged");
+    const github = siteRest();
     const pass = await dailyPass(root, DAY(4, 7), [1, 2, 3], { fetch: github.fetch, siteUrl: site.url });
     assert.equal(pass.row.state, "staged", JSON.stringify(pass.row));
     const [staged] = seenCandidates(site.seen);
@@ -271,11 +271,11 @@ test("W1-T10832: core stamps no review fields and nothing merges the site PR", a
   }
 });
 
-test("W1-T10832: a refused or unchanged stage opens no PR", async () => {
+test("W1-T10832: a refused or unchanged stage opens no PR", async (t) => {
   const root = tempRoot("refused");
   try {
-    const refusedSite = siteRepository(root, "refused");
-    const github = fakeGithub();
+    const refusedSite = stageFixture(t, root, "refused");
+    const github = siteRest();
     const refused = await dailyPass(root, DAY(4, 7), [1, 2, 3], { fetch: github.fetch, siteUrl: refusedSite.url });
     assert.equal(refused.code, 0, "a site refusal never fails the refresh's other steps");
     assert.deepEqual({ state: refused.row.state, by: refused.row.by, reason: refused.row.reason },
@@ -286,7 +286,7 @@ test("W1-T10832: a refused or unchanged stage opens no PR", async () => {
     assert.deepEqual(github.calls, [], "a refusal opens no PR and writes nothing to the site");
     assert.match(refused.lines.join("\n"), /site import: refused \(model field note refused/);
 
-    const unchangedSite = siteRepository(root, "unchanged");
+    const unchangedSite = stageFixture(t, root, "unchanged");
     const unchanged = await dailyPass(root, DAY(5, 7), [1, 2, 3, 4], { fetch: github.fetch, siteUrl: unchangedSite.url });
     assert.equal(unchanged.row.state, "unchanged", JSON.stringify(unchanged.row));
     assert.deepEqual(github.calls, [], "unchanged is never treated as staged: no branch, no PR");
@@ -295,7 +295,21 @@ test("W1-T10832: a refused or unchanged stage opens no PR", async () => {
   }
 });
 
-test("W1-T10832: every unhealthy site-import arm is a recorded outcome, never a throw or a PR", async () => {
+test("W1-T10832: git reads cannot execute a hook written by the site's stage script", async (t) => {
+  const root = tempRoot("git-hook");
+  try {
+    const site = stageFixture(t, root, "git-hook");
+    const github = siteRest();
+    const pass = await dailyPass(root, DAY(4, 7), [1, 2, 3], { fetch: github.fetch, siteUrl: site.url });
+    assert.equal(pass.row.state, "staged", JSON.stringify(pass.row));
+    assert.equal(github.state.prs.length, 1, "the hardened reads still publish the staged data");
+    assert.equal(existsSync(join(root, "git-hook-ran")), false, "stage-written fsmonitor code never executes");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T10832: every unhealthy site-import arm is a recorded outcome, never a throw or a PR", async (t) => {
   const root = tempRoot("arms");
   try {
     const note = { schema: "model-field-note-v1", releaseId: "fn-2026-09-01-2026-09-04-abcdefabcdef", status: "published",
@@ -303,10 +317,10 @@ test("W1-T10832: every unhealthy site-import arm is a recorded outcome, never a 
       sourceDigest: "a".repeat(64), sourceRepos: ["remudero"], consentRegistryRevision: "owner-2026-09-25-v1",
       rows: [] } as ModelFieldNoteBody;
     const candidate = (): FieldNoteExport => ({ state: "candidate", note });
-    const sync = (mode: Mode | null, deps: SiteImportDeps = {}, exportCandidate = candidate) => {
-      const github = fakeGithub();
+    const sync = (mode: Mode | null, deps: SiteImportOptions = {}, exportCandidate = candidate) => {
+      const github = siteRest();
       const outcome = syncFieldNoteSiteImport({ workRoot: join(root, "work"), nowIso: DAY(4, 7), exportCandidate },
-        { fetch: github.fetch, ...(mode ? { siteUrl: siteRepository(root, mode).url } : {}), ...deps });
+        { fetch: github.fetch, ...(mode ? { siteUrl: stageFixture(t, root, mode).url } : {}), ...deps });
       return { outcome, calls: github.calls };
     };
     const valid = JSON.stringify({ version: "field-trials-consent-v1",
@@ -331,19 +345,21 @@ test("W1-T10832: every unhealthy site-import arm is a recorded outcome, never a 
     const outside = sync("outside-data");
     assert.match(JSON.stringify(outside.outcome), /"state":"stage-failed".*stage-wrote-outside-data: \?\? README\.md/);
     assert.deepEqual(outside.calls, []);
-    const grantless = fakeGithub({ failWrites: true });
+    const configRefused = sync("git-config-refused");
+    assert.match(JSON.stringify(configRefused.outcome), /"state":"stage-failed".*git-status-failed:.*core.editor/);
+    assert.deepEqual(configRefused.calls, [], "a pinned-config refusal never reaches the REST writer");
+    const grantless = siteRest({ failWrites: true });
     const denied = syncFieldNoteSiteImport({ workRoot: join(root, "work"), nowIso: DAY(4, 7), exportCandidate: candidate },
-      { fetch: grantless.fetch, siteUrl: siteRepository(root, "staged").url });
+      { fetch: grantless.fetch, siteUrl: stageFixture(t, root, "staged").url });
     assert.equal(denied.state, "publish-failed");
     assert.equal((denied as { grant: string }).grant, SITE_IMPORT_GRANT, "the outcome names the exact grant the operator must add");
     assert.match((denied as { reason: string }).reason, /Resource not accessible by integration/);
     assert.ok(grantless.state.prs.length === 0, "no PR without the grant");
-    const unreadable = siteRepository(root, "staged");
-    const historyless = join(root, "historyless");
-    git(root, "clone", "-q", unreadable.url, historyless);
-    rmSync(join(historyless, "data", "model-field-note-history.json"));
-    git(historyless, "commit", "-qam", "drop history");
-    const noHistory = sync(null, { siteUrl: pathToFileURL(historyless).href });
+    const unreadable = stageFixture(t, root, "staged");
+    const historyless = gitRepo({ scope: t, cloneFrom: unreadable.url });
+    rmSync(join(historyless.dir, "data", "model-field-note-history.json"));
+    historyless.git("commit", "-qam", "drop history");
+    const noHistory = sync(null, { siteUrl: pathToFileURL(historyless.dir).href });
     assert.match(JSON.stringify(noHistory.outcome), /"state":"site-checkout-failed".*site-history-unreadable: ENOENT/);
     assert.match(JSON.stringify(sync("usage").outcome), /"state":"stage-failed".*stage-exit-2: usage: --daily-stage/);
     assert.match(JSON.stringify(sync("staged-nothing").outcome), /stage-reported-staged-but-changed-nothing/);

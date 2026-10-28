@@ -13,6 +13,12 @@ const consent = JSON.stringify({ version: "field-trials-consent-v1",
 
 type Placement = "owner-only" | "group-readable" | "symlink" | "absent" | "override";
 
+function writeConsent(path: string, mode: number) {
+  const previous = process.umask(0o022);
+  try { writeFileSync(path, consent, { mode }); }
+  finally { process.umask(previous); }
+}
+
 /** One full refresh pass through the real script with a fake docker that runs the real command. */
 function pass(placement: Placement) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-consent-refresh-"));
@@ -28,10 +34,10 @@ function pass(placement: Placement) {
   writeFileSync(registry, ["core", "site", "console"].map(name => `  ${name}:\n    state_dir: ${join(dir, name)}\n`).join(""));
   const target = join(outDir, "field-trials-consent-v1.json");
   const elsewhere = join(dir, "owner-grant.json");
-  if (placement === "owner-only") { writeFileSync(target, consent); chmodSync(target, 0o600); }
-  if (placement === "group-readable") { writeFileSync(target, consent); chmodSync(target, 0o640); }
-  if (placement === "symlink") { writeFileSync(elsewhere, consent); chmodSync(elsewhere, 0o600); symlinkSync(elsewhere, target); }
-  if (placement === "override") { writeFileSync(elsewhere, consent); chmodSync(elsewhere, 0o600); }
+  if (placement === "owner-only") writeConsent(target, 0o600);
+  if (placement === "group-readable") writeConsent(target, 0o640);
+  if (placement === "symlink") { writeConsent(elsewhere, 0o600); symlinkSync(elsewhere, target); }
+  if (placement === "override") writeConsent(elsewhere, 0o600);
   const driver = join(dir, "driver.mjs");
   const flowUrl = pathToFileURL(join(REPO_ROOT, "src/lib/field-trials-flow.ts")).href;
   writeFileSync(driver, `import { fieldTrialsCommand, buildFieldTrialsFlowSnapshot } from ${JSON.stringify(flowUrl)};
