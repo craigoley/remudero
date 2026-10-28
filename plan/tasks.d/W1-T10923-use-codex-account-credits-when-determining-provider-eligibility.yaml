@@ -6,7 +6,10 @@
   type: implement
   verify: auto
   risk: medium
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=ac5ca4a17ad12ba6
+  # backlog gardener: placed=2026-10-28T16:44:03.107Z
   attempts: 0
   files:
     - src/lib/worker-provider.ts
