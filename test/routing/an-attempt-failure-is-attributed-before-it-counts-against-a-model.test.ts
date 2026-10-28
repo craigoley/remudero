@@ -44,12 +44,10 @@ function attempt(id: string, fields: Record<string, unknown>): Record<string, un
     selection_assignment_id: id };
 }
 
-/** Fold ledger-shaped pairs; `signals` rides on the projected attempt the way a row mapper would supply it. */
-function fold(pairs: { id: string; attempt: Record<string, unknown>; signals?: Record<string, unknown> }[]) {
-  const rows = pairs.flatMap(({ id, attempt: fields, signals }, i) => {
-    const projected = projectFlowRow(attempt(id, fields), `fp-a-${i}`);
-    return [projectFlowRow(assignment(id), `fp-s-${i}`), signals ? { ...projected, outcomeSignals: signals } : projected];
-  });
+/** Fold ledger-shaped pairs through the production projection (projectFlowRow); nothing is injected past it. */
+function fold(pairs: { id: string; attempt: Record<string, unknown> }[]) {
+  const rows = pairs.flatMap(({ id, attempt: fields }, i) =>
+    [projectFlowRow(assignment(id), `fp-s-${i}`), projectFlowRow(attempt(id, fields), `fp-a-${i}`)]);
   return servedTrialCohorts(rows, T(11), periodOf);
 }
 
@@ -99,16 +97,16 @@ test("W1-T10875: an orphaned or signal-ended attempt is infrastructure, not the 
   assert.deepEqual(attributeAttemptOutcome(killed), { outcome: "infrastructure", signal: "worker-exit-signal" });
 
   // A signal death that already named its served model qualifies for a cohort, and still is not the model's.
-  const evidence = fold([{ id: "killed", attempt: { success: false, served_model: "gpt-6-luna-snapshot" },
-    signals: { worker_exit: "signal", worker_exit_signal: "SIGKILL" } },
+  const evidence = fold([{ id: "killed", attempt: { success: false, served_model: "gpt-6-luna-snapshot",
+    worker_exit: "signal", worker_exit_signal: "SIGKILL" } },
   { id: "orphan", attempt: orphanedAttemptFields("orphan", "daemon-boot") }]);
   assert.equal(evidence.qualifiedAssignments, 1);
   const cohort = evidence.cohorts[0]!;
   assert.equal(cohort.workerFailed, 0, "a killed worker is never the model's failure");
   assert.equal(cohort.workerInfrastructure, 1);
   assert.equal(evidence.excluded["served-model-unavailable"], 1, "the orphan still has no served model to bucket under");
-  assert.equal(evidence.outcomeAttribution.infrastructure, 1, "the orphan is counted only once the row mapper supplies its worker_failure");
-  assert.equal(evidence.outcomeAttribution.unknown, 1, "without worker_failure the orphan is unknown, never a model failure");
+  assert.deepEqual(evidence.outcomeAttribution, { success: 0, model: 0, "pre-request-refusal": 0, infrastructure: 2, unknown: 0 },
+    "the projected worker_failure places the orphan as infrastructure, never unknown or the model");
 });
 
 test("W1-T10875: a provider-invoked contract or truncation failure is the model", () => {
@@ -125,7 +123,7 @@ test("W1-T10875: a provider-invoked contract or truncation failure is the model"
   assert.deepEqual(attributeAttemptOutcome(replied), { outcome: "model", signal: "provider-invoked" });
   assert.deepEqual(attributeAttemptOutcome({ step: "worker.attempt", success: true }), { outcome: "success", signal: "success" });
 
-  const evidence = fold([{ id: "draft", attempt: draft, signals: { worker_failure: "draft-contract" } },
+  const evidence = fold([{ id: "draft", attempt: draft },
     { id: "ok", attempt: { success: true, served_model: "gpt-oss-120b" } }]);
   const cohort = evidence.cohorts.find((entry) => entry.servedModel === "gpt-oss-120b")!;
   assert.equal(cohort.workerFailed, 1); assert.equal(cohort.workerSucceeded, 1);
@@ -141,8 +139,8 @@ test("W1-T10875: an attempt the signals cannot place is unknown and counted in n
   const contradicted = { step: "worker.attempt", success: false, worker_failure: "deployment-absent", served_model: "gpt-6-luna-snapshot" };
   assert.deepEqual(attributeAttemptOutcome(contradicted), { outcome: "unknown", signal: "refusal-with-invocation-evidence" });
 
-  const evidence = fold([{ id: "contradicted", attempt: { success: false, served_model: "gpt-6-luna-snapshot" },
-    signals: { worker_failure: "deployment-absent" } }, { id: "thrown", attempt: thrown }]);
+  const evidence = fold([{ id: "contradicted", attempt: { success: false, served_model: "gpt-6-luna-snapshot",
+    worker_failure: "deployment-absent" } }, { id: "thrown", attempt: thrown }]);
   assert.equal(evidence.qualifiedAssignments, 1);
   const cohort = evidence.cohorts[0]!;
   assert.equal(cohort.assignments, 1);
