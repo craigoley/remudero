@@ -890,6 +890,12 @@
       "grepHint": "Recovered research artefacts"
     },
     {
+      "path": "docs/research/agent-automation-inspirations.md",
+      "title": "Retained automation inspirations: current overlap and dispositions",
+      "summary": "Public-source comparison for W1-T10959, reviewed 2026-10-28 UTC. All four dispositions are no-change.",
+      "grepHint": "Retained automation inspirations: current overlap and dispositions"
+    },
+    {
       "path": "docs/research/model-evidence-program.md",
       "title": "Model evidence program: from fleet work to field trials",
       "summary": "Status: design, 2026-09-25. No trial result, public data transfer, new routing policy, paid call, or merge gate is authorized by this document. The site's `/fi…",
