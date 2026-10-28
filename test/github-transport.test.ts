@@ -17,15 +17,15 @@ import {
   ghOptionsWithDefaultTimeout,
   parseGhRateLimitHeaders,
   withGhKillEscalation,
-} from "../src/lib/github-transport.js";
-import { classifyGhFailure, type GitHub } from "../src/lib/status.js";
-import { ghPostureGateway } from "../src/lib/github-posture.js";
-import { ghIssueListGateway } from "../src/lib/issues-intake.js";
-import { ghIssueCloser } from "../src/lib/panel-actions.js";
-import { postSpecialistPanelComment } from "../src/lib/specialist-panel.js";
-import { ghTraceGateway } from "../src/lib/trace.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { approveCommand, daemonCommand, defaultDepReviewPrMutations, planCommand } from "../src/run-task.js";
+} from "#src/lib/github-transport.js";
+import { classifyGhFailure, type GitHub } from "#src/lib/status.js";
+import { ghPostureGateway } from "#src/lib/github-posture.js";
+import { ghIssueListGateway } from "#src/lib/issues-intake.js";
+import { ghIssueCloser } from "#src/lib/panel-actions.js";
+import { postSpecialistPanelComment } from "#src/lib/specialist-panel.js";
+import { ghTraceGateway } from "#src/lib/trace.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { approveCommand, daemonCommand, defaultDepReviewPrMutations, planCommand } from "#src/run-task.js";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 

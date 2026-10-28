@@ -18,7 +18,7 @@ import {
   type AnalyticsSnapshot,
   type AnalyticsTimer,
   type CashSpendSnapshot,
-} from "../src/lib/analytics-route.js";
+} from "#src/lib/analytics-route.js";
 import {
   ANALYTICS_SOURCE_CONSOLE_V1,
   ANALYTICS_SOURCE_SIGNALS,
@@ -36,19 +36,19 @@ import {
   mergeAnalytics,
   type AnalyticsConsoleSource,
   type AnalyticsViewData,
-} from "../src/lib/analytics-view.js";
-import type { Clock } from "../src/lib/clock.js";
-import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "../src/lib/ledger-projector.js";
-import { attachReadModel, currentReadModelPath, flushReadModelTransactions, sourceSnapshotStates, type SourceSnapshotWrite } from "../src/lib/read-model-db.js";
-import { runSlowLaneWorker, type AnalyticsRefresh, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
-import { createReadModelTicker, readModelSwitchesPath, runReadModelWorker, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { buildUsageProjection, accumulateUsageLine, usageTelemetryState } from "../src/lib/usage-telemetry.js";
-import { createViewShadow, legacyViewSampler, type ShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
-import type { ViewSource } from "../src/lib/views.js";
-import { switchViewsOn } from "./helpers/read-model-switches.js";
-import { SPEC, violations } from "./helpers/openapi-strict.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+} from "#src/lib/analytics-view.js";
+import type { Clock } from "#src/lib/clock.js";
+import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "#src/lib/ledger-projector.js";
+import { attachReadModel, currentReadModelPath, flushReadModelTransactions, sourceSnapshotStates, type SourceSnapshotWrite } from "#src/lib/read-model-db.js";
+import { runSlowLaneWorker, type AnalyticsRefresh, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
+import { createReadModelTicker, readModelSwitchesPath, runReadModelWorker, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { buildUsageProjection, accumulateUsageLine, usageTelemetryState } from "#src/lib/usage-telemetry.js";
+import { createViewShadow, legacyViewSampler, type ShadowEvidence, type ShadowRequest } from "#src/lib/view-shadow.js";
+import type { ViewSource } from "#src/lib/views.js";
+import { switchViewsOn } from "#test/helpers/read-model-switches.js";
+import { SPEC, violations } from "#test/helpers/openapi-strict.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { GARDENER_SPEND_SOURCE_NAME } from "#src/lib/analytics-view.js";
 import { captureGardenerSpendSource, foldGardenerSpend } from "#src/lib/gardener-spend.js";
 import { createReadModelWorker } from "#src/lib/read-model-worker.js";

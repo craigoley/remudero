@@ -3,9 +3,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { projectPlan, type DeriveDeps, type GitHub } from "../src/lib/status.js";
-import { FIXED_NOW_ISO, corpusLedgerPath, loadCorpusGithub, loadCorpusLedgerLines, loadCorpusPlan } from "./fixtures/w1-t187/load.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { projectPlan, type DeriveDeps, type GitHub } from "#src/lib/status.js";
+import { FIXED_NOW_ISO, corpusLedgerPath, loadCorpusGithub, loadCorpusLedgerLines, loadCorpusPlan } from "#test/fixtures/w1-t187/load.js";
 
 /**
  * W1-T187 acceptance criterion 2 — "projectPlan reads and parses the ledger EXACTLY ONCE per

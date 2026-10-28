@@ -12,8 +12,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { GARDEN_LEDGER_BUCKET_MS, gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
-import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
+import { GARDEN_LEDGER_BUCKET_MS, gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "#src/lib/gardener.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import {
   DURATION_ADOPTION_CADENCE_MS,
   DURATION_WINDOW_RUNS,
@@ -29,12 +29,12 @@ import {
   testGardenSpec,
   testManifestProposalHistoryPath,
   testManifestProposalPath,
-} from "../src/lib/test-gardener.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { daemonCommand } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/test-gardener.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { daemonCommand } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 // scripts/ is outside tsconfig's include; load the real .mjs module through a URL, as the

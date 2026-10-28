@@ -13,14 +13,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
+import { createService } from "#src/lib/service.js";
 import {
   buildReplayRoute,
   renderReplayPanelHtml,
   renderReplayRefusalHtml,
   type ReplayRouteDeps,
-} from "../src/lib/serve.js";
-import { buildReplay, type ReplayLedgerLine, type ReplayLedgerRead } from "../src/lib/ledger-replay.js";
+} from "#src/lib/serve.js";
+import { buildReplay, type ReplayLedgerLine, type ReplayLedgerRead } from "#src/lib/ledger-replay.js";
 
 const READ_TOKEN = "replay-read-token";
 const WRITE_TOKEN = "replay-write-token";

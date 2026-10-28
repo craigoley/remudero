@@ -6,8 +6,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { CONFIG_GARDEN_LEDGER_STEPS } from "../src/lib/config-gardener.js";
-import { gatherRuns, type LedgerRecord } from "../src/lib/retro.js";
+import { CONFIG_GARDEN_LEDGER_STEPS } from "#src/lib/config-gardener.js";
+import { gatherRuns, type LedgerRecord } from "#src/lib/retro.js";
 
 /**
  * W1-T5527 — EVERY PRICED LEDGER STEP IS IN THE CONFIG GARDEN'S READ.

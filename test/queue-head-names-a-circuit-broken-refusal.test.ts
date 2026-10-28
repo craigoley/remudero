@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { IDLE_REASON_ID_CAP, runnableCandidates, type MergedSet } from "../src/lib/drain.js";
-import { deriveQueueHead, renderQueueHeadBlock } from "../src/lib/status-board.js";
-import { DEFAULT_MAX_TASK_DISPATCHES, type StatusProjection } from "../src/lib/status.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { IDLE_REASON_ID_CAP, runnableCandidates, type MergedSet } from "#src/lib/drain.js";
+import { deriveQueueHead, renderQueueHeadBlock } from "#src/lib/status-board.js";
+import { DEFAULT_MAX_TASK_DISPATCHES, type StatusProjection } from "#src/lib/status.js";
 
 // ── W1-T2415: THE QUEUE HEAD DROPS A CIRCUIT-BROKEN TASK AND NEVER SAYS WHY.
 //

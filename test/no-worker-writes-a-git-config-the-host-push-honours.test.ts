@@ -23,12 +23,12 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 
-import * as gitPush from "../src/lib/git-push.js";
-import * as leaf from "../src/lib/worktree-git.js";
-import * as provider from "../src/lib/worker-provider.js";
-import { renderWorkerSettings, wireCredentialHelperSocket, worktreeAdd } from "../src/lib/worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import * as gitPush from "#src/lib/git-push.js";
+import * as leaf from "#src/lib/worktree-git.js";
+import * as provider from "#src/lib/worker-provider.js";
+import { renderWorkerSettings, wireCredentialHelperSocket, worktreeAdd } from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 const USER = "fixture-user";
 const PASS = "fixture-pass";

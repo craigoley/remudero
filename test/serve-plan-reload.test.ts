@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createBoardSnapshotCache, type BoardDeps } from "../src/lib/board.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { assessGatewayCheckout, gateStaleCodeExit, type StaleCodeExitDeps } from "../src/lib/serve.js";
-import { readServePlanAtRef, reloadServePlan, SERVE_PLAN_RELOADABLE_PATHS, type PlanRead } from "../src/lib/serve-plan-reload.js";
-import { serveRestartRelevant, type ChangedPathsRead } from "../src/lib/serve-restart-relevance.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { createBoardSnapshotCache, type BoardDeps } from "#src/lib/board.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { assessGatewayCheckout, gateStaleCodeExit, type StaleCodeExitDeps } from "#src/lib/serve.js";
+import { readServePlanAtRef, reloadServePlan, SERVE_PLAN_RELOADABLE_PATHS, type PlanRead } from "#src/lib/serve-plan-reload.js";
+import { serveRestartRelevant, type ChangedPathsRead } from "#src/lib/serve-restart-relevance.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T4481: a plan-only advance reloads serve's plan in place instead of restarting it.
 

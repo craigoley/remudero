@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { priorStrikesFor, runFixRung } from "./helpers/run-task-test.js";
-import { isRealStrike, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../src/lib/ledger.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { priorStrikesFor, runFixRung } from "#test/helpers/run-task-test.js";
+import { isRealStrike, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "#src/lib/ledger.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 /**
  * W1-T127 — STRIKE-ACCOUNTING INTEGRITY (the #212 fixture: PR #212/#213, a

@@ -10,7 +10,7 @@ import {
   ROTATED_LOG_FILES,
   generateNewsyslogConfig,
   newsyslogConfigPath,
-} from "../src/lib/log-rotation.js";
+} from "#src/lib/log-rotation.js";
 
 // ── W1-T218: "no log has a size or age bound — and a naive rotation policy would sweep up the
 // ledger and zero the dispatch breaker" (RECON R-25). generateNewsyslogConfig (src/lib/

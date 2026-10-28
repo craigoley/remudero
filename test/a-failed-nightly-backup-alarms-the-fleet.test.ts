@@ -4,10 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import type { Escalation } from "../src/lib/escalate.js";
-import { hostResourceStatePath, parseHeartbeatPayload, runHostResourcePass, type HostResourcePorts } from "../src/lib/host-resource-gardener.js";
-import { runBeat, REPO_ROOT } from "./helpers/fleet-heartbeat-harness.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { hostResourceStatePath, parseHeartbeatPayload, runHostResourcePass, type HostResourcePorts } from "#src/lib/host-resource-gardener.js";
+import { runBeat, REPO_ROOT } from "#test/helpers/fleet-heartbeat-harness.js";
 
 const PROOF = "test/a-failed-nightly-backup-alarms-the-fleet.test.ts";
 const NOW = Date.parse("2026-10-05T12:00:00Z");

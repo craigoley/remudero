@@ -17,11 +17,11 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { buildSweepEffects } from "../src/run-task.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#test/helpers/sweep-test.js";
+import { buildSweepEffects } from "#src/run-task.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = Date.parse("2026-10-06T05:30:00Z");
 const PR = 9438;

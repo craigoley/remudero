@@ -10,8 +10,8 @@ import fsDefault from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { buildBatchedGithub, projectPlan, type GitHub, type PrRef } from "../src/lib/status.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { buildBatchedGithub, projectPlan, type GitHub, type PrRef } from "#src/lib/status.js";
 
 // ── W1-T207: WRITE-SIDE ATOMICITY for state/status.json ─────────────────────────────
 //

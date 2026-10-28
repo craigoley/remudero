@@ -8901,6 +8901,9 @@ export function terminalVerdictFields(r: WorkerResult | null): {
  * `failed`. The ledger payload always carries `num_turns` and `cost_usd`, so a
  * failed run is never free in the ledger (WS-1: an implement run's ~6 minutes of
  * spend was previously invisible because the SDK threw before we read them).
+ *
+ * W1-T9034: `failOnWorkerError` may overwrite the `reason`, so the status latch reads a worker error by this
+ * row's `stage` and `subtype`. A new `failOnWorkerError` stage joins `WORKER_ERROR_VERDICT_STAGES` (status.ts).
  */
 export function workerErrorVerdict(
   r: WorkerResult,

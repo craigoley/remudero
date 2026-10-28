@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { mapBoardPr, prStateFromRest, type RestPullRow } from "../src/lib/open-prs-rest.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
+import { mapBoardPr, prStateFromRest, type RestPullRow } from "#src/lib/open-prs-rest.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
 
 /**
  * THE `merged` FIELD DOES NOT EXIST ON A LIST ROW. This file exists because a whole afternoon of

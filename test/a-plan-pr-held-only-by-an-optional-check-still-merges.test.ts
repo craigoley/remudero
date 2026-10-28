@@ -4,9 +4,9 @@ import { describe, test } from "node:test";
 import {
   attemptArm, attemptArmAsync, realArmDeps, realArmDepsAsync,
   PLAN_TOUCH_READ_TTL_MS, type ArmDeps,
-} from "../src/lib/arm-auto-merge.js";
-import { systemClock } from "../src/lib/clock.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/arm-auto-merge.js";
+import { systemClock } from "#src/lib/clock.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const HEAD = "head5674";
 const FILES = '[{"filename":"plan/tasks.d/optional-check.yaml"}]';

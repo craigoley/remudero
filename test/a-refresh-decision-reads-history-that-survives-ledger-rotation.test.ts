@@ -6,12 +6,12 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { DECISION_RELEVANT_LEDGER_STEPS, MAX_RETAINED_LINES_PER_STEP, rotateLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { assessRefreshClearance, refusedRefreshClearancesFromLedger } from "../src/lib/base-reproduction.js";
+import { DECISION_RELEVANT_LEDGER_STEPS, MAX_RETAINED_LINES_PER_STEP, rotateLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { assessRefreshClearance, refusedRefreshClearancesFromLedger } from "#src/lib/base-reproduction.js";
 
-import { taskSemanticRevision } from "../src/lib/escalate.js";
+import { taskSemanticRevision } from "#src/lib/escalate.js";
 
 type Row = Record<string, unknown>;
 const KNOWN = ["fix.base_refreshed", "sweep.base_red.refresh", "sweep.base_fixed.refresh", "refresh.clearance"];

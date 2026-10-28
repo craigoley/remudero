@@ -13,9 +13,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import * as panelGraph from "../src/lib/panel-graph.js";
-import { tallyDispatchFilters, type DispatchFilterReason, type MergedSet } from "../src/lib/drain.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import * as panelGraph from "#src/lib/panel-graph.js";
+import { tallyDispatchFilters, type DispatchFilterReason, type MergedSet } from "#src/lib/drain.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 type FrontierFilterReason = (
   plan: Plan,

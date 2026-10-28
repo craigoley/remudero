@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import type { CriterionVerdict } from "../src/lib/review.js";
-import { buildOpenPrViews } from "../src/run-task.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import type { CriterionVerdict } from "#src/lib/review.js";
+import { buildOpenPrViews } from "#src/run-task.js";
 
 const TASK = "W1-T5020";
 const PR = "https://github.com/o/r/pull/77";

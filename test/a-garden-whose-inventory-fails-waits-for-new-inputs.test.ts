@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { ciFrictionGardenSpec, type CiFrictionGardenSources } from "../src/lib/ci-friction-gardener.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { ciFrictionGardenSpec, type CiFrictionGardenSources } from "#src/lib/ci-friction-gardener.js";
 import {
   GARDEN_INVENTORY_RETRY_BASE_MS, gardenInventoryFailurePath, gardenPassDue, gardenStatePath, runGarden, type GardenerDeps,
-} from "../src/lib/gardener.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // OBSERVED 2026-10-09 10:52-11:54Z on the fleet host: the ci-friction garden ran 47 passes for 1,505 s of
 // child time. Every pass read the whole ledger union and then failed the same way ("workflow ownership

@@ -9,7 +9,7 @@ import {
   defaultPreflightSpawn,
   spawnFailureDetail,
   typecheckStep,
-} from "../src/lib/commit-message.js";
+} from "#src/lib/commit-message.js";
 
 /**
  * A KILLED CHILD IS NOT A CHILD THAT NEVER STARTED, and until this change the seam could not say

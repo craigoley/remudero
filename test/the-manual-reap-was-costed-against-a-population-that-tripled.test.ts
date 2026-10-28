@@ -16,7 +16,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { countOrphanedHeads, readOrphanedHeadCount } from "../src/lib/branch-reaper.js";
+import { countOrphanedHeads, readOrphanedHeadCount } from "#src/lib/branch-reaper.js";
 
 // ── CRITERION 1: one remote listing, never an eight-page enumeration ─────────────────────────
 

@@ -5,12 +5,12 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
-import { createReadModelTicker, createReadModelWorker, readModelStatusView, runReadModelWorker, type ReadModelView, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { legacyRepositories, repositoriesSourcesPath } from "../src/lib/repositories-view.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
+import { createReadModelTicker, createReadModelWorker, readModelStatusView, runReadModelWorker, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { legacyRepositories, repositoriesSourcesPath } from "#src/lib/repositories-view.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 import {
   VIEW_SHADOW_DIFF_STEP,
   VIEW_SHADOW_SAMPLE_MS,
@@ -33,10 +33,10 @@ import {
   type ShadowLatest,
   type ShadowRequest,
   type ViewShadowState,
-} from "../src/lib/view-shadow.js";
-import { buildReadModelViewRoutes, type ViewBodyEntry, type ViewDefinition } from "../src/lib/views.js";
-import { switchViewsOn } from "./helpers/read-model-switches.js";
-import { SPEC, violations } from "./helpers/openapi-strict.js";
+} from "#src/lib/view-shadow.js";
+import { buildReadModelViewRoutes, type ViewBodyEntry, type ViewDefinition } from "#src/lib/views.js";
+import { switchViewsOn } from "#test/helpers/read-model-switches.js";
+import { SPEC, violations } from "#test/helpers/openapi-strict.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const HOUR = 3_600_000;

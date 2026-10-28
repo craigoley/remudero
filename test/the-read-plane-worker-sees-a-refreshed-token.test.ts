@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { startReadPlane } from "../src/lib/read-plane.js";
+import { startReadPlane } from "#src/lib/read-plane.js";
 
 // 2026-10-04: the read-plane worker kept the GH_TOKEN it was spawned with, so an hour after a daemon
 // boot every worker GitHub read failed with 401 (read_plane.open_failed / board_gateway.fetch_failed

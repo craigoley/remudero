@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { components } from "../packages/api-client/src/schema.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import type { GardenerRuntimeEvent } from "../src/lib/gardener-runtime.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import type { GardenerRuntimeEvent } from "#src/lib/gardener-runtime.js";
 import {
   boundedGardenPassSpawn,
   childGardenPassSpawn,
@@ -18,13 +18,13 @@ import {
   REGISTERED_GARDEN_NAMES,
   startGardenOffLoop,
   type GardenPassSpawn,
-} from "../src/lib/garden-registry.js";
-import { HOST_RESOURCE_MIN_INTERVAL_MS } from "../src/lib/host-resource-gardener.js";
-import { OVERSEER_MIN_INTERVAL_MS } from "../src/lib/gardener-overseer.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildRegisteredGarden, daemonCommand, gardenCommand as runGardenCommand, runRegisteredGardenPass, type GardenBuildContext } from "../src/run-task.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { declaredBody, SPEC, violations } from "./helpers/openapi-strict.js";
+} from "#src/lib/garden-registry.js";
+import { HOST_RESOURCE_MIN_INTERVAL_MS } from "#src/lib/host-resource-gardener.js";
+import { OVERSEER_MIN_INTERVAL_MS } from "#src/lib/gardener-overseer.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildRegisteredGarden, daemonCommand, gardenCommand as runGardenCommand, runRegisteredGardenPass, type GardenBuildContext } from "#src/run-task.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { declaredBody, SPEC, violations } from "#test/helpers/openapi-strict.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 // MEASURED 2026-10-01: eleven daemon ticks spent 4,344 s reaching admission; ~1,620 s of the silent-loop gaps ended
@@ -32,7 +32,7 @@ import { gitRepo } from "#test/helpers/git-repo.js";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function invokeGardenerRoute(route: import("../src/lib/service.js").Route) {
+async function invokeGardenerRoute(route: import("#src/lib/service.js").Route) {
   let status = 0, body = "";
   const res = { writeHead(code: number) { status = code; }, end(value: string) { body = value; } };
   await route.handler({} as never, res as never, { params: {} });
@@ -41,8 +41,8 @@ async function invokeGardenerRoute(route: import("../src/lib/service.js").Route)
 
 test("gardener runtime projects only known fields at persistence and the read boundary", async (t) => {
   const { createGardenerRuntimeWriter, readGardenerRuntime, parseGardenerRuntime, GARDENER_RUNTIME_FILE } =
-    await import("../src/lib/gardener-runtime.js");
-  const { buildGardenersRoute } = await import("../src/lib/gardeners-route.js");
+    await import("#src/lib/gardener-runtime.js");
+  const { buildGardenersRoute } = await import("#src/lib/gardeners-route.js");
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gardener-projection-`));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   const stamp = "2026-10-07T12:00:00.000Z", clock = clockFromMillisFn(() => Date.parse(stamp));
@@ -71,8 +71,8 @@ test("gardener runtime projects only known fields at persistence and the read bo
 });
 
 test("gardener runtime refuses array enum coercion at the parse and route boundaries", async (t) => {
-  const { createGardenerRuntimeWriter, readGardenerRuntime, parseGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
-  const { buildGardenersRoute } = await import("../src/lib/gardeners-route.js");
+  const { createGardenerRuntimeWriter, readGardenerRuntime, parseGardenerRuntime } = await import("#src/lib/gardener-runtime.js");
+  const { buildGardenersRoute } = await import("#src/lib/gardeners-route.js");
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gardener-enum-`));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   const clock = clockFromMillisFn(() => Date.parse("2026-10-07T12:00:00.000Z"));
@@ -115,7 +115,7 @@ test("gardener lifecycle measures admission separately from execution and preser
 });
 
 test("gardener memory deferral is not a cancelled or completed process", async (t) => {
-  const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
+  const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("#src/lib/gardener-runtime.js");
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-deferred-runtime-`));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   let now = Date.now();
@@ -153,8 +153,8 @@ test("gardener memory deferral is not a cancelled or completed process", async (
 });
 
 test("gardener admission deferral conforms to the published generated service contract", async (t) => {
-  const { createGardenerRuntimeWriter } = await import("../src/lib/gardener-runtime.js");
-  const { buildGardenersRoute } = await import("../src/lib/gardeners-route.js");
+  const { createGardenerRuntimeWriter } = await import("#src/lib/gardener-runtime.js");
+  const { buildGardenersRoute } = await import("#src/lib/gardeners-route.js");
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-deferral-contract-`));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   const now = Date.now();
@@ -178,7 +178,7 @@ test("gardener admission deferral conforms to the published generated service co
 });
 
 test("gardener completion rows retain the runtime pass id and separate admission timings", async (t) => {
-  const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
+  const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("#src/lib/gardener-runtime.js");
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-correlation-`));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   // Controlled process outcomes, not a claim of measured production work. The
@@ -231,8 +231,8 @@ test("gardener completion rows retain the runtime pass id and separate admission
 });
 
 test("gardener persistence drains a terminal receipt arriving as an atomic write settles", async (t) => {
-  const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
-  const { writeAtomicAsync } = await import("../src/lib/fs-race-safe.js");
+  const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("#src/lib/gardener-runtime.js");
+  const { writeAtomicAsync } = await import("#src/lib/fs-race-safe.js");
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-final-drain-`));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   const clock = clockFromMillisFn(() => Date.parse("2026-10-07T12:00:00Z"));
@@ -257,8 +257,8 @@ test("gardener persistence drains a terminal receipt arriving as an atomic write
 });
 
 test("gardener persistence reports a real write refusal without retrying and recovers on the next observation", async (t) => {
-  const { createGardenerRuntimeWriter, readGardenerRuntime, GARDENER_RUNTIME_FILE } = await import("../src/lib/gardener-runtime.js");
-  const { writeAtomicAsync } = await import("../src/lib/fs-race-safe.js");
+  const { createGardenerRuntimeWriter, readGardenerRuntime, GARDENER_RUNTIME_FILE } = await import("#src/lib/gardener-runtime.js");
+  const { writeAtomicAsync } = await import("#src/lib/fs-race-safe.js");
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-write-recovery-`));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   const clock = clockFromMillisFn(() => Date.parse("2026-10-07T12:00:00Z")), logged = rows();

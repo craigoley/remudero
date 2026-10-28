@@ -3,15 +3,15 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { armAutoMergeDetailed, type ArmDeps } from "../src/lib/arm-auto-merge.js";
-import type { Config } from "../src/lib/config.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { armAutoMergeDetailed, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import type { Config } from "#src/lib/config.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 // A namespace import, so this file still LOADS at the merge base (where the helper does not exist)
 // and its tests fail there as tests, which is what lets the reviewer see them discriminate.
-import * as runTask from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import * as runTask from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // W1-T5516. PR #8887's `review.posted` row was lost to a ledger rotation race on 2026-10-03
 // (fixed at the source by W1-T5514). The arm gate (W1-T230) reads ONLY the ledger, so a lost row

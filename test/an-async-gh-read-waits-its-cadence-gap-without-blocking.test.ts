@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 import {
   applyGhReadCadenceAsync,
@@ -20,7 +20,7 @@ import {
   ghTextAsync,
   readGhReadCadenceStampMs,
   stampGhRead,
-} from "../src/lib/github-transport.js";
+} from "#src/lib/github-transport.js";
 
 /** A self-rescheduling zero-delay timer: it can only advance while the event loop is free. */
 function startTimerProbe(): { ticks(): number; stop(): void } {

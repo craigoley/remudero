@@ -10,8 +10,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { readLedgerLines, type BranchReapPlan } from "../src/lib/status.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { readLedgerLines, type BranchReapPlan } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   projectMergedTaskCandidates,
@@ -19,8 +19,8 @@ import {
   type CreditCandidate,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { buildOpenPrViews, DECLARED_BRANCH_GUARDS, keepReversiblyClosedHeads, reapBranchesCommand } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { buildOpenPrViews, DECLARED_BRANCH_GUARDS, keepReversiblyClosedHeads, reapBranchesCommand } from "#src/run-task.js";
 
 const NOW = Date.parse("2026-09-27T15:12:50.591Z");
 const PR_NUMBER = 7465;

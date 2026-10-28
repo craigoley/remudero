@@ -365,8 +365,9 @@ test("W1-T8676: a worker-error latch re-offers once the provider serves a clean 
 test("W1-T8676: a task-caused latch keeps its back-off", () => {
   const merge = { ts: at(30 * MINUTE), task_id: "W1-T8000", step: "verdict.merged", pr_url: "https://github.com/o/r/pull/1" };
   for (const verdictExtra of [
-    { reason: "tests failed" },
-    { reason: undefined },
+    // W1-T9034: run-task never writes a worker stage and an error subtype for a task-caused failure.
+    { stage: "pr_open.refused", subtype: undefined, reason: "tests failed" },
+    { stage: undefined, subtype: undefined, reason: undefined },
     { verdict: "no_pr", reason: "completed" },
   ]) {
     const rows = latchedRun("r2", 0, verdictExtra);

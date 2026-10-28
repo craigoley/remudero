@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import type { ServerResponse } from "node:http";
 import { test } from "node:test";
 
-import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
+import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 
 const NOW = "2026-09-24T12:00:00.000Z";
 

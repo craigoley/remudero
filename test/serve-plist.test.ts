@@ -26,7 +26,7 @@ import {
   generateServeLaunchdPlist,
   launchdPlistPath,
   serveLogPaths,
-} from "../src/lib/launchd.js";
+} from "#src/lib/launchd.js";
 import {
   DEFAULT_SERVE_PORT,
   SERVE_EXPECTED_BRANCH,
@@ -37,9 +37,9 @@ import {
   offMainNotice,
   resolveServeHosts,
   resolveServePort,
-} from "../src/lib/serve.js";
-import { main, servePlistCommand } from "../src/run-task.js";
-import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
+} from "#src/lib/serve.js";
+import { main, servePlistCommand } from "#src/run-task.js";
+import { SELF_SYNC_GUARD_ENV } from "#src/lib/self-sync.js";
 
 const VALID = {
   rmdBin: "/Users/op/Remudero/daemon-install/bin/rmd",

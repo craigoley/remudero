@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
 
-import { ledgerPathFor, nextLaneEpochMs } from "../src/lib/ledger-path.js";
-import type { Config } from "../src/lib/config.js";
+import { ledgerPathFor, nextLaneEpochMs } from "#src/lib/ledger-path.js";
+import type { Config } from "#src/lib/config.js";
 
 function withFrozenClock<T>(epochMs: number, fn: () => T): T {
   const real = Date.now;

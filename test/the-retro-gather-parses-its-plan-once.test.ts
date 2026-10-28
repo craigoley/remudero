@@ -5,11 +5,11 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { configPath } from "../src/lib/config.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { retroCommand, resolveRepoRoot } from "../src/run-task.js";
-import { withHealthyRetroProbeGh } from "./helpers/w4226-g1-retro-probe-gh.js";
-import { offlineGithub } from "./setup/offline-github.js";
+import { configPath } from "#src/lib/config.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { retroCommand, resolveRepoRoot } from "#src/run-task.js";
+import { withHealthyRetroProbeGh } from "#test/helpers/w4226-g1-retro-probe-gh.js";
+import { offlineGithub } from "#test/setup/offline-github.js";
 
 const installRoot = resolveRepoRoot(process.argv.slice(2), process.cwd());
 const sentinel = "cobalt marmalade telescope synchronizes otter postcards";

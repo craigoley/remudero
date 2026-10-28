@@ -18,8 +18,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 
-import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized } from "../src/lib/ledger-union.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized } from "#src/lib/ledger-union.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const ROTATIONS = [
   "ledger.2026-10-12T00-00-00-000Z.ndjson.gz",

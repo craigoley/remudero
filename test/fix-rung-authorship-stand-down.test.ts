@@ -30,16 +30,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runFixRung, branchAuthorshipStandDownReason, buildSweepEffects, type LiveHeadResult } from "./helpers/run-task-test.js";
-import { runSweep, stillRedRequiredNames, DEFAULT_SWEEP_POLICY, type OpenPrView, type RollupCheckEntry } from "./helpers/sweep-test.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { runFixRung, branchAuthorshipStandDownReason, buildSweepEffects, type LiveHeadResult } from "#test/helpers/run-task-test.js";
+import { runSweep, stillRedRequiredNames, DEFAULT_SWEEP_POLICY, type OpenPrView, type RollupCheckEntry } from "#test/helpers/sweep-test.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 const GIT_ENV = {
   ...process.env,

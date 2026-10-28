@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { buildStatusStream } from "../src/lib/board.js";
-import { createService, type SseRoute } from "../src/lib/service.js";
-import type { BoardDeps } from "../src/lib/status.js";
+import { buildStatusStream } from "#src/lib/board.js";
+import { createService, type SseRoute } from "#src/lib/service.js";
+import type { BoardDeps } from "#src/lib/status.js";
 
 const TOKEN = "status-stream-wire-read";
 

@@ -10,9 +10,9 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { serveCommand } from "../src/run-task.js";
-import type { GenerationMessage } from "../src/lib/serve-generation.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { serveCommand } from "#src/run-task.js";
+import type { GenerationMessage } from "#src/lib/serve-generation.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const BOARD_BRANCH_LISTS = { listMergedHeadBranches: () => [], listOpenHeadBranches: () => [] };

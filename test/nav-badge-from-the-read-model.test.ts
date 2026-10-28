@@ -5,10 +5,10 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { coldAnalyticsSnapshot, createAnalyticsSnapshotCache, type AnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { fixedClock, systemClock } from "../src/lib/clock.js";
-import { analyticsSourceBodies } from "../src/lib/analytics-view.js";
-import { createAgentView, agentViewKey, type AgentProposalsBody, type AgentViewData } from "../src/lib/agent-view.js";
+import { coldAnalyticsSnapshot, createAnalyticsSnapshotCache, type AnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { fixedClock, systemClock } from "#src/lib/clock.js";
+import { analyticsSourceBodies } from "#src/lib/analytics-view.js";
+import { createAgentView, agentViewKey, type AgentProposalsBody, type AgentViewData } from "#src/lib/agent-view.js";
 import {
   createNavBadgeReadModelView,
   createNavBadgeSourcePublisher,
@@ -18,14 +18,14 @@ import {
   startNavBadgeSourcePublisher,
   type NavBadgeData,
   type NavBadgeScope,
-} from "../src/lib/nav-badge-view.js";
+} from "#src/lib/nav-badge-view.js";
 import {
   OPERATOR_AGENT_DECISION_STEP,
   OPERATOR_AGENT_OUTCOME_STEP,
   OPERATOR_AGENT_PROPOSAL_STEP,
   OPERATOR_AGENT_SETTINGS_STEP,
   createOperatorAgentMemorySource,
-} from "../src/lib/operator-agent.js";
+} from "#src/lib/operator-agent.js";
 import {
   createReadModelTicker,
   createReadModelWorker,
@@ -33,13 +33,13 @@ import {
   readModelSwitchesPath,
   type ReadModelBodyEntry,
   type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { READ_MODEL_DB_DIR_ENV } from "../src/lib/read-model-db.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { createViewShadow, legacyViewSampler, unreadySources, type ShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
-import { buildReadModelViewRoutes, renderView, type ViewBody, type ViewSource } from "../src/lib/views.js";
+} from "#src/lib/read-model-worker.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { READ_MODEL_DB_DIR_ENV } from "#src/lib/read-model-db.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { createViewShadow, legacyViewSampler, unreadySources, type ShadowEvidence, type ShadowRequest } from "#src/lib/view-shadow.js";
+import { buildReadModelViewRoutes, renderView, type ViewBody, type ViewSource } from "#src/lib/views.js";
 
 // P1-07: the nav badge materialized by the read-model worker must be the Phase 0 (#8042) answer,
 // persisted so a restarted serve answers warm, and dark until the switch file names it `serve`.

@@ -8,9 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { flakeIncidentOrigin, runFlakeIncidentGardener } from "../src/lib/flake-incident-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { flakeIncidentOrigin, runFlakeIncidentGardener } from "#src/lib/flake-incident-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const FILE = "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts";
 const TITLE = "W1-T6123: no src file holds a raw git -C/cwd site beyond its widened reasoned exception";

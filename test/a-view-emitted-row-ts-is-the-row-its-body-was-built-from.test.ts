@@ -7,10 +7,10 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { test } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
+import type { Clock } from "#src/lib/clock.js";
 // A namespace import, so a checkout without builtRow still loads this file and its tests fail on their assertions.
-import * as viewEvents from "../src/lib/view-events.js";
-import { viewEtag, type ViewBodyEntry, type ViewSource } from "../src/lib/views.js";
+import * as viewEvents from "#src/lib/view-events.js";
+import { viewEtag, type ViewBodyEntry, type ViewSource } from "#src/lib/views.js";
 
 const T0 = Date.parse("2026-10-06T12:00:00.000Z");
 const iso = (ms: number): string => new Date(ms).toISOString();

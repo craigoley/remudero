@@ -8,30 +8,30 @@
 // runtime helper (test/setup/open-shell.ts's reachSection) for exactly that reason -- there is no
 // `page` here to reach a section on.
 import assert from "node:assert/strict";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { classifyAskRecordItem } from "../src/lib/ask-classification.js";
+import { classifyAskRecordItem } from "#src/lib/ask-classification.js";
 import { fileURLToPath } from "node:url";
 import { createServer, type AddressInfo } from "node:net";
-import { buildServeRoutes, resolveConsoleSha, CONSOLE_SHA_UNKNOWN, buildServeServer, DEFAULT_BOARD_PREWARM_MS, DEFAULT_SERVE_PORT, prewarmBoardGithub, resolveServePort, resolveServeHost, resolveServeHosts, DEFAULT_SERVE_HOST, resolveServiceTokens, serviceTokensPath, defaultIsListening, type ServeDeps } from "../src/lib/serve.js";
-import type { Route } from "../src/lib/service.js";
-import { isPaused, pauseDetail } from "../src/lib/fleet-control.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { buildBatchedGithub, type GitHub, type PrRef } from "../src/lib/status.js";
-import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
+import { buildServeRoutes, resolveConsoleSha, CONSOLE_SHA_UNKNOWN, buildServeServer, DEFAULT_BOARD_PREWARM_MS, DEFAULT_SERVE_PORT, prewarmBoardGithub, resolveServePort, resolveServeHost, resolveServeHosts, DEFAULT_SERVE_HOST, resolveServiceTokens, serviceTokensPath, defaultIsListening, type ServeDeps } from "#src/lib/serve.js";
+import type { Route } from "#src/lib/service.js";
+import { isPaused, pauseDetail } from "#src/lib/fleet-control.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { buildBatchedGithub, type GitHub, type PrRef } from "#src/lib/status.js";
+import type { TraceGithub, TracePrView } from "#src/lib/trace.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
 // W1-T188 (W1-T154 re-verification): the SAME committed, production-scale corpus W1-T187's own
 // suite (test/w1-t187-*.test.ts) uses -- >= 200 tasks / >= 18,000 ledger lines, a fixed clock, all
 // checked into git rather than generated per-run. Reused here rather than duplicated so this
 // suite's re-verification measures the identical fixture, not a second one that could quietly
 // drift out of "production scale" over time.
-import { FIXED_NOW_ISO, corpusLedgerPath, loadCorpusGithub, loadCorpusLedgerLines, loadCorpusPlan } from "./fixtures/w1-t187/load.js";
+import { FIXED_NOW_ISO, corpusLedgerPath, loadCorpusGithub, loadCorpusLedgerLines, loadCorpusPlan } from "#test/fixtures/w1-t187/load.js";
 
 // ── W1-T139: rmd serve -- the front door ─────────────────────────────────────────────────
 //
@@ -1277,7 +1277,7 @@ test("W1-T4563: GET / answers what this surface is and where the console lives, 
 });
 
 test("W1-T4563: the gateway names app.remudero.com as the canonical console", async () => {
-  const { CANONICAL_CONSOLE_URL } = await import("../src/lib/serve.js");
+  const { CANONICAL_CONSOLE_URL } = await import("#src/lib/serve.js");
   assert.equal(CANONICAL_CONSOLE_URL, "https://app.remudero.com");
 });
 

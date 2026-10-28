@@ -28,13 +28,13 @@ import {
   resolveAlreadySatisfied,
   runTask,
   type AlreadySatisfiedClaim,
-} from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { classifyGhFailure, type GitHub, type PrRef } from "../src/lib/status.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
+} from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { classifyGhFailure, type GitHub, type PrRef } from "#src/lib/status.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
 
 /** Build a minimal WorkerResult; only the fields each test reads matter (mirrors
  *  run-task.test.ts's own `result` helper — duplicated here so this file stays

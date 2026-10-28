@@ -5,9 +5,9 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, sy
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
-import { gitRepo } from "./helpers/git-repo.js";
-import * as harness from "../src/run-task.js";
-import { hostWorktreeGitAsync } from "../src/lib/worktree-git.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import * as harness from "#src/run-task.js";
+import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
 // @ts-ignore executable census module has no declaration file.
 import { readCensusSnapshot, main as censusMain } from "#scripts/census-precheck.mjs";
 

@@ -99,6 +99,8 @@ export interface FlowRow {
   provider?: string | null;
   servedModel: string | null;
   servedModelReason?: string | null;
+  /** W1-T10875: bounded worker.attempt fields the cohort's attribution reads (see projectOutcomeSignals). */
+  outcomeSignals?: Readonly<Record<string, unknown>>;
   notionalCostUsd?: number | null;
   notionalCostReported?: boolean;
   repair?: RepairCostContext;
@@ -135,6 +137,36 @@ function flowRelevant(row: Record<string, unknown>): boolean {
     || (row.actor === "operator" && typeof row.task_id === "string");
 }
 
+/** W1-T10875: the bounded worker.attempt fields attributeAttemptOutcome reads; strings, finite numbers and
+ *  observed {state,value} cells only, so a prompt or body can never ride along. */
+function projectOutcomeSignals(row: Record<string, unknown>): Readonly<Record<string, unknown>> | undefined {
+  if (row.step !== "worker.attempt") return undefined;
+  const cell = (value: unknown) => {
+    const observed = record(value);
+    return observed && typeof observed.state === "string"
+      ? { state: observed.state, ...(typeof observed.value === "string" || typeof observed.value === "boolean"
+        || (typeof observed.value === "number" && Number.isFinite(observed.value)) ? { value: observed.value } : {}) }
+      : undefined;
+  };
+  const evidence = record(row.terminal_evidence);
+  const terminal = evidence ? Object.fromEntries(["invocation", "allowanceRefused", "reservedUsd", "settledUsd"]
+    .flatMap((key) => { const projected = cell(evidence[key]); return projected ? [[key, projected]] : []; })) : undefined;
+  const tokens = record(row.tokens);
+  const counted = tokens ? Object.fromEntries(Object.entries(tokens)
+    .filter(([, value]) => typeof value === "number" && Number.isFinite(value))) : undefined;
+  const signals: Record<string, unknown> = {
+    ...(text(row.worker_failure) ? { worker_failure: row.worker_failure } : {}),
+    ...(text(row.error_class) ? { error_class: row.error_class } : {}),
+    ...(text(row.worker_exit) ? { worker_exit: row.worker_exit } : {}),
+    ...(text(row.worker_exit_signal) ? { worker_exit_signal: row.worker_exit_signal } : {}),
+    ...(text(row.selection_assignment_unavailable_reason)
+      ? { selection_assignment_unavailable_reason: row.selection_assignment_unavailable_reason } : {}),
+    ...(terminal && Object.keys(terminal).length > 0 ? { terminal_evidence: terminal } : {}),
+    ...(counted && Object.keys(counted).length > 0 ? { tokens: counted } : {}),
+  };
+  return Object.keys(signals).length > 0 ? signals : undefined;
+}
+
 /** Only these fields leave the raw row; prompts, bodies and free text never enter the snapshot. */
 export function projectFlowRow(row: Record<string, unknown>, fingerprint: string): FlowRow {
   const assignment = record(row.worker_assignment);
@@ -157,6 +189,7 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     provider: text(row.provider) ?? text(record(assignment?.selected)?.provider),
     servedModel: text(row.served_model),
     servedModelReason: text(row.served_model_reason),
+    ...(projectOutcomeSignals(row) ? { outcomeSignals: projectOutcomeSignals(row) } : {}),
     notionalCostReported: Object.hasOwn(row, "notional_cost_usd"),
     repair: projectRepairCostContext(row),
     importedModule: importedModuleOf(benchmark?.loadedModule),
