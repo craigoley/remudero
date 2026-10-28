@@ -776,6 +776,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T3868: sweep.ts reads this fix-lane refusal to release the unchanged-head claim after the
   // harness declined to create a commit; rotating it away would strand that head again.
   "fix.commit_refused",
+  "fix.refused", // W1-T10386: emptyCodeScanningRounds reads refusals to stop unchanged-head retries.
   // W1-T4207: `lastCommitRefusalPromptLines` (run-task.ts) reads its `subtype` to name the last refused paths.
   "fix.done",
   "fix.progress_judged", // the sweep labels each judged PR from its newest judgement; rotated away, the label reverts to the stale strike ratio.
