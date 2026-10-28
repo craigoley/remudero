@@ -1,0 +1,23 @@
+- id: W1-T10900
+  title: "Prevent futile scope-amendment retries for unchanged non-test paths"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - src/cli/commands/fix.ts
+    - src/lib/proof-amendment.ts
+  rationale: >-
+    From the 2026-10-27 follow-up on W1-T10585-1793135839441, ratified via rmd approve:
+  
+    One cross-file invariant, unsatisfiable piecewise: the fix rung must drop or self-heal scope
+    paths the worker's diff does not touch before amendScope, otherwise requestScopeAmendment
+    refuses them path-not-changed and the round retries.
+  acceptance:
+    - claim: "A non-test scope path the worker's diff does not touch is removed or self-healed before amendScope, rather than retried after path-not-changed refusal"
+      proof: "unit test: W1-T10585: fix_refusal:non-test-paths-need-scope-path-not-changed is prevented, not retried"
+  origin: "followup:W1-T10585-1793135839441:2026-10-27T21:37:12.675Z:0"
