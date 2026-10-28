@@ -1,8 +1,10 @@
 import { observeCiRefreshDeferrals } from "../src/lib/ci-refresh-prevention.ts";
 /** Private daily operational review. No paid model calls, GitHub reads or routing writes. */
 import { execFileSync } from "node:child_process";
-import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
@@ -37,7 +39,6 @@ async function readSource(source, asOf, resolutions, openUnion) {
     return { ...source, state: "unavailable", reasons: ["ledger-source-missing"], forms, rowsRead: 0, rows: [] };
   const rows = [];
   const resolvedRows = new WeakSet();
-  const qualityRows = new WeakSet();
   let routingResolvedFutureRows = 0;
   const findings = [];
   let findingsOmitted = 0;
@@ -47,41 +48,57 @@ async function readSource(source, asOf, resolutions, openUnion) {
   const reportSeen = new Set();
   const reportSteps = new Set();
   let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, invalidTimestampRows = 0, newestTs = null;
-  for await (const row of openUnion(source.stateDir, {
-    since: `${since}T00:00:00Z`,
-    // Audit the corpus without keeping records; the separate report read is step-filtered.
-    dedupe: false,
-    onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
-    onMalformedRow: (item) => { malformedRows++; finding({ kind: item.kind, form: item.form, path: item.path, rowOrdinal: item.rowOrdinal, timestamp: item.timestamp }); },
-    onAcceptedRecord: (row, raw) => {
-      const timestamp = Date.parse(row.ts);
-      if (reportReads(row, timestamp, windowStart) && timestamp <= Date.parse(asOf)) {
-        const fingerprint = createHash("sha256").update(raw).digest("hex");
-        if (reportSeen.has(fingerprint)) return;
-        if (reportSeen.size < 100_000) {
-          reportSeen.add(fingerprint);
-          reportSteps.add(row.step);
-        } else retainedRowsOmitted++;
-      }
-      // Do not count an exact report replay twice, but keep auditing unrelated physical rows.
-      qualityRows.add(row);
-      const resolution = resolveRoutingQuarantineRow(resolutions, source.label, row, raw, asOf);
-      if (resolution) resolvedRows.add(row);
-      if (!Number.isFinite(timestamp) || timestamp > Date.parse(asOf) + 5 * 60_000) finding({
-        kind: Number.isFinite(timestamp) ? "future-timestamp" : "invalid-timestamp", rowHash: createHash("sha256").update(raw).digest("hex"),
-        timestamp: typeof row.ts === "string" ? row.ts.slice(0, 80) : null, step: typeof row.step === "string" ? row.step.slice(0, 80) : null,
-        ...(resolution ? { resolutionScope: resolution.scope, resolvedAt: resolution.resolvedAt } : {}),
-      });
-    },
-  })) {
-    if (!qualityRows.has(row)) continue;
-    const time = Date.parse(row.ts);
-    if (!Number.isFinite(time)) { invalidTimestampRows++; continue; }
-    if (time > Date.parse(asOf) + 5 * 60_000) { futureRows++; if (resolvedRows.has(row)) routingResolvedFutureRows++; continue; }
-    // Normal writes arriving during the scan belong to the next snapshot, not a clock warning.
-    if (time > Date.parse(asOf)) continue;
-    rowsRead++;
-    if (newestTs === null || row.ts > newestTs) newestTs = row.ts;
+  // Audit fingerprints spill to a private disposable database, never a corpus-sized JS Set.
+  // A 2 MiB page-cache target and disabled mmap keep the fingerprint corpus out of RAM.
+  const auditDir = mkdtempSync(join(tmpdir(), "rmd-routing-quality-"));
+  let auditDb;
+  try {
+    auditDb = new DatabaseSync(join(auditDir, "seen.sqlite"));
+    auditDb.exec(`PRAGMA cache_size = -2048; PRAGMA mmap_size = 0;
+      PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;
+      CREATE TABLE seen (fingerprint BLOB PRIMARY KEY) WITHOUT ROWID; BEGIN`);
+    const acceptQualityRow = auditDb.prepare("INSERT OR IGNORE INTO seen VALUES (?)");
+    const qualityRows = new WeakSet();
+    for await (const row of openUnion(source.stateDir, {
+      since: `${since}T00:00:00Z`,
+      // Audit the corpus without keeping records; the separate report read is step-filtered.
+      dedupe: false,
+      onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
+      onMalformedRow: (item) => { malformedRows++; finding({ kind: item.kind, form: item.form, path: item.path, rowOrdinal: item.rowOrdinal, timestamp: item.timestamp }); },
+      onAcceptedRecord: (row, raw) => {
+        const fingerprint = createHash("sha256").update(raw).digest();
+        if (!acceptQualityRow.run(fingerprint).changes) return;
+        const timestamp = Date.parse(row.ts);
+        if (reportReads(row, timestamp, windowStart) && timestamp <= Date.parse(asOf)) {
+          if (reportSeen.size < 100_000) {
+            reportSeen.add(fingerprint.toString("hex"));
+            reportSteps.add(row.step);
+          } else retainedRowsOmitted++;
+        }
+        // Count each logical union row once, including unrelated and quarantined rows.
+        qualityRows.add(row);
+        const resolution = resolveRoutingQuarantineRow(resolutions, source.label, row, raw, asOf);
+        if (resolution) resolvedRows.add(row);
+        if (!Number.isFinite(timestamp) || timestamp > Date.parse(asOf) + 5 * 60_000) finding({
+          kind: Number.isFinite(timestamp) ? "future-timestamp" : "invalid-timestamp", rowHash: createHash("sha256").update(raw).digest("hex"),
+          timestamp: typeof row.ts === "string" ? row.ts.slice(0, 80) : null, step: typeof row.step === "string" ? row.step.slice(0, 80) : null,
+          ...(resolution ? { resolutionScope: resolution.scope, resolvedAt: resolution.resolvedAt } : {}),
+        });
+      },
+    })) {
+      if (!qualityRows.has(row)) continue;
+      const time = Date.parse(row.ts);
+      if (!Number.isFinite(time)) { invalidTimestampRows++; continue; }
+      if (time > Date.parse(asOf) + 5 * 60_000) { futureRows++; if (resolvedRows.has(row)) routingResolvedFutureRows++; continue; }
+      // Normal writes arriving during the scan belong to the next snapshot, not a clock warning.
+      if (time > Date.parse(asOf)) continue;
+      rowsRead++;
+      if (newestTs === null || row.ts > newestTs) newestTs = row.ts;
+    }
+    auditDb.exec("COMMIT");
+  } finally {
+    try { auditDb?.close(); }
+    finally { rmSync(auditDir, { recursive: true, force: true }); }
   }
   const dedupeRows = reportSeen.size;
   if (reportSteps.size) {

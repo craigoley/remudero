@@ -19,11 +19,13 @@ const assignment = { ts, step: "worker.assignment", task_id: "W1-T1", worker_ass
     experiment: { assignedArm: "sol61", crossover: false } } } };
 const encode = (rows: unknown[]) => rows.map(row => JSON.stringify(row)).join("\n") + "\n";
 
-async function review(rows: unknown[], check: (source: any) => void, beforeReports?: (stateDir: string) => void) {
+async function review(rows: unknown[], check: (source: any) => void, beforeReports?: (stateDir: string) => void,
+  replayRows?: unknown[]) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-bounded-review-"));
   try {
     const stateDir = join(dir, "state"); mkdirSync(stateDir);
-    writeFileSync(join(stateDir, "ledger.2026-10-02T11-00-00-000Z.ndjson.gz"), gzipSync(encode([assignment])));
+    writeFileSync(join(stateDir, "ledger.2026-10-02T11-00-00-000Z.ndjson.gz"), gzipSync(encode(replayRows ?? [assignment])));
+    if (replayRows) writeFileSync(join(stateDir, "ledger.2026-10-02T12-00-00-000Z.ndjson"), encode([...replayRows].reverse()));
     writeFileSync(join(stateDir, "ledger.ndjson"), encode(rows));
     const reads: { options: OpenLedgerUnionOptions; steps: unknown[] }[] = [];
     const result = await dailyRoutingReview({ sources: [{ label: "core", stateDir }], outDir: join(dir, "out"), asOf,
@@ -55,8 +57,13 @@ async function review(rows: unknown[], check: (source: any) => void, beforeRepor
 
 test("W1-T10830: the routing review dedupes only the rows its reports read", async () => {
   const noise = Array.from({ length: 10_000 }, (_, n) => ({ ts, step: "unrelated", n }));
-  await review([...noise, assignment, null, { ts: "invalid", step: "unrelated" },
-    { ts: "2026-11-01T00:00:00Z", step: "unrelated" }], source => {
+  const replayRows = [...noise, assignment, { ts: "invalid", step: "unrelated" },
+    { ts: "2026-11-01T00:00:00Z", step: "unrelated" }];
+  let original: unknown;
+  const metrics = ({ stateDir, forms: _forms, ...source }: any) => ({ ...source,
+    findings: source.findings.map((finding: any) => ({ ...finding,
+      ...(finding.path ? { path: finding.path.replace(stateDir, "<state>") } : {}) })) });
+  const check = (source: any) => {
     assert.equal(source.dedupeRows, 1);
     assert.equal(source.retainedRows, 1);
     assert.equal(source.rowsRead, 10_001);
@@ -66,7 +73,13 @@ test("W1-T10830: the routing review dedupes only the rows its reports read", asy
     assert.equal(source.findings.length, 3);
     assert.equal(source.newestTs, ts);
     assert.equal(source.reports.find((report: any) => report.id === epoch.id).assignments, 1);
-  });
+  };
+  await review([...replayRows, null], source => { check(source); original = metrics(source); });
+  await review([...replayRows, null], source => {
+    assert.deepEqual(source.forms, { gzip: 1, plain: 1, live: 1 }, "every replay form must be opened");
+    check(source);
+    assert.deepEqual(metrics(source), original, "cross-form replays must not change quality counts, quarantine or reports");
+  }, undefined, replayRows);
 });
 
 test("a source lost between audit and report collection remains partial with its audited counts", async () => {
