@@ -6671,9 +6671,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       // 19:52:37.704Z) against a session limit whose own message said it reset at 20:50Z, 57m23s
       // later. The schedule lives in classify.ts (transientBackoffMs, bounded); this passes only
       // the clock, so a test can drive the whole thing without a real timer.
-      driverResult = resumeAtPreopen
-        ? { outcome: "success", strikes: 0, transientRetries: 0, diagnosed: false, attempts: 0 }
-        : await runDiagnoseThenRetry({
+      if (resumeAtPreopen) {
+        driverResult = { outcome: "success", strikes: 0, transientRetries: 0, diagnosed: false, attempts: 0 };
+      } else {
+        driverResult = await runDiagnoseThenRetry({
           fixProgressJudge: ctx.spawnInjected ? undefined : productionFixProgressJudge({ cwd: worktreePath, settingsFile }),
           progressInput: buildFixProgressInput({ taskId, headSha: "implement", currentRed: [], ledger: [] }),
           attempt: attemptImplement,
@@ -6681,6 +6682,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           log,
           sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         });
+      }
     } catch (e) {
       if (!(e instanceof ImplementBudgetBreach)) throw e;
       // Exits the diagnose-then-retry loop immediately — `impl` (the breaching attempt) is
