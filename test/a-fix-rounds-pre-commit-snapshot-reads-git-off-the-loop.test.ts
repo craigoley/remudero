@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 import * as harness from "#src/run-task.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
 // @ts-ignore executable census module has no declaration file.
@@ -157,7 +158,7 @@ test("the native snapshot controller can collect bounded child outcomes without 
       if ((opts.timeout ?? 0) <= 121_000) return { status: null, signal: "SIGTERM" as NodeJS.Signals, stdout: "partial child progress", stderr: "" };
       return { status: 2, signal: null, stdout: "census-precheck: retained source-reader capability UNKNOWN", stderr: "" };
     }
-    return { status: 0, signal: null, stdout: "# tests 1\n# pass 1\n# fail 0\n", stderr: "" };
+    return { ...finishJudgedRun(args, opts), signal: null, stdout: "# tests 1\n# pass 1\n# fail 0\n", stderr: "" };
   });
   assert.equal(checked?.refusal, undefined);
   assert.match(checked?.unmeasured ?? "", /capability UNKNOWN/);
