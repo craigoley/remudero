@@ -1,0 +1,137 @@
+- id: W1-T10919
+  title: "A PROOF RUN THAT COLLECTS ZERO TESTS IS A RUNNER-SCOPE OUTCOME, NOT A WORKER MISS, AND IS NOT REBUILT ON THE SAME BASE — check-proof exit 3 (no-match) refuses as a plain re-dispatchable `branch-gap` even when the named test exists at the head, so PORTAL-T45 was rebuilt 5 times in 31 minutes on a base whose vitest include could not collect its .test.tsx file, and tripped its breaker"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern spans the PR-open refusal class, the non-worker strike set and the existing W1-T3959 hold that reads it; no conclusive verdict for a real miss changes
+  band_meaning: span
+  priority: 1
+  status: queued
+  attempts: 0
+  origin: "filing agent X1 2026-10-28, on Craig's 'file and fix both' after W1's wedge diagnosis of PORTAL-T45"
+  plan_refs: [W1-T10742, W1-T8759, W1-T3525, W1-T4691, W1-T7742, W1-T10897, PORTAL-T45, PORTAL-T44]
+  files:
+    - src/lib/pr-open.ts
+    - src/lib/check-proof.ts
+    - src/lib/non-worker-verdict.ts
+    - src/lib/stranded-task-detector.ts
+    - src/lib/dispatch-repair.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/cli/commands/daemon.ts
+    - test/review/a-proof-that-collects-nothing-is-not-retried-on-the-same-base.test.ts
+  rationale: |
+    RE-VERIFIED 2026-10-28 on origin/main d03d7d3ef by direct read.
+
+    THE INCIDENT (site instance ledger, read-only on the host, via W1's diagnosis 2026-10-28).
+    - PORTAL-T45 ran five times on 2026-10-27, 19:07Z to 19:38Z (runs ...055092, ...703335,
+      ...189960, ...619000, ...873766), each with a pushed commit. Every run ended
+      `pr.open_refused`: its `unit test:` proof "did not pass against merge base", and Vitest printed
+      the TAP plan `1..0`, so it collected zero tests.
+    - The cause was the runner's scope, not the work. On every one of those bases the site's
+      vitest.config.mjs included only `*.test.ts`, and the declared test was a `.test.tsx` file that
+      held the proof's title. PORTAL-T44 (site #213, merged 19:56Z) widened the include to
+      `{ts,tsx}`. A build cut from that main would have passed.
+    - About every 8 minutes a fresh build was cut on the SAME base and refused the same way, until
+      `dispatch.circuit_broken` (freshCount 5, maxDispatches 5) halted the task. Releasing it now
+      needs an operator `rmd release` (W1-T4691).
+
+    THE DEFECT (core, every repo).
+    - `execWhitelistedProof` (src/lib/review.ts) reads a name-filtered run that executed no
+      non-skipped leaf as `no-match`, through `vitestNameFilteredOutcome` or `nameFilteredOutcome`.
+    - `checkProofCommand` (src/lib/check-proof.ts) exits `CHECK_PROOF_EXIT.noMatch` (3) for it.
+    - `openPullRequestChecked` (src/lib/pr-open.ts) treats exit 3 as CONCLUSIVE: `proofInconclusive`
+      is only exit 4, null, a signal or an error (W1-T10742), and `failingProof` only exit 1. So it
+      rejects as `branch-gap`, the re-dispatchable class, with no cause recorded.
+    - `streakRefusal` (src/lib/non-worker-verdict.ts) counts that `pr_open.refused` as the worker's
+      strike, and the dispatcher rebuilds it on an unchanged base.
+    - Exit 3 conflates two different facts:
+      (a) the proof's title is in NO test file at the head: the worker did not write the test, and a
+          rebuild can fix it. This stays `branch-gap`.
+      (b) the title IS in a test file at the head, but the runner collected zero tests: the runner's
+          scope (include glob, file extension, suite root) cannot see that file on this base. A
+          rebuild on the same base produces the same refusal, every time.
+
+    WHY NOT A DUPLICATE. W1-T10742 (merged, #14795) made exit 4 a harness outcome and named exit 3
+    as conclusive on purpose. W1-T8759 (queued) is about a proof that already passes at base.
+    W1-T10897 (queued) makes a consumer daemon see its own run branches. That stops the five
+    separate branches, but not the identical rebuild after the branch grace.
+  design: |
+    1. Classify case (b) in check-proof, where the evidence is. A test proof whose run reports
+       `no-match`, whose candidate resolution found at least one head test file holding the proof's
+       title (the files check-proof already prints as `candidates:`), and whose runner loaded ZERO
+       files prints a `cause: collected-nothing` line. The line names those files and, when it can
+       read one, the runner's include pattern. "Loaded zero files" means the top-level TAP plan is
+       `1..0` with no top-level `ok`/`not ok` line, or the runner said "No test files found". That
+       covers vitest's `1..0` and a node --test run reporting `# tests 0` with no file wrapper. A
+       node name-filtered run that LOADED its file but matched no title still emits the file
+       wrapper, so it stays a real miss. Exit code 3 is unchanged for every caller.
+    2. In `openPullRequestChecked`, a refusal whose check-proof output carries that cause gets a new
+       `PrOpenRefusalClass` value, "proof-collected-nothing". Its message names the files and the
+       include pattern. The error carries `runnerConfigDigest`: the sha256 of
+       `git ls-tree HEAD -- <runner config paths>` in the run worktree (the vitest.config.* and
+       vitest.workspace.* variants, and package.json). That is what the run's runner actually read.
+       A real miss (case a) is unchanged: `branch-gap`.
+    3. The run's `pr_open.refused` verdict row (run-task-verb.ts) already carries `refusal_class`;
+       it also carries `runner_config_digest`. In `streakRefusal` (non-worker-verdict.ts), a
+       `pr_open.refused` verdict with `refusal_class: "proof-collected-nothing"` is the non-worker
+       class `proof_collected_nothing`: excluded from the breaker, never resetting a streak. Keep
+       the W1-T7742 contract: rows from before this task carry no class and are left as they were.
+       `nonWorkerVerdictClass` (stranded-task-detector.ts) names it as itself, as it does
+       `proof_inconclusive`, never as a `toolchain` fault, so the breaker-release runbook reads it
+       as the runner's scope.
+    4. HOLD through the EXISTING W1-T3959 mechanism, never a second one. At that refusal,
+       run-task-verb.ts writes the task's prior-refusal record (dispatch-repair.ts
+       `writePriorRefusal`): escalated, `preDispatchContractRevision` = the task's current
+       revision, plus a new optional `runnerConfigDigest`. `terminalPreDispatchRefusalRevisions`
+       gains an optional reader for the TARGET repo's current runner-config digest, computed the
+       same way from `git ls-tree origin/main -- <paths>`. It is read lazily, at most once per
+       selection pass, and only when some record carries a digest. A record whose digest differs
+       from that reading, or whose reading failed, is left out of the held map, which fails open. So
+       the daemon's existing `isTerminalPreDispatchRefusalHeld` holds the task while BOTH the shard
+       and main's runner config are unchanged, and releases it on the next pass when either moves
+       (as PORTAL-T44 did), with no operator release. No timer and no count (no-hard-thresholds).
+       daemon.ts wires the reader to the target's checkout: the repo root for a self-target, the
+       managed `repos/<repo>` checkout for a consumer.
+    5. The hold is reported under the existing `held-pre-dispatch-refusal` filter name. The record's
+       verdict text, `proof-collected-nothing: <files> (<include>)`, says why, so no new filter
+       reason reaches the census tallies.
+  prompt: |
+    Read the rationale and design. Write the failing tests first, in
+    test/review/a-proof-that-collects-nothing-is-not-retried-on-the-same-base.test.ts, through
+    `#src/*` and `#test/*` imports, with REPO_ROOT from #test/helpers/repo-root.js. Inject the proof
+    runner and the git reads; do not spawn a real suite for the classification cases. Add ONE case
+    that runs check-proof for real against a two-file fixture tree, so the default runner seam is
+    covered. Then implement the five design steps. Prove each new test is load-bearing by restoring
+    the old branch of the code with `git show` and watching it fail.
+  acceptance:
+    - claim: "a test proof whose title is in a head test file but whose run collects zero tests refuses as proof-collected-nothing, naming the file and the runner include pattern"
+      proof: 'grep: test("W1-T10919: a proof whose title is in a head test file but collects zero tests refuses as proof-collected-nothing" in test/review/a-proof-that-collects-nothing-is-not-retried-on-the-same-base.test.ts'
+    - claim: "the classification holds for both runners: a vitest 1..0 run and a node --test run reporting # tests 0"
+      proof: 'grep: test("W1-T10919: a zero-collected run is classified for both vitest and node --test" in test/review/a-proof-that-collects-nothing-is-not-retried-on-the-same-base.test.ts'
+    - claim: "a proof whose title is in no head file still refuses as branch-gap, so a real worker miss is unchanged"
+      proof: 'grep: test("W1-T10919: a proof whose title is in no file still refuses as branch-gap" in test/review/a-proof-that-collects-nothing-is-not-retried-on-the-same-base.test.ts'
+    - claim: "a proof-collected-nothing refusal is a non-worker strike that the breaker does not count"
+      proof: 'grep: test("W1-T10919: a proof-collected-nothing refusal is a non-worker strike" in test/review/a-proof-that-collects-nothing-is-not-retried-on-the-same-base.test.ts'
+    - claim: "a task refused proof-collected-nothing is skipped until main changes its runner config or its shard, then dispatches with no operator release"
+      proof: 'grep: test("W1-T10919: a collected-nothing task waits for a runner-config or shard change, then dispatches" in test/review/a-proof-that-collects-nothing-is-not-retried-on-the-same-base.test.ts'
+  falsifier: |
+    - Drop the collected-nothing cause in check-proof: the first two cases must fail, because the
+      refusal is `branch-gap`.
+    - Map the new class back to `branch-gap` in `openPullRequestChecked`: the first case must fail.
+    - Return undefined from `streakRefusal` for the new verdict: the strike case must fail.
+    - Make `terminalPreDispatchRefusalRevisions` ignore the runner-config digest, so the record holds
+      forever: the dispatch case must fail when the digest changes.
+    - Key the hold on main's head sha instead of the runner-config digest: the same case must fail,
+      because an unrelated merge to main would release a build that is refused again.
+    - Hold when the digest read fails: the dispatch case must fail, because an unreadable digest
+      must fail open.
+    GUARDS that held at base and must still hold:
+    - an exit-1 proof still opens with its failing proof named;
+    - exit 4 is still `proof_inconclusive` (W1-T10742);
+    - exit 5 still refuses `stale-proof`;
+    - a real miss (case a) still refuses `branch-gap` and still counts as the worker's strike.
+    Remove each guard's production branch in turn: its existing case must fail. Then restore it and
+    require zero failures.
