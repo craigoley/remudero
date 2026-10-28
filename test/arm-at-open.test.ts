@@ -1163,7 +1163,7 @@ function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: strin
 }
 
 const armVerdictCases = [
-  { mode: "live", title: "W1-T975: a live run records its verdict and arms auto-merge using only its run-owned hold ledger" },
+  { mode: "live", title: "legacy arm uses its ledger when HOME has no Remudero configuration (W1-T975: a live run records its verdict and arms auto-merge using only its run-owned hold ledger)" },
   { mode: "shadow", title: "W1-T975: a shadow run records its verdict and does not arm auto-merge" },
 ] as const;
 for (const { mode, title } of armVerdictCases) test(title, async (t) => runArmVerdictFixture(t, mode));
