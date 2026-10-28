@@ -7,7 +7,7 @@ import { test, type TestContext } from "node:test";
 import { gatherActorEvidence, readActorEvidence } from "#src/lib/actor-evidence.js";
 import { realDeployDeps } from "#src/lib/deployer.js";
 import { isRecyclePauseDetail, pauseActor, pauseDetail } from "#src/lib/fleet-control.js";
-import { deriveControlInterventions } from "#src/lib/operator-interventions.js";
+import { deriveControlInterventions, interventionFromLedgerRow, interventionKey } from "#src/lib/operator-interventions.js";
 import { routeOperatorInterventions } from "#src/lib/sre-lane.js";
 import { daemonSreRunbookHost } from "#src/lib/sre-runbooks.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -166,6 +166,24 @@ test("W1-T9515: a recycle with no known caller is a hand-recycle intervention", 
     assert.equal(deriveControlInterventions([{ ...row, caller }]).length, 1);
   }
   assert.equal(deriveControlInterventions([{ ...row, actor_evidence: undefined }])[0]!.cause_class, "hand-recycle:actor unrecorded");
+
+  f.run({ SSH_CONNECTION: "192.0.2.1 123 192.0.2.2 22" }, ["--bad-argument"]);
+  const second = { ...f.rows()[1], ts: row.ts };
+  assert.notEqual(second.pid, row.pid);
+  assert.notEqual(second.run_id, row.run_id);
+  assert.equal(second.instance, row.instance);
+  const ledger = join(f.root, "state/ledger.ndjson");
+  writeFileSync(ledger, [row, second, row, second].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  const distinct = deriveControlInterventions([row, second, row, second]);
+  assert.equal(distinct.length, 2);
+  assert.equal(new Set(distinct.map(interventionKey)).size, 2, "each invocation keeps its identity through routing");
+  const secondEvents = await routeOperatorInterventions(input);
+  assert.equal(secondEvents.length, 1, "a second recycle in the same second is routed independently");
+  const recorded = written.filter((entry) => entry.step === "operator.intervention");
+  assert.equal(recorded.length, 2);
+  assert.deepEqual(recorded.map(interventionFromLedgerRow), distinct, "persisted interventions retain invocation identity");
+  assert.equal(interventionFromLedgerRow({ ...recorded[0], invocation_id: 1 }), undefined);
+  assert.deepEqual(await routeOperatorInterventions(input), [], "both invocation keys survive the routing-memory reread");
 });
 
 test("test/every-recycle-names-who-invoked-it.test.ts: shell and TypeScript actor classifiers agree", (t) => {

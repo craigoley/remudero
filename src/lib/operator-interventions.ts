@@ -48,6 +48,7 @@ export interface OperatorInterventionRow {
   target: string;
   actor: string;
   actor_evidence?: unknown;
+  invocation_id?: string;
   cause_class: string;
   source: string;
 }
@@ -169,7 +170,8 @@ export function deriveControlInterventions(rows: readonly Record<string, unknown
     if (!control) continue;
     const actor = ledgerRowActor(row);
     if (!recycle && isFleetAutomationActor(actor)) continue;
-    const key = `${step}\u0000${String(row.ts)}\u0000${controlTarget(row)}\u0000${String(row.run_id ?? "")}`;
+    const invocation = recycle ? JSON.stringify([row.run_id ?? "", row.pid ?? "", row.writer_start ?? ""]) : undefined;
+    const key = `${step}\u0000${String(row.ts)}\u0000${controlTarget(row)}\u0000${String(row.run_id ?? "")}\u0000${invocation ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({
@@ -179,6 +181,7 @@ export function deriveControlInterventions(rows: readonly Record<string, unknown
       target: controlTarget(row),
       actor,
       ...(row.actor_evidence !== undefined ? { actor_evidence: row.actor_evidence } : {}),
+      ...(invocation !== undefined ? { invocation_id: invocation } : {}),
       cause_class: controlCauseClass(row, tsMs(row), timeline),
       source: "ledger",
     });
@@ -195,6 +198,7 @@ export function interventionLedgerFields(row: OperatorInterventionRow): Record<s
     target: row.target,
     intervention_actor: row.actor,
     ...(row.actor_evidence !== undefined ? { actor_evidence: row.actor_evidence } : {}),
+    ...(row.invocation_id !== undefined ? { invocation_id: row.invocation_id } : {}),
     cause_class: row.cause_class,
     source: row.source,
   };
@@ -210,9 +214,10 @@ export function interventionLedgerLine(row: OperatorInterventionRow): LedgerLine
   };
 }
 
-/** One intervention's identity: surface, action, target and instant — what dedupes a re-read of the same window. */
-export function interventionKey(row: Pick<OperatorInterventionRow, "surface" | "action" | "target" | "at">): string {
-  return `${row.surface}|${row.action}|${row.target}|${row.at}`;
+/** Invocation identity separates recycles sharing an instant; the final timestamp also bounds routing memory. */
+export function interventionKey(row: Pick<OperatorInterventionRow, "surface" | "action" | "target" | "at" | "invocation_id">): string {
+  const invocation = row.invocation_id !== undefined ? `|${encodeURIComponent(row.invocation_id)}` : "";
+  return `${row.surface}|${row.action}|${row.target}${invocation}|${row.at}`;
 }
 
 /** An `operator.intervention` ledger row read back as an {@link OperatorInterventionRow}; undefined if malformed. */
@@ -223,7 +228,9 @@ export function interventionFromLedgerRow(row: Record<string, unknown>): Operato
       typeof target !== "string" || typeof actor !== "string" || typeof cause !== "string" || typeof source !== "string") {
     return undefined;
   }
+  if (row.invocation_id !== undefined && typeof row.invocation_id !== "string") return undefined;
   return { at, surface, action, target, actor, cause_class: cause, source,
+    ...(row.invocation_id !== undefined ? { invocation_id: row.invocation_id } : {}),
     ...(row.actor_evidence !== undefined ? { actor_evidence: row.actor_evidence } : {}) };
 }
 
