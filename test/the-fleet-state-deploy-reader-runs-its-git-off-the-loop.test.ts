@@ -108,7 +108,7 @@ test("W1-T9552: a slow git during the deploy read does not delay a concurrent ti
   assert.ok(ticksDuringRead > 0, `the timer ticked while git slept (${ticksDuringRead} ticks in ${tookMs} ms)`);
 });
 
-test("W1-T9552: a failed deploy fact reads as unknown, as the sync getter does", async (t) => {
+test("W1-T9552: a failed deploy fact reads as unknown", async (t) => {
   const { sha, opts, stub } = installFixture(t);
   stub("docker", "echo 'Error: No such container' >&2\nexit 1");
   const sync = realDeployDeps(opts);
