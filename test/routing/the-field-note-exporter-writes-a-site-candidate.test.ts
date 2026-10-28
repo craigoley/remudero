@@ -15,9 +15,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { buildModelFieldNoteCandidate, PINNED_SITE_CONSENT_REGISTRY, SITE_MIN_CELL, SITE_ROW_LIMIT, SITE_SAFE_ID_RE, type FieldNoteWindows,
   type ModelFieldNoteCandidate, type SiteConsentRegistry } from "#src/lib/field-trials-field-note.js";
-import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand, projectFlowRow, SMALL_CELL_MIN, type FieldTrialsConsent,
-  type FieldTrialsFlowSnapshot } from "#src/lib/field-trials-flow.js";
+import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand, readFieldTrialsLedger, SMALL_CELL_MIN, type FieldTrialsConsent,
+  type FieldTrialsFlowSnapshot, type FieldTrialsSource } from "#src/lib/field-trials-flow.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 // ---- PINNED COPY of the site validator (remudero-site lib/model-field-note.ts) --------------------------------
 const siteRowKeys = ["modelId", "taskClass", "assigned", "servedObserved", "callOutcomeObserved", "verified"];
@@ -76,7 +77,7 @@ type Call = "served" | "no-call" | "ladder-refusal" | "served-no-outcome";
 type Spec = { model: string; taskClass?: string; day: number; n: number; call: Call; host?: string; label?: string };
 
 /** Ledger rows shaped like production: an assignment, and (unless no-call) the worker.attempt joined by assignment id. */
-function ledgerRows(specs: Spec[]): Record<string, unknown>[] {
+function assignmentCallRows(specs: Spec[]): Record<string, unknown>[] {
   return specs.flatMap((spec) => Array.from({ length: spec.n }, (_, i) => {
     const id = `asg-${spec.label ?? "core"}-${spec.model}-${spec.taskClass ?? "implement"}-${spec.day}-${spec.call}-${i}`;
     const base = { host: spec.host ?? "host-alpha-private", actor: "daemon", task_id: `task-${id}`, run_id: `run-${id}` };
@@ -91,11 +92,17 @@ function ledgerRows(specs: Spec[]): Record<string, unknown>[] {
   }).flat());
 }
 
-function snapshotOf(asOf: string, sources: { label: string; repo: string; specs: Spec[] }[]): FieldTrialsFlowSnapshot {
-  return buildFieldTrialsFlowSnapshot({ asOf, github: { version: "field-trials-github-v1", repos: {} },
-    sources: sources.map(({ label, repo, specs }) => ({ label, repo, ledger: { state: "observed", reason: null,
-      forms: { gzip: 0, plain: 0, live: 1 }, malformedRows: 0, duplicateRows: 0, futureRows: 0, unreadSources: 0, newestTs: null,
-      rows: ledgerRows(specs.map((spec) => ({ ...spec, label }))).map((value, index) => projectFlowRow(value, `fp-${label}-${index}`)) } })) });
+async function snapshotOf(asOf: string, sources: { label: string; repo: string; specs: Spec[] }[]): Promise<FieldTrialsFlowSnapshot> {
+  const observed: FieldTrialsSource[] = [];
+  for (const { label, repo, specs } of sources) {
+    const fixture = writeLedger(assignmentCallRows(specs.map((spec) => ({ ...spec, label }))));
+    try {
+      observed.push({ label, repo, ledger: await readFieldTrialsLedger(fixture.dir, Date.parse(asOf)) });
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  }
+  return buildFieldTrialsFlowSnapshot({ asOf, github: { version: "field-trials-github-v1", repos: {} }, sources: observed });
 }
 
 const CONSENT: FieldTrialsConsent = { version: "field-trials-consent-v1", repos: [
@@ -109,8 +116,8 @@ const candidateOf = (snapshot: FieldTrialsFlowSnapshot, overrides: Partial<Param
 const tempDir = (name: string) => mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}field-note-${name}-`));
 const reviewed = (note: ModelFieldNoteCandidate["note"], at: string) => ({ ...note, reviewedBy: "owner", reviewedAt: at, publishedAt: at });
 
-test("W1-T10831: the field-note candidate passes the site validator once reviewed", () => {
-  const snapshot = snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [
+test("W1-T10831: the field-note candidate passes the site validator once reviewed", async () => {
+  const snapshot = await snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [
     { model: "gpt-6.1-sol", day: 1, n: 20, call: "served" }, { model: "gpt-6.1-sol", day: 2, n: 10, call: "no-call" },
     { model: "claude-opus-5", day: 2, n: 20, call: "served" }, { model: "claude-opus-5", day: 3, n: 10, call: "ladder-refusal" },
     { model: "claude-opus-5", taskClass: "review", day: 3, n: 10, call: "served" },
@@ -143,8 +150,8 @@ test("W1-T10831: the field-note candidate passes the site validator once reviewe
   assert.equal(candidate.note.consentRegistryRevision, "owner-2026-09-25-v1");
 });
 
-test("W1-T10831: small cells and complements are withheld from the field note", () => {
-  const snapshot = snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [
+test("W1-T10831: small cells and complements are withheld from the field note", async () => {
+  const snapshot = await snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [
     { model: "model-ok", day: 1, n: 20, call: "served" },
     { model: "model-six", day: 1, n: 6, call: "served" },
     { model: "model-nineteen", day: 1, n: 19, call: "served" },
@@ -165,8 +172,8 @@ test("W1-T10831: small cells and complements are withheld from the field note", 
 
   const many = Array.from({ length: SITE_ROW_LIMIT + 2 }, (_, i) => ({ model: `model-${String(i).padStart(2, "0")}`, day: 1,
     n: 20 + (i % 3) * 10, call: "served" as const }));
-  const crowded = candidateOf(snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: many }]));
-  const reversed = candidateOf(snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [...many].reverse() }]));
+  const crowded = candidateOf(await snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: many }]));
+  const reversed = candidateOf(await snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [...many].reverse() }]));
   assert.equal(crowded.state, "candidate");
   if (crowded.state !== "candidate" || reversed.state !== "candidate") return;
   assert.equal(crowded.candidate.note.rows.length, SITE_ROW_LIMIT, "never more rows than the site admits");
@@ -174,7 +181,7 @@ test("W1-T10831: small cells and complements are withheld from the field note", 
   assert.deepEqual(crowded.candidate.note.rows, reversed.candidate.note.rows, "the kept subset does not depend on input order");
   assert.deepEqual(crowded.candidate.note.rows.slice(0, 3).map((row) => row.assigned), [40, 40, 40], "the largest cells are kept first");
   assert.ok(siteParseModelFieldNote(reviewed(crowded.candidate.note, crowded.candidate.note.asOf), PINNED_SITE_CONSENT_REGISTRY));
-  const none = candidateOf(snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [
+  const none = candidateOf(await snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [
     { model: "model-six", day: 1, n: 6, call: "served" }] }]));
   assert.deepEqual(none, { state: "withheld", reason: "no-publishable-row",
     withheld: { cells: 1, reasons: { "assigned-below-twice-min-cell": 1 }, sources: [] } }, "no publishable row is no candidate");
@@ -182,7 +189,7 @@ test("W1-T10831: small cells and complements are withheld from the field note", 
 
 test("W1-T10831: the field note honours the consent receipts and carries no private ids", async () => {
   const specs: Spec[] = [{ model: "gpt-6.1-sol", day: 1, n: 20, call: "served" }, { model: "gpt-6.1-sol", day: 2, n: 10, call: "no-call" }];
-  const snapshot = snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs },
+  const snapshot = await snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs },
     { label: "console", repo: "craigoley/remudero-console", specs: specs.map((spec) => ({ ...spec, host: "host-beta-private" })) },
     { label: "lab", repo: "craigoley/remudero-lab", specs }]);
   assert.deepEqual(candidateOf(snapshot, { consent: null }), { state: "withheld", reason: "no-consent-receipt" });
@@ -267,14 +274,14 @@ test("W1-T10831: consecutive field-note windows never overlap", async () => {
       buildFieldTrialsFlowSnapshot, { nowIso, print: (line) => lines.push(line), resolveConfig: () => ({ root }) });
     const firstDays: Spec[] = [1, 2, 3].map((day) => ({ model: "gpt-6.1-sol", day, n: 10, call: "served" }));
     const laterDays: Spec[] = [4, 5, 6].map((day) => ({ model: "gpt-6.1-sol", day, n: 7, call: "served" }));
-    writeFileSync(join(outDir, "field-trials-flow-v1.json"), JSON.stringify(snapshotOf(DAY(4, 6),
+    writeFileSync(join(outDir, "field-trials-flow-v1.json"), JSON.stringify(await snapshotOf(DAY(4, 6),
       [{ label: "core", repo: "craigoley/remudero", specs: firstDays }])));
     assert.equal(await run(DAY(4, 7)), 0);
     assert.match(lines.at(-1)!, /^field-trials: field note candidate-unreviewed fn-2026-09-01-2026-09-04-[0-9a-f]{12} .*: 1 rows, 0 cells withheld/);
     const first = JSON.parse(readFileSync(out, "utf8")) as ModelFieldNoteCandidate;
     assert.deepEqual([first.note.windowStart, first.note.windowEnd, first.note.rows[0]!.assigned], [DAY(1), DAY(4), 30]);
 
-    writeFileSync(join(outDir, "field-trials-flow-v1.json"), JSON.stringify(snapshotOf(DAY(7, 6),
+    writeFileSync(join(outDir, "field-trials-flow-v1.json"), JSON.stringify(await snapshotOf(DAY(7, 6),
       [{ label: "core", repo: "craigoley/remudero", specs: [...firstDays, ...laterDays] }])));
     assert.equal(await run(DAY(7, 7)), 0);
     const second = JSON.parse(readFileSync(out, "utf8")) as ModelFieldNoteCandidate;
@@ -298,10 +305,10 @@ test("W1-T10831: consecutive field-note windows never overlap", async () => {
     assert.equal(await run(DAY(8, 7)), 1);
     assert.equal(lines.at(-1), "field-trials: field note refused (no-snapshot)");
 
-    const empty = snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [] }]);
+    const empty = await snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [] }]);
     assert.deepEqual(candidateOf(empty), { state: "withheld", reason: "no-observed-assignment-day" }, "no day observed is no window");
     assert.deepEqual(candidateOf({ ...empty, state: "unavailable" }), { state: "refused", reason: "snapshot-unavailable" });
-    const legacy = snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: firstDays }]);
+    const legacy = await snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: firstDays }]);
     for (const partition of Object.values(legacy.families.adoption)) delete (partition.cells as { bySelected?: unknown }).bySelected;
     assert.deepEqual(candidateOf(legacy), { state: "refused", reason: "snapshot-predates-selected-model-cross-tab" },
       "a snapshot written before the cross-tab cannot be read as zero served-known assignments");

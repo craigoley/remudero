@@ -17,7 +17,19 @@
  * test/routing/the-field-note-exporter-writes-a-site-candidate.test.ts.
  */
 import { createHash, createHmac } from "node:crypto";
-import type { AdoptionSelectedCell, FieldTrialsConsent, FieldTrialsFlowSnapshot } from "./field-trials-flow.js";
+import { fixedClock } from "./clock.js";
+
+/** Counts per selected model; a ladder refusal contributes no attributable call outcome. */
+export interface AdoptionSelectedCell { assigned: number; servedKnown: number; callOutcomeKnown: number }
+
+/** Snapshot projection consumed by the exporter; the snapshot producer depends on this contract. */
+export interface FieldNoteSnapshot {
+  asOf: string;
+  state: "observed" | "observed-partial" | "unavailable";
+  provenance: { sources: { label: string; repo: string }[] };
+  families: { adoption: Record<string, { inputHash: string; cells: { bySelected: Record<string, AdoptionSelectedCell> } }> };
+  privateKeys: string[];
+}
 
 export const MODEL_FIELD_NOTE_SCHEMA = "model-field-note-v1" as const;
 export const FIELD_NOTE_CANDIDATE_VERSION = "model-field-note-candidate-v1" as const;
@@ -105,8 +117,9 @@ export type ModelFieldNoteResult =
   | { state: "withheld" | "refused"; reason: string; withheld?: ModelFieldNoteCandidate["withheld"] };
 
 export interface ModelFieldNoteInput {
-  snapshot: FieldTrialsFlowSnapshot;
-  consent: FieldTrialsConsent | string | null;
+  snapshot: FieldNoteSnapshot;
+  consent: { version: "field-trials-consent-v1"; repos: { repo: string; rights: "private" | "aggregate-opt-in" | "public-benchmark";
+    receipt: string; revoked?: boolean; publicSourceUrl?: string }[] } | string | null;
   registry: SiteConsentRegistry | string;
   windows: FieldNoteWindows;
   salt: string;
@@ -124,7 +137,7 @@ function sha256(value: string): string {
 }
 
 function msIso(ms: number): string {
-  return new Date(ms).toISOString();
+  return fixedClock(ms).iso();
 }
 
 /** The site's publishableCount: a positive small subgroup, or a small complement, is never shown. */

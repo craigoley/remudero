@@ -27,7 +27,8 @@ import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { attributeAttemptOutcome, type AttemptOutcome } from "./attempt-outcome-attribution.js";
 import { buildModelFieldNoteCandidate, parseFieldNoteWindows, parseSiteConsentRegistry, PINNED_SITE_CONSENT_REGISTRY,
-  type FieldNoteWindows } from "./field-trials-field-note.js";
+  type AdoptionSelectedCell, type FieldNoteWindows } from "./field-trials-field-note.js";
+export type { AdoptionSelectedCell } from "./field-trials-field-note.js";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
@@ -406,10 +407,6 @@ function repairCells(units: RepairUnit[]) {
 type AdoptionUnit = Unit & { requested: string | null; selected: string | null; served: string | null; servedMissing: string | null;
   /** W1-T10831: the joined call's outcome under the shared attribution (W1-T10875); null when no call joined. */
   outcome: AttemptOutcome | null };
-
-/** W1-T10831: per selected model, assignments, those whose joined call named a served model, and those whose
- *  joined call ended in an outcome attributable to the model (success or model) — never a ladder refusal. */
-export interface AdoptionSelectedCell { assigned: number; servedKnown: number; callOutcomeKnown: number }
 
 function adoptionCells(units: AdoptionUnit[]) {
   const tally = (values: (string | null)[]) => {
