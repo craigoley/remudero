@@ -395,7 +395,7 @@ export interface LedgerEpochFacts {
   rows: Iterable<Record<string, unknown>>;
   /** Registered protocol's pinned stack, independent of per-assignment receipt completeness. */
   protocol?: { epochId: string; stack: Record<string, unknown> };
-  merged: readonly { trailerTaskIds: readonly string[]; mergedAt: string | null }[];
+  merged: readonly { trailerTaskIds: readonly string[]; mergedAt: string | null; mergedOnMain?: boolean }[];
   /** The time through which every source repo's pull history was read to completion, or null when any is incomplete. */
   mergesObservedThrough: string | null;
   sourceRepos: readonly string[];
@@ -415,8 +415,8 @@ const nonEmpty = (value: unknown): string | undefined => typeof value === "strin
 /**
  * PRODUCER: derive one registered epoch's builder input from the ledger. Assignments are the experiment's
  * `worker.assignment` rows (assigned arm from the intention-to-treat record, propensity only when the draw
- * was recorded through selectionPropensity with ROUTING_DRAW_METHOD); the served arm is the receipt's served
- * model, else the decision's served arm. Outcomes: merged = a merged pull naming the task as its ONLY
+ * was recorded through selectionPropensity with ROUTING_DRAW_METHOD); the served arm stays unknown until
+ * an execution receipt names its served model. Outcomes: merged = a pull verified on main naming the task as its ONLY
  * `Remudero-Task` trailer, at or after the task's first assignment; repair rounds = the fix lane's distinct
  * `fix.dispatch` rounds for the task within the outcome window. Returns null for an unregistered epoch.
  */
@@ -448,10 +448,8 @@ export function deriveRegisteredEpoch(epochId: string, facts: LedgerEpochFacts):
       const label = nonEmpty(itt?.assignedArm) ?? experimentArmForTask(experiment, taskId).arm;
       const probability = itt?.assignedProbability;
       const drawn = rec(routing?.propensity)?.method === ROUTING_DRAW_METHOD && typeof probability === "number";
-      const provider = nonEmpty(rec(assignment?.selected)?.provider);
-      const servedLabel = nonEmpty(itt?.servedArm) ?? (provider === undefined ? undefined : experiment.arms[provider as keyof typeof experiment.arms]);
       const entry: EpochAssignment = { taskId, at: fixedClock(ms(at)).iso(), assignedArm: reg.models[label] ?? label,
-        servedArm: armOf(servedLabel === undefined ? undefined : reg.models[servedLabel] ?? servedLabel),
+        servedArm: null,
         propensity: drawn ? probability as number : "unavailable" };
       assignments.push(entry);
       const id = nonEmpty(assignment?.id);
@@ -479,7 +477,7 @@ export function deriveRegisteredEpoch(epochId: string, facts: LedgerEpochFacts):
   const mergesOf = new Map<string, number[]>();
   for (const pull of facts.merged) {
     const only = pull.trailerTaskIds.length === 1 ? pull.trailerTaskIds[0]! : undefined;
-    if (only === undefined || pull.mergedAt === null || !Number.isFinite(ms(pull.mergedAt))) continue;
+    if (pull.mergedOnMain !== true || only === undefined || pull.mergedAt === null || !Number.isFinite(ms(pull.mergedAt))) continue;
     mergesOf.set(only, [...(mergesOf.get(only) ?? []), ms(pull.mergedAt)]);
   }
   const outcomes = [...first.entries()].map(([taskId, row]): EpochTaskOutcome => {

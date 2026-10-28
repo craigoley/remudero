@@ -320,6 +320,12 @@ test("W1-T10843: a failing assignment audit or an unreached horizon emits no rel
   assert.equal(noOutcomeForArm.reason, "horizon-not-reached", "an arm none of whose tasks reached the outcome window is not a result");
   // the audit alone decides "pass": a clean fixture is the only one that yields a release
   assert.equal(built().release.assignmentAudit, "pass");
+  const fx = productionFixture();
+  const missingReceipts = fx.rows.filter((row) => row.step !== "worker.attempt" || Number(String(row.selection_assignment_id).slice(1)) % 7 !== 0);
+  const derived = deriveRegisteredEpoch("sol61-vs-sonnet55", { rows: missingReceipts, merged: [], mergesObservedThrough: AS_OF, sourceRepos: [REPO] })!;
+  assert.equal(derived.assignments.filter((row) => row.servedArm === null).length, 12, "routing choices are not execution receipts");
+  const refusal = buildControlledFieldTrialsRelease({ ...input(), ...derived, pins: PINS });
+  assert.deepEqual(refusal, { state: "refused", reason: "assignment-audit-failed", detail: "served-model-missingness" });
 });
 
 test("W1-T10843: arm counts and intervals come from task-level outcomes", () => {
@@ -355,6 +361,10 @@ test("W1-T10843: arm counts and intervals come from task-level outcomes", () => 
   const reseeded = built({ epoch: { ...EPOCH, seed: "seed-2" } }, data).release;
   assert.deepEqual(reseeded.arms.map((a) => [a.assigned, a.observed, a.successes]), release.arms.map((a) => [a.assigned, a.observed, a.successes]));
   assert.ok(reseeded.arms.every((a) => a.ciLower < a.successes / a.observed && a.successes / a.observed < a.ciUpper));
+  const registered = registeredOutcomeRelease().release;
+  assert.deepEqual(registered.arms.map((arm) => [arm.assigned, arm.observed, arm.successes]), [[40, 40, 1], [40, 40, 2]],
+    "only verified main merges score; develop-only and missing main evidence do not");
+  assert.ok(registered.arms.every((arm) => arm.ciLower < arm.successes / arm.observed && arm.successes / arm.observed < arm.ciUpper));
 });
 
 test("W1-T10843: the controlled release is a candidate and is never published automatically", async () => {
@@ -451,6 +461,11 @@ test("W1-T10843: the Sol x Sonnet release carries pre-registered secondaries and
     .concat({ taskId: "t0", at: "2026-09-27T00:30:00.000Z", assignedArm: SON, servedArm: SON, propensity: 0.5 });
   const flipped = built({}, { ...data, assignments: reassigned }).release;
   assert.equal(flipped.arms[0].assigned, release.arms[0].assigned - 1, "t0's earliest assignment was the other arm");
+  const registered = registeredOutcomeRelease();
+  assert.deepEqual(registered.release.secondary[0]!.arms.map((arm) => arm.value), [3, 3],
+    "first pass counts only zero-repair main merges, never develop-only merges");
+  assert.deepEqual(registered.release.secondary[1]!.arms.map((arm) => arm.value), [0.5, 0.4]);
+  assert.deepEqual(registered.sidecar.crossover, { crossed: 28, assignments: 80 }, "execution receipts determine crossover");
 });
 
 /** Raw ledger rows and a GitHub store shaped like production's, for the registered sol61-vs-sonnet55 epoch. */
@@ -468,9 +483,12 @@ function productionFixture() {
   const stack = { harnessRevision: { state: "observed", value: HEX("9") } };
   const rows: Record<string, unknown>[] = [];
   const pulls: Record<string, unknown> = {};
-  const pull = (n: number, ids: string[], mergedAt: number) => {
+  const commits: Record<string, string> = {};
+  const pull = (n: number, ids: string[], mergedAt: number, onMain = true) => {
+    const sha = n.toString(16).padStart(40, "0");
+    if (onMain) commits[sha] = iso(mergedAt);
     pulls[String(n)] = { nodeId: `n${n}`, number: n, state: "closed", createdAt: iso(mergedAt - 1000), updatedAt: iso(mergedAt), mergedAt: iso(mergedAt),
-      closedAt: iso(mergedAt), headRef: null, headSha: null, mergeCommitSha: null, trailerTaskIds: ids, revertsPr: null, authorClass: "bot",
+      closedAt: iso(mergedAt), headRef: null, headSha: null, mergeCommitSha: sha, trailerTaskIds: ids, revertsPr: null, authorClass: "bot",
       detail: { state: "pending" } };
   };
   for (let i = 0; i < 80; i += 1) {
@@ -482,7 +500,7 @@ function productionFixture() {
       routing: { decision: { ab: "sol61-vs-sonnet55", considered: [claude, { provider: "codex", model: PROD_SOL, eligible: true, selected: servedLabel === "sol61" }] },
         propensity: { method: ROUTING_DRAW_METHOD, selectedProbability: 0.5 },
         experiment: { id: "sol61-vs-sonnet55", unit: "task", assignedArm: label, assignedProbability: 0.5, servedArm: servedLabel, crossover: crossed(i) } } } });
-    if (i % 7 !== 0) rows.push({ step: "worker.attempt", task_id: task(i), ts: iso(at(i) + 60_000), selection_assignment_id: `a${i}`, served_model: modelOf(servedLabel) });
+    rows.push({ step: "worker.attempt", task_id: task(i), ts: iso(at(i) + 60_000), selection_assignment_id: `a${i}`, served_model: modelOf(servedLabel) });
     for (let r = 1; r <= rounds(i); r += 1) {
       rows.push({ step: "fix.dispatch", task_id: task(i), ts: iso(at(i) + r * 600_000), round_id: `r${i}-${r}` });
       rows.push({ step: "fix.done", task_id: task(i), ts: iso(at(i) + r * 600_000 + 1), round_id: `r${i}-${r}`, served_model: PROD_SON });
@@ -494,10 +512,22 @@ function productionFixture() {
   rows.push({ step: "fix.dispatch", task_id: task(6), ts: iso(at(6) - 3_600_000), round_id: "before-6" }); // before the first assignment
   pull(500, [task(10)], at(10) - 86_400_000); // merged BEFORE its first assignment: not this assignment's outcome
   pull(501, [task(13), task(14)], at(13) + 86_400_000); // two trailers: ambiguous, never an exact trailer match
+  for (const i of [5, 20]) pull(600 + i, [task(i)], at(i) + 86_400_000, false); // develop-only merges, zero repair rounds
   const cursor = (state: string) => ({ state, reason: null, watermark: null, sweepHigh: null, resumePage: null, pagesRead: 1, asOf: AS_OF });
-  const store = (state: string) => ({ version: FIELD_TRIALS_GITHUB_VERSION, repos: { [REPO]: { pulls, commits: {}, deployments: {},
+  const store = (state: string) => ({ version: FIELD_TRIALS_GITHUB_VERSION, repos: { [REPO]: { pulls, commits, deployments: {},
     cursors: { pulls: cursor(state), commits: cursor("complete"), deployments: cursor("complete") } } } });
   return { rows, store, PROD_SOL, PROD_SON, labelOf, crossed, merged, rounds, task };
+}
+
+function registeredOutcomeRelease() {
+  const fx = productionFixture();
+  const merge = (i: number, mergedOnMain?: boolean) => ({ trailerTaskIds: [fx.task(i)], mergedAt: "2026-10-10T00:00:00.000Z",
+    ...(mergedOnMain === undefined ? {} : { mergedOnMain }) });
+  const derived = deriveRegisteredEpoch("sol61-vs-sonnet55", { rows: fx.rows, merged: [merge(4, true), merge(7, true), merge(3, true),
+    merge(2, false), merge(5, false), merge(8), merge(11)], mergesObservedThrough: AS_OF, sourceRepos: [REPO] })!;
+  const result = buildControlledFieldTrialsRelease({ ...input(), ...derived, pins: PINS });
+  if (result.state !== "candidate") throw new Error(result.reason);
+  return result;
 }
 
 test("W1-T10843: the registered sol61-vs-sonnet55 epoch is read from the ledger, with no operator epoch file", async () => {
@@ -508,10 +538,10 @@ test("W1-T10843: the registered sol61-vs-sonnet55 epoch is read from the ledger,
     writeFileSync(consentPath, JSON.stringify(CONSENT));
     const SITE_COMMIT = SITE_SECONDARY_COMMIT;
     const printed: string[] = [];
-    const run = async (name: string, extra: string[], opts: { store?: string; rows?: Record<string, unknown>[]; protocol?: unknown; evidence?: unknown } = {}) => {
+    const run = async (name: string, extra: string[], opts: { store?: string; github?: ReturnType<typeof fx.store>; rows?: Record<string, unknown>[]; protocol?: unknown; evidence?: unknown } = {}) => {
       const dir = join(root, name);
       mkdirSync(dir);
-      writeFileSync(join(dir, "field-trials-github-v1.json"), JSON.stringify(fx.store(opts.store ?? "complete")));
+      writeFileSync(join(dir, "field-trials-github-v1.json"), JSON.stringify(opts.github ?? fx.store(opts.store ?? "complete")));
       writeFileSync(join(root, "benchmark-paid-pilot-v1.sol61-vs-sonnet55.protocol.json"), JSON.stringify({ protocol: opts.protocol ?? {
         version: "benchmark-paid-pilot-v1", pilotId: "sol61-vs-sonnet55",
         revisions: Object.fromEntries(Object.entries(PINS).map(([k, v]) => [`${k}Revision`, v])) } }));
@@ -568,10 +598,32 @@ test("W1-T10843: the registered sol61-vs-sonnet55 epoch is read from the ledger,
     assert.deepEqual(candidate.sourceRepos, ["remudero"]);
     assert.equal(candidate.harnessRevision, "a".repeat(40));
     assert.equal(candidate.scorerRevision, "d".repeat(40));
+    // Positive main-history control above; without main evidence, merge timestamps cannot score either success metric.
+    for (const missing of ["history", "merge-sha"]) {
+      const github = structuredClone(fx.store("complete"));
+      if (missing === "history") github.repos[REPO]!.commits = {};
+      else for (const pull of Object.values(github.repos[REPO]!.pulls)) (pull as { mergeCommitSha: string | null }).mergeCommitSha = null;
+      const result = await run(`no-main-${missing}`, ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { github });
+      const file = readdirSync(join(result.dir, "controlled")).find((f) => f.endsWith(".candidate.json"))!;
+      const release = JSON.parse(readFileSync(join(result.dir, "controlled", file), "utf8"));
+      assert.deepEqual(release.arms.map((a: FieldTrialsArm) => [a.assigned, a.observed, a.successes, a.ciLower, a.ciUpper]),
+        [[40, 40, 0, 0, 0], [40, 40, 0, 0, 0]], missing);
+      assert.deepEqual(release.secondary[0].arms.map((a: FieldTrialsInterval) => [a.value, a.ciLower, a.ciUpper]), [[0, 0, 0], [0, 0, 0]], missing);
+      assert.deepEqual(release.secondary[1], candidate.secondary[1], "repair rounds do not depend on merge evidence");
+      assert.deepEqual(siteParse(release, [REPO]), { ok: true });
+    }
+    for (const incomplete of ["partial", "stale"]) {
+      const github = structuredClone(fx.store("complete"));
+      if (incomplete === "partial") github.repos[REPO]!.cursors.commits.state = "partial";
+      else github.repos[REPO]!.cursors.commits.asOf = "2026-10-26T00:00:00.000Z";
+      const result = await run(`main-${incomplete}`, ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { github });
+      assert.match(result.out, /controlled release refused \(horizon-not-reached/);
+      assert.equal(existsSync(join(result.dir, "controlled")), false);
+    }
     // an incomplete pull history observed no outcomes: the epoch refuses rather than count unread merges as failures
     const lateRows = [...fx.rows, { step: "fix.dispatch", task_id: fx.task(4), ts: "2026-10-26T00:00:00.000Z", round_id: "late" }];
     const lateDerived = deriveRegisteredEpoch("sol61-vs-sonnet55", { rows: lateRows,
-      merged: [{ trailerTaskIds: [fx.task(4)], mergedAt: "2026-10-26T00:00:00.000Z" }], mergesObservedThrough: AS_OF, sourceRepos: [REPO] })!;
+      merged: [{ trailerTaskIds: [fx.task(4)], mergedAt: "2026-10-26T00:00:00.000Z", mergedOnMain: true }], mergesObservedThrough: AS_OF, sourceRepos: [REPO] })!;
     assert.equal(lateDerived.outcomes.find((o) => o.taskId === fx.task(4))!.outcome, "not-merged");
     assert.equal(lateDerived.outcomes.find((o) => o.taskId === fx.task(4))!.fixRounds, 0);
     const partial = await run("partial", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { store: "partial" });
@@ -586,6 +638,11 @@ test("W1-T10843: the registered sol61-vs-sonnet55 epoch is read from the ledger,
     const unknown = await run("unknown-served", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { rows: unknownServed });
     assert.match(unknown.out, /served-arm-outside-registered-arms/);
     assert.equal(existsSync(join(unknown.dir, "controlled")), false);
+    const noReceipts = await run("missing-receipts", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT],
+      { rows: fx.rows.filter((row) => row.step !== "worker.attempt") });
+    assert.equal(noReceipts.code, 1);
+    assert.match(noReceipts.out, /controlled release refused \(assignment-audit-failed: served-model-missingness/);
+    assert.equal(existsSync(join(noReceipts.dir, "controlled")), false, "routing selections emit neither candidate nor sidecar");
     // an empty ledger has no assignments; an unregistered epoch and a malformed site commit are refused
     assert.match((await run("empty", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { rows: [] })).out,
       /assignment-audit-failed: no-assignments-in-window/);

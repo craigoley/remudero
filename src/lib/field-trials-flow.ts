@@ -1273,9 +1273,15 @@ async function controlledEpochFacts(repos: readonly (readonly [string, string])[
     sourceRepos.push(repo);
     const store = github.repos[repo];
     const cursor = store?.cursors.pulls;
-    if (store === undefined || cursor?.state !== "complete" || cursor.asOf === null) complete = false;
-    else if (observedThrough === null || cursor.asOf < observedThrough) observedThrough = cursor.asOf;
-    for (const pull of Object.values(store?.pulls ?? {})) merged.push({ trailerTaskIds: pull.trailerTaskIds, mergedAt: pull.mergedAt });
+    const commits = store?.cursors.commits;
+    if (store === undefined || cursor?.state !== "complete" || cursor.asOf === null
+      || commits?.state !== "complete" || commits.asOf === null) complete = false;
+    else {
+      const through = cursor.asOf < commits.asOf ? cursor.asOf : commits.asOf;
+      if (observedThrough === null || through < observedThrough) observedThrough = through;
+    }
+    for (const pull of Object.values(store?.pulls ?? {})) merged.push({ trailerTaskIds: pull.trailerTaskIds, mergedAt: pull.mergedAt,
+      mergedOnMain: pull.mergeCommitSha !== null && typeof store?.commits[pull.mergeCommitSha] === "string" });
   }
   if (sourceRepos.length === 0) return "controlled-ledger-unavailable";
   return { rows, merged, mergesObservedThrough: complete ? observedThrough : null, sourceRepos };
