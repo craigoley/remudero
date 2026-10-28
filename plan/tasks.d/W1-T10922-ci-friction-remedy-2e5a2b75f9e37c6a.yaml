@@ -93,3 +93,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.92
+    reasons:
+      - "high-risk verdict at confidence 0.92 — on the change's description/files alone, no diff was read — The excerpts verify repeated unmapped-command failures, but the filing supplies no root-cause diagnosis or concrete prevention mechanism connecting those failures to the proposed src/run-task.ts change.; on the change's description/files alone, no diff was read — Acceptance requires eliminating fix rounds without specifying how command-classification enforcement is preserved; the supplied record cannot establish whether the remedy prevents omissions or changes enforcement policy."
+    judged_at: "2026-10-28T13:51:28.995Z"
+    pin: "9cd71a4f8c6fdb2e3d1528ea370987d763cd74b65666b102cb3753b99f570098"
