@@ -1383,7 +1383,12 @@ test("recycler refuses invalid or duplicate mode before effects", t => {
     assert.equal(run.status, 2, `${fields.join(" / ")}: ${run.stderr}`);
     assert.match(run.stderr, /mode/);
     assert.deepEqual(run.calls, [], "not even the first Docker/Azure read or mutation is allowed");
-    assert.equal(existsSync(join(root, "state", "state")), false, "no PAUSE, receipt or state write before refusal");
+    const fixtureState = join(root, "state", "state");
+    assert.deepEqual(readdirSync(fixtureState), ["ledger.ndjson"], "only invocation evidence, no PAUSE, receipt or lifecycle state before refusal");
+    const rows = readFileSync(join(fixtureState, "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(rows.map((row) => row.step), ["recycle.invoked"]);
+    assert.equal(rows[0].instance, "fixture");
+    assert.equal(typeof rows[0].pid, "number");
   }
 });
 

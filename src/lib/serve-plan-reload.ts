@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { isMainThread, parentPort, threadId, Worker, workerData } from "node:worker_threads";
 import { bundledWorkerUrl } from "./child-entry-argv.js";
 import { systemClock, type Clock } from "./clock.js";
-import { mergePlanBlobsQuarantiningDuplicates, readBlobsAtRef, type Plan, type QuarantinedTask } from "./plan.js";
+import { mergePlanBlobsQuarantiningDuplicates, readBlobsAtRefAsync, type Plan, type QuarantinedTask } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 
 const HOUSE_LAYOUT = resolveRepoLayout("", () => undefined);
@@ -66,7 +66,7 @@ function gitAsync(repoDir: string, args: string[], stdin?: string): Promise<stri
 }
 
 /** The plan AT `ref`, from committed objects and never the working tree: the blob for the monolith,
- *  one `ls-tree`, ONE `cat-file --batch` for the shards. Async, so serve's event loop never waits on
+ *  one `ls-tree` naming the shards, ONE `cat-file --batch` reading them by blob id. Async, so serve's event loop never waits on
  *  git. A duplicated id and its dependents are quarantined and returned; every other error throws. */
 export async function readServePlanAtRef(repoDir: string, ref: string, clock: Clock = systemClock): Promise<PlanRead> {
   const startedAt = clock.now();
@@ -87,8 +87,7 @@ async function readServePlanBlobs(repoDir: string, ref: string): Promise<Array<{
     .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")))
     .sort();
   if (shardPaths.length > 0) {
-    const raw = await gitAsync(repoDir, ["cat-file", "--batch"], shardPaths.map((p) => `${ref}:${p}`).join("\n") + "\n");
-    const texts = readBlobsAtRef(() => raw, ref, shardPaths);
+    const texts = await readBlobsAtRefAsync((args, stdin) => gitAsync(repoDir, args, stdin), ref, shardPaths);
     shardPaths.forEach((path, i) => blobs.push({ label: `${ref}:${path}`, text: texts[i]! }));
   }
   return blobs;

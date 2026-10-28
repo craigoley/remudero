@@ -14,6 +14,7 @@ const UNION = "test/a-union-read-of-an-unretained-step-is-refused.test.ts";
 const SPEND = "test/spend-is-counted-once-at-its-producer.test.ts";
 const ENV = "test/env-var-registry.test.ts";
 const ERROR = "test/error-subclass-census.test.ts";
+const REACH = "test/the-affected-suite-reach-ratchet.test.ts";
 const STEPS = [LEDGER, UNION, SPEND];
 const SOURCE = "src/lib/sweep-plan.ts";
 
@@ -55,7 +56,9 @@ test("W1-T5692: each step spelling joins all three ledger censuses; existing or 
   ]) {
     assert.deepEqual(evaluate(text).runs, [STEPS], text);
     assert.deepEqual(evaluate(text + "\nconst value = 2;", text).runs, [], text);
-    assert.deepEqual(evaluate(null, text).runs, [], text);
+    assert.deepEqual(evaluate("", text).runs, [], `${text}: removing a literal keeps the source in the graph`);
+    assert.deepEqual(evaluate(null, text).runs, [[REACH]],
+      `${text}: deleting the source runs only reach, not the ledger censuses`);
   }
   assert.deepEqual(evaluate('log("fresh.step", {})', null).runs, [STEPS]);
   assert.deepEqual(evaluate('const unrelated = "fresh.step";').runs, []);

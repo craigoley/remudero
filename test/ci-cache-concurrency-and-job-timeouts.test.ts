@@ -56,15 +56,16 @@ function assertSetupCache(file: string, jobId: string, steps: WorkflowStep[], in
     assert.doesNotMatch(steps.map(step => step.run ?? "").join("\n"),
       /\b(?:npm|npx|pnpm|yarn)\b|\bbun\s+(?:install|add|x)\b/,
       `${context} must not install dependencies anywhere in the job`);
-    assert.equal(steps.length, 5, `${context} must retain its five known steps`);
+    assert.equal(steps.length, 8, `${context} must retain ledger resolution and the three floor admission steps`);
     assert.equal(index, 1, `${context} must set up Node immediately after sparse checkout`);
     const [checkout, setup, resolve, publish, finish] = steps;
     assert.match(checkout?.uses ?? "", /^actions\/checkout@[a-f0-9]{40}$/i);
     assert.equal(checkout?.with?.["fetch-depth"], 2);
     assert.equal(checkout?.with?.["sparse-checkout-cone-mode"], false);
     assert.deepEqual(String(checkout?.with?.["sparse-checkout"]).split(/\s+/).filter(Boolean),
-      [".nvmrc", "scripts/", "src/lib/plan-scope.ts", "src/lib/rule-suites.ts"],
-      `${context} must not acquire a package-lock or a dependency checkout`);
+      [".nvmrc", "package.json", "package-lock.json", "test/setup/tmp-hygiene.ts",
+        "scripts/", "src/lib/plan-scope.ts", "src/lib/rule-suites.ts"],
+      `${context} must carry the floor policy inputs without installing dependencies`);
     assert.match(setup?.uses ?? "", /^actions\/setup-node@[a-f0-9]{40}$/i);
     assert.equal(setup?.with?.cache, undefined, `${context} must remain uncached without a lockfile`);
     assert.deepEqual(setup?.with, { "node-version-file": ".nvmrc" });
@@ -83,8 +84,9 @@ function assertSetupCache(file: string, jobId: string, steps: WorkflowStep[], in
     const nodeCommands = runBodies.split("\n")
       .map(line => line.trim()).filter(line => /\bnode\s/.test(line));
     assert.deepEqual([...runBodies.matchAll(/\bnode\s+(\S+)/g)].map(match => match[1]),
-      ["scripts/diff-class.mjs", "scripts/test-tier-manifest.mjs", "scripts/test-tier-manifest.mjs"],
-      `${context} must run only the dependency-free classifier and strict ledger CLI`);
+      ["scripts/diff-class.mjs", "scripts/test-tier-manifest.mjs", "scripts/test-tier-manifest.mjs",
+        "scripts/coverage-floor.mjs"],
+      `${context} must run only the dependency-free classifier, ledger and floor CLIs`);
     assert.match(nodeCommands[0]!, /--coverage-class\b/);
     assert.match(nodeCommands[0]!, /--changed-files\s+ledger-changed-files\.txt\b/);
     for (const [command, verb, directory] of [
@@ -115,6 +117,21 @@ function assertSetupCache(file: string, jobId: string, steps: WorkflowStep[], in
     assert.ok(finish?.run?.includes('[[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] ||'),
       `${context} must refuse an unpublished identity`);
     for (const step of [checkout, setup, publish]) assert.equal(step?.run, undefined);
+    const [select, floorPublish, floorFinish] = steps.slice(5);
+    assert.equal(select?.id, "floor-select");
+    assert.match(select?.run ?? "", /timeout 30s node scripts\/coverage-floor\.mjs select/);
+    assert.equal(floorPublish?.id, "floor-publish");
+    assert.equal(floorPublish?.if, "steps.floor-select.outputs.decision == 'narrow'");
+    assert.match(floorPublish?.uses ?? "", /^actions\/upload-artifact@[a-f0-9]{40}$/i);
+    assert.deepEqual(floorPublish?.with, {
+      name: "coverage-floor-pin-${{ github.run_attempt }}", path: "coverage-floor-pin",
+      "retention-days": 1, "if-no-files-found": "error",
+    });
+    assert.equal(floorFinish?.id, "floor-finish");
+    assert.deepEqual(floorFinish?.env, {
+      DECISION: "${{ steps.floor-select.outputs.decision }}",
+      REASON: "${{ steps.floor-select.outputs.reason }}", PUBLISHED: "${{ steps.floor-publish.outcome }}",
+    });
     return;
   }
   const step = steps[index]!;
@@ -185,6 +202,10 @@ test("uncached ledger bootstrap preserves its pin and identity without admitting
   assert.equal(job.if, undefined);
   assert.deepEqual(job.outputs, {
     artifact_id: "${{ steps.finish.outputs.artifact_id }}", digest: "${{ steps.resolve.outputs.digest }}",
+    floor_decision: "${{ steps.floor-finish.outputs.decision }}",
+    floor_reason: "${{ steps.floor-finish.outputs.reason }}",
+    floor_pin_digest: "${{ steps.floor-select.outputs.pin_digest }}",
+    floor_artifact: "coverage-floor-pin-${{ github.run_attempt }}",
   });
   assert.match(await readFile(join(REPO_ROOT, ".nvmrc"), "utf8"), /^\d+\.\d+\.\d+\s*$/);
   assertSetupCache("ci.yml", "coverage-ledger", steps, index);
@@ -219,7 +240,8 @@ test("uncached ledger bootstrap preserves its pin and identity without admitting
     assertSetupCache("ci.yml", "coverage-ledger", repinned, index);
   }
   changed(copy => { copy[index]!.with!["node-version-file"] = ".other-node-version"; });
-  changed(copy => { copy[0]!.with!["sparse-checkout"] += "package-lock.json\n"; });
+  changed(copy => { copy[0]!.with!["sparse-checkout"] += "src/unrelated.ts\n"; });
+  changed(copy => { copy[0]!.with!["sparse-checkout"] = String(copy[0]!.with!["sparse-checkout"]).replace("package-lock.json\n", ""); });
   changed(copy => { copy[2]!.run += "\nnode scripts/unrelated.mjs"; });
   changed(copy => { copy[4]!.run += "\nnode scripts/unrelated.mjs"; });
   changed(copy => {
@@ -344,7 +366,7 @@ test("coverage-shard has headroom beyond the measured 39m ceiling but remains be
 });
 
 
-test("ledger bootstrap admits only its two classifier leaves without admitting dependencies", async () => {
+test("ledger bootstrap admits its classifier leaves and floor policy inputs without dependencies", async () => {
   const doc = (await loadWorkflowFiles()).find(entry => entry.file === "ci.yml")!.doc;
   const steps = doc.jobs["coverage-ledger"]!.steps!;
   const index = steps.findIndex(step => step.uses?.startsWith("actions/setup-node@"));
@@ -354,11 +376,13 @@ test("ledger bootstrap admits only its two classifier leaves without admitting d
     declared.replace("src/lib/rule-suites.ts", ""),
     declared.replace("src/lib/plan-scope.ts", ""),
     declared.replace("src/lib/rule-suites.ts", "src/lib/"),
+    declared.replace("package-lock.json", ""),
+    declared.replace("test/setup/tmp-hygiene.ts", ""),
     declared + "package-lock.json\n", declared + "node_modules/\n", declared + "src/lib/unrelated.ts\n",
   ]) {
     const changed = structuredClone(steps);
     changed[0]!.with!["sparse-checkout"] = replacement;
     assert.throws(() => assertSetupCache("ci.yml", "coverage-ledger", changed, index),
-      /must not acquire a package-lock or a dependency checkout/);
+      /must carry the floor policy inputs without installing dependencies/);
   }
 });

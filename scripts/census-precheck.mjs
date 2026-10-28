@@ -30,8 +30,9 @@
  * Exit 0 clean, 1 a caused violation, 2 could not measure (the hook does not block on 2).
  */
 import { spawnSync } from "node:child_process";
-import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
+import { parse, parseExpressionAt } from "acorn";
 import { isTrustRootPath, scanTrustRootText, trustRootFor } from "../src/lib/trust-root-text.ts";
+import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
 import { createHash } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
@@ -1145,13 +1146,18 @@ export const PRECHECK_TRIGGERED_SUITES = [
     recognizer: "scripts/citation-anchor-census.mjs", ownFiles: ["scripts/citation-anchor-census.mjs"], gitFree: true, script: "census:citation-anchor", structural: true,
     trigger: ({ changed }) => changed.some((p) => p.startsWith("plan/tasks.d/") || p === "MASTER-PLAN.md" || p === "scripts/citation-anchor-census.mjs"),
     remedy: "anchor each #NNNN citation the shard or MASTER-PLAN.md adds (scripts/citation-anchor-census.mjs)" },
-  // W1-T5702: a new test importing src/run-task.ts is the reach ratchet's own refusal.
+  // Deletions can grow median reach by shrinking its denominator; removed helper edges also move reach.
   { testFile: "test/the-affected-suite-reach-ratchet.test.ts",
     gateRegex: IMPORT_SPECIFIER_RE,
     recognizer: "src/lib/affected-suites.ts", ownFiles: ["scripts/affected-reach-baseline.json"], script: "census:affected-reach", structural: true,
     trigger: (input) =>
-      input.changed.some((p) => ["src/lib/affected-suites.ts", "scripts/affected-reach-baseline.json"].includes(p)) ||
-      addsImport(input, TEST_TS_SCOPE_RE, (spec) => /(?:^|\/)run-task\.[jt]s$/.test(spec)),
+      input.changed.some((p) => ["src/lib/affected-suites.ts", "scripts/affected-reach-baseline.json",
+        "test/the-affected-suite-reach-ratchet.test.ts", "package.json"].includes(p)) ||
+      addsImport(input, TEST_TS_SCOPE_RE, (spec) => /(?:^|\/)run-task\.[jt]s$/.test(spec)) ||
+      addsImport({ ...input, readHead: input.readBase, readBase: input.readHead }, TEST_TS_SCOPE_RE) ||
+      (typeof input.readHead === "function" && typeof input.readBase === "function" &&
+        input.changed.some((p) => /^(?:src|scripts|bin|test)\/.+\.(?:ts|mts|mjs|js|cjs)$/.test(p) &&
+          input.readHead(p) === null && input.readBase(p) !== null)),
     remedy: "import the module the suite tests rather than src/run-task.ts, or record the tighter ceiling in scripts/affected-reach-baseline.json" },
   { testFile: "test/node-24-runtime-compatibility.test.ts",
     gateRegex: NODE24_RUNTIME_RE,
@@ -1463,6 +1469,59 @@ export function ciCensusPopulation(ruleSuites, extras = PRECHECK_EXTRA_CI_CENSUS
   return [...new Set([...ruleSuites, ...Object.keys(extras)])].sort();
 }
 
+/** Read the worker's selector data as syntax, without executing worktree TypeScript in the managed hook. */
+function workerRuleSuiteSelector(text) {
+  const unreadable = () => { throw new Error("worker rule-suite selector is not statically readable"); };
+  const declaration = (name) => {
+    const match = new RegExp(`^\\s*(?:export\\s+)?const ${name}(?:\\s*:[^=]+)?\\s*=\\s*`, "m").exec(text);
+    if (!match) return unreadable();
+    try { return parseExpressionAt(text, match.index + match[0].length, { ecmaVersion: "latest" }); }
+    catch { return unreadable(); }
+  };
+  const string = (node) => node?.type === "Literal" && typeof node.value === "string" ? node.value : unreadable();
+  const array = (name) => {
+    const node = declaration(name);
+    return node.type === "ArrayExpression" ? node.elements : unreadable();
+  };
+  const roster = new Set();
+  for (const row of array("CENSUS_POPULATION")) {
+    if (row?.type === "ObjectExpression") {
+      const field = row.properties.find((p) => p.type === "Property" && (p.key.name ?? p.key.value) === "testFile");
+      roster.add(string(field?.value).split("/").at(-1));
+    } else if (row?.type === "CallExpression" && row.callee.name === "refusedForPredicate") {
+      roster.add(string(row.arguments[0]).split("/").at(-1));
+    } else unreadable();
+  }
+  for (const row of array("RETAINED_RULE_SUITES")) roster.add(string(row).split("/").at(-1));
+  const namePattern = declaration("RULE_SUITE_NAME_RE");
+  const ruleDir = string(declaration("RULE_SUITE_DIR"));
+  if (namePattern.type !== "Literal" || !(namePattern.value instanceof RegExp)) unreadable();
+  return { roster, ruleDir, namePattern: namePattern.value };
+}
+
+/** Mirror ci-parity's rule-suite selection using the worker tree's selector data. */
+export function listCiRuleSuites(root) {
+  const selector = workerRuleSuiteSelector(readFileSync(join(root, "src/lib/rule-suites.ts"), "utf8"));
+  const tracked = gitOut(root, ["ls-files", "--", "test"]).split(/\r?\n/).filter(Boolean);
+  const suites = tracked.filter((path) => {
+    if (!path.startsWith("test/") || !path.endsWith(".test.ts")) return false;
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    if (path.startsWith(selector.ruleDir) || selector.roster.has(name)) return true;
+    if (!selector.namePattern.test(name)) return false;
+    const source = readFileSync(join(root, path), "utf8");
+    const header = source.match(/^\s*(?:(?:\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/)\s*)*/)[0];
+    const markers = [...header.matchAll(/@not-a-rule-suite\b([^\r\n]*)/g)];
+    for (const marker of markers) {
+      if (!/^[ \t]*:[ \t]*\S/.test(marker[1].replace(/\*\/.*$/, "").trimEnd())) {
+        throw new Error(`${path}: @not-a-rule-suite requires a reason`);
+      }
+    }
+    return markers.length === 0;
+  }).sort();
+  if (suites.length < 20) throw new Error(`rule-check population too small: found ${suites.length}, expected at least 20`);
+  return suites;
+}
+
 /**
  * The parity verdict. `unasked`: a population member neither on `parity` nor baselined. `stale`: a
  * baseline row `parity` now asks or the population no longer holds, which must leave the baseline.
@@ -1477,6 +1536,111 @@ export function precheckParityVerdict({ population, baseline, baseBaseline = nul
     stale: baseline.filter((p) => Object.hasOwn(parity, p) || !members.has(p)).sort(),
     grown: baseline.filter((p) => !carried.has(p)).sort(),
   };
+}
+
+/** Read the worker's literal parity keys, table-map spreads and extra census keys without running worker code.
+ * Unsupported declarations are unmeasured, never replaced with the harness's registrations. */
+function workerCensusDeclarations(text) {
+  const tree = parse(text, { ecmaVersion: "latest", sourceType: "module" });
+  const declarations = new Map();
+  for (const statement of tree.body) {
+    const declaration = statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
+    if (declaration?.type !== "VariableDeclaration") continue;
+    for (const entry of declaration.declarations) {
+      if (entry.id.type === "Identifier") declarations.set(entry.id.name, entry.init);
+    }
+  }
+  const unsupported = () => { throw new Error("worker PRECHECK_PARITY declaration is not statically readable"); };
+  const member = (node, object, property) => node?.type === "MemberExpression" && !node.computed &&
+    node.object.type === "Identifier" && node.object.name === object && node.property.name === property;
+  const literal = (node) => node?.type === "Literal" && typeof node.value === "string" ? node.value : unsupported();
+  const rowsOf = (node) => {
+    if (node?.type !== "ArrayExpression") return unsupported();
+    return node.elements.flatMap((row) => {
+      if (row?.type === "ObjectExpression" && row.properties.every((p) => p.type === "Property" && !p.computed)) {
+        const key = row.properties.findLast((p) => (p.key.name ?? p.key.value) === "testFile");
+        return [literal(key?.value)];
+      }
+      const map = row?.argument;
+      const arrow = map?.arguments?.[0];
+      const pattern = arrow?.params?.[0];
+      const rest = pattern?.properties?.find((p) => p.type === "RestElement");
+      if (row?.type !== "SpreadElement" || map?.type !== "CallExpression" || map.arguments.length !== 1 ||
+          map.callee.type !== "MemberExpression" || map.callee.computed || map.callee.property.name !== "map" ||
+          arrow?.type !== "ArrowFunctionExpression" || arrow.params.length !== 1 || pattern.type !== "ObjectPattern" ||
+          !rest || rest.argument.type !== "Identifier" || pattern.properties.some((p) => p.type !== "RestElement" &&
+            (p.type !== "Property" || p.computed || (p.key.name ?? p.key.value) === "testFile")) ||
+          arrow.body.type !== "ObjectExpression" || arrow.body.properties.length === 0 ||
+          !arrow.body.properties.every((p, i) => i === 0
+            ? p.type === "SpreadElement" && p.argument.type === "Identifier" && p.argument.name === rest.argument.name
+            : p.type === "Property" && !p.computed && (p.key.name ?? p.key.value) !== "testFile")) return unsupported();
+      return rowsOf(map.callee.object);
+    });
+  };
+  const parity = Object.create(null);
+  const table = declarations.get("PRECHECK_PARITY");
+  if (table?.type !== "ObjectExpression") return unsupported();
+  for (const property of table.properties) {
+    if (property.type === "Property" && !property.computed && property.kind === "init") {
+      parity[literal(property.key)] = true;
+      continue;
+    }
+    const call = property.argument;
+    if (property.type !== "SpreadElement" || call?.type !== "CallExpression" ||
+        !member(call.callee, "Object", "fromEntries") || call.arguments.length !== 1) return unsupported();
+    const map = call.arguments[0];
+    const arrow = map?.arguments?.[0];
+    if (map?.type !== "CallExpression" || map.arguments.length !== 1 ||
+        map.callee.type !== "MemberExpression" || map.callee.computed || map.callee.property.name !== "map" ||
+        map.callee.object.type !== "Identifier" || arrow?.type !== "ArrowFunctionExpression" ||
+        arrow.params.length !== 1 || arrow.params[0].type !== "Identifier" ||
+        arrow.body.type !== "ArrayExpression" || arrow.body.elements.length !== 2 ||
+        !member(arrow.body.elements[0], arrow.params[0].name, "testFile")) return unsupported();
+    for (const path of rowsOf(declarations.get(map.callee.object.name))) parity[path] = true;
+  }
+  const extras = Object.create(null);
+  const extraTable = declarations.get("PRECHECK_EXTRA_CI_CENSUSES");
+  if (extraTable?.type !== "ObjectExpression") {
+    throw new Error("worker PRECHECK_EXTRA_CI_CENSUSES declaration is not statically readable");
+  }
+  for (const property of extraTable.properties) {
+    if (property.type !== "Property" || property.computed || property.kind !== "init" || property.method ||
+        property.key.type !== "Literal" || typeof property.key.value !== "string" ||
+        property.value.type !== "Literal" || typeof property.value.value !== "string") {
+      throw new Error("worker PRECHECK_EXTRA_CI_CENSUSES declaration is not statically readable");
+    }
+    extras[property.key.value] = property.value.value;
+  }
+  return { parity, extras };
+}
+
+/** W1-T10798: test/every-ci-census-is-asked-before-the-push.test.ts, asked before the push. A diff that moves a test,
+ *  PRECHECK_PARITY or the shrink-only baseline must leave no CI census unasked and no stale or grown baseline row. `population`
+ *  is CI's census population on this tree; absent (snapshot mode) the check is not measured and returns []. */
+export function censusParityViolations({ changed, readHead, readBase = () => null, population }) {
+  if (!population) return [];
+  if (!changed.some((p) => p === PRECHECK_PARITY_BASELINE || p === "scripts/census-precheck.mjs" || p === "src/lib/rule-suites.ts" || p.startsWith("test/"))) return [];
+  const text = readHead(PRECHECK_PARITY_BASELINE);
+  if (text === null) return [];
+  let baseline;
+  try {
+    baseline = JSON.parse(text).ciOnly;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(baseline)) return [];
+  const baseText = readBase(PRECHECK_PARITY_BASELINE);
+  const baseBaseline = baseText === null ? null : JSON.parse(baseText).ciOnly;
+  if (baseBaseline !== null && !Array.isArray(baseBaseline)) throw new Error("base CI census baseline is not an array");
+  const worker = readHead("scripts/census-precheck.mjs");
+  if (worker === null) throw new Error("worker PRECHECK_PARITY source is unavailable");
+  const { parity, extras } = workerCensusDeclarations(worker);
+  const verdict = precheckParityVerdict({ population: typeof population === "function" ? population(extras) : population, baseline, baseBaseline, parity });
+  return [
+    ...verdict.unasked.map((p) => `census-parity: ${p} is a CI census nothing asks before the push — model it in PRECHECK_PARITY (scripts/census-precheck.mjs); ${PRECHECK_PARITY_BASELINE} may only shrink`),
+    ...verdict.stale.map((p) => `census-parity: ${p} is baselined but precheck now asks it or CI no longer runs it — delete the row from ${PRECHECK_PARITY_BASELINE}`),
+    ...verdict.grown.map((p) => `census-parity: ${p} is new in ${PRECHECK_PARITY_BASELINE} — model it in PRECHECK_PARITY; the baseline may only shrink`),
+  ];
 }
 
 /** The script-level gates CI runs as their own steps (W1-T5737). The question W1-T5616 asked of every census
@@ -1739,6 +1903,10 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       testFiles: listFixtureCopyFiles(root),
       srcFiles: listHouseLayoutSrcFiles(root),
     });
+    if (!snapshot) {
+      violations = [...violations, ...censusParityViolations({ changed, ...readers,
+        population: (extras) => ciCensusPopulation(listCiRuleSuites(root), extras) })];
+    }
     const instrument = evaluateInstrumentSurface({
       changed,
       readHead: readers.readHead,

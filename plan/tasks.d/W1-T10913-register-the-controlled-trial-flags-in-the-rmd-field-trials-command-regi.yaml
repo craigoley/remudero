@@ -1,0 +1,35 @@
+- id: W1-T10913
+  title: Register the controlled-trial flags in the rmd field-trials command-registry text and regenerate docs/cli-reference.md
+  repo: remudero
+  depends_on:
+    - W1-T10843
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=9098d34c6e61b6f7
+  # backlog gardener: placed=2026-10-28T13:56:49.080Z
+  attempts: 0
+  files:
+    - src/run-task.ts
+    - docs/cli-reference.md
+  acceptance:
+    - claim: The field-trials entry in the command registry lists --controlled-registered in its syntax line
+      proof: "grep: --controlled-registered in src/run-task.ts"
+    - claim: The field-trials entry in the command registry lists --site-parser-commit in its syntax line
+      proof: "grep: --site-parser-commit in src/run-task.ts"
+    - claim: docs/cli-reference.md is regenerated from the registry and shows the new --controlled-registered flag
+      proof: "grep: --controlled-registered in docs/cli-reference.md"
+    - claim: docs/cli-reference.md is regenerated from the registry and shows the new --site-parser-commit flag
+      proof: "grep: --site-parser-commit in docs/cli-reference.md"
+  origin: followup:DAEMON-1793155571742:2026-10-28T03:17:51.335Z:2
+  rationale: >-
+    From the 2026-10-28 follow-up on https://github.com/craigoley/remudero/pull/15027, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: add `--controlled-registered` and `--site-parser-commit` to the `rmd
+    field-trials` command-registry text and regenerate `docs/cli-reference.md`. Both are outside
+    this task's declared scope. — from W1-T10843 (run DAEMON-1793155571742,
+    https://github.com/craigoley/remudero/pull/15027)
