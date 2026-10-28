@@ -1,0 +1,54 @@
+- id: W1-T10885
+  title: "A retro preflight watchdog stops its own test process group"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 3
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "operator-approved cash/retro follow-through; bounded Core/retro source-only lifecycle investigation"
+  principles: { tdd: strict }
+  budget_usd: 8.00
+  plan_refs: [W1-T2803, W1-T2993, W1-T6111]
+  files:
+    - src/lib/retro-preflight.ts
+    - test/retro-preflight-bound-fires-on-a-healthy-run.test.ts
+  acceptance:
+    - claim: "The existing timeout and output limits stop known descendants in the command-owned group without stopping unrelated work"
+      proof: "unit test: W1-T10885: the retro watchdog stops its owned descendants without signaling a sibling"
+    - claim: "The command preserves bounded capture and truthful ordinary and spawn-failure results while terminating owned leftovers"
+      proof: "unit test: W1-T10885: retro process-group cleanup preserves ordinary results and spawn failures"
+  rationale: |
+    The existing watchdog sends SIGTERM to the single process returned by spawn. Its real command is a retry wrapper which spawns the Node test runner. A naturally timed-out command returned before its existing runner journal stopped recording test starts; source and a bounded local nested-process replay must distinguish leader termination from descendant closure. This is a timeout-boundary repair, not proof of an OOM cause or justification for changing the one-hour backstop.
+    The retained events prove ongoing progress and a later marker update, not a whole-run pass or a shared OOM cause.
+    All captured open advertised Git head trees were swept against main for this subject before reserving the ID.
+    W1-T9651 explicitly excludes this off-loop retro runner; existing deadline/selection and Core freshness work retain their owners.
+  note: |
+    The ID was atomically reserved by the maintained next-task-id command from the operator-owned checkout.
+    Reservation holder: codex/file-retro-preflight-stop-1793135202544
+    This machine-authored record starts at verify: human pending normal native filing-risk adjudication.
+    No hand-authored risk ruling, historical task credit or operator release is implied.
+    No production retry, restart, deployment, claim/lease/breaker/marker change, paid probe or policy/cap/routing change is authorized.
+    Build criteria must stay pinned; amendments belong in a separate plan-only PR.
+    Keep private evidence paths, topology, live identities and raw output out of public artifacts.
+  design: |
+    First drive the actual exported runner with real small wrapper/descendant fixtures, contained to private scratch and no network. Confirm that a descendant can write after the original watchdog result. No paid production retry.
+    Give only the spawned command its own process group and terminate that owned group on the existing silence, total-duration and output bounds. Reuse the established process-group signaling primitives; never infer a group from an unrelated process, signal the caller or sibling groups, or replace unknown teardown evidence with success. Bound any teardown escalation and keep the event loop responsive.
+    Keep existing capture-byte, silence and total-duration budgets, suite enumeration/selection, slot admission/private-coverage ownership, retry/repair stand-down, monetary, publication and marker gates unchanged. Ordinary status/signals and spawn errors remain truthful. A signal sent is not a universal descendant-death/lease-release proof, and detached foreign groups remain outside this narrow guarantee.
+    Use literal fixed/deleted/restored controls with the same committed physical suite; test real descendants including one with private stdio and an unrelated sibling control. Verify the original ordinary-completion, silence, total and output limits and spawn-error regressions. Run caller/census and mapped changed-source coverage, normal full hosted/native/protected automatic merge, then natural source adoption/effect. No manual restart, retro, release, kill, marker/cap/routing change or waived gates.
+  falsifier: |
+    With exactly the same assertions and fixture files, remove group ownership/signaling and restore the original child-only termination: the known descendant must survive long enough to fail the post-result write control. Restore the entire fixed tree for zero failures. Refused admission, missing summaries, empty child starts, unknown process identity or unchanged-bound timeouts are not discrimination. If the real nested replay does not distinguish the original behavior, stop rather than ship a speculative cleanup.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared files are one source module (src/lib/retro-preflight.ts) and its test. The description says the change is a source-only repair of the watchdog's process-group termination, so it does not touch secrets, auth, merge/deploy policy, or data deletion."
+      - "The plan record states that no production retries, signals, caps, policies or paid probes are authorized, and that the existing gates stay pinned. Both acceptance criteria are verifiable by named unit tests, and the sibling-protection and spawn-failure cases are explicitly covered."
+      - "The task signals descendants only within a command-owned group, not unrelated work, so it stays within the escalation rule's LOW scope. The family has no track record (0 merged), but nothing in the description or gates state is concerning, and CI and review still apply."
+    judged_at: "2026-10-27T21:45:30.406Z"
+    pin: "ee6606ac2beb80fff74510958cf3f9370808391090eaf52a683334a65f8fc4fe"

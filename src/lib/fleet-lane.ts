@@ -24,6 +24,7 @@ import { machineTokens, type PlainStore } from "./inbox-plain.js";
 import { appendPanelLedger } from "./panel-actions.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { readLedgerUnionRecords, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { stripMintedFollowupAffix } from "./followup-dedup-census.js";
 
 /**
  * lib/fleet-lane.ts (W1-T4089) — the fleet triages its own findings.
@@ -72,9 +73,17 @@ export interface FleetLaneDeps<R extends number | Promise<number> = number> {
   escalateReplayStranded?: (stranded: ReplayStranded) => void;
   /** Awaited replay I/O; default held by this deps object, which the daemon resolves once for its lifetime. */
   replayRegistryReader?: BandMeaningReplayRegistryReader;
+  /** W1-T9103: whether the later follow-up's text restates the earlier's (both with the minted affix stripped). Absent,
+   *  only the shared-path rule merges follow-ups; an answer of "unavailable" merges nothing and is never stored. */
+  sameFinding?: (earlier: string, later: string) => Sameness | Promise<Sameness>;
 }
 
+/** W1-T9103: the judge's answer for a pair of follow-ups; "unavailable" is a third value, never read as "distinct". */
+export type Sameness = "same" | "distinct" | "unavailable";
+
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+const REPO_PATH = /(?:src|test|scripts|docs|plan)\/[\w./-]+?\.\w+/;
 
 export function classificationSnapshotPath(stateDir: string): string {
   return `${stateDir}/inbox-classified.json`;
@@ -281,9 +290,11 @@ export function fleetLaneOffPath(stateDir: string, kind: string): string {
  *  findings with the same subject are one piece of work. `undefined` when it names nothing shared. */
 export function findingSubject(proposalId: string): string | undefined {
   const kind = inboxKind(proposalId);
-  const path = /(?:src|test|scripts|docs|plan)\/[\w./-]+?\.\w+/.exec(proposalId)?.[0];
+  const path = REPO_PATH.exec(proposalId)?.[0];
   if (path) return `${kind}|${path}`;
-  const task = /\b[A-Z][A-Z0-9]*-T\d+\b/.exec(proposalId)?.[0];
+  // W1-T9103 (operator ruling 2026-10-13): a shared task id alone no longer merges two follow-ups; they are candidates
+  // for `mergeFollowupRestatements`, which asks whether they share a path or restate one another.
+  const task = kind === "followup" ? undefined : /\b[A-Z][A-Z0-9]*-T\d+\b/.exec(proposalId)?.[0];
   if (task) return `${kind}|${task}`;
   if (kind === "codeql-quality") return `${kind}|${proposalId.slice(kind.length + 1)}`;
   return undefined;
@@ -328,8 +339,18 @@ export type DecisionStore = Record<string, {
 /** Every decision the lane has made. An unreadable store THROWS: read as empty, every finding would
  *  be decided again — the defect this store replaces — so the pass fails loudly instead. */
 export function readFleetLaneStore(stateDir: string): DecisionStore {
+  const { [SAMENESS_KEY]: _verdicts, ...decisions } = readRawStore(stateDir);
+  return decisions as DecisionStore;
+}
+
+/** W1-T9103: the judged pairs ride in the lane's own file under one reserved key, so a rewrite of the decisions keeps them
+ *  and no reader of the decisions meets them. Each key is `<earlier id> <later id>`, each value that pair's verdict. */
+const SAMENESS_KEY = "fleet-lane:sameness";
+type PairVerdicts = Record<string, "same" | "distinct">;
+
+function readRawStore(stateDir: string): Record<string, unknown> {
   const raw = readJson(fleetLaneStorePath(stateDir));
-  return raw === undefined ? {} : (JSON.parse(raw) as DecisionStore);
+  return raw === undefined ? {} : (JSON.parse(raw) as Record<string, unknown>);
 }
 
 function decide(deps: FleetLaneDeps<number | Promise<number>>, store: DecisionStore, proposalId: string, decision: FleetLaneDecision, extra: Record<string, unknown> = {}): void {
@@ -463,6 +484,77 @@ function replayReofferTimes(stateDir: string): Map<string, number> {
   return out;
 }
 
+interface FollowupFacts {
+  proposal: Proposal;
+  /** The report row it came from: its id without the entry index, so entries of one row share it. */
+  row: string;
+  task?: string;
+  /** The run and PR its minted summary names (`routeFollowupsToRegistry`'s shape). */
+  source?: string;
+  /** Its text with the minted affix stripped. */
+  text: string;
+}
+
+function followupFacts(p: Proposal): FollowupFacts {
+  const text = stripMintedFollowupAffix(p.summary);
+  let source: string | undefined;
+  if (text !== p.summary) {
+    const tail = p.summary.slice(p.summary.indexOf("]: ") + 3 + text.length);
+    const m = /^ — from \S+ \(run ([^,()]*)(?:, ([^()]*))?\)$/.exec(tail);
+    if (m) source = `${m[1]}|${m[2] ?? ""}`;
+  }
+  return { proposal: p, row: p.id.replace(/:\d+$/, ""), task: /\b[A-Z][A-Z0-9]*-T\d+\b/.exec(p.id)?.[0], source, text };
+}
+
+/**
+ * W1-T9103 — A FOLLOW-UP RESTATED BY A LATER ROUND OF ITS RUN IS ONE FINDING. Two open follow-ups are candidates when
+ * they come from different report rows and share a source run and PR or name one task. A candidate pair merges when its
+ * texts name the same first repo path, or the `sameFinding` port says the later restates the earlier; the LATER report's
+ * finding is kept and the earlier declined. Each pair is judged once (its verdict is stored); an unavailable judge
+ * stores nothing, merges nothing and writes `fleet_lane.sameness_unavailable`. Entries of one row are never compared.
+ */
+function* mergeFollowupRestatements(deps: FleetLaneDeps<number | Promise<number>>, store: DecisionStore, survivors: Proposal[]): Steps<{ merged: string[]; survivors: Proposal[] }> {
+  const merged: string[] = [];
+  const gone = new Set<string>();
+  const facts = survivors.filter((p) => inboxKind(p.id) === "followup").map(followupFacts);
+  const verdicts = ((store as Record<string, unknown>)[SAMENESS_KEY] ?? {}) as PairVerdicts;
+  for (let j = 1; j < facts.length; j++) {
+    const later = facts[j]!;
+    for (let i = 0; i < j; i++) {
+      const earlier = facts[i]!;
+      if (gone.has(earlier.proposal.id) || earlier.row === later.row) continue;
+      if (!(earlier.task !== undefined && earlier.task === later.task) && !(earlier.source !== undefined && earlier.source === later.source)) continue;
+      const pair = `${earlier.proposal.id} ${later.proposal.id}`;
+      const path = REPO_PATH.exec(earlier.text)?.[0];
+      let verdict: Sameness | undefined = path !== undefined && path === REPO_PATH.exec(later.text)?.[0] ? "same" : verdicts[pair];
+      if (verdict === undefined && deps.sameFinding) {
+        const ask = deps.sameFinding;
+        verdict = yield* step(async (): Promise<Sameness> => {
+          try {
+            return await ask(earlier.text, later.text);
+          } catch {
+            // deliberate: a judge that threw answered nothing; "unavailable" is its own value, written as a row below.
+            return "unavailable";
+          }
+        });
+        if (verdict === "unavailable") {
+          appendPanelLedger(deps.ledgerPath, "fleet_lane.sameness_unavailable", later.proposal.id, ORIGIN, { earlier: earlier.proposal.id });
+        } else {
+          verdicts[pair] = verdict;
+          (store as Record<string, unknown>)[SAMENESS_KEY] = verdicts;
+          writeAtomic(fleetLaneStorePath(deps.stateDir), JSON.stringify(store) + "\n");
+        }
+      }
+      if (verdict !== "same") continue;
+      decide(deps, store, earlier.proposal.id, "merge", { into: later.proposal.id });
+      appendPanelLedger(deps.ledgerPath, "panel.proposal_declined", earlier.proposal.id, ORIGIN, { reason: `${PLAIN_REASON.merge} (${later.proposal.id})` });
+      merged.push(earlier.proposal.id);
+      gone.add(earlier.proposal.id);
+    }
+  }
+  return { merged, survivors: survivors.filter((p) => !gone.has(p.id)) };
+}
+
 function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, readRows: HandoffRows,
   replay: (input: BandMeaningReplayInput) => BandMeaningReplayPass | Promise<BandMeaningReplayPass> = replayBandMeaningRefusals): Steps<FleetLanePass> {
   // W1-T8714: the one-shot replay of the proposals the band split lost. It only drops their cached drafts, so the
@@ -488,7 +580,7 @@ function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, re
   const age = Number.isFinite(generatedMs) ? { classificationAgeMs: now - generatedMs } : {};
   const ledger = readLedger(deps.ledgerPath);
   const isDeclined = declinedWithReceipts(ledger as never, deps.stateDir);
-  const store = readFleetLaneStore(deps.stateDir);
+  const store = readRawStore(deps.stateDir) as DecisionStore;
   const proposals = parseProposalRegistry(readJson(`${deps.stateDir}/inbox-proposals.json`));
   const drafts = parseDraftCache(readJson(`${deps.stateDir}/inbox-drafts.json`));
   // A merge is final (the finding is declined). A file is retried after a day if the finding is
@@ -532,6 +624,10 @@ function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, re
     if (subject) keeperBySubject.set(subject, p.id);
     survivors.push(p);
   }
+  // W1-T9103: follow-ups restating one another, which no subject in the id can pair.
+  const restated = yield* mergeFollowupRestatements(deps, store, survivors);
+  merged.push(...restated.merged);
+  survivors.splice(0, survivors.length, ...restated.survivors);
 
   // FILE: drafted findings, oldest of the most common kind first, at the fleet's own pace.
   const filedToday = Object.entries(store).filter(([id, d]) => d.decision === "file" && withinDay(d.ts) && !unrecorded(id)).length;
