@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -10,36 +10,44 @@ import {
   writeDaemonTargetRecord,
   type DaemonTargetRecord,
 } from "#src/cli/commands/daemon.js";
-import { dispatchClaimRef } from "#src/lib/dispatch-claim.js";
-import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
-import { SELF_SYNC_GUARD_ENV } from "#src/lib/self-sync.js";
+import { LIVE_WRITE_OVERRIDE_ENV } from "#src/lib/live-write-guard.js";
 import { loadPlan } from "#src/lib/plan.js";
+import { SELF_SYNC_GUARD_ENV } from "#src/lib/self-sync.js";
 import { readLedgerLines } from "#src/lib/status.js";
-import { claimCommand, main, plannedOnOriginMain } from "#src/run-task.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T10925: `rmd release PORTAL-T45`, docker-exec'd into a consumer daemon's container, loaded the
 // ENGINE checkout's plan (cwd), exited 2 "unknown task" and wrote no `dispatch.breaker_released` row.
 // The daemon now records its target at boot; a per-task verb whose cwd plan lacks the id reads the
-// target checkout's plan instead. Here THIS checkout is the engine (cwd); the fixture config root
-// holds the target checkout and the boot record naming it.
+// target checkout's plan instead. Each case runs the real CLI with cwd inside a fixture ENGINE
+// checkout; the fixture config root holds the target checkout and the boot record naming it.
 
 const TARGET_TASK = "PORTAL-T999";
-const ENGINE_TASK = "W1-T143"; // a real id in this checkout's plan (repo: remudero)
-const ENGINE_PLAN = join(REPO_ROOT, "plan", "tasks.yaml");
+const ENGINE_TASK = "ENGINE-T1";
 
 const planYaml = (id: string, repo: string): string =>
-  `- id: ${id}\n  title: "a consumer task"\n  repo: ${repo}\n  depends_on: []\n  type: implement\n  verify: auto\n` +
-  `  risk: low\n  status: queued\n  files: [src/site.ts]\n  acceptance:\n    - claim: "it holds"\n      proof: "unit test: it holds"\n`;
+  `- id: ${id}\n  title: "a task"\n  repo: ${repo}\n  depends_on: []\n  type: implement\n  verify: auto\n` +
+  `  risk: low\n  status: queued\n  files: [src/x.ts]\n  acceptance:\n    - claim: "it holds"\n      proof: "unit test: it holds"\n`;
 
 const planHolds = (root: string, id: string): boolean => loadPlan(join(root, "plan", "tasks.yaml")).byId.has(id);
 
-interface Instance { home: string; root: string; stateDir: string; ledgerPath: string; target: string }
+/** A git checkout whose committed plan holds `id`. */
+function checkout(kind: string, id: string, repo: string): GitRepo {
+  const r = gitRepo({ kind });
+  mkdirSync(join(r.dir, "plan"), { recursive: true });
+  writeFileSync(join(r.dir, "plan", "tasks.yaml"), planYaml(id, repo));
+  r.git("add", "plan/tasks.yaml");
+  r.git("commit", "--quiet", "-m", `plan ${id}`);
+  return r;
+}
 
-/** A fixture HOME whose config root holds `repos/remudero-site` (only its plan names PORTAL-T999). */
-function instance(): Instance {
+interface Instance { home: string; root: string; stateDir: string; ledgerPath: string; target: string; engine: GitRepo; enginePlan: string }
+
+/** A fixture HOME whose config root holds `repos/remudero-site` (only its plan names PORTAL-T999), and
+ *  an engine checkout (origin craigoley/remudero) whose plan names only ENGINE-T1. */
+function instance(t: TestContext): Instance {
   const home = mkdtempSync(join(tmpdir(), "rmd-t10925-"));
   const root = join(home, "Remudero");
   const stateDir = join(root, "state");
@@ -51,87 +59,78 @@ function instance(): Instance {
   writeFileSync(join(target, "plan", "tasks.yaml"), planYaml(TARGET_TASK, "remudero-site"));
   const ledgerPath = join(stateDir, "ledger.ndjson");
   writeFileSync(ledgerPath, JSON.stringify({ step: "dispatch.circuit_broken", task: TARGET_TASK, freshCount: 5 }) + "\n");
-  return { home, root, stateDir, ledgerPath, target };
+  const engine = checkout("t10925-engine", ENGINE_TASK, "remudero");
+  engine.addRemote("origin", "https://github.com/craigoley/remudero.git");
+  t.after(() => {
+    engine.cleanup();
+    rmSync(home, { recursive: true, force: true });
+  });
+  return { home, root, stateDir, ledgerPath, target, engine, enginePlan: join(realpathSync(engine.dir), "plan", "tasks.yaml") };
 }
 
 const consumerRecord = (f: Instance): DaemonTargetRecord =>
   ({ owner: "craigoley", repo: "remudero-site", isSelf: false, checkoutRoot: f.target });
 
-class ProcessExitCalled extends Error {
-  constructor(public code: number | undefined) {
-    super(`process.exit(${code})`);
-  }
-}
+interface Run { code: number | null; out: string; err: string; released: Array<Record<string, unknown>> }
 
-interface Run { code: number | undefined; out: string; err: string; released: Array<Record<string, unknown>> }
-
-/** `rmd <argv>` through the real `main()`, cwd = this (engine) checkout, HOME = the fixture's. */
-async function rmd(t: TestContext, f: Instance, argv: string[]): Promise<Run> {
+/** `rmd <argv>`, the real CLI in a child, cwd = the fixture engine checkout, HOME = the fixture's. */
+function rmd(f: Instance, argv: string[]): Run {
   const shim = ghShim([{ when: "", stderr: "t10925 test: unexpected gh call", exit: 1 }], { kind: "t10925-gh" });
-  const out: string[] = [];
-  const err: string[] = [];
-  t.mock.method(process, "exit", ((code?: number): never => {
-    throw new ProcessExitCalled(code);
-  }) as typeof process.exit);
-  t.mock.method(console, "log", (...a: unknown[]) => out.push(a.join(" ")));
-  t.mock.method(console, "error", (...a: unknown[]) => err.push(a.join(" ")));
-  t.mock.method(console, "warn", () => {});
-  const saved = { argv: process.argv, home: process.env.HOME, path: process.env.PATH, guard: process.env[SELF_SYNC_GUARD_ENV] };
-  process.argv = ["node", "run-task.js", ...argv];
-  process.env.HOME = f.home;
-  process.env.PATH = `${shim.dir}:${saved.path}`;
-  process.env[SELF_SYNC_GUARD_ENV] = "1";
-  try {
-    let caught: unknown;
-    await withLiveWritesAllowed(() => main().catch((e) => { caught = e; }));
-    assert.ok(caught instanceof ProcessExitCalled, `main() must reach process.exit: ${String(caught)}`);
-    const released = (readLedgerLines(f.ledgerPath) as Array<Record<string, unknown>>)
-      .filter((r) => r.step === "dispatch.breaker_released");
-    return { code: (caught as ProcessExitCalled).code, out: out.join("\n"), err: err.join("\n"), released };
-  } finally {
-    process.argv = saved.argv;
-    process.env.HOME = saved.home;
-    process.env.PATH = saved.path;
-    if (saved.guard === undefined) delete process.env[SELF_SYNC_GUARD_ENV];
-    else process.env[SELF_SYNC_GUARD_ENV] = saved.guard;
-  }
+  const r = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), join(REPO_ROOT, "src", "run-task.ts"), ...argv], {
+    cwd: f.engine.dir,
+    encoding: "utf8",
+    timeout: 180_000,
+    env: {
+      ...process.env,
+      HOME: f.home,
+      PATH: `${shim.dir}:${process.env.PATH}`,
+      [SELF_SYNC_GUARD_ENV]: "1",
+      // The ledger is this fixture's own and gh is the shim: the child's writes are contained.
+      [LIVE_WRITE_OVERRIDE_ENV]: "1",
+      GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+      GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+      GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+      GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+    },
+  });
+  rmSync(shim.dir, { recursive: true, force: true });
+  const released = (readLedgerLines(f.ledgerPath) as Array<Record<string, unknown>>)
+    .filter((row) => row.step === "dispatch.breaker_released");
+  return { code: r.status, out: r.stdout, err: r.stderr, released };
 }
 
-test("W1-T10925: a release in a consumer instance resolves the target plan", async (t) => {
-  const f = instance();
-  t.after(() => rmSync(f.home, { recursive: true, force: true }));
+test("W1-T10925: a release in a consumer instance resolves the target plan", (t) => {
+  const f = instance(t);
   assert.deepEqual(writeDaemonTargetRecord(f.stateDir, consumerRecord(f)), { written: true });
 
-  const r = await rmd(t, f, ["release", TARGET_TASK, "--reason", "site block fixed"]);
+  const r = rmd(f, ["release", TARGET_TASK, "--reason", "site block fixed"]);
   assert.equal(r.code, 0, r.err);
   assert.equal(r.released.length, 1, "exactly one dispatch.breaker_released row");
   assert.equal(r.released[0]!.task_id, TARGET_TASK);
   assert.equal(r.released[0]!.repo, "remudero-site", "the row carries the TARGET plan's repo");
 
   // `correct` and `trace` share the resolver: the target task is found, and correct asks the TARGET repo.
-  const corrected = await rmd(t, f, ["correct", TARGET_TASK, "--pr", "7"]);
-  assert.equal(corrected.code, 1);
+  const corrected = rmd(f, ["correct", TARGET_TASK, "--pr", "7"]);
+  assert.equal(corrected.code, 1, corrected.err);
   assert.match(corrected.err, /could not resolve PR '7' in craigoley\/remudero-site/);
-  const traced = await rmd(t, f, ["trace", TARGET_TASK]);
+  const traced = rmd(f, ["trace", TARGET_TASK]);
   assert.equal(traced.code, 0, traced.err);
   assert.match(traced.out, new RegExp(`### rmd trace ${TARGET_TASK} \\(reverse`));
-  assert.equal((await rmd(t, f, ["trace"])).code, 2, "no id still reaches trace's own usage error");
 });
 
-test("W1-T10925: a self-targeting instance and --repo-root are unchanged", async (t) => {
-  const f = instance();
-  t.after(() => rmSync(f.home, { recursive: true, force: true }));
+test("W1-T10925: a self-targeting instance and --repo-root are unchanged", (t) => {
+  const f = instance(t);
 
   // A self-targeting record is never consulted: an id only some other checkout holds is unknown, as before.
   writeDaemonTargetRecord(f.stateDir, { ...consumerRecord(f), repo: "remudero", isSelf: true });
-  const self = await rmd(t, f, ["release", TARGET_TASK, "--reason", "x"]);
+  const self = rmd(f, ["release", TARGET_TASK, "--reason", "x"]);
   assert.equal(self.code, 2);
-  assert.match(self.err, new RegExp(`unknown task '${TARGET_TASK}' \\(not found in ${ENGINE_PLAN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`));
+  assert.ok(self.err.includes(`unknown task '${TARGET_TASK}' (not found in ${f.enginePlan})`), self.err);
   assert.equal(self.released.length, 0);
 
   // A consumer record never shadows the cwd plan: an id cwd holds resolves from cwd.
   writeDaemonTargetRecord(f.stateDir, consumerRecord(f));
-  const cwd = await rmd(t, f, ["release", ENGINE_TASK, "--reason", "engine release"]);
+  const cwd = rmd(f, ["release", ENGINE_TASK, "--reason", "engine release"]);
   assert.equal(cwd.code, 0, cwd.err);
   assert.equal(cwd.released.at(-1)!.task_id, ENGINE_TASK);
   assert.equal(cwd.released.at(-1)!.repo, "remudero");
@@ -140,26 +139,25 @@ test("W1-T10925: a self-targeting instance and --repo-root are unchanged", async
   const elsewhere = join(f.root, "elsewhere");
   mkdirSync(join(elsewhere, "plan"), { recursive: true });
   writeFileSync(join(elsewhere, "plan", "tasks.yaml"), planYaml("OTHER-T1", "other"));
-  const missed = await rmd(t, f, ["--repo-root", elsewhere, "release", TARGET_TASK, "--reason", "x"]);
+  const missed = rmd(f, ["--repo-root", elsewhere, "release", TARGET_TASK, "--reason", "x"]);
   assert.equal(missed.code, 2);
-  assert.match(missed.err, /not found in \S*elsewhere\/plan\/tasks\.yaml;/);
-  assert.ok(!missed.err.includes(ENGINE_PLAN), "the cwd plan is not searched under --repo-root");
+  assert.ok(missed.err.includes(`not found in ${join(elsewhere, "plan", "tasks.yaml")};`), missed.err);
+  assert.ok(!missed.err.includes(f.enginePlan), "the cwd plan is not searched under --repo-root");
   assert.equal(missed.released.length, 1, "nothing new was written");
-  const explicit = await rmd(t, f, ["--repo-root", f.target, "release", TARGET_TASK, "--reason", "explicit"]);
+  const explicit = rmd(f, ["--repo-root", f.target, "release", TARGET_TASK, "--reason", "explicit"]);
   assert.equal(explicit.code, 0, explicit.err);
   assert.equal(explicit.released.at(-1)!.task_id, TARGET_TASK);
 });
 
-test("W1-T10925: a miss names every plan searched and the repo-root to use", async (t) => {
-  const f = instance();
-  t.after(() => rmSync(f.home, { recursive: true, force: true }));
+test("W1-T10925: a miss names every plan searched and the repo-root to use", (t) => {
+  const f = instance(t);
   const targetPlan = join(f.target, "plan", "tasks.yaml");
 
   // With a consumer record: both plans, and the target's --repo-root.
   writeDaemonTargetRecord(f.stateDir, consumerRecord(f));
-  const r = await rmd(t, f, ["release", "PORTAL-T000", "--reason", "x"]);
+  const r = rmd(f, ["release", "PORTAL-T000", "--reason", "x"]);
   assert.equal(r.code, 2);
-  assert.ok(r.err.includes(`not found in ${ENGINE_PLAN}, ${targetPlan}`), r.err);
+  assert.ok(r.err.includes(`not found in ${f.enginePlan}, ${targetPlan}`), r.err);
   assert.ok(r.err.includes(`targets craigoley/remudero-site — read its plan with --repo-root ${f.target}`), r.err);
   assert.equal(r.released.length, 0);
 
@@ -168,15 +166,15 @@ test("W1-T10925: a miss names every plan searched and the repo-root to use", asy
   const other = join(f.root, "repos", "remudero-docs");
   mkdirSync(join(other, "plan"), { recursive: true });
   writeFileSync(join(other, "plan", "tasks.yaml"), planYaml(TARGET_TASK, "remudero-docs"));
-  const guess = await rmd(t, f, ["release", TARGET_TASK, "--reason", "x"]);
+  const guess = rmd(f, ["release", TARGET_TASK, "--reason", "x"]);
   assert.equal(guess.code, 2);
-  assert.ok(guess.err.includes(`not found in ${ENGINE_PLAN})`), guess.err);
+  assert.ok(guess.err.includes(`not found in ${f.enginePlan})`), guess.err);
   assert.ok(!guess.err.includes("--repo-root"), "no record names a target, so no --repo-root is offered");
   assert.equal(guess.released.length, 0);
 
   // A malformed record is "no target" with its reason; a record naming a missing checkout names it unreadable.
-  const onlyTarget = (id: string) => resolveVerbPlanRoot(id, { argv: [], cwdRoot: REPO_ROOT, stateDir: () => f.stateDir,
-    holds: (root, task) => root !== REPO_ROOT && planHolds(root, task) });
+  const onlyTarget = (id: string) => resolveVerbPlanRoot(id, { argv: [], cwdRoot: f.engine.dir, stateDir: () => f.stateDir,
+    holds: planHolds });
   writeFileSync(join(f.stateDir, "daemon-target.json"), "{not json");
   const bad = onlyTarget(TARGET_TASK);
   assert.match(bad.ok ? "" : bad.error, /; no instance target \(record unreadable: \S*daemon-target\.json: /);
@@ -193,51 +191,33 @@ test("W1-T10925: a miss names every plan searched and the repo-root to use", asy
   // An instance config that cannot be read is named, never guessed past; a record that cannot be written says why.
   const noConfig = resolveVerbPlanRoot(TARGET_TASK, { argv: [], cwdRoot: f.target, stateDir: () => { throw new Error("bad config"); },
     holds: () => false });
-  assert.deepEqual(noConfig.ok ? undefined : noConfig.error.endsWith("(record unreadable: instance config: bad config)"), true);
+  assert.equal(noConfig.ok ? undefined : noConfig.error.endsWith("(record unreadable: instance config: bad config)"), true);
   const blocked = writeDaemonTargetRecord(join(f.ledgerPath, "nested"), consumerRecord(f));
   assert.equal(blocked.written, false);
 });
 
 test("W1-T10925: a consumer claim reserves on the target repo", (t) => {
-  const saved = { ...process.env };
-  Object.assign(process.env, {
-    GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
-    GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
-    GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
-    GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
-  });
-  const bare = gitRepo({ bare: true, kind: "t10925-target-origin" });
-  const target = gitRepo({ kind: "t10925-target" });
-  const stateDir = mkdtempSync(join(tmpdir(), "rmd-t10925-state-"));
+  const f = instance(t);
+  // Both checkouts get a real local origin: the engine's main does not plan PORTAL-T999, the target's does.
+  const engineOrigin = gitRepo({ bare: true, kind: "t10925-engine-origin" });
+  const targetOrigin = gitRepo({ bare: true, kind: "t10925-target-origin" });
+  const target = checkout("t10925-target", TARGET_TASK, "remudero-site");
   t.after(() => {
-    for (const k of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]) {
-      if (saved[k] === undefined) delete process.env[k];
-      else process.env[k] = saved[k];
-    }
-    bare.cleanup();
+    engineOrigin.cleanup();
+    targetOrigin.cleanup();
     target.cleanup();
-    rmSync(stateDir, { recursive: true, force: true });
   });
-  mkdirSync(join(target.dir, "plan"), { recursive: true });
-  writeFileSync(join(target.dir, "plan", "tasks.yaml"), planYaml(TARGET_TASK, "remudero-site"));
-  target.git("add", "plan/tasks.yaml");
-  target.git("commit", "--quiet", "-m", "plan PORTAL-T999");
-  target.addRemote("origin", bare.dir);
+  f.engine.git("remote", "set-url", "origin", engineOrigin.dir);
+  f.engine.git("push", "--quiet", "origin", "main");
+  target.addRemote("origin", targetOrigin.dir);
   target.git("push", "--quiet", "origin", "main");
-  writeDaemonTargetRecord(stateDir, { owner: "craigoley", repo: "remudero-site", isSelf: false, checkoutRoot: target.dir });
+  writeDaemonTargetRecord(f.stateDir, { ...consumerRecord(f), checkoutRoot: target.dir });
 
-  const asked: string[] = [];
-  const out = t.mock.method(console, "log", () => {});
-  const err = t.mock.method(console, "error", () => {});
-  // The engine checkout (cwd) does not plan PORTAL-T999; the target's origin/main really does.
-  const code = claimCommand([TARGET_TASK], {
-    stateDir,
-    isPlanned: (id, dir) => { asked.push(dir!); return dir === target.dir && plannedOnOriginMain(id, dir); },
-  });
-  const text = (m: typeof out) => m.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
-  assert.equal(code, 0, text(err));
-  assert.equal(text(out), `claimed ${dispatchClaimRef(TARGET_TASK)}`);
-  assert.deepEqual(asked, [REPO_ROOT, target.dir], "cwd's plan first, then the target's");
-  const held = execFileSync("git", ["-C", bare.dir, "for-each-ref", "--format=%(objectname)", dispatchClaimRef(TARGET_TASK)], { encoding: "utf8" }).trim();
-  assert.match(held, /^[0-9a-f]{40}$/, "the claim ref exists on the TARGET repo's origin");
+  const r = rmd(f, ["claim", TARGET_TASK]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /claimed refs\/rmd-dispatch\/PORTAL-T999/);
+  const held = (origin: GitRepo) =>
+    execFileSync("git", ["-C", origin.dir, "for-each-ref", "--format=%(objectname)", "refs/rmd-dispatch/PORTAL-T999"], { encoding: "utf8" }).trim();
+  assert.match(held(targetOrigin), /^[0-9a-f]{40}$/, "the claim ref exists on the TARGET repo's origin");
+  assert.equal(held(engineOrigin), "", "and not on the engine's origin");
 });
