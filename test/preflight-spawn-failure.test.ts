@@ -35,7 +35,7 @@ import {
   spawnFailureDetail,
   typecheckStep,
   type PreflightSpawn,
-} from "../src/lib/commit-message.js";
+} from "#src/lib/commit-message.js";
 
 /** A spawn whose child NEVER STARTED — `status: null` plus an `error`, exactly the shape
  *  `defaultPreflightSpawn` returns for ENOENT, a signal kill or a buffer ceiling. */

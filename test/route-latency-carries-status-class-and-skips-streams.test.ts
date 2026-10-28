@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { test } from "node:test";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { createRouteReadRollup } from "../src/lib/route-read-rollup.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { createRouteReadRollup } from "#src/lib/route-read-rollup.js";
 
 function harness() {
   let monotonic = 0;

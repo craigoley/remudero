@@ -23,3 +23,11 @@
     Add the named regression in test/infra/compress-src-cli-commands-run-task-verb-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it touches secrets, auth, tokens or permissions (\"tokens\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-28T01:29:54.926Z"
+    pin: "af8c0f567cad0fd990f4618fc7303ab180dfca5e9e691b35518195f319991f64"

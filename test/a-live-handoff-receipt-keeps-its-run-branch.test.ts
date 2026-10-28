@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { pendingWorkerBoundaryHandoffs, handoffReceiptsToCarry } from "../src/lib/daemon.js";
-import { rotateLedger } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { DECLARED_BRANCH_GUARDS, reapBranchesCommand, restoreBoundaryCheckpoint, runTask } from "./helpers/run-task-test.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { pendingWorkerBoundaryHandoffs, handoffReceiptsToCarry } from "#src/lib/daemon.js";
+import { rotateLedger } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { DECLARED_BRANCH_GUARDS, reapBranchesCommand, restoreBoundaryCheckpoint, runTask } from "#test/helpers/run-task-test.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const taskId = "W1-T8503";
 const branch = `run-${taskId}-1`;

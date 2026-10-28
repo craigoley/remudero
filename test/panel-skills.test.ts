@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildPanelSkillsRoutes, buildSkillsRoute, type PanelSkillsDeps } from "../src/lib/panel-skills.js";
-import { skillsDir } from "../src/lib/skill.js";
+import { createService } from "#src/lib/service.js";
+import { buildPanelSkillsRoutes, buildSkillsRoute, type PanelSkillsDeps } from "#src/lib/panel-skills.js";
+import { skillsDir } from "#src/lib/skill.js";
 
 // ── W3-T8: panel skill actions — each registry skill is a panel button wired to the registry ──
 // (MASTER-PLAN §5B/§7)

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { landingIdentity, type LandingRepository } from "../src/lib/feedback-landing.js";
-import { isDeclaredBranchGuard, planReverseBranchDrift } from "../src/lib/branch-reaper.js";
-import { planBranchReap, type BranchFacts } from "../src/lib/status.js";
+import { landingIdentity, type LandingRepository } from "#src/lib/feedback-landing.js";
+import { isDeclaredBranchGuard, planReverseBranchDrift } from "#src/lib/branch-reaper.js";
+import { planBranchReap, type BranchFacts } from "#src/lib/status.js";
 
 const coreRepo: LandingRepository = { owner: "craigoley", repo: "remudero" };
 

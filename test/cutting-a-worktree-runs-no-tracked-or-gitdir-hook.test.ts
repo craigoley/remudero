@@ -3,9 +3,9 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { readWorktreeBase, worktreeAdd, worktreeAddAsync } from "../src/lib/worker.js";
-import { recordedWorktreeGitDir } from "../src/lib/worktree-git.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { readWorktreeBase, worktreeAdd, worktreeAddAsync } from "#src/lib/worker.js";
+import { recordedWorktreeGitDir } from "#src/lib/worktree-git.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 /**
  * W1-T6147: `git worktree add` checks the new tree out and runs `post-checkout` from whatever hooks

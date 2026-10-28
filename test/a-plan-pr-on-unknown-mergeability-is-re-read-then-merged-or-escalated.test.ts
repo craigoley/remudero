@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { systemClock } from "../src/lib/clock.js";
+import { systemClock } from "#src/lib/clock.js";
 import {
   attemptArm,
   attemptArmAsync,
@@ -8,7 +8,7 @@ import {
   logArmAttribution,
   type ArmDeps,
   type ArmAttemptResult,
-} from "../src/lib/arm-auto-merge.js";
+} from "#src/lib/arm-auto-merge.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/9138";
 const HEAD = "head5733";

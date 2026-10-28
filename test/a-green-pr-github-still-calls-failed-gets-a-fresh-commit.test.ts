@@ -3,14 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { Config } from "../src/lib/config.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { Config } from "#src/lib/config.js";
 import {
   buildSweepEffects, refreshStaleRollupAfterRefusal, runSweep, type ArmedStalledPr, type OpenPrView, type RollupCheckEntry, type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#test/helpers/sweep-test.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const HEAD = "6404640464046404640464046404640464046404";
 const NEXT_HEAD = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

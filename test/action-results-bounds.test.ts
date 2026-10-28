@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ACTION_RESULTS_MAX_RESPONSE_BYTES, ACTION_RESULTS_MAX_RESULTS, buildActionResultsProjection, buildActionResultsRoute } from "../src/lib/action-results.js";
-import type { LedgerLines } from "../src/lib/status.js";
+import { ACTION_RESULTS_MAX_RESPONSE_BYTES, ACTION_RESULTS_MAX_RESULTS, buildActionResultsProjection, buildActionResultsRoute } from "#src/lib/action-results.js";
+import type { LedgerLines } from "#src/lib/status.js";
 
 function row(index: number): Record<string, unknown> {
   return {

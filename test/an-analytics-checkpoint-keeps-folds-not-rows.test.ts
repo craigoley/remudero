@@ -13,10 +13,10 @@ import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import * as analytics from "../src/lib/analytics-route.js";
-import * as judge from "../src/lib/judge-calibration.js";
-import * as workIntegrity from "../src/lib/work-integrity.js";
-import { fixedClock } from "../src/lib/clock.js";
+import * as analytics from "#src/lib/analytics-route.js";
+import * as judge from "#src/lib/judge-calibration.js";
+import * as workIntegrity from "#src/lib/work-integrity.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 type Row = Record<string, unknown>;
 

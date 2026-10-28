@@ -9,22 +9,22 @@ import {
   type ThreadListRefreshSettled,
   type ThreadListSources,
   type ThreadStoreRead,
-} from "../src/lib/inbox-thread-list-view.js";
+} from "#src/lib/inbox-thread-list-view.js";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fixedClock } from "../src/lib/clock.js";
-import { writeClassificationSnapshot } from "../src/lib/fleet-lane.js";
-import { inboxLegacyView } from "../src/lib/inbox-view.js";
-import * as panelGraph from "../src/lib/panel-graph.js";
-import type { PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import type { InboxThreadItem, ReadMarks } from "../src/lib/inbox-responder.js";
-import { appendThreadMessage, inboxThreadIdentity, inboxThreadId, type ThreadMessage } from "../src/lib/inbox-thread.js";
-import { createService } from "../src/lib/service.js";
-import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
-import { snapshotCursor } from "../src/lib/read-page.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { writeClassificationSnapshot } from "#src/lib/fleet-lane.js";
+import { inboxLegacyView } from "#src/lib/inbox-view.js";
+import * as panelGraph from "#src/lib/panel-graph.js";
+import type { PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import type { InboxThreadItem, ReadMarks } from "#src/lib/inbox-responder.js";
+import { appendThreadMessage, inboxThreadIdentity, inboxThreadId, type ThreadMessage } from "#src/lib/inbox-thread.js";
+import { createService } from "#src/lib/service.js";
+import { mountInstanceInboxRoutes } from "#src/lib/instance-inbox-contract.js";
+import { snapshotCursor } from "#src/lib/read-page.js";
 import type { AddressInfo } from "node:net";
 import type { TestContext } from "node:test";
 

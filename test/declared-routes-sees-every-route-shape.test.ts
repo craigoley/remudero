@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { assembledRoutes, declaredConsoleRoutes } from "./helpers/declared-routes.js";
+import { assembledRoutes, declaredConsoleRoutes } from "#test/helpers/declared-routes.js";
 
 test("W1-T4584: every route the server assembles is in the declared set, and a same-line declaration is scanned", () => {
   const declared = declaredConsoleRoutes();

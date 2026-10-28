@@ -12,7 +12,7 @@ import {
   type GoldenTask,
   type HarnessRunner,
   type ReplayOutcome,
-} from "../src/lib/replay.js";
+} from "#src/lib/replay.js";
 
 // ── W1-T165 — the golden-task regression suite, the missing Self-Harness leg ─
 //

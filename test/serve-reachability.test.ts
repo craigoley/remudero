@@ -30,12 +30,12 @@ import {
   resolveServeHosts,
   resolveServiceTokens,
   type ServeDeps,
-} from "../src/lib/serve.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { type GitHub, type PrRef } from "../src/lib/status.js";
-import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
+} from "#src/lib/serve.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { type GitHub, type PrRef } from "#src/lib/status.js";
+import type { TraceGithub, TracePrView } from "#src/lib/trace.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
 
 function planOf(tasks: Task[]): Plan {
   return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };

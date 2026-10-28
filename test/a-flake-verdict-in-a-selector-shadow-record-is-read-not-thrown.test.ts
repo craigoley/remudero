@@ -10,10 +10,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 // A namespace import: `flakes` is new, so this suite still loads (and fails) at the base sha.
-import * as gardener from "../src/lib/selector-shadow-gardener.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as gardener from "#src/lib/selector-shadow-gardener.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const STEP = "selector-shadow.observation";
 const NOW = Date.parse("2026-10-06T00:00:00.000Z");

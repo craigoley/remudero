@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createPlanFilingFileCache, hydratePlanFilingFiles, type GhApiFetcher } from "../src/lib/open-prs-rest.js";
+import { createPlanFilingFileCache, hydratePlanFilingFiles, type GhApiFetcher } from "#src/lib/open-prs-rest.js";
 
 // W1-T9820, measured on the core ledger 2026-10-16: the light pass read at most 3 uncached heads per
 // pass, newest-first. #12299 and #12301 (plan-file heads) stayed `unreadable` from 12:53Z, so they

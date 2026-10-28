@@ -6,13 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createBoardProjectionWorker } from "../src/lib/board-worker.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { repoRoot } from "../src/lib/repo-location.js";
-import { planFilesIdentity } from "../src/lib/thread-plan.js";
-import { serveCommand } from "../src/run-task.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { createBoardProjectionWorker } from "#src/lib/board-worker.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { repoRoot } from "#src/lib/repo-location.js";
+import { planFilesIdentity } from "#src/lib/thread-plan.js";
+import { serveCommand } from "#src/run-task.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // W1-T5639: after an initial assembly failure the DEFAULT board worker recovers on its own. Plan-view must adopt the
 // generation that worker read, rather than stay bound to the failed placeholder beside a healthy board.

@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildStatusBoard, livenessState, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
-import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
+import { buildStatusBoard, livenessState, renderStatusBoardText, type StatusBoardDeps } from "#src/lib/status-board.js";
+import { loadPlanFromYaml, type Plan } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
 
 // ── W1-T301: `rmd status` reported the deploy-supervisor (a launchd StartInterval ONE-SHOT,
 // `rmd deploy-run` every ~120s) as "not running" whenever polled between ticks — its NORMAL

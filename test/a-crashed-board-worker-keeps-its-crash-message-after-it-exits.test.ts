@@ -11,9 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Worker } from "node:worker_threads";
-import { createBoardProjectionWorker, type BoardProjectionWorker } from "../src/lib/board-worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { createBoardProjectionWorker, type BoardProjectionWorker } from "#src/lib/board-worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 function boardPaths() {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}board-crash-`));

@@ -12,15 +12,15 @@ import {
   buildPanelWriteRoutes,
   type PanelGraphDeps,
   type RatifyCliGateway,
-} from "../src/lib/panel-graph.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
-import { createService, type Route } from "../src/lib/service.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/panel-graph.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
+import { createService, type Route } from "#src/lib/service.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const READ_TOKEN = "snapshot-read-token";
 const WRITE_TOKEN = "snapshot-write-token";

@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, w
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { fixedClock } from "../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "../src/lib/ledger-projector.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "#src/lib/ledger-projector.js";
 import {
   READ_MODEL_GENERATION_GRACE_MS,
   READ_MODEL_REBUILT_STEP,
@@ -14,8 +14,8 @@ import {
   readModelStatus,
   readModelSwitchesPath,
   readReadModelSwitches,
-} from "../src/lib/read-model-cli.js";
-import { runConsistencyCheck } from "../src/lib/read-model-consistency.js";
+} from "#src/lib/read-model-cli.js";
+import { runConsistencyCheck } from "#src/lib/read-model-consistency.js";
 import {
   READ_MODEL_LEASE_TTL_MS,
   acquireLease,
@@ -24,8 +24,8 @@ import {
   readModelPointerPath,
   withWriteTransaction,
   type ReadModelDb,
-} from "../src/lib/read-model-db.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/read-model-db.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";

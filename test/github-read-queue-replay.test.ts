@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CERTIFIED_REPLAY_READ_DESCRIPTORS, GithubReadQueueReplay, type ReplayObservation, type ReplayReadIdentity, type ReplayReadRequest, type ReplayReceipt } from "../src/lib/github-read-queue-replay.js";
-import { DEFAULT_GH_READ_CADENCE_S, classifyGhLimitFailure, ghArgvIsWrite, ghReadCadenceDecision } from "../src/lib/github-transport.js";
+import { CERTIFIED_REPLAY_READ_DESCRIPTORS, GithubReadQueueReplay, type ReplayObservation, type ReplayReadIdentity, type ReplayReadRequest, type ReplayReceipt } from "#src/lib/github-read-queue-replay.js";
+import { DEFAULT_GH_READ_CADENCE_S, classifyGhLimitFailure, ghArgvIsWrite, ghReadCadenceDecision } from "#src/lib/github-transport.js";
 
 const floor = DEFAULT_GH_READ_CADENCE_S * 1000;
 const identity: ReplayReadIdentity = Object.freeze({ repository: "fixture/repo", authScope: "fixture-installation-1",

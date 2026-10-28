@@ -1,0 +1,57 @@
+- id: W1-T10894
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts cost 18 PR minute(s) across 10 round(s) on 9 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.23
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts"
+  files:
+    - src/lib/config-gardener.ts
+    - test/gardeners/check-test-test-every-priced-ledger-step-is-in-the-config-garden-read-te.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts"
+      proof: "unit test: W1-T10894: check:test:test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts cost 18 PR minute(s) (seven-day half-life) across 10 fix round(s) on 9 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/config-gardener.ts: test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts imports it
+    - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: named by the failing check
+    - the rounds name a failing test: test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12954 (https://github.com/craigoley/remudero/pull/12954) at 2026-10-19T17:25:13.226Z: ci-log round — coverage-shard (3/8): test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
+        failing tests: semantic mode with no head-resolved task metadata names its deterministic fallback and invents no mount or budget, test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption; semantic mode with no head-resolved task metadata names its deterministic fallback and invents no mount or budget; test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — semantic mode with no head-resolved task metadata names its deterministic fallback and invents no mount or budget, test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+          | not ok 3 - semantic mode with no head-resolved task metadata names its deterministic fallback and invents no mount or budget
+          |   ---
+          |   duration_ms: 5903.339803
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/event-driven-semantic-review.test.ts:118:1'
+          |   f
+    - PR #12385 (https://github.com/craigoley/remudero/pull/12385) at 2026-10-16T22:16:05.961Z: ci-log round — coverage-shard (8/8): test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
+        failing tests: test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+          | not ok 1 - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+          |   ---
+          |   duration_ms: 115.878285
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts:239:1'
+          |   failureType: 'testCodeFailure'
+          | 
+    - PR #10234 (https://github.com/craigoley/remudero/pull/10234) at 2026-10-09T04:24:20.817Z: ci-log round — coverage-shard (5/8): test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
+        failing tests: test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption
+    - PR #10132 at 2026-10-08T15:58:55.465Z: ci-log round — coverage-shard (1/8): test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts; coverage-shard (2/8); coverage-shard (8/8): test/every-host-git-spawn-into-a-worktree-use
+    - PR #10022 at 2026-10-08T05:10:58.177Z: ci-log round — coverage-shard (4/8): test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts; coverage-shard (7/8): test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.te
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

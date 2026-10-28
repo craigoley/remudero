@@ -9,11 +9,11 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Clock } from "../src/lib/clock.js";
-import { buildConsoleTelemetryRoute, CONSOLE_TELEMETRY_ROUTE_PATH, TELEMETRY_BURST_ROWS } from "../src/lib/console-telemetry.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import type { Clock } from "#src/lib/clock.js";
+import { buildConsoleTelemetryRoute, CONSOLE_TELEMETRY_ROUTE_PATH, TELEMETRY_BURST_ROWS } from "#src/lib/console-telemetry.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 type TestCtx = { after: (fn: () => void | Promise<void>) => void };
 const READ = "telemetry-read-token";

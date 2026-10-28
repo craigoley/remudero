@@ -8,8 +8,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 // Namespace import: the K constant is new, so this suite still loads (and fails) at the base sha.
-import * as gardener from "../src/lib/selector-shadow-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as gardener from "#src/lib/selector-shadow-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const files = (n: number, prefix = "mass") => Array.from({ length: n }, (_, i) => `test/${prefix}-${i + 1}.test.ts`);
 

@@ -16,13 +16,13 @@ import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 
-import { affectedSelectionOrFullAsync, readAffectedListings, readAffectedListingsAsync } from "../src/lib/affected-suites.js";
-import { gitPushRunBranchAsync, PushFailedError } from "../src/lib/git-push.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { startReadPlaneTelemetry } from "../src/lib/read-plane.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { worktreeAdd } from "../src/lib/worker.js";
-import { pinnedConfigValue, pinnedConfigValueAsync, pinWorktreeGit } from "../src/lib/worktree-git.js";
+import { affectedSelectionOrFullAsync, readAffectedListings, readAffectedListingsAsync } from "#src/lib/affected-suites.js";
+import { gitPushRunBranchAsync, PushFailedError } from "#src/lib/git-push.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { startReadPlaneTelemetry } from "#src/lib/read-plane.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { worktreeAdd } from "#src/lib/worker.js";
+import { pinnedConfigValue, pinnedConfigValueAsync, pinWorktreeGit } from "#src/lib/worktree-git.js";
 import {
   checkFixCensusSnapshot,
   checkFixCensusSnapshotAsync,
@@ -33,8 +33,8 @@ import {
   readDispatchFilingSnapshotAsync,
   spawnCensusChild,
   type CoverageRunResult,
-} from "../src/run-task.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+} from "#src/run-task.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 const SYNC_PRIMITIVES = ["execFileSync", "spawnSync", "execSync"] as const;
 

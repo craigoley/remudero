@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import test from "node:test";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { reportLoopLag } from "../src/lib/daemon.js";
-import { startReadPlaneTelemetry } from "../src/lib/read-plane.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { reportLoopLag } from "#src/lib/daemon.js";
+import { startReadPlaneTelemetry } from "#src/lib/read-plane.js";
 
 // Inject a slow execFileSync UNDER the telemetry wrapper: each call advances a fake clock by `ms`.
 function withSlowExecFileSync(run: (call: (file: string, args: string[], ms: number) => void,

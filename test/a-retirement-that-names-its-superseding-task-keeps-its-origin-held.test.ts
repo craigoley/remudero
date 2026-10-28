@@ -8,13 +8,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { flakeIncidentOrigin, runFlakeIncidentGardener } from "../src/lib/flake-incident-gardener.js";
-import { runFlowGardener, type FlowGardenSources } from "../src/lib/flow-gardener.js";
-import { gateGardenSpec, loadGateProbes } from "../src/lib/gate-gardener.js";
-import { loadPlanFromYaml, PlanError, retirementHoldsOrigin, type Task } from "../src/lib/plan.js";
-import { lintPlan, lintTask } from "../src/lib/task-linter.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { flakeIncidentOrigin, runFlakeIncidentGardener } from "#src/lib/flake-incident-gardener.js";
+import { runFlowGardener, type FlowGardenSources } from "#src/lib/flow-gardener.js";
+import { gateGardenSpec, loadGateProbes } from "#src/lib/gate-gardener.js";
+import { loadPlanFromYaml, PlanError, retirementHoldsOrigin, type Task } from "#src/lib/plan.js";
+import { lintPlan, lintTask } from "#src/lib/task-linter.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const FILE = "test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts";
 const TITLE = "W1-T9503: a cause owned by a test alone escalates as no-owner";

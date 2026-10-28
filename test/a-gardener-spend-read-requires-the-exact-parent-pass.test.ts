@@ -3,17 +3,17 @@ import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "no
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { createAnalyticsView, type AnalyticsViewData } from "../src/lib/analytics-view.js";
-import { deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { analyticsSourceBodies } from "../src/lib/analytics-view.js";
-import { createReadModelTicker, createReadModelWorker, runReadModelWorker, readModelSwitchesPath, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { createService } from "../src/lib/service.js";
-import { buildReadModelViewRoutes } from "../src/lib/views.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { SPEC, violations } from "./helpers/openapi-strict.js";
+import { createAnalyticsView, type AnalyticsViewData } from "#src/lib/analytics-view.js";
+import { deriveAnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { analyticsSourceBodies } from "#src/lib/analytics-view.js";
+import { createReadModelTicker, createReadModelWorker, runReadModelWorker, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { createService } from "#src/lib/service.js";
+import { buildReadModelViewRoutes } from "#src/lib/views.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { SPEC, violations } from "#test/helpers/openapi-strict.js";
 import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { captureGardenerSpendSource, foldGardenerSpend } from "#src/lib/gardener-spend.js";
 
 const repository = "fixture/repo";
@@ -31,7 +31,7 @@ const origin = { state: "linked", version: 1, name: "config", passId };
 async function loadSpend() {
   assert.ok(existsSync(new URL("../src/lib/gardener-spend.ts", import.meta.url)),
     "the canonical spend implementation must exist before its contract can be exercised");
-  return import("../src/lib/gardener-spend.js");
+  return import("#src/lib/gardener-spend.js");
 }
 const parent = { ts: at, step: "garden.lifecycle", name: "config", passId, repository,
   daemon_run_id: "daemon-1", phase: "completed", exit: 0 };

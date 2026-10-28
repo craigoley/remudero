@@ -12,10 +12,10 @@ import {
   foldDecisionFingerprint,
   isDecisionRelevantRow,
   type BoardDeps,
-} from "../src/lib/board.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
+} from "#src/lib/board.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
 
 /**
  * test/board-snapshot-cache-ignores-heartbeats.test.ts — W1-T2919.

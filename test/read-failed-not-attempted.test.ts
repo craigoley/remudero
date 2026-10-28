@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildBatchedGithub, ghGateway, classifyGhFailure, type GitHub, type GhReadState } from "../src/lib/status.js";
-import { buildStatusBoard, type StatusBoardDeps } from "../src/lib/status-board.js";
-import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
+import { buildBatchedGithub, ghGateway, classifyGhFailure, type GitHub, type GhReadState } from "#src/lib/status.js";
+import { buildStatusBoard, type StatusBoardDeps } from "#src/lib/status-board.js";
+import { loadPlanFromYaml, type Plan } from "#src/lib/plan.js";
 
 /**
  * W1-T2219: `readFailed()`/`readFailureReason()` were a boolean plus a reason with no

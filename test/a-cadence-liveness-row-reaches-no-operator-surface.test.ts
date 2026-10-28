@@ -26,8 +26,8 @@ import {
   CADENCE_MARKERS,
   renderStatusBoardText,
   type StatusBoardDeps,
-} from "../src/lib/status-board.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/status-board.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function tmpRoot(): string {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}cadence-board-`));

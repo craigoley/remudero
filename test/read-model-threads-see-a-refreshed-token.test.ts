@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
-import { createReadModelWorker, threadOracle, threadViews } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { LIVE_WRITE_SENTINEL_TOKEN } from "../src/lib/live-write-guard.js";
+import { createReadModelWorker, threadOracle, threadViews } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { LIVE_WRITE_SENTINEL_TOKEN } from "#src/lib/live-write-guard.js";
 
 // 2026-10-04: a worker thread gets a COPY of process.env unless it is spawned with SHARE_ENV, so it
 // keeps the GH_TOKEN it was born with while serve refreshes its own hourly (github-app.ts). The

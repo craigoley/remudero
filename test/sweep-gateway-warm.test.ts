@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildSweepHook } from "../src/run-task.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
-import { fetchBoardPrsRest, type BoardPrRest } from "../src/lib/open-prs-rest.js";
-import { DEFAULT_POLL_INTERVAL_MS } from "../src/lib/daemon.js";
-import type { Config } from "../src/lib/config.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { buildSweepHook } from "#src/run-task.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
+import { fetchBoardPrsRest, type BoardPrRest } from "#src/lib/open-prs-rest.js";
+import { DEFAULT_POLL_INTERVAL_MS } from "#src/lib/daemon.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 /**
  * W1-T265's board delta EXISTS and was being defeated by a constructor's lifetime.

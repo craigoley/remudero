@@ -7,13 +7,13 @@ import {
   stalledRunReason,
   type OpenPrView,
   type WorkflowRunObservation,
-} from "../src/lib/sweep.js";
+} from "#src/lib/sweep.js";
 import {
   CONCLUDED_RUN_JOBS_CACHE_MAX_ENTRIES,
   WORKFLOW_RUN_HYDRATION_CAP,
   fetchWorkflowRunObservations,
   hydrateWorkflowRuns,
-} from "../src/lib/open-prs-rest.js";
+} from "#src/lib/open-prs-rest.js";
 
 /**
  * W1-T2340 — the `followUpFiled` shard for W1-T2327's falsified criterion 1. Corrected

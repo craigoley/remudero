@@ -5,7 +5,7 @@ import {
   RISK_OVERRIDE_REASON_CLASSES,
   RISK_OVERRIDE_RECORDED_STEP,
   riskOverrideFromLedger,
-} from "../src/lib/ledger.js";
+} from "#src/lib/ledger.js";
 
 // ── W1-T2244 — THE READER'S REFUSAL ARMS, IN THEIR OWN FILE ─────────────────────────────────
 //
