@@ -594,7 +594,7 @@ export function judgedTestShellOut(
   args: string[],
   opts: { cwd: string; env?: NodeJS.ProcessEnv },
 ): CiParityLeafResult {
-  const judged = prepareJudgedTestRun(args, opts.cwd, label);
+  const judged = prepareJudgedTestRun(args, opts.cwd, "node --test");
   try {
     const r = shellOut(spawn, label, process.execPath, judged.args, { ...opts, env: { ...opts.env, ...judged.env } });
     if (!r.ok) return r;

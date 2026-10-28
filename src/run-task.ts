@@ -10759,7 +10759,7 @@ function* fixCensusSnapshotSteps(
     const reach = "test/the-affected-suite-reach-ratchet.test.ts";
     // W1-T8379: judged — an exit 0 passes only when the suite reached its own summary (scripts/pure-test-pool.mjs).
     const judged = prepareJudgedTestRun(["--test", "--test-reporter=tap", "--import", "tsx", "--import",
-      "./test/setup/tmp-hygiene.ts", reach], scriptsRoot, `census suite ${reach}`);
+      "./test/setup/tmp-hygiene.ts", reach], scriptsRoot, "reach-ratchet census suite");
     try {
       const result = yield* step(() => run(process.execPath, judged.args,
         { cwd: scriptsRoot, env: { ...env, ...judged.env }, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
