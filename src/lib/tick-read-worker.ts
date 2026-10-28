@@ -312,6 +312,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   const { owner, repo, config, ledgerPath, checkoutRoot } = options;
   const log = io.log ?? (() => {});
   const pacer = io.pacer ?? createGhCallPacer();
+  const nextDistanceProbe = createDistanceProbeSequence();
   const snapshotCache = createBoardSnapshotCache(config.root, owner, repo, { log });
   const fileOptions = { log, ...(io.changedFilesFetch ? { fetch: io.changedFilesFetch } : {}) };
   const files = createChangedFilesCache(config.root, owner, repo, fileOptions);
@@ -438,7 +439,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     }) : [];
     const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, openPrViews);
     const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
-    const behindMainByPr = await buildBehindMainByPrAsync(owner, repo, openPrViews, fetchAsync, undefined, baseChangedFilesByPr);
+    const behindMainByPr = await buildBehindMainByPrAsync(owner, repo, openPrViews, fetchAsync, nextDistanceProbe(), baseChangedFilesByPr);
     const mergedFixPrNumbers = [...new Set(DEFAULT_FIX_CLASSES.map((entry) => entry.fixPrNumber))]
       .filter((number) => github.prByRef(number)?.state === "MERGED");
     const rawByNumber = new Map(openPrRows?.map((pr) => [pr.number, pr]));
@@ -546,6 +547,13 @@ export function buildStaleGateWorkflowsByPr(
 export const DISTANCE_REFRESH_PROBE_LIMIT = 3;
 
 export const DISTANCE_REFRESH_ROTATION_MS = 5 * 60_000;
+
+/** Advance once per producer pass so wall-clock cadence cannot repeatedly select the same slice.
+ * Each scheduler starts with the oldest eligible heads and keeps its own bounded rotation. */
+export function createDistanceProbeSequence(): () => number {
+  let window = 0;
+  return () => window++ * DISTANCE_REFRESH_ROTATION_MS;
+}
 
 /** W1-T3277 — choose a small, fair rotating slice of PRs for direct graph comparison. A draft or
  * conflicted PR cannot reach `update-branch`, so probing it would spend GitHub capacity without

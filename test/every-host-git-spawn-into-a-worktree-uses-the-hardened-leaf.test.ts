@@ -112,9 +112,10 @@ const RAW_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: stri
  */
 export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; reason: string }>> = {
   "src/cli/commands/daemon.ts": {
-    count: 3,
+    count: 5,
     reason:
-      "CHECKOUT (W1-T6135): daemonCommand's 3 sites moved with it, still classed in RUN_TASK_WIDENED_SITES in " +
+      "CHECKOUT (W1-T10897): daemonCommand's 3 sites and the 2 run-branch readers moved from run-task.ts; " +
+      "the readers list the target managed checkout, still classed in RUN_TASK_WIDENED_SITES in " +
       "test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts",
   },
   "src/lib/benchmark-aa-readiness.ts": { count: 1, reason: "CHECKOUT: deriveRuntimePins reads the harness checkout it runs from (-C cwd)" },
@@ -256,7 +257,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
     reason: "CHECKOUT (W1-T6135): refreshManagedCheckout moved unchanged from run-task.ts; its git helper reads the managed repoDir, still classed in RUN_TASK_WIDENED_SITES in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts",
   },
   "src/run-task.ts": {
-    count: 65,
+    count: 63,
     reason:
       "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
       "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",

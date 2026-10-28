@@ -177,6 +177,10 @@ jobs:
             writeFileSync("coverage/coverage-nightly-summary.json", JSON.stringify(summary, null, 2) + "\n");
             console.log(JSON.stringify(summary));
           '
+          # W1-T5892: who measured this lcov, on which head and runtime, and every shard's suite exit,
+          # so a narrowed ci.yml pull request may pin it as its absolute floor.
+          node scripts/coverage-floor.mjs provenance --producer coverage-nightly --lcov coverage-nightly-artifact/lcov.info \
+            --shards-dir coverage-shards --out coverage-nightly-artifact/provenance.json
       - name: Bind code-health evidence to the original coverage measurement
         run: |
           node scripts/code-health-provenance.mjs \
@@ -190,6 +194,7 @@ jobs:
           path: |
             coverage-nightly-artifact/lcov.info
             coverage-nightly-artifact/coverage-nightly-summary.json
+            coverage-nightly-artifact/provenance.json
           retention-days: 14
           if-no-files-found: error
       # W1-T6107: the test impact map ci.yml's coverage shards hand their shadow selector, built from the

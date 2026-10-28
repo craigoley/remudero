@@ -1,0 +1,29 @@
+- id: W1-T10936
+  title: Have the CI-friction gardener place remedy proof in an existing suite that already imports the remedy owner
+  repo: remudero
+  depends_on:
+    - W1-T10798
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/ci-friction-remedy.ts
+    - test/the-ci-friction-ladder-drafts-remedies-not-docs.test.ts
+  acceptance:
+    - claim: The CI-friction remedy drafter names an existing owner-importing suite as the place for remedy proof instead of a new per-hash ci-friction-remedy test file.
+      proof: "grep: remedyProofSuite( in src/lib/ci-friction-remedy.ts"
+    - claim: A regression test shows the drafted remedy proof reuses an existing suite that imports the owner and adds no new suite importing a hub.
+      proof: "unit test: CI friction remedy proof reuses an existing owner-importing suite"
+  origin: followup:DAEMON-1793155571742:2026-10-28T03:55:39.415Z:1
+  rationale: >-
+    From the 2026-10-28 follow-up on https://github.com/craigoley/remudero/pull/15022, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: have the ci-friction gardener put the remedy proof in a suite that
+    already imports the remedy's owner, instead of a new
+    `test/ci/gates/ci-friction-remedy-<hash>.test.ts` — every new suite importing a hub like
+    census-precheck trips the reach ratchet. — from W1-T10798 (run DAEMON-1793155571742,
+    https://github.com/craigoley/remudero/pull/15022)

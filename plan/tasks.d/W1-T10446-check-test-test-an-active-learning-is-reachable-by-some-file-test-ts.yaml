@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.58
+  # refusal-amendment (W1-T10446, run W1-T10446-1793201218439, 2026-10-28T17:21:44.056Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The reported failure requires changing the proof reader or original census test; `src/lib/learnings.ts` does not control either surface.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

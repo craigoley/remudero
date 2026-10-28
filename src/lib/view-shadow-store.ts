@@ -4,6 +4,21 @@ import { openShadowCounterDb, type ReadModelDb } from "./read-model-db.js";
 
 export type ShadowClassification = "legacy_horizon" | "timing" | "dedupe" | "real";
 
+/** The completed producer owns routing bindings; counters use only their scoped logical identities. */
+export interface ShadowPopulation {
+  policy: string;
+  generation: string;
+  snapshotKey: string;
+  scope: { instance: string; repository: string };
+  pages: Array<{ key: string; logicalKey: string; incarnation: string; section: string; index: number }>;
+}
+
+export interface ShadowPopulationEvidence {
+  generation: string;
+  scope: ShadowPopulation["scope"];
+  pages: Array<{ logicalKey: string; incarnation: string; samples: number; sinceMs: number | null; lastSampleMs: number | null }>;
+}
+
 export interface ViewShadowState {
   /** Qualified states coexist with the untouched, older per-view counters in the same native store. */
   view?: string;
@@ -20,6 +35,8 @@ export interface ViewShadowState {
   lastRealMs: number | null;
   /** The keys sampled since the streak began; absent in a state persisted before it was counted. */
   streakKeys?: string[];
+  /** Current membership only. Retired population records remain in their own qualification namespace. */
+  population?: ShadowPopulationEvidence;
   /** Samples not compared because a side said it was not ready, and the latest one's reason. */
   skipped?: number;
   lastSkippedMs?: number;
@@ -28,11 +45,11 @@ export interface ViewShadowState {
   summary?: { sinceMs: number; samples: number; skipped: number; diffs: Record<ShadowClassification, number> };
 }
 
-export interface ShadowKeyChange { reset: boolean; add?: string }
+export interface ShadowKeyChange { reset: boolean; add?: string; replace?: readonly string[] }
 export const shadowCounterPath = (legacyPath: string): string => `${legacyPath}.sqlite`;
 
 /** Confirmed absence alone permits legacy migration; corrupt, unreadable and foreign stores throw. */
-export function readShadowCounters(path: string, includeKeys: boolean): { states: Record<string, ViewShadowState>; keyCounts: Map<string, number> } | undefined {
+export function readShadowCounters(path: string, includeKeys: boolean, activeQualifications?: Readonly<Record<string, string>>): { states: Record<string, ViewShadowState>; keyCounts: Map<string, number> } | undefined {
   const target = shadowCounterPath(path);
   try { statSync(target); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
@@ -42,8 +59,17 @@ export function readShadowCounters(path: string, includeKeys: boolean): { states
     if (db.meta("shadow_migrated") !== "1") throw new Error("shadow counter migration is not committed");
     const states = Object.fromEntries(db.prepare("SELECT view, state FROM shadow_counter").all()
       .map(row => [String(row.view), JSON.parse(String(row.state)) as ViewShadowState]));
-    const keyCounts = new Map(db.prepare("SELECT view, count(*) AS n FROM shadow_key GROUP BY view").all().map(row => [String(row.view), Number(row.n)]));
+    const active = activeQualifications === undefined ? undefined : Object.entries(states).filter(([key, state]) => {
+      const generation = activeQualifications[state.view ?? key];
+      return generation === undefined || state.qualificationGeneration === generation;
+    }).map(([key]) => key);
+    const keyCounts = active === undefined
+      ? new Map(db.prepare("SELECT view, count(*) AS n FROM shadow_key GROUP BY view").all().map(row => [String(row.view), Number(row.n)]))
+      : new Map(active.map(view => [view, Number(db.prepare("SELECT count(*) AS n FROM shadow_key WHERE view = ?").get(view)?.n ?? 0)]));
     if (includeKeys) for (const [view, state] of Object.entries(states)) {
+      const current = activeQualifications?.[state.view ?? view];
+      // Archived membership stays in SQL. A current qualified comparator never needs to hydrate it.
+      if (current !== undefined && state.qualificationGeneration !== current) continue;
       if (state.streakKeys !== undefined) state.streakKeys = db.prepare("SELECT key FROM shadow_key WHERE view = ? ORDER BY ordinal").all(view).map(row => String(row.key));
     }
     return { states, keyCounts };
@@ -74,9 +100,9 @@ export function saveShadowCounter(path: string, legacy: Record<string, ViewShado
       db.prepare("INSERT INTO meta(k,v) VALUES('shadow_migrated','1')").run();
     }
     writeCounter(db, view, state);
-    if (change === undefined || change.reset || state.streakKeys === undefined) {
+    if (change === undefined || change.reset || change.replace !== undefined || state.streakKeys === undefined) {
       db.prepare("DELETE FROM shadow_key WHERE view = ?").run(view);
-      for (const key of change === undefined ? state.streakKeys ?? [] : change.add === undefined ? [] : [change.add]) addKey(db, view, key);
+      for (const key of change?.replace ?? (change === undefined ? state.streakKeys ?? [] : change.add === undefined ? [] : [change.add])) addKey(db, view, key);
     } else if (change.add !== undefined) addKey(db, view, change.add);
     db.exec("COMMIT");
   } catch (error) {

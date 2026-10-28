@@ -42,7 +42,7 @@ function fakeGit(over: Partial<Record<"fetch" | "merge-tree" | "ls-tree" | "batc
     if (args[0] === "cat-file" && args[1] === "-e") return { status: missing ? 1 : 0, stdout: "" };
     if (args[0] === "fetch") return over.fetch ?? { status: 0, stdout: "" };
     if (args[0] === "merge-tree") return over["merge-tree"] ?? { status: 0, stdout: `${TREE}\n` };
-    if (args[0] === "ls-tree") return over["ls-tree"] ?? { status: 0, stdout: "plan/tasks.d/W1-T1.yaml\n" };
+    if (args[0] === "ls-tree") return over["ls-tree"] ?? { status: 0, stdout: `100644 blob ${"1".repeat(40)}\tplan/tasks.d/W1-T1.yaml\n` };
     return over.batch ?? { status: 0, stdout: "" };
   };
 }
@@ -163,24 +163,22 @@ function corruptLooseObject(repo: GitRepo, oid: string): void {
 
 test("W1-T9670: a real cat-file failure surfaces gits stderr in the unreadable reading", async (t) => {
   const { repo, main, head } = planFixture(t);
-  // After merge-tree and ls-tree have read it, the merged plan/tasks.d tree is corrupted under the batch.
+  // After ls-tree has listed it, the first blob the batch asks for (the monolith, by id) is corrupted under the batch.
   const real = planSafetyGitAsync(repo.dir);
   const corruptingBeforeBatch: PlanSafetyGit = (args, stdin) => {
-    if (args[0] === "cat-file" && args[1] === "--batch") {
-      const tree = String(stdin).split(":")[0];
-      corruptLooseObject(repo, repo.git("rev-parse", `${tree}:plan/tasks.d`));
-    }
+    if (args[0] === "cat-file" && args[1] === "--batch") corruptLooseObject(repo, String(stdin).split("\n")[0]!);
     return real(args, stdin);
   };
   const reading = await runStepsAsync(readPlanMergeSafetySteps(TARGET, restFor(main, head), corruptingBeforeBatch));
   const tree = unreadable(reading);
-  assert.match(tree.error, /^git cat-file --batch exited 128, git failed: .*fatal: loose object [0-9a-f]{40} .* is corrupt/s);
-  assert.match(String(tree.gitStderr), /fatal: loose object [0-9a-f]{40} .* is corrupt/);
+  // asked by id, git reports a corrupt blob as `<id> missing` and exits 0; its stderr still says why.
+  assert.match(tree.error, /^the batch read was unusable: .*\([0-9a-f]{40} missing\): .*unable to unpack [0-9a-f]{40} header/s);
+  assert.match(String(tree.gitStderr), /unable to unpack [0-9a-f]{40} header/);
   assert.equal(mergedTreeGitStderr(reading), tree.gitStderr);
 
-  // The sync runner says the same: the corrupted tree now fails ls-tree, in git's own words.
+  // The sync runner says the same: the corrupted blob still fails the batch, in git's own words.
   const again = unreadable(runStepsSync(readPlanMergeSafetySteps(TARGET, restFor(main, head), planSafetyGitSync(repo.dir))));
-  assert.match(again.error, /^git ls-tree exited 128, git failed: .*is corrupt/s);
+  assert.match(again.error, /^the batch read was unusable: .*unable to unpack [0-9a-f]{40} header/s);
   const direct = planSafetyGitSync(repo.dir)(["cat-file", "-p", "0".repeat(40)]) as PlanSafetyGitResult;
   assert.equal(direct.status, 128);
   assert.equal(direct.signal, null);

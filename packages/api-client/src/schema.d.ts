@@ -637,7 +637,33 @@ export interface components {
       taskId: string;
       pullRequest: number;
     };
-    /** At most 65536 raw bytes. Import an approved brief, adopt its existing repository, verify a merged reviewed plan, or request one guarded build. Client evidence and verification fields are rejected. */
+    /** A saved product by identity and revision only. A pull request, brief text or budget is never accepted. */
+    ProductCasePropose: {
+      requestId: ProductRequestId;
+      productId: ProductId;
+      expectedRevision: number;
+      expectedObjectiveRevision: number;
+    };
+    /** The durable plan-operation observation. pending, proposed, refused, unknown, changed-brief and stale-target stay distinct; a pending or proposed operation is never an approved or merged plan. */
+    ProductPlanOperation: {
+      operationId: string;
+      state: "pending" | "proposed" | "refused" | "unknown" | "changed-brief" | "stale-target";
+      mode: "create" | "clarify";
+      planEvidenceId: string;
+      repository: {
+        id: number;
+        owner: string;
+        name: string;
+      };
+      targetHead: string;
+      revision: number;
+      objectiveRevision: number;
+      briefDigest: string;
+      requestedAt: string;
+      /** The correlated plan pull request */
+      proposal?: string;
+    };
+    /** At most 65536 raw bytes. Import an approved brief, adopt its existing repository, verify a merged reviewed plan, propose one native plan for the saved brief, or request one guarded build. Client evidence and verification fields are rejected. */
     ProductCaseCommand: ({
       version: "product-case-v1";
       action: "import";
@@ -654,6 +680,10 @@ export interface components {
       version: "product-case-v1";
       action: "build";
       command: ProductBuildCommand;
+    }) | ({
+      version: "product-case-v1";
+      action: "propose";
+      command: ProductCasePropose;
     });
     ProductCaseResponse: {
       version: "product-case-v1";
@@ -692,10 +722,11 @@ export interface components {
         })[];
       };
       build?: ProductBuildReceipt;
+      planOperation?: ProductPlanOperation;
     };
     ProductCaseError: {
       version: "product-case-v1";
-      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "fleet_halted" | "kick_failed" | "creation_denied";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "concurrency_exceeded" | "fleet_halted" | "kick_failed" | "creation_denied" | "envelope_missing" | "handoff_unavailable";
     };
     /** At most 4096 raw request bytes. Names one task the target repository's own plan filed for the product's approved plan evidence. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
     ProductBuildCommand: {
@@ -735,7 +766,7 @@ export interface components {
     };
     ProductBuildError: {
       version: "product-build-v1";
-      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "fleet_halted" | "kick_failed";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "concurrency_exceeded" | "fleet_halted" | "kick_failed";
     };
     /** The service's scope, tier or confirmation gate refused access before the build handler. */
     ProductBuildAccessError: {
