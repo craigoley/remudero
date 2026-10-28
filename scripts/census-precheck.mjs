@@ -1464,7 +1464,7 @@ export function censusParityViolations({ changed, readHead, population }) {
     return [];
   }
   if (!Array.isArray(baseline)) return [];
-  const verdict = precheckParityVerdict({ population, baseline });
+  const verdict = precheckParityVerdict({ population: typeof population === "function" ? population() : population, baseline });
   return [
     ...verdict.unasked.map((p) => `census-parity: ${p} is a CI census nothing asks before the push — model it in PRECHECK_PARITY (scripts/census-precheck.mjs); ${PRECHECK_PARITY_BASELINE} may only shrink`),
     ...verdict.stale.map((p) => `census-parity: ${p} is baselined but precheck now asks it or CI no longer runs it — delete the row from ${PRECHECK_PARITY_BASELINE}`),
@@ -1726,7 +1726,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       srcFiles: listHouseLayoutSrcFiles(root),
     });
     if (!snapshot) {
-      violations = [...violations, ...censusParityViolations({ changed, readHead: readers.readHead, population: ciCensusPopulation(listRuleSuites(root)) })];
+      violations = [...violations, ...censusParityViolations({ changed, readHead: readers.readHead, population: () => ciCensusPopulation(listRuleSuites(root)) })];
     }
     const instrument = evaluateInstrumentSurface({
       changed,
