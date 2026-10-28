@@ -18,18 +18,18 @@ type FieldName = typeof FIELD_NAMES[number];
 type Answer = { number: number; newestMs?: number; fields: Partial<Record<FieldName, Field>>; error?: string };
 const USAGE = "usage: rmd pr-state <n...> [--max-age <dur>] (dur: <n>s|m|h|d)";
 
-export interface PrStateDeps {
-  stateDir?: () => string;
-  repository?: () => { owner: string; repo: string };
-  readLedger?: (dir: string, options: OpenLedgerUnionOptions) => AsyncIterable<Row>;
-  readBroker?: (args: string[]) => Promise<unknown>;
-  policyPollIntervalMs?: () => number;
-  policyPath?: string;
-  now?: () => number;
-  write?: (text: string) => void;
-  error?: (text: string) => void;
-  env?: NodeJS.ProcessEnv;
-}
+const PR_STATE_RUNTIME = {
+  stateDir: () => dirname(ledgerPathFor(loadConfig())),
+  repository: () => resolveOwnerRepoAt(process.cwd()),
+  readLedger: (dir: string, options: OpenLedgerUnionOptions): AsyncIterable<Row> => openLedgerUnion(dir, options),
+  readBroker: brokerRead,
+  policyPollIntervalMs: (path: string) => loadPolicy(path).values.pollIntervalMs,
+  policyPath: installPolicyPath,
+  clock: systemClock,
+  write: (text: string) => console.log(text),
+  error: (text: string) => console.error(text),
+  env: process.env,
+};
 
 function parseArgs(args: string[]): { numbers: number[]; maxAge?: number } | undefined {
   const numbers = new Set<number>();
@@ -194,24 +194,24 @@ function render(answer: Answer): string {
 }
 
 /** One ledger-union pass and, only for stale or incomplete PRs, one broker read. W1-T10370. */
-export async function prStateCommand(rest: string[], deps: PrStateDeps = {}): Promise<number> {
+export async function prStateCommand(rest: string[], deps: Partial<typeof PR_STATE_RUNTIME> = {}): Promise<number> {
   const parsed = parseArgs(rest);
-  if (!parsed) { (deps.error ?? console.error)(USAGE); return 2; }
+  if (!parsed) { (deps.error ?? PR_STATE_RUNTIME.error)(USAGE); return 2; }
   const answers = new Map(parsed.numbers.map(number => [number, { number, fields: {} } as Answer]));
   const ledgerErrors = new Set<string>();
   const passes: number[] = [];
-  const now = deps.now ?? (() => systemClock.now());
+  const clock = deps.clock ?? PR_STATE_RUNTIME.clock;
   try {
-    const dir = (deps.stateDir ?? (() => dirname(ledgerPathFor(loadConfig()))))();
+    const dir = (deps.stateDir ?? PR_STATE_RUNTIME.stateDir)();
     const unread = (path: string) => { ledgerErrors.add(`ledger unread: ${path}`); };
-    for await (const row of (deps.readLedger ?? openLedgerUnion)(dir, {
+    for await (const row of (deps.readLedger ?? PR_STATE_RUNTIME.readLedger)(dir, {
       onUnreadArchive: unread, onUnreadLive: unread, onUnreadDirectory: unread,
       onMalformedRow: finding => { ledgerErrors.add(`ledger malformed: ${finding.path}`); },
     })) {
       const ms = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
       const n = rowNumber(row);
       const answer = n === undefined ? undefined : answers.get(n);
-      if (!Number.isFinite(ms) || ms > now()) {
+      if (!Number.isFinite(ms) || ms > clock.now()) {
         if (answer) ledgerErrors.add(`ledger invalid timestamp for PR #${answer.number}`);
         continue;
       }
@@ -220,37 +220,40 @@ export async function prStateCommand(rest: string[], deps: PrStateDeps = {}): Pr
       }
       if (answer && typeof row.step === "string" && row.dry_run !== true) fold(answer, row, ms);
     }
-  } catch (error) { ledgerErrors.add(`ledger read failed: ${String(error)}`); }
+  } catch (error) {
+    const reason = `ledger read failed: ${String(error)}`;
+    ledgerErrors.add(reason);
+  }
   let maxAge = parsed.maxAge;
   if (maxAge === undefined) {
     try {
-      const policyPath = deps.policyPath ?? installPolicyPath();
       maxAge = 2 * (passes.length === 2 ? passes[0] - passes[1] :
-        deps.policyPollIntervalMs?.() ?? loadPolicy(policyPath).values.pollIntervalMs);
+        (deps.policyPollIntervalMs ?? PR_STATE_RUNTIME.policyPollIntervalMs)((deps.policyPath ?? PR_STATE_RUNTIME.policyPath)()));
       if (!Number.isFinite(maxAge) || maxAge <= 0) throw new Error("no positive sweep cadence");
     } catch (error) {
-      ledgerErrors.add(`ledger freshness unavailable: ${String(error)}`);
+      const reason = `ledger freshness unavailable: ${String(error)}`;
+      ledgerErrors.add(reason);
       maxAge = 0;
     }
   }
   const stale = [...answers.values()].filter(answer => ledgerErrors.size > 0 || answer.newestMs === undefined ||
-    now() - answer.newestMs > maxAge || FIELD_NAMES.some(key => answer.fields[key] === undefined));
+    clock.now() - answer.newestMs > maxAge || FIELD_NAMES.some(key => answer.fields[key] === undefined));
   if (stale.length > 0) {
     try {
-      const args = queryArgs(stale.map(answer => answer.number), (deps.repository ?? (() => resolveOwnerRepoAt(process.cwd())))());
-      const response = object(await (deps.readBroker ?? (args => brokerRead(args, deps.env ?? process.env)))(args));
+      const args = queryArgs(stale.map(answer => answer.number), (deps.repository ?? PR_STATE_RUNTIME.repository)());
+      const response = object(await (deps.readBroker ?? PR_STATE_RUNTIME.readBroker)(args, deps.env ?? PR_STATE_RUNTIME.env));
       if (Array.isArray(response.errors) && response.errors.length > 0) throw new Error(JSON.stringify(response.errors));
       const repository = object(object(response.data).repository);
-      const asOf = new Date(now()).toISOString();
+      const asOf = clock.iso();
       for (const answer of stale) {
         try { answer.fields = githubFields(repository[`pr${answer.number}`], asOf); }
-        catch (error) { answer.error = String(error); }
+        catch (error) { Object.assign(answer, { error: String(error) }); }
       }
-    } catch (error) { for (const answer of stale) answer.error = String(error); }
+    } catch (error) { for (const answer of stale) Object.assign(answer, { error: String(error) }); }
     for (const answer of stale) {
       if (answer.error && ledgerErrors.size > 0) answer.error = `${[...ledgerErrors].join("; ")}; ${answer.error}`;
     }
   }
-  for (const answer of answers.values()) (deps.write ?? console.log)(render(answer));
+  for (const answer of answers.values()) (deps.write ?? PR_STATE_RUNTIME.write)(render(answer));
   return [...answers.values()].some(answer => answer.error !== undefined) ? 1 : 0;
 }

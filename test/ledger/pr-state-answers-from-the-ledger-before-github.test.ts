@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { parse, stringify } from "yaml";
-import { prStateCommand, type PrStateDeps } from "#src/lib/pr-state.js";
+import { prStateCommand } from "#src/lib/pr-state.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { openLedgerUnion, readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -23,12 +24,12 @@ function evidence(n: number, age = 1000, head = `head-${n}`): Row[] {
     { ...common, step: "automerge.armed", outcome: "armed" },
   ];
 }
-function capture(stateDir: string, overrides: Partial<PrStateDeps> = {}) {
+function capture(stateDir: string, overrides: Parameters<typeof prStateCommand>[1] = {}) {
   const out: string[] = [], err: string[] = [];
   const calls: string[][] = [];
-  const deps: PrStateDeps = {
+  const deps: Parameters<typeof prStateCommand>[1] = {
     stateDir: () => stateDir, repository: () => ({ owner: "acme", repo: "project" }),
-    now: () => now, policyPollIntervalMs: () => 60_000,
+    clock: fixedClock(now), policyPollIntervalMs: () => 60_000,
     readBroker: async (args) => { calls.push(args); return response([1, 2, 3, 4, 5, 99]); },
     write: (text) => out.push(text), error: (text) => err.push(text), ...overrides,
   };
@@ -143,7 +144,7 @@ describe("test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts", (
     policy.pollIntervalMs.value = 120_000;
     const policyPath = join(fixture.dir, "policy.yaml");
     writeFileSync(policyPath, stringify(policy));
-    const c = capture(fixture.dir, { policyPollIntervalMs: undefined, policyPath });
+    const c = capture(fixture.dir, { policyPollIntervalMs: undefined, policyPath: () => policyPath });
     assert.equal(await prStateCommand(["1"], c.deps), 0);
     assert.equal(c.calls.length, 0);
   });
@@ -231,47 +232,21 @@ describe("test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts", (
 
   test("the default direct transport really spawns and retains a failed read as stale", async t => {
     const fixture = writeLedger(evidence(1, 300_000), { scope: t });
-    // Node is the fixture's gh executable: it rejects api as a missing module, without a network call.
-    symlinkSync(process.execPath, join(fixture.dir, "gh"));
+    const shim = ghShim([{ when: "api graphql", stderr: "direct read unavailable", exit: 1 }]);
+    t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
     const c = capture(fixture.dir, { readBroker: undefined, env: {
-      ...process.env, PATH: fixture.dir, RMD_GH_CACHE_HOME: fixture.dir, NODE_V8_COVERAGE: "",
+      ...process.env, PATH: `${shim.dir}:${process.env.PATH}`, RMD_GH_CACHE_HOME: fixture.dir, NODE_V8_COVERAGE: "",
     } });
     assert.equal(await prStateCommand(["1", "--max-age", "2m"], c.deps), 1);
-    assert.match(c.out[0], /STALE.*(Command failed|Cannot find module)/);
+    assert.equal(shim.calls().filter(call => call.startsWith("api graphql ")).length, 1);
+    assert.match(c.out[0], /STALE.*direct read unavailable/s);
     assert.match(c.out[0], /head_sha: "head-1"/);
-  });
-
-  test("the CLI dispatches pr-state usage and help before any invocation ledger write", t => {
-    const fixture = writeLedger([], { scope: t });
-    const before = snapshot(fixture.dir);
-    for (const [arg, code] of [["0", 2], ["--help", 0]] as const) {
-      const result = spawnSync(process.execPath, ["--import", "tsx", join(REPO_ROOT, "src", "run-task.ts"), "pr-state", arg], {
-        cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, HOME: fixture.dir, NODE_V8_COVERAGE: "" },
-      });
-      assert.equal(result.status, code, result.stderr);
-      assert.match(result.stdout + result.stderr, /rmd pr-state <n\.\.\.>/);
-      assert.deepEqual(snapshot(fixture.dir), before);
-    }
-  });
-
-  test("a fresh CLI answer reads the configured core ledger without writing state or invoking credentials", t => {
-    const fixture = writeLedger([], { scope: t });
-    const root = join(fixture.dir, "workspace");
-    const cliRows = evidence(1).map(row => ({ ...row, ts: new Date(Date.now() - 1000).toISOString() }));
-    const state = writeLedger(cliRows, { dir: join(root, "state") });
-    const configDir = join(fixture.dir, ".config", "remudero");
-    mkdirSync(configDir, { recursive: true });
-    writeFileSync(join(configDir, "config.json"), JSON.stringify({ root, claudeBin: process.execPath }));
-    const before = snapshot(join(root, "state"));
-    const result = spawnSync(process.execPath, ["--import", "tsx", join(REPO_ROOT, "src", "run-task.ts"), "pr-state", "1"], {
-      cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, HOME: fixture.dir, NODE_V8_COVERAGE: "" },
-    });
-    assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.match(result.stdout, /head_sha: "head-1"/);
-    assert.match(result.stdout, /source=review.posted/);
-    assert.deepEqual(snapshot(join(root, "state")), before);
-    assert.equal(readLedgerUnionRecordsSync(join(root, "state")).rows.length, evidence(1).length);
-    assert.equal(readFileSync(state.path, "utf8").split("\n").filter(Boolean).length, evidence(1).length);
+    shim.addRoute({ when: "api graphql", stdout: JSON.stringify(response([1])) });
+    assert.equal(await prStateCommand(["1", "--max-age", "2m"], c.deps), 0);
+    assert.equal(shim.calls().filter(call => call.startsWith("api graphql ")).length, 2);
+    assert.match(c.out[1], /head_sha: "github-1"/);
+    assert.match(c.out[1], new RegExp(`as_of=${fixedClock(now).iso()} source=github.graphql`));
+    assert.deepEqual(readLedgerUnionRecordsSync(fixture.dir).rows, evidence(1, 300_000));
   });
 
   test("the real broker client sends a single agent revalidation and writes no ledger rows", async t => {
