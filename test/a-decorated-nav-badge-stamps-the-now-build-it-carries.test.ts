@@ -5,14 +5,14 @@
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
-import { NAV_BADGE_VIEW_NAME } from "../src/lib/nav-badge-view.js";
-import { NEEDS_YOU_VIEW_NAME, withNeedsYouView } from "../src/lib/needs-you-view.js";
-import type { NowDecision } from "../src/lib/now-decisions.js";
-import type { ReadModelInstanceState, ReadModelWorkerHandle } from "../src/lib/read-model-worker.js";
-import { createService } from "../src/lib/service.js";
-import { createViewEvents, VIEW_EVENTS_PATH } from "../src/lib/view-events.js";
-import { viewEtag, type ViewBodyEntry, type ViewSource } from "../src/lib/views.js";
+import type { Clock } from "#src/lib/clock.js";
+import { NAV_BADGE_VIEW_NAME } from "#src/lib/nav-badge-view.js";
+import { NEEDS_YOU_VIEW_NAME, withNeedsYouView } from "#src/lib/needs-you-view.js";
+import type { NowDecision } from "#src/lib/now-decisions.js";
+import type { ReadModelInstanceState, ReadModelWorkerHandle } from "#src/lib/read-model-worker.js";
+import { createService } from "#src/lib/service.js";
+import { createViewEvents, VIEW_EVENTS_PATH } from "#src/lib/view-events.js";
+import { viewEtag, type ViewBodyEntry, type ViewSource } from "#src/lib/views.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 const T0 = Date.parse("2026-10-06T01:30:00.000Z");

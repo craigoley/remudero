@@ -24,15 +24,15 @@ import {
   type CiFrictionGardenAction,
   type CiFrictionGardenSources,
   type CiFrictionRound,
-} from "../src/lib/ci-friction-gardener.js";
-import type { CiFrictionRemedyTask, OwnerSearch } from "../src/lib/ci-friction-remedy.js";
-import { renderMachineShard } from "../src/lib/machine-filing.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import type { Escalation } from "../src/lib/escalate.js";
-import { runGarden, type GardenerDeps } from "../src/lib/gardener.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
-import { gardenReplayCommand } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/ci-friction-gardener.js";
+import type { CiFrictionRemedyTask, OwnerSearch } from "#src/lib/ci-friction-remedy.js";
+import { renderMachineShard } from "#src/lib/machine-filing.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { runGarden, type GardenerDeps } from "#src/lib/gardener.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
+import { gardenReplayCommand } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const NOW = Date.parse("2026-10-02T12:00:00.000Z");
 const HOUR = 3_600_000;

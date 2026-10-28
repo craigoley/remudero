@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { consoleUrl, notifyRecipient, type Config } from "../src/lib/config.js";
+import { consoleUrl, notifyRecipient, type Config } from "#src/lib/config.js";
 
 function config(over: Partial<Config> = {}): Config {
   return { claudeBin: "/usr/bin/claude", root: "/tmp/root", ...over };

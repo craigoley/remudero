@@ -16,10 +16,10 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { IDLE_REASON_ID_CAP, runnableCandidates, tallyDispatchFilters, type MergedSet } from "../src/lib/drain.js";
-import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
-import { DEFAULT_MAX_TASK_DISPATCHES, isDispatchBreakerTripped, type GitHub } from "../src/lib/status.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { IDLE_REASON_ID_CAP, runnableCandidates, tallyDispatchFilters, type MergedSet } from "#src/lib/drain.js";
+import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "#src/lib/status-board.js";
+import { DEFAULT_MAX_TASK_DISPATCHES, isDispatchBreakerTripped, type GitHub } from "#src/lib/status.js";
 
 // W1-T2415 — `deriveQueueHead` (status-board.ts) binds `isCircuitTripped` into
 // `runnableCandidates`'s options, so a tripped task is correctly REMOVED from `rows` — but it
@@ -144,7 +144,7 @@ test("buildStatusBoard: QUEUE HEAD — the circuit-broken refused row carries di
   // The SAME numbers BLOCKERS' own circuit_broken class renders for this task — one derivation,
   // read twice, never two independent computations that could disagree.
   const blockerRow = model.blockers.rows.find(
-    (r): r is import("../src/lib/status-board.js").CircuitBrokenBlocker => r.kind === "circuit_broken" && r.taskId === "W1-T920",
+    (r): r is import("#src/lib/status-board.js").CircuitBrokenBlocker => r.kind === "circuit_broken" && r.taskId === "W1-T920",
   );
   assert.ok(blockerRow, "BLOCKERS also names this task's breaker trip");
   assert.equal(row.dispatchCount, blockerRow!.dispatchCount);

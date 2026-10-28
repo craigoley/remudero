@@ -14,8 +14,8 @@ import {
   requireExplicitArmSeam,
   withdrawArmIfVerdictRefuses,
   type ArmDeps,
-} from "../src/run-task.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+} from "#src/run-task.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 
 // ── W1-T2346's census (test/operator-gated-default-reachability.test.ts) named the population:
 // `armAutoMerge`/`armAutoMergeDetailed`/`armAutoMergeAtOpen`/`disarmAutoMerge` each default a

@@ -6,18 +6,18 @@ import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { buildIncidentsRoute, incidentLifecycleStorePath, writeIncidentLifecycleStore, type IncidentLifecycleRecord } from "../src/lib/incident-lifecycle.js";
-import { createIncidentsView, INCIDENTS_VIEW_NAME, INCIDENTS_VIEW_VERSION, type IncidentsViewData } from "../src/lib/incidents-view.js";
-import { INSTANCE_LIVENESS_BOUND_MS } from "../src/lib/instances-view.js";
-import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "../src/lib/ledger.js";
-import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { buildOperatorAgentRoutes } from "../src/lib/operator-agent.js";
-import { createAgentFolds, type ReadModelDb } from "../src/lib/read-model-db.js";
-import { createReadModelTicker, ledgerSource, type ReadModelInstanceState } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { viewEtag, type ViewSource } from "../src/lib/views.js";
-import { get, listen } from "./helpers/operator-agent-corpus.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { buildIncidentsRoute, incidentLifecycleStorePath, writeIncidentLifecycleStore, type IncidentLifecycleRecord } from "#src/lib/incident-lifecycle.js";
+import { createIncidentsView, INCIDENTS_VIEW_NAME, INCIDENTS_VIEW_VERSION, type IncidentsViewData } from "#src/lib/incidents-view.js";
+import { INSTANCE_LIVENESS_BOUND_MS } from "#src/lib/instances-view.js";
+import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "#src/lib/ledger.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { buildOperatorAgentRoutes } from "#src/lib/operator-agent.js";
+import { createAgentFolds, type ReadModelDb } from "#src/lib/read-model-db.js";
+import { createReadModelTicker, ledgerSource, type ReadModelInstanceState } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { viewEtag, type ViewSource } from "#src/lib/views.js";
+import { get, listen } from "#test/helpers/operator-agent-corpus.js";
 
 type T = { after: (fn: () => void) => void };
 // The projector stamps rows on the real clock, so the fixture's times are real ones too.

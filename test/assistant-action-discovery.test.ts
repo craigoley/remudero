@@ -18,13 +18,13 @@ import {
   buildAssistantControlReceiptRoute,
   buildAssistantControlRoute,
   type AssistantControlOptions,
-} from "../src/lib/panel-actions.js";
-import { readAssistantActionDiscovery, type AssistantActionDiscovery } from "../src/lib/assistant-action-discovery.js";
-import { instanceRouteSet, mountUnderInstance } from "../src/lib/instance-gateway.js";
-import { createService, type Route, type Scope } from "../src/lib/service.js";
-import { isPaused, isStopped } from "../src/lib/fleet-control.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { clockFromMillisFn, systemClock } from "../src/lib/clock.js";
+} from "#src/lib/panel-actions.js";
+import { readAssistantActionDiscovery, type AssistantActionDiscovery } from "#src/lib/assistant-action-discovery.js";
+import { instanceRouteSet, mountUnderInstance } from "#src/lib/instance-gateway.js";
+import { createService, type Route, type Scope } from "#src/lib/service.js";
+import { isPaused, isStopped } from "#src/lib/fleet-control.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { clockFromMillisFn, systemClock } from "#src/lib/clock.js";
 
 const DISCOVERY = "/v1/control/assistant-action/discovery";
 const ACTION = "/v1/control/assistant-action";

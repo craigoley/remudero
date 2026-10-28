@@ -19,9 +19,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildPeekRoute } from "../src/lib/serve.js";
-import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
+import { createService } from "#src/lib/service.js";
+import { buildPeekRoute } from "#src/lib/serve.js";
+import { SELF_SYNC_GUARD_ENV } from "#src/lib/self-sync.js";
 import {
   capWorkerTailLines,
   isValidRunId,
@@ -32,7 +32,7 @@ import {
   WORKER_TAIL_MAX_BYTES,
   WORKER_TAIL_MAX_LINES,
   type PeekTailResult,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "rmd-peek-"));

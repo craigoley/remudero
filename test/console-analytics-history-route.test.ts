@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
+import { deriveAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 
 const NOW = "2026-09-20T12:00:00.000Z";
 

@@ -11,9 +11,9 @@ import {
   topLedgerWriters,
   type LedgerArchiveFsDeps,
   type LedgerLine,
-} from "../src/lib/ledger.js";
-import { rotationStampIso } from "../src/lib/ledger-union.js";
-import { buildDigest, renderDigest, summarize, summarizeLedgerWriters } from "../src/lib/digest.js";
+} from "#src/lib/ledger.js";
+import { rotationStampIso } from "#src/lib/ledger-union.js";
+import { buildDigest, renderDigest, summarize, summarizeLedgerWriters } from "#src/lib/digest.js";
 
 const ts0 = "2026-09-23T00:00:00.000Z";
 

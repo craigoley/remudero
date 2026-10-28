@@ -3,17 +3,17 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, 
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { computeBoardSnapshot, type BoardSnapshot } from "../src/lib/board.js";
+import { computeBoardSnapshot, type BoardSnapshot } from "#src/lib/board.js";
 import {
   OPEN_SNAPSHOT_RESAVE_MS,
   boardOpenSnapshotPath,
   createBoardSnapshotCache,
   readOpenBoardSnapshot,
   type BoardSnapshotIo,
-} from "../src/lib/board-snapshot-cache.js";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
-import { createLedgerProjector, isFactStep, LEDGER_PROJECTOR_SCHEMA_VERSION, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
-import { factColumns } from "../src/lib/read-model-consistency.js";
+} from "#src/lib/board-snapshot-cache.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import { createLedgerProjector, isFactStep, LEDGER_PROJECTOR_SCHEMA_VERSION, openProjectorReadModel, type LedgerProjector } from "#src/lib/ledger-projector.js";
+import { factColumns } from "#src/lib/read-model-consistency.js";
 import {
   NOW_GITHUB_STALE_MS,
   NOW_HOST_PROBE_MS,
@@ -34,16 +34,16 @@ import {
   type NowViewContext,
   type NowViewData,
   type NowViewOptions,
-} from "../src/lib/now-view.js";
-import type { BoardPrRest } from "../src/lib/open-prs-rest.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { acquireLease, openReadModel, type ReadModelDb } from "../src/lib/read-model-db.js";
-import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { HOST_PROBE_BUDGET_MS, PLAN_BUDGET_MS } from "../src/lib/view-freshness.js";
-import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, defaultCreditStorePath, readLedgerLines, saveCreditStore, type BatchedPr, type CreditStore, type GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP, createViewShadow, readShadowEvidence } from "../src/lib/view-shadow.js";
-import { viewEtag, type ViewSwitchMode } from "../src/lib/views.js";
+} from "#src/lib/now-view.js";
+import type { BoardPrRest } from "#src/lib/open-prs-rest.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { acquireLease, openReadModel, type ReadModelDb } from "#src/lib/read-model-db.js";
+import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { HOST_PROBE_BUDGET_MS, PLAN_BUDGET_MS } from "#src/lib/view-freshness.js";
+import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, defaultCreditStorePath, readLedgerLines, saveCreditStore, type BatchedPr, type CreditStore, type GitHub } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP, createViewShadow, readShadowEvidence } from "#src/lib/view-shadow.js";
+import { viewEtag, type ViewSwitchMode } from "#src/lib/views.js";
 import { changedFilesCachePath, createChangedFilesCache } from "#src/lib/changed-files-cache.js";
 import { isPlanOnlyChangeset } from "#src/lib/status.js";
 import { ghShim } from "#test/helpers/gh-shim.js";

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createConfirmNonceStore, CONFIRM_NONCE_TTL_MS, type ConfirmNonceAction } from "../src/lib/service.js";
+import { createConfirmNonceStore, CONFIRM_NONCE_TTL_MS, type ConfirmNonceAction } from "#src/lib/service.js";
 
 // ── W1-T451: `createConfirmNonceStore` never expired a nonce — an unspent one leaked forever
 // (unbounded `Map` growth) and a spent-but-never-consumed one stayed usable forever (standing

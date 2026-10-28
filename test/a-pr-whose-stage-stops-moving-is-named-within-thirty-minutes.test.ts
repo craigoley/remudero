@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readLedgerLines } from "../src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { buildSweepEffects } from "../src/run-task.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { buildSweepEffects } from "#src/run-task.js";
 
 const now = Date.UTC(2026, 9, 5, 12);
 const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();

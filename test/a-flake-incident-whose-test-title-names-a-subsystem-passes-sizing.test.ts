@@ -9,12 +9,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { runFlakeIncidentGardener } from "../src/lib/flake-incident-gardener.js";
-import { machineShardFilingRefusal } from "../src/lib/machine-filing.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml } from "../src/lib/plan.js";
-import { lintTask, sizingViolation } from "../src/lib/task-linter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { runFlakeIncidentGardener } from "#src/lib/flake-incident-gardener.js";
+import { machineShardFilingRefusal } from "#src/lib/machine-filing.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml } from "#src/lib/plan.js";
+import { lintTask, sizingViolation } from "#src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const TEST_FILE = "test/new-work-is-ordered-by-cost-of-delay.test.ts";
 const TITLE = "W1-T4064: the daemon reads filing dates from the plan path it was given";

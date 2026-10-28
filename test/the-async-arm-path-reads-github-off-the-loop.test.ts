@@ -4,9 +4,9 @@ import { test } from "node:test";
 import {
   attemptArm, attemptArmAsync, disarmAutoMerge, disarmAutoMergeAsync,
   realArmDeps, realArmDepsAsync, type ArmDeps,
-} from "../src/lib/arm-auto-merge.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+} from "#src/lib/arm-auto-merge.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 
 const url = "https://github.com/fixture/async-arm/pull/1";
 const row = { body: "Stacked on #2", state: "open", merged: false, head: { sha: "head" },

@@ -5,8 +5,8 @@
 import assert from "node:assert/strict";
 import { appendFileSync, rmSync } from "node:fs";
 import { test } from "node:test";
-import { openLedgerUnion, type LedgerMalformedRowFinding } from "../src/lib/ledger-union.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { openLedgerUnion, type LedgerMalformedRowFinding } from "#src/lib/ledger-union.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const WANTED = ["escalation_answer.ignored", "panel.question_answered"];
 

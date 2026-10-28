@@ -11,13 +11,13 @@ import {
   stillBlockedByPushedRunBranch,
   type OrphanRunBranchEvidence,
   type PushedRunRef,
-} from "../src/lib/drain.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import { orphanRunBranchEvidenceReader, writeAutomaticBranchReapState } from "../src/lib/branch-reaper.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { RunResult } from "../src/lib/run-result.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/drain.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { orphanRunBranchEvidenceReader, writeAutomaticBranchReapState } from "#src/lib/branch-reaper.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import type { RunResult } from "#src/lib/run-result.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // The live shape measured on 2026-09-30: twelve tasks each held by ONE run branch the reaper
 // proved has no PR, 1-2 commits ahead of main, refused 31 times apiece in 23 hours.

@@ -34,8 +34,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deriveStatus, type GitHub, type PrRef, type DeriveDeps } from "../src/lib/status.js";
-import type { Task } from "../src/lib/plan.js";
+import { deriveStatus, type GitHub, type PrRef, type DeriveDeps } from "#src/lib/status.js";
+import type { Task } from "#src/lib/plan.js";
 
 const TASK_ID = "W1-T377";
 /** PR #1386's real head ref, copied from the live API rather than typed from memory. */

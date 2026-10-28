@@ -10,10 +10,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Clock } from "../src/lib/clock.js";
-import type { Escalation } from "../src/lib/escalate.js";
-import { gardenPassDue, gardenStatePath, runGarden, type GardenAction, type GardenCheckout, type GardenSpec } from "../src/lib/gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { Clock } from "#src/lib/clock.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { gardenPassDue, gardenStatePath, runGarden, type GardenAction, type GardenCheckout, type GardenSpec } from "#src/lib/gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NAME = "refusal-probe";
 const NOTE = "notes/proposal.md";

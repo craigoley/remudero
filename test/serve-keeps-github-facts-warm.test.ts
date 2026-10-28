@@ -10,12 +10,12 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
 
-import { createGithubKeepWarm, readerActivity, refreshPace, type RefreshSpend, type WarmRefreshOutcome, type WarmRefreshTelemetry } from "../src/lib/github-refresh-pacer.js";
-import { DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS } from "../src/lib/github-transport.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { buildBatchedGithub, type GitHub } from "../src/lib/status.js";
-import type { Clock } from "../src/lib/clock.js";
+import { createGithubKeepWarm, readerActivity, refreshPace, type RefreshSpend, type WarmRefreshOutcome, type WarmRefreshTelemetry } from "#src/lib/github-refresh-pacer.js";
+import { DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS } from "#src/lib/github-transport.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { buildBatchedGithub, type GitHub } from "#src/lib/status.js";
+import type { Clock } from "#src/lib/clock.js";
 
 const HOUR_MS = 60 * 60 * 1000;
 

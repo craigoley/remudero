@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
-import { configPath, type Config } from "../src/lib/config.js";
-import { resolveLedgerUnion } from "../src/lib/ledger-grep.js";
-import { ledgerGrepCommand, stepFromRawLedgerLine } from "../src/run-task.js";
+import { configPath, type Config } from "#src/lib/config.js";
+import { resolveLedgerUnion } from "#src/lib/ledger-grep.js";
+import { ledgerGrepCommand, stepFromRawLedgerLine } from "#src/run-task.js";
 
 function tmpStateDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

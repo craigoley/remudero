@@ -24,13 +24,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { outputContractLines } from "../src/lib/compaction.js";
-import { parseSkillsUsed, type SkillsUsedResult } from "../src/lib/worker.js";
-import { logSkillsUsed } from "../src/run-task.js";
-import { loadProposalRegistry } from "../src/lib/inbox.js";
-import { GUARD_RETIREMENT_ZERO_STREAK } from "../src/lib/retro-closure.js";
-import { slugifyRuleId } from "../src/lib/doctrine-lifecycle.js";
-import { buildKnowledgeInventory, danglingWhyPointers } from "../src/lib/knowledge-inventory.js";
+import { outputContractLines } from "#src/lib/compaction.js";
+import { parseSkillsUsed, type SkillsUsedResult } from "#src/lib/worker.js";
+import { logSkillsUsed } from "#src/run-task.js";
+import { loadProposalRegistry } from "#src/lib/inbox.js";
+import { GUARD_RETIREMENT_ZERO_STREAK } from "#src/lib/retro-closure.js";
+import { slugifyRuleId } from "#src/lib/doctrine-lifecycle.js";
+import { buildKnowledgeInventory, danglingWhyPointers } from "#src/lib/knowledge-inventory.js";
 import {
   applyRepairReferenceActions,
   applyRuleMergeActions,
@@ -50,8 +50,8 @@ import {
   skillUsagePath,
   stageGuardRetirementProposal,
   stageSkillLifecycleForAction,
-} from "../src/lib/knowledge-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/knowledge-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function tmpRoot(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));

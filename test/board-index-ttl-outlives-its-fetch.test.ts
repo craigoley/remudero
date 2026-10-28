@@ -22,7 +22,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { buildBatchedGithub } from "../src/lib/status.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
 
 /** A gateway on a deterministic clock whose fetch ADVANCES that clock, exactly as a synchronous
  *  execFileSync walk advances wall time on the real event loop. */

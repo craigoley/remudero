@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test, type TestContext } from "node:test";
 
-import * as gardener from "../src/lib/selector-shadow-gardener.js";
-import { shadowRecord } from "../src/lib/affected-suites.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as gardener from "#src/lib/selector-shadow-gardener.js";
+import { shadowRecord } from "#src/lib/affected-suites.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const line = (record: unknown) => `AFFECTED-SUITES-SHADOW: ${JSON.stringify(record)}`;
 const hit = (file = "test/hit.test.ts") => ({ file, floor: "selected", narrow: "selected", impact: "selected" });

@@ -9,15 +9,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 // A namespace import, not named ones: at the merge base the new exports are absent, and a named
 // import would fail the whole file at link time instead of failing each test on its own.
-import * as prOpen from "../src/lib/pr-open.js";
-import { defaultProofRunner, openPullRequestChecked, PrOpenRefusedError } from "../src/lib/pr-open.js";
-import type { AsyncOpenPullRequestProofRunner } from "../src/lib/pr-open.js";
+import * as prOpen from "#src/lib/pr-open.js";
+import { defaultProofRunner, openPullRequestChecked, PrOpenRefusedError } from "#src/lib/pr-open.js";
+import type { AsyncOpenPullRequestProofRunner } from "#src/lib/pr-open.js";
 
 const defaultProofRunnerAsync: typeof prOpen.defaultProofRunnerAsync = (...args) => prOpen.defaultProofRunnerAsync(...args);
 const prerunPullRequestProofs: typeof prOpen.prerunPullRequestProofs = (...args) => prOpen.prerunPullRequestProofs(...args);
-import { gitRepo } from "./helpers/git-repo.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
-import { parseAcceptanceBlock } from "../src/lib/review.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
+import { parseAcceptanceBlock } from "#src/lib/review.js";
 
 /** A fake `rmd`: echoes its argv, writes to stderr, sleeps `RMD_FAKE_SLEEP_MS`, and exits 3 when
  *  the proof names FAIL. With RMD_FAKE_IGNORE_TERM it survives SIGTERM, so only SIGKILL ends it. */

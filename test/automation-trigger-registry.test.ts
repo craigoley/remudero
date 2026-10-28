@@ -8,9 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
-import type { Clock } from "../src/lib/clock.js";
+import { createService } from "#src/lib/service.js";
+import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
+import type { Clock } from "#src/lib/clock.js";
 import {
   AUTOMATION_TRIGGER_FORBIDDEN_FIELD_RE,
   AUTOMATION_TRIGGER_VERSION,
@@ -24,7 +24,7 @@ import {
   submitAutomationTrigger,
   webhookTriggerRequest,
   type AutomationTriggerRegistry,
-} from "../src/lib/automation-trigger.js";
+} from "#src/lib/automation-trigger.js";
 
 const READ_TOKEN = "trigger-read-token";
 const WRITE_TOKEN = "trigger-write-token";

@@ -13,9 +13,9 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import type { MergeConflictEvidence } from "../src/lib/merge-state.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import type { MergeConflictEvidence } from "#src/lib/merge-state.js";
 
 const NOW = Date.parse("2026-09-09T20:00:00.000Z");
 const RECENT = "2026-09-09T19:00:00.000Z";

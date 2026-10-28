@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
-import { resolveLedgerUnion } from "../src/lib/ledger-grep.js";
+import { resolveLedgerUnion } from "#src/lib/ledger-grep.js";
 
 function tmpStateDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

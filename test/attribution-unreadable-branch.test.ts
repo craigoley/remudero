@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { checkPrOwnership, ghPrHeadGateway } from "../src/run-task.js";
+import { checkPrOwnership, ghPrHeadGateway } from "#src/run-task.js";
 
 /*
  * W1-T1026 — AN UNREADABLE HEAD REF AND A FOREIGN ONE REACH THE SAME TERMINAL DISPOSITION.

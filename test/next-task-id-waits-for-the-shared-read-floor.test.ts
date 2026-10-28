@@ -9,9 +9,9 @@ import {
   applyGhReadCadence, applyGhReadCadenceAsync, ghReadCadenceStampPath, GhReadCadenceRefusal,
   resetGhCadenceAdvisoryForTest, withGhTransportFloorMode,
   type GhReadCadenceDeps,
-} from "../src/lib/github-transport.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/github-transport.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 function fixture(t: TestContext, cooldown?: string, elapsedMs = 120_000) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-next-id-floor-"));

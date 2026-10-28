@@ -5,14 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { runGarden, runGardenAsync, type GardenCheckout, type GardenSpec } from "../src/lib/gardener.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import * as worker from "../src/lib/worker.js";
-import * as gardens from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { runGarden, runGardenAsync, type GardenCheckout, type GardenSpec } from "#src/lib/gardener.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import * as worker from "#src/lib/worker.js";
+import * as gardens from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 
 type Row = [string, Record<string, unknown> | undefined];
 const PR = "https://github.com/acme/demo/pull/7";

@@ -14,11 +14,11 @@
  * error propagation.
  */
 import assert from "node:assert/strict";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { test } from "node:test";
 
-import { rollupFor, GhPaceFloorStandDownError, type GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { pollToGate, waitForCiGreen, STALL_WINDOW, ciGateState } from "../src/run-task.js";
+import { rollupFor, GhPaceFloorStandDownError, type GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { pollToGate, waitForCiGreen, STALL_WINDOW, ciGateState } from "#src/run-task.js";
 
 const PR_URL = "https://github.com/acme/remudero/pull/42";
 const OWNER = "acme";

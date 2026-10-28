@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { test } from "node:test";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
 import {
   CONSOLE_SNAPSHOT_VIEWER_IDLE_MS,
   createConsoleSnapshotCache,
   createConsoleWriteGeneration,
   invalidateSnapshotsOnWrite,
   type ConsoleResponseStaleness,
-} from "../src/lib/console-snapshot-cache.js";
-import { boundConsoleReadRoutes, type ServeDeps } from "../src/lib/serve.js";
-import type { Route } from "../src/lib/service.js";
+} from "#src/lib/console-snapshot-cache.js";
+import { boundConsoleReadRoutes, type ServeDeps } from "#src/lib/serve.js";
+import type { Route } from "#src/lib/service.js";
 
 class Capture {
   status = 0;

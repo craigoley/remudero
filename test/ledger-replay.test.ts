@@ -5,8 +5,8 @@ import {
   buildReplay,
   resolveReplayLedgerLines,
   type ReplayLedgerLine,
-} from "../src/lib/ledger-replay.js";
-import type { LedgerGrepFsDeps } from "../src/lib/ledger-grep.js";
+} from "#src/lib/ledger-replay.js";
+import type { LedgerGrepFsDeps } from "#src/lib/ledger-grep.js";
 
 // ── W1-T2296 — "an incident is reconstructed by hand every time" ───────────────────────────────
 //
@@ -208,7 +208,7 @@ test("a partially-unreadable rotation refuses the union rather than narrating a 
 // refuses on a bad union, exactly like buildReplay/resolveReplayLedgerLines do standalone.)
 
 test("replayCommand prints buildReplay's narration for a resolved window", async () => {
-  const { replayCommand } = await import("../src/run-task.js");
+  const { replayCommand } = await import("#src/run-task.js");
   const logs: string[] = [];
   const realLog = console.log;
   console.log = (msg?: unknown) => {
@@ -230,7 +230,7 @@ test("replayCommand prints buildReplay's narration for a resolved window", async
 });
 
 test("replayCommand exits non-zero and prints no narration when the ledger union is refused", async () => {
-  const { replayCommand } = await import("../src/run-task.js");
+  const { replayCommand } = await import("#src/run-task.js");
   const errors: string[] = [];
   const logs: string[] = [];
   const realError = console.error;
@@ -256,7 +256,7 @@ test("replayCommand exits non-zero and prints no narration when the ledger union
 });
 
 test("replayCommand rejects an unknown flag before touching the ledger — fail loud", async () => {
-  const { replayCommand } = await import("../src/run-task.js");
+  const { replayCommand } = await import("#src/run-task.js");
   const errors: string[] = [];
   const realError = console.error;
   console.error = (msg?: unknown) => {

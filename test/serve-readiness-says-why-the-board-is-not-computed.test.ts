@@ -9,11 +9,11 @@ import { createServer, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createBoardProjectionWorker } from "../src/lib/board-worker.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { BOARD_REASON_BOUND, boardComputedProbe, listenReadiness } from "../src/lib/serve-generation.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { createBoardProjectionWorker } from "#src/lib/board-worker.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { BOARD_REASON_BOUND, boardComputedProbe, listenReadiness } from "#src/lib/serve-generation.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const BOOT = Date.parse("2026-10-01T16:00:00.000Z");
 const query = new URLSearchParams();

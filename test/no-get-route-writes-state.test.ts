@@ -20,7 +20,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
-import type { Route } from "../src/lib/service.js";
+import type { Route } from "#src/lib/service.js";
 
 const context = new AsyncLocalStorage<string>();
 /** Each route's writes, as `<kind> <path relative to the fixture>`. */
@@ -78,9 +78,9 @@ childProcess.execFile = spied("git", childProcess.execFile, gitWrite);
 childProcess.spawnSync = spied("git", childProcess.spawnSync, gitWrite);
 syncBuiltinESMExports();
 
-const { buildServeRoutes } = await import("../src/lib/serve.js");
-const { appendLedger } = await import("../src/lib/ledger.js");
-const { loadPlan } = await import("../src/lib/plan.js");
+const { buildServeRoutes } = await import("#src/lib/serve.js");
+const { appendLedger } = await import("#src/lib/ledger.js");
+const { loadPlan } = await import("#src/lib/plan.js");
 
 /** Queries a route needs to reach the code that writes; every other route is requested bare. */
 const SAMPLE_QUERIES: Record<string, string> = {

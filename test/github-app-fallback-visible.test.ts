@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { generateKeyPairSync } from "node:crypto";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { TOKEN_REFRESHED_STEP, TOKEN_REFRESH_FAILED_STEP, refreshInstallationToken, EXCHANGE_TIMEOUT_MS } from "../src/lib/github-app.js";
-import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
-import type { GitHub } from "../src/lib/status.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { TOKEN_REFRESHED_STEP, TOKEN_REFRESH_FAILED_STEP, refreshInstallationToken, EXCHANGE_TIMEOUT_MS } from "#src/lib/github-app.js";
+import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "#src/lib/status-board.js";
+import type { GitHub } from "#src/lib/status.js";
 
 // THE FALLBACK WAS SILENT. `refreshInstallationToken` leaves `process.env.GH_TOKEN` exactly as it
 // found it when the exchange fails, so the fleet keeps running on the personal token's buckets with

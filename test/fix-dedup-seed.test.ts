@@ -38,12 +38,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
-import { buildSweepEffects } from "./helpers/run-task-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
+import { buildSweepEffects } from "#test/helpers/run-task-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const GIT_ENV = {
   ...process.env,

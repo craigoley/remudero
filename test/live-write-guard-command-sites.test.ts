@@ -15,11 +15,11 @@ import {
   planCommand,
   realArmDeps,
   triageCommand,
-} from "./helpers/run-task-test.js";
-import { ghPrMergeSquash, type WorkerResult } from "../src/lib/worker.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { approveRunBranch } from "../src/lib/inbox.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#test/helpers/run-task-test.js";
+import { ghPrMergeSquash, type WorkerResult } from "#src/lib/worker.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { approveRunBranch } from "#src/lib/inbox.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /** ghPrMergeSquash requires the closing-reference guard; these tests are about the merge call itself. */
 const CLEAN_GUARD = () => ({ state: "clean" as const, defused: [] });

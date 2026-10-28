@@ -26,12 +26,12 @@ import {
   leaselessRefusalMessage,
   foreignHeadRefusalMessage,
   discardRefusalMessage,
-} from "../src/lib/git-push.js";
+} from "#src/lib/git-push.js";
 // The fixture's origin is a bare repo under TMPDIR, which is exactly the case the live-write
 // guard names as legitimate — it checks the CALL, not the destination, so a real-but-local remote
 // still has to be declared. Each push is wrapped individually so nothing else in a test is exempt.
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 /** A lane worktree on `run-<id>-<epochMs>`, with one commit already published to a real bare remote. */
 function laneOnAPublishedBranch(): { lane: GitRepo; remote: GitRepo; branch: string; published: string } {

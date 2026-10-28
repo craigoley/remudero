@@ -22,7 +22,7 @@ import {
   TOKEN_REFRESH_REASONS,
   refreshInstallationToken,
   startInstallationTokenRefresh,
-} from "../src/lib/github-app.js";
+} from "#src/lib/github-app.js";
 
 function keyPair() {
   return generateKeyPairSync("rsa", {

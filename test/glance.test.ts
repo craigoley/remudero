@@ -6,8 +6,8 @@
 // the SAME already-read ledger lines board.ts's computeBoardSnapshot holds.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { computeGlanceSpend } from "../src/lib/glance.js";
-import { deriveDayCostUsd, deriveWeekCostUsd, utcDayWindowMs, utcWeekWindowMs } from "../src/lib/sweep.js";
+import { computeGlanceSpend } from "#src/lib/glance.js";
+import { deriveDayCostUsd, deriveWeekCostUsd, utcDayWindowMs, utcWeekWindowMs } from "#src/lib/sweep.js";
 
 const NOW = Date.parse("2026-07-29T18:00:00.000Z"); // a Wednesday
 

@@ -9,17 +9,17 @@ import {
   createBoardSnapshotCache,
   createBoardSnapshotReader,
   type BoardSnapshotIo,
-} from "../src/lib/board-snapshot-cache.js";
-import type { Clock } from "../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { NOW_REFRESH_MS, createNowView, planStamp, snapshotGithub, type NowInstance, type NowViewContext, type NowViewOptions } from "../src/lib/now-view.js";
-import type { BoardIssueRest, BoardPrRest } from "../src/lib/open-prs-rest.js";
-import { loadPlanQuarantiningDuplicates, type Plan, type Task } from "../src/lib/plan.js";
-import { createTaskView, taskViewKey, type TaskViewData } from "../src/lib/task-view.js";
-import { swapThreadPlanParser, threadPlan } from "../src/lib/thread-plan.js";
-import { TASK_VIEW_NAME, createDemandBook } from "../src/lib/view-demand.js";
-import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/board-snapshot-cache.js";
+import type { Clock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { NOW_REFRESH_MS, createNowView, planStamp, snapshotGithub, type NowInstance, type NowViewContext, type NowViewOptions } from "#src/lib/now-view.js";
+import type { BoardIssueRest, BoardPrRest } from "#src/lib/open-prs-rest.js";
+import { loadPlanQuarantiningDuplicates, type Plan, type Task } from "#src/lib/plan.js";
+import { createTaskView, taskViewKey, type TaskViewData } from "#src/lib/task-view.js";
+import { swapThreadPlanParser, threadPlan } from "#src/lib/thread-plan.js";
+import { TASK_VIEW_NAME, createDemandBook } from "#src/lib/view-demand.js";
+import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };

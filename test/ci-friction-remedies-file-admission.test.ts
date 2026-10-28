@@ -11,9 +11,9 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { CI_FRICTION_REMEDIES_FILE, ciFrictionRemedyTestTitle, ciFrictionShardStem, ciFrictionShardYaml } from "../src/lib/ci-friction-gardener.js";
-import { lintTask, sizingViolation } from "../src/lib/task-linter.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, newTestPath } from "../src/lib/plan.js";
+import { CI_FRICTION_REMEDIES_FILE, ciFrictionRemedyTestTitle, ciFrictionShardStem, ciFrictionShardYaml } from "#src/lib/ci-friction-gardener.js";
+import { lintTask, sizingViolation } from "#src/lib/task-linter.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, newTestPath } from "#src/lib/plan.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
