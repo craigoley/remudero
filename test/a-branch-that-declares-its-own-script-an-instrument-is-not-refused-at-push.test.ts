@@ -13,6 +13,7 @@ import { evaluateInstrumentSurface, main } from "../scripts/census-precheck.mjs"
 const SCRIPT = "scripts/branch-gate.mjs";
 const OTHER = "scripts/another-gate.mjs";
 const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
+const ALIAS_CENSUS = "test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts";
 
 function declaringBranch(declaration: string, scripts = [SCRIPT]) {
   const repo = gitRepo({ kind: "branch-instrument-declaration" });
@@ -24,6 +25,9 @@ function declaringBranch(declaration: string, scripts = [SCRIPT]) {
   put("scripts/old-ratchet.mjs", "export {};\n");
   // The always-on skill census joins every nonempty diff, so the base carries a healthy stand-in for it.
   put(SKILL_CENSUS, 'import { test } from "node:test";\ntest("skill census stand-in", () => undefined);\n');
+  // So does the import-alias graph suite. Its suite child is judged (W1-T8379): a suite path with no file never
+  // reports, so it is a failing suite, not the silent pass an absent path used to read as.
+  put(ALIAS_CENSUS, 'import { test } from "node:test";\ntest("alias census stand-in", () => undefined);\n');
   repo.git("add", "-A");
   repo.git("commit", "-qm", "seed census candidates");
   repo.git("switch", "-qc", "work");
