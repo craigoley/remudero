@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { checkProofCommand, CHECK_PROOF_EXIT, verifyBaseGrepAbsence } from "../src/lib/check-proof.js";
 
 /** This repo's own root — used by the base_unknown test below, which needs a real `unit test:`
@@ -523,7 +524,7 @@ test("check-proof refuses --repo when its owner/name value is missing or malform
 
 
 test("a check-proof base never expands an ambiguous title without the full-suite opt-in", () => {
-  const markerRoot = mkdtempSync(join(tmpdir(), "rmd-proof-unrequested-"));
+  const markerRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}proof-unrequested-`));
   const marker = join(markerRoot, "loaded");
   const title = "base scope marker new";
   const repo = twoCommitRepo({
