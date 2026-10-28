@@ -19,19 +19,36 @@ const assignment = { ts, step: "worker.assignment", task_id: "W1-T1", worker_ass
     experiment: { assignedArm: "sol61", crossover: false } } } };
 const encode = (rows: unknown[]) => rows.map(row => JSON.stringify(row)).join("\n") + "\n";
 
-async function review(rows: unknown[], check: (source: any) => void) {
+async function review(rows: unknown[], check: (source: any) => void, beforeReports?: (stateDir: string) => void) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-bounded-review-"));
   try {
     const stateDir = join(dir, "state"); mkdirSync(stateDir);
     writeFileSync(join(stateDir, "ledger.2026-10-02T11-00-00-000Z.ndjson.gz"), gzipSync(encode([assignment])));
     writeFileSync(join(stateDir, "ledger.ndjson"), encode(rows));
-    let unionDedupe: boolean | undefined;
+    const reads: { options: OpenLedgerUnionOptions; steps: unknown[] }[] = [];
     const result = await dailyRoutingReview({ sources: [{ label: "core", stateDir }], outDir: join(dir, "out"), asOf,
-      openUnion: (path: string, options: OpenLedgerUnionOptions) => {
-        unionDedupe = options.dedupe;
-        return openLedgerUnion(path, options);
+      openUnion: async function* (path: string, options: OpenLedgerUnionOptions) {
+        if (options.step !== undefined) beforeReports?.(path);
+        const read = { options, steps: [] as unknown[] };
+        reads.push(read);
+        for await (const row of openLedgerUnion(path, options)) {
+          read.steps.push(row.step);
+          yield row;
+        }
       } });
-    assert.equal(unionDedupe, false, "the union must not retain unrelated lines in its replay Set");
+    assert.equal(reads.length, 2, "quality auditing and filtered report collection must use separate reads");
+    assert.equal(reads[0]!.options.dedupe, false, "the audit must not retain the corpus in a replay Set");
+    assert.equal(reads[0]!.options.step, undefined, "quality auditing must still cover unrelated steps");
+    for (const noise of ["unrelated", "worker.activity", "inbox.draft_synthesized"]) {
+      assert.ok(!reads[1]!.steps.includes(noise), `${noise} escaped the report line filter`);
+    }
+    const reportSteps = reads[1]!.options.step;
+    assert.ok(Array.isArray(reportSteps), "the report read must filter lines before the union parses them");
+    assert.equal(reads[1]!.options.onMalformedRow, undefined, "report filtering must not be disabled by an audit callback");
+    assert.ok(reportSteps.includes("worker.assignment"), "the report filter must include experiment inputs");
+    for (const noise of ["unrelated", "worker.activity", "inbox.draft_synthesized"]) {
+      assert.ok(!reportSteps.includes(noise), `${noise} must not reach the report reader`);
+    }
     check(result.snapshot.sources[0]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
@@ -50,6 +67,21 @@ test("W1-T10830: the routing review dedupes only the rows its reports read", asy
     assert.equal(source.newestTs, ts);
     assert.equal(source.reports.find((report: any) => report.id === epoch.id).assignments, 1);
   });
+});
+
+test("a source lost between audit and report collection remains partial with its audited counts", async () => {
+  await review([], source => {
+    assert.equal(source.rowsRead, 1);
+    assert.equal(source.newestTs, ts);
+    assert.equal(source.malformedRows, 0);
+    assert.equal(source.unreadSources, 1);
+    assert.equal(source.dedupeRows, 1);
+    assert.equal(source.retainedRows, 0);
+    assert.equal(source.state, "observed-partial");
+    assert.ok(source.reasons.includes("ledger-source-unreadable"));
+    assert.ok(source.reasons.includes("ledger-source-changed-during-review"));
+    assert.equal(source.reports.find((report: any) => report.id === epoch.id).reviewState, "source-incomplete");
+  }, stateDir => writeFileSync(join(stateDir, "ledger.2026-10-02T11-00-00-000Z.ndjson.gz"), "corrupt gzip"));
 });
 
 test("W1-T10830: assignment-stamped activity rows do not fill the retained set", async () => {

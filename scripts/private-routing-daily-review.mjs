@@ -45,10 +45,11 @@ async function readSource(source, asOf, resolutions, openUnion) {
   const windowStart = Date.parse(asOf) - DAY;
   let retainedRowsOmitted = 0;
   const reportSeen = new Set();
+  const reportSteps = new Set();
   let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, invalidTimestampRows = 0, newestTs = null;
   for await (const row of openUnion(source.stateDir, {
     since: `${since}T00:00:00Z`,
-    // Quality audits stream the whole corpus; only report inputs own bounded replay fingerprints.
+    // Audit the corpus without keeping records; the separate report read is step-filtered.
     dedupe: false,
     onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
     onMalformedRow: (item) => { malformedRows++; finding({ kind: item.kind, form: item.form, path: item.path, rowOrdinal: item.rowOrdinal, timestamp: item.timestamp }); },
@@ -57,8 +58,10 @@ async function readSource(source, asOf, resolutions, openUnion) {
       if (reportReads(row, timestamp, windowStart) && timestamp <= Date.parse(asOf)) {
         const fingerprint = createHash("sha256").update(raw).digest("hex");
         if (reportSeen.has(fingerprint)) return;
-        if (reportSeen.size < 100_000) reportSeen.add(fingerprint);
-        if (rows.length < 100_000) rows.push(row); else retainedRowsOmitted++;
+        if (reportSeen.size < 100_000) {
+          reportSeen.add(fingerprint);
+          reportSteps.add(row.step);
+        } else retainedRowsOmitted++;
       }
       // Do not count an exact report replay twice, but keep auditing unrelated physical rows.
       qualityRows.add(row);
@@ -80,14 +83,27 @@ async function readSource(source, asOf, resolutions, openUnion) {
     rowsRead++;
     if (newestTs === null || row.ts > newestTs) newestTs = row.ts;
   }
+  const dedupeRows = reportSeen.size;
+  if (reportSteps.size) {
+    // Only audited report steps reach the union parser. Consume fingerprints on delivery so
+    // replays, concurrent appends and unrelated rows cannot enlarge the retained population.
+    for await (const row of openUnion(source.stateDir, {
+      since: `${since}T00:00:00Z`, step: [...reportSteps], dedupe: false,
+      onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
+      onAcceptedRecord: (row, raw) => {
+        if (reportSeen.delete(createHash("sha256").update(raw).digest("hex"))) rows.push(row);
+      },
+    })) { /* Report records are delivered through the raw-line identity callback. */ }
+  }
   const reasons = [];
+  if (reportSeen.size) reasons.push("ledger-source-changed-during-review");
   if (retainedRowsOmitted) reasons.push("ledger-retention-row-bound");
   if (unreadSources) reasons.push("ledger-source-unreadable");
   if (malformedRows) reasons.push("ledger-source-malformed");
   if (invalidTimestampRows) reasons.push("ledger-source-invalid-timestamp");
   if (futureRows) reasons.push("ledger-source-future-dated");
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
-    rowsRead, retainedRows: rows.length, dedupeRows: reportSeen.size, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
+    rowsRead, retainedRows: rows.length, dedupeRows, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
 }
 
 function privateWrite(path, value) {
