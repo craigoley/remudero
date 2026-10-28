@@ -26674,6 +26674,46 @@ export function plainInboxWriter(
   }
 }
 
+/** W1-T9103: the fleet lane's production `sameFinding` port — one question to the `inbox-draft` lane's mount, whose
+ *  answer is "same", "distinct" or, when no answer can be read, "unavailable" (the failure is logged, never read as "distinct"). */
+export function fleetLaneSamenessJudge(
+  config: Config,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  rawSpawn: typeof spawnWorker = spawnWorker,
+): ((earlier: string, later: string) => Promise<"same" | "distinct" | "unavailable">) | undefined {
+  try {
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", "fleet-lane-sameness-settings.json"),
+    });
+    const mount = loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
+    return async (earlier, later) => {
+      const prompt = [
+        "Two follow-up findings were written by different rounds of one run. Say whether the LATER one restates the EARLIER one",
+        "(the same request, possibly in other words, possibly with more detail) or asks something distinct.",
+        'Answer with one JSON object only: {"answer": "same"} or {"answer": "distinct"}.',
+        "", `EARLIER: ${earlier}`, "", `LATER: ${later}`,
+      ].join("\n");
+      try {
+        const result = await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({
+          ...buildInboxDraftSpawnArgs({ cwd: config.root, settingsFile, mount, config, prompt, disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS }),
+          onSelectionAssignment: undefined,
+        });
+        const answer = /\{[^{}]*\}/.exec(result.text)?.[0];
+        const parsed = answer === undefined ? undefined : (JSON.parse(answer) as { answer?: unknown }).answer;
+        return parsed === "same" || parsed === "distinct" ? parsed : "unavailable";
+      } catch (e) {
+        log("fleet_lane.sameness_judge_failed", { error: String((e as Error)?.message ?? e) });
+        return "unavailable";
+      }
+    };
+  } catch (e) {
+    log("fleet_lane.sameness_judge_unavailable", { error: String((e as Error)?.message ?? e) });
+    return undefined;
+  }
+}
+
 /** W1-T4409/W1-T4421 — ledger every quarantined task and escalate each duplicated id once (escalate dedups). */
 export function reportQuarantined(
   quarantined: QuarantinedTask[],
@@ -27878,6 +27918,7 @@ function daemonCommandHost(): DaemonCommandHost {
     orphanSweepRunActive,
     orphanWorkerKillLedger,
     plainInboxWriter,
+    fleetLaneSamenessJudge,
     productionLifetimePressureHook,
     quarantineReporter,
     queueGovernorGateFor,
