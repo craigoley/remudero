@@ -72,7 +72,7 @@ test("W1-T10383: an exhausted codex capacity reads below-reserve in considered",
 });
 
 test("W1-T10383: an unreadable codex probe still reads unreadable", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "codex-unreadable-probe-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-codex-unreadable-probe-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   let probeCalls = 0;
   const failed = await readCodexCapacity({
