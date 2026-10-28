@@ -1,3 +1,4 @@
+// @census-reads: test/read-model-oracle-never-blocks-projection.test.ts test/a-read-model-upgrade-never-re-reads-the-corpus.test.ts test/a-view-body-is-behind-only-by-the-rows-it-reads.test.ts test/a-view-unit-s-measured-cost-survives-a-restart.test.ts test/inbox-thread-evidence.test.ts test/now-view-bounded-steps.test.ts — the fixtures whose teardown wiring it pins.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -69,12 +70,33 @@ async function verifyFailedClosure() {
 test("read-model fixture cleanup retains evidence and still closes other writers after a closure failure", verifyFailedClosure);
 
 
-test("the four observed read-model fixtures wire owned scratch and writer closure to the verified cleanup", async () => {
+test("a scope that owns several roots and writers registers exactly one ordered teardown hook", async () => {
+  const hooks: Array<() => unknown> = [];
+  const scope = { after(fn: () => unknown) { hooks.push(fn); } } as ReadModelFixtureScope;
+  const first = readModelFixtureDir(scope, "read-model-single-hook-a");
+  const second = readModelFixtureDir(scope, "read-model-single-hook-b");
+  const order: string[] = [];
+  closeReadModelFixture(scope, () => { order.push(`close:${existsSync(first)}:${existsSync(second)}`); });
+  closeReadModelFixture(scope, () => { order.push("close-2"); });
+  assert.equal(hooks.length, 1, "roots and writers share one teardown, so no root can outlive-or-precede a writer");
+  assert.equal(existsSync(first), true);
+  assert.equal(existsSync(second), true);
+  await hooks[0]!();
+  assert.deepEqual(order, ["close:true:true", "close-2"], "writers close while every root still exists");
+  assert.equal(existsSync(first), false);
+  assert.equal(existsSync(second), false);
+});
+
+// @source-text-subject: this test pins which fixtures call the shared teardown helper and that none
+// keeps a private t.after/rmSync path; the helper's behaviour is asserted by the tests above.
+test("the observed read-model fixtures wire owned scratch and writer closure to the verified cleanup (plus inbox and now-view callers)", () => {
   for (const file of [
     "test/read-model-oracle-never-blocks-projection.test.ts",
     "test/a-read-model-upgrade-never-re-reads-the-corpus.test.ts",
     "test/a-view-body-is-behind-only-by-the-rows-it-reads.test.ts",
     "test/a-view-unit-s-measured-cost-survives-a-restart.test.ts",
+    "test/inbox-thread-evidence.test.ts",
+    "test/now-view-bounded-steps.test.ts",
   ]) {
     const source = readFileSync(join(REPO_ROOT, file), "utf8");
     assert.match(source, /from "#test\/helpers\/read-model-fixture\.js"/, file);
@@ -83,6 +105,4 @@ test("the four observed read-model fixtures wire owned scratch and writer closur
     assert.doesNotMatch(source, /t\.after\(/, `${file}: resource hooks all join the ordered cleanup`);
     assert.doesNotMatch(source, /rmSync\(/, `${file}: scratch is removed only after registered writers close`);
   }
-  await verifyWriterClosure();
-  await verifyFailedClosure();
 });
