@@ -348,3 +348,41 @@ test("W1-T9918: synchronous on-loop timing follows owned continuations and exclu
   assert.ok(Number(row.sync_on_loop_ms) >= ownedMs * 0.9, JSON.stringify(row));
   assert.ok(Number(row.sync_on_loop_ms) < elapsed - siblingMs * 0.9, JSON.stringify(row));
 });
+
+
+test("an older armed review orphan is not overtaken across refresh batches", async t => {
+  const old = { ...pr(991882), autoMergeArmed: true, createdAt: "2026-10-27T00:00:00Z" };
+  const young = { ...pr(991883), createdAt: "2026-10-27T01:00:00Z" };
+  const f = fixture([pr(991881, true), young, old]);
+  const compareGate = deferred<void>(), compareEntered = deferred<void>(), oldReviewGate = deferred<void>();
+  f.effects.selectAdaptiveReviewWidth = () => 1;
+  f.io.readCompare = async () => {
+    compareEntered.resolve();
+    await compareGate.promise;
+    return { ahead_by: 0, files: [] };
+  };
+  f.effects.postReview = async subject => {
+    f.reviewed.push(subject.prNumber);
+    if (subject.prNumber === old.prNumber) await oldReviewGate.promise;
+  };
+  const running = f.hook()();
+  try {
+    await t.waitFor(() => compareEntered.settled, { interval: 1, timeout: 2000 });
+    await turn();
+    assert.equal(compareGate.settled, false, "the existing refresh barrier remains in force");
+    assert.deepEqual(f.reviewed, [], "a younger early-batch review cannot take the older orphan's place");
+    compareGate.resolve();
+    await t.waitFor(() => f.reviewed.length > 0, { interval: 1, timeout: 2000 });
+    assert.equal(f.reviewed[0], old.prNumber, "one oldest-first order spans both former batches");
+    oldReviewGate.resolve();
+    await running;
+    assert.deepEqual(f.reviewed, [old.prNumber, young.prNumber]);
+    assert.deepEqual(f.updates, [], "review priority adds no branch refresh");
+    assert.deepEqual(f.logs.filter(row => row.step === "sweep_light.error"), []);
+  } finally {
+    compareGate.resolve();
+    oldReviewGate.resolve();
+    await running;
+    f.cleanup();
+  }
+});
