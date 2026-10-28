@@ -10,12 +10,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { daemonTargetCheckoutRoot } from "#src/cli/commands/daemon.js";
+import { daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync } from "#src/cli/commands/daemon.js";
 import { runBranchDispatchOpts, runBranchStateFrom } from "#src/lib/daemon.js";
 import { nextRunnable, runBranchTaskIds } from "#src/lib/drain.js";
 import { loadPlan } from "#src/lib/plan.js";
 import { repoRoot } from "#src/lib/repo-location.js";
-import { readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync } from "#src/run-task.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 

@@ -136,7 +136,8 @@ import {
 } from "./cli/commands/run-task-verb.js";
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
-import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
+import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
+export { readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync };
 import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import { createIndexedLifetimeAccounting, type LifetimeIndexFailure } from "./lib/lifetime-identity-index.js";
@@ -24844,58 +24845,6 @@ function readAvailableMibBounded(
  * logic over GitHub-derived status; it STOPS ON ANY BLOCK (v1); it is headroom-aware
  * and bounded. See lib/drain.ts for the loop; this only wires the real defaults.
  */
-
-/**
- * W1-T916 — the ONE ref read behind {@link DrainDeps.readPushedRunBranches} and its daemon twin.
- * Raw `git ls-remote --heads origin 'run-*'` output, returned verbatim for `runBranchTaskIds`
- * (drain.ts) to parse ONCE PER PASS above the dispatch loop. Scoped to `run-*` so the refspec
- * filters server-side rather than shipping every head back; `ls-remote` speaks the git protocol and
- * spends neither the REST nor the GraphQL budget — measured at 46 refs in 199 ms with `core`
- * remaining identical before and after.
- *
- * FAIL OPEN, DELIBERATELY. A throw (network blip, auth, no remote) yields `""`, which parses to an
- * EMPTY set, so no task is refused — precisely the behaviour before this existed. The degraded
- * outcome is "no improvement", never "dispatch wrongly blocked", which is the only safe direction
- * for a guard that decides whether work starts at all.
- *
- * `exec` is appended LAST and defaulted so no caller shifts; it exists because the catch arm above
- * is otherwise unreachable from any offline test, which is exactly how this task's own defect
- * (a seam nothing supplied) came about.
- */
-type RunBranchSyncExec = (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string }) => string;
-type RunBranchAsyncExec = (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string }>;
-
-/** W1-T10897: a leading checkout path names the repo whose `origin` is listed; without one it is this engine checkout. */
-export function readPushedRunBranchesOutput(checkout: string, exec?: RunBranchSyncExec): string;
-export function readPushedRunBranchesOutput(exec?: RunBranchSyncExec): string;
-export function readPushedRunBranchesOutput(...args: [(string | RunBranchSyncExec)?, RunBranchSyncExec?]): string {
-  const [cwd, exec = execFileSync as never] = typeof args[0] === "string" ? [args[0], args[1]] : [repoRoot, args[0]];
-  try {
-    return exec("git", ["ls-remote", "--heads", "origin", "run-*"], { encoding: "utf8", cwd });
-  } catch {
-    return "";
-  }
-}
-
-/** W1-T5805 — the same read as an awaited child, for the daemon's tick and each lane refill: killed past
- *  `timeoutMs`, and REJECTING on any failure so the daemon ledgers it and keeps its fail-open direction.
- *  W1-T10897: a consumer daemon passes its target checkout, and the rejection names that checkout, so the
- *  `dispatch.run_branch_read_failed` row says which repo's listing failed. */
-export function readPushedRunBranchesOutputAsync(checkout: string, exec?: RunBranchAsyncExec, timeoutMs?: number): Promise<string>;
-export function readPushedRunBranchesOutputAsync(exec?: RunBranchAsyncExec, timeoutMs?: number): Promise<string>;
-export async function readPushedRunBranchesOutputAsync(
-  ...args: [(string | RunBranchAsyncExec)?, (RunBranchAsyncExec | number)?, number?]
-): Promise<string> {
-  const [cwd, exec = execFileLoopBounded, timeoutMs = GATEWAY_FETCH_TIMEOUT_MS] = typeof args[0] === "string"
-    ? [args[0], args[1] as RunBranchAsyncExec | undefined, args[2]]
-    : [repoRoot, args[0], args[1] as number | undefined];
-  const opts = { encoding: "utf8", cwd, timeout: timeoutMs, killSignal: "SIGKILL" } as const;
-  try {
-    return (await exec("git", ["ls-remote", "--heads", "origin", "run-*"], opts)).stdout;
-  } catch (error) {
-    throw new Error(`run-branch listing in ${cwd}: ${String((error as Error)?.message ?? error)}`, { cause: error });
-  }
-}
 
 /** Bounded page walk — same shape and bound `reapBranchesCommand`'s own `state=all` read already
  *  uses (8 pages, 100/page = 800 rows), never a per-branch lookup. */
