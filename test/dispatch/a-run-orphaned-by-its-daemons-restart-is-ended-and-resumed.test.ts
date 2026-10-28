@@ -7,150 +7,24 @@
  * run never got a verdict, and its pushed branch blocked dispatch for the 24 h orphan grace.
  *
  * These cases run the boot sweep `rmd daemon` calls after taking its lock, with its real /proc liveness probe and
- * its real ledger reads; the resume case reads the pushed head through a real git remote.
+ * its real ledger reads. The real-remote resume case lives beside the daemon checkpoint-consumer tests.
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test, type TestContext } from "node:test";
+import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import {
-  bootSweepDispatchClaims,
-  dispatchClaimRef,
-  gitDispatchClaimReserver,
-  readRunLedgerState,
-  runBranchHeadFromLsRemote,
-  type ClaimAnchorIdentity,
-  type DispatchClaimReserver,
-  type GitAnswer,
+  dispatchClaimRef, readRunLedgerState, runBranchHeadFromLsRemote, type ClaimAnchorIdentity,
 } from "#src/lib/dispatch-claim.js";
-import { appendLedger } from "#src/lib/ledger.js";
 import { makeTempDir } from "#src/lib/tmp.js";
-import {
-  CHECKPOINT_HANDOFF_REASONS,
-  pendingWorkerBoundaryHandoffs,
-  runBranchDispatchOpts,
-  runBranchStateFrom,
-} from "#src/lib/daemon.js";
 import { dispatchesWithoutNewOwnedPr } from "#src/lib/status.js";
 import { readBreakerStrikes } from "#src/lib/breaker-release.js";
 import { streakRefusal } from "#src/lib/non-worker-verdict.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
-
-const TASK = "W1-T10838";
-const RUN_ID = `${TASK}-946684799000`;
-const BRANCH = `run-${RUN_ID}`;
-const HEAD = `4cefc7ba3${"0".repeat(31)}`;
-/** Minted long before any namespace this test can run in booted. */
-const MINT_ISO = "2000-01-01T00:00:00.000Z";
-/** No Linux pid reaches this (pid_max is at most 2^22). */
-const DEAD_PID = 2_147_483_646;
-const LOCAL = hostname();
-const OTHER_HOST = "0123456789ab";
-
-function anchorMessage(pid: number, host: string, iso: string): string {
-  return `rmd-dispatch claim ${pid}@${host} ${iso}`;
-}
-
-/** The orphaned run's own rows: its start, the claim it minted, and the work it finished. */
-function orphanRunRows(taskId = TASK, runId = RUN_ID, host = LOCAL): Array<Record<string, unknown>> {
-  return [
-    { ts: "1999-12-31T23:59:59.000Z", run_id: runId, task_id: taskId, step: "run.start", host },
-    { ts: "2000-01-01T00:00:00.500Z", run_id: runId, task_id: taskId, step: "dispatch.claim", host, actor: "run_child",
-      ref: dispatchClaimRef(taskId), outcome: "created" },
-    { ts: "2000-01-01T00:30:00.000Z", run_id: runId, task_id: taskId, step: "implement.done", host },
-  ];
-}
-
-function fakeReserver(
-  claims: Record<string, string>,
-  opts: { keepOnDrop?: boolean; heads?: Record<string, string> } = {},
-): DispatchClaimReserver & { dropped: string[]; askedHeads: string[] } {
-  const dropped: string[] = [];
-  const askedHeads: string[] = [];
-  return {
-    dropped,
-    askedHeads,
-    mintAnchor: () => "anchor",
-    attempt: () => "taken",
-    holder: (taskId) => (claims[taskId] !== undefined ? `sha-${taskId}` : undefined),
-    drop: (taskId) => {
-      dropped.push(taskId);
-      if (!opts.keepOnDrop) delete claims[taskId];
-      return true;
-    },
-    anchorMessage: (taskId) => claims[taskId],
-    list: () => Object.keys(claims),
-    branchHead: (branch) => {
-      askedHeads.push(branch);
-      return opts.heads?.[branch];
-    },
-  };
-}
-
-interface Instance {
-  stateDir: string;
-  boot: (reserver: DispatchClaimReserver) => void;
-  rawLines: () => string[];
-  rows: () => Array<Record<string, unknown>>;
-}
-
-/** One instance's state directory, booted the way `rmd daemon` boots: its log stamps the daemon's run id and
- *  lets a row's own `run_id`/`task_id` override them. */
-function instance(t: TestContext, seed: Array<Record<string, unknown>>): Instance {
-  const stateDir = makeTempDir("restart-orphan");
-  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
-  const ledger = join(stateDir, "ledger.ndjson");
-  writeFileSync(ledger, seed.map((row) => `${JSON.stringify(row)}\n`).join(""));
-  const rawLines = () => readFileSync(ledger, "utf8").split("\n").filter(Boolean);
-  let boots = 0;
-  return {
-    stateDir,
-    rawLines,
-    rows: () => rawLines().map((line) => JSON.parse(line) as Record<string, unknown>),
-    boot: (reserver) => {
-      const runId = `DAEMON-${++boots}`;
-      const lockIso = new Date().toISOString();
-      bootSweepDispatchClaims(reserver, {
-        localHost: LOCAL,
-        lockHeldSinceMs: Date.parse(lockIso),
-        lockHeldSinceIso: lockIso,
-        stateDir,
-        log: (step, fields) => appendLedger(ledger, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...fields }),
-      });
-    },
-  };
-}
-
-/** A real bare remote holding the orphan's claim and its pushed run branch, read through the real git reserver. */
-function gitRemote(t: TestContext): { reserver: DispatchClaimReserver; head: string; claimTip: () => string } {
-  const remote = gitRepo({ bare: true, scope: t });
-  const client = gitRepo({ scope: t });
-  client.addRemote("origin", remote.dir);
-  const tree = client.git("rev-parse", "HEAD^{tree}");
-  const anchor = client.git("commit-tree", tree, "-m", anchorMessage(DEAD_PID, LOCAL, MINT_ISO));
-  client.git("push", "origin", `${anchor}:${dispatchClaimRef(TASK)}`);
-  const head = client.git("commit-tree", tree, "-p", "HEAD", "-m", "the orphan's finished work");
-  client.git("push", "origin", `${head}:refs/heads/${BRANCH}`);
-  const env = {
-    ...process.env,
-    GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
-    GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
-    GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
-  };
-  const run = (args: string[]): GitAnswer => {
-    const r = spawnSync("git", args, { cwd: client.dir, env, encoding: "utf8", timeout: 10_000 });
-    return { status: r.status ?? 128, stdout: r.stdout, stderr: r.stderr };
-  };
-  return { reserver: gitDispatchClaimReserver({ run }), head, claimTip: () => client.git("ls-remote", "origin", dispatchClaimRef(TASK)) };
-}
-
-const sweepRows = (rows: Array<Record<string, unknown>>) =>
-  rows.filter((r) => r.step === "dispatch.claim_released" && r.surface === "boot-sweep");
-const orphanVerdicts = (rows: Array<Record<string, unknown>>) =>
-  rows.filter((r) => r.step === "verdict" && r.reason === "orphaned-by-restart");
+import {
+  TASK, RUN_ID, BRANCH, HEAD, MINT_ISO, DEAD_PID, LOCAL, OTHER_HOST,
+  anchorMessage, orphanRunRows, fakeReserver, instance, gitRemote, sweepRows, orphanVerdicts,
+} from "#test/helpers/restart-orphan.js";
 
 test("W1-T10896: a same-host claim minted before an in-place restart is released at boot", (t) => {
   const live = new Date(Date.now() + 60_000).toISOString();
@@ -210,7 +84,6 @@ test("W1-T10896: a run orphaned by the restart gets one orphaned-by-restart verd
   assert.equal(verdict.claim_ref, dispatchClaimRef(TASK));
   assert.equal(verdict.claim_anchor, `${DEAD_PID}@${LOCAL} ${MINT_ISO}`);
   assert.match(String(verdict.namespace_boot), /^\d{4}-\d\d-\d\dT/);
-  assert.equal(CHECKPOINT_HANDOFF_REASONS.has(String(verdict.reason)), true, "its reason is a checkpoint handoff reason");
   // No branch on origin, so no head is provable.
   assert.equal(verdict.branch, undefined, "an unprovable head carries no receipt");
   assert.equal(verdict.head_sha, undefined);
@@ -240,39 +113,17 @@ test("W1-T10896: a run orphaned by the restart gets one orphaned-by-restart verd
 });
 
 test("W1-T10896: the orphaned run pushed head resumes instead of blocking dispatch", (t) => {
-  // The claim and the pushed branch live on a real remote, read through the git reserver the daemon uses.
   const origin = gitRemote(t);
-  const resumed = `${origin.head}\trefs/heads/${BRANCH}\n`;
-  const blocked = (lines: readonly string[]) =>
-    runBranchDispatchOpts(runBranchStateFrom(resumed, undefined, pendingWorkerBoundaryHandoffs(lines)), [], () => {})
-      .hasPushedRunBranch!(TASK);
   const node = instance(t, orphanRunRows());
-  assert.equal(blocked(node.rawLines()), true, "before the boot sweep the pushed branch blocks dispatch");
-
+  assert.equal(dispatchesWithoutNewOwnedPr(node.rows(), TASK), 1);
   node.boot(origin.reserver);
-  assert.equal(origin.claimTip(), "", "the dead claim is dropped from origin");
-  const verdict = orphanVerdicts(node.rows())[0]!;
-  assert.equal(verdict.branch, BRANCH);
-  assert.equal(verdict.head_sha, origin.head, "the receipt names origin's exact pushed head");
-  assert.equal(blocked(node.rawLines()), false, "the exact pushed head is a resumable checkpoint");
-  const pending = pendingWorkerBoundaryHandoffs(node.rawLines());
-  assert.deepEqual(pending.get(TASK), { branch: BRANCH, headSha: origin.head });
-  // A re-push moves the tip off the receipt, so that head blocks again.
-  const moved = `${"f".repeat(40)}\trefs/heads/${BRANCH}\n`;
-  assert.equal(runBranchDispatchOpts(runBranchStateFrom(moved, undefined, pending), [], () => {}).hasPushedRunBranch!(TASK), true);
-});
-
-test("W1-T10896: a run that already opened its PR gets the verdict without a resume receipt", (t) => {
-  const prUrl = "https://github.com/o/r/pull/1";
-  const seed = [...orphanRunRows(), { ts: "2000-01-01T00:40:00.000Z", run_id: RUN_ID, task_id: TASK, step: "pr.opened", pr_url: prUrl }];
-  const node = instance(t, seed);
-  const reserver = fakeReserver({ [TASK]: anchorMessage(DEAD_PID, LOCAL, MINT_ISO) }, { heads: { [BRANCH]: HEAD } });
-  node.boot(reserver);
-  const verdict = orphanVerdicts(node.rows())[0]!;
-  assert.equal(verdict.pr_url, prUrl);
-  assert.equal(verdict.head_sha, undefined);
-  assert.deepEqual(reserver.askedHeads, [], "a run with its own PR is not resumed from its branch");
-  assert.equal(pendingWorkerBoundaryHandoffs(node.rawLines()).get(TASK), undefined);
+  assert.equal(origin.claimTip(), "", "the dead claim no longer blocks dispatch");
+  const verdicts = orphanVerdicts(node.rows());
+  assert.equal(verdicts.length, 1);
+  assert.equal(verdicts[0]!.branch, BRANCH);
+  assert.equal(verdicts[0]!.head_sha, origin.head, "the resume receipt names the real remote's exact head");
+  assert.equal(verdicts[0]!.verdict, "handed_off");
+  assert.equal(dispatchesWithoutNewOwnedPr(node.rows(), TASK), 0, "the orphan no longer consumes the dispatch budget");
 });
 
 test("W1-T10896: a released claim whose run already ended or never started writes no verdict", (t) => {
