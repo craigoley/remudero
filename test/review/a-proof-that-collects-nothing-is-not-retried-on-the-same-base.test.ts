@@ -105,7 +105,11 @@ test("W1-T10919: a zero-collected run is classified for both vitest and node --t
   assert.equal(runnerLoadedNoTestFile("TAP version 13\n1..0\n# tests 0\n# suites 0\n# pass 0\n# fail 0\n"), true, "node --test, no file");
   assert.equal(runnerLoadedNoTestFile("TAP version 13\n# tests 0\n# pass 0\n"), true, "node --test, # tests 0 and no wrapper");
   // A runner that LOADED its file and matched no title still prints the file's wrapper: that is the worker's miss.
-  assert.equal(runnerLoadedNoTestFile("TAP version 13\nok 1 - test/a.test.ts\n  ---\n  duration_ms: 1\n  ...\n1..1\n# tests 1\n"), false);
+  // Node 24's real zero-match report, captured 2026-10-28: the file's own empty `1..0` plan sits UNINDENTED above
+  // its wrapper, so the wrapper, not the plan, is what tells a loaded file from an empty scope.
+  const nodeZeroMatch = "TAP version 13\n1..0\n# Subtest: a.test.mjs\nok 1 - a.test.mjs\n  ---\n  duration_ms: 32.48\n" +
+    "  type: 'test'\n  ...\n1..1\n# tests 1\n# suites 0\n# pass 1\n# fail 0\n";
+  assert.equal(runnerLoadedNoTestFile(nodeZeroMatch), false);
   assert.equal(runnerLoadedNoTestFile("TAP version 13\n1..1\nok 1 - tests/unit/a.test.ts {\n    1..1\n    ok 1 - x # SKIP\n}\n"), false);
   assert.equal(runnerLoadedNoTestFile(""), false, "no output at all is not evidence of an empty scope");
 });
