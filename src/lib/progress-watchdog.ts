@@ -13,7 +13,7 @@ import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, rea
 import { join } from "node:path";
 import { fixedClock } from "./clock.js";
 
-export type ProgressWatchdogState = "PROGRESSING" | "IDLE" | "STALLED" | "IN_PASS" | "CRASH_LOOP" | "UNKNOWN";
+export type ProgressWatchdogState = "PROGRESSING" | "IDLE" | "STALLED" | "IN_PASS" | "RECOVERING" | "CRASH_LOOP" | "UNKNOWN";
 export type ProgressWatchdogAction = "none" | "capture-diagnostics" | "recycle" | "hold-revive";
 /** W1-T9702: where the open-PR count came from. A light pass writes one `sweep.pass` per PR, so only a full one counts. */
 export type OpenPrCountSource = "full_pass" | "full_pass_raised" | "max_over_window";
@@ -22,8 +22,11 @@ export type OpenPrCountSource = "full_pass" | "full_pass_raised" | "max_over_win
 export const PROGRESS_STEPS: ReadonlySet<string> = new Set(["sweep.pass", "review.posted", "verdict.merged"]);
 /** W1-T9779: the daemon's own full-pass marker (runGatedSweep, daemon.ts) and its loop's pulse. */
 export const PASS_MARKER_STEPS: readonly string[] = ["daemon.sweep.started", "daemon.sweep.settled", "daemon.sweep.abandoned", "daemon.pulse"];
+/** W1-T9516: the row the daemon's loop writes on the first tick after a block clears (daemon.ts reportLoopLag). */
+export const LOOP_RESUME_STEP = "daemon.loop_lag";
 /** Steps the verb must read from the ledger union to feed the verdict. */
-export const PROGRESS_WATCHDOG_READ_STEPS: readonly string[] = [...PROGRESS_STEPS, "daemon.paths", "daemon.boot", ...PASS_MARKER_STEPS];
+export const PROGRESS_WATCHDOG_READ_STEPS: readonly string[] =
+  [...PROGRESS_STEPS, "daemon.paths", "daemon.boot", ...PASS_MARKER_STEPS, LOOP_RESUME_STEP];
 
 /** bound kind: calibrated — progress older than this captures a diagnostics bundle (the 45-min and 51-min gaps all pass it). */
 export const STALL_DIAGNOSE_AFTER_MS = 15 * 60_000;
@@ -49,6 +52,8 @@ export interface ProgressWatchdogVerdict {
   progressAgeMs: number | null;
   /** W1-T6598: the boot that started the current generation, when it is newer than every progress row. */
   generationBootMs?: number | null;
+  /** W1-T9516: the current generation's newest loop resume, when it is newer than every progress row. */
+  loopResumedMs?: number | null;
   failedBoots15m: number;
   /** W1-T9627: the trailing run of revived containers that died before node wrote `daemon.paths`. */
   preNodeDeaths?: number;
@@ -250,6 +255,39 @@ export function inFlightPass(rows: ReadonlyArray<Record<string, unknown>>, nowMs
   return pulsed ? { startedMs: started.ms, boundMs: started.boundMs } : undefined;
 }
 
+/**
+ * W1-T9516 — 2026-10-14 05:35:56Z, A DAEMON WHOSE LOOP HAD RESUMED WAS RECYCLED AS STALLED. pid 3182622's loop was
+ * blocked for 45.7 min; at 05:35:46Z it wrote `daemon.loop_lag` lag_ms 2,742,587, the row its loop writes on the first
+ * tick after a block clears. Ten seconds later the verdict read the 46.8-min-old progress row and asked for a recycle,
+ * which replaced a daemon that was posting reviews again.
+ *
+ * A RESUME is a `daemon.loop_lag` row newer than the newest progress row, written by the current generation (the
+ * `actor_pid`, and `host` when stamped, of the newest `daemon.boot`), carrying a positive lag_ms. Its block must have
+ * begun (ts - lag_ms) while progress was still inside STALL_RECYCLE_AFTER_MS: a loop already stalled when it blocked
+ * is not excused, so a healthy loop's every-minute lag rows cannot reopen the allowance. No new bound.
+ */
+export function loopResumeFromRows(rows: ReadonlyArray<Record<string, unknown>>, newestProgressMs: number | undefined):
+  { resumedMs: number; lagMs: number } | undefined {
+  if (newestProgressMs === undefined) return undefined;
+  let boot: Record<string, unknown> | undefined;
+  let bootMs = -Infinity;
+  for (const row of rows) {
+    const ms = row.step === "daemon.boot" ? rowMs(row) : undefined;
+    if (ms !== undefined && ms >= bootMs) [boot, bootMs] = [row, ms];
+  }
+  if (boot === undefined || typeof boot.actor_pid !== "number") return undefined;
+  let resume: { resumedMs: number; lagMs: number } | undefined;
+  for (const row of rows) {
+    const ms = row.step === LOOP_RESUME_STEP ? rowMs(row) : undefined;
+    const lagMs = row.lag_ms;
+    if (ms === undefined || ms <= newestProgressMs || ms < bootMs || typeof lagMs !== "number" || !(lagMs > 0)) continue;
+    if (row.actor_pid !== boot.actor_pid || (typeof boot.host === "string" && row.host !== boot.host)) continue;
+    if (ms - lagMs - newestProgressMs > STALL_RECYCLE_AFTER_MS) continue;
+    if (resume === undefined || ms > resume.resumedMs) resume = { resumedMs: ms, lagMs };
+  }
+  return resume;
+}
+
 export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWatchdogVerdict {
   const { rows, nowMs, openPrCount, openPrCountSource } = input;
   const failedBoots15m = failedBootTimes(rows, nowMs).filter((ms) => nowMs - ms <= CRASH_LOOP_WINDOW_MS).length;
@@ -262,9 +300,12 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
   const progressAgeMs = newestProgressMs === undefined ? null : Math.max(0, nowMs - newestProgressMs);
   // A generation's stall is aged from its OWN boot, never from the dead generation's last progress row.
   const generationBootMs = generationBootMsFromRows(rows, nowMs, newestProgressMs);
+  // W1-T9516: a resumed loop's stall is aged from its resume, as a generation's is from its boot.
+  const resume = loopResumeFromRows(rows, newestProgressMs);
+  const loopResumedMs = resume?.resumedMs ?? null;
   const preNode = preNodeDeathRun(input.revivalLog ?? readRevivalLogTail(process.env[REVIVAL_LOG_ENV]), rows);
   const verdict = (state: ProgressWatchdogState, action: ProgressWatchdogAction, reason: string): ProgressWatchdogVerdict =>
-    ({ state, action, progressAgeMs, generationBootMs, failedBoots15m, preNodeDeaths: preNode.count,
+    ({ state, action, progressAgeMs, generationBootMs, loopResumedMs, failedBoots15m, preNodeDeaths: preNode.count,
       ...(openPrCountSource ? { openPrCountSource } : {}), reason });
 
   if (failedBoots15m >= CRASH_LOOP_BOOTS) {
@@ -292,6 +333,13 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
   }
   if (progressAgeMs === null) return verdict("UNKNOWN", "none", "no sweep.pass, review.posted or verdict.merged row was read");
   const minutes = Math.floor(progressAgeMs / 60_000);
+  const resumeAgeMs = resume ? Math.max(0, nowMs - resume.resumedMs) : undefined;
+  if (resume && resumeAgeMs !== undefined && progressAgeMs > STALL_DIAGNOSE_AFTER_MS && resumeAgeMs <= STALL_RECYCLE_AFTER_MS) {
+    const said = `newest progress row is ${minutes} min old, but this generation's loop resumed at ` +
+      `${fixedClock(resume.resumedMs).iso()} (${Math.floor(resumeAgeMs / 60_000)} min ago) after a block of lag_ms ${resume.lagMs}`;
+    if (resumeAgeMs > STALL_DIAGNOSE_AFTER_MS) return verdict("STALLED", "capture-diagnostics", `${said} and has written no progress row since`);
+    return verdict("RECOVERING", "none", `${said}; its progress is owed ${STALL_RECYCLE_AFTER_MS / 60_000} min after the resume`);
+  }
   if (progressAgeMs > STALL_RECYCLE_AFTER_MS) {
     const pass = inFlightPass(rows, nowMs);
     if (pass) {
