@@ -687,3 +687,36 @@ test("an enrolled repair still refuses incomplete changed-line evidence", async 
     ghJson: f.ghJson, ghText: async () => `diff --git a/${baseline} b/${baseline}\n--- a/${baseline}\n+++ b/${baseline}\n@@ -1 +1 @@\n-old\n+new\n`,
   }), /textual hunk or changed-line totals incomplete/);
 });
+
+
+test("the gate gardener reads each immutable commit comparison once per inventory", async () => {
+  const calls: string[] = [];
+  let failComparison = false;
+  const ghJson = async (args: string[]): Promise<unknown> => {
+    const path = args[1] ?? "";
+    calls.push(path);
+    if (args[0] === "repo") return { nameWithOwner: "o/r" };
+    if (path.includes("/pulls?")) return [{ number: 5, base: { sha: "base" } }];
+    if (path.endsWith("/pulls/5/commits?per_page=100")) return [{ sha: "red" }, { sha: "green" }];
+    if (path.includes("/check-runs")) return { check_runs: ["census", "second"].map((name, i) => ({
+      id: i + 7, name, status: "completed", conclusion: path.includes("/commits/red/") ? "failure" : "success",
+    })) };
+    if (path.endsWith("/status")) return { statuses: [] };
+    if (path.includes("/compare/red...green")) {
+      if (failComparison) throw new Error("comparison unavailable");
+      return { files: [{ filename: baseline, patch: "@@\n-1\n+2" }] };
+    }
+    if (path.includes("/compare/base...red")) return { merge_base_commit: { sha: "base" }, files: [] };
+    throw new Error(`unexpected evidence read: ${args.join(" ")}`);
+  };
+  const rules = [rule, { ...rule, gate: "second" }].map(r => ({ ...r, trigger: () => true }));
+  const inventory = () => loadGateRepairObservations(rules, { ghJson, ghText: async () => "" });
+  const first = await inventory();
+  assert.deepEqual(first.map(x => x.pair.gate).sort(), ["census", "second"]);
+  assert.equal(calls.filter(p => p.includes("/compare/red...green")).length, 1);
+  assert.equal(calls.filter(p => p.includes("/compare/base...red")).length, 1);
+  assert.deepEqual(await inventory(), first);
+  assert.equal(calls.filter(p => p.includes("/compare/red...green")).length, 2);
+  failComparison = true;
+  await assert.rejects(inventory(), /comparison unavailable/);
+});
