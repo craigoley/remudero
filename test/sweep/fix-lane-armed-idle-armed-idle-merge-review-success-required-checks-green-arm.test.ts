@@ -36,7 +36,7 @@ test("W1-T10741: fix-lane-armed-idle-armed-idle-merge-review-success-required-ch
     },
     updateBranch: () => {
       refreshes++;
-      if (refreshes === 1) throw new Error("ECONNRESET");
+      if (refreshes === 1) return "error"; // updateBranchViaGh catches transport failures.
       return "updated";
     },
     close: () => assert.fail("no close"), dispatchFix: () => assert.fail("no fix worker"),
@@ -48,7 +48,7 @@ test("W1-T10741: fix-lane-armed-idle-armed-idle-merge-review-success-required-ch
   await runSweep([pr()], deps);
   assert.equal(refreshes, 2, "retry the refresh that never produced a head");
   assert.deepEqual(rows.filter(row => row.step === STALE_ROLLUP_REFRESHED_STEP)
-    .map(row => row.outcome), ["error: ECONNRESET", "updated"]);
+    .map(row => row.outcome), ["error", "updated"]);
   await runSweep([pr({ headSha: NEXT, checksState: "pending", reviewState: "pending" })], deps);
   assert.deepEqual(arms, [HEAD, HEAD], "fresh head must earn checks and review");
   review(NEXT);
@@ -74,3 +74,18 @@ for (const outcome of ["updated", "head-moved", "repushed", "conflict", "error: 
     assert.match(result, /still refused after its one stale-rollup refresh/);
   });
 }
+
+test("a second ambiguous idle refresh error exhausts the bounded retry", async () => {
+  const rows: Record<string, unknown>[] = [{
+    step: STALE_ROLLUP_REFRESHED_STEP, pr_number: 10741, head_sha: HEAD, outcome: "error",
+  }, {
+    step: STALE_ROLLUP_REFRESHED_STEP, pr_number: 10741, head_sha: HEAD, outcome: "error",
+  }];
+  let escalations = 0;
+  const result = await refreshStaleRollupAfterRefusal({
+    ledgerPath: "/unused/idle-retry", runId: "bounded-errors", updateBranch: () => assert.fail("no third refresh"),
+    escalate: () => { escalations++; }, appendLine: (_path, row) => { rows.push(row); },
+  }, pr(), rows);
+  assert.equal(escalations, 1);
+  assert.match(result, /still refused after its one stale-rollup refresh/);
+});
