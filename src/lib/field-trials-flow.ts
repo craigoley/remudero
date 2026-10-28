@@ -20,6 +20,7 @@
 import { ciRemedyExecutionOf, ciRemedyExecutionReport, type CiRemedyExecution } from "./ci-remedy-execution.js";
 import { importedModuleOf, preventionRegistrationsOf, preventionAdoption, type ImportedModuleEvidence, type PreventionSourceRegistration } from "./prevention-source-evidence.js";
 import { servedTrialCohorts, trialRevisionPins, type TrialRevisionPins } from "./field-trials-cohorts.js";
+import { buildControlledFieldTrialsRelease, type ControlledReleaseInput } from "./field-trials-controlled-release.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { projectRepairCostContext, repairCostCells, repairCostsByPull, type RepairCostContext, type RepairCostReport } from "./repair-cost-evidence.js";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -1177,6 +1178,27 @@ function pseudonymSalt(outDir: string): string {
   }
 }
 
+/**
+ * W1-T10843: build the CONTROLLED release for one registered epoch beside the observational one. The epoch
+ * file carries `{ epoch, assignments, outcomes, stack }`. A candidate and its private sidecar land under
+ * `<outDir>/controlled/` for the reviewed import flow; nothing is published, no manifest entry is made.
+ */
+export function writeControlledCandidate(outDir: string, epochFile: unknown, consent: FieldTrialsConsent | string | null, nowIso: string,
+  siteAcceptsSecondary?: boolean): { state: "candidate"; file: string } | { state: "refused"; reason: string } {
+  const body = record(epochFile);
+  if (!record(body?.epoch) || !Array.isArray(body?.assignments) || !Array.isArray(body?.outcomes)) {
+    return { state: "refused", reason: "controlled-epoch-invalid" };
+  }
+  const result = buildControlledFieldTrialsRelease({ epoch: body.epoch, assignments: body.assignments, outcomes: body.outcomes,
+    pins: trialRevisionPins(record(body.stack)), consent, asOf: nowIso,
+    ...(siteAcceptsSecondary === undefined ? {} : { siteAcceptsSecondary }) } as ControlledReleaseInput);
+  if (result.state === "refused") return { state: "refused", reason: `${result.reason}: ${result.detail}` };
+  const file = join("controlled", `${result.release.releaseId}.candidate.json`);
+  writeJsonAtomically(join(outDir, file), result.release);
+  writeJsonAtomically(join(outDir, "controlled", `${result.release.releaseId}.sidecar.private.json`), result.sidecar);
+  return { state: "candidate", file };
+}
+
 export interface FieldTrialsCommandInput {
   nowIso?: string;
   print?: (line: string) => void;
@@ -1184,11 +1206,13 @@ export interface FieldTrialsCommandInput {
   fetch?: GithubPageFetch;
   readLedger?: (stateDir: string) => Promise<FieldTrialsLedgerRead>;
   resolveConfig?: () => { root: string; fleetRepos?: string[] };
+  /** W1-T10843: overrides whether the site parser is known to accept `adherence` and `secondary`. */
+  siteAcceptsSecondary?: boolean;
 }
 
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
   + "[--consent <file>] [--case-files <file>] [--finding-evidence <file>] [--finding-evidence-keys <file>] "
-  + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--json]";
+  + "[--controlled-epoch <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--json]";
 
 function labelOf(repo: string): string {
   const name = repo.split("/").at(-1)!.toLowerCase();
@@ -1220,7 +1244,7 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     values = parseArgs({ args: rest, strict: true, allowPositionals: false, options: {
       source: { type: "string", multiple: true }, ledger: { type: "string", multiple: true }, "out-dir": { type: "string" },
       consent: { type: "string" }, "case-files": { type: "string" }, "max-pages": { type: "string" },
-      "finding-evidence": { type: "string" }, "finding-evidence-keys": { type: "string" },
+      "finding-evidence": { type: "string" }, "finding-evidence-keys": { type: "string" }, "controlled-epoch": { type: "string" },
       offline: { type: "boolean" }, revoke: { type: "string" }, json: { type: "boolean" } } }).values;
   } catch {
     const reason = "arguments-invalid";
@@ -1307,9 +1331,15 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     printError(JSON.stringify({ event: "field_trials.refresh_failed", reason: failure, last_known_good: manifest.lastKnownGood }));
   }
   writeJsonAtomically(manifestPath, manifest);
+  let controlled: ReturnType<typeof writeControlledCandidate> | null = null;
+  if (typeof values["controlled-epoch"] === "string") {
+    controlled = writeControlledCandidate(outDir, readJson(values["controlled-epoch"]), consent, nowIso, input.siteAcceptsSecondary);
+    if (values.json !== true) print(controlled.state === "candidate" ? `  controlled candidate: ${controlled.file} (never published; reviewed import only)`
+      : `  controlled release refused (${controlled.reason})`);
+  }
   if (values.json === true) print(JSON.stringify({ snapshot: { state: snapshot.state, reasons: snapshot.reasons, links: {
     prs: snapshot.links.prs, matched: snapshot.links.matched, ambiguous: snapshot.links.ambiguous, unmatched: snapshot.links.unmatched },
-  rebuild: snapshot.rebuild }, github: { state: githubPass.state, pagesRead: githubPass.pagesRead }, manifest }));
+  rebuild: snapshot.rebuild }, github: { state: githubPass.state, pagesRead: githubPass.pagesRead }, manifest, controlled }));
   else {
     print(`field-trials ${snapshot.asOf}: snapshot ${snapshot.state}; github ${githubPass.state} (${githubPass.pagesRead} pages); `
       + `${snapshot.links.matched}/${snapshot.links.prs} PRs linked, ${snapshot.links.ambiguous} ambiguous, ${snapshot.links.unmatched} unmatched`);
@@ -1318,5 +1348,5 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
       + `last known good ${manifest.lastKnownGood ? `${manifest.lastKnownGood.releaseId} as of ${manifest.lastKnownGood.asOf}` : "none"}`);
     print("  observational only: no causal claim, no routing change, nothing published");
   }
-  return failure === null ? 0 : 1;
+  return failure === null && controlled?.state !== "refused" ? 0 : 1;
 }
