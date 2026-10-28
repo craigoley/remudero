@@ -1,0 +1,75 @@
+- id: W1-T10889
+  title: Preserve original CodeQL tool identity and inspect missing source evidence
+  repo: remudero
+  type: implement
+  verify: human
+  priority: 1
+  risk: medium
+  band_meaning: span
+  budget_usd: 15
+  author_class: machine
+  origin: "cockpit-readiness: all three original CodeQL artifacts remain partial in main run40604345009, 2026-10-27"
+  status: queued
+  attempts: 0
+  depends_on: [W1-T10560]
+  plan_refs: [W1-T10560, W1-T10561]
+  files:
+    - scripts/code-health-provenance.mjs
+    - test/infra/code-health-source-provenance.test.ts
+  rationale: >-
+    Native bounded readCodeHealthQualityEvidence independently read completed main CodeQL run40604345009,
+    SHA26f9ed4d7116f63a8a81ddd49c50154e61515554, for the configured actions, JavaScript-TypeScript and
+    Python languages. All original metadata artifacts are partial with null toolVersion and zero
+    explicit measured files. The exporter reads only original tool.driver.version, although SARIF
+    supports semanticVersion. The API-returned SARIF for matching JavaScript analysis2041084782
+    positively contains semanticVersion2.27.3 and no version. That server subset is not the original
+    pre-upload SARIF and its59 result artifacts cannot establish complete analysis scope. A normal
+    new collection clock alone cannot fix these producer facts. This task repairs the supported
+    tool identity and provides safe original-format evidence before any measured-scope repair.
+  design: >-
+    In the existing exporter, honor a valid bounded original CodeQL semanticVersion with the
+    SARIF precedence over version. Preserve supported legacy version when semanticVersion is absent;
+    present malformed or contradictory evidence must not silently turn an unsupported analysis into
+    a supported one. Keep the existing CodeQL identity, run/SHA/SARIF/configuration/language,
+    successful-completion, rule inventory, exclusion and scope bounds. A version fix alone must
+    leave missing measured scope partial and cannot enable planning or create benefit credit.
+
+    From the existing real exporter CLI, emit a small fixed-schema diagnostic of the original
+    output's structure. Use only bounded counts and fixed allowlisted booleans/categories for tool
+    identity, explicit target roles and recognized CodeQL baseline/file-coverage structures. Never
+    emit raw result messages, code, file paths, arbitrary property names/values, notification text,
+    host output, tokens or raw SARIF; invalid input keeps the current allowlisted error. Keep the
+    metadata artifact schema and the existing workflow invocation unchanged. Retain the original
+    source-format and method distinction; do not label server result locations, git files, expected
+    baseline counts or extraction inputs as complete measured scope. The pinned CodeQL Action already
+    requests baseline file information, so do not add another analysis or duplicate flags.
+
+    Verify with the real CLI and small representative original-output fixtures: supported semantic
+    and legacy identity, malformed/foreign identity and unsupported version; partial scope remains
+    partial; representative complete old input retains required source facts. Inject sentinel
+    security text and paths into result/arbitrary structures and parser errors and prove no leak
+    through the diagnostic or public error. Import via repository aliases, compute any repository
+    root through the maintained helper, and verify the actual new physical test with rmd test-place.
+    Keep all existing jobs, collector24h clock, ownership, memory/admission/spending, source and
+    review guards. This task does not activate a view, create a source opportunity, release either
+    cockpit consumer hold, restart/deploy a service or certify Code health complete. Trace the actual
+    remaining measured-scope format from the diagnostic before filing any separate scope repair.
+  acceptance:
+    - claim: Supported original tool identity is preserved without granting unmeasured scope
+      proof: "unit test: Code health accepts original semantic tool identity without granting unmeasured scope"
+    - claim: Original source diagnostics cannot disclose result contents or arbitrary input
+      proof: "unit test: Code health exporter keeps original source diagnostics bounded and private"
+    - claim: Existing identity refusals and supported legacy source facts remain enforced
+      proof: "unit test: Code health exporter preserves source identity refusals and legacy evidence"
+  falsifier: >-
+    Delete only semantic tool-version support and prove its positive real-CLI test fails while
+    unknown scope stays partial. Independently remove the diagnostic allowlist and prove sentinel
+    disclosure is caught. Restore the exact committed source and rerun the complete verified
+    physical suite, type checking and source-positive coverage. Use normal author admission,
+    literal stored acceptance proofs, full required hosted checks and native review before merge.
+  note: >-
+    Unfiled machine proposal pending a genuine native allocation and configured filing judgment.
+    No old approval, previous risk ruling, merged source credit or product readiness is borrowed.
+    Native deterministic placement from the two proposed imports computes infra with no competing
+    subsystem signal; verify actual source placement again before first publication. This is a
+    bounded first repair, not a claim that the entire Code health source problem is solved.
