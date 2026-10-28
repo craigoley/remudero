@@ -13,9 +13,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, chmodSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore the executable .mjs module has no declaration file.
@@ -95,7 +95,13 @@ test("a src file the branch adds that names no literal, and a non-src path that 
 function installHook(dir: string): void {
   mkdirSync(join(dir, "hooks"), { recursive: true });
   mkdirSync(join(dir, "scripts", "lib"), { recursive: true });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module" }));
   mkdirSync(join(dir, "src", "lib"), { recursive: true });
+  mkdirSync(join(dir, "test", "setup"), { recursive: true });
+  assert.equal(lstatSync(join(dir, "test", "setup")).isSymbolicLink(), false,
+    "the fixture owns its preload directory; lending it lets fixture writes change the checkout");
+  writeFileSync(join(dir, "test", "setup", "tmp-hygiene.ts"),
+    `import ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "test/setup/tmp-hygiene.ts")).href)};\n`);
   copyFileSync(join(REPO_ROOT, "src", "lib", "rule-suites.ts"), join(dir, "src", "lib", "rule-suites.ts"));
   copyFileSync(join(REPO_ROOT, "src", "lib", "trust-root-text.ts"), join(dir, "src", "lib", "trust-root-text.ts"));
   copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(dir, "hooks", "pre-push"));
@@ -122,7 +128,7 @@ function installHook(dir: string): void {
   mkdirSync(join(dir, "test", "rules"), { recursive: true });
   writeFileSync(join(dir, "test", "rules", "scout-config-gardener-failed.test.ts"), `
     import assert from "node:assert/strict";
-    import { statSync } from "node:fs";
+    import { lstatSync, statSync } from "node:fs";
     import { test } from "node:test";
     test("synthetic runner is present in the census child's working directory", () => {
       assert.ok(statSync("src/run-task.ts").isFile());
