@@ -155,7 +155,11 @@ test("W1-T9951: static-preflight runs while the suite ticket waits", async (t) =
   for (let i = 0; i < 1500 && !existsSync(ready); i += 1) await new Promise(resolve => setTimeout(resolve, 10));
   assert.ok(existsSync(ready), "the holder never took the slot and its ticket");
 
-  assert.equal(main([], { root: f.root, select: suites, testSlot: { pollMs: 50, log: () => {} } }), 0);
+  let fixtureMemoryReads = 0;
+  assert.equal(main([], { root: f.root, select: suites, testSlot: {
+    pollMs: 50, log: () => {}, memoryHeadroom: () => { fixtureMemoryReads++; return 16 * GiB; },
+  } }), 0);
+  assert.ok(fixtureMemoryReads > 0, "queue-order fixture consumes its controlled memory reading");
   const receipt = f.receipt();
   const seen = f.observed();
   assert.equal(seen.slotLabel, "suite-holder", "static-preflight ran while another run still held every suite slot");
