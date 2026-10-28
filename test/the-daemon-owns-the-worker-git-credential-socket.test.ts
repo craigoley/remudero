@@ -21,7 +21,7 @@ import { buildWorkerEnv } from "../src/lib/env.js";
 import { mintScopedToken } from "../src/lib/github-app.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { fileTargetJobStore } from "../src/lib/product-build.js";
+import { fileTargetJobStore } from "#src/lib/product-build.js";
 import {
   daemonGitCredentialSocketPath,
   realScopedMint,
@@ -45,7 +45,7 @@ import {
 import { buildSweepHook, daemonCommand, gitCredentialFixSpawn, runTask, unwireOwnCheckoutCredentialHelper } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
-import { ownedFixtureDir } from "./helpers/owned-fixture-dir.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 /** `git credential fill` for one owner/repo URL, asynchronously, with its stdin closed. */
 function credentialFill(cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
