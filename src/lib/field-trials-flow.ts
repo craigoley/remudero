@@ -32,6 +32,8 @@ import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { ghInteractiveRead } from "./github-transport.js";
 import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol } from "./benchmark-paid-pilot.js";
+import { parseRefreshSteps, recordFieldTrialsRefresh, refreshSection, type FieldTrialsRefresh, type RefreshStep } from "./field-trials-refresh.js";
+import type { IssueGateway } from "./escalate.js";
 import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, observedCurrentHeadGreen, parseGithubStore, RUN_BRANCH_RE,
   type FieldTrialsGithubPass, type FieldTrialsGithubStore, type GithubCursor, type GithubPageFetch,
   type GithubPull, type GithubRepoStore } from "./field-trials-github.js";
@@ -466,6 +468,7 @@ export interface FieldTrialsFlowSnapshot {
   asOf: string;
   state: "observed" | "observed-partial" | "unavailable";
   reasons: string[];
+  refresh?: FieldTrialsRefresh;
   observational: true;
   causalClaims: "none";
   followUpWindowDays: number;
@@ -1304,6 +1307,7 @@ function isFullCommitSha(value: string): boolean {
 }
 
 export interface FieldTrialsCommandInput {
+  refreshIssues?: IssueGateway;
   nowIso?: string;
   print?: (line: string) => void;
   printError?: (line: string) => void;
@@ -1319,7 +1323,8 @@ export interface FieldTrialsCommandInput {
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
   + "[--consent <file>] [--case-files <file>] [--finding-evidence <file>] [--finding-evidence-keys <file>] "
   + "[--controlled-registered <epoch-id> | --controlled-epoch <file>] [--controlled-protocol <file>] [--site-parser-commit <sha>] "
-  + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--json]";
+  + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--json] "
+  + "[--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]";
 
 function labelOf(repo: string): string {
   const name = repo.split("/").at(-1)!.toLowerCase();
@@ -1354,7 +1359,7 @@ export async function verifySiteSecondarySupport(commit: string | undefined, rea
  * `rmd field-trials`: one resumable snapshot pass. Reads each source's ledger union and a bounded
  * number of GitHub pages, writes the private snapshot, and — only with a consent file — a dated,
  * revocable candidate release. A refresh failure keeps the last known good release and says so.
- * It writes no ledger line, gates no PR, changes no routing, spends nothing and publishes nothing.
+ * With refresh metadata it records the collector outcome; it changes no routing or publication.
  */
 export async function fieldTrialsCommand(rest: string[], build: (input: FieldTrialsFlowInput) => FieldTrialsFlowSnapshot,
   input: FieldTrialsCommandInput = {}): Promise<number> {
@@ -1367,6 +1372,7 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
       consent: { type: "string" }, "case-files": { type: "string" }, "max-pages": { type: "string" },
       "finding-evidence": { type: "string" }, "finding-evidence-keys": { type: "string" }, "controlled-epoch": { type: "string" },
       "controlled-registered": { type: "string" }, "controlled-protocol": { type: "string" }, "site-parser-commit": { type: "string" },
+      "refresh-step": { type: "string", multiple: true }, "refresh-script-blob": { type: "string" }, "refresh-record-only": { type: "boolean" },
       offline: { type: "boolean" }, revoke: { type: "string" }, json: { type: "boolean" } } }).values;
   } catch {
     const reason = "arguments-invalid";
@@ -1391,6 +1397,29 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
   const outDir = typeof values["out-dir"] === "string" ? values["out-dir"] : join(config.root, "state", "field-trials");
   const nowIso = input.nowIso ?? systemClock.iso();
   mkdirSync(outDir, { recursive: true, mode: 0o700 });
+  let refreshSteps: RefreshStep[] | undefined;
+  const scriptBlob = values["refresh-script-blob"];
+  try {
+    if (values["refresh-step"] !== undefined || scriptBlob !== undefined || values["refresh-record-only"] === true) {
+      if (typeof scriptBlob !== "string" || !/^[0-9a-f]{40}$/.test(scriptBlob) || values.revoke !== undefined) throw new Error("invalid refresh metadata");
+      refreshSteps = parseRefreshSteps(values["refresh-step"] as string[] ?? [], values["refresh-record-only"] === true);
+    }
+  } catch (error) {
+    const reason = String(error);
+    print(`${USAGE} (${reason})`);
+    return 2;
+  }
+  const snapshotPath = join(outDir, "field-trials-flow-v1.json");
+  const priorValue = record(readJson(snapshotPath));
+  const prior = priorValue?.version === FIELD_TRIALS_FLOW_VERSION ? priorValue as unknown as FieldTrialsFlowSnapshot : undefined;
+  const refreshInput = { outDir, ledgerPath: ledgerLivePath(ledgerPairs.get("core") ?? join(config.root, "state")),
+    asOf: nowIso, scriptBlob: scriptBlob as string, priorSnapshotAsOf: prior?.asOf ?? null,
+    caseFilesFallback: (values["case-files"] === undefined ? "none" : "previous") as "none" | "previous",
+    ...(input.refreshIssues ? { issues: input.refreshIssues } : {}) };
+  if (values["refresh-record-only"] === true) {
+    recordFieldTrialsRefresh({ ...refreshInput, steps: refreshSteps!, snapshotAsOf: null });
+    return 0;
+  }
   const manifestPath = join(outDir, "field-trials-release-manifest.json");
   const manifest = parseReleaseManifest(readJson(manifestPath));
   if (typeof values.revoke === "string") {
@@ -1430,13 +1459,21 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     }
     sources.push({ label, repo, ledger });
   }
-  const snapshotPath = join(outDir, "field-trials-flow-v1.json");
-  const priorValue = record(readJson(snapshotPath));
-  const prior = priorValue?.version === FIELD_TRIALS_FLOW_VERSION ? priorValue as unknown as FieldTrialsFlowSnapshot : undefined;
   const findingEvidence = readReviewFindingEvidence(values["finding-evidence"] as string | undefined,
     values["finding-evidence-keys"] as string | undefined);
   const snapshot = build({ asOf: nowIso, sources, github, githubPass, findingEvidence,
     ...(prior ? { prior } : {}), ...(caseFiles ? { caseFiles } : {}) });
+  if (refreshSteps) {
+    snapshot.refresh = refreshSection(refreshSteps, scriptBlob as string, snapshot.state === "unavailable" ? null : snapshot.asOf,
+      prior?.refresh ? prior.refresh.lastGoodSnapshotAsOf : prior?.asOf ?? null);
+    snapshot.refresh.caseFilesFallback = refreshSteps.some(step => step.name === "case-files" && step.state === "failed")
+      ? refreshInput.caseFilesFallback : "none";
+    if (snapshot.refresh.state === "ok") snapshot.refresh.lastGoodSnapshotAsOf = snapshot.asOf;
+    if (snapshot.refresh.state !== "ok") {
+      if (snapshot.state === "observed") snapshot.state = "observed-partial";
+      snapshot.reasons.push(...refreshSteps.filter(step => step.state !== "ok").map(step => `refresh-${step.name}-${step.state}`));
+    }
+  }
   if (snapshot.state !== "unavailable") writeJsonAtomically(snapshotPath, snapshot);
   const consent = typeof values.consent === "string" ? parseFieldTrialsConsent(readJson(values.consent)) : null;
   for (const file of revokeWithdrawnConsent(manifest, consent, nowIso)) rmSync(join(outDir, file), { force: true });
@@ -1500,6 +1537,10 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     print(`  release: ${manifest.lastRefresh!.state}${manifest.lastRefresh!.reason ? ` (${manifest.lastRefresh!.reason})` : ""}; `
       + `last known good ${manifest.lastKnownGood ? `${manifest.lastKnownGood.releaseId} as of ${manifest.lastKnownGood.asOf}` : "none"}`);
     print("  observational only: no causal claim, no routing change, nothing published");
+  }
+  if (refreshSteps && snapshot.state !== "unavailable") {
+    recordFieldTrialsRefresh({ ...refreshInput, steps: refreshSteps, snapshotAsOf: snapshot.asOf });
+    return 0;
   }
   return failure === null && controlled?.state !== "refused" ? 0 : 1;
 }

@@ -17,7 +17,16 @@ import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from ".
 const DAY = 86_400_000;
 const since = ROUTING_EXPERIMENTS.map((item) => item.startedOn).sort()[0];
 
-async function readSource(source, asOf, resolutions) {
+function reportReads(row, time, windowStart) {
+  const step = String(row.step);
+  return ["worker.assignment", "verdict.merged", "fix.dispatch"].includes(step)
+    || row.selection_assignment_id && (step === "worker.attempt" || step === "verdict" || step.endsWith(".done"))
+    || time >= windowStart && (REVIEW_FLOW_STEPS.includes(step) || step === "ci_learning_cadence.ran"
+      || step === "ci_learning_cadence.run_failed" || step === "sweep.update_branch.pending_guard"
+      || step.endsWith(".gardener_judged") || step.endsWith(".gardener_failed") || step.startsWith("goal."));
+}
+
+async function readSource(source, asOf, resolutions, openUnion) {
   let names;
   try { names = readdirSync(source.stateDir); }
   catch { return { ...source, state: "unavailable", reasons: ["ledger-source-unreadable"], rowsRead: 0, rows: [] }; }
@@ -28,19 +37,31 @@ async function readSource(source, asOf, resolutions) {
     return { ...source, state: "unavailable", reasons: ["ledger-source-missing"], forms, rowsRead: 0, rows: [] };
   const rows = [];
   const resolvedRows = new WeakSet();
+  const qualityRows = new WeakSet();
   let routingResolvedFutureRows = 0;
   const findings = [];
   let findingsOmitted = 0;
   const finding = (value) => { if (findings.length < 200) findings.push(value); else findingsOmitted++; };
   const windowStart = Date.parse(asOf) - DAY;
   let retainedRowsOmitted = 0;
+  const reportSeen = new Set();
   let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, invalidTimestampRows = 0, newestTs = null;
-  for await (const row of openLedgerUnion(source.stateDir, {
+  for await (const row of openUnion(source.stateDir, {
     since: `${since}T00:00:00Z`,
+    // Quality audits stream the whole corpus; only report inputs own bounded replay fingerprints.
+    dedupe: false,
     onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
     onMalformedRow: (item) => { malformedRows++; finding({ kind: item.kind, form: item.form, path: item.path, rowOrdinal: item.rowOrdinal, timestamp: item.timestamp }); },
     onAcceptedRecord: (row, raw) => {
       const timestamp = Date.parse(row.ts);
+      if (reportReads(row, timestamp, windowStart) && timestamp <= Date.parse(asOf)) {
+        const fingerprint = createHash("sha256").update(raw).digest("hex");
+        if (reportSeen.has(fingerprint)) return;
+        if (reportSeen.size < 100_000) reportSeen.add(fingerprint);
+        if (rows.length < 100_000) rows.push(row); else retainedRowsOmitted++;
+      }
+      // Do not count an exact report replay twice, but keep auditing unrelated physical rows.
+      qualityRows.add(row);
       const resolution = resolveRoutingQuarantineRow(resolutions, source.label, row, raw, asOf);
       if (resolution) resolvedRows.add(row);
       if (!Number.isFinite(timestamp) || timestamp > Date.parse(asOf) + 5 * 60_000) finding({
@@ -50,6 +71,7 @@ async function readSource(source, asOf, resolutions) {
       });
     },
   })) {
+    if (!qualityRows.has(row)) continue;
     const time = Date.parse(row.ts);
     if (!Number.isFinite(time)) { invalidTimestampRows++; continue; }
     if (time > Date.parse(asOf) + 5 * 60_000) { futureRows++; if (resolvedRows.has(row)) routingResolvedFutureRows++; continue; }
@@ -57,13 +79,6 @@ async function readSource(source, asOf, resolutions) {
     if (time > Date.parse(asOf)) continue;
     rowsRead++;
     if (newestTs === null || row.ts > newestTs) newestTs = row.ts;
-    if (["worker.assignment", "verdict.merged", "fix.dispatch"].includes(row.step) || row.selection_assignment_id
-      || time >= windowStart && (REVIEW_FLOW_STEPS.includes(row.step) || row.step === "ci_learning_cadence.ran"
-        || row.step === "ci_learning_cadence.run_failed" || row.step === "sweep.update_branch.pending_guard"
-        || String(row.step).endsWith(".gardener_judged")
-        || String(row.step).endsWith(".gardener_failed") || String(row.step).startsWith("goal."))) {
-      if (rows.length < 100_000) rows.push(row); else retainedRowsOmitted++;
-    }
   }
   const reasons = [];
   if (retainedRowsOmitted) reasons.push("ledger-retention-row-bound");
@@ -72,7 +87,7 @@ async function readSource(source, asOf, resolutions) {
   if (invalidTimestampRows) reasons.push("ledger-source-invalid-timestamp");
   if (futureRows) reasons.push("ledger-source-future-dated");
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
-    rowsRead, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
+    rowsRead, retainedRows: rows.length, dedupeRows: reportSeen.size, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
 }
 
 function privateWrite(path, value) {
@@ -81,7 +96,7 @@ function privateWrite(path, value) {
   renameSync(temp, path);
 }
 
-export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions }) {
+export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions, openUnion = openLedgerUnion }) {
   const resolutions = readRoutingQuarantineResolutions(quarantineResolutions, asOf, sources.map(source => source.label));
   const today = asOf.slice(0, 10);
   const yesterday = fixedClock(Date.parse(`${today}T00:00:00Z`) - DAY).iso().slice(0, 10);
@@ -103,7 +118,7 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
   }
   const results = [];
   for (const source of sources) {
-    const { rows, ...quality } = await readSource(source, asOf, resolutions);
+    const { rows, ...quality } = await readSource(source, asOf, resolutions, openUnion);
     const trialReasons = quality.reasons.filter(reason => reason !== "ledger-source-future-dated"
       || quality.futureRows !== quality.routingResolvedFutureRows);
     const trialSourceQuality = { scope: "routing-trials", rawSourceState: quality.state,
