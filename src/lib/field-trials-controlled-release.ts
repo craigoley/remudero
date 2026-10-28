@@ -19,6 +19,7 @@
  * network call, opens no pull request and writes no manifest entry.
  */
 import { createHash } from "node:crypto";
+import { fixedClock } from "./clock.js";
 import type { FieldTrialsConsent } from "./field-trials-flow.js";
 import { TRIAL_REVISION_RE, type TrialRevisionPins } from "./field-trials-cohorts.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
@@ -29,7 +30,7 @@ export const CONTROLLED_RELEASE_SCHEMA = "field-trials-v1" as const;
 export const CENSORING_MARGIN_MS = 72 * 3_600_000;
 export const BOOTSTRAP_RESAMPLES = 2000;
 /** The site's id grammar (model ids, release ids, revisions). */
-export const SITE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
+export const SITE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
 /** An assignment count whose arm split strays this many standard errors from the draw is a broken allocation. */
 export const BALANCE_MAX_Z = 4;
 /** Share of assignments whose served model is unknown above which the audit does not pass. */
@@ -199,16 +200,16 @@ function interval(values: readonly number[], rng: () => number, places: number):
 /** Everything the site's parser would reject, found here first. Returns the first violation or null. */
 export function siteParserViolation(release: ControlledFieldTrialsRelease): string | null {
   const arms = release.arms;
-  if (!SITE_ID_RE.test(release.releaseId)) return "releaseId";
+  if (!SITE_ID_PATTERN.test(release.releaseId)) return "releaseId";
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(release.publishedAt) || Number.isNaN(ms(release.publishedAt))) return "publishedAt";
   for (const key of ["corpusRevision", "harnessRevision", "scorerRevision", "consentRegistryRevision"] as const) {
-    if (!SITE_ID_RE.test(release[key])) return key;
+    if (!SITE_ID_PATTERN.test(release[key])) return key;
   }
   if (release.sourceRepos.length === 0) return "sourceRepos";
   if (arms.length !== 2 || arms[0].modelId === arms[1].modelId) return "arms";
   for (const arm of arms) {
     const rate = arm.successes / arm.observed;
-    if (!SITE_ID_RE.test(arm.modelId) || !(arm.observed > 0 && arm.observed <= arm.assigned)
+    if (!SITE_ID_PATTERN.test(arm.modelId) || !(arm.observed > 0 && arm.observed <= arm.assigned)
       || !(arm.successes >= 0 && arm.successes <= arm.observed) || !Number.isInteger(arm.assigned) || !Number.isInteger(arm.successes)
       || !(arm.ciLower >= 0 && arm.ciUpper <= 1 && arm.ciLower <= rate && rate <= arm.ciUpper)) return `arm:${arm.modelId}`;
   }
@@ -226,7 +227,7 @@ export function buildControlledFieldTrialsRelease(input: ControlledReleaseInput)
   const { epoch } = input;
   const [armA, armB] = epoch.arms;
   if (epoch.arms.length !== 2 || armA === armB || epoch.randomizationUnit !== "task" || epoch.drawMethod !== ROUTING_DRAW_METHOD
-    || !(epoch.drawProbability > 0 && epoch.drawProbability < 1) || !SITE_ID_RE.test(epoch.epochId)
+    || !(epoch.drawProbability > 0 && epoch.drawProbability < 1) || !SITE_ID_PATTERN.test(epoch.epochId)
     || !(ms(epoch.window.start) < ms(epoch.window.end))) {
     return refuse("epoch-not-registered", `${epoch.epochId}: needs two distinct arms, unit task, draw ${ROUTING_DRAW_METHOD}, a window`);
   }
@@ -244,7 +245,7 @@ export function buildControlledFieldTrialsRelease(input: ControlledReleaseInput)
   const cutoff = ms(epoch.window.end) + CENSORING_MARGIN_MS;
   const asOf = ms(input.asOf);
   if (!(asOf >= cutoff) || !(asOf >= ms(epoch.stopping.afterIso))) {
-    return refuse("horizon-not-reached", `as of ${input.asOf}; earliest read ${new Date(Math.max(cutoff, ms(epoch.stopping.afterIso))).toISOString()}`);
+    return refuse("horizon-not-reached", `as of ${input.asOf}; earliest read ${fixedClock(Math.max(cutoff, ms(epoch.stopping.afterIso))).iso()}`);
   }
   const windowRows = input.assignments.filter((row) => ms(row.at) >= ms(epoch.window.start) && ms(row.at) <= ms(epoch.window.end));
   const first = firstAssignments(epoch, input.assignments);
@@ -287,7 +288,7 @@ export function buildControlledFieldTrialsRelease(input: ControlledReleaseInput)
   const crossed = windowRows.filter((row) => row.servedArm !== row.assignedArm).length;
   const body = {
     schema: CONTROLLED_RELEASE_SCHEMA, releaseId: "", status: "published" as const, publicationScope: "public-opt-in" as const,
-    publishedAt: new Date(asOf).toISOString(), evidence: "controlled" as const, randomizationUnit: "task" as const,
+    publishedAt: fixedClock(asOf).iso(), evidence: "controlled" as const, randomizationUnit: "task" as const,
     metric: "verified_completion" as const, intervalMethod: "bootstrap-95-task" as const, corpusRevision: epoch.corpusRevision,
     harnessRevision: pins.harness!, scorerRevision: pins.scorer!, assignmentAudit: "pass" as const,
     sourceRepos: [...epoch.sourceRepos], consentRegistryRevision: createHash("sha256").update(JSON.stringify(consent)).digest("hex"),

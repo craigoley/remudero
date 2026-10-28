@@ -1186,7 +1186,7 @@ function pseudonymSalt(outDir: string): string {
 export function writeControlledCandidate(outDir: string, epochFile: unknown, consent: FieldTrialsConsent | string | null, nowIso: string,
   siteAcceptsSecondary?: boolean): { state: "candidate"; file: string } | { state: "refused"; reason: string } {
   const body = record(epochFile);
-  if (!record(body?.epoch) || !Array.isArray(body?.assignments) || !Array.isArray(body?.outcomes)) {
+  if (body === undefined || record(body.epoch) === undefined || !Array.isArray(body.assignments) || !Array.isArray(body.outcomes)) {
     return { state: "refused", reason: "controlled-epoch-invalid" };
   }
   const result = buildControlledFieldTrialsRelease({ epoch: body.epoch, assignments: body.assignments, outcomes: body.outcomes,
