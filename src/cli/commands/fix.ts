@@ -85,6 +85,8 @@ export interface FixCommandHost {
   readonly buildProofAmendmentGitOps: RunTaskCommandHost["buildProofAmendmentGitOps"];
   readonly buildProofAmendmentWritePorts: RunTaskCommandHost["buildProofAmendmentWritePorts"];
   readonly buildSweepEffects: HostFn;
+  readonly preserveInheritedCensusWork: RunTaskCommandHost["preserveInheritedCensusWork"];
+  readonly readInheritedCensusContextAsync: RunTaskCommandHost["readInheritedCensusContextAsync"];
   readonly checkFixCensusSnapshotAsync: RunTaskCommandHost["checkFixCensusSnapshotAsync"];
   readonly ciEvidenceDisagreementObservation: HostFn;
   readonly ciGateState: RunTaskCommandHost["ciGateState"];
@@ -2098,6 +2100,63 @@ async function capturedScopeMergeConflict(
   return hasCapturedMergeConflictEvidence(evidence) ? evidence : undefined;
 }
 
+type InheritedCensusRefreshInput = {
+  root: string; worktreePath: string; branch: string; prUrl: string; prNumber: number;
+  snapshotPath: string; context: Extract<NonNullable<CensusPushRefusal["inheritedMain"]>, { state: "inherited" }>;
+};
+
+/** A refusal stays a refusal. Only a proven trial merge may request the existing exact-head update;
+ *  its asynchronous acceptance returns to the sweep, never to a worker on this old checkout. */
+export async function refreshInheritedCensusRefusal(input: InheritedCensusRefreshInput,
+  deps: Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"],
+  evidence: Pick<FixCommandHost, "readInheritedCensusContextAsync" | "preserveInheritedCensusWork">,
+): Promise<{ outcome: "requested" | "held"; reason: string }> {
+  const { context } = input;
+  const log = (outcome: string, reason: string, extra: Record<string, unknown> = {}) =>
+    deps.log("fix.census_refresh", { pr_number: input.prNumber, head_sha: context.headSha, main_sha: context.mainSha,
+      merge_base: context.mergeBase, baseline_path: context.baselinePath, outcome, reason, ...extra });
+  const held = (reason: string) => { log("held", reason); return { outcome: "held" as const, reason }; };
+  if (!deps.branchClaim?.verify || !deps.readLiveState || !deps.readLiveHead || !deps.readCiRollup ||
+      !deps.readMergeFacts || !deps.reproduceFailingTestsOnMerge || !deps.updateBranch) return held("native refresh ownership or evidence is not wired");
+  try {
+    const check = async (): Promise<string | undefined> => {
+      const claim = deps.branchClaim!.reacquire() ?? deps.branchClaim!.verify!();
+      if (claim) return claim;
+      const state = await deps.readLiveState!(input.prUrl);
+      if (!state.ok || state.state !== "OPEN") return "PR is not confirmed open";
+      const live = await deps.readLiveHead!(input.prUrl);
+      if (!live.ok || live.headSha !== context.headSha || live.headRefName !== input.branch) return "PR head or branch changed";
+      const current = await evidence.readInheritedCensusContextAsync(input.worktreePath, input.snapshotPath);
+      if (JSON.stringify(current) !== JSON.stringify(context)) return "census context changed or is unavailable";
+      const rollup = await deps.readCiRollup!(input.prUrl);
+      // Check every row independently: an earlier failure must not hide a later in-flight check.
+      if (rollup.length === 0 || rollup.some(row => !["green", "red"].includes(checksStateFromRollup([row], undefined)))) return "CI is in flight or unreadable";
+      const facts = await deps.readMergeFacts!(input.prNumber);
+      if (facts.mergeable !== "MERGEABLE" || !Number.isInteger(facts.behindBy) || facts.behindBy! <= 0) return "main merge is not confirmed safe and behind";
+      return deps.branchClaim!.verify!();
+    };
+    const before = await check();
+    if (before) return held(before);
+    const reach = "test/the-affected-suite-reach-ratchet.test.ts";
+    const trial = await deps.reproduceFailingTestsOnMerge({ prNumber: input.prNumber, headSha: context.headSha } as OpenPrView, [reach], context.mainSha);
+    if (trial.setup_error || trial.length !== 1 || trial[0]?.file !== reach || trial[0].outcome !== "passes") return held("unchanged reach check did not pass on the trial merge");
+    const saved = await evidence.preserveInheritedCensusWork(input.root, input.worktreePath, input.branch, context);
+    log("work-preserved", "saved work is durable; current checkout is unchanged", saved);
+    const after = await check();
+    if (after) return held(after);
+    // Last read plus API CAS protects a concurrent remote head even after the asynchronous trial.
+    const live = await deps.readLiveHead(input.prUrl);
+    if (!live.ok || live.headSha !== context.headSha || live.headRefName !== input.branch) return held("PR head changed before update");
+    const claim = deps.branchClaim.verify();
+    if (claim) return held(claim);
+    const updated = await deps.updateBranch(input.prNumber, context.headSha);
+    if (!updated.ok) return held(`exact-head update refused: ${updated.error ?? "unknown result"}`);
+    const reason = "native exact-head base refresh requested for inherited census contract; await new head and unchanged gates";
+    log("requested", reason);
+    return { outcome: "requested", reason };
+  } catch (error) { return held(`native refresh evidence unavailable: ${String(error).slice(0, 512)}`); }
+}
+
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   pendingAnswer?: OpenPrView["pendingAnswer"];
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
@@ -3880,6 +3939,17 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     if (fixHarnessOwnsGit && fixCensusApplies && !deps.writeFixCensusSnapshot) {
       deps.log("fix.census_snapshot", { outcome: "unavailable", reason: "snapshot producer is not wired" });
     }
+    if (censusSnapshotPath && currentMergeConflict === undefined && prNumber !== undefined) {
+      const context = await host.readInheritedCensusContextAsync(opts.worktreePath, censusSnapshotPath);
+      if (context.state === "inherited") {
+        const checked = await host.checkFixCensusSnapshotAsync(opts.worktreePath, censusSnapshotPath, deps.log);
+        if (checked?.refusal?.inheritedMain?.state === "inherited") {
+          const refresh = await refreshInheritedCensusRefusal({ root: opts.config.root, worktreePath: opts.worktreePath,
+            branch: opts.branch, prUrl: opts.prUrl, prNumber, snapshotPath: censusSnapshotPath, context }, deps, host);
+          return { outcome: refresh.outcome === "requested" ? "base_refreshed" : "stood_down", review, strikes, retriggers, reason: refresh.reason };
+        }
+      }
+    }
     // W1-T5544: a proof-repair round stages EXACTLY the PR's own test files plus the task's declared test paths —
     // the census-baseline offers and every src/plan path are left out, so the harness commit refuses them by name.
     const proofRepairStageable = proofRepairRound
@@ -4744,6 +4814,12 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       // parent validates it on the gate-log evidence and opens the one proof-only plan PR. Best-effort, logged either way.
       if (proofRepairRound && proofDiscriminationNow) {
         amendProofs(proofDiscriminationNow);
+      }
+      if (censusCheck?.refusal?.inheritedMain?.state === "inherited" && censusSnapshotPath && prNumber !== undefined) {
+        const refresh = await refreshInheritedCensusRefusal({ root: opts.config.root, worktreePath: opts.worktreePath,
+          branch: opts.branch, prUrl: opts.prUrl, prNumber, snapshotPath: censusSnapshotPath, context: censusCheck.refusal.inheritedMain }, deps, host);
+        logFixDone();
+        return { outcome: refresh.outcome === "requested" ? "base_refreshed" : "stood_down", review, strikes, retriggers, reason: refresh.reason };
       }
       logFixDone();
       if (censusCheck?.refusal) {

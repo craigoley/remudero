@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, unlinkSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
@@ -31,7 +31,7 @@ const REACH_STAND_IN = [
   IMPORT_CLI.trimEnd(),
   'import assert from "node:assert/strict";',
   'import { existsSync } from "node:fs";',
-  'import { test } from "node:test";',
+  'import { test, type TestContext } from "node:test";',
   'test("reach stand-in refuses the new importer", () => {',
   '  assert.equal(existsSync("test/new.test.ts"), false, "importerCount: new importer test/new.test.ts");',
   "});", "",
@@ -44,7 +44,7 @@ function fixture(root = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-")), lin
     "src/lib/affected-suites.ts": "export {};\n",
     // A module no suite reaches keeps the fixture's median reach under the real tree's recorded one.
     "src/lib/unreached.ts": "export {};\n",
-    [SKILL_CENSUS]: 'import { test } from "node:test";\ntest("skill census stand-in", () => undefined);\n',
+    [SKILL_CENSUS]: 'import { test, type TestContext } from "node:test";\ntest("skill census stand-in", () => undefined);\n',
     "scripts/affected-reach-baseline.json": JSON.stringify(baseline),
     "package.json": JSON.stringify({ imports: JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).imports }),
   };
@@ -352,7 +352,7 @@ test("a pending main merge gives the census its prospective merged base without 
     "the branch's own newly unsafe census input remains different from the measured base");
 });
 
-test("the real snapshot checker identifies the inherited reach contract after its merged control passes", async t => {
+async function inheritedContractFixture(t: TestContext) {
   const harness = await import("#src/run-task.js");
   const repo = gitRepo({ scope: t, kind: "inherited-census-contract" });
   const f = fixture(repo.dir, true);
@@ -380,6 +380,11 @@ test("the real snapshot checker identifies the inherited reach contract after it
   const head = repo.git("rev-parse", "HEAD");
   const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
   const log = (step: string, fields: Record<string, unknown> = {}) => { rows.push({ step, fields }); };
+  return { harness, repo, baselinePath, current, head, main, base, rows, log };
+}
+
+test("the real snapshot checker identifies the inherited reach contract after its merged control passes", async t => {
+  const { harness, repo, baselinePath, current, head, main, base, log } = await inheritedContractFixture(t);
   const snapshot = await harness.writeFixCensusSnapshotAsync(repo.dir, log);
   assert.ok(snapshot, "the real Git snapshot is available");
   const refused = await harness.checkFixCensusSnapshotAsync(repo.dir, snapshot, log);
@@ -397,4 +402,67 @@ test("the real snapshot checker identifies the inherited reach contract after it
   const context = (refused.refusal as unknown as { inheritedMain?: Record<string, unknown> }).inheritedMain;
   assert.deepEqual(context, { state: "inherited", headSha: head, mainSha: main, mergeBase: base, baselinePath },
     "the refusing result must name its verified inherited context rather than buying another blind model retry");
+});
+
+
+test("inherited census baseline drift refreshes before another fix worker", async t => {
+  const { harness, repo, head, main, baselinePath, current, rows, log } = await inheritedContractFixture(t);
+  const { acquireInflightLock } = await import("#src/lib/inflight-lock.js");
+  const { fixRoundBranchClaim } = await import("#src/lib/sweep.js");
+  const { spawnSync } = await import("node:child_process");
+  const root = join(repo.dir, "state", "native-refresh");
+  mkdirSync(root, { recursive: true });
+  const branch = repo.git("branch", "--show-current");
+  const sibling = "refs/heads/unrelated-sibling";
+  repo.git("update-ref", sibling, main);
+  const lock = acquireInflightLock(join(root, "locks"), "refresh", { run_id: "TEST-refresh" });
+  t.after(() => lock.release());
+  const claim = fixRoundBranchClaim(lock, () => { throw new Error("unexpected second owner"); });
+  const mount = { model: "sonnet", effort: "medium" as const, maxTurns: 2, contextBudget: 120000 };
+  const review = { state: "failure" as const, headSha: head, reviewerOutcome: "failure", testTheater: false, summary: "cleanup needs repair",
+    floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+    criteria: [{ claim: "the cleanup is confirmed", proof: "unit test: cleanup is confirmed", met: false, reason: "still blocked", proof_exec: "not_executable" as const }] };
+  let spawned = 0, updates = 0;
+  const outcome = await harness.runFixRung({ taskId: "W1-T10935TEST", runId: "TEST-refresh",
+    task: { id: "W1-T10935TEST", title: "cleanup is confirmed", files: ["src/lib/unreached.ts"] },
+    prUrl: "https://github.com/craigoley/remudero/pull/1", branch, worktreePath: repo.dir, initialSessionId: "fixture",
+    mount, settingsFile: join(root, "settings.json"), config: { root, workerProviders: { harnessCommitsFix: true } },
+    budgetUsd: 1, strikeCap: 1, initialReview: review,
+    reviewBase: { owner: "craigoley", repo: "remudero", headCheckoutDir: repo.dir, reviewerMount: mount },
+    deps: { spawn: async () => { spawned++; throw new Error("must refresh before buying a model retry"); },
+      waitForCiGreen: async () => "green" as const, runReview: async () => review,
+      fetchPrBody: async () => "REPORT", push: () => { throw new Error("no push from old checkout"); },
+      issues: { create: () => "https://github.com/craigoley/remudero/issues/1", listOpen: () => [], comment: () => {} },
+      ledgerPath: join(root, "ledger.ndjson"), ledgerLines: () => [], log, say: () => {}, account: result => result,
+      writeFixCensusSnapshot: harness.writeFixCensusSnapshotAsync, branchClaim: claim,
+      readLiveState: () => ({ ok: true, state: "OPEN" }),
+      readLiveHead: () => ({ ok: true, headSha: head, headRefName: branch }),
+      readCiRollup: () => [{ name: "ci-gate", conclusion: "SUCCESS" }],
+      readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 1 }),
+      reproduceFailingTestsOnMerge: async (_pr, files, tip) => {
+        assert.equal(tip, main);
+        const trial = join(root, "trial");
+        repo.git("worktree", "add", "--detach", trial, main);
+        try {
+          const git = (...args: string[]) => {
+            const out = spawnSync("git", ["-C", trial, ...args], { encoding: "utf8" });
+            assert.equal(out.status, 0, out.stderr); return out.stdout.trim();
+          };
+          git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-edit", head);
+          const snap = await harness.writeFixCensusSnapshotAsync(trial, log);
+          const checked = await harness.checkFixCensusSnapshotAsync(trial, snap, log);
+          assert.equal(checked?.refusal, undefined, "the unchanged real checker passes the private merged control");
+          assert.equal(readFileSync(join(trial, baselinePath), "utf8"), current);
+          return files.map(file => ({ file, outcome: "passes" as const, duration_ms: 1, cached: false }));
+        } finally { repo.git("worktree", "remove", "--force", trial); }
+      },
+      updateBranch: (number, expected) => { assert.equal(number, 1); assert.equal(expected, head); updates++; return { ok: true }; },
+    },
+  });
+  assert.equal(outcome.outcome, "base_refreshed", JSON.stringify({ outcome, rows }));
+  assert.equal(spawned, 0); assert.equal(updates, 1);
+  assert.equal(repo.git("rev-parse", "HEAD"), head, "asynchronous acceptance never pretends this old checkout was refreshed");
+  assert.equal(repo.git("rev-parse", sibling), main, "unrelated sibling is untouched");
+  assert.ok(rows.some(row => row.step === "fix.census_check" && row.fields.outcome === "refused"));
+  assert.ok(rows.some(row => row.step === "fix.census_refresh" && row.fields.outcome === "requested"));
 });

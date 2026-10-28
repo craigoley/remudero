@@ -4623,7 +4623,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             readMergeFacts: (n: number) => fixRebaseMergeFactsFromRest(owner, repo, n),
             // W1-T2671: same ci-log-only base-gap reader as the run-loop call site above.
             readRedBaseRefreshFacts: (n: number) => redBaseRefreshFactsFromRest(owner, repo, n),
-            updateBranch: (n: number) => ghUpdateBranch(owner, repo, n),
+            reproduceFailingTestsOnMerge: deps.reproduceFailingTestsOnMergeImpl,
+
+            updateBranch: (n: number, head?: string) => ghUpdateBranch(owner, repo, n, undefined, undefined, undefined, head),
             // W1-T1044: THIS is the call site the measured incident actually hit — a fix-rung
             // worker spawned from a `dispatchFix` disposition ran 8,970s as a direct child of
             // the daemon, parking `await deps.sweep()` (daemon.ts) for the whole of it. The
@@ -12968,6 +12970,8 @@ export interface FixRoundBranchClaim {
   /** `undefined` once held; a string is the stand-down reason. */
   reacquire(): string | undefined;
   last(): InflightLockHandle;
+  /** Positive current lock identity; absent on an older adapter means UNKNOWN. */
+  verify?(): string | undefined;
 }
 
 export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => InflightLockHandle | string): FixRoundBranchClaim {
@@ -12987,6 +12991,17 @@ export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => Inf
       return undefined;
     },
     last: () => last,
+    verify: () => {
+      if (!held) return "branch claim is not held";
+      try {
+        const stat = fs.lstatSync(held.path);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096) return "branch claim identity is unreadable";
+        const info = parseInflightLockInfo(readFileSync(held.path, "utf8"));
+        if (!info || info.run_id !== held.info.run_id || info.pid !== held.info.pid ||
+            info.host !== held.info.host || info.startedAt !== held.info.startedAt) return "branch claim belongs to another owner";
+        return undefined;
+      } catch { return "branch claim identity is unavailable"; }
+    },
   };
 }
 

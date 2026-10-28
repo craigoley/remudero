@@ -270,7 +270,7 @@ export interface RunTaskCommandHost {
   readonly ghLiveState: (prUrl: string) => LiveStateResult;
   readonly ghLiveHead: (prUrl: string, gh?: (args: string[]) => unknown) => LiveHeadResult;
   readonly captureWorktreeSnapshotViaGit: (worktreePath: string) => WorktreeSnapshot | undefined;
-  readonly ghUpdateBranch: (owner: string, repo: string, prNumber: number, exec?: typeof execFileSync, via?: string, record?: BranchUpdateRecorder) => { ok: boolean; error?: string };
+  readonly ghUpdateBranch: (owner: string, repo: string, prNumber: number, exec?: typeof execFileSync, via?: string, record?: BranchUpdateRecorder, expectedHeadSha?: string) => { ok: boolean; error?: string };
   readonly redBaseRefreshFactsFromRest: (owner: string, repo: string, prNumber: number, fetch?: GhApiFetcher) => RedBaseRefreshFacts;
   readonly fixRebaseMergeFactsFromRest: (owner: string, repo: string, prNumber: number, fetch?: GhApiFetcher) => FixRebaseMergeFacts;
   readonly reclaimAbandonedWorker: (info: { runId: string; taskId: string; elapsedMs: number }, deps?: {
@@ -432,7 +432,7 @@ export interface RunTaskCommandHost {
     
     readMergeFacts?: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
     
-    updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
+    updateBranch?: (prNumber: number, expectedHeadSha?: string) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
     
     readRedBaseRefreshFacts?: (prNumber: number) => RedBaseRefreshFacts | Promise<RedBaseRefreshFacts>;
     
@@ -525,6 +525,8 @@ export interface RunTaskCommandHost {
   readonly fixCensusAppliesToRepo: (repo: string | undefined, log: (step: string, extra?: Record<string, unknown>) => void, resolveSelf?: () => { owner: string; repo: string }) => boolean;
   readonly writeFixCensusSnapshot: (root: string, log: (step: string, extra?: Record<string, unknown>) => void, runGit?: typeof hostWorktreeGit) => string | undefined;
   readonly writeFixCensusSnapshotAsync: (root: string, log: (step: string, extra?: Record<string, unknown>) => void, runGit?: (root: string, args: string[], options?: HostWorktreeGitOptions) => string | Promise<string>) => Promise<string | undefined>;
+  readonly preserveInheritedCensusWork: (root: string, worktreePath: string, branch: string, context: Extract<InheritedCensusContext, { state: "inherited" }>) => Promise<Record<string, string>>;
+  readonly readInheritedCensusContextAsync: (root: string, path: string) => Promise<InheritedCensusContext>;
   readonly checkFixCensusSnapshotAsync: (root: string, path: string | undefined, log: (step: string, extra?: Record<string, unknown>) => void, run?: CensusChildRunner<Promise<CensusChildResult>>) => Promise<{ refusal?: CensusPushRefusal; unmeasured?: string } | undefined>;
   readonly FixRoundPushError: new (pushCause: RunErrorCause, refusal: CensusPushRefusal | undefined, detail: string) => RmdError & { readonly pushCause: RunErrorCause; readonly refusal: CensusPushRefusal | undefined; readonly detail: string };
   readonly pushFixRound: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string, deps?: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts }) => Promise<FixRoundPushReceipt>;
@@ -1127,7 +1129,12 @@ export type RunErrorCause =
   | "subscription-only-refused"
   | "run-error";
 
+export type InheritedCensusContext =
+  | { state: "inherited"; headSha: string; mainSha: string; mergeBase: string; baselinePath: string }
+  | { state: "not-inherited" | "unavailable"; reason: string };
+
 export interface CensusPushRefusal {
+  inheritedMain?: InheritedCensusContext;
   text: string;
   censuses: string[];
   offeredBaselines: string[];
@@ -3386,6 +3393,11 @@ async function repairCensusRefusedPush(helperHost: Pick<RunTaskHelperHost, "CENS
     const censusCheck = await checkFixCensusSnapshotAsync(cwd, censusSnapshotPath, log);
     if (censusCheck?.refusal) {
       refusal = censusCheck.refusal;
+      if (refusal.inheritedMain?.state === "inherited") {
+        const reason = "inherited census contract needs native base refresh before another worker; no PR exists yet";
+        log("census_push.refresh_held", { strike, ...refusal.inheritedMain, reason });
+        return { outcome: "refused", strikes: strike, refusal, reason };
+      }
       log("census_push.strike", { strike, ...receipt.ledgerFields(result), cost_usd: result.costUsd,
         reason: "saved edits refused by census before commit", refusal: refusal.text });
       continue;
@@ -7759,7 +7771,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           readRedBaseRefreshFacts: (n) => redBaseRefreshFactsFromRest(owner, task.repo, n),
           // W1-T8396: this rung's own checkout already holds the head, so its trial merge needs no fetch of it.
           reproduceFailingTestsOnMerge: buildBaseReproductionProbe(config, worktreePath, ledgerPath, (s, extra) => log(s, extra), { merge: true }),
-          updateBranch: (n) => ghUpdateBranch(owner, task.repo, n),
+          updateBranch: (n, head) => ghUpdateBranch(owner, task.repo, n, undefined, undefined, undefined, head),
           // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
           // reclaim of whatever it abandoned — see runFixRung's own deps doc. W1-T1219: reads
           // `fixSpawnWallClockBoundMs`, its OWN policy row, not the sweep tick's.

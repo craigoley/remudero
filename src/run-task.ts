@@ -7877,11 +7877,12 @@ export function ghUpdateBranch(
   exec: typeof execFileSync = execFileSync,
   via = "fix-rung",
   record?: BranchUpdateRecorder,
+  expectedHeadSha?: string,
 ): { ok: boolean; error?: string } {
   assertLiveWriteAllowed("gh-pr-update-branch", `updating the base of ${owner}/${repo}#${prNumber}`);
   const fields = { repo: `${owner}/${repo}`, prNumber, via };
   try {
-    exec("gh", ghUpdateBranchArgv(owner, repo, prNumber), { stdio: "pipe" });
+    exec("gh", ghUpdateBranchArgv(owner, repo, prNumber, expectedHeadSha), { stdio: "pipe" });
     recordBranchUpdate({ ...fields, outcome: "updated" }, record);
     return { ok: true };
   } catch (e) {
@@ -10670,6 +10671,57 @@ function* writeFixCensusSnapshotSteps(
 /** A census child's result: `spawnSync`'s own fields, or the same fields from {@link spawnCensusChild}. */
 /** How a census check runs one child: `spawnSync` on the CLI, an awaited spawn on the daemon's loop (W1-T7744). */
 
+/** W1-T10935: only the witnessed relative-to-package-imports contract migration is a refresh
+ * candidate. This is context for a refusing gate, never permission to skip it or raise its baseline. */
+export function readInheritedCensusContextAsync(root: string, path: string): Promise<import("./cli/commands/run-task-verb.js").InheritedCensusContext> {
+  return runStepsAsync(inheritedCensusContextSteps(root, path, hostWorktreeGitAsync));
+}
+
+function* inheritedCensusContextSteps(
+  root: string, path: string,
+  git: (root: string, args: string[], options?: HostWorktreeGitOptions) => string | Promise<string>,
+): Steps<import("./cli/commands/run-task-verb.js").InheritedCensusContext> {
+  const baselinePath = "scripts/affected-reach-baseline.json";
+  try {
+    // Read only the small, writer-owned identity prefix, not the snapshot's large baseBlobs union.
+    const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    let prefix: string;
+    try {
+      if (!fstatSync(fd).isFile()) throw new Error("census snapshot is not a regular file");
+      const bytes = Buffer.alloc(8192);
+      prefix = bytes.subarray(0, readSync(fd, bytes, 0, bytes.length, 0)).toString("utf8");
+    } finally { closeSync(fd); }
+    const end = prefix.indexOf(',"headPaths":');
+    if (end < 0) throw new Error("census snapshot identity prefix unavailable");
+    const identity = JSON.parse(prefix.slice(0, end) + "}");
+    if (identity.version !== 1 || identity.root !== resolve(root) ||
+        ![identity.headSha, identity.mainSha, identity.mergeBase].every(sha => typeof sha === "string" && /^[a-f0-9]{40}$/.test(sha))) {
+      throw new Error("census snapshot identity invalid");
+    }
+    const read = function* (args: string[]): Steps<string> {
+      return (yield* step(() => git(root, args, { maxBuffer: 256 * 1024 }))).trim();
+    };
+    if ((yield* read(["rev-parse", "HEAD"])) !== identity.headSha ||
+        (yield* read(["rev-parse", "origin/main"])) !== identity.mainSha ||
+        (yield* read(["merge-base", identity.headSha, identity.mainSha])) !== identity.mergeBase) {
+      throw new Error("census snapshot refs changed");
+    }
+    const base = yield* read(["show", `${identity.mergeBase}:${baselinePath}`]);
+    const head = yield* read(["show", `${identity.headSha}:${baselinePath}`]);
+    const main = yield* read(["show", `${identity.mainSha}:${baselinePath}`]);
+    if (head !== base || (yield* read(["diff", "HEAD", "--", baselinePath])) !== "") {
+      return { state: "not-inherited", reason: "branch or saved work edits the reach baseline" };
+    }
+    if (JSON.parse(base).resolution !== undefined || JSON.parse(main).resolution !== "package-imports") {
+      return { state: "not-inherited", reason: "no witnessed reach resolution migration on main" };
+    }
+    return { state: "inherited", headSha: identity.headSha, mainSha: identity.mainSha,
+      mergeBase: identity.mergeBase, baselinePath };
+  } catch (error) {
+    return { state: "unavailable", reason: String(error).slice(0, 512) };
+  }
+}
+
 export function checkFixCensusSnapshot(
   root: string,
   path: string | undefined,
@@ -10769,12 +10821,21 @@ function* fixCensusSnapshotSteps(
       const result = yield* step(() => run(process.execPath, judged.args,
         { cwd: scriptsRoot, env: { ...env, ...judged.env }, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
       const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-      const stopped = (reason: string) => ({ text: `census-precheck: this branch grows 1 census count(s) CI will refuse:\n  census-suite: ${reach} fails — ${reason}`,
+      const stopped = (reason: string): CensusPushRefusal => ({ text: `census-precheck: this branch grows 1 census count(s) CI will refuse:\n  census-suite: ${reach} fails — ${reason}`,
         censuses: ["census-suite"], offeredBaselines: [] });
       if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
         refusal = unavailable(`census suite ${reach}`, result, output);
       } else if (result.status !== 0) {
         refusal = stopped(String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000));
+        refusal.inheritedMain = yield* inheritedCensusContextSteps(root, path,
+          (root, args, options) => {
+            const result = run("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: childTimeBoundMs, maxBuffer: options?.maxBuffer });
+            const checked = (value: CensusChildResult) => {
+              if (value.status !== 0 || value.signal || value.error) throw new Error("inherited census Git evidence unavailable");
+              return String(value.stdout);
+            };
+            return result instanceof Promise ? result.then(checked) : checked(result);
+          });
       } else {
         const verdict = judged.judge(0);
         if (!verdict.complete) refusal = stopped(verdict.line);
@@ -10786,6 +10847,20 @@ function* fixCensusSnapshotSteps(
   log("fix.census_check", { outcome: refusal ? "refused" : unmeasured ? "partially-measured" : "passed",
     ...(refusal ? { refusal: refusal.text } : {}), ...(unmeasured ? { reason: unmeasured } : {}) });
   return { refusal, unmeasured };
+}
+
+/** Preserve this owner before requesting a remote refresh. No reset, clean or sibling ref update. */
+export async function preserveInheritedCensusWork(root: string, worktreePath: string, branch: string,
+  context: Extract<import("./cli/commands/run-task-verb.js").InheritedCensusContext, { state: "inherited" }>): Promise<Record<string, string>> {
+  const git = (args: string[]) => hostWorktreeGitAsync(worktreePath, args, { maxBuffer: 1 << 24 });
+  if ((await git(["rev-parse", "HEAD"])).trim() !== context.headSha) throw new Error("saved work head changed");
+  const tracked = (await git(["diff", "HEAD", "--name-only", "-z"])).split("\0").filter(Boolean);
+  const untracked = (await git(["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
+  const mainChanged = new Set((await git(["diff", "--name-only", "-z", context.mergeBase, context.mainSha])).split("\0"));
+  if ([...tracked, ...untracked].some(path => mainChanged.has(path))) throw new Error("saved work overlaps main migration");
+  if (untracked.length > 0) return { saved_path: preserveStaleDirtyFixOwner(root, worktreePath, worktreePath, branch, context.headSha) };
+  if (tracked.length > 0) return { recovery_ref: preserveTrackedDirtyFixOwner(worktreePath, worktreePath, branch, context.headSha) };
+  return {};
 }
 
 /** W1-T4693: a fix round's push that did not land — `refusal` set when the pre-push census refused it. */
@@ -42811,6 +42886,8 @@ function runTaskCommandHost(): RunTaskCommandHost {
     writeFixCensusSnapshot,
     writeFixCensusSnapshotAsync,
     checkFixCensusSnapshotAsync,
+    readInheritedCensusContextAsync,
+    preserveInheritedCensusWork,
     FixRoundPushError,
     pushFixRound,
     coveragePrecheck,
@@ -42872,6 +42949,8 @@ function fixCommandHost(): FixCommandHost {
     get buildProofAmendmentWritePorts() { return buildProofAmendmentWritePorts; },
     get buildSweepEffects() { return buildSweepEffects; },
     get checkFixCensusSnapshotAsync() { return checkFixCensusSnapshotAsync; },
+    get readInheritedCensusContextAsync() { return readInheritedCensusContextAsync; },
+    get preserveInheritedCensusWork() { return preserveInheritedCensusWork; },
     get ciEvidenceDisagreementObservation() { return ciEvidenceDisagreementObservation; },
     get ciGateState() { return ciGateState; },
     get commandSyntax() { return commandSyntax; },
