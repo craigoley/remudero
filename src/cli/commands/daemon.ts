@@ -42,6 +42,7 @@ import { gitRecommendationEvidence, RECOMMENDATION_SEED_PATH } from "../../lib/i
 import { censusRunDirs } from "../../lib/run-child-contract.js";
 import { plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
+import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
 import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktrees } from "../../lib/review-worktree-reclaim.js";
@@ -273,18 +274,20 @@ export function daemonKickPort(root: string, target: { repo: string; isSelf: boo
 }
 
 /**
- * W1-T10799: the repo-scoped kick markers under the CORE root that no other daemon addresses: those naming a repository
- * other than this daemon's own. They are offered ONLY to {@link createNativeTargetJobRunner}, never to `pendingKicks`
- * ({@link daemonKickPort} still hands the self daemon nothing for a foreign repository), and only while the exact file
- * its clear would delete exists.
+ * W1-T10799: foreign repo-scoped markers and unfinished durable jobs under the CORE root. Only
+ * {@link createNativeTargetJobRunner} consumes them; durable recovery survives a missing marker.
  */
 export function daemonTargetJobPort(root: string, self: { repo: string }): {
   pendingTargetJobs: () => Array<DaemonKick & { repo: string }>;
 } {
   return {
-    pendingTargetJobs: () => pendingKicks(root).flatMap((kick) =>
-      kick.repo !== undefined && kick.repo.toLowerCase() !== self.repo.toLowerCase() && existsSync(kickFilePath(root, kick.taskId, kick.repo))
-        ? [{ taskId: kick.taskId, origin: kick.origin, repo: kick.repo }] : []),
+    pendingTargetJobs: () => {
+      const marked = pendingKicks(root).flatMap((kick) =>
+        kick.repo !== undefined && kick.repo.toLowerCase() !== self.repo.toLowerCase() && existsSync(kickFilePath(root, kick.taskId, kick.repo))
+          ? [{ taskId: kick.taskId, origin: kick.origin, repo: kick.repo }] : []);
+      const durable = fileTargetJobStore(root).readAll().filter((job) => job.status === "admitted" && job.repo.toLowerCase() !== self.repo.toLowerCase());
+      return [...marked, ...durable.filter((job) => !marked.some((kick) => kick.origin === job.origin))];
+    },
   };
 }
 
@@ -309,7 +312,7 @@ export interface NativeTargetJobContext {
   syncPlan: (planPath: string, owner: string, repo: string) => Promise<{ plan: Plan } | { error: string }>;
   /** The merged/open-PR projection bound to the TARGET owner and repository, never the core repository's closures. */
   project: (plan: Plan, owner: string, repo: string) => Map<string, StatusProjection>;
-  runTask: (taskId: string, target: { planPath: string; owner: string }) => Promise<RunResult>;
+  runTask: (taskId: string, target: { planPath: string; owner: string; repo: string; plan: Plan }) => Promise<RunResult>;
   claimHeld: BoundedTargetJobPorts["claimHeld"];
   runDrain?: typeof runDrain;
 }
@@ -323,43 +326,51 @@ export interface NativeTargetJobContext {
 export function createNativeTargetJobRunner(ctx: NativeTargetJobContext): (kick: DaemonKick & { repo: string }, daemonDeps: DaemonDeps) => Promise<BoundedTargetJobOutcome> {
   const store = fileTargetJobStore(ctx.root);
   const stateDir = join(ctx.root, "state");
-  return (kick, daemonDeps) => {
-    let owner = "";
-    let planPath = "";
-    let projection = new Map<string, StatusProjection>();
-    const governors = Object.fromEntries(TARGET_JOB_DAEMON_DEPS.flatMap((key) => (daemonDeps[key] === undefined ? [] : [[key, daemonDeps[key]]]))) as Partial<DrainDeps>;
-    const jobDeps: BoundedTargetJobPorts = {
-      readJob: store.read,
-      writeJob: store.write,
-      admit: (repo) => nativeTargetAdmission(repo, { ...ctx.instances, repoRoot: ctx.repoRoot }),
-      syncPlan: async (targetOwner, repo) => {
-        const path = ctx.planPathFor(targetOwner, repo);
-        if (path === undefined) return { error: "no target clone path" };
-        owner = targetOwner;
-        planPath = path;
-        return ctx.syncPlan(path, targetOwner, repo);
-      },
-      claimHeld: ctx.claimHeld,
-      // The core ledger's own receipts for THIS origin, read from the dispatch time the durable record kept.
-      execution: (record) => readTargetExecution(stateDir, { taskId: record.taskId, origin: record.origin, repo: record.repo,
-        requestedAt: fixedClock(Date.parse(record.updatedAt) - 60_000).iso(), nowMs: ctx.nowMs() }),
-      drain: (plan, opts, onDispatch) => (ctx.runDrain ?? runDrain)(plan, {
-        ...governors,
-        refreshMerged: () => {
-          projection = ctx.project(plan, owner, kick.repo);
-          return (id) => projection.get(id)?.merged ?? false;
+  let reserved = false;
+  return async (kick, daemonDeps) => {
+    if (reserved) {
+      ctx.log("target_job.capacity_deferred", { task: kick.taskId, origin: kick.origin, repo: kick.repo, reason: "core lane reserved by another job" });
+      return { state: "held", reason: "core lane reserved by another job" };
+    }
+    reserved = true;
+    try {
+      let owner = "";
+      let planPath = "";
+      let projection = new Map<string, StatusProjection>();
+      const governors = Object.fromEntries(TARGET_JOB_DAEMON_DEPS.flatMap((key) => (daemonDeps[key] === undefined ? [] : [[key, daemonDeps[key]]]))) as Partial<DrainDeps>;
+      const jobDeps: BoundedTargetJobPorts = {
+        readJob: store.read,
+        writeJob: store.write,
+        admit: (repo) => nativeTargetAdmission(repo, { ...ctx.instances, repoRoot: ctx.repoRoot }),
+        syncPlan: async (targetOwner, repo) => {
+          const path = ctx.planPathFor(targetOwner, repo);
+          if (path === undefined) return { error: "no target clone path" };
+          owner = targetOwner;
+          planPath = path;
+          return ctx.syncPlan(path, targetOwner, repo);
         },
-        isOpenPr: (id) => { const row = projection.get(id); return row?.prState === "OPEN" ? row.prNumber : undefined; },
-        isCreditIndeterminate: (id) => projection.get(id)?.indeterminate === true,
-        isIndeterminate: (id) => projection.get(id)?.indeterminate === true,
-        runOne: async (id) => { onDispatch(); return ctx.runTask(id, { planPath, owner }); },
+        claimHeld: ctx.claimHeld,
+        // The core ledger's own receipts for THIS origin, read from the dispatch time the durable record kept.
+        execution: (record) => readTargetExecution(stateDir, { taskId: record.taskId, origin: record.origin, repo: record.repo,
+          requestedAt: fixedClock(Date.parse(record.updatedAt) - 60_000).iso(), nowMs: ctx.nowMs() }),
+        drain: (plan, opts, onDispatch) => (ctx.runDrain ?? runDrain)(plan, {
+          ...governors,
+          refreshMerged: () => {
+            projection = ctx.project(plan, owner, kick.repo);
+            return (id) => projection.get(id)?.merged ?? false;
+          },
+          isOpenPr: (id) => { const row = projection.get(id); return row?.prState === "OPEN" ? row.prNumber : undefined; },
+          isCreditIndeterminate: (id) => projection.get(id)?.indeterminate === true,
+          isIndeterminate: (id) => projection.get(id)?.indeterminate === true,
+          runOne: async (id) => { onDispatch(); return ctx.runTask(id, { planPath, owner, repo: kick.repo, plan }); },
+          log: ctx.log,
+        }, opts),
+        clearKick: (taskId, repo) => { clearKick(ctx.root, taskId, repo); },
         log: ctx.log,
-      }, opts),
-      clearKick: (taskId, repo) => { clearKick(ctx.root, taskId, repo); },
-      log: ctx.log,
-      nowIso: () => clockFromMillisFn(ctx.nowMs).iso(),
-    };
-    return runBoundedTargetJob(kick, jobDeps);
+        nowIso: () => clockFromMillisFn(ctx.nowMs).iso(),
+      };
+      return await runBoundedTargetJob(kick, jobDeps);
+    } finally { reserved = false; }
   };
 }
 
@@ -875,11 +886,41 @@ export async function daemonCommand(
   // W1-T3144: identical to drainCommand — complete board depth from the projection's existing
   // batch read, with the old projection count retained only for gateways that omit that method.
   // W1-T4465 design (i): the SAME batch, split by fleet ownership — never a second GitHub read.
-  const openPrOwnership = () => boardOpenPrCount.readOwnership(() => {
-    let projected = 0;
-    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
-    return projected;
-  });
+  const openPrOwnership = () => {
+    const own = boardOpenPrCount.readOwnership(() => {
+      let projected = 0;
+      for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
+      return projected;
+    });
+    if (!target.isSelf) return own;
+    const jobs = fileTargetJobStore(config.root).readAll();
+    let owned = own.owned;
+    let foreign = own.foreign;
+    for (const managed of loadManagedRepos(effectiveRepoRoot)) {
+      if (managed.repo.toLowerCase() === target.repo.toLowerCase()) continue;
+      const admission = nativeTargetAdmission(managed.repo, { repoRoot: effectiveRepoRoot });
+      if (admission.state === "unreadable") throw new Error("managed target ownership unreadable");
+      if (admission.state !== "native") continue;
+      // A new board snapshot sees a PR just handed off, even while the lane gateway's cache is warm.
+      const github = githubFactory(managed.owner, managed.repo);
+      const rows = github.listOpenHeadBranches?.();
+      if (!rows) throw new Error(`target WIP unreadable: ${managed.owner}/${managed.repo}`);
+      const observation = createOpenPrCountObservation();
+      observation.observe(rows);
+      const counts = observation.readOwnership(() => 0);
+      owned += counts.owned;
+      foreign += counts.foreign;
+      for (const job of jobs) {
+        if (job.status !== "admitted" || job.repo.toLowerCase() !== managed.repo.toLowerCase()) continue;
+        if (rows.some((pr: PrRef) => taskIdFromRunBranch(pr.headRefName ?? "") === job.taskId)) continue;
+        const execution = readTargetExecution(join(config.root, "state"), { taskId: job.taskId, origin: job.origin, repo: job.repo,
+          requestedAt: fixedClock(Date.parse(job.updatedAt) - 60_000).iso(), nowMs: (deps.now ?? Date.now)() });
+        if (execution.state !== "ended") owned++;
+      }
+    }
+    // Target PR numbers have their own namespace; Core's adaptive flow must retain only Core's numbers.
+    return { ...own, owned, foreign };
+  };
   const openPrCount = () => openPrOwnership().owned;
   const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
@@ -1768,6 +1809,7 @@ export async function daemonCommand(
             },
             runTask: (taskId, job) => runTaskFn(taskId, {
               planPath: job.planPath, config, allowStale: false, pairedTrialHost: "daemon", owner: job.owner, githubFor: laneGithubFor, handOffAtPrOpen: true,
+              planSnapshot: async () => ({ plan: job.plan, staleDispatch: false }),
               ...(gitCredentialSocket ? { gitCredentialSocketPath: gitCredentialSocket.socketPath } : {}),
             }),
             claimHeld: async (taskId, repo) => {

@@ -76,7 +76,7 @@ const BOUNDED_DRAIN: readonly EntryPoint[] = [
     role: "caller",
     file: "src/cli/commands/daemon.ts",
     from: "export function createNativeTargetJobRunner(",
-    calls: ["(ctx.runDrain ?? runDrain)(plan, {", "return runBoundedTargetJob(kick, jobDeps);"],
+    calls: ["(ctx.runDrain ?? runDrain)(plan, {", "return await runBoundedTargetJob(kick, jobDeps);"],
     bounds: "runBoundedTargetJob's curation: one task, depth 1, max 1, laneCount 1; the core daemon's own governors from its deps",
   },
   {

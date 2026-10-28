@@ -2767,6 +2767,7 @@ export interface TargetJobRecord {
   origin: string; taskId: string; repo: string; status: TargetJobStatus;
   /** How many times the drain was entered for this job; a replay never raises it past a dispatch that happened. */
   attempts: number; updatedAt: string; reason?: string; stopReason?: string;
+  owner?: string; planRevision?: string;
 }
 /** `unreadable` is its own state: a record this process cannot read is never "no job", so it can never respend. */
 export type TargetJobRead = { state: "found"; record: TargetJobRecord } | { state: "absent" } | { state: "unreadable" };

@@ -45,7 +45,7 @@ import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-revi
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
 import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
-import { runChildOutsideKill, type AdoptedRunChild, type RunChildHandle, type RunChildPending } from "./run-child.js";
+import { planSha, runChildOutsideKill, type AdoptedRunChild, type RunChildHandle, type RunChildPending } from "./run-child.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
@@ -6651,7 +6651,15 @@ export async function runDaemon(
     // reserves for it. Core's own kick has priority, a busy lane or a zero enforced lane target defers the job
     // explicitly, and a second request in the same tick defers behind the first: this adds no capacity.
     if (!forcedNext && deps.pendingTargetJobs && deps.runTargetJob) {
-      const [job, ...waiting] = deps.pendingTargetJobs();
+      let pending: Array<DaemonKick & { repo: string }>;
+      try { pending = deps.pendingTargetJobs(); }
+      catch (error) {
+        log("target_job.unknown", { reason: `durable jobs unreadable: ${String(error)}` });
+        ticks++;
+        await sleepUntilSweepWake(pollIntervalMs);
+        continue;
+      }
+      const [job, ...waiting] = pending;
       if (job) {
         const laneTarget = enforcedLaneTarget(children.size, tickQueueAdmission?.wipLimit);
         const wipBudget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
@@ -8051,6 +8059,7 @@ export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: Boun
   const read = deps.readJob(origin);
   if (read.state === "unreadable") return held("job record unreadable", "target_job.unknown");
   const prior = read.state === "found" ? read.record : undefined;
+  if (prior && (prior.taskId !== taskId || prior.repo.toLowerCase() !== repo.toLowerCase())) return held("job identity conflicts with request", "target_job.unknown");
   // A closed job is reported, never re-run: the same origin never spends twice.
   if (prior && (prior.status === "ended" || prior.status === "refused")) {
     deps.log("target_job.replayed", { ...fields, status: prior.status });
@@ -8061,10 +8070,7 @@ export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: Boun
   if (admission.state === "unreadable") return held("registry or managed set unreadable", "target_job.unknown");
   if (admission.state === "not_enrolled") return refuse(prior, "target is not an enrolled managed repository");
   if (admission.state === "own_instance") return refuse(prior, `${admission.instance} drives this repository; its own kick path owns the task`);
-
-  const synced = await deps.syncPlan(admission.owner, repo);
-  if ("error" in synced) return held(`target plan not synced: ${synced.error}`, "target_job.plan_unreadable");
-  if (!synced.plan.tasks.some((t) => t.id === taskId)) return refuse(prior, "unknown task id");
+  if (prior?.owner && prior.owner.toLowerCase() !== admission.owner.toLowerCase()) return held("verified target owner changed", "target_job.unknown");
 
   if (prior?.status === "admitted") {
     // A restart or a lost response: recover from the durable record, the native receipts and the dispatch claim.
@@ -8080,7 +8086,15 @@ export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: Boun
       }
       return { state: "resumed", reason: `dispatch already landed (${seen.state})` };
     }
+    return held(`previous dispatch unresolved (${seen.state}); claim absent`, "target_job.unknown");
   }
+
+  const synced = await deps.syncPlan(admission.owner, repo);
+  if ("error" in synced) return held(`target plan not synced: ${synced.error}`, "target_job.plan_unreadable");
+  const task = synced.plan.tasks.find((t) => t.id === taskId);
+  if (!task) return refuse(prior, "unknown task id");
+  if (task.repo.toLowerCase() !== repo.toLowerCase()) return refuse(prior, "task repository conflicts with verified target");
+  const identity = { owner: admission.owner, planRevision: planSha(synced.plan.tasks) };
 
   // One task, depth 1, max 1, one lane: the job can never re-enter the target plan's other tasks.
   const opts = applyCuratedSelection({ ...baseOpts, laneCount: 1, wipLimit: 1 }, { taskIds: [taskId], depth: 1 });
@@ -8089,7 +8103,8 @@ export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: Boun
   try {
     summary = await deps.drain(synced.plan, opts, () => {
       // Durable BEFORE the spend, and the receipt only when the drain really starts the run.
-      deps.writeJob(base("admitted", prior, { attempts: (prior?.attempts ?? 0) + 1 }));
+      if (dispatched) throw new Error("bounded job already dispatched");
+      deps.writeJob(base("admitted", prior, { ...identity, attempts: (prior?.attempts ?? 0) + 1 }));
       dispatched = true;
       deps.log("console.kick_dispatched", fields);
     });
@@ -8098,8 +8113,9 @@ export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: Boun
     return held(`drain failed${dispatched ? " after dispatch" : ""}: ${String((error as Error)?.message ?? error)}`, "target_job.error");
   }
   if (dispatched) {
+    if (summary.stopReason === "error") return held("dispatch outcome unresolved", "target_job.unknown");
     deps.log("target_job.ended", { ...fields, stop_reason: summary.stopReason });
-    return close(base("ended", { ...(prior ?? base("queued")), attempts: (prior?.attempts ?? 0) + 1 }, { stopReason: summary.stopReason }), summary.stopReason, false);
+    return close(base("ended", { ...(prior ?? base("queued")), attempts: (prior?.attempts ?? 0) + 1 }, { ...identity, stopReason: summary.stopReason }), summary.stopReason, false);
   }
   if (CAPACITY_STOPS.has(summary.stopReason) || summary.stopReason === "error") {
     return held(`${summary.stopReason}${summary.stopDetail ? `: ${summary.stopDetail}` : ""}`, "target_job.capacity_deferred");

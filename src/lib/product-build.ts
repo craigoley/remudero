@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -431,8 +431,8 @@ export class ProductBuildService {
     const queuedEvidence = product.stageEvidence.find((item) => item.id === operationId);
     if (!queuedEvidence) throw new Fault("recovery_required");
 
-    // Observation may add admitted/running evidence, each with its own record; absence adds nothing. Admission is a
-    // held claim or the daemon's dispatch of this request; running is ONLY the target daemon's native evidence.
+    // Native routes require this origin's dispatch receipt for admission. An instance's own route retains its
+    // claim observation; running always requires the daemon's correlated native execution evidence.
     const seen = await this.target.observe(subject, input.taskId);
     daemon ??= this.routeDaemon(subject);
     // A daemon whose state this process cannot reach (a remote or unmounted instance) has no readable evidence.
@@ -443,7 +443,7 @@ export class ProductBuildService {
     const runUrl = branch !== undefined && seen.state !== "unknown" && seen.branches.includes(branch) ? `${repositoryUrl}/tree/${branch}` : repositoryUrl;
     // The daemon refusing THIS request's kick outranks a claim some other dispatch holds: that claim is not this admission.
     const wanted = {
-      admitted: execution.state !== "refused" && (seen.state === "admitted" || ["dispatched", "running", "ended", "silent"].includes(execution.state)),
+      admitted: execution.state !== "refused" && ((daemon.state === "found" && !daemon.native && seen.state === "admitted") || ["dispatched", "running", "ended", "silent"].includes(execution.state)),
       running: execution.state === "running",
     };
     for (const outcome of ["admitted", "running"] as const) {
@@ -533,13 +533,19 @@ export function nativeTargetAdmission(repoName: string, options: ProductBuildIns
 const targetJobRecordSchema = z.object({
   origin: z.string().min(1), taskId: z.string().min(1), repo: z.string().min(1), status: z.enum(["queued", "admitted", "ended", "refused"]),
   attempts: z.number().int().min(0), updatedAt: z.string(), reason: z.string().optional(), stopReason: z.string().optional(),
+  owner: z.string().optional(), planRevision: z.string().optional(),
 }).strict();
 
 /** The durable job record: one file per kick origin under `<root>/state/target-jobs`, replaced atomically. */
-export function fileTargetJobStore(root: string): { read: (origin: string) => TargetJobRead; write: (record: TargetJobRecord) => void } {
+export function fileTargetJobStore(root: string): { read: (origin: string) => TargetJobRead; write: (record: TargetJobRecord) => void; readAll: () => TargetJobRecord[] } {
   const dir = join(root, "state", "target-jobs");
   const pathFor = (origin: string) => join(dir, `${digest(origin).slice(0, 48)}.json`);
   return {
+    readAll() {
+      if (!existsSync(dir)) return [];
+      return readdirSync(dir).filter((name) => name.endsWith(".json"))
+        .map((name) => targetJobRecordSchema.parse(JSON.parse(readFileSync(join(dir, name), "utf8"))));
+    },
     read(origin) {
       const path = pathFor(origin);
       if (!existsSync(path)) return { state: "absent" };

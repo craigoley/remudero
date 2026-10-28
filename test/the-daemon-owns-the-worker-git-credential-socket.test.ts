@@ -29,7 +29,7 @@ import {
   startDaemonGitCredentialSocket,
   type ScopedTokenMint,
 } from "../src/lib/secret-boundary.js";
-import type { GitHub } from "../src/lib/status.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   CLAUDE_BIN_ENV_OVERRIDE,
@@ -893,7 +893,7 @@ test("W1-T10799: a missing target clone creates its parent and a failed clone ne
 
 // The core daemon's OWN composition root, not a hand-wired runner: it binds the job to the target clone, reads the
 // target's dispatch claim from that clone's origin, and hands the job's worker the daemon's one credential socket.
-test("W1-T10799: the core daemon's own wiring runs the job over the target clone, its claim and its credential socket", async (t) => {
+test("W1-T10799: one managed target without a daemon reaches one bounded native job through core wiring and shared WIP", async (t) => {
   const root = ownedFixtureDir(t, "bounded-target-daemon").dir;
   const home = join(root, "home");
   const coreRoot = join(home, "Remudero");
@@ -938,20 +938,46 @@ test("W1-T10799: the core daemon's own wiring runs the job over the target clone
   delete process.env.GITHUB_ACTIONS;
   const outcomes: Record<string, unknown> = {};
   const taskCalls: Array<{ taskId: string; opts: Record<string, unknown> }> = [];
+  const corePrs: PrRef[] = [];
+  const targetPrs: PrRef[] = [];
   try {
     const code = await daemonCommand(["--allow-self-target", "--plan", selfPlan, "--max", "0"], {
       repoRoot: checkout,
-      githubFactory: () => OFFLINE_GITHUB,
+      githubFactory: (_owner: string, repo: string) => ({ ...OFFLINE_GITHUB,
+        listOpenHeadBranches: () => repo === "remudero" ? corePrs : repo === "wreckterra" ? targetPrs : [],
+      }),
+      readQueuePressure: (floorMib: number) => ({ availableMib: floorMib * 10, floorMib, tier: "fits" }),
       startGithubAppRefresh: () => ({ armed: true, ready: Promise.resolve() }),
       gitCredentialMint: async (repo: string) => ({ ok: true, token: `scoped-for-${repo}` }),
       runTask: (async (taskId: string, opts: Record<string, unknown>) => {
         taskCalls.push({ taskId, opts });
-        return { taskId, runId: `${taskId}-wired`, merged: true, costUsd: 0, verdict: "merged" };
+        const snapshot = await (opts.planSnapshot as () => Promise<{ plan: { tasks: Array<{ id: string; repo: string }> } }>)();
+        assert.equal(snapshot.plan.tasks.find((task) => task.id === taskId)?.repo, "wreckterra", "runTask reads the exact selected target plan snapshot");
+        targetPrs.push({ number: 1, url: "https://github.com/craigoley/wreckterra/pull/1", state: "OPEN", headRefName: `run-${taskId}-1` });
+        return { taskId, runId: `${taskId}-wired`, merged: false, costUsd: 5, verdict: "handed_off", prUrl: targetPrs[0]!.url };
       }) as never,
       runDaemon: (async (_plan: unknown, daemonDeps: DaemonDeps) => {
         for (const repo of ["wreckterra", "gammaterra"]) {
           outcomes[repo] = await daemonDeps.runTargetJob!({ taskId: "W9-T1", origin: origins[repo]!, repo }, {} as DaemonDeps);
         }
+        assert.equal(daemonDeps.openPrCount!(), 2, "both unresolved durable target jobs occupy shared WIP after restart");
+        // Resolve the fixture records, then fill all but the last slot on Core's board.
+        for (const repo of Object.keys(origins)) store.write({ origin: origins[repo]!, taskId: "W9-T1", repo, status: "ended", attempts: 1, updatedAt: new Date().toISOString() });
+        daemonDeps.refreshMerged();
+        daemonDeps.checkQueueGovernor!();
+        const limit = daemonDeps.readQueueAdmission!()!.wipLimit;
+        for (let n = 1; n < limit; n++) corePrs.push({ number: n, url: `https://github.com/craigoley/remudero/pull/${n}`, state: "OPEN", headRefName: `run-W1-T${n}-1` });
+        daemonDeps.refreshMerged();
+        assert.equal(daemonDeps.openPrCount!(), limit - 1);
+        const gates = { checkQueueGovernor: daemonDeps.checkQueueGovernor } as DaemonDeps;
+        [outcomes.fresh, outcomes.concurrent] = await Promise.all([
+          daemonDeps.runTargetJob!({ taskId: "W9-T1", origin: "product:fresh/one", repo: "wreckterra" }, gates),
+          daemonDeps.runTargetJob!({ taskId: "W9-T3", origin: "product:fresh/two", repo: "wreckterra" }, gates),
+        ]);
+        assert.equal((outcomes.concurrent as { state: string }).state, "held", "concurrent requests reserve the shared lane before awaiting plan sync");
+        assert.equal(daemonDeps.openPrCount!(), limit, "the first target PR consumes the last shared WIP slot");
+        outcomes.waiting = await daemonDeps.runTargetJob!({ taskId: "W9-T3", origin: "product:fresh/two", repo: "wreckterra" }, gates);
+        assert.equal((outcomes.waiting as { state: string }).state, "held", "the second job defers on target WIP even with a free lane");
         return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
       }) as never,
     });
@@ -964,8 +990,8 @@ test("W1-T10799: the core daemon's own wiring runs the job over the target clone
     rmSync(dirname(socketPath), { recursive: true, force: true });
   }
 
-  // A claim the target's origin does not hold is free: the one job entered the maintained drain and ended.
-  assert.equal((outcomes.wreckterra as { state: string }).state, "ended", "a readable, absent claim lets the recovered job dispatch once");
+  assert.equal((outcomes.wreckterra as { state: string }).state, "held", "a free claim cannot disprove an earlier spend");
+  assert.equal((outcomes.fresh as { state: string }).state, "ended", "a new origin enters one maintained drain");
   assert.deepEqual(taskCalls.map((call) => call.taskId), ["W9-T1"], "exactly one dispatch across both recovered jobs");
   assert.equal(taskCalls[0]!.opts.planPath, join(reposDir, "wreckterra", "plan", "tasks.yaml"), "the target clone's own plan, derived as resolveDaemonTarget derives it");
   assert.equal(taskCalls[0]!.opts.owner, "craigoley", "bound to the verified target owner");
@@ -975,8 +1001,6 @@ test("W1-T10799: the core daemon's own wiring runs the job over the target clone
 
   // A claim that cannot be read is unknown: the job resumes from its record and is never dispatched a second time.
   assert.equal((outcomes.gammaterra as { state: string }).state, "resumed", "an unreadable claim is held, never read as free");
-  const resumed = store.read(origins.gammaterra!);
-  assert.ok(resumed.state === "found" && resumed.record.status === "admitted" && resumed.record.reason === "resumed");
   const ledger = readFileSync(join(coreRoot, "state", "ledger.ndjson"), "utf8").split("\n").filter((line) => line.includes("target_job.resumed"));
   assert.equal(ledger.length, 1, "the resumption is ledgered once");
   assert.ok(ledger[0]!.includes('"claim":"unknown"'), "and it records that the claim could not be read");
