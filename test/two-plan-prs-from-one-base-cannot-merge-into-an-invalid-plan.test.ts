@@ -139,6 +139,41 @@ test("planTouchFromRest classifies the REST files page, and every unprovable lis
   );
 });
 
+test("planTouchFromRest reads past a full page, so a PR over 100 files is classified, not unreadable", () => {
+  const files = (n: number, from = 0) => Array.from({ length: n }, (_, i) => ({ filename: `test/f${from + i}.test.ts` }));
+  const pages = (all: unknown[]): { fetch: Fetch; seen: string[] } => {
+    const seen: string[] = [];
+    return {
+      seen,
+      fetch: (args) => {
+        const path = args[args.length - 1]!;
+        seen.push(path);
+        const n = Number(/[?&]page=(\d+)/.exec(path)?.[1] ?? 1);
+        return all.slice((n - 1) * 100, n * 100);
+      },
+    };
+  };
+  // #14817: 843 files, none under plan/, read as one full page and sent down the plan-PR path.
+  const large = pages(files(843));
+  assert.equal(planTouchFromRest("o", "r", 14817, large.fetch), "untouched");
+  assert.deepEqual(large.seen, [
+    "repos/o/r/pulls/14817/files?per_page=100",
+    ...Array.from({ length: 8 }, (_, i) => `repos/o/r/pulls/14817/files?per_page=100&page=${i + 2}`),
+  ]);
+  const late = pages([...files(150), { filename: "plan/tasks.d/w1-t1.yaml" }]);
+  assert.equal(planTouchFromRest("o", "r", 2, late.fetch), "touched", "a plan path on page 2 counts");
+  assert.equal(planTouchFromRest("o", "r", 3, pages(files(200)).fetch), "untouched", "an empty page after a full one ends the list");
+  const capped = pages(files(3_000));
+  assert.equal(planTouchFromRest("o", "r", 4, capped.fetch), "unreadable", "GitHub lists 3,000 files at most; past that nothing is proven");
+  assert.equal(capped.seen.length, 30);
+  let calls = 0;
+  const failing: Fetch = () => {
+    if (++calls === 2) throw new Error("HTTP 502");
+    return files(100);
+  };
+  assert.equal(planTouchFromRest("o", "r", 5, failing), "unreadable", "a failed later page proves nothing");
+});
+
 test("realArmDeps().readPlanTouch reads the PR files page through gh, and refuses an unaddressable URL", () => {
   const shim = ghShim([{ when: "pulls/8871/files", stdout: '[{"filename":"plan/tasks.d/a.yaml"}]' }], { kind: "w1t5472" });
   const oldPath = process.env.PATH;

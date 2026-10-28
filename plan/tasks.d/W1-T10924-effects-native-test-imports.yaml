@@ -1,0 +1,95 @@
+- id: W1-T10924
+  title: Make native improvement test imports visible to reach checks
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  priority: 1
+  risk: high
+  band_meaning: span
+  budget_usd: 12
+  author_class: machine
+  origin: "cockpit-test-integrity: Effects PR14986 left a computed production import outside literal dependency accounting"
+  status: queued
+  attempts: 0
+  depends_on: [W1-T10562]
+  plan_refs: [W1-T10561, W1-T10562]
+  files:
+    - test/gardeners/improvement-effect-follow-through.test.ts
+    - test/inbox/improvement-thread.test.ts
+  rationale: >-
+    Effects source merged through native review in PR14986, but its gardeners test still loads
+    src/run-task.ts through a computed location-relative URL with a hand-written module shape.
+    Its comment explicitly says this avoids the direct-import reach population. Production
+    decoupling does not justify hiding a real test dependency. The existing Inbox improvement
+    integration suite already imports the same production module literally. A current main and
+    all23 open-head tree audit found no changes to these two files, and the actual source history
+    contains only the original Effects merge. Preserve all behavior assertions and guards.
+  prompt: |
+    Repair only the two existing test files. Move the native discovery scenario and registered
+    overseer scenario from the focused Effects library suite into the existing improvement-thread
+    integration suite, which already literally imports #src/run-task.js. Remove the computed
+    URL loader and its hand-written RunTaskModule shape once unused. Import both production
+    functions together on one real physical line at the destination:
+    import { buildRegisteredGarden, improvementNativeFilingReceipt } from "#src/run-task.js";
+    This actual executable import, never a comment or a string, supplies the structural proof.
+    Use the actual exported
+    function and parameter types and literal repository aliases, with the maintained repoRoot
+    helper where a repository root is needed. Do not import a test module as a fixture: that
+    would execute its tests or conceal the dependency transitively.
+
+    Preserve every original assertion in both moved scenarios: original filed baseline after a
+    later chat goal; complete native discovery and async default evidence reads; current
+    analysis mismatch and unreadable projection; source failure and recovery history; publication
+    lock refusal and ownership changes; registered off switch, ordinary overseer positive control,
+    unrelated source preservation, 512-improvement cap and 2 MiB input bound. Preserve all other
+    Effects and Inbox tests. Keep real default and error-path evidence, fixture cleanup, clock
+    relationships and every current threshold. Reuse the destination's existing sourceFixture
+    and local fixture construction where suitable, without modifying that helper, duplicating
+    large fixture blocks or weakening scenario inputs. Keep the two native cases in their own
+    temporary roots. Only rename their titles to the exact acceptance titles below so stored
+    proofs identify the relocated integration cases. This is test organization and honest
+    dependency accounting, with no product behavior, source schema, scanner rule, ignore,
+    baseline, selector, ceiling, budget, ownership, admission or review-policy changes.
+
+    Before changing anything, inspect main and every current public open head again, actual
+    merged task credit, remote dispatch/run refs, and main history since this filing for both
+    files. Respect any other active owner or repair. Verify physical file lists and the configured
+    test-place result. Run both complete physical suites, type checking, applicable caller and
+    whole-tree census checks, and the unchanged reach gate on the same committed tree. Confirm
+    the gardeners suite no longer reaches run-task while the destination's already-existing
+    literal run-task dependency remains visible. Do not increase a ratchet or disguise imports.
+    Prove that removing the literal production import from the moved native scenario makes its
+    exact functional proof fail; restore the exact committed source and qualify it. Preserve
+    every failed and incomplete receipt. Use normal author admission, stored-body parser and
+    literal proof resolution, required hosted checks and native review before merge. Do not
+    activate views, release consumer holds, restart services or interfere with existing workers.
+  acceptance:
+    - claim: Native production imports are visible to the existing reach checks
+      proof: 'grep: import { buildRegisteredGarden, improvementNativeFilingReceipt } from "#src/run-task[.]js"; in test/inbox/improvement-thread.test.ts'
+    - claim: Native discovery preserves its original filed baseline and evidence refusals
+      kind: guard
+      proof: "unit test: native improvement filing preserves the original baseline after a newer chat goal"
+    - claim: Registered follow-through preserves its off switch and source bounds
+      kind: guard
+      proof: "unit test: native improvement gardener registration preserves the off switch and source bounds"
+  note: >-
+    Revised proof contract after native admission correctly refused the first test-only draft
+    (proof-test-only-discrimination). That LOW0.94 ruling and refused rendering are preserved;
+    this exact revised pin requires a new configured judgment. The structural proof is actual
+    executable dependency code; both unchanged behavioral cases are explicitly preservation guards.
+    New bounded follow-up proposed under the approved cockpit completion work, pending this
+    exact contract's configured native filing judgment. No human release, risk ruling, task
+    credit or source/runtime qualification is borrowed. Risk high/span honestly declares two
+    existing test concerns and budget12 bounds the worker; all native spending checks remain.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed contract limits work to two existing test files, relocating two scenarios while preserving assertions, fixtures, thresholds and error-path evidence."
+      - "The requested literal repository imports and shared root helper align with standing repository instructions; the contract explicitly preserves reach checks, baselines and admission policy."
+      - "The revised contract requires executable structural proof, complete suite validation and import-removal falsification under normal CI and review. No supplied gate state reports a current failure or requests an operator-only decision."
+    judged_at: "2026-10-28T12:57:33.522Z"
+    pin: "4ff892fb8e20440b3bfa34e79294c55711ebbd5e855f1163024cd29a950b85e5"
