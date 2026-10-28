@@ -666,8 +666,12 @@ export function startInboxResponder(
       if (all.status === "unresolved") throw new Error(all.reason);
       for (const [threadId, messages] of all.threads) {
         if (!messages.some(message => message.role === "reply" && !hasThreadEvent(message.extra)) || !proposalIdOfThread(threadId)) continue;
-        const action = await answerThread(threadId, deps);
-        if (action) log("inbox.thread_answered", { thread_id: threadId, action });
+        try {
+          const action = await answerThread(threadId, deps);
+          if (action) log("inbox.thread_answered", { thread_id: threadId, action });
+        } catch (error) {
+          log("inbox.thread_answer_failed", { thread_id: threadId, error: String((error as Error)?.message ?? error) });
+        }
       }
     })()
       .catch((e) => log("inbox.thread_answer_failed", { error: String((e as Error)?.message ?? e) }))
