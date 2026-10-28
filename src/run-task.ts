@@ -14841,11 +14841,17 @@ export function censusMembershipCommand(
   const joinedReaders = (deps.readers ?? (() => discoverSourceTextReaders(root)))().filter((r) => changed.some((p) => readerJoins(r, p)));
   const censusReaders = joinedReaders.filter((r) => r.censusShaped).map((r) => r.testFile);
   const textReaders = joinedReaders.filter((r) => !r.censusShaped).map((r) => r.testFile);
+  // W1-T10408: registry drift must name the parity suite in the author's pre-publication sweep.
+  const consoleParitySuite = "test/console-parity-ratchet.test.ts";
+  const joinsConsoleParity = changed.some((p) =>
+    p === "src/run-task.ts" || p.startsWith("src/lib/") || [
+      "scripts/console-parity-ratchet.mjs", "scripts/console-parity-baseline.json",
+      "test/helpers/declared-routes.ts", consoleParitySuite,
+    ].includes(p),
+  );
+  if (joinsConsoleParity && !censusReaders.includes(consoleParitySuite)) censusReaders.push(consoleParitySuite);
   if (rest.includes("--files")) {
-    // W1-T3059 — ONE PREDICATE, NEVER TWO. The pre-push hook that RUNS these suites reads this
-    // list; it does not carry its own copy of the table. A second copy is the drift this repo has
-    // already paid for once (rule15-precheck imports the reviewer's own predicate for the same
-    // reason), and a hook whose table lags the model refuses the wrong diffs, silently.
+    // W1-T3059: author sweeps consume this file list without copying the membership table.
     const byJob = new Map(CENSUS_MEMBERSHIP_SUITES.map((s) => [s.job, s.testFile] as const));
     const files = new Set<string>();
     for (const e of report.entries) {
