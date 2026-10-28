@@ -287,11 +287,16 @@ export function daemonTargetRecordPath(stateDir: string): string {
 
 /** W1-T10925: written at boot under `<config.root>/state`, so a verb run with `docker exec` in this
  *  instance can find the target's checkout. The daemon's launch argv is not visible to that verb. */
-export function writeDaemonTargetRecord(stateDir: string, record: DaemonTargetRecord): void {
+export function writeDaemonTargetRecord(stateDir: string, record: DaemonTargetRecord): { written: true } | { written: false; reason: string } {
   const path = daemonTargetRecordPath(stateDir);
-  mkdirSync(stateDir, { recursive: true });
-  writeFileSync(`${path}.${process.pid}.tmp`, JSON.stringify(record, null, 2) + "\n");
-  renameSync(`${path}.${process.pid}.tmp`, path);
+  try {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(`${path}.${process.pid}.tmp`, JSON.stringify(record, null, 2) + "\n");
+    renameSync(`${path}.${process.pid}.tmp`, path);
+    return { written: true };
+  } catch (e) {
+    return { written: false, reason: `${path}: ${(e as Error).message}` };
+  }
 }
 
 export type DaemonTargetRecordRead =
@@ -877,11 +882,9 @@ export async function daemonCommand(
   let tickReadGeneration: ReadGeneration<TickReadFacts> | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
   const targetCheckoutRoot = daemonTargetCheckoutRoot(target, config.root);
-  try {
-    writeDaemonTargetRecord(join(config.root, "state"), { owner: target.owner, repo: target.repo, isSelf: target.isSelf, checkoutRoot: targetCheckoutRoot });
-  } catch (e) {
-    log("daemon.target_record_failed", { reason: (e as Error).message });
-  }
+  const targetRecordWrite = writeDaemonTargetRecord(join(config.root, "state"),
+    { owner: target.owner, repo: target.repo, isSelf: target.isSelf, checkoutRoot: targetCheckoutRoot });
+  if (!targetRecordWrite.written) log("daemon.target_record_failed", { reason: targetRecordWrite.reason });
   const targetCommitTrailerIndex = () =>
     buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot })();
   const gatewayFor = createDaemonGatewayFactory(config.root, log, {
