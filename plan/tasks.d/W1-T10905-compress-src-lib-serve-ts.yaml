@@ -1,0 +1,25 @@
+- id: W1-T10905
+  title: "Compress the 1367 comment lines in src/lib/serve.ts without changing executable code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "comment-compression:src/lib/serve.ts"
+  files:
+    - src/lib/serve.ts
+    - test/console-api/serve/compress-src-lib-serve-ts.test.ts
+  acceptance:
+    - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
+      proof: "unit test: W1-T10905: comment compression preserves executable code"
+  rationale: |
+    Observed 1367 comment lines in src/lib/serve.ts. This is maintenance debt, never a merge ceiling.
+    Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
+    Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.
+    Add the named regression in test/console-api/serve/compress-src-lib-serve-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
+    Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
+    Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.

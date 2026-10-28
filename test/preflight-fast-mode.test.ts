@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
 import { preflightCommand } from "../src/run-task.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 // ── W1-T373: `rmd preflight --fast` — the deterministic npm-script gates, nothing else ──────
 //
@@ -206,7 +207,8 @@ test("preflightCommand: --fast ADDS the fast-mode steps after the three hand-rou
 });
 
 test("preflightCommand (W1-T3737, reverses the --fast opt-in): the fast gate runs by DEFAULT, and only --no-fast declines it", async () => {
-  const spawn: PreflightSpawn = () => ({ status: 0, stdout: "\0feat(x): fine\n", stderr: "" });
+  // The judged census children (W1-T8379) pass only on a tally: this fake stands for finished runs.
+  const spawn: PreflightSpawn = (_file, args, opts) => ({ ...finishJudgedRun(args, opts), stdout: "\0feat(x): fine\n", stderr: "" });
   const originalLog = console.log;
   const lines: string[] = [];
   console.log = (...args: unknown[]) => {
