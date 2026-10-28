@@ -12994,10 +12994,17 @@ export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => Inf
     verify: () => {
       if (!held) return "branch claim is not held";
       try {
-        const stat = fs.lstatSync(held.path);
-        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096) return "branch claim identity is unreadable";
-        const info = parseInflightLockInfo(readFileSync(held.path, "utf8"));
-        if (!info || info.run_id !== held.info.run_id || info.pid !== held.info.pid ||
+        const fd = fs.openSync(held.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+        let raw: string;
+        try {
+          if (!fs.fstatSync(fd).isFile()) return "branch claim identity is unreadable";
+          const bytes = Buffer.alloc(4097);
+          const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
+          if (length > 4096) return "branch claim identity is unreadable";
+          raw = bytes.subarray(0, length).toString("utf8");
+        } finally { fs.closeSync(fd); }
+        const info = parseInflightLockInfo(raw);
+        if (!info || !info.host || !info.startedAt || info.run_id !== held.info.run_id || info.pid !== held.info.pid ||
             info.host !== held.info.host || info.startedAt !== held.info.startedAt) return "branch claim belongs to another owner";
         return undefined;
       } catch { return "branch claim identity is unavailable"; }

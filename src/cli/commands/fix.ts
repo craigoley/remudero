@@ -2108,7 +2108,8 @@ type InheritedCensusRefreshInput = {
 /** A refusal stays a refusal. Only a proven trial merge may request the existing exact-head update;
  *  its asynchronous acceptance returns to the sweep, never to a worker on this old checkout. */
 export async function refreshInheritedCensusRefusal(input: InheritedCensusRefreshInput,
-  deps: Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"],
+  deps: Pick<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"], "branchClaim" | "readLiveState" | "readLiveHead" |
+    "readCiRollup" | "readMergeFacts" | "reproduceFailingTestsOnMerge" | "updateBranch" | "log">,
   evidence: Pick<FixCommandHost, "readInheritedCensusContextAsync" | "preserveInheritedCensusWork">,
 ): Promise<{ outcome: "requested" | "held"; reason: string }> {
   const { context } = input;
@@ -2127,7 +2128,8 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
       const live = await deps.readLiveHead!(input.prUrl);
       if (!live.ok || live.headSha !== context.headSha || live.headRefName !== input.branch) return "PR head or branch changed";
       const current = await evidence.readInheritedCensusContextAsync(input.worktreePath, input.snapshotPath);
-      if (JSON.stringify(current) !== JSON.stringify(context)) return "census context changed or is unavailable";
+      if (current.state !== "inherited" || current.headSha !== context.headSha || current.mainSha !== context.mainSha ||
+          current.mergeBase !== context.mergeBase || current.baselinePath !== context.baselinePath) return "census context changed or is unavailable";
       const rollup = await deps.readCiRollup!(input.prUrl);
       // Check every row independently: an earlier failure must not hide a later in-flight check.
       if (rollup.length === 0 || rollup.some(row => !["green", "red"].includes(checksStateFromRollup([row], undefined)))) return "CI is in flight or unreadable";

@@ -8,7 +8,7 @@
  * success. These tests drive the PRODUCTION sweep adapter's push and the real runFixRung.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -236,4 +236,122 @@ test("W1-T8833: the progress judge reads a push_failed round as not landed", asy
   assert.equal(round.pushedHead, undefined, "no head is credited to it");
   assert.equal(input.signals.pushFailedRounds, 1);
   assert.equal(input.signals.reviewerOnlyFailurePersists, 0, "it cleared nothing and failed nothing on the reviewer's side");
+});
+
+
+async function censusRefreshOwner(t: import("node:test").TestContext) {
+  const { writeFixCensusSnapshotAsync, readInheritedCensusContextAsync, preserveInheritedCensusWork } = await import("#src/run-task.js");
+  const { refreshInheritedCensusRefusal } = await import("#src/cli/commands/fix.js");
+  const { fixRoundBranchClaim } = await import("#src/lib/sweep.js");
+  const { acquireInflightLock } = await import("#src/lib/inflight-lock.js");
+  const repo = gitRepo({ scope: t, kind: "census-refresh-owner" });
+  const root = join(repo.dir, "state", "owner");
+  mkdirSync(root, { recursive: true }); mkdirSync(join(repo.dir, "scripts"));
+  writeFileSync(join(repo.dir, ".gitignore"), "state/\n");
+  writeFileSync(join(repo.dir, "scripts/affected-reach-baseline.json"), '{"importerCount":1}');
+  writeFileSync(join(repo.dir, "source.ts"), "export const saved = 0;\n");
+  repo.git("add", "."); repo.git("commit", "-m", "fixture: old baseline");
+  const base = repo.git("rev-parse", "HEAD");
+  repo.git("branch", "refresh");
+  writeFileSync(join(repo.dir, "scripts/affected-reach-baseline.json"), '{"resolution":"package-imports","importerCount":1}');
+  repo.git("add", "scripts"); repo.git("commit", "-m", "fixture: main migration");
+  const main = repo.git("rev-parse", "HEAD"); repo.git("update-ref", "refs/remotes/origin/main", main);
+  repo.git("switch", "refresh");
+  const snapshot = await writeFixCensusSnapshotAsync(repo.dir, () => {}); assert.ok(snapshot);
+  const context = await readInheritedCensusContextAsync(repo.dir, snapshot); assert.equal(context.state, "inherited");
+  if (context.state !== "inherited") throw new Error("fixture context unavailable");
+  const lock = acquireInflightLock(join(root, "locks"), "refresh", { run_id: "TEST-refresh" });
+  const claim = fixRoundBranchClaim(lock, () => { throw new Error("unexpected reacquire"); });
+  t.after(() => lock.release());
+  let updates = 0;
+  const rows: Row[] = [];
+  const deps: Parameters<typeof refreshInheritedCensusRefusal>[1] = {
+    branchClaim: claim, readLiveState: () => ({ ok: true, state: "OPEN" }),
+    readLiveHead: () => ({ ok: true, headSha: base, headRefName: "refresh" }),
+    readCiRollup: () => [{ name: "ci-gate", conclusion: "SUCCESS" }],
+    readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 1 }),
+    reproduceFailingTestsOnMerge: async (_pr, files) => files.map(file => ({ file, outcome: "passes", duration_ms: 1, cached: false })),
+    updateBranch: (_pr, head) => { assert.equal(head, base); updates++; return { ok: true }; },
+    log: (step, extra) => rows.push({ step, ...extra }),
+  };
+  const input = { root, worktreePath: repo.dir, branch: "refresh", prUrl: PR_URL, prNumber: 11133, snapshotPath: snapshot, context };
+  return { repo, root, base, main, lock, claim, context, deps, input, rows,
+    evidence: { readInheritedCensusContextAsync, preserveInheritedCensusWork },
+    run: () => refreshInheritedCensusRefusal(input, deps, { readInheritedCensusContextAsync, preserveInheritedCensusWork }),
+    updates: () => updates };
+}
+
+test("census baseline refresh respects live owners and the exact head", async t => {
+  for (const mode of ["foreign-owner", "unknown-owner", "head-changed", "branch-changed", "ci-in-flight", "no-ci", "merge-unknown", "context-changed", "update-refused"] as const) {
+    await t.test(mode, async t => {
+      const fx = await censusRefreshOwner(t);
+      if (mode === "foreign-owner") writeFileSync(fx.lock.path, JSON.stringify({ ...fx.lock.info, run_id: "FOREIGN-live" }));
+      if (mode === "unknown-owner") unlinkSync(fx.lock.path);
+      if (mode === "head-changed") {
+        let reads = 0;
+        fx.deps.readLiveHead = () => ({ ok: true, headSha: ++reads === 1 ? fx.base : fx.main, headRefName: "refresh" });
+      }
+      if (mode === "branch-changed") fx.deps.readLiveHead = () => ({ ok: true, headSha: fx.base, headRefName: "sibling" });
+      if (mode === "ci-in-flight") fx.deps.readCiRollup = () => [{ name: "old-red", conclusion: "FAILURE" }, { name: "running", status: "IN_PROGRESS" }];
+      if (mode === "no-ci") fx.deps.readCiRollup = () => [];
+      if (mode === "merge-unknown") fx.deps.readMergeFacts = () => ({ mergeable: "UNKNOWN", behindBy: 1 });
+      if (mode === "context-changed") fx.deps.reproduceFailingTestsOnMerge = async (_pr, files) => {
+        fx.repo.git("update-ref", "refs/remotes/origin/main", fx.base);
+        return files.map(file => ({ file, outcome: "passes", duration_ms: 1, cached: false }));
+      };
+      if (mode === "update-refused") fx.deps.updateBranch = () => ({ ok: false, error: "expected_head_sha mismatch" });
+      const before = fx.repo.git("status", "--porcelain=v1");
+      const result = await fx.run();
+      assert.equal(result.outcome, "held", JSON.stringify(fx.rows)); assert.equal(fx.updates(), 0);
+      assert.equal(fx.repo.git("status", "--porcelain=v1"), before, "refusal keeps unpublished work unchanged");
+      if (mode === "foreign-owner") assert.equal(JSON.parse(readFileSync(fx.lock.path, "utf8")).run_id, "FOREIGN-live");
+    });
+  }
+});
+
+test("census refresh durably preserves staged unstaged and untracked work without changing any owner tree", async t => {
+  const fx = await censusRefreshOwner(t);
+  fx.repo.git("branch", "sibling", fx.main);
+  writeFileSync(join(fx.repo.dir, "source.ts"), "export const saved = 1;\n"); fx.repo.git("add", "source.ts");
+  writeFileSync(join(fx.repo.dir, "source.ts"), "export const saved = 2;\n");
+  writeFileSync(join(fx.repo.dir, "unpublished.txt"), "untracked fix\n");
+  const before = fx.repo.git("status", "--porcelain=v1");
+  assert.equal((await fx.run()).outcome, "requested"); assert.equal(fx.updates(), 1);
+  assert.equal(fx.repo.git("status", "--porcelain=v1"), before);
+  assert.equal(fx.repo.git("show", ":source.ts"), "export const saved = 1;");
+  assert.equal(readFileSync(join(fx.repo.dir, "source.ts"), "utf8"), "export const saved = 2;\n");
+  const saved = fx.rows.find(row => row.outcome === "work-preserved")!.saved_path as string;
+  assert.match(readFileSync(join(saved, "index.patch"), "utf8"), /saved = 1/);
+  assert.match(readFileSync(join(saved, "worktree.patch"), "utf8"), /saved = 2/);
+  assert.match(readFileSync(join(saved, "untracked.patch"), "utf8"), /untracked fix/);
+  assert.equal(fx.repo.git("rev-parse", "sibling"), fx.main);
+  assert.equal(fx.repo.git("rev-parse", "HEAD"), fx.base);
+});
+
+test("census refresh retains failed merged checks overlaps unavailable reads and preservation errors", async t => {
+  for (const mode of ["growth", "unrunnable", "missing-probe", "unwired-owner", "overlap", "reader-error", "save-error", "tracked-only"] as const) {
+    await t.test(mode, async t => {
+      const fx = await censusRefreshOwner(t);
+      if (mode === "growth" || mode === "unrunnable") fx.deps.reproduceFailingTestsOnMerge = async (_pr, files) =>
+        files.map(file => ({ file, outcome: mode === "growth" ? "fails" : "unrunnable", duration_ms: 1, cached: false }));
+      if (mode === "missing-probe") fx.deps.reproduceFailingTestsOnMerge = undefined;
+      if (mode === "unwired-owner") fx.deps.branchClaim = undefined;
+      if (mode === "overlap") {
+        writeFileSync(join(fx.repo.dir, "scripts/affected-reach-baseline.json"), "changed saved baseline\n");
+      }
+      if (mode === "reader-error") fx.deps.readCiRollup = () => { throw new Error("read unavailable"); };
+      if (mode === "save-error") {
+        // Real default preservation must fail; no fake that bypasses its filesystem arm.
+        writeFileSync(join(fx.repo.dir, "unpublished.txt"), "saved fix\n");
+        writeFileSync(join(fx.root, "recovery"), "file blocks recovery directory");
+      }
+      if (mode === "tracked-only") writeFileSync(join(fx.repo.dir, "source.ts"), "export const saved = 3;\n");
+      const before = fx.repo.git("status", "--porcelain=v1");
+      const result = await fx.run();
+      assert.equal(result.outcome, mode === "tracked-only" ? "requested" : "held", JSON.stringify(fx.rows));
+      assert.equal(fx.repo.git("status", "--porcelain=v1"), before);
+      assert.equal(fx.updates(), mode === "tracked-only" ? 1 : 0);
+      if (mode === "tracked-only") assert.match(String(fx.rows.find(row => row.outcome === "work-preserved")!.recovery_ref), /^refs\/rmd-recovery\//);
+    });
+  }
 });

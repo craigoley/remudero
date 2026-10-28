@@ -10706,12 +10706,12 @@ function* inheritedCensusContextSteps(
         (yield* read(["merge-base", identity.headSha, identity.mainSha])) !== identity.mergeBase) {
       throw new Error("census snapshot refs changed");
     }
-    const base = yield* read(["show", `${identity.mergeBase}:${baselinePath}`]);
-    const head = yield* read(["show", `${identity.headSha}:${baselinePath}`]);
-    const main = yield* read(["show", `${identity.mainSha}:${baselinePath}`]);
-    if (head !== base || (yield* read(["diff", "HEAD", "--", baselinePath])) !== "") {
+    const branchEdits = yield* read(["diff", "--name-only", identity.mergeBase, identity.headSha, "--", baselinePath]);
+    if (branchEdits !== "" || (yield* read(["diff", "HEAD", "--", baselinePath])) !== "") {
       return { state: "not-inherited", reason: "branch or saved work edits the reach baseline" };
     }
+    const base = yield* read(["show", `${identity.mergeBase}:${baselinePath}`]);
+    const main = yield* read(["show", `${identity.mainSha}:${baselinePath}`]);
     if (JSON.parse(base).resolution !== undefined || JSON.parse(main).resolution !== "package-imports") {
       return { state: "not-inherited", reason: "no witnessed reach resolution migration on main" };
     }

@@ -426,7 +426,7 @@ test("inherited census baseline drift refreshes before another fix worker", asyn
   const outcome = await harness.runFixRung({ taskId: "W1-T10935TEST", runId: "TEST-refresh",
     task: { id: "W1-T10935TEST", title: "cleanup is confirmed", files: ["src/lib/unreached.ts"] },
     prUrl: "https://github.com/craigoley/remudero/pull/1", branch, worktreePath: repo.dir, initialSessionId: "fixture",
-    mount, settingsFile: join(root, "settings.json"), config: { root, workerProviders: { harnessCommitsFix: true } },
+    mount, settingsFile: join(root, "settings.json"), config: { root, workerProviders: { harnessCommitsFix: true } } as import("#src/lib/config.js").Config,
     budgetUsd: 1, strikeCap: 1, initialReview: review,
     reviewBase: { owner: "craigoley", repo: "remudero", headCheckoutDir: repo.dir, reviewerMount: mount },
     deps: { spawn: async () => { spawned++; throw new Error("must refresh before buying a model retry"); },
@@ -465,4 +465,35 @@ test("inherited census baseline drift refreshes before another fix worker", asyn
   assert.equal(repo.git("rev-parse", sibling), main, "unrelated sibling is untouched");
   assert.ok(rows.some(row => row.step === "fix.census_check" && row.fields.outcome === "refused"));
   assert.ok(rows.some(row => row.step === "fix.census_refresh" && row.fields.outcome === "requested"));
+});
+
+
+test("census baseline refresh never excuses new growth or an edited baseline", async t => {
+  const { harness, repo, baselinePath, current, log } = await inheritedContractFixture(t);
+  // A formatting-only edit is still a PR baseline edit; compare Git blobs, not trimmed JSON.
+  writeFileSync(join(repo.dir, baselinePath), readFileSync(join(repo.dir, baselinePath), "utf8") + "\n");
+  repo.git("add", baselinePath); repo.git("commit", "-m", "fixture: baseline edited by PR");
+  let snapshot = await harness.writeFixCensusSnapshotAsync(repo.dir, log);
+  assert.ok(snapshot);
+  assert.equal((await harness.readInheritedCensusContextAsync(repo.dir, snapshot)).state, "not-inherited");
+  repo.git("revert", "--no-edit", "HEAD");
+  // Keep this fresh head/base pair for the unreadable and stale-identity controls below.
+  snapshot = await harness.writeFixCensusSnapshotAsync(repo.dir, log);
+  assert.ok(snapshot);
+  assert.equal((await harness.readInheritedCensusContextAsync(repo.dir, snapshot)).state, "inherited");
+  const malformed = join(repo.dir, "state", "malformed-snapshot.json");
+  writeFileSync(malformed, "{\"version\":1}");
+  assert.equal((await harness.readInheritedCensusContextAsync(repo.dir, malformed)).state, "unavailable");
+  assert.equal((await harness.readInheritedCensusContextAsync(repo.dir, malformed + ".missing")).state, "unavailable");
+  repo.git("merge", "--no-edit", "origin/main");
+  assert.equal((await harness.readInheritedCensusContextAsync(repo.dir, snapshot)).state, "unavailable", "a stale snapshot cannot authorize refresh");
+  writeFileSync(join(repo.dir, "test/new.test.ts"), IMPORT_ALIAS);
+  repo.git("add", "test/new.test.ts"); repo.git("commit", "-m", "fixture: actual new alias importer");
+  snapshot = await harness.writeFixCensusSnapshotAsync(repo.dir, log);
+  assert.ok(snapshot);
+  const refused = await harness.checkFixCensusSnapshotAsync(repo.dir, snapshot, log);
+  assert.ok(refused?.refusal, "new head-only growth remains refused after main's migration");
+  assert.match(refused.refusal.text, /importerCount|new importers/);
+  assert.notEqual(refused.refusal.inheritedMain?.state, "inherited");
+  assert.equal(readFileSync(join(repo.dir, baselinePath), "utf8"), current, "no ceiling or baseline edit excused new growth");
 });
