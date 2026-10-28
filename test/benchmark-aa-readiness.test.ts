@@ -691,6 +691,51 @@ test("competing calibration gap writers admit one record", async (t) => {
   assert.equal(followUpRows(other).length, 1);
 });
 
+test("a writer that loses the owner-file race yields to the winner and never appends", (t) => {
+  const write = fs.writeFileSync;
+  const row = { ts: "2026-10-02T09:00:00.000Z", key: GAP_KEY, trialId: TRIAL, gap: GAP, repo: REPO };
+  for (const winnerAppended of [false, true]) {
+    const stateDir = root();
+    const path = join(stateDir, READINESS_FOLLOW_UPS_FILE);
+    // The winner publishes generation 0 between the loser's scan (absent) and its link(2).
+    t.mock.method(fs, "writeFileSync", (...args: Parameters<typeof write>) => {
+      if (String(args[0]).endsWith(".tmp")) {
+        t.mock.restoreAll();
+        syncBuiltinESMExports();
+        write(`${ownerStem(stateDir)}.0.owner`, `${JSON.stringify({ host: hostname(), pid: process.pid, nonce: "n-winner", row })}\n`);
+        if (winnerAppended) appendFileSync(path, `${JSON.stringify(row)}\n`);
+      }
+      return write(...args);
+    });
+    syncBuiltinESMExports();
+    let state: string | undefined;
+    try {
+      state = recordReadinessGap(stateDir, TRIAL, GAP, "2026-10-02T09:00:05.000Z", REPO)?.state;
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+    assert.equal(state, winnerAppended ? "already-recorded" : "pending", "the loser reports the winner's outcome explicitly");
+    assert.equal(readdirSync(join(stateDir, `${READINESS_FOLLOW_UPS_FILE}.admissions`)).filter((name) => name.endsWith(".tmp")).length, 0, "the loser's temp file is removed");
+    assert.equal(existsSync(`${ownerStem(stateDir)}.1.owner`), false, "the winner's live ownership is never taken over");
+    assert.equal(winnerAppended ? followUpRows(stateDir).length : readFileSync(path, "utf8").length, winnerAppended ? 1 : 0, "the loser appended nothing");
+  }
+});
+
+test("an owner-file publish failure other than EEXIST propagates and cleans up", (t) => {
+  const stateDir = root();
+  t.mock.method(fs, "linkSync", () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); });
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => recordReadinessGap(stateDir, TRIAL, GAP, "2026-10-02T09:00:00.000Z", REPO), /denied/);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+  assert.equal(readdirSync(join(stateDir, `${READINESS_FOLLOW_UPS_FILE}.admissions`)).length, 0, "no owner and no temp file is left behind");
+  assert.equal(readFileSync(join(stateDir, READINESS_FOLLOW_UPS_FILE), "utf8"), "", "nothing was recorded");
+});
+
 test("interrupted calibration gap admission resumes safely", () => {
   const stateDir = root();
   mkdirSync(join(stateDir, `${READINESS_FOLLOW_UPS_FILE}.admissions`), { recursive: true });
