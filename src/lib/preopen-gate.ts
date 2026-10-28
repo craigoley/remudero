@@ -150,7 +150,7 @@ export interface GateRun {
  */
 export type GateSummary = ({ failedSteps: string[]; failedDetail?: Record<string, string>; environmentSteps?: string[] } | { unreadable: string }) & { sandboxMetrics?: GateSandboxMeasurement };
 
-/** W1-T10920: the most of one step's detail a gate row carries — its last lines, never its first. */
+/** PRIMARY CONTROL: bound one step's retained detail on a gate row (W1-T10920) — its last lines, never its first. */
 export const GATE_DETAIL_MAX_BYTES = 2048;
 
 /** The last whole lines of `detail` that fit {@link GATE_DETAIL_MAX_BYTES}; one over-long line is cut from its end. */
