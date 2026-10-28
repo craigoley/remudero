@@ -34,6 +34,7 @@
     - test/route-wiring.test.ts
     - src/lib/panel-graph.ts
     - test/plan/wreckterra-product-case.test.ts
+    - test/infra/product-build.test.ts
   status: queued
   attempts: 0
   rationale: >

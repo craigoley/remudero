@@ -20,18 +20,25 @@
 import { ciRemedyExecutionOf, ciRemedyExecutionReport, type CiRemedyExecution } from "./ci-remedy-execution.js";
 import { importedModuleOf, preventionRegistrationsOf, preventionAdoption, type ImportedModuleEvidence, type PreventionSourceRegistration } from "./prevention-source-evidence.js";
 import { servedTrialCohorts, trialRevisionPins, type TrialRevisionPins } from "./field-trials-cohorts.js";
+import { buildControlledFieldTrialsRelease, deriveRegisteredEpoch, SITE_SECONDARY_COMMIT, type ControlledReleaseInput,
+  type ControlledReleaseResult, type LedgerEpochFacts } from "./field-trials-controlled-release.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { projectRepairCostContext, repairCostCells, repairCostsByPull, type RepairCostContext, type RepairCostReport } from "./repair-cost-evidence.js";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
+import { buildModelFieldNoteCandidate, FIELD_NOTE_WINDOWS_VERSION, parseFieldNoteWindows, parseSiteConsentRegistry, PINNED_SITE_CONSENT_REGISTRY,
+  type AdoptionSelectedCell, type FieldNoteWindows } from "./field-trials-field-note.js";
+export type { AdoptionSelectedCell } from "./field-trials-field-note.js";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
+import { ghInteractiveRead } from "./github-transport.js";
+import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol } from "./benchmark-paid-pilot.js";
 import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, observedCurrentHeadGreen, parseGithubStore, RUN_BRANCH_RE,
   type FieldTrialsGithubPass, type FieldTrialsGithubStore, type GithubCursor, type GithubPageFetch,
   type GithubPull, type GithubRepoStore } from "./field-trials-github.js";
-import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
+import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion, readLedgerUnionRecords } from "./ledger-union.js";
 import { deriveReviewFindingOutcomes, type FindingOutcomeReport, type VerifiedFindingEvidence } from "./review-finding-outcomes.js";
 import { deriveVerifiedReviewFindingEvidence, readReviewFindingEvidence, type FindingEvidenceInput, type FindingEvidenceReport } from "./review-finding-evidence.js";
 import type { TaskCaseFile } from "./task-case-file.js";
@@ -400,7 +407,9 @@ function repairCells(units: RepairUnit[]) {
     incidents: { state: "unavailable" as const, reason: "no-incident-source" } };
 }
 
-type AdoptionUnit = Unit & { requested: string | null; selected: string | null; served: string | null; servedMissing: string | null };
+type AdoptionUnit = Unit & { requested: string | null; selected: string | null; served: string | null; servedMissing: string | null;
+  /** W1-T10831: a joined boolean worker outcome, regardless of which component caused a failure. */
+  callOutcomeKnown: boolean; verifiedOutcome: boolean | null };
 
 function adoptionCells(units: AdoptionUnit[]) {
   const tally = (values: (string | null)[]) => {
@@ -410,7 +419,23 @@ function adoptionCells(units: AdoptionUnit[]) {
   };
   return { assignments: units.length, requested: tally(units.map((unit) => unit.requested)),
     selected: tally(units.map((unit) => unit.selected)), served: tally(units.map((unit) => unit.served)),
-    servedUnavailable: tally(units.map((unit) => unit.servedMissing)) };
+    servedUnavailable: tally(units.map((unit) => unit.servedMissing)), bySelected: selectedCrossTab(units) };
+}
+
+function selectedCrossTab(units: AdoptionUnit[]): Record<string, AdoptionSelectedCell> {
+  const out: Record<string, AdoptionSelectedCell> = {};
+  for (const unit of units) {
+    if (unit.selected === null) continue;
+    const cell = Object.hasOwn(out, unit.selected) ? out[unit.selected]!
+      : { assigned: 0, servedKnown: 0, callOutcomeKnown: 0, verifiedOutcomes: 0, verifiedSuccesses: 0 };
+    cell.assigned += 1;
+    cell.servedKnown += Number(unit.served !== null);
+    cell.callOutcomeKnown += Number(unit.callOutcomeKnown);
+    cell.verifiedOutcomes += Number(unit.verifiedOutcome !== null);
+    cell.verifiedSuccesses += Number(unit.verifiedOutcome === true);
+    Object.defineProperty(out, unit.selected, { value: cell, enumerable: true, configurable: true, writable: true });
+  }
+  return out;
 }
 
 type LearningUnit = Unit & { kind: "gardener-pr" | "evidence-followup" | "judgement";
@@ -654,8 +679,10 @@ function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: M
   });
 }
 
-function adoptionUnits(ctx: SourceContext): { units: AdoptionUnit[]; transitions: ModelTransition[] } {
+function adoptionUnits(ctx: SourceContext, caseFiles: readonly TaskCaseFile[] | undefined): { units: AdoptionUnit[]; transitions: ModelTransition[] } {
   const assignments = ctx.rows.filter((row) => row.step === "worker.assignment" && row.assignmentId !== null);
+  const filesByTask = new Map<string, TaskCaseFile[]>();
+  for (const file of caseFiles ?? []) filesByTask.set(file.taskId, [...(filesByTask.get(file.taskId) ?? []), file]);
   const calls = new Map<string, FlowRow>();
   for (const row of ctx.rows) {
     if ((row.step === "worker.attempt" || row.step === "verdict") && row.assignmentId !== null) calls.set(row.assignmentId, row);
@@ -675,9 +702,14 @@ function adoptionUnits(ctx: SourceContext): { units: AdoptionUnit[]; transitions
     const call = calls.get(row.assignmentId!);
     const host = stratum(row.host);
     const served = call?.servedModel ?? null;
+    const { coverage } = joinVerifiedTaskOutcomes([{ assignmentId: row.assignmentId!, taskId: row.taskId, runId: row.runId,
+      assignedAt: row.ts, taskClass: row.taskClass, selectedModel: row.selectedModel, servedModel: served,
+      billingMode: null, costUsd: null, attempted: call !== undefined }], filesByTask.get(row.taskId ?? "") ?? [], ctx.asOf);
     units.push(withDigest({ key: `${ctx.label}|${host}|${row.ts?.slice(0, 10) ?? "unknown"}|${stratum(row.taskClass)}`,
       requested: row.requestedModel, selected: row.selectedModel, served,
-      servedMissing: served !== null ? null : call === undefined ? "no-attempt" : "not-recorded" }));
+      servedMissing: served !== null ? null : call === undefined ? "no-attempt" : "not-recorded",
+      callOutcomeKnown: typeof call?.success === "boolean",
+      verifiedOutcome: coverage.completed > 0 ? true : coverage.endedWithoutCompletion > 0 ? false : null }));
     note(host, row.requestedModel, "firstRequestedAt", row.ts);
     note(host, row.selectedModel, "firstSelectedAt", row.ts);
     note(host, served, "firstServedAt", call?.ts ?? null);
@@ -855,7 +887,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
       units.flow.push(flow);
     }
     units.repair.push(...repairUnits(ctx, taskOf, classOf, rowsByTask));
-    const adoption = adoptionUnits(ctx);
+    const adoption = adoptionUnits(ctx, input.caseFiles);
     units.adoption.push(...adoption.units);
     transitions.push(...adoption.transitions);
     units.learning.push(...learningUnits(ctx, storeOf));
@@ -893,8 +925,9 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
 
 export interface FieldTrialsConsent {
   version: typeof FIELD_TRIALS_CONSENT_VERSION;
+  consentRegistryRevision?: string;
   repos: { repo: string; rights: "private" | "aggregate-opt-in" | "public-benchmark"; receipt: string; revoked?: boolean;
-    publicSourceUrl?: string }[];
+    publicSourceUrl?: string; sourceId?: string }[];
 }
 
 export function parseFieldTrialsConsent(value: unknown): FieldTrialsConsent | string {
@@ -1189,9 +1222,10 @@ function writeJsonAtomically(path: string, value: unknown): string {
   return sha256(encoded);
 }
 
-function readJson(path: string): unknown {
+function readJson(path: string, missing?: unknown): unknown {
   try { return JSON.parse(readFileSync(path, "utf8")); }
-  catch {
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && missing !== undefined) return missing;
     const reason = "absent-or-unreadable";
     return { unreadable: reason };
   }
@@ -1210,6 +1244,94 @@ function pseudonymSalt(outDir: string): string {
   }
 }
 
+/**
+ * W1-T10843: build the CONTROLLED release for one registered epoch beside the observational one. The epoch
+ * file carries `{ epoch, assignments, outcomes, stack }`. A candidate and its private sidecar land under
+ * `<outDir>/controlled/` for the reviewed import flow; nothing is published, no manifest entry is made.
+ */
+export function writeControlledCandidate(outDir: string, epochFile: unknown, consent: FieldTrialsConsent | string | null, nowIso: string,
+  siteAcceptsSecondary?: boolean, siteParserCommit?: string): { state: "candidate"; file: string } | { state: "refused"; reason: string } {
+  const body = record(epochFile);
+  if (body === undefined || record(body.epoch) === undefined || !Array.isArray(body.assignments) || !Array.isArray(body.outcomes)) {
+    return { state: "refused", reason: "controlled-epoch-invalid" };
+  }
+  return persistControlled(outDir, buildControlledFieldTrialsRelease({ epoch: body.epoch, assignments: body.assignments, outcomes: body.outcomes,
+    pins: trialRevisionPins(record(body.stack)), consent, asOf: nowIso,
+    ...(siteAcceptsSecondary === undefined ? {} : { siteAcceptsSecondary }),
+    ...(siteParserCommit === undefined ? {} : { siteParserCommit }) } as ControlledReleaseInput));
+}
+
+function persistControlled(outDir: string, result: ControlledReleaseResult): { state: "candidate"; file: string } | { state: "refused"; reason: string } {
+  if (result.state === "refused") return { state: "refused", reason: `${result.reason}: ${result.detail}` };
+  const file = join("controlled", `${result.release.releaseId}.candidate.json`);
+  writeJsonAtomically(join(outDir, file), result.release);
+  writeJsonAtomically(join(outDir, "controlled", `${result.release.releaseId}.sidecar.private.json`), result.sidecar);
+  return { state: "candidate", file };
+}
+
+/**
+ * PRODUCTION SOURCE of a registered epoch (W1-T10843): derive assignments and outcomes from the ledger,
+ * merged `Remudero-Task` pulls and fix rows; take revisions from the registered protocol, then build.
+ * The command reads the existing paid-pilot protocol (or --controlled-protocol envelope), never receipt pins.
+ */
+export function writeRegisteredControlledCandidate(outDir: string, epochId: string, facts: LedgerEpochFacts,
+  consent: FieldTrialsConsent | string | null, nowIso: string, siteAcceptsSecondary: boolean,
+  siteParserCommit?: string): { state: "candidate"; file: string } | { state: "refused"; reason: string } {
+  const derived = deriveRegisteredEpoch(epochId, facts);
+  if (derived === null) return { state: "refused", reason: `controlled-epoch-unregistered: ${epochId}` };
+  return persistControlled(outDir, buildControlledFieldTrialsRelease({ ...derived, consent, asOf: nowIso, siteAcceptsSecondary,
+    ...(siteParserCommit === undefined ? {} : { siteParserCommit }) }));
+}
+
+async function readControlledLedgerRows(stateDir: string): Promise<Record<string, unknown>[]> {
+  const problems: string[] = [];
+  const rows = await readLedgerUnionRecords(stateDir, {
+    onUnreadDirectory: (path) => { problems.push(`unread-directory: ${path}`); },
+    onUnreadArchive: (path) => { problems.push(`unread-archive: ${path}`); },
+    onUnreadLive: (path) => { problems.push(`unread-live: ${path}`); },
+    onMalformedRow: (finding) => { problems.push(`malformed-${finding.kind}: ${finding.path}:${finding.rowOrdinal}`); },
+  });
+  if (problems.length > 0) throw new Error(problems.join("; "));
+  return rows;
+}
+
+/** The ledger rows and merged pulls of every source that has a ledger, or a named source refusal. */
+async function controlledEpochFacts(repos: readonly (readonly [string, string])[], ledgers: ReadonlyMap<string, string>, github: FieldTrialsGithubStore,
+  readRows: (stateDir: string) => Promise<Record<string, unknown>[]>): Promise<LedgerEpochFacts | string> {
+  const rows: Record<string, unknown>[] = [];
+  const merged: LedgerEpochFacts["merged"][number][] = [];
+  const sourceRepos: string[] = [];
+  let observedThrough: string | null = null;
+  let complete = true;
+  for (const [label, repo] of repos) {
+    const dir = ledgers.get(label);
+    if (dir === undefined) continue;
+    try { for (const row of await readRows(dir)) rows.push(row); }
+    catch (error) {
+      return `controlled-ledger-read-failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    sourceRepos.push(repo);
+    const store = github.repos[repo];
+    const cursor = store?.cursors.pulls;
+    const commits = store?.cursors.commits;
+    if (store === undefined || cursor?.state !== "complete" || cursor.asOf === null
+      || commits?.state !== "complete" || commits.asOf === null) complete = false;
+    else {
+      const through = cursor.asOf < commits.asOf ? cursor.asOf : commits.asOf;
+      if (observedThrough === null || through < observedThrough) observedThrough = through;
+    }
+    for (const pull of Object.values(store?.pulls ?? {})) merged.push({ trailerTaskIds: pull.trailerTaskIds, mergedAt: pull.mergedAt,
+      mergedOnMain: pull.mergeCommitSha !== null && typeof store?.commits[pull.mergeCommitSha] === "string" });
+  }
+  if (sourceRepos.length === 0) return "controlled-ledger-unavailable";
+  return { rows, merged, mergesObservedThrough: complete ? observedThrough : null, sourceRepos };
+}
+
+/** A full 40-hex git commit id (case-insensitive); a function, not a module-scope regex constant. */
+function isFullCommitSha(value: string): boolean {
+  return value.length === 40 && /^[0-9a-f]+$/i.test(value);
+}
+
 export interface FieldTrialsCommandInput {
   nowIso?: string;
   print?: (line: string) => void;
@@ -1217,11 +1339,47 @@ export interface FieldTrialsCommandInput {
   fetch?: GithubPageFetch;
   readLedger?: (stateDir: string) => Promise<FieldTrialsLedgerRead>;
   resolveConfig?: () => { root: string; fleetRepos?: string[] };
+  /** Read the GitHub comparison proving that the vendored accepting parser commit is on site main. */
+  readSiteEvidence?: (path: string) => Promise<unknown>;
+  /** W1-T10843: the raw ledger-union rows of one state dir, read for a registered controlled epoch. */
+  readRows?: (stateDir: string) => Promise<Record<string, unknown>[]>;
 }
 
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
   + "[--consent <file>] [--case-files <file>] [--finding-evidence <file>] [--finding-evidence-keys <file>] "
-  + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--json]";
+  + "[--controlled-registered <epoch-id> | --controlled-epoch <file>] [--controlled-protocol <file>] [--site-parser-commit <sha>] "
+  + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json]";
+
+/**
+ * W1-T10831 `--field-note <out>`: read the latest private snapshot (no refresh), and write a
+ * candidate-unreviewed site field note plus the private record of the window it covered. A withheld
+ * result writes nothing and exits 0; a refusal exits 1.
+ */
+function fieldNoteMode(args: { outDir: string; out: string; nowIso: string; json: boolean; print: (line: string) => void;
+  consentPath: string | undefined; registryPath: string | undefined }): number {
+  const snapshotValue = record(readJson(join(args.outDir, "field-trials-flow-v1.json")));
+  const windowsPath = join(args.outDir, "field-trials-field-note-windows.json");
+  const windows = parseFieldNoteWindows(readJson(windowsPath, { version: FIELD_NOTE_WINDOWS_VERSION, windows: [] }));
+  const consent = typeof args.consentPath === "string" ? parseFieldTrialsConsent(readJson(args.consentPath)) : null;
+  const registry = args.registryPath === undefined ? PINNED_SITE_CONSENT_REGISTRY : parseSiteConsentRegistry(readJson(args.registryPath));
+  const result = snapshotValue?.version !== FIELD_TRIALS_FLOW_VERSION ? { state: "refused" as const, reason: "no-snapshot" }
+    : typeof windows === "string" ? { state: "refused" as const, reason: windows }
+    : buildModelFieldNoteCandidate({ snapshot: snapshotValue as unknown as FieldTrialsFlowSnapshot, consent, registry,
+      windows, salt: pseudonymSalt(args.outDir), nowIso: args.nowIso });
+  if (result.state === "candidate") {
+    writeJsonAtomically(args.out, result.candidate);
+    const recorded = windows as FieldNoteWindows;
+    writeJsonAtomically(windowsPath, { ...recorded, windows: [...recorded.windows, result.window] });
+  }
+  if (args.json) args.print(JSON.stringify(result.state === "candidate"
+    ? { state: "candidate", releaseId: result.window.releaseId, windowStart: result.window.windowStart, windowEnd: result.window.windowEnd,
+      rows: result.candidate.note.rows.length, withheld: result.candidate.withheld.cells } : result));
+  else args.print(result.state === "candidate"
+    ? `field-trials: field note candidate-unreviewed ${result.window.releaseId} ${result.window.windowStart}..${result.window.windowEnd}: `
+      + `${result.candidate.note.rows.length} rows, ${result.candidate.withheld.cells} cells withheld; written to ${args.out}`
+    : `field-trials: field note ${result.state} (${result.reason})`);
+  return result.state === "refused" ? 1 : 0;
+}
 
 function labelOf(repo: string): string {
   const name = repo.split("/").at(-1)!.toLowerCase();
@@ -1236,6 +1394,20 @@ function pairs(values: string[] | undefined): Map<string, string> | string {
     out.set(value.slice(0, at), value.slice(at + 1));
   }
   return out;
+}
+
+/** Only the vendored parser revision is supported; its presence on site main is verified at release time. */
+export async function verifySiteSecondarySupport(commit: string | undefined, read: (path: string) => Promise<unknown>):
+  Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (commit !== SITE_SECONDARY_COMMIT) return { ok: false, reason: "parser-commit-not-vendored" };
+  try {
+    const comparison = record(await read(`repos/craigoley/remudero-site/compare/${commit}...main?per_page=1`));
+    const onMain = (comparison?.status === "ahead" || comparison?.status === "identical")
+      && record(comparison.base_commit)?.sha === commit && record(comparison.merge_base_commit)?.sha === commit;
+    return onMain ? { ok: true } : { ok: false, reason: "parser-commit-not-on-main" };
+  } catch (err) {
+    return { ok: false, reason: `site-evidence-read-failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 /**
@@ -1253,8 +1425,10 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     values = parseArgs({ args: rest, strict: true, allowPositionals: false, options: {
       source: { type: "string", multiple: true }, ledger: { type: "string", multiple: true }, "out-dir": { type: "string" },
       consent: { type: "string" }, "case-files": { type: "string" }, "max-pages": { type: "string" },
-      "finding-evidence": { type: "string" }, "finding-evidence-keys": { type: "string" },
-      offline: { type: "boolean" }, revoke: { type: "string" }, json: { type: "boolean" } } }).values;
+      "finding-evidence": { type: "string" }, "finding-evidence-keys": { type: "string" }, "controlled-epoch": { type: "string" },
+      "controlled-registered": { type: "string" }, "controlled-protocol": { type: "string" }, "site-parser-commit": { type: "string" },
+      offline: { type: "boolean" }, revoke: { type: "string" }, json: { type: "boolean" },
+      "field-note": { type: "string" }, "site-registry": { type: "string" } } }).values;
   } catch {
     const reason = "arguments-invalid";
     print(`${USAGE} (${reason})`);
@@ -1265,6 +1439,13 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
   const maxPages = values["max-pages"] === undefined ? DEFAULT_MAX_PAGES : Number(values["max-pages"]);
   if (typeof sourcePairs === "string" || typeof ledgerPairs === "string" || !Number.isSafeInteger(maxPages) || maxPages < 1) {
     print(`${USAGE} (invalid: ${typeof sourcePairs === "string" ? sourcePairs : typeof ledgerPairs === "string" ? ledgerPairs : "--max-pages"})`);
+    return 2;
+  }
+  const siteCommit = typeof values["site-parser-commit"] === "string" ? values["site-parser-commit"] : undefined;
+  const registeredEpoch = typeof values["controlled-registered"] === "string" ? values["controlled-registered"] : undefined;
+  const siteCommitInvalid = siteCommit !== undefined && !isFullCommitSha(siteCommit);
+  if (siteCommitInvalid || (registeredEpoch !== undefined && values["controlled-epoch"] !== undefined)) {
+    print(`${USAGE} (invalid: ${siteCommitInvalid ? "--site-parser-commit" : "--controlled-registered with --controlled-epoch"})`);
     return 2;
   }
   const config = (input.resolveConfig ?? loadConfig)();
@@ -1280,6 +1461,10 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     writeJsonAtomically(manifestPath, manifest);
     print(`field-trials: revoked ${values.revoke}; last known good ${manifest.lastKnownGood?.releaseId ?? "none"}`);
     return 0;
+  }
+  if (typeof values["field-note"] === "string") {
+    return fieldNoteMode({ outDir, out: values["field-note"], nowIso, json: values.json === true, print,
+      consentPath: values.consent as string | undefined, registryPath: values["site-registry"] as string | undefined });
   }
   let caseFiles: TaskCaseFile[] | undefined;
   if (typeof values["case-files"] === "string") {
@@ -1340,9 +1525,39 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     printError(JSON.stringify({ event: "field_trials.refresh_failed", reason: failure, last_known_good: manifest.lastKnownGood }));
   }
   writeJsonAtomically(manifestPath, manifest);
+  let controlled: ReturnType<typeof writeControlledCandidate> | null = null;
+  if (typeof values["controlled-epoch"] === "string" || registeredEpoch !== undefined) {
+    const siteEvidence = values.offline === true && input.readSiteEvidence === undefined ? { ok: false as const, reason: "site-evidence-unavailable-offline" }
+      : await verifySiteSecondarySupport(siteCommit, input.readSiteEvidence ?? (async (path) =>
+        JSON.parse(String(await ghInteractiveRead(["api", path], { encoding: "utf8" })))));
+    const siteAccepts = siteEvidence.ok;
+    if (registeredEpoch === undefined) {
+      controlled = writeControlledCandidate(outDir, readJson(values["controlled-epoch"] as string), consent, nowIso, siteAccepts, siteCommit);
+    } else {
+      const facts = await controlledEpochFacts(repos, defaultLedgers, github, input.readRows ?? readControlledLedgerRows);
+      if (typeof facts !== "string") {
+        const stateDir = defaultLedgers.values().next().value ?? join(config.root, "state");
+        const loaded = typeof values["controlled-protocol"] === "string" ? record(readJson(values["controlled-protocol"]))
+          : record(loadPaidPilotProtocol(stateDir, registeredEpoch));
+        const protocol = record(loaded?.protocol);
+        const revisions = record(protocol?.revisions);
+        if (protocol?.version === BENCHMARK_PAID_PILOT_VERSION && protocol.pilotId === registeredEpoch && revisions !== undefined) {
+          const stack = Object.fromEntries(Object.entries(revisions).map(([key, value]) => [key, { state: "observed", value }]));
+          facts.protocol = { epochId: registeredEpoch, stack };
+        }
+      }
+      controlled = typeof facts === "string" ? { state: "refused", reason: facts }
+        : writeRegisteredControlledCandidate(outDir, registeredEpoch, facts, consent, nowIso, siteAccepts, siteCommit);
+    }
+    if (controlled.state === "refused" && controlled.reason.startsWith("site-secondary-unavailable") && !siteEvidence.ok) {
+      controlled.reason += `; ${siteEvidence.reason}`;
+    }
+    if (values.json !== true) print(controlled.state === "candidate" ? `  controlled candidate: ${controlled.file} (never published; reviewed import only)`
+      : `  controlled release refused (${controlled.reason})`);
+  }
   if (values.json === true) print(JSON.stringify({ snapshot: { state: snapshot.state, reasons: snapshot.reasons, links: {
     prs: snapshot.links.prs, matched: snapshot.links.matched, ambiguous: snapshot.links.ambiguous, unmatched: snapshot.links.unmatched },
-  rebuild: snapshot.rebuild }, github: { state: githubPass.state, pagesRead: githubPass.pagesRead }, manifest }));
+  rebuild: snapshot.rebuild }, github: { state: githubPass.state, pagesRead: githubPass.pagesRead }, manifest, controlled }));
   else {
     print(`field-trials ${snapshot.asOf}: snapshot ${snapshot.state}; github ${githubPass.state} (${githubPass.pagesRead} pages); `
       + `${snapshot.links.matched}/${snapshot.links.prs} PRs linked, ${snapshot.links.ambiguous} ambiguous, ${snapshot.links.unmatched} unmatched`);
@@ -1351,5 +1566,5 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
       + `last known good ${manifest.lastKnownGood ? `${manifest.lastKnownGood.releaseId} as of ${manifest.lastKnownGood.asOf}` : "none"}`);
     print("  observational only: no causal claim, no routing change, nothing published");
   }
-  return failure === null ? 0 : 1;
+  return failure === null && controlled?.state !== "refused" ? 0 : 1;
 }
