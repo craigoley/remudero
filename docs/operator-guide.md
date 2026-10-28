@@ -1967,6 +1967,29 @@ variable names to Docker, so key values do not enter its command arguments or un
 missing or unsafe file leaves that cash route unavailable while subscription work can boot; check
 the named launcher warning and repair the file before relying on squeeze fallback.
 
+For the second Azure account, boot also loads the optional
+`~/.local/share/remudero/secrets/cash-eastus-api-key` into `RMD_CASH_EASTUS_API_KEY`.
+A recycle preserves a captured container value (then a shell value), otherwise reads this durable
+mode-0600 secret; an absent or unsafe file leaves only that deployment unavailable.
+`RMD_CASH_EASTUS_API_KEY_PATH` overrides the host file path at boot or recycle. At boot the
+file defaults to `cash-eastus-api-key` under the rendered `RMD_CASH_SECRET_DIR`.
+
+From a machine where `az` is logged in to the subscription, create the host secrets directory if
+needed (`mkdir -p ~/.local/share/remudero/secrets` on the host), then write the EastUS key directly
+from Azure over SSH. This command rejects empty or multiple key lines before replacing an existing
+file and prints only its mode, byte size and path:
+
+```bash
+az cognitiveservices account keys list -g synthwatch-rg -n synthwatch-foundry-eus --query key1 -o tsv | ssh remudero 'set -e; umask 077; d="$HOME/.local/share/remudero/secrets"; t="$d/.cash-eastus-api-key.tmp"; cat > "$t"; [ "$(awk "NF{n++} END{print n+0}" "$t")" = 1 ] || { rm -f "$t"; echo "refused: expected exactly one key line" >&2; exit 1; }; chmod 600 "$t"; mv "$t" "$d/cash-eastus-api-key"; stat -c "%a %s %n" "$d/cash-eastus-api-key"'
+```
+
+The watchdog converges the generated launcher after this change ships. The next relaunch or
+recycle carries the key by name only, without printing its value. Verify presence in the container:
+
+```bash
+docker exec remudero-daemon sh -c 'test -n "$RMD_CASH_EASTUS_API_KEY" && echo set || echo unset'
+```
+
 Every Foundry Messages turn reserves against the same UTC-day `dailyCapUsd` as the inexpensive
 cash requests **within one daemon** unless `workerProviders.fleetCashAllowancePath` names one
 host-shared file for every cash instance. Opus has an additional $5 ordinary and $10 squeeze-day limit; automatic routing
