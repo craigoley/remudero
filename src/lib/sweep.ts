@@ -5336,7 +5336,9 @@ export async function refreshStaleRollupAfterRefusal(
   if (!staleRollupRefreshApplies(pr)) {
     return `no stale-rollup refresh: GitHub reports mergeable=${String(pr.mergeable)}, mergeableState=${pr.mergeableState ?? "unknown"}`;
   }
-  const priorRefresh = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber);
+  // W1-T10741: a transient exception leaves the refresh unconfirmed; allow a later gated retry.
+  const priorRefresh = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber &&
+    !(typeof l.outcome === "string" && l.outcome.startsWith("error:") && armFailureAction(l.outcome) === "transient"));
   if (priorRefresh.length > 0) {
     if (rowsAtHead(ledgerLines, STALE_ROLLUP_REFRESH_EXHAUSTED_STEP, pr).length > 0) {
       return "stale-rollup refresh already spent for this PR; escalated once at this head";
