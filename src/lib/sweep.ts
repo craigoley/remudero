@@ -20000,6 +20000,7 @@ export async function runSweep(
     let rearmAfterDisarm: number | undefined;
     let rearmIncidentFields: Record<string, unknown> = {};
     let queueMembership: MergeQueueMembership | undefined;
+    const hadIdleObservation = idleHeads.has(pr.prNumber);
     if (disposition !== "mergeable" || pr.autoMergeArmed !== true || idleHeads.get(pr.prNumber) !== pr.headSha) {
       clearIdle(pr);
     }
@@ -20646,6 +20647,11 @@ export async function runSweep(
               // W1-T1061: capture the concrete outcome whenever one came back. A `void` return is
               // the legacy "treat as armed" shape and names no real branch, so no field is written.
               if (armOutcomeName !== undefined) armOutcome = armOutcomeName;
+              if (!armedIdleDue && !hadIdleObservation && armOutcomeName === "armed" && deps.repairAdmissionSurface !== "light") {
+                recordIdle("automerge.armed_idle", pr, true, {
+                  reason: "first reviewed, green idle sighting after a successful full-pass arm",
+                });
+              }
               if (armedIdleDue) {
                 const step = armOutcomeName === "direct-merged" ? "automerge.armed_idle_merged"
                   : armOutcomeName === "armed" ? "automerge.armed_idle_enqueued" : "automerge.armed_idle_refused";

@@ -169,6 +169,13 @@ hide otherwise eligible old regular cache entries. The existing whole-cache
 live/open checks still hold a cache with a live endpoint. Foreign, linked,
 non-socket `.pipe` entries and all other unknown data retain the whole cache.
 
+Codex runs also leave per-run copies of downloads deep inside evidence folders that
+stay active for weeks. The janitor removes each Playwright browser install (a
+`chromium-*`, `chromium_headless_shell-*`, `firefox-*`, `webkit-*` or `ffmpeg-*`
+directory stamped `INSTALLATION_COMPLETE`) and each npm `_cacache` store under
+`.codex/work-artifacts` once that copy alone has been idle six hours, with the same
+owner, process, cwd and open-file guards as any artifact. Reports beside them stay.
+
 The regular janitor additionally inspects this account's `.codex/work-artifacts`
 for exact ignored package duplicates and `.next/cache/turbopack` compiler data.
 Each invocation uses one account lock and serial probes. Inspection is bounded
