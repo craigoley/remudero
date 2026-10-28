@@ -219,15 +219,25 @@ function readStoredPopulation(protocol: ProspectiveAaProtocol, path: string): Po
   } catch (error) { return { ok: false, reason: `population-unreadable:${(error as Error).message.slice(0, 80)}` }; }
   if (stored === undefined) return undefined;
   const changed: PopulationOutcome = { ok: false, reason: "population-changed-since-freeze" };
-  if (stored === null || typeof stored !== "object" || !Array.isArray(stored.eligible) || !Array.isArray(stored.refused)) return changed;
+  if (stored === null || typeof stored !== "object" || Array.isArray(stored)
+    || !Array.isArray(stored.eligible) || !Array.isArray(stored.refused)) return changed;
+  const hash = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  if (stored.version !== READINESS_POPULATION_VERSION || typeof stored.trialId !== "string"
+    || typeof stored.frozenAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(stored.frozenAt)
+    || !Number.isFinite(Date.parse(stored.frozenAt)) || !hash(stored.allocationReceiptHash) || !hash(stored.digest)
+    || stored.consent !== protocol.manifest.cohort.kind || stored.orderMethod !== READINESS_ORDER_METHOD
+    || !Number.isSafeInteger(stored.denominator)
+    || stored.eligible.some((entry) => entry === null || typeof entry !== "object" || Array.isArray(entry)
+      || typeof entry.taskId !== "string" || !hash(entry.criteriaHash))
+    || stored.refused.some((entry) => entry === null || typeof entry !== "object" || Array.isArray(entry)
+      || typeof entry.taskId !== "string" || typeof entry.reason !== "string" || entry.reason.trim().length === 0)) return changed;
   const { digest, ...body } = stored;
-  if (stored.version !== READINESS_POPULATION_VERSION || digest !== sha256(JSON.stringify(body))
+  if (digest !== sha256(JSON.stringify(body))
     || stored.trialId !== protocol.trialId || stored.allocationReceiptHash !== protocol.allocationReceiptHash
     || stored.denominator !== protocol.manifest.tasks.length) return changed;
-  const covered = [...stored.eligible.map((entry) => entry?.taskId), ...stored.refused.map((entry) => entry?.taskId)].sort();
+  const covered = [...stored.eligible.map((entry) => entry.taskId), ...stored.refused.map((entry) => entry.taskId)].sort();
   const registered = protocol.manifest.tasks.map((entry) => entry.taskId).sort();
-  if (JSON.stringify(covered) !== JSON.stringify(registered)
-    || stored.eligible.some((entry) => typeof entry.criteriaHash !== "string")) return changed;
+  if (JSON.stringify(covered) !== JSON.stringify(registered)) return changed;
   return { ok: true, population: stored };
 }
 
