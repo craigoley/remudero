@@ -270,7 +270,7 @@ test("daily progress reports improvement checks as activity without inventing co
   const { withTempDir } = await import("#src/lib/tmp.js");
   const { appendLedger } = await import("#src/lib/ledger.js");
   const { collectDailyProgress } = await import("#src/lib/daily-progress-collector.js");
-  const { openReadModel, acquireLease } = await import("#src/lib/read-model-db.js");
+  const { openReadModel, acquireLease, flushReadModelTransactions } = await import("#src/lib/read-model-db.js");
   const { dailyDateAt } = await import("#src/lib/daily-progress-calendar.js");
   const { dailyProgressDayKey, readDailyProgressRevision } = await import("#src/lib/daily-progress-store.js");
   await withTempDir("improvement-daily-activity", async dir => {
@@ -302,7 +302,7 @@ test("daily progress reports improvement checks as activity without inventing co
       assert.equal(observed.kind, "activity"); assert.deepEqual(observed.taskIds, source.taskIds); assert.equal(observed.url, evidence.merges[0]!.url);
       assert.notEqual(stored.report.totals.completedTasks.precision, "exact", "an observed check is not a completed plan task or complete PR corpus");
       assert.equal(events.filter(event => event.kind === "merged").length, 0);
-    } finally { db.close(); }
+    } finally { db.close(); await flushReadModelTransactions(); }
   });
 });
 
