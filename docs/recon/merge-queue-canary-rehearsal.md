@@ -40,6 +40,8 @@ affected suites.
 ## Notes
 
 - Ran under the operator's admin user token by operator decision 2026-10-28 (the App lacks Administration: write); the kind line above is the script's fixed text.
+- OBSERVED: the token was fine-grained (GitHub sent no `X-OAuth-Scopes` header), and its account has repository `admin: true`. The 403 below came from the token's own permissions; the account's admin role does not extend to a fine-grained token that lacks Administration: write.
+- Operator decision 2026-10-28: the rehearsal is parked. No token is to gain Administration: write, the run is not to be repeated, and ruleset 24525891 stays disabled.
 
 ## Verdict
 
