@@ -367,15 +367,16 @@ test("an older armed review orphan is not overtaken across refresh batches", asy
   };
   const running = f.hook()();
   try {
-    await t.waitFor(() => compareEntered.settled, { interval: 1, timeout: 2000 });
+    await t.waitFor(() => assert.equal(compareEntered.settled, true), { interval: 1, timeout: 2000 });
     await turn();
     assert.equal(compareGate.settled, false, "the existing refresh barrier remains in force");
     assert.deepEqual(f.reviewed, [], "a younger early-batch review cannot take the older orphan's place");
     compareGate.resolve();
-    await t.waitFor(() => f.reviewed.length > 0, { interval: 1, timeout: 2000 });
+    await t.waitFor(() => assert.ok(f.reviewed.length > 0), { interval: 1, timeout: 2000 });
     assert.equal(f.reviewed[0], old.prNumber, "one oldest-first order spans both former batches");
     oldReviewGate.resolve();
     await running;
+    await t.waitFor(() => assert.equal(f.reviewed.length, 2), { interval: 1, timeout: 2000 });
     assert.deepEqual(f.reviewed, [old.prNumber, young.prNumber]);
     assert.deepEqual(f.updates, [], "review priority adds no branch refresh");
     assert.deepEqual(f.logs.filter(row => row.step === "sweep_light.error"), []);
