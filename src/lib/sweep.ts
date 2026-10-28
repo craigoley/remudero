@@ -15910,9 +15910,9 @@ export function metadataOnlyRed(pr: OpenPrView): string[] | undefined {
   return checks.length > 0 && checks.every((name) => METADATA_RED_CHECKS.has(name)) ? checks : undefined;
 }
 
-/** Keep every currently observed red: an aggregate rollup does not replace a failed shard's evidence. */
+/** Use the required-check rollup when available; ciFailures is the older producer's fallback. */
 export function redCheckNames(pr: OpenPrView): string[] {
-  const names = [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((failure) => failure.name)];
+  const names = pr.redRequiredChecks?.length ? [...pr.redRequiredChecks] : pr.ciFailures?.map((failure) => failure.name) ?? [];
   if (pr.reviewState === "failure") {
     names.push(...pr.unmetCriteria.map((criterion) => `review:${criterion.claim}:${criterion.proof}`));
   }
