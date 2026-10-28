@@ -202,15 +202,6 @@ test("W1-T7736: the report records completion time, outcome and suite selection 
   assert.match(renderReport({ ...plan, sample: [], conflictPair: null, requiredChecks: undefined, identity: { login: "x", kind: "y", note: "z" } }),
     /- ran as `x` \(y\)\n- z\n[\s\S]*required checks: none\n[\s\S]*sample: none\n- conflicting pair: none in the sample/);
 
-  // The sample is sized from the runner budget and a CI run's measured job-minutes, never a fixed count.
-  assert.deepEqual(sizeSample({ candidates: 9, budget: { freeJobSlots: 10, jobMinutesPerRun: 150 }, maxEntriesToBuild: 4, windowMinutes: 120 }),
-    { size: 8, concurrent: 4, slotMinutes: 1200, groupCost: 150 });
-  assert.deepEqual(sizeSample({ candidates: 9, budget: { freeJobSlots: 0, jobMinutesPerRun: 150 }, maxEntriesToBuild: 4, windowMinutes: 120 }),
-    { size: 0, concurrent: 0, slotMinutes: 0, groupCost: 150 });
-  // jobs x wall-clock is no price: with no measured job-minutes the window fits no group.
-  assert.deepEqual(sizeSample({ candidates: 9, groupCiMinutes: 30, budget: { freeJobSlots: 10, jobsPerRun: 5 }, maxEntriesToBuild: 4, windowMinutes: 120 }),
-    { size: 0, concurrent: 0, slotMinutes: 1200, groupCost: undefined });
-  assert.equal(DEFAULT_RUNNER_SLOTS, 114, "the default is the 2026-10-27 observed concurrency floor, not Free's 20");
   assert.equal(pickSample(CANDIDATES, 1).conflictPair, null);
   const full = fakeSeam({ budget: { busyJobs: DEFAULT_RUNNER_SLOTS, jobMinutesPerRun: 80 } });
   const noRoom = await runRehearsal(full.seam, { live: true });
@@ -221,6 +212,38 @@ test("W1-T7736: the report records completion time, outcome and suite selection 
   assert.equal(none.groupCiMinutes, undefined, "no green PR means no observed duration, and no sample");
   assert.equal(none.sizing.size, 0);
   assert.match(renderReport(none), /\/ — job-min per group = 0 group\(s\)/);
+});
+
+test("W1-T7736: the canary prices runner capacity in jobs and measured job-minutes, not runs", async () => {
+  // The sample is sized from the runner budget and a CI run's measured job-minutes, never a fixed count.
+  assert.deepEqual(sizeSample({ candidates: 9, budget: { freeJobSlots: 10, jobMinutesPerRun: 150 }, maxEntriesToBuild: 4, windowMinutes: 120 }),
+    { size: 8, concurrent: 4, slotMinutes: 1200, groupCost: 150 });
+  assert.deepEqual(sizeSample({ candidates: 9, budget: { freeJobSlots: 0, jobMinutesPerRun: 150 }, maxEntriesToBuild: 4, windowMinutes: 120 }),
+    { size: 0, concurrent: 0, slotMinutes: 0, groupCost: 150 });
+  // jobs x wall-clock is no price: with no measured job-minutes the window fits no group.
+  assert.deepEqual(sizeSample({ candidates: 9, groupCiMinutes: 30, budget: { freeJobSlots: 10, jobsPerRun: 5 }, maxEntriesToBuild: 4, windowMinutes: 120 }),
+    { size: 0, concurrent: 0, slotMinutes: 1200, groupCost: undefined });
+  assert.equal(DEFAULT_RUNNER_SLOTS, 114, "the default is the 2026-10-27 observed concurrency floor, not Free's 20");
+  // The real seam counts busy JOBS across runs and prices a run by its jobs' runner minutes.
+  const job = (conclusion: string, minutes: number) =>
+    ({ conclusion, started_at: "2026-10-27T00:00:00Z", completed_at: new Date(Date.parse("2026-10-27T00:00:00Z") + minutes * 60_000).toISOString() });
+  const answers: Array<[RegExp, unknown]> = [
+    [/status=in_progress/, { workflow_runs: [{ id: 1 }] }], [/status=queued/, { workflow_runs: [{ id: 2 }] }],
+    [/runs\/1\/jobs/, { jobs: [{ status: "in_progress" }, { status: "in_progress" }, { status: "completed" }] }],
+    [/runs\/2\/jobs/, { jobs: [{ status: "queued" }] }],
+    [/workflows\/ci\.yml\/runs/, { workflow_runs: [{ id: 3 }, { id: 4 }, { id: 5 }] }],
+    [/runs\/3\/jobs/, { jobs: [job("success", 30), job("skipped", 30)] }],
+    [/runs\/4\/jobs/, { jobs: [job("success", 50), { conclusion: "cancelled", started_at: null, completed_at: null }] }],
+    [/runs\/5\/jobs/, { jobs: [job("success", 10)] }],
+  ];
+  const seam = createGhSeam({ pacer: { waitAsync: async () => {}, wait: () => {}, recordResult: () => {} },
+    readExec: (_file: string, args: string[]) => {
+      const hit = answers.find(([re]) => args.some((a) => re.test(a)));
+      assert.ok(hit, `unanswered read ${args.join(" ")}`);
+      return JSON.stringify(hit[1]);
+    }, exec: () => "" });
+  assert.deepEqual(await seam.readRunnerBudget(), { busyJobs: 3, jobMinutesPerRun: 50 },
+    "a running run's two busy jobs plus a queued run's one, and the costliest of runs priced 30, 50 and 10");
 });
 
 test("W1-T7736: the rehearsal tears down even when a group fails", async () => {
