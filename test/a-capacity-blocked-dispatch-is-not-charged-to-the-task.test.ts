@@ -4,15 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { auditLedgerUnion } from "../src/lib/ledger-union.js";
-import { MAX_RETAINED_LINES_PER_STEP } from "../src/lib/ledger.js";
-import { auditedLifetimeTalliesFromArchives, MAX_LIFETIME_ARCHIVE_START_IDENTITIES } from "../src/run-task.js";
+import { auditLedgerUnion } from "#src/lib/ledger-union.js";
+import { MAX_RETAINED_LINES_PER_STEP } from "#src/lib/ledger.js";
+import { auditedLifetimeTalliesFromArchives, MAX_LIFETIME_ARCHIVE_START_IDENTITIES } from "#src/run-task.js";
 import {
   DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
   effectiveLifetimeDispatches,
   isLifetimeDispatchCapExceeded,
   lifetimeDispatchTally,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 
 function runStart(taskId: string, n: number): Record<string, unknown> {
   return { ts: `2026-09-17T00:00:${String(n).padStart(2, "0")}.000Z`, task_id: taskId, run_id: `${taskId}-${n}`, step: "run.start" };

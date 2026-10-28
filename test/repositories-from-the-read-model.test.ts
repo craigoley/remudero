@@ -5,20 +5,20 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { fixedClock, systemClock } from "../src/lib/clock.js";
-import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
-import { pauseFilePath } from "../src/lib/fleet-control.js";
-import { createLedgerProjector, LEDGER_PROJECTOR_SCHEMA_VERSION, ledgerLineIdentity, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { acquireLease, flushReadModelTransactions, openReadModel, READ_MODEL_DB_DIR_ENV } from "../src/lib/read-model-db.js";
+import { fixedClock, systemClock } from "#src/lib/clock.js";
+import { daemonInstanceRegistryPath } from "#src/lib/deployer.js";
+import { pauseFilePath } from "#src/lib/fleet-control.js";
+import { createLedgerProjector, LEDGER_PROJECTOR_SCHEMA_VERSION, ledgerLineIdentity, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { acquireLease, flushReadModelTransactions, openReadModel, READ_MODEL_DB_DIR_ENV } from "#src/lib/read-model-db.js";
 import {
   createReadModelTicker,
   ledgerSource,
   readModelSwitchesPath,
   type ReadModelBodyEntry,
   type ReadModelInstanceState,
-} from "../src/lib/read-model-worker.js";
-import { buildRepoDashboardRoutes, type RepoDashboardResult } from "../src/lib/repo-dashboard-route.js";
-import { createRepoLedgerIndex } from "../src/lib/repo-ledger-index.js";
+} from "#src/lib/read-model-worker.js";
+import { buildRepoDashboardRoutes, type RepoDashboardResult } from "#src/lib/repo-dashboard-route.js";
+import { createRepoLedgerIndex } from "#src/lib/repo-ledger-index.js";
 import {
   createRepositoriesReadModelView,
   createRepositoriesSourcePublisher,
@@ -30,12 +30,12 @@ import {
   type RepositoriesSources,
   type RepositoriesSummary,
   unstampedSummary,
-} from "../src/lib/repositories-view.js";
-import { buildServeServer, repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { createViewShadow, readShadowEvidence, type ShadowComparison, type ShadowRequest } from "../src/lib/view-shadow.js";
-import type { ViewBody, ViewSource } from "../src/lib/views.js";
-import { switchViewsOn } from "./helpers/read-model-switches.js";
+} from "#src/lib/repositories-view.js";
+import { buildServeServer, repositoriesSources, type ServeDeps } from "#src/lib/serve.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { createViewShadow, readShadowEvidence, type ShadowComparison, type ShadowRequest } from "#src/lib/view-shadow.js";
+import type { ViewBody, ViewSource } from "#src/lib/views.js";
+import { switchViewsOn } from "#test/helpers/read-model-switches.js";
 
 // P1-08: the repositories view is #7926's repos summary for every instance, computed from each instance's
 // read-model `repo_row` table, counted once however many rotations carry a row, and dark until switched.

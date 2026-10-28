@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import * as armModule from "../src/lib/arm-auto-merge.js";
+import * as armModule from "#src/lib/arm-auto-merge.js";
 
 type Scan = (planDir: string) => Array<{ path: string; error: string }>;
 // Read off the namespace so this file still LOADS on a tree without the export, and fails per test.

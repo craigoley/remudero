@@ -5,8 +5,8 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { MessageChannel, Worker } from "node:worker_threads";
-import { createLedgerRotationMemo, ledgerRotationEntries, registerRotationDigestCodec } from "../src/lib/ledger-union.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { createLedgerRotationMemo, ledgerRotationEntries, registerRotationDigestCodec } from "#src/lib/ledger-union.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const holder = "landed-rotation";
 const noParse = () => { throw new Error("the memo must supply the rotation"); };

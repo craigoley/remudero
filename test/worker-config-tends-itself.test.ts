@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Clock } from "../src/lib/clock.js";
+import type { Clock } from "#src/lib/clock.js";
 import {
   applyConfigEdits,
   capDerivation,
@@ -29,14 +29,14 @@ import {
   CONFIG_GARDEN_CLASSES,
   type ConfigGardenSources,
   type ConfigInventory,
-} from "../src/lib/config-gardener.js";
-import { cohortGuardMetrics, cohortGuardObservations, enterCanary, stepCanary } from "../src/lib/experiment-promotion.js";
-import type { MountRecommendation } from "../src/lib/mount-recommender.js";
-import { gardenStatePath, readGardenState, type GardenCheckout, type PrState } from "../src/lib/gardener.js";
-import type { RunSummary } from "../src/lib/retro.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { daemonCommand } from "../src/run-task.js";
+} from "#src/lib/config-gardener.js";
+import { cohortGuardMetrics, cohortGuardObservations, enterCanary, stepCanary } from "#src/lib/experiment-promotion.js";
+import type { MountRecommendation } from "#src/lib/mount-recommender.js";
+import { gardenStatePath, readGardenState, type GardenCheckout, type PrState } from "#src/lib/gardener.js";
+import type { RunSummary } from "#src/lib/retro.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { daemonCommand } from "#src/run-task.js";
 
 const T0 = Date.parse("2026-09-25T00:00:00Z");
 const HOUR = 3600 * 1000;

@@ -10,9 +10,9 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { ANALYTICS_VIEW_NAME } from "../src/lib/analytics-view.js";
-import { runSlowLaneWorker, threadSlowLane, type SlowLaneMessage, type SlowLaneWork } from "../src/lib/read-model-slow-lane.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { ANALYTICS_VIEW_NAME } from "#src/lib/analytics-view.js";
+import { runSlowLaneWorker, threadSlowLane, type SlowLaneMessage, type SlowLaneWork } from "#src/lib/read-model-slow-lane.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 type Logged = { step: string; extra: Record<string, unknown> };
 

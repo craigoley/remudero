@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { accessIdentityProviders } from "../src/lib/serve.js";
-import type { CloudflareAccessKeyCache, IdentityProvider } from "../src/lib/service.js";
+import { accessIdentityProviders } from "#src/lib/serve.js";
+import type { CloudflareAccessKeyCache, IdentityProvider } from "#src/lib/service.js";
 import type { IncomingMessage } from "node:http";
 
 const REPO_ROOT = join(import.meta.dirname, "..");

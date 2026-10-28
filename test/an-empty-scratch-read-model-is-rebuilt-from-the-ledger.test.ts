@@ -8,12 +8,12 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { readModelCommand } from "../src/lib/read-model-cli.js";
-import { READ_MODEL_DB_DIR_ENV, readModelDbDir } from "../src/lib/read-model-db.js";
-import { createReadModelTicker, readModelStatusView, readModelSwitchesPath, type ReadModelView, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { readModelCommand } from "#src/lib/read-model-cli.js";
+import { READ_MODEL_DB_DIR_ENV, readModelDbDir } from "#src/lib/read-model-db.js";
+import { createReadModelTicker, readModelStatusView, readModelSwitchesPath, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 function scratch(t: { after: (fn: () => void) => void }, kind: string): string {
   const dir = makeTempDir(kind);

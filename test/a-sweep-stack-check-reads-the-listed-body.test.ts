@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { stackPrerequisiteFromRest } from "../src/lib/arm-auto-merge.js";
-import type { OpenPrView } from "./helpers/sweep-test.js";
-import { buildSweepEffects } from "../src/run-task.js";
+import { stackPrerequisiteFromRest } from "#src/lib/arm-auto-merge.js";
+import type { OpenPrView } from "#test/helpers/sweep-test.js";
+import { buildSweepEffects } from "#src/run-task.js";
 
 // A live CPU profile of remudero-daemon on 2026-09-30 put runSweep > stackPrerequisiteFromRest at
 // 8.8% of the loop's busy time: one synchronous `gh api pulls/<n>` per open PR per pass, to read a

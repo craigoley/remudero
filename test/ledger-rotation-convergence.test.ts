@@ -12,8 +12,8 @@ import {
   ledgerExceedsRotationCeiling,
   rotateLedger,
   type LedgerLine,
-} from "../src/lib/ledger.js";
-import { assessBootHealth, countLedgerBootsAfter } from "../src/lib/deployer.js";
+} from "#src/lib/ledger.js";
+import { assessBootHealth, countLedgerBootsAfter } from "#src/lib/deployer.js";
 
 // ── W1-T244 (feedback fb-1784769525147-13afc6, OBSERVED LIVE 2026-07-23): W1-T209's rotation
 // existed but violated an invariant it never stated — AFTER ANY ROTATION THE LIVE LEDGER MUST

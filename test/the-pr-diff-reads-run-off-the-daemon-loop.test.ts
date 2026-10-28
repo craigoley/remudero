@@ -5,19 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { judgeReview, type ReviewVerdict } from "../src/lib/review.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import type { OpenPrView, ReviewReuseInputs } from "../src/lib/sweep.js";
-import { ghExec, type GhAsyncExecutor } from "../src/lib/github-transport.js";
-import type { AsyncGitRunner } from "../src/lib/git-fetch-retry.js";
+import { judgeReview, type ReviewVerdict } from "#src/lib/review.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import type { OpenPrView, ReviewReuseInputs } from "#src/lib/sweep.js";
+import { ghExec, type GhAsyncExecutor } from "#src/lib/github-transport.js";
+import type { AsyncGitRunner } from "#src/lib/git-fetch-retry.js";
 // Namespace imports: this file must LOAD on a base without the awaited symbols, so each proof
 // fails there on its own assertion rather than on a missing export.
-import * as prDiffLib from "../src/lib/pr-diff.js";
-import * as runTaskLib from "../src/run-task.js";
-import { ghShim, type GhShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as prDiffLib from "#src/lib/pr-diff.js";
+import * as runTaskLib from "#src/run-task.js";
+import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const fetchPrDiff = (...a: Parameters<typeof prDiffLib.fetchPrDiff>) => Promise.resolve(prDiffLib.fetchPrDiff(...a));
 const ghPrDiffAsync: typeof prDiffLib.ghPrDiffAsync = (...a) => prDiffLib.ghPrDiffAsync(...a);

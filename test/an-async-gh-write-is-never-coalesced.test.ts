@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import test from "node:test";
 
-import { ghJsonAsync, ghTextAsync } from "../src/lib/github-transport.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { ghJsonAsync, ghTextAsync } from "#src/lib/github-transport.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 test("test/an-async-gh-write-is-never-coalesced.test.ts: writes spawn separately and GET reads share", async (t) => {
   const shim = ghShim([{ when: "", stdout: '{"ok":true}', delaySeconds: 0.02 }]);

@@ -9,7 +9,7 @@ import {
   ENVIRONMENTAL_BLOCK_COOLDOWN_MS,
   latestIndependentFailureBlock,
   MAX_ENVIRONMENTAL_REOFFERS,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 
 const TASK = "CONSOLE-T80";
 const T0 = Date.parse("2026-09-26T12:00:00.000Z");

@@ -3,10 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { IMAGE_BAKED_PATHS } from "../src/lib/deploy-judge.js";
-import type { Escalation } from "../src/lib/escalate.js";
-import { realServePolicyDeps, runServePolicyCycle, type ServeImageDrift, type ServeImageInputs } from "../src/lib/serve-policy-convergence.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { IMAGE_BAKED_PATHS } from "#src/lib/deploy-judge.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { realServePolicyDeps, runServePolicyCycle, type ServeImageDrift, type ServeImageInputs } from "#src/lib/serve-policy-convergence.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // W1-T9487 — 2026-10-14: #11665 changed only serve-supervisor source, acr-build.yml published its
 // image, the build daemon (W1-T9094) rightly stayed put, and serve — judged against the daemon's

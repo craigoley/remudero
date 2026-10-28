@@ -6,8 +6,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import * as nowView from "../src/lib/now-view.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import * as nowView from "#src/lib/now-view.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 type Behind = ReturnType<typeof nowView.gitPlanBehind>;
 

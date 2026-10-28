@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 
-import { readMergeCreditedTaskIds } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { readMergeCreditedTaskIds } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /**
  * THE SYNCHRONOUS MERGE-CREDIT SCAN PARSES A ROTATION ONCE. `buildOpenPrViews` asks

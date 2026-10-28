@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
-import { DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS, type GhCallPacer } from "../src/lib/open-prs-rest.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { nextRunnable, type MergedSet } from "#src/lib/drain.js";
+import { DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS, type GhCallPacer } from "#src/lib/open-prs-rest.js";
 import {
   buildBatchedGithub,
   classifyGhFailure,
@@ -29,7 +29,7 @@ import {
   type PrRef,
   type SupersessionCommit,
   type SupersessionSearch,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 
 /** A minimal task; fields not under test get sensible defaults. */
 function task(over: Partial<Task> = {}): Task {

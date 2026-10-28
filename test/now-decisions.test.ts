@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { BoardRow } from "../src/lib/board.js";
-import type { FeedbackEntry } from "../src/lib/feedback.js";
+import type { BoardRow } from "#src/lib/board.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
 import {
   NOW_DECISION_PROMPT_CHARS,
   NOW_DECISIONS_CAP,
@@ -18,8 +18,8 @@ import {
   readQuestionStore,
   taskQuestionDecisions,
   type NowDecision,
-} from "../src/lib/now-decisions.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/now-decisions.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 

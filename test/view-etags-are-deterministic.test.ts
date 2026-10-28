@@ -8,11 +8,11 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
-import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
-import { createInstancesView } from "../src/lib/instances-view.js";
-import { createNowView } from "../src/lib/now-view.js";
-import type { Plan } from "../src/lib/plan.js";
+import type { Clock } from "#src/lib/clock.js";
+import { daemonInstanceRegistryPath } from "#src/lib/deployer.js";
+import { createInstancesView } from "#src/lib/instances-view.js";
+import { createNowView } from "#src/lib/now-view.js";
+import type { Plan } from "#src/lib/plan.js";
 import {
   createReadModelTicker,
   ledgerSource,
@@ -21,14 +21,14 @@ import {
   readModelStatusView,
   readModelSwitchesPath,
   type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import type { ViewBodyEntry } from "../src/lib/views.js";
-import { createAnalyticsView } from "../src/lib/analytics-view.js";
-import { createNavBadgeReadModelView } from "../src/lib/nav-badge-view.js";
-import { createRepositoriesReadModelView, createRepositoriesSourcePublisher } from "../src/lib/repositories-view.js";
-import { repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+} from "#src/lib/read-model-worker.js";
+import type { ViewBodyEntry } from "#src/lib/views.js";
+import { createAnalyticsView } from "#src/lib/analytics-view.js";
+import { createNavBadgeReadModelView } from "#src/lib/nav-badge-view.js";
+import { createRepositoriesReadModelView, createRepositoriesSourcePublisher } from "#src/lib/repositories-view.js";
+import { repositoriesSources, type ServeDeps } from "#src/lib/serve.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
 import { collectDailyProgress } from "#src/lib/daily-progress-collector.js";
 import { createDailyProgressView } from "#src/lib/daily-progress-view.js";

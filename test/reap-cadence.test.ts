@@ -12,10 +12,10 @@ import {
   AUTOMATIC_BRANCH_REAP_INTERVAL_MS,
   decideAutomaticBranchReap,
   type AutomaticBranchReapState,
-} from "../src/lib/branch-reaper.js";
-import { runAutomaticBranchReapRung } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/branch-reaper.js";
+import { runAutomaticBranchReapRung } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");

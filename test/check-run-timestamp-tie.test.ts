@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { rollupFromRest } from "../src/lib/open-prs-rest.js";
-import { checksStateFromRollup, dedupeRollupByLatestAttempt } from "../src/lib/sweep.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { rollupFromRest } from "#src/lib/open-prs-rest.js";
+import { checksStateFromRollup, dedupeRollupByLatestAttempt } from "#src/lib/sweep.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const NAME = "acceptance-author-gate";
 const STARTED = "2026-09-28T21:25:45Z";

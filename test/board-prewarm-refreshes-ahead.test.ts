@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { buildBatchedGithub, postPrewarmWorkerResponse, type GitHub } from "../src/lib/status.js";
+import { buildBatchedGithub, postPrewarmWorkerResponse, type GitHub } from "#src/lib/status.js";
 
 const OPEN_PR_URL = "https://github.com/o/r/pull/7";
 

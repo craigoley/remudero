@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
 import {
   READ_MODEL_BUSY_TIMEOUT_MS,
   READ_MODEL_DIRNAME,
@@ -25,8 +25,8 @@ import {
   withWriteTransaction,
   writeAgentFold,
   writeSourceSnapshot,
-} from "../src/lib/read-model-db.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/read-model-db.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const DDL = "CREATE TABLE IF NOT EXISTS item(id INTEGER PRIMARY KEY, label TEXT);";

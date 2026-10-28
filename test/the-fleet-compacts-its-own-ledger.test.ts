@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { DaemonDeps } from "../src/lib/daemon.js";
+import type { DaemonDeps } from "#src/lib/daemon.js";
 import {
   DEFAULT_LEDGER_COMPACTION_TRIGGER,
   decideLedgerCompaction,
   ledgerCompactionIntervalMs,
   readLedgerCorpusPressure,
   type LedgerCompactionTrigger,
-} from "../src/lib/ledger-compaction-rung.js";
+} from "#src/lib/ledger-compaction-rung.js";
 
 // ── W1-T3368: the fleet compacts its own ledger ──────────────────────────────────────────────────
 //
@@ -157,8 +157,8 @@ async function daemonRows(
   deps: Partial<DaemonDeps>,
   allRows = false,
 ): Promise<Array<{ step: string; extra?: Record<string, unknown> }>> {
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = mkdtempSync(join(tmpdir(), "rmd-lcr-"));
   try {
     const f = join(dir, "tasks.yaml");
@@ -277,7 +277,7 @@ test("W1-T3368: the verb's own help no longer claims it never runs from a daemon
   // A contract whose code disagrees with its own description is the defect class this change exists
   // to stop repeating, so retiring that half of the contract is part of the change, not a follow-up.
   // Rendered through the same `commandHelp` an operator reaches, not read off the registry's source.
-  const { COMMANDS, commandHelp } = await import("../src/run-task.js");
+  const { COMMANDS, commandHelp } = await import("#src/run-task.js");
   const spec = COMMANDS.find((c) => c.name === "ledger-compact");
   assert.ok(spec, "the ledger-compact verb must still be in the registry rmd --help renders from");
   const help = commandHelp(spec);

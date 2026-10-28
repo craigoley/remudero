@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GARDEN_FILING_ESCALATE_AT, freshMergedPlanLint, freshMergedPlanLintAsync, gardenStatePath, lintMergedPlanChange, runGarden, runGardenAsync, type GardenAction, type GardenSpec, type GardenerDeps } from "../src/lib/gardener.js";
-import { makeTempDir, RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { GARDEN_FILING_ESCALATE_AT, freshMergedPlanLint, freshMergedPlanLintAsync, gardenStatePath, lintMergedPlanChange, runGarden, runGardenAsync, type GardenAction, type GardenSpec, type GardenerDeps } from "#src/lib/gardener.js";
+import { makeTempDir, RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const task = (id: string, extra = "") => `- id: ${id}\n  title: t\n  repo: remudero\n  type: implement\n  verify: auto\n${extra}`;
 const SHARD = "plan/tasks.d/W1-T1-a.yaml";

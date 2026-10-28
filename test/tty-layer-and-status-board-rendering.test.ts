@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { renderQueueHeadBlock, renderStatusBoardText, type StatusBoardModel } from "../src/lib/status-board.js";
-import { colourEnabled, DEFAULT_TERMINAL_WIDTH, paint, sectionRule, SEMANTIC_CODES, terminalWidth } from "../src/lib/tty.js";
+import { renderQueueHeadBlock, renderStatusBoardText, type StatusBoardModel } from "#src/lib/status-board.js";
+import { colourEnabled, DEFAULT_TERMINAL_WIDTH, paint, sectionRule, SEMANTIC_CODES, terminalWidth } from "#src/lib/tty.js";
 
 // ── W1-T2475: the operator console rendered a crash loop, a starved queue and a healthy idle in
 // the same undifferentiated grey — zero ANSI escapes anywhere in src, NO_COLOR/FORCE_COLOR read

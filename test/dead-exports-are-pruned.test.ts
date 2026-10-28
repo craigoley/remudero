@@ -25,12 +25,12 @@ import {
   IDENT_RE,
   parseSymbolFinding,
   SYMBOL_ID_RE,
-} from "../src/lib/export-gardener.js";
-import { gardenStatePath, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
-import { adoptionLatestPath, adoptionProposalId } from "../src/lib/measurement-cadence.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { writeAtomic as writeAtomicFile } from "../src/lib/fs-race-safe.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/export-gardener.js";
+import { gardenStatePath, runGarden, type GardenCheckout } from "#src/lib/gardener.js";
+import { adoptionLatestPath, adoptionProposalId } from "#src/lib/measurement-cadence.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeAtomic as writeAtomicFile } from "#src/lib/fs-race-safe.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const DEAD = ["deadA", "deadB", "deadC", "deadD", "deadE", "deadF", "deadG"];
 
@@ -241,10 +241,10 @@ test("W1-T4117: only a symbol-no-caller id with a plain name is read as a deleta
 
 test("W1-T4117: this measured deletion batch removes its five exact exports", async () => {
   const [configSchema, contextControls, operatorAgent, replyInterpreter] = await Promise.all([
-    import("../src/lib/config-schema.js"),
-    import("../src/lib/context-controls.js"),
-    import("../src/lib/operator-agent.js"),
-    import("../src/lib/reply-interpreter.js"),
+    import("#src/lib/config-schema.js"),
+    import("#src/lib/context-controls.js"),
+    import("#src/lib/operator-agent.js"),
+    import("#src/lib/reply-interpreter.js"),
   ]);
 
   assert.equal(Object.hasOwn(configSchema, "CONFIG_SCHEMA_VERSION"), false);

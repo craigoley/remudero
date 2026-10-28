@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { buildBatchedGithub } from "../src/lib/status.js";
-import { daemonCommand, ledgerPathFor } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
+import { daemonCommand, ledgerPathFor } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 
 // ── W1-T143 (DAEMON OBSERVABILITY). Two independent things were broken: (1) the daemon's
 // operator narration went through console.log/console.error, whose writes to a non-TTY fd

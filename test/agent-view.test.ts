@@ -12,14 +12,14 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { AGENT_CLOCK_MS, AGENT_VIEW_PARTS, agentPartBodies, agentViewKey, createAgentView, type AgentProposalsBody, type AgentViewData, type AgentViewPart } from "../src/lib/agent-view.js";
-import { coldAnalyticsSnapshot, type AnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { analyticsSourceBodies } from "../src/lib/analytics-view.js";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
-import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
-import { createNavBadgeReadModelView, navBadgeView, type NavBadgeData } from "../src/lib/nav-badge-view.js";
-import { buildOperatorAgentRoutes, OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_DECISION_STEP } from "../src/lib/operator-agent.js";
+import { AGENT_CLOCK_MS, AGENT_VIEW_PARTS, agentPartBodies, agentViewKey, createAgentView, type AgentProposalsBody, type AgentViewData, type AgentViewPart } from "#src/lib/agent-view.js";
+import { coldAnalyticsSnapshot, type AnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { analyticsSourceBodies } from "#src/lib/analytics-view.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
+import { createNavBadgeReadModelView, navBadgeView, type NavBadgeData } from "#src/lib/nav-badge-view.js";
+import { buildOperatorAgentRoutes, OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_DECISION_STEP } from "#src/lib/operator-agent.js";
 import {
   acquireLease,
   AGENT_FOLD_CHUNK,
@@ -31,14 +31,14 @@ import {
   writeSourceSnapshot,
   type ReadModelDb,
   type ReadModelLease,
-} from "../src/lib/read-model-db.js";
-import { createReadModelTicker, ledgerSource, readModelLaneViews, type ReadModelInstanceState, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { createDemandBook } from "../src/lib/view-demand.js";
-import { renderView } from "../src/lib/views.js";
-import { corpus, get, listen, NOW } from "./helpers/operator-agent-corpus.js";
-import { SPEC, violations } from "./helpers/openapi-strict.js";
-import { switchViewsOn } from "./helpers/read-model-switches.js";
+} from "#src/lib/read-model-db.js";
+import { createReadModelTicker, ledgerSource, readModelLaneViews, type ReadModelInstanceState, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { createDemandBook } from "#src/lib/view-demand.js";
+import { renderView } from "#src/lib/views.js";
+import { corpus, get, listen, NOW } from "#test/helpers/operator-agent-corpus.js";
+import { SPEC, violations } from "#test/helpers/openapi-strict.js";
+import { switchViewsOn } from "#test/helpers/read-model-switches.js";
 
 const REPO = "owner/repo";
 const ANALYTICS_AS_OF = new Date(NOW - 60_000).toISOString();

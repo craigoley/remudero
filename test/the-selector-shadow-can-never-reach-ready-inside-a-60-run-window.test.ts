@@ -10,13 +10,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 // Namespace imports: the store and the replay are new, so this suite still loads (and fails) at the base sha.
-import * as gardener from "../src/lib/selector-shadow-gardener.js";
-import * as registry from "../src/lib/garden-registry.js";
-import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as gardener from "#src/lib/selector-shadow-gardener.js";
+import * as registry from "#src/lib/garden-registry.js";
+import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const STEP = "selector-shadow.observation";
 const NOW = Date.parse("2026-10-06T00:00:00.000Z");

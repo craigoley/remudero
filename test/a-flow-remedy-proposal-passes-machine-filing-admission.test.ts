@@ -3,12 +3,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { flowGardenSpec, type FlowGardenSources } from "../src/lib/flow-remedy-gardener.js";
-import type { GardenerDeps } from "../src/lib/gardener.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations } from "../src/lib/plan.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
-import { runnableCandidates } from "../src/lib/drain.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { flowGardenSpec, type FlowGardenSources } from "#src/lib/flow-remedy-gardener.js";
+import type { GardenerDeps } from "#src/lib/gardener.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations } from "#src/lib/plan.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
+import { runnableCandidates } from "#src/lib/drain.js";
 import { assertRunnable, type Plan } from "#src/lib/plan.js";
 import { machineAuthorVerifyViolation, taskRulingPin } from "#src/lib/task-linter.js";
 

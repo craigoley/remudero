@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService, type IdentityProvider, type Route } from "../src/lib/service.js";
+import { createService, type IdentityProvider, type Route } from "#src/lib/service.js";
 
 // ── W1-T495 acceptance, ALL THREE claims, BOTH falsifier directions (design v) ──
 //

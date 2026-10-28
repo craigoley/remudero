@@ -9,8 +9,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import * as analytics from "../src/lib/analytics-route.js";
-import { fixedClock } from "../src/lib/clock.js";
+import * as analytics from "#src/lib/analytics-route.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 function ownFields(owner: object): Record<string, unknown> {
   return Object.fromEntries(Object.getOwnPropertyNames(owner).map((name) => [name, (owner as Record<string, unknown>)[name]]));

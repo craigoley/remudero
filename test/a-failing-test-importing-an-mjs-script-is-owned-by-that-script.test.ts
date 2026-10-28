@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { ciFrictionRecordVerdict, ciFrictionShardStem, ciFrictionShardYaml, gitCiFrictionOwnerSearch } from "../src/lib/ci-friction-gardener.js";
-import { locateCiFrictionOwner } from "../src/lib/ci-friction-remedy.js";
-import { testSourcePaths } from "../src/lib/flake-incident-gardener.js";
-import { machineShardFilingRefusal } from "../src/lib/machine-filing.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { ciFrictionRecordVerdict, ciFrictionShardStem, ciFrictionShardYaml, gitCiFrictionOwnerSearch } from "#src/lib/ci-friction-gardener.js";
+import { locateCiFrictionOwner } from "#src/lib/ci-friction-remedy.js";
+import { testSourcePaths } from "#src/lib/flake-incident-gardener.js";
+import { machineShardFilingRefusal } from "#src/lib/machine-filing.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // #11716: the ci-friction gardener's costliest cause (check:ci-log:ci-shard) failed in
 // test/security-merge-producer.test.ts, which imports ../scripts/security-merge-producer.mjs.

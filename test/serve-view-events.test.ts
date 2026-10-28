@@ -8,10 +8,10 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { buildServeServer, resolveConsoleSha, type ServeDeps } from "../src/lib/serve.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { VIEW_EVENTS_PATH } from "../src/lib/view-events.js";
-import { readModelSwitchesPath } from "../src/lib/read-model-worker.js";
+import { buildServeServer, resolveConsoleSha, type ServeDeps } from "#src/lib/serve.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { VIEW_EVENTS_PATH } from "#src/lib/view-events.js";
+import { readModelSwitchesPath } from "#src/lib/read-model-worker.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const READ = { authorization: "Bearer read-token" };

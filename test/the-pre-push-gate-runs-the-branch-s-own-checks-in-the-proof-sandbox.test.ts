@@ -4,12 +4,12 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSy
 import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import * as push from "../src/lib/git-push.js";
-import { probeProofSandbox, ProofSandboxUnavailableError } from "../src/lib/review.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { worktreeAdd } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as push from "#src/lib/git-push.js";
+import { probeProofSandbox, ProofSandboxUnavailableError } from "#src/lib/review.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { worktreeAdd } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const credentials = { GH_TOKEN: "fixture-token", GH_APP_ID: "123", GH_APP_PRIVATE_KEY_PATH: "/fixture/key", NODE_OPTIONS: "--require /fixture/evil" };

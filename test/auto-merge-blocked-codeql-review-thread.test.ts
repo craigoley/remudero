@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildOpenPrViews } from "../src/run-task.js";
-import { reviewInputDigest } from "../src/lib/review.js";
+import { buildOpenPrViews } from "#src/run-task.js";
+import { reviewInputDigest } from "#src/lib/review.js";
 import {
   classifyScannerBlocker,
   hydrateMergeStateObservations,
@@ -18,7 +18,7 @@ import {
   SCANNER_DIAGNOSTIC_MAX_CHARS,
   type ScannerBlockerCandidate,
   type ScannerBlockerObservation,
-} from "../src/lib/open-prs-rest.js";
+} from "#src/lib/open-prs-rest.js";
 import {
   CODEQL_BLOCKER_DISPATCH_STEP,
   codeqlBlockerCiFailure,
@@ -32,7 +32,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 /*
  * W1-T3980 — core PR #7495 (2026-09-27): every required context green, `mergeable: true`, auto-merge

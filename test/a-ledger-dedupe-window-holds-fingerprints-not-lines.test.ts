@@ -12,8 +12,8 @@ import { test } from "node:test";
 import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import { gzipSync } from "node:zlib";
-import { fingerprintLedgerLine, openLedgerUnion } from "../src/lib/ledger-union.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { fingerprintLedgerLine, openLedgerUnion } from "#src/lib/ledger-union.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 /** One rotation of `lines` unique rows; every 64th is a step seen once, so a window keeps it. */
 function corpus(lines: number): { dir: string; bytes: number } {

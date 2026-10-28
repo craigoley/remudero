@@ -10,9 +10,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { defaultProofRunner, checkProofLaunchArgv } from "../src/lib/pr-open.js";
-import { defaultPreflightSpawn } from "../src/lib/commit-message.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { defaultProofRunner, checkProofLaunchArgv } from "#src/lib/pr-open.js";
+import { defaultPreflightSpawn } from "#src/lib/commit-message.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
