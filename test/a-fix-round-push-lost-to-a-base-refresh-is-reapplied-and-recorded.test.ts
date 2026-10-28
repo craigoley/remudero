@@ -351,6 +351,7 @@ test("census refresh retains failed merged checks overlaps unavailable reads and
       assert.equal(result.outcome, mode === "tracked-only" ? "requested" : "held", JSON.stringify(fx.rows));
       assert.equal(fx.repo.git("status", "--porcelain=v1"), before);
       assert.equal(fx.updates(), mode === "tracked-only" ? 1 : 0);
+      if (mode === "overlap") await assert.rejects(fx.evidence.preserveInheritedCensusWork(fx.root, fx.repo.dir, "refresh", fx.context), /overlaps main/);
       if (mode === "tracked-only") assert.match(String(fx.rows.find(row => row.outcome === "work-preserved")!.recovery_ref), /^refs\/rmd-recovery\//);
     });
   }

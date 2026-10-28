@@ -485,8 +485,13 @@ test("census baseline refresh never excuses new growth or an edited baseline", a
   writeFileSync(malformed, "{\"version\":1}");
   assert.equal((await harness.readInheritedCensusContextAsync(repo.dir, malformed)).state, "unavailable");
   assert.equal((await harness.readInheritedCensusContextAsync(repo.dir, malformed + ".missing")).state, "unavailable");
+  assert.equal((await harness.readInheritedCensusContextAsync(repo.dir, join(repo.dir, "state"))).state, "unavailable");
+  writeFileSync(malformed, JSON.stringify({ version: 1, root: repo.dir, headSha: "invalid", headPaths: [] }));
+  assert.equal((await harness.readInheritedCensusContextAsync(repo.dir, malformed)).state, "unavailable");
   repo.git("merge", "--no-edit", "origin/main");
   assert.equal((await harness.readInheritedCensusContextAsync(repo.dir, snapshot)).state, "unavailable", "a stale snapshot cannot authorize refresh");
+  const migrated = await harness.writeFixCensusSnapshotAsync(repo.dir, log); assert.ok(migrated);
+  assert.equal((await harness.readInheritedCensusContextAsync(repo.dir, migrated)).state, "not-inherited", "an already migrated baseline needs no refresh");
   writeFileSync(join(repo.dir, "test/new.test.ts"), IMPORT_ALIAS);
   repo.git("add", "test/new.test.ts"); repo.git("commit", "-m", "fixture: actual new alias importer");
   snapshot = await harness.writeFixCensusSnapshotAsync(repo.dir, log);

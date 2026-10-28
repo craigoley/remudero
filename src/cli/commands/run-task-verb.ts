@@ -3333,6 +3333,11 @@ async function repairCensusRefusedPush(helperHost: Pick<RunTaskHelperHost, "CENS
   const strikeCap = fixStrikeCap(input.config);
   let refusal = input.refusal;
   for (let strike = 1; strike <= strikeCap; strike++) {
+    if (refusal.inheritedMain?.state === "inherited") {
+      const reason = "inherited census contract needs native base refresh before another worker; no PR exists yet";
+      log("census_push.refresh_held", { strike, ...refusal.inheritedMain, reason });
+      return { outcome: "refused", strikes: strike - 1, refusal, reason };
+    }
     const catalogFiles = input.catalogFiles?.(refusal) ?? [];
     for (const path of catalogFiles) catalogOffered.add(path);
     log("census_push.refused", { strike, censuses: refusal.censuses, refusal: refusal.text, worktree: cwd });
