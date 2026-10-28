@@ -5336,8 +5336,14 @@ export async function refreshStaleRollupAfterRefusal(
   if (!staleRollupRefreshApplies(pr)) {
     return `no stale-rollup refresh: GitHub reports mergeable=${String(pr.mergeable)}, mergeableState=${pr.mergeableState ?? "unknown"}`;
   }
-  const priorRefresh = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber);
-  if (priorRefresh.length > 0) {
+  // updateBranchViaGh catches transport failures and returns bare "error". Neither that result
+  // nor a transient thrown exception confirms a new head; give either one later guarded retry.
+  // Two failures spend the allowance so a persistent transport problem cannot loop forever.
+  const refreshRows = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber);
+  const unconfirmed = (l: Record<string, unknown>) => l.outcome === "error" ||
+    (typeof l.outcome === "string" && l.outcome.startsWith("error:") && armFailureAction(l.outcome) === "transient");
+  const priorRefresh = refreshRows.filter((l) => !unconfirmed(l));
+  if (priorRefresh.length > 0 || refreshRows.length >= 2) {
     if (rowsAtHead(ledgerLines, STALE_ROLLUP_REFRESH_EXHAUSTED_STEP, pr).length > 0) {
       return "stale-rollup refresh already spent for this PR; escalated once at this head";
     }
