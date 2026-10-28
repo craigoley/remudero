@@ -2,9 +2,10 @@
 // projector's activity_ring, materialized in the read-model worker and debounced on ring inserts.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import fsNative, { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { syncBuiltinESMExports } from "node:module";
 import type { Clock } from "#src/lib/clock.js";
 import { ACTIVITY_RING_PROJECTION, isFactStep, ledgerLineIdentity } from "#src/lib/ledger-projector.js";
 import { snapshotGithub } from "#src/lib/now-view.js";
@@ -484,6 +485,8 @@ for (const mode of ["cold", "warm"] as const) {
     assert.deepEqual(f.activityIds(result.data as WorkstreamsData), f.activityIds(f.data), "the cap must follow cutoff qualification, on cold and warm default paths");
     assert.deepEqual(result.data, f.data, "the complete independently read body matches the frozen body");
     const held = f.view.heldSizes();
+    assert.ok(held["workstreams:legacy-cutoff-rows@core"]!.entries <= OPERATOR_ACTIVITY_MAX_ITEMS, "qualified reductions retain a separately bounded population");
+    assert.equal(held["workstreams:legacy-cutoff-memo-index"]!.entries, 1, "one active qualified cutoff per instance");
     assert.ok(held["workstreams:legacy-rows@core"]!.entries <= OPERATOR_ACTIVITY_MAX_ITEMS, "one archive retains bounded candidates");
     assert.ok(held["workstreams:legacy-rows@core"]!.bytes! > 0, "retained row bytes stay measured");
     assert.equal(held["workstreams:legacy-memo-index"]!.entries, 1, "one active cutoff memo per instance");
@@ -492,13 +495,28 @@ for (const mode of ["cold", "warm"] as const) {
 
 test("W1-T10942: a changed cutoff or archive identity requalifies its candidates", (t) => {
   const f = frozenCutoffArchive(t);
+  const realRead = fsNative.readFileSync;
+  let archiveReads = 0;
+  const reader = t.mock.method(fsNative, "readFileSync", (...args: Parameters<typeof realRead>) => {
+    if (String(args[0]) === f.archive) archiveReads++;
+    return Reflect.apply(realRead, fsNative, args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { reader.mock.restore(); syncBuiltinESMExports(); });
   const first = f.view.legacy("", NOW + 60_000, f.data);
   assert.ok(first);
   assert.deepEqual(first.data, f.data);
+  assert.equal(archiveReads, 1, "cold ordinary and qualified reductions share one actual archive parse");
+  reader.mock.resetCalls();
+  const repeated = f.view.legacy("", NOW + 60_000, f.data);
+  assert.ok(repeated);
+  assert.deepEqual(repeated.data, f.data);
+  assert.equal(archiveReads, 1, "the same frozen cutoff reuses its qualified archive");
+  reader.mock.resetCalls();
   // Advance only the actual ring projection using rows already present in the unchanged archive.
   // This exercises a new frozen cutoff without changing its archive identity or reparsing a fake.
   const db = f.context.instances[0]!.db!;
-  for (const row of f.later) {
+  for (const row of f.later.slice(0, 195)) {
     const line = JSON.stringify(row);
     ACTIVITY_RING_PROJECTION.apply(db, line, ledgerLineIdentity(line), () => row);
   }
@@ -506,9 +524,26 @@ test("W1-T10942: a changed cutoff or archive identity requalifies its candidates
   const [newer] = f.view.materialize({ ...f.context, now: NOW + 90_000 });
   const newData = newer!.data as WorkstreamsData;
   assert.notDeepEqual(f.activityIds(newData), f.activityIds(f.data), "positive control: the projected cutoff and population advanced");
+  const readsBeforeAdvancingCutoff = archiveReads;
   const current = f.view.legacy("", NOW + 90_000, newData);
+  reader.mock.resetCalls();
+  assert.equal(archiveReads, readsBeforeAdvancingCutoff + 1, "a crossing archive is independently requalified for its new cutoff");
   assert.ok(current);
   assert.deepEqual(current.data, newData, "a new cutoff cannot reuse candidates reduced for the earlier cutoff");
+  for (const row of f.later.slice(195)) {
+    const line = JSON.stringify(row);
+    ACTIVITY_RING_PROJECTION.apply(db, line, ledgerLineIdentity(line), () => row);
+  }
+  ACTIVITY_RING_PROJECTION.settle?.(db);
+  const [fullyAdvanced] = f.view.materialize({ ...f.context, now: NOW + 120_000 });
+  const healthyData = fullyAdvanced!.data as WorkstreamsData;
+  const beforeHealthy = archiveReads;
+  const healthy = f.view.legacy("", NOW + 120_000, healthyData);
+  assert.ok(healthy);
+  assert.deepEqual(healthy.data, healthyData);
+  assert.equal(archiveReads, beforeHealthy, "an already-eligible archive must not be reparsed merely because the cutoff advanced");
+  reader.mock.resetCalls();
+  assert.equal(f.view.heldSizes()["workstreams:legacy-cutoff-rows@core"]!.entries, 0, "unused qualified candidates are released on a healthy cutoff");
   const historical = f.view.legacy("", NOW + 90_000, f.data);
   assert.ok(historical);
   assert.deepEqual(historical.data, f.data, "revisiting the older frozen body requalifies its cutoff too");

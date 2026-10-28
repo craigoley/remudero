@@ -27,7 +27,7 @@ import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, r
 import { dirname, join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { createLedgerRotationMemo, type LedgerRotationMemo } from "./ledger-union.js";
+import { createLedgerRotationMemo, type LedgerRotationMemo, type LedgerRotationHook } from "./ledger-union.js";
 import { gitPlanBehind, nowPlanPath, planSource, planStamp, snapshotGeneration, snapshotGithub, type NowInstance, type PlanBehind } from "./now-view.js";
 import { buildOperatorActivityProjection, OPERATOR_ACTIVITY_CONTRACT_VERSION, operatorActivityCandidates, type OperatorActivityEnvelope } from "./panel-graph.js";
 import type { Plan } from "./plan.js";
@@ -305,7 +305,8 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
   const gatewaySources = new Map<string, Omit<ViewSource, "name">>();
   /** Keyed by the very `data` object a body published, as now-view's `shown`. */
   const shown = new WeakMap<WorkstreamsData, { builtMs: number; entries: Map<string, Built> }>();
-  const legacyMemos = new Map<string, { cutoff: number; memo: LedgerRotationMemo }>();
+  const legacyMemos = new Map<string, LedgerRotationMemo>();
+  const legacyCutoffMemos = new Map<string, { cutoff: number; memo: LedgerRotationMemo }>();
   const liveLedgerTail = new Map(opts.instances.map((i) => [i.name, createLiveLedgerTail(join(i.ledgerDir, LEDGER_FILENAME))]));
   const projectionReuse = createWorkstreamsProjectionReuse();
   /** When each instance's reuse was last audited (or first held), on the build clock. */
@@ -460,7 +461,7 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
     stages: () => (Object.keys(ran).length > 0 ? { ...ran } : undefined),
     heldSizes: () => {
       for (const [name, map] of Object.entries({ instances: byName, "behind-memo": behindMemo, "gateway-sources": gatewaySources,
-        "legacy-memo-index": legacyMemos, "live-ledger-tails": liveLedgerTail, "reuse-audits": reuseAuditedAt })) {
+        "legacy-memo-index": legacyMemos, "legacy-cutoff-memo-index": legacyCutoffMemos, "live-ledger-tails": liveLedgerTail, "reuse-audits": reuseAuditedAt })) {
         if (map.size) holds.unsized(`workstreams:${name}`, map.size, "shared memo, source or closure state; exclusive bytes unavailable", "keys");
         else holds.forget(`workstreams:${name}`);
       }
@@ -483,21 +484,34 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
       const instances = view.instances.map(({ instance, activity }) => {
         const b = built.entries.get(instance);
         if (!b) return { instance, activity };
-        // Reduce only after the frozen cutoff is applied. A top-candidate reduction first can
-        // discard every eligible row when an archive contains newer, not-yet-compared activity.
-        // Retain one cutoff memo per instance; the closure keeps only its primitive cutoff,
-        // while the existing memo still keys each bounded reduction by archive identity.
+        // Keep ordinary bounded archive candidates reusable across frozen cutoffs. Only an
+        // archive crossing this cutoff needs a separately qualified reduction; a healthy
+        // older archive must not be parsed again just because the ring advanced.
+        const memo = legacyMemos.get(instance) ?? createLedgerRotationMemo(operatorActivityCandidates);
+        legacyMemos.set(instance, memo);
         const cutoff = b.ringNewestMs;
-        const previous = legacyMemos.get(instance);
-        const memo = previous && Object.is(previous.cutoff, cutoff)
+        const previous = legacyCutoffMemos.get(instance);
+        const qualified = previous && Object.is(previous.cutoff, cutoff)
           ? previous.memo
           : createLedgerRotationMemo((rows) => operatorActivityCandidates(rows.filter((row) => !(Date.parse(String(row.ts)) > cutoff))));
-        legacyMemos.set(instance, { cutoff, memo });
+        legacyCutoffMemos.set(instance, { cutoff, memo: qualified });
         const pass = memo.pass({ parseMissing: true });
+        const cutoffPass = qualified.pass({ parseMissing: true });
+        const rotationRecords: LedgerRotationHook = (entry, parse) => {
+          // Both cold reductions share one actual parse, without retaining the full archive.
+          let parsed: ReturnType<typeof parse> | undefined;
+          const parseOnce = () => (parsed ??= parse());
+          const ordinary = pass.rotationRecords(entry, parseOnce);
+          return ordinary.rows.some((row) => Date.parse(String(row.ts)) > cutoff)
+            ? cutoffPass.rotationRecords(entry, parseOnce)
+            : ordinary;
+        };
         const livePath = join(b.instance.ledgerDir, LEDGER_FILENAME);
-        const union = readLedgerUnionBounded(livePath, { rotationRecords: pass.rotationRecords, ...(b.liveApplied ? { ledgerFs: appliedLedgerFs(livePath, b.liveApplied) } : {}) });
+        const union = readLedgerUnionBounded(livePath, { rotationRecords, ...(b.liveApplied ? { ledgerFs: appliedLedgerFs(livePath, b.liveApplied) } : {}) });
         pass.complete();
+        cutoffPass.complete();
         holds.known(`workstreams:legacy-rows@${instance}`, memo.retention().rows, memo.approxBytes());
+        holds.known(`workstreams:legacy-cutoff-rows@${instance}`, qualified.retention().rows, qualified.approxBytes());
         const rows = operatorActivityCandidates(union.filter((row) => !(Date.parse(String(row.ts)) > b.ringNewestMs)));
         return { instance, activity: buildOperatorActivityProjection({
           plan: b.plan, projection: b.projection, ledgerLines: withMeta(rows, union.present !== false), frontierLedgerLines: b.live,
