@@ -570,6 +570,26 @@ test("W1-T5892: builtin consumers reject absent admission identities and missing
   assert.throws(() => agreeOnFloor({ shardsDir: shards, outDir: dir }), /shard 2 did not consume/);
 });
 
+test("W1-T5892: builtin consumption propagates download failure and rejects missing or changed admission pins", () => {
+  const pinDir = join(tmp("consume-errors"), "pin");
+  const identity = { pinDir, runId: "999", artifact: "coverage-floor-pin-2", digest: sha256("admitted pin") };
+  const failures = [
+    { result: { status: 1, stderr: "artifact vanished" }, why: /cannot download the pinned admission: artifact vanished/ },
+    { result: { status: 0 }, why: /the admission pin differs from the workflow's digest/ },
+    { result: { status: 0, files: { "pin.json": "substituted pin" } }, why: /the admission pin differs from the workflow's digest/ },
+  ];
+  for (const { result, why } of failures) {
+    mkdirSync(pinDir, { recursive: true });
+    writeFileSync(join(pinDir, "pin.json"), "admitted pin");
+    const calls: string[] = [];
+    const run = fakeRun((args) => { calls.push(args); return result; });
+    assert.throws(() => consumeFloor({ ...identity, run }), why);
+    assert.deepEqual(calls, [`run download 999 -n coverage-floor-pin-2 -D ${pinDir}`]);
+    assert.equal(existsSync(join(pinDir, "pin.json")), result.status === 0 && "files" in result,
+      "a failed or empty download cannot reuse the previously staged pin");
+  }
+});
+
 test("W1-T5892: the CLI stamps provenance only for a trusted green run, and select/agree/verify answer through gh", () => {
   const dir = tmp("cli-main");
   const lcov = join(dir, "lcov.info");
@@ -604,7 +624,7 @@ test("W1-T5892: the CLI stamps provenance only for a trusted green run, and sele
     assert.throws(() => main(["select", join(dir, "p"), "--as-of", "yesterday"], env), /--as-of yesterday is not a time/);
     assert.throws(() => main(["nonsense"], env), /usage: coverage-floor\.mjs provenance\|select/);
 
-    // select and agree shell the real `gh`, answered here by the shared shim on PATH.
+    // select and consume shell the real `gh`, answered here by the shared shim on PATH.
     const { row, provenance } = nightly({ measuredAt: new Date(Date.now() - 3_600_000),
       row: { updatedAt: new Date(Date.now() - 3_000_000).toISOString() } });
     const pinDir = join(dir, "coverage-floor-pin");
@@ -618,6 +638,24 @@ test("W1-T5892: the CLI stamps provenance only for a trusted green run, and sele
       assert.equal(readFileSync(decision, "utf8"), "narrow\n");
       assert.equal(main(["verify", pinDir], env), 0);
       assert.equal(logs.at(-1), join(pinDir, "lcov.info"));
+      const consumedDir = join(dir, "consumed-pin");
+      mkdirSync(consumedDir);
+      writeFileSync(join(consumedDir, "stale"), "previous attempt");
+      const pinBytes = readFileSync(join(pinDir, "pin.json"));
+      shim.addRoute({ when: "run download 999 -n coverage-floor-pin-2", writes: [
+        { path: join(consumedDir, "pin.json"), content: pinBytes },
+        { path: join(consumedDir, "lcov.info"), content: LCOV },
+      ] });
+      const beforeConsume = shim.calls().length;
+      assert.equal(main(["consume", consumedDir, "--run-id", "999", "--artifact", "coverage-floor-pin-2",
+        "--pin-digest", sha256(pinBytes)], env), 0);
+      assert.equal(logs.at(-1), join(consumedDir, "lcov.info"));
+      assert.equal(existsSync(join(consumedDir, "stale")), false, "consumption clears previous attempt's files");
+      assert.deepEqual(readFileSync(join(consumedDir, "pin.json")), pinBytes);
+      assert.equal(readFileSync(join(consumedDir, "lcov.info"), "utf8"), LCOV);
+      assert.deepEqual(shim.calls().slice(beforeConsume), [
+        `run download 999 -n coverage-floor-pin-2 -D ${consumedDir}`,
+      ], "the default spawn reads only the exact admission, without selecting another producer");
       const shardsDir = join(dir, "agree-shards");
       mkdirSync(join(shardsDir, "coverage-shard-4"), { recursive: true });
       writeFileSync(join(shardsDir, "coverage-shard-4", "selection"), "narrow\n");
