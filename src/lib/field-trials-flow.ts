@@ -409,7 +409,7 @@ function repairCells(units: RepairUnit[]) {
 
 type AdoptionUnit = Unit & { requested: string | null; selected: string | null; served: string | null; servedMissing: string | null;
   /** W1-T10831: a joined boolean worker outcome, regardless of which component caused a failure. */
-  callOutcomeKnown: boolean };
+  callOutcomeKnown: boolean; verifiedOutcome: boolean | null };
 
 function adoptionCells(units: AdoptionUnit[]) {
   const tally = (values: (string | null)[]) => {
@@ -426,10 +426,13 @@ function selectedCrossTab(units: AdoptionUnit[]): Record<string, AdoptionSelecte
   const out: Record<string, AdoptionSelectedCell> = {};
   for (const unit of units) {
     if (unit.selected === null) continue;
-    const cell = Object.hasOwn(out, unit.selected) ? out[unit.selected]! : { assigned: 0, servedKnown: 0, callOutcomeKnown: 0 };
+    const cell = Object.hasOwn(out, unit.selected) ? out[unit.selected]!
+      : { assigned: 0, servedKnown: 0, callOutcomeKnown: 0, verifiedOutcomes: 0, verifiedSuccesses: 0 };
     cell.assigned += 1;
     cell.servedKnown += Number(unit.served !== null);
     cell.callOutcomeKnown += Number(unit.callOutcomeKnown);
+    cell.verifiedOutcomes += Number(unit.verifiedOutcome !== null);
+    cell.verifiedSuccesses += Number(unit.verifiedOutcome === true);
     Object.defineProperty(out, unit.selected, { value: cell, enumerable: true, configurable: true, writable: true });
   }
   return out;
@@ -676,8 +679,10 @@ function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: M
   });
 }
 
-function adoptionUnits(ctx: SourceContext): { units: AdoptionUnit[]; transitions: ModelTransition[] } {
+function adoptionUnits(ctx: SourceContext, caseFiles: readonly TaskCaseFile[] | undefined): { units: AdoptionUnit[]; transitions: ModelTransition[] } {
   const assignments = ctx.rows.filter((row) => row.step === "worker.assignment" && row.assignmentId !== null);
+  const filesByTask = new Map<string, TaskCaseFile[]>();
+  for (const file of caseFiles ?? []) filesByTask.set(file.taskId, [...(filesByTask.get(file.taskId) ?? []), file]);
   const calls = new Map<string, FlowRow>();
   for (const row of ctx.rows) {
     if ((row.step === "worker.attempt" || row.step === "verdict") && row.assignmentId !== null) calls.set(row.assignmentId, row);
@@ -697,10 +702,14 @@ function adoptionUnits(ctx: SourceContext): { units: AdoptionUnit[]; transitions
     const call = calls.get(row.assignmentId!);
     const host = stratum(row.host);
     const served = call?.servedModel ?? null;
+    const { coverage } = joinVerifiedTaskOutcomes([{ assignmentId: row.assignmentId!, taskId: row.taskId, runId: row.runId,
+      assignedAt: row.ts, taskClass: row.taskClass, selectedModel: row.selectedModel, servedModel: served,
+      billingMode: null, costUsd: null, attempted: call !== undefined }], filesByTask.get(row.taskId ?? "") ?? [], ctx.asOf);
     units.push(withDigest({ key: `${ctx.label}|${host}|${row.ts?.slice(0, 10) ?? "unknown"}|${stratum(row.taskClass)}`,
       requested: row.requestedModel, selected: row.selectedModel, served,
       servedMissing: served !== null ? null : call === undefined ? "no-attempt" : "not-recorded",
-      callOutcomeKnown: typeof call?.success === "boolean" }));
+      callOutcomeKnown: typeof call?.success === "boolean",
+      verifiedOutcome: coverage.completed > 0 ? true : coverage.endedWithoutCompletion > 0 ? false : null }));
     note(host, row.requestedModel, "firstRequestedAt", row.ts);
     note(host, row.selectedModel, "firstSelectedAt", row.ts);
     note(host, served, "firstServedAt", call?.ts ?? null);
@@ -878,7 +887,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
       units.flow.push(flow);
     }
     units.repair.push(...repairUnits(ctx, taskOf, classOf, rowsByTask));
-    const adoption = adoptionUnits(ctx);
+    const adoption = adoptionUnits(ctx, input.caseFiles);
     units.adoption.push(...adoption.units);
     transitions.push(...adoption.transitions);
     units.learning.push(...learningUnits(ctx, storeOf));

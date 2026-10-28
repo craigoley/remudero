@@ -18,6 +18,7 @@ import { buildModelFieldNoteCandidate, PINNED_SITE_CONSENT_REGISTRY, SITE_MIN_CE
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand, readFieldTrialsLedger, SMALL_CELL_MIN, type FieldTrialsConsent,
   type FieldTrialsFlowSnapshot, type FieldTrialsSource } from "#src/lib/field-trials-flow.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { TaskCaseFile } from "#src/lib/task-case-file.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 // ---- PINNED COPY of the site validator (remudero-site lib/model-field-note.ts) --------------------------------
@@ -74,12 +75,14 @@ const wholeUtcDays = (start: string, end: string) => start < end && Date.parse(s
 
 const DAY = (day: number, hour = 0) => new Date(Date.UTC(2026, 8, day, hour)).toISOString();
 type Call = "served" | "served-failure" | "no-call" | "ladder-refusal" | "served-no-outcome";
-type Spec = { model: string; taskClass?: string; day: number; n: number; call: Call; host?: string; label?: string };
+type Verification = "completed" | "ended" | "open" | "unaccepted" | "mismatched" | "stale";
+type Spec = { model: string; taskClass?: string; day: number; n: number; call: Call; host?: string; label?: string;
+  verified?: Verification };
 
 /** Ledger rows shaped like production: an assignment, and (unless no-call) the worker.attempt joined by assignment id. */
 function assignmentCallRows(specs: Spec[]): Record<string, unknown>[] {
   return specs.flatMap((spec) => Array.from({ length: spec.n }, (_, i) => {
-    const id = `asg-${spec.label ?? "core"}-${spec.model}-${spec.taskClass ?? "implement"}-${spec.day}-${spec.call}-${i}`;
+    const id = `asg-${spec.label ?? "core"}-${spec.model}-${spec.taskClass ?? "implement"}-${spec.day}-${spec.call}-${i}${spec.verified ? `-${spec.verified}` : ""}`;
     const base = { host: spec.host ?? "host-alpha-private", actor: "daemon", task_id: `task-${id}`, run_id: `run-${id}` };
     const assignment = { ...base, ts: DAY(spec.day, 2), step: "worker.assignment",
       worker_assignment: { id, requested: { model: spec.model }, selected: { provider: "p", model: spec.model } },
@@ -93,9 +96,37 @@ function assignmentCallRows(specs: Spec[]): Record<string, unknown>[] {
   }).flat());
 }
 
-async function snapshotOf(asOf: string, sources: { label: string; repo: string; specs: Spec[] }[]): Promise<FieldTrialsFlowSnapshot> {
+function caseFileFor(row: Record<string, unknown>, asOf: string, verified: Verification): TaskCaseFile {
+  const observed = <T>(value: T) => ({ state: "observed" as const, value, source: "fixture", asOf });
+  const unavailable = { state: "unavailable" as const, reason: "not-collected", source: "fixture", asOf };
+  const id = (row.worker_assignment as { id: string }).id;
+  const headSha = "a".repeat(40);
+  const gate = observed({ headSha, status: "success" as const });
+  return { version: "task-case-file-v1", taskId: String(row.task_id),
+    asOf: verified === "stale" ? DAY(1) : asOf, plan: unavailable,
+    ledger: observed({ windowStart: DAY(1), forms: { gzip: 0, plain: 0, live: 1 }, matchingRows: 2 }),
+    runs: [{ runId: String(row.run_id), startedAt: String(row.ts),
+      assignmentId: verified === "mismatched" ? `other-${id}` : id, selectedProvider: "p", selectedModel: null,
+      servedModel: null, billingMode: null, costUsd: null, verdict: verified === "ended" ? "no_pr" : "merged",
+      prNumber: verified === "ended" ? null : 123 }],
+    pr: verified === "ended" ? { ...unavailable, reason: "no-pr-in-current-projection", source: "github-pr-read" }
+      : observed({ number: 123, url: "https://example.com/pull/123", headSha,
+        state: verified === "open" ? "OPEN" as const : "MERGED" as const, taskCredit: true }),
+    review: gate, acceptance: verified === "unaccepted" ? unavailable : gate, ci: gate,
+    mergedSource: observed({ prNumber: 123, mergedAt: new Date(Date.parse(String(row.ts)) + 3 * 3_600_000).toISOString() }),
+    deployment: unavailable, runtime: unavailable, next: null };
+}
+
+async function snapshotOf(asOf: string, sources: { label: string; repo: string; specs: Spec[] }[],
+  prior?: FieldTrialsFlowSnapshot, omitCaseFiles = false): Promise<FieldTrialsFlowSnapshot> {
   const observed: FieldTrialsSource[] = [];
+  const caseFiles: TaskCaseFile[] = [];
   for (const { label, repo, specs } of sources) {
+    for (const spec of specs) if (spec.verified) {
+      for (const row of assignmentCallRows([{ ...spec, label }]).filter((row) => row.step === "worker.assignment")) {
+        caseFiles.push(caseFileFor(row, asOf, spec.verified));
+      }
+    }
     const fixture = writeLedger(assignmentCallRows(specs.map((spec) => ({ ...spec, label }))));
     try {
       observed.push({ label, repo, ledger: await readFieldTrialsLedger(fixture.dir, Date.parse(asOf)) });
@@ -103,7 +134,8 @@ async function snapshotOf(asOf: string, sources: { label: string; repo: string; 
       rmSync(fixture.dir, { recursive: true, force: true });
     }
   }
-  return buildFieldTrialsFlowSnapshot({ asOf, github: { version: "field-trials-github-v1", repos: {} }, sources: observed });
+  return buildFieldTrialsFlowSnapshot({ asOf, github: { version: "field-trials-github-v1", repos: {} }, sources: observed,
+    ...(omitCaseFiles ? {} : { caseFiles }), ...(prior ? { prior } : {}) });
 }
 
 const CONSENT: FieldTrialsConsent = { version: "field-trials-consent-v1", repos: [
@@ -119,12 +151,12 @@ const reviewed = (note: ModelFieldNoteCandidate["note"], at: string) => ({ ...no
 
 test("W1-T10831: the field-note candidate passes the site validator once reviewed", async () => {
   const snapshot = await snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [
-    { model: "gpt-6.1-sol", day: 1, n: 20, call: "served" }, { model: "gpt-6.1-sol", day: 2, n: 10, call: "no-call" },
+    { model: "gpt-6.1-sol", day: 1, n: 20, call: "served", verified: "completed" }, { model: "gpt-6.1-sol", day: 2, n: 10, call: "no-call" },
     { model: "claude-opus-5", day: 2, n: 20, call: "served" }, { model: "claude-opus-5", day: 3, n: 10, call: "ladder-refusal" },
-    { model: "claude-opus-5", taskClass: "review", day: 3, n: 10, call: "served" },
-    { model: "claude-opus-5", taskClass: "review", day: 3, n: 10, call: "served-no-outcome" },
-    { model: "gpt-6.1-sol", taskClass: "review", day: 3, n: 20, call: "served-failure" },
-    { model: "gpt-6.1-sol", day: 4, n: 12, call: "served" }] }]);
+    { model: "claude-opus-5", taskClass: "review", day: 3, n: 10, call: "served", verified: "completed" },
+    { model: "claude-opus-5", taskClass: "review", day: 3, n: 10, call: "served-no-outcome", verified: "ended" },
+    { model: "gpt-6.1-sol", taskClass: "review", day: 3, n: 20, call: "served-failure", verified: "ended" },
+    { model: "gpt-6.1-sol", day: 4, n: 12, call: "served", verified: "completed" }] }]);
   const result = candidateOf(snapshot);
   assert.equal(result.state, "candidate");
   if (result.state !== "candidate") return;
@@ -146,7 +178,11 @@ test("W1-T10831: the field-note candidate passes the site validator once reviewe
     ["claude-opus-5", "implement", 30, 20, 30], ["gpt-6.1-sol", "implement", 30, 20, 20],
     ["claude-opus-5", "review", 20, 20, 10], ["gpt-6.1-sol", "review", 20, 20, 20],
   ], "joined true and false outcomes count regardless of attribution; absent outcomes and calls do not; day 4 is excluded");
-  assert.deepEqual(candidate.note.rows[0]!.verified, { state: "unavailable", reason: "no-verified-outcome-join" });
+  assert.deepEqual(candidate.note.rows.map((row) => row.verified), [
+    { state: "unavailable", reason: "no-verified-outcome-join" },
+    { state: "observed", outcomes: 20, successes: 20 }, { state: "observed", outcomes: 20, successes: 10 },
+    { state: "observed", outcomes: 20, successes: 0 },
+  ], "case-file completions and terminal non-completions survive the selected-model join independently of worker outcomes");
   assert.deepEqual(candidate.servedModelGap.rows.find((row) => row.modelId === "gpt-6.1-sol"),
     { modelId: "gpt-6.1-sol", taskClass: "implement", assigned: 30, servedObserved: 20, servedUnknown: 10 });
   assert.match(candidate.note.sourceDigest, /^[a-f0-9]{64}$/);
@@ -190,8 +226,76 @@ test("W1-T10831: small cells and complements are withheld from the field note", 
     withheld: { cells: 1, reasons: { "assigned-below-twice-min-cell": 1 }, sources: [] } }, "no publishable row is no candidate");
 });
 
+test("W1-T10831: verified counts and their complements obey the pinned site disclosure rule", async () => {
+  const snapshot = await snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [
+    { model: "model-ok", day: 1, n: 20, call: "served", verified: "completed" },
+    { model: "outcomes-small", day: 1, n: 5, call: "served", verified: "completed" },
+    { model: "outcomes-small", day: 2, n: 15, call: "served" },
+    { model: "outcomes-complement-small", day: 1, n: 20, call: "served", verified: "completed" },
+    { model: "outcomes-complement-small", day: 2, n: 5, call: "served" },
+    { model: "successes-small", day: 1, n: 5, call: "served", verified: "completed" },
+    { model: "successes-small", day: 2, n: 15, call: "served", verified: "ended" },
+    { model: "successes-complement-small", day: 1, n: 15, call: "served", verified: "completed" },
+    { model: "successes-complement-small", day: 2, n: 5, call: "served", verified: "ended" }] }]);
+  const result = candidateOf(snapshot);
+  assert.equal(result.state, "candidate");
+  if (result.state !== "candidate") return;
+  assert.deepEqual(result.candidate.note.rows.map((row) => row.modelId), ["model-ok"]);
+  assert.deepEqual(result.candidate.withheld.reasons, { "verified-outcomes-or-complement-small": 2,
+    "verified-successes-or-complement-small": 2 });
+  assert.equal(result.candidate.withheld.cells, 4, "a sensitive verified count withholds the entire cell");
+  assert.ok(siteParseModelFieldNote(reviewed(result.candidate.note, result.candidate.note.asOf), PINNED_SITE_CONSENT_REGISTRY));
+  for (const verified of [{ state: "observed", outcomes: 5, successes: 5 }, { state: "observed", outcomes: 20, successes: 5 }]) {
+    assert.equal(siteValidRow({ ...result.candidate.note.rows[0], verified }), false,
+      "the pinned site validator independently rejects the withheld subgroups");
+  }
+});
+
+test("W1-T10831: only the verified outcome join can populate verified field-note counts", async () => {
+  const specs: Spec[] = ["open", "unaccepted", "mismatched", "stale"].map((verified) => ({ model: `model-${verified}`,
+    day: 1, n: 20, call: "served", verified: verified as Verification }));
+  const result = candidateOf(await snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs }]));
+  assert.equal(result.state, "candidate");
+  if (result.state !== "candidate") return;
+  assert.equal(result.candidate.note.rows.length, 4);
+  for (const row of result.candidate.note.rows) {
+    assert.equal(row.callOutcomeObserved, 20, "successful worker calls do not prove verified completion");
+    assert.deepEqual(row.verified, { state: "unavailable", reason: "no-verified-outcome-join" }, row.modelId);
+  }
+  const sources = [{ label: "core", repo: "craigoley/remudero", specs: [
+    { model: "model-verified", day: 1, n: 20, call: "served" as const, verified: "completed" as const }] }];
+  const before = await snapshotOf(DAY(4, 6), sources, undefined, true);
+  const after = await snapshotOf(DAY(4, 6), sources, before);
+  const afterResult = candidateOf(after);
+  assert.equal(afterResult.state, "candidate");
+  if (afterResult.state !== "candidate") return;
+  assert.deepEqual(afterResult.candidate.note.rows[0]!.verified, { state: "observed", outcomes: 20, successes: 20 });
+  const beforeResult = candidateOf(before);
+  assert.equal(beforeResult.state, "candidate");
+  if (beforeResult.state !== "candidate") return;
+  assert.notEqual(afterResult.candidate.note.sourceDigest, beforeResult.candidate.note.sourceDigest,
+    "new case-file evidence invalidates adoption partitions and changes the candidate's input digest");
+  const reused = await snapshotOf(DAY(4, 6), sources, after);
+  assert.deepEqual(reused.families.adoption, after.families.adoption, "unchanged verified evidence reuses its cross-tab");
+  assert.equal(reused.rebuild.rebuiltPartitions.some((key) => key.startsWith("adoption:")), false);
+  const withdrawn = candidateOf(await snapshotOf(DAY(4, 6), sources, after, true));
+  assert.equal(withdrawn.state, "candidate");
+  if (withdrawn.state !== "candidate") return;
+  assert.deepEqual(withdrawn.candidate.note.rows[0]!.verified, { state: "unavailable", reason: "no-verified-outcome-join" },
+    "removing case-file evidence also invalidates cached verified counts");
+  for (const field of ["verifiedOutcomes", "verifiedSuccesses"] as const) {
+    const legacy = structuredClone(after);
+    for (const partition of Object.values(legacy.families.adoption)) {
+      for (const cell of Object.values(partition.cells.bySelected)) delete (cell as Partial<typeof cell>)[field];
+    }
+    assert.deepEqual(candidateOf(legacy), { state: "refused", reason: "snapshot-predates-verified-outcome-cross-tab" },
+      "an older cross-tab cannot silently discard verified evidence as unavailable");
+  }
+});
+
 test("W1-T10831: the field note honours the consent receipts and carries no private ids", async () => {
-  const specs: Spec[] = [{ model: "gpt-6.1-sol", day: 1, n: 20, call: "served" }, { model: "gpt-6.1-sol", day: 2, n: 10, call: "no-call" }];
+  const specs: Spec[] = [{ model: "gpt-6.1-sol", day: 1, n: 20, call: "served", verified: "completed" },
+    { model: "gpt-6.1-sol", day: 2, n: 10, call: "no-call" }];
   const snapshot = await snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs },
     { label: "console", repo: "craigoley/remudero-console", specs: specs.map((spec) => ({ ...spec, host: "host-beta-private" })) },
     { label: "lab", repo: "craigoley/remudero-lab", specs }]);
@@ -211,6 +315,7 @@ test("W1-T10831: the field note honours the consent receipts and carries no priv
   assert.deepEqual(mixed.candidate.note.sourceRepos, ["remudero-console"]);
   assert.deepEqual(mixed.candidate.note.rows.map((row) => [row.assigned, row.servedObserved, row.callOutcomeObserved]), [[30, 20, 20]],
     "only the source with live aggregate-opt-in consent contributes counts");
+  assert.deepEqual(mixed.candidate.note.rows[0]!.verified, { state: "observed", outcomes: 20, successes: 20 });
   assert.deepEqual(mixed.candidate.withheld.sources.map((source) => source.reason), ["no-aggregate-consent", "no-aggregate-consent"]);
 
   const revokedCore = candidateOf(snapshot, { consent: { version: "field-trials-consent-v1", repos: [{ ...CONSENT.repos[0]!, revoked: true },
@@ -231,6 +336,7 @@ test("W1-T10831: the field note honours the consent receipts and carries no priv
   if (full.state !== "candidate") return;
   assert.deepEqual(full.candidate.note.rows.map((row) => [row.assigned, row.servedObserved]), [[60, 40]],
     "the two consented sources pool into one row; the unconsented one adds nothing");
+  assert.deepEqual(full.candidate.note.rows[0]!.verified, { state: "observed", outcomes: 40, successes: 40 });
   assert.deepEqual(full.candidate.note.sourceRepos, ["remudero", "remudero-console"]);
   const encoded = JSON.stringify(full.candidate);
   const strings: string[] = [];
@@ -272,6 +378,9 @@ test("W1-T10831: the field note honours the consent receipts and carries no priv
     assert.equal(printed.state, "candidate");
     const written = JSON.parse(readFileSync(out, "utf8")) as ModelFieldNoteCandidate;
     assert.deepEqual(written.note.sourceRepos, ["remudero"], "the operator's pinned registry decides which repos may contribute");
+    assert.deepEqual(written.note.rows[0]!.verified, { state: "observed", outcomes: 20, successes: 20 },
+      "the command writes the verified cross-tab from the saved snapshot");
+    assert.ok(siteParseModelFieldNote(reviewed(written.note, written.note.asOf), PINNED_SITE_CONSENT_REGISTRY));
     assert.equal(statSync(out).mode & 0o777, 0o600, "the candidate stays private until the site imports it");
     writeFileSync(join(root, "bad-registry.json"), JSON.stringify({ revision: "", entries: [] }));
     assert.equal(await run(["--consent", join(root, "consent.json"), "--site-registry", join(root, "bad-registry.json")]), 0);
@@ -291,8 +400,8 @@ test("W1-T10831: consecutive field-note windows never overlap", async () => {
     const lines: string[] = [];
     const run = (nowIso: string) => fieldTrialsCommand(["--out-dir", outDir, "--field-note", out, "--consent", join(root, "consent.json")],
       buildFieldTrialsFlowSnapshot, { nowIso, print: (line) => lines.push(line), resolveConfig: () => ({ root }) });
-    const firstDays: Spec[] = [1, 2, 3].map((day) => ({ model: "gpt-6.1-sol", day, n: 10, call: "served" }));
-    const laterDays: Spec[] = [4, 5, 6].map((day) => ({ model: "gpt-6.1-sol", day, n: 7, call: "served" }));
+    const firstDays: Spec[] = [1, 2, 3].map((day) => ({ model: "gpt-6.1-sol", day, n: 10, call: "served", verified: "completed" }));
+    const laterDays: Spec[] = [4, 5, 6].map((day) => ({ model: "gpt-6.1-sol", day, n: 7, call: "served", verified: "ended" }));
     writeFileSync(join(outDir, "field-trials-flow-v1.json"), JSON.stringify(await snapshotOf(DAY(4, 6),
       [{ label: "core", repo: "craigoley/remudero", specs: firstDays }])));
     assert.equal(await run(DAY(4, 7)), 0);
@@ -307,6 +416,8 @@ test("W1-T10831: consecutive field-note windows never overlap", async () => {
     assert.deepEqual([second.note.windowStart, second.note.windowEnd], [first.note.windowEnd, DAY(7)],
       "the second window starts where the first exported window ended, not at a fixed lookback");
     assert.equal(second.note.rows[0]!.assigned, 21, "only the new whole days are counted");
+    assert.deepEqual(second.note.rows[0]!.verified, { state: "observed", outcomes: 21, successes: 0 },
+      "verified counts also exclude the prior exported window");
     assert.ok(second.note.windowStart >= first.note.windowEnd && wholeUtcDays(second.note.windowStart, second.note.windowEnd));
     assert.notEqual(second.note.releaseId, first.note.releaseId);
     assert.ok(siteParseModelFieldNote(reviewed(second.note, second.note.asOf), PINNED_SITE_CONSENT_REGISTRY));

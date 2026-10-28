@@ -20,7 +20,8 @@ import { createHash, createHmac } from "node:crypto";
 import { fixedClock } from "./clock.js";
 
 /** Counts per selected model; outcome availability is independent of failure attribution. */
-export interface AdoptionSelectedCell { assigned: number; servedKnown: number; callOutcomeKnown: number }
+export interface AdoptionSelectedCell { assigned: number; servedKnown: number; callOutcomeKnown: number;
+  verifiedOutcomes: number; verifiedSuccesses: number }
 
 /** Snapshot projection consumed by the exporter; the snapshot producer depends on this contract. */
 export interface FieldNoteSnapshot {
@@ -64,7 +65,8 @@ export interface ModelFieldNoteRow {
   assigned: number;
   servedObserved: number;
   callOutcomeObserved: number;
-  verified: { state: "unavailable"; reason: "no-verified-outcome-join" };
+  verified: { state: "unavailable"; reason: "no-verified-outcome-join" }
+    | { state: "observed"; outcomes: number; successes: number };
 }
 
 /** The note body without the review fields the site stamps. */
@@ -146,11 +148,15 @@ export function sitePublishableCount(value: number, denominator: number, minCell
 }
 
 /** Why a row fails the site's disclosure rule, or null when it may be shown. */
-export function siteRowDisclosure(row: Pick<ModelFieldNoteRow, "assigned" | "servedObserved" | "callOutcomeObserved">,
+export function siteRowDisclosure(row: Pick<ModelFieldNoteRow, "assigned" | "servedObserved" | "callOutcomeObserved" | "verified">,
   minCell: number = SITE_MIN_CELL): string | null {
   if (row.assigned < minCell * 2) return "assigned-below-twice-min-cell";
   if (!sitePublishableCount(row.servedObserved, row.assigned, minCell)) return "served-observed-or-complement-small";
   if (!sitePublishableCount(row.callOutcomeObserved, row.assigned, minCell)) return "call-outcome-or-complement-small";
+  if (row.verified.state === "observed") {
+    if (!sitePublishableCount(row.verified.outcomes, row.assigned, minCell)) return "verified-outcomes-or-complement-small";
+    if (!sitePublishableCount(row.verified.successes, row.verified.outcomes, minCell)) return "verified-successes-or-complement-small";
+  }
   return null;
 }
 
@@ -233,16 +239,23 @@ export function buildModelFieldNoteCandidate(input: ModelFieldNoteInput): ModelF
   if (windowStartMs === undefined) return { state: "withheld", reason: "no-observed-assignment-day" };
   if (windowStartMs >= windowEndMs) return { state: "withheld", reason: "no-new-whole-utc-day" };
   const inWindow = partitions.filter((entry) => entry.dayMs >= windowStartMs && entry.dayMs < windowEndMs);
+  if (inWindow.some(({ partition }) => Object.values(partition.cells.bySelected)
+    .some((cell) => cell.verifiedOutcomes === undefined || cell.verifiedSuccesses === undefined))) {
+    return { state: "refused", reason: "snapshot-predates-verified-outcome-cross-tab" };
+  }
   const totals = new Map<string, { modelId: string; taskClass: string } & AdoptionSelectedCell>();
   const reasons: Record<string, number> = {};
   const withhold = (reason: string) => { reasons[reason] = (reasons[reason] ?? 0) + 1; };
   for (const { taskClass, partition } of inWindow) {
     for (const [modelId, cell] of Object.entries(partition.cells.bySelected)) {
       const id = JSON.stringify([modelId, taskClass]);
-      const total = totals.get(id) ?? { modelId, taskClass, assigned: 0, servedKnown: 0, callOutcomeKnown: 0 };
+      const total = totals.get(id) ?? { modelId, taskClass, assigned: 0, servedKnown: 0, callOutcomeKnown: 0,
+        verifiedOutcomes: 0, verifiedSuccesses: 0 };
       total.assigned += cell.assigned;
       total.servedKnown += cell.servedKnown;
       total.callOutcomeKnown += cell.callOutcomeKnown;
+      total.verifiedOutcomes += cell.verifiedOutcomes;
+      total.verifiedSuccesses += cell.verifiedSuccesses;
       totals.set(id, total);
     }
   }
@@ -253,7 +266,9 @@ export function buildModelFieldNoteCandidate(input: ModelFieldNoteInput): ModelF
     if (total.taskClass === "unknown" || !SITE_SAFE_ID_RE.test(total.taskClass)) { withhold("task-class-unknown-or-unsafe"); continue; }
     const row: ModelFieldNoteRow = { modelId: total.modelId, taskClass: total.taskClass, assigned: total.assigned,
       servedObserved: total.servedKnown, callOutcomeObserved: total.callOutcomeKnown,
-      verified: { state: "unavailable", reason: "no-verified-outcome-join" } };
+      verified: total.verifiedOutcomes > 0
+        ? { state: "observed", outcomes: total.verifiedOutcomes, successes: total.verifiedSuccesses }
+        : { state: "unavailable", reason: "no-verified-outcome-join" } };
     const failure = siteRowDisclosure(row);
     if (failure !== null) { withhold(failure); continue; }
     publishable.push(row);
