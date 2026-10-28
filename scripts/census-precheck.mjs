@@ -1145,13 +1145,18 @@ export const PRECHECK_TRIGGERED_SUITES = [
     recognizer: "scripts/citation-anchor-census.mjs", ownFiles: ["scripts/citation-anchor-census.mjs"], gitFree: true, script: "census:citation-anchor", structural: true,
     trigger: ({ changed }) => changed.some((p) => p.startsWith("plan/tasks.d/") || p === "MASTER-PLAN.md" || p === "scripts/citation-anchor-census.mjs"),
     remedy: "anchor each #NNNN citation the shard or MASTER-PLAN.md adds (scripts/citation-anchor-census.mjs)" },
-  // W1-T5702: a new test importing src/run-task.ts is the reach ratchet's own refusal.
+  // Deletions can grow median reach by shrinking its denominator; removed helper edges also move reach.
   { testFile: "test/the-affected-suite-reach-ratchet.test.ts",
     gateRegex: IMPORT_SPECIFIER_RE,
     recognizer: "src/lib/affected-suites.ts", ownFiles: ["scripts/affected-reach-baseline.json"], script: "census:affected-reach", structural: true,
     trigger: (input) =>
-      input.changed.some((p) => ["src/lib/affected-suites.ts", "scripts/affected-reach-baseline.json"].includes(p)) ||
-      addsImport(input, TEST_TS_SCOPE_RE, (spec) => /(?:^|\/)run-task\.[jt]s$/.test(spec)),
+      input.changed.some((p) => ["src/lib/affected-suites.ts", "scripts/affected-reach-baseline.json",
+        "test/the-affected-suite-reach-ratchet.test.ts", "package.json"].includes(p)) ||
+      addsImport(input, TEST_TS_SCOPE_RE, (spec) => /(?:^|\/)run-task\.[jt]s$/.test(spec)) ||
+      addsImport({ ...input, readHead: input.readBase, readBase: input.readHead }, TEST_TS_SCOPE_RE) ||
+      (typeof input.readHead === "function" && typeof input.readBase === "function" &&
+        input.changed.some((p) => /^(?:src|scripts|bin|test)\/.+\.(?:ts|mts|mjs|js|cjs)$/.test(p) &&
+          input.readHead(p) === null && input.readBase(p) !== null)),
     remedy: "import the module the suite tests rather than src/run-task.ts, or record the tighter ceiling in scripts/affected-reach-baseline.json" },
   { testFile: "test/node-24-runtime-compatibility.test.ts",
     gateRegex: NODE24_RUNTIME_RE,

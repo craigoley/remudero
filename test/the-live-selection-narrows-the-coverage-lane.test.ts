@@ -3,27 +3,30 @@
  *
  * `RMD_AFFECTED_SUITE_LIVE` (ci.yml's top-level env, W1-T4406) used to reach only `ci`'s Test step,
  * which on a pull_request SOURCE diff already exits early (W1-T3207), so flipping it saved nothing
- * of coverage-shard's runner-hours. With the flag at 1, a pull_request SOURCE coverage shard now runs
- * the selector's `narrow` set (src/lib/affected-suites.ts) through `--select-candidates` instead of
- * `--select-all`; with the flag at 0, or on push and merge_group, it keeps `--select-all`. A
- * narrowed run cannot certify the ABSOLUTE floor, so the aggregator's ratchet step then reads the
- * newest nightly (W1-T5704) or merge-group lcov instead of the narrowed one.
+ * of coverage-shard's runner-hours. With the flag at 1 and a floor the shard pinned (W1-T5892),
+ * a pull_request SOURCE coverage shard now runs the selector's `narrow` set (src/lib/affected-suites.ts)
+ * through `--select-candidates` instead of `--select-all`; with the flag at 0, or on push and
+ * merge_group, it keeps `--select-all`. A narrowed run cannot certify the ABSOLUTE floor, so the
+ * aggregator's ratchet step then reads the run's pinned nightly (W1-T5704) or merge-group lcov
+ * instead of the narrowed one.
  *
  * Every arm below is driven through the REAL step body with stub `node`/`gh`/`git` binaries.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { after, test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+const owned: string[] = [];
+after(() => { for (const path of owned) rmSync(path, { recursive: true, force: true }); });
 const doc = parseYaml(readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")) as {
   env?: Record<string, string>;
   jobs: Record<string, { strategy?: { matrix?: { shard?: unknown[] } }; steps?: Array<{ name?: string; run?: string; env?: Record<string, string> }> }>;
@@ -47,12 +50,15 @@ function step(job: string, name: string) {
 
 const NARROW = Array.from({ length: 10 }, (_, i) => `test/n${i}.test.ts`);
 
-/** A stub `node`: the inline selector writes `selectorOut` to its last argument; the manifest
+/** A stub `node`: the floor helper decides `narrow` (W1-T5892's suite drives the real one) and its
+ *  `agree` refuses; the inline selector writes `selectorOut` to its last argument; the manifest
  *  answers `--select-all`/`--select-candidates`; the instrumented runner leaves a real-looking lcov. */
 function nodeStub(selectorOut: string, candidatesExit = 0): string {
   return `#!/usr/bin/env bash
 echo "node $*" >> "$CALL_LOG"
 case "$*" in
+  scripts/coverage-floor.mjs\\ consume*) mkdir -p coverage-floor-pin; echo '{}' > coverage-floor-pin/pin.json ;;
+  scripts/coverage-floor.mjs\\ agree*) echo "coverage-floor: no shard pin" >&2; exit 1 ;;
   *--import\\ tsx\\ -e*) for last; do :; done; printf '${selectorOut}' > "$last" ;;
   *--select-candidates*) [ ${candidatesExit} = 0 ] || exit ${candidatesExit}; head -n 1 "$3" ;;
   *--select-all*) echo "test/all.test.ts" ;;
@@ -67,6 +73,7 @@ esac
 function run(body: string, env: Record<string, string>, node: string, ghRoutes: GhShimRoute[] = []) {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5705-`));
   const gh = ghShim(ghRoutes, { kind: "w1t5705-gh" });
+  owned.push(dir, gh.dir);
   mkdirSync(join(dir, "bin"));
   for (const [name, text] of [["node", node], ["git", "#!/usr/bin/env bash\necho \"git $*\" >> \"$CALL_LOG\"\n"]]) {
     writeFileSync(join(dir, "bin", name!), text!);
@@ -84,6 +91,7 @@ function run(body: string, env: Record<string, string>, node: string, ghRoutes: 
       GITHUB_OUTPUT: join(dir, "outputs.txt"),
       RUNNER_TEMP: dir,
       CALL_LOG: join(dir, "calls.log"),
+      GITHUB_RUN_ID: "999", FLOOR_DECISION: "narrow", FLOOR_ARTIFACT: "coverage-floor-pin-1", FLOOR_PIN_DIGEST: "fixture",
       ...env,
     },
   });
@@ -158,37 +166,18 @@ test("W1-T5705: each shard stages its selection for the aggregator", () => {
 const seed = (narrowShard: number) => Array.from({ length: SHARDS }, (_, i) =>
   `mkdir -p coverage-shards/coverage-shard-${i + 1}; echo ${i + 1 === narrowShard ? "narrow" : "all"} > coverage-shards/coverage-shard-${i + 1}/selection`).join("\n");
 
-test("W1-T5705: when narrowed, the absolute-floor step reads the nightly artifact, and diff coverage reads the selection", () => {
+test("W1-T5705: when narrowed, the absolute-floor step reads only this run's pinned floor, and diff coverage reads the selection", () => {
+  // W1-T5892 owns the floor: one admission publishes it, and this step never lists or picks a newest run.
+  // test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts drives the pinned arms.
   const ratchet = step("coverage-ratchet-required", "Coverage ratchet (blocks a PR whose branch coverage is below the absolute floor)");
-  assert.equal(ratchet.env?.GH_TOKEN, "${{ github.token }}", "the floor lookup reads another run's artifact with the job token");
+  assert.equal(ratchet.env?.GH_TOKEN, "${{ github.token }}", "the pinned floor is read with the job token");
   const body = ratchet.run!.replaceAll("${{ steps.coverage-artifact.outputs.class }}", "SOURCE");
   const base = { GITHUB_EVENT_NAME: "pull_request" };
-  const downloaded = "mkdir -p floor-111 floor-222; echo SF:src/a.ts > floor-111/lcov.info; echo SF:src/a.ts > floor-222/lcov.info";
-  const narrowed = `${seed(3)}\n${downloaded}\n${body}`;
-  const listed = (nightlyAt: string, queueAt?: string): GhShimRoute[] => [
-    { when: "run list --workflow coverage-nightly.yml", stdout: `${nightlyAt} 111 coverage-nightly` },
-    ...(queueAt ? [{ when: "run list --workflow ci.yml", stdout: `${queueAt} 222 coverage-merged` }] : []),
-  ];
+  assert.doesNotMatch(body, /gh run list/, "no consumer chooses its own newest floor");
 
-  const nightly = run(narrowed, base, nodeStub(""), listed("2026-10-05T04:52:00Z", "2026-10-04T01:00:00Z"));
-  assert.equal(nightly.status, 0, nightly.out);
-  assert.match(nightly.calls, /gh run list --workflow coverage-nightly\.yml --branch main/);
-  assert.match(nightly.calls, /gh run download 111 -n coverage-nightly -D floor-111/, "the newest run is the nightly, so its artifact is read");
-  assert.match(nightly.calls, /coverage-ratchet\.mjs --lcov floor-111\/lcov\.info --baseline scripts\/coverage-baseline\.json/);
-  assert.doesNotMatch(nightly.calls, /--lcov coverage\/lcov\.info/, "a narrowed lcov must never be held to the absolute floor");
-
-  const queue = run(narrowed, base, nodeStub(""), listed("2026-10-03T04:52:00Z", "2026-10-05T09:00:00Z"));
-  assert.equal(queue.status, 0, queue.out);
-  assert.match(queue.calls, /gh run download 222 -n coverage-merged -D floor-222/, "a newer merge-group run is read before an older nightly");
-  assert.match(queue.calls, /coverage-ratchet\.mjs --lcov floor-222\/lcov\.info/);
-
-  const expired = run(narrowed, base, nodeStub(""), [{ when: "run download 222", exit: 1 }, ...listed("2026-10-03T04:52:00Z", "2026-10-05T09:00:00Z")]);
-  assert.equal(expired.status, 0, expired.out);
-  assert.match(expired.calls, /coverage-ratchet\.mjs --lcov floor-111\/lcov\.info/, "an expired newest artifact falls to the next run");
-
-  const none = run(narrowed, base, nodeStub(""), [{ when: "run download", exit: 1 }, ...listed("2026-10-05T04:52:00Z")]);
-  assert.notEqual(none.status, 0, "no readable full-run lcov must refuse, never pass an unmeasured floor");
-  assert.doesNotMatch(none.calls, /coverage-ratchet\.mjs/);
+  const unpinned = run(`${seed(3)}\n${body}`, base, nodeStub(""), [{ when: "run list", stdout: "2026-10-05T04:52:00Z 111 coverage-nightly" }]);
+  assert.notEqual(unpinned.status, 0, "a narrowed run with no pinned floor must refuse, never pass an unmeasured floor");
+  assert.doesNotMatch(unpinned.calls, /coverage-ratchet\.mjs|gh run/);
 
   for (const full of [run(`${seed(0)}\n${body}`, base, nodeStub("")), run(body, base, nodeStub(""))]) {
     assert.equal(full.status, 0, full.out);
@@ -204,6 +193,7 @@ test("W1-T5705: the inline narrow selector runs for real against this repo", () 
   const script = /node --import tsx -e '\n([\s\S]*?)\n\s*' changed-files\.txt "\$\{RUNNER_TEMP\}\/affected\.diff" coverage-narrow-suites\.txt/.exec(coverageBody);
   assert.ok(script, "the coverage shard must invoke node --import tsx -e '<script>' changed-files.txt <diff> coverage-narrow-suites.txt");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5705-real-`));
+  owned.push(dir);
   writeFileSync(join(dir, "changed.txt"), ".github/workflows/ci.yml\n");
   writeFileSync(join(dir, "affected.diff"), "");
   const real = spawnSync(process.execPath, ["--import", "tsx", "-e", script![1]!, join(dir, "changed.txt"), join(dir, "affected.diff"), join(dir, "out.txt")], {

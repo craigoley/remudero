@@ -687,3 +687,67 @@ test("an enrolled repair still refuses incomplete changed-line evidence", async 
     ghJson: f.ghJson, ghText: async () => `diff --git a/${baseline} b/${baseline}\n--- a/${baseline}\n+++ b/${baseline}\n@@ -1 +1 @@\n-old\n+new\n`,
   }), /textual hunk or changed-line totals incomplete/);
 });
+
+
+test("the gate gardener reads each immutable commit comparison once per inventory", async () => {
+  const calls: string[] = [];
+  let failComparison = false;
+  const ghJson = async (args: string[]): Promise<unknown> => {
+    const path = args[1] ?? "";
+    calls.push(path);
+    if (args[0] === "repo") return { nameWithOwner: "o/r" };
+    if (path.includes("/pulls?")) return [{ number: 5, base: { sha: "base" } }];
+    if (path.endsWith("/pulls/5/commits?per_page=100")) return [{ sha: "red" }, { sha: "green" }];
+    if (path.includes("/check-runs")) return { check_runs: ["census", "second"].map((name, i) => ({
+      id: i + 7, name, status: "completed", conclusion: path.includes("/commits/red/") ? "failure" : "success",
+    })) };
+    if (path.endsWith("/status")) return { statuses: [] };
+    if (path.includes("/compare/red...green")) {
+      if (failComparison) throw new Error("comparison unavailable");
+      return { files: [{ filename: baseline, patch: "@@\n-1\n+2" }] };
+    }
+    if (path.includes("/compare/base...red")) return { merge_base_commit: { sha: "base" }, files: [] };
+    throw new Error(`unexpected evidence read: ${args.join(" ")}`);
+  };
+  const rules = [rule, { ...rule, gate: "second" }].map(r => ({ ...r, trigger: () => true }));
+  const inventory = () => loadGateRepairObservations(rules, { ghJson, ghText: async () => "" });
+  const first = await inventory();
+  assert.deepEqual(first.map(x => x.pair.gate).sort(), ["census", "second"]);
+  assert.equal(calls.filter(p => p.includes("/compare/red...green")).length, 1);
+  assert.equal(calls.filter(p => p.includes("/compare/base...red")).length, 1);
+  assert.deepEqual(await inventory(), first);
+  assert.equal(calls.filter(p => p.includes("/compare/red...green")).length, 2);
+  failComparison = true;
+  await assert.rejects(inventory(), /comparison unavailable/);
+});
+
+test("the bounded gate comparison cache evicts and rereads older evidence", async () => {
+  const calls: string[] = [];
+  const names = ["census", "second", "third"];
+  const commits = ["red", "green1", "green2", "green3"];
+  const ghJson = async (args: string[]): Promise<unknown> => {
+    const path = args[1] ?? "";
+    calls.push(path);
+    if (args[0] === "repo") return { nameWithOwner: "o/r" };
+    if (path.includes("/pulls?")) return [{ number: 5, base: { sha: "base" } }];
+    if (path.endsWith("/pulls/5/commits?per_page=100")) return commits.map((sha) => ({ sha }));
+    if (path.includes("/check-runs")) {
+      const sha = path.match(/\/commits\/([^/]+)\/check-runs/)?.[1];
+      const stage = commits.indexOf(sha ?? "");
+      assert.ok(stage >= 0);
+      return { check_runs: names.map((name, index) => ({
+        id: index + 7, name, status: "completed", conclusion: stage > index ? "success" : "failure",
+      })) };
+    }
+    if (path.endsWith("/status")) return { statuses: [] };
+    if (path.includes("/compare/base...red")) return { merge_base_commit: { sha: "base" }, files: [] };
+    if (path.includes("/compare/red...green")) return { files: [{ filename: baseline, patch: "@@\n-1\n+2" }] };
+    throw new Error(`unexpected evidence read: ${args.join(" ")}`);
+  };
+  const rules = names.map((gate) => ({ ...rule, gate, trigger: () => true }));
+  const observations = await loadGateRepairObservations(rules, { ghJson, ghText: async () => "" });
+  assert.deepEqual(observations.map((item) => item.pair.gate).sort(), names.slice().sort());
+  assert.equal(calls.filter((path) => path.includes("/compare/base...red")).length, 2,
+    "the third distinct repair comparison evicts the base comparison before it is needed again");
+  assert.equal(calls.filter((path) => path.includes("/compare/red...green")).length, 3);
+});
