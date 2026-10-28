@@ -6,7 +6,10 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=c6dd2a1be75849e2
+  # backlog gardener: placed=2026-10-28T07:14:28.745Z
   attempts: 0
   files:
     - scripts/test-with-retry.mjs

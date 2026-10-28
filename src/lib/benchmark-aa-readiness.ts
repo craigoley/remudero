@@ -208,21 +208,45 @@ function eligibilityReason(task: ReadinessTask | undefined): string | null {
   return criteria.some((criterion) => parseWhitelistedProof(criterion.proof) !== null) ? null : "no-executable-proof";
 }
 
-/** The population is frozen ONCE, before the first pair: a later run reads it back and never re-derives eligibility. */
-function freezePopulation(protocol: ProspectiveAaProtocol, trialDir: string, tasks: ReadonlyMap<string, ReadinessTask> | null,
-  nowIso: string): { ok: true; population: FrozenPopulation } | { ok: false; reason: string } {
-  const path = join(trialDir, "population.json");
+type PopulationOutcome = { ok: true; population: FrozenPopulation } | { ok: false; reason: string };
+
+/** Reads and validates a population already on disk; never re-derives or widens it. */
+function readStoredPopulation(protocol: ProspectiveAaProtocol, path: string): PopulationOutcome | undefined {
   let stored: FrozenPopulation | undefined;
   try {
     const text = readOptional(path);
     if (text !== undefined) stored = JSON.parse(text) as FrozenPopulation;
   } catch (error) { return { ok: false, reason: `population-unreadable:${(error as Error).message.slice(0, 80)}` }; }
-  if (stored !== undefined) {
-    const { digest, ...body } = stored;
-    if (stored.version !== READINESS_POPULATION_VERSION || digest !== sha256(JSON.stringify(body))
-      || stored.allocationReceiptHash !== protocol.allocationReceiptHash) return { ok: false, reason: "population-changed-since-freeze" };
-    return { ok: true, population: stored };
-  }
+  if (stored === undefined) return undefined;
+  const changed: PopulationOutcome = { ok: false, reason: "population-changed-since-freeze" };
+  if (stored === null || typeof stored !== "object" || Array.isArray(stored)
+    || !Array.isArray(stored.eligible) || !Array.isArray(stored.refused)) return changed;
+  const hash = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  if (stored.version !== READINESS_POPULATION_VERSION || typeof stored.trialId !== "string"
+    || typeof stored.frozenAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(stored.frozenAt)
+    || !Number.isFinite(Date.parse(stored.frozenAt)) || !hash(stored.allocationReceiptHash) || !hash(stored.digest)
+    || stored.consent !== protocol.manifest.cohort.kind || stored.orderMethod !== READINESS_ORDER_METHOD
+    || !Number.isSafeInteger(stored.denominator)
+    || stored.eligible.some((entry) => entry === null || typeof entry !== "object" || Array.isArray(entry)
+      || typeof entry.taskId !== "string" || !hash(entry.criteriaHash))
+    || stored.refused.some((entry) => entry === null || typeof entry !== "object" || Array.isArray(entry)
+      || typeof entry.taskId !== "string" || typeof entry.reason !== "string" || entry.reason.trim().length === 0)) return changed;
+  const { digest, ...body } = stored;
+  if (digest !== sha256(JSON.stringify(body))
+    || stored.trialId !== protocol.trialId || stored.allocationReceiptHash !== protocol.allocationReceiptHash
+    || stored.denominator !== protocol.manifest.tasks.length) return changed;
+  const covered = [...stored.eligible.map((entry) => entry.taskId), ...stored.refused.map((entry) => entry.taskId)].sort();
+  const registered = protocol.manifest.tasks.map((entry) => entry.taskId).sort();
+  if (JSON.stringify(covered) !== JSON.stringify(registered)) return changed;
+  return { ok: true, population: stored };
+}
+
+/** The population is frozen ONCE, before the first pair: a later run reads it back and never re-derives eligibility. */
+function freezePopulation(protocol: ProspectiveAaProtocol, trialDir: string, tasks: ReadonlyMap<string, ReadinessTask> | null,
+  nowIso: string): PopulationOutcome {
+  const path = join(trialDir, "population.json");
+  const existing = readStoredPopulation(protocol, path);
+  if (existing !== undefined) return existing;
   if (tasks === null) return { ok: false, reason: "plan-unreadable-before-freeze" };
   const order = (taskId: string) => sha256(`benchmark-aa-readiness-order-v1\0${protocol.allocationReceiptHash}\0${taskId}`);
   const eligible: FrozenPopulation["eligible"] = [];
@@ -237,7 +261,12 @@ function freezePopulation(protocol: ProspectiveAaProtocol, trialDir: string, tas
     allocationReceiptHash: protocol.allocationReceiptHash, consent: protocol.manifest.cohort.kind, orderMethod: READINESS_ORDER_METHOD,
     denominator: protocol.manifest.tasks.length, eligible, refused };
   const population: FrozenPopulation = { ...body, digest: sha256(JSON.stringify(body)) };
-  writeFileSync(path, `${JSON.stringify(population, null, 2)}\n`, { flag: "wx" });
+  try { writeFileSync(path, `${JSON.stringify(population, null, 2)}\n`, { flag: "wx" }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // A competing driver installed its population between the read and the create: validate that winner, never replace it.
+    return readStoredPopulation(protocol, path) ?? { ok: false, reason: "population-unreadable:winner-vanished" };
+  }
   return { ok: true, population };
 }
 
