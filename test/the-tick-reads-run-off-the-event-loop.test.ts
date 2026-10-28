@@ -6,17 +6,17 @@ import { execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
-import { startReadPlane, startReadPlaneTelemetry, freezeReadGeneration, onePassPerGeneration } from "../src/lib/read-plane.js";
+import { startReadPlane, startReadPlaneTelemetry, freezeReadGeneration, onePassPerGeneration } from "#src/lib/read-plane.js";
 import { createTickReadProducer, buildBoardReviewDaemonHooks, applyTickCreditUpdates, buildDaemonReadRefresher,
-  buildInboxDraftHook, daemonCommand, projectionReadinessAccessors, tickReadReverificationDeps } from "../src/run-task.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
-import { defaultCreditStorePath, loadCreditStore, type StatusProjection } from "../src/lib/status.js";
-import { runSweep, type OpenPrView } from "./helpers/sweep-test.js";
-import { runReadPlaneWorker, readPlaneWorkerInput, readPlaneWorkerLog } from "../src/lib/read-plane.worker.js";
-import { boardOpenSnapshotPath } from "../src/lib/board-snapshot-cache.js";
-import { ghShim } from "./helpers/gh-shim.js";
+  buildInboxDraftHook, daemonCommand, projectionReadinessAccessors, tickReadReverificationDeps } from "#src/run-task.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { runDaemon, type DaemonDeps, type DaemonSummary } from "#src/lib/daemon.js";
+import { defaultCreditStorePath, loadCreditStore, type StatusProjection } from "#src/lib/status.js";
+import { runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
+import { runReadPlaneWorker, readPlaneWorkerInput, readPlaneWorkerLog } from "#src/lib/read-plane.worker.js";
+import { boardOpenSnapshotPath } from "#src/lib/board-snapshot-cache.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 function fixture() {
   const root = makeTempDir("read-plane");
@@ -107,6 +107,21 @@ test("W1-T4075: the tick reads run off the main thread while a timer keeps firin
     assert.deepEqual(generation.facts.prs, [1, 2]);
     assert.throws(() => generation.facts.prs.push(3), TypeError);
   } finally { clearInterval(timer); await plane.stop(); }
+});
+
+test("the persistent tick reader rotates bounded probes across stable open PRs", async () => {
+  const f = fixtureReader();
+  f.setListed(Array.from({ length: 9 }, (_, i) => i + 10));
+  const produce = createTickReadProducer(f.options, f.io);
+  const visited = new Set<number>();
+  try {
+    for (let pass = 0; pass < 3; pass++) {
+      const facts = await produce({ plan: f.plan });
+      assert.equal(facts.behindMainByPr.size, 3);
+      for (const number of facts.behindMainByPr.keys()) visited.add(number);
+    }
+    assert.equal(visited.size, 9);
+  } finally { rmSync(f.options.config.root, { recursive: true, force: true }); }
 });
 
 test("W1-T4075: one generation serves sweep and board review and credit with one open-PR read", async () => {

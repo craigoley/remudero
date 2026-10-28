@@ -8,8 +8,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { CONVENTIONAL_LIMITS, checkCommitMessage } from "../src/lib/commit-message.js";
-import * as inbox from "../src/lib/inbox.js";
+import { CONVENTIONAL_LIMITS, checkCommitMessage } from "#src/lib/commit-message.js";
+import * as inbox from "#src/lib/inbox.js";
 
 /** Read through the namespace, so the suite loads at a base that lacks the helper and fails on the assertion. */
 function approvePrTitle(id: string): string {

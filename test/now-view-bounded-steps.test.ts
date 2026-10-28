@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { NOW_SLOW_STAGE_MS, createNowView, type NowViewContext, type NowViewOptions } from "../src/lib/now-view.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { acquireLease } from "../src/lib/read-model-db.js";
-import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import type { Clock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { NOW_SLOW_STAGE_MS, createNowView, type NowViewContext, type NowViewOptions } from "#src/lib/now-view.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { acquireLease } from "#src/lib/read-model-db.js";
+import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import type { GitHub } from "#src/lib/status.js";
+import { closeReadModelFixture, readModelFixtureDir, type ReadModelFixtureScope } from "#test/helpers/read-model-fixture.js";
 
 const T0 = Date.parse("2026-10-01T08:00:00.000Z");
 const PASS_MS = 2_500;
@@ -17,7 +17,7 @@ const PASS_MS = 2_500;
 const STAGE_MS = 600;
 const IDS = ["W1-T1", "W1-T2", "W1-T3"];
 
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = ReadModelFixtureScope;
 
 function task(id: string): Task {
   return { id, title: `task ${id}`, repo: "remudero", depends_on: [], type: "implement", risk: "medium", verify: "auto", status: "queued", attempts: 0 };
@@ -36,9 +36,7 @@ function handClock(): Clock & { advance(ms: number): void } {
 }
 
 function scratch(t: TestCtx): string {
-  const dir = makeTempDir("now-steps");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
+  return readModelFixtureDir(t, "now-steps");
 }
 
 function seededDir(root: string, clock: Clock): string {
@@ -85,7 +83,7 @@ test("W1-T5066: the now view builds an instance across bounded steps within the 
   };
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir, instances: [instance], clock, views: [timed], oracle: "off", passBudgetMs: PASS_MS, post: (m) => void posted.push(m) });
-  t.after(() => ticker.release());
+  closeReadModelFixture(t, () => ticker.release());
   ticker.start();
   let ticks = 0;
   while (!posted.some((m) => m.type === "body" && m.entry.view === "now") && ticks < 20) {
@@ -108,7 +106,7 @@ function world(t: TestCtx) {
   const clock = handClock();
   const ledgerDir = seededDir(root, clock);
   const db = openProjectorReadModel(join(root, "home"), "core", clock);
-  t.after(() => db.close());
+  closeReadModelFixture(t, () => db.close());
   const got = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   createLedgerProjector({ ledgerDir, db, lease: got.lease, clock }).tick();
@@ -190,7 +188,7 @@ function slowFirstCall(t: TestCtx) {
   });
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir, instances: [instance], clock, views: [view], oracle: "off", passBudgetMs: PASS_MS, post: (m) => void posted.push(m) });
-  t.after(() => ticker.release());
+  closeReadModelFixture(t, () => ticker.release());
   ticker.start();
   for (let ticks = 0; !posted.some((m) => m.type === "body" && m.entry.view === "now") && ticks < 20; ticks++) {
     ticker.tick();

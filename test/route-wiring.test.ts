@@ -5,18 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { declaredConsoleRoutes } from "./helpers/declared-routes.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { OPERATOR_SESSION_HEADER } from "../src/lib/service.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import { drainNowFilePath, kickFilePath, pauseFilePath, pendingPrActions, quietHoursFilePath, stopFilePath } from "../src/lib/fleet-control.js";
-import type { Plan } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
-import { dailyCostCeilingOverridePath } from "../src/lib/policy.js";
+import { declaredConsoleRoutes } from "#test/helpers/declared-routes.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { OPERATOR_SESSION_HEADER } from "#src/lib/service.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import { drainNowFilePath, kickFilePath, pauseFilePath, pendingPrActions, quietHoursFilePath, stopFilePath } from "#src/lib/fleet-control.js";
+import type { Plan } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
+import { dailyCostCeilingOverridePath } from "#src/lib/policy.js";
 import { operatorNoteStore } from "#src/lib/operator-notes.js";
 import { readNativeOperatorNotes } from "#src/cli/commands/run-task-verb.js";
 import { renderImplementPrompt, renderReconPrompt } from "#src/run-task.js";
@@ -729,6 +729,31 @@ test("W1-T10618: POST /v1/products/case requires confirmation and persists under
     assert.ok(existsSync(join(h.fleetRoot, "state/products/v1")));
     assert.ok(!existsSync(join(h.questionsRoot, "state/products")));
     assert.equal((await send({ "x-confirm-nonce": nonce })).status, 403, "confirmation cannot be replayed");
+  }, true, true);
+});
+
+test("W1-T10823: POST /v1/products/case plan proposal is high tier, confirmed, and hands nothing off for an unbound product", async () => {
+  await withProductionServer(async (h) => {
+    const headers: Record<string, string> = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+      [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({ version: "product-intent-v1",
+      requestId: "wiring-propose-0001", expectedRevision: 0, brief: { idea: "private plan wiring fixture",
+        resourceEnvelope: { budgetUsd: 30, maxConcurrentBuilds: 1, existingSetupOnly: true } } }) });
+    const { receipt } = await saved.json() as { receipt: { productId: string } };
+    const payload = JSON.stringify({ version: "product-case-v1", action: "propose", command: { requestId: "wiring-propose-0002",
+      productId: receipt.productId, expectedRevision: 1, expectedObjectiveRevision: 1 } });
+    const refused = await fetch(`${h.base}/v1/products/case`, { method: "POST", headers, body: payload });
+    assert.equal(refused.status, 403);
+    assert.equal((await refused.json()).error, "confirm_nonce_required");
+    const confirmed = await fetch(`${h.base}/v1/confirm`, { method: "POST", headers,
+      body: JSON.stringify({ method: "POST", path: "/v1/products/case", payload }) });
+    assert.equal(confirmed.status, 200);
+    const { nonce } = await confirmed.json() as { nonce: string };
+    const proposed = await fetch(`${h.base}/v1/products/case`, { method: "POST", headers: { ...headers, "x-confirm-nonce": nonce }, body: payload });
+    assert.equal(proposed.status, 409, "the production handler found the product under the fleet root and refused: no repository yet");
+    assert.equal((await proposed.json()).error, "repository_missing");
+    assert.ok(!existsSync(join(h.fleetRoot, "state", "products", "v1", "plan-operations")), "a refusal journals no plan operation");
+    assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "a refused proposal hands nothing to the gateway");
   }, true, true);
 });
 

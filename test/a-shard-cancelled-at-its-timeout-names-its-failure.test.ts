@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { fetchCiFailuresAsync } from "../src/run-task.js";
-import { ciFailureSignature } from "../src/lib/ci-friction-gardener.js";
-import { decideRedBaseRefresh } from "../src/lib/sweep.js";
+import { fetchCiFailuresAsync } from "#src/run-task.js";
+import { ciFailureSignature } from "#src/lib/ci-friction-gardener.js";
+import { decideRedBaseRefresh } from "#src/lib/sweep.js";
 
 // 2026-10-11, PR #10829: ci-shard (7/8) and (8/8) were cancelled at ci.yml's 35-minute ceiling. Their
 // annotations held only the runner's own timeout lines, the job log held the pooled `not ok`, the isolated

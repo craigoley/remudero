@@ -10,7 +10,7 @@ import {
   resolveConsoleV1Projection,
   type AnalyticsSnapshot,
   type ConsoleV1MeasurementClass,
-} from "../src/lib/analytics-route.js";
+} from "#src/lib/analytics-route.js";
 
 /**
  * W1-T3623 — TWO CONTRACTS BOTH CALLED console-v1 AND THEY SHARE NO METRIC. The console's

@@ -5,14 +5,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
-import { applyBacklogActions, backlogGardenSpec, backlogInventory, type BacklogSources } from "../src/lib/backlog-gardener.js";
-import { fixedClock } from "../src/lib/clock.js";
+import { applyBacklogActions, backlogGardenSpec, backlogInventory, type BacklogSources } from "#src/lib/backlog-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { runGardenAsync } from "#src/lib/gardener.js";
-import { REGISTERED_GARDEN_NAMES, gardenSchedule } from "../src/lib/garden-registry.js";
-import type { MainCommit } from "../src/lib/hot-file-gardener.js";
-import type { PlanInventory } from "../src/lib/plan-gardener.js";
-import type { Task } from "../src/lib/plan.js";
-import { GARDEN_BRANCH_RE } from "../src/run-task.js";
+import { REGISTERED_GARDEN_NAMES, gardenSchedule } from "#src/lib/garden-registry.js";
+import type { MainCommit } from "#src/lib/hot-file-gardener.js";
+import type { PlanInventory } from "#src/lib/plan-gardener.js";
+import type { Task } from "#src/lib/plan.js";
+import { GARDEN_BRANCH_RE } from "#src/run-task.js";
 
 const NOW = new Date("2026-10-01T12:00:00.000Z");
 function task(id: string, fields: Partial<Task> = {}): Task {

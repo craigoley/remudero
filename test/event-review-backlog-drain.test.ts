@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GhPaceFloorStandDownError } from "../src/lib/open-prs-rest.js";
-import { appendLedger } from "../src/lib/ledger.js";
+import { GhPaceFloorStandDownError } from "#src/lib/open-prs-rest.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweep,
@@ -12,8 +12,8 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-event-review-drain-")), "ledger.ndjson");

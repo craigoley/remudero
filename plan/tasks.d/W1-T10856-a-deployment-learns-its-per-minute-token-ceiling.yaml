@@ -15,6 +15,7 @@
     - src/lib/worker-provider.ts
     - docs/model-routing.md
     - test/worker/spawn/a-deployment-learns-its-per-minute-token-ceiling.test.ts
+    - "src/lib/worker.ts"
   status: queued
   attempts: 0
   rationale: |

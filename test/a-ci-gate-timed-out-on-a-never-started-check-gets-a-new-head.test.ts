@@ -9,9 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { readLedgerLines } from "../src/lib/status.js";
-import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger } from "../src/lib/ledger.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger } from "#src/lib/ledger.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   CI_TIMEOUT_REFRESH_BACKSTOP,
   DEFAULT_SWEEP_POLICY,
@@ -26,7 +26,7 @@ import {
   type RollupCheckEntry,
   type SweepDeps,
   type UpdateBranchOutcome,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 // The #9388 evidence, verbatim in shape: the gate's own error line, then its not-ready list.
 const TIMEOUT_LINE =

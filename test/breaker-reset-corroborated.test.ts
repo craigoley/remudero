@@ -12,10 +12,10 @@ import {
   readLedgerLines,
   type GitHub,
   type PrRef,
-} from "../src/lib/status.js";
-import { drainCommand } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { DrainSummary } from "../src/lib/drain.js";
+} from "#src/lib/status.js";
+import { drainCommand } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { DrainSummary } from "#src/lib/drain.js";
 
 // ── W1-T414: "the dispatch breaker's COUNT is necessarily per-host but its RESET is local for
 // no reason the design requires" ───────────────────────────────────────────────────────────

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { closeReadModelFixture, readModelFixtureDir, type ReadModelFixtureScope } from "#test/helpers/read-model-fixture.js";
 import { createDemandBook } from "../src/lib/view-demand.js";
 import { inboxThreadId } from "../src/lib/inbox-thread.js";
 import { createInboxThreadView, inboxThreadViewKey } from "../src/lib/inbox-thread-view.js";
@@ -16,12 +16,12 @@ const item = (proposalId: string) => ({ proposalId, summary: "Known", plain, lan
 const fresh: ViewSource = { name: "inbox-store:core", asOf: clock.iso(), state: "fresh" };
 type Page = { index: number; of: number; total: number; next?: string };
 
-function fixture(t: { after(fn: () => void): void }) {
-  const root = makeTempDir("inbox-thread-evidence");
+function fixture(t: ReadModelFixtureScope) {
+  const root = readModelFixtureDir(t, "inbox-thread-evidence");
   const inboxRoot = join(root, "inbox");
   mkdirSync(join(inboxRoot, "state"), { recursive: true });
   const db = openProjectorReadModel(join(root, "read-model"), "core");
-  t.after(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
+  closeReadModelFixture(t, () => db.close());
   db.exec("CREATE TABLE view_body(view TEXT NOT NULL,key TEXT NOT NULL,version INTEGER NOT NULL,generation INTEGER NOT NULL,etag TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(view,key)) WITHOUT ROWID");
   const demand = createDemandBook({ clock });
   const view = createInboxThreadView({ inboxRoot, demand, clock });

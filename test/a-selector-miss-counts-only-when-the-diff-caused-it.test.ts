@@ -10,12 +10,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 // Namespace import: the attribution exports are new, so this suite still loads (and fails) at base.
-import * as gardener from "../src/lib/selector-shadow-gardener.js";
-import { shadowRecord } from "../src/lib/affected-suites.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as gardener from "#src/lib/selector-shadow-gardener.js";
+import { shadowRecord } from "#src/lib/affected-suites.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
-import * as shadowScript from "../scripts/select-affected-suites.mjs";
+import * as shadowScript from "#scripts/select-affected-suites.mjs";
 
 type Failure = { file: string; floor: string; narrow?: string; retry?: string };
 

@@ -8,16 +8,16 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
+import type { Clock } from "#src/lib/clock.js";
 import {
   READ_MODEL_LEDGER_STALE_MS,
   committedTickTimes,
   createReadModelTicker,
   createReadModelWorker,
   type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import type { ViewSource } from "../src/lib/views.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/read-model-worker.js";
+import type { ViewSource } from "#src/lib/views.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-10-01T12:00:00.000Z");
 

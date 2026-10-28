@@ -14,7 +14,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { pruneDeletableBranches, type BranchManifestEntry } from "../src/lib/branch-reaper.js";
+import { pruneDeletableBranches, type BranchManifestEntry } from "#src/lib/branch-reaper.js";
 
 function entries(...names: string[]): BranchManifestEntry[] {
   return names.map((name, i) => ({ name, sha: `${String(i).repeat(40)}`.slice(0, 40), reason: "merged" }));
@@ -125,7 +125,7 @@ test("W1-T3020: the prune has one shared automatic full-sweep adapter", async ()
  */
 
 test("W1-T3020: an open PR on a reused branch name dominates every merged PR that name ever carried", async () => {
-  const { foldPrState } = await import("../src/run-task.js");
+  const { foldPrState } = await import("#src/run-task.js");
 
   // The live shape: many merged rows, then the open one, in either arrival order.
   let mergedFirst: ReturnType<typeof foldPrState> | undefined;
@@ -146,11 +146,11 @@ test("W1-T3020: merged still beats closed, so the fold did not simply become 'la
 
 // Imported eagerly for the synchronous test above; the async import in the first test proves the
 // symbol is reachable from the CLI module itself rather than only through this alias.
-import { foldPrState as foldPrStateSync } from "../src/run-task.js";
+import { foldPrState as foldPrStateSync } from "#src/run-task.js";
 
 // ── the active-branch screen (W1-T3020) ─────────────────────────────────────────────────────────
 
-import { withholdActiveBranches, NO_PR_EVIDENCE_REASONS } from "../src/lib/branch-reaper.js";
+import { withholdActiveBranches, NO_PR_EVIDENCE_REASONS } from "#src/lib/branch-reaper.js";
 
 const HOUR = 3600_000;
 function m(name: string, reason: string): BranchManifestEntry {

@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 import {
   DEFAULT_GH_READ_CADENCE_S,
@@ -30,7 +30,7 @@ import {
   stampGhRead,
   withDaemonGhTransportFloor,
   withGhTransportFloor,
-} from "../src/lib/github-transport.js";
+} from "#src/lib/github-transport.js";
 
 // ── W1-T3297 — THE TRANSPORT WATCHED THE LIMIT THAT DOES NOT FIRE ────────────────────────────
 //

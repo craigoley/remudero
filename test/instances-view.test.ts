@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
+import type { Clock } from "#src/lib/clock.js";
 import {
   INSTANCE_LIVENESS_BOUND_MS,
   INSTANCES_VIEW_NAME,
@@ -14,14 +14,14 @@ import {
   legacyRegistryBody,
   registryFromInstances,
   type InstancesData,
-} from "../src/lib/instances-view.js";
-import type { ReadModelDb } from "../src/lib/read-model-db.js";
-import { createReadModelTicker, ledgerSource, readModelSwitchesPath, type ReadModelInstanceState, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { buildRegistryRoute } from "../src/lib/serve.js";
-import type { Route } from "../src/lib/service.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { diffViewData } from "../src/lib/view-shadow.js";
-import type { ViewBodyEntry } from "../src/lib/views.js";
+} from "#src/lib/instances-view.js";
+import type { ReadModelDb } from "#src/lib/read-model-db.js";
+import { createReadModelTicker, ledgerSource, readModelSwitchesPath, type ReadModelInstanceState, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { buildRegistryRoute } from "#src/lib/serve.js";
+import type { Route } from "#src/lib/service.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { diffViewData } from "#src/lib/view-shadow.js";
+import type { ViewBodyEntry } from "#src/lib/views.js";
 import { observeInstanceInboxContract, mountInstanceInboxRoutes } from "#src/lib/instance-inbox-contract.js";
 import { judgeSource, SLOW_LANE_STORE_BUDGET_MS } from "#src/lib/view-freshness.js";
 import { RAW_BODY_CACHE } from "#src/lib/service.js";

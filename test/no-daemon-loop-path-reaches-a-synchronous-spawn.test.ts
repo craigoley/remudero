@@ -20,7 +20,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { loopReachable, MODULE_LOAD, splitObjectLiteral, topLevelFunctions, type Fn } from "./helpers/daemon-loop-walk.js";
+import { factoryNames, loopReachable, MODULE_LOAD, splitObjectLiteral, topLevelFunctions, type Fn } from "./helpers/daemon-loop-walk.js";
 
 /** Loop-reachable functions that still call a synchronous spawn primitive or hand one over as a value,
  *  with the count recorded at build time (2026-10-10, f49ee17d3; re-recorded the same day on e91d490f1
@@ -667,4 +667,57 @@ test("W1-T9701: an object literal member function is still loop reach", () => {
   assert.deepEqual(["onLoop", "handedOver", "memoize", "wrappedOnLoop", "inMethod"].filter((n) => !fromSeed.has(n)), [], "functions and handed-over values stay reached");
   assert.deepEqual(["atLoad", "afterLiteral"].filter((n) => fromSeed.has(n)), [], "initializer calls are not reached from the seed");
   assert.deepEqual(["atLoad", "afterLiteral"].filter((n) => !loopReachable(synthetic, MODULE_LOAD).has(n)), [], "the module-load node holds them");
+});
+
+test("W1-T9737: a factory member of a const initializer stays loop reach", () => {
+  const fns = censusFunctions();
+  const factories = factoryNames(fns);
+  // The real seam: a factory whose declared return type is `typeof spawnWorker`, handed to the alert-fix dispatch.
+  assert.ok(factories.has("ledgeredNonDispatchSpawn"), "a `typeof <function>` return type makes a factory");
+  const real = fns.find((f) => f.name === "REAL_ALERT_FIX_DISPATCH_DEPS");
+  assert.ok(real && /spawn:\s*ledgeredNonDispatchSpawn\(/.test(real.body), "REAL_ALERT_FIX_DISPATCH_DEPS.spawn is reach, not module load");
+  assert.ok(loopReachable(fns, "REAL_ALERT_FIX_DISPATCH_DEPS").has("ledgeredNonDispatchSpawn"));
+  // The data-returning captures still move to module load (W1-T9701).
+  for (const name of MODULE_LOAD_CAPTURES) assert.ok(!factories.has(name), `${name} returns data`);
+
+  // Synthetic: each of the three forms makes a factory; a closure's sync spawn is reached from a function naming the literal.
+  const source = ["const D = {", '  spawn: makeSpawner("x"),', "};"].join("\n");
+  const sources: Record<string, string> = {
+    makeSpawner: 'function makeSpawner(lane) {\n  return (cmd) => spawnSync(cmd, [lane]);\n}',
+    viaIdentifier: "function viaIdentifier(lane) {\n  const run = (cmd) => spawnSync(cmd, [lane]);\n  return run;\n}",
+    viaType: "function viaType(lane): typeof spawnSync {\n  return pick(lane);\n}",
+    viaFunctionType: "function viaFunctionType(lane): (cmd: string) => number {\n  return pick(lane);\n}",
+  };
+  const defs: Fn[] = Object.entries(sources).map(([name, body]) => ({ name, file: "x", body }));
+  defs.push({ name: "spawnSync", file: "x", body: "function spawnSync() {}" });
+  const set = factoryNames(defs);
+  for (const name of Object.keys(sources)) assert.ok(set.has(name), `${name} is a factory`);
+  const split = splitObjectLiteral(source, source.indexOf("{"), set);
+  const synthetic: Fn[] = [
+    { name: "seed", file: "x", body: "function seed() { D; }" },
+    { name: "D", file: "x", body: split.reach },
+    { name: MODULE_LOAD, file: "x", body: split.load },
+    ...defs,
+  ];
+  assert.ok(loopReachable(synthetic, "seed").has("spawnSync"), "a sync spawn inside the factory's returned closure is loop reach");
+  // Falsifier: without the factory index the member moves to module load and the spawn escapes the loop walk.
+  const blind = splitObjectLiteral(source, source.indexOf("{"));
+  const unaware = synthetic.map((f) => (f.name === "D" ? { ...f, body: blind.reach } : f.name === MODULE_LOAD ? { ...f, body: blind.load } : f));
+  assert.ok(!loopReachable(unaware, "seed").has("spawnSync"));
+});
+
+test("W1-T9737: a data-returning initializer call stays module load", () => {
+  const source = ["const D = {", '  id: captureId("x"),', '  made: new Thing("y"),', "};"].join("\n");
+  const defs: Fn[] = [
+    { name: "captureId", file: "x", body: "function captureId(x) {\n  return `${x}-id`;\n}" },
+    { name: "Thing", file: "x", body: "function Thing(y) {\n  return pick(y);\n}" },
+    { name: "pick", file: "x", body: "function pick(y) { return y; }" },
+  ];
+  const factories = factoryNames(defs);
+  assert.ok(!factories.has("captureId") && !factories.has("pick"), "a callee returning data is no factory");
+  const { reach, load } = splitObjectLiteral(source, source.indexOf("{"), factories);
+  const synthetic: Fn[] = [{ name: "seed", file: "x", body: "function seed() { D; }" }, { name: "D", file: "x", body: reach }, { name: MODULE_LOAD, file: "x", body: load }, ...defs];
+  const fromSeed = loopReachable(synthetic, "seed");
+  assert.ok(!fromSeed.has("captureId") && !fromSeed.has("Thing"), "data-returning calls are not loop reach");
+  assert.ok(loopReachable(synthetic, MODULE_LOAD).has("captureId"), "the module-load node holds the call");
 });

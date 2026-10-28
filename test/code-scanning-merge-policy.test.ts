@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 // @ts-expect-error — ESM metadata policy outside tsconfig source roots; executable seam is intentionally plain JS.
-import {classifyCodeScanningMergePolicy as classify} from '../src/lib/code-scanning-merge-policy.mjs';
+import {classifyCodeScanningMergePolicy as classify} from '#src/lib/code-scanning-merge-policy.mjs';
 const head='a'.repeat(40), other='b'.repeat(40);
 const clean=()=>({prNumber:11468,headSha:head,observedHeadSha:head,filesComplete:true,filesHeadSha:head,changedFileCount:1,
  files:[{filename:'src/feature.ts'}],checksComplete:true,checksHeadSha:head,

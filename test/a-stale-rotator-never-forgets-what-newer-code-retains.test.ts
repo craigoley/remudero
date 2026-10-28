@@ -8,8 +8,8 @@ import {
   LEDGER_ROTATION_BACKSTOP_MULTIPLIER,
   ledgerRetainedStepsPath,
   rotateLedger,
-} from "../src/lib/ledger.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/ledger.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 // MEASURED 2026-10-01: every `dispatch.breaker_released` row written 2026-09-29/30 sat in an archive while the
 // 09-28 `dispatch.circuit_broken` rows they cancel stayed live. A rotation is done by whichever process crosses the

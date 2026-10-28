@@ -22,9 +22,9 @@ import {
   SELECTOR_SHADOW_SKIP_CLASSES,
   selectorShadowReport,
   type SelectorShadowRun,
-} from "../src/lib/selector-shadow-gardener.js";
+} from "#src/lib/selector-shadow-gardener.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
-import { COVERAGE_CLASSES } from "../scripts/diff-class.mjs";
+import { COVERAGE_CLASSES } from "#scripts/diff-class.mjs";
 
 function skipLog(cls: string, shards = SELECTOR_SHADOW_SHARDS): string {
   return Array.from({ length: shards }, (_, i) =>

@@ -520,7 +520,7 @@
     "test/a-live-console-review-is-runnable.test.ts": 2,
     "test/a-live-handoff-receipt-keeps-its-run-branch.test.ts": 8000,
     "test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts": 2100,
-    "test/a-local-gate-run-has-no-bound-of-its-own.test.ts": 1900,
+    "test/a-local-gate-run-has-no-bound-of-its-own.test.ts": 5000,
     "test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts": 16000,
     "test/a-lockfile-advance-restarts-the-daemon-without-a-quiet-window.test.ts": 1500,
     "test/a-long-phase-still-pulses.test.ts": 5300,

@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   armAutoMerge,
@@ -13,16 +13,16 @@ import {
   realArmDeps,
   runTask,
   type ArmDeps,
-} from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import { decideAutoMergeArm, judgeReview } from "../src/lib/review.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import { decideAutoMergeArm, judgeReview } from "#src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
@@ -159,6 +159,11 @@ test(
     assert.equal(outcome, "armed");
     assert.equal(armedUrl, "url/open-1");
     assert.deepEqual(merged, [], "the happy arm path never touches the direct-merge fallback");
+    assert.deepEqual(
+      said.filter((m) => /refused|withheld|error_ignored|direct_merge|irreversib/i.test(m)),
+      [],
+      "the happy arm path says nothing about a refusal, an ignored error or a direct merge",
+    );
   },
 );
 
@@ -1162,7 +1167,13 @@ function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: strin
   return fakeBinDir;
 }
 
-for (const mode of ["live", "shadow"] as const) test(`W1-T975: a ${mode} run records its verdict and ${mode === "live" ? "arms" : "does not arm"} auto-merge`, async (t) => {
+const armVerdictCases = [
+  { mode: "live", title: "legacy arm uses its ledger when HOME has no Remudero configuration (W1-T975: a live run records its verdict and arms auto-merge using only its run-owned hold ledger)" },
+  { mode: "shadow", title: "W1-T975: a shadow run records its verdict and does not arm auto-merge" },
+] as const;
+for (const { mode, title } of armVerdictCases) test(title, async (t) => runArmVerdictFixture(t, mode));
+
+async function runArmVerdictFixture(t: TestContext, mode: "live" | "shadow") {
   const root = mkdtempSync(join(tmpdir(), "arm-verdict-merged-root-"));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, ARM_OPEN_FIXTURE_PLAN);
@@ -1170,12 +1181,8 @@ for (const mode of ["live", "shadow"] as const) test(`W1-T975: a ${mode} run rec
 
   armOpenGitFixture(root);
 
-  // The real arm deps load the HOST config for the merge write's operator-hold fence, which fails
-  // closed on an absent ledger: point a fixture HOME's config at this run's own root, whose ledger
-  // the run writes, so the fence reads real "no hold recorded" evidence instead of the host's.
+  // The run owns its hold ledger; an unrelated ambient HOME must not supply its config.
   const fixtureHome = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}arm-verdict-merged-home-`));
-  mkdirSync(join(fixtureHome, ".config", "remudero"), { recursive: true });
-  writeFileSync(join(fixtureHome, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
   mkdirSync(join(root, "state"), { recursive: true });
   appendFileSync(join(root, "state", "ledger.ndjson"), "");
   const savedHome = process.env.HOME;
@@ -1285,7 +1292,7 @@ for (const mode of ["live", "shadow"] as const) test(`W1-T975: a ${mode} run rec
     rmSync(fixtureHome, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
-});
+}
 
 // Re-exported so `armAutoMerge`'s own (unmodified) 6-call-site contract is
 // still importable from this file without an unused-import lint complaint —

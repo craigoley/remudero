@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { createService, type Route } from "../src/lib/service.js";
+import { createService, type Route } from "#src/lib/service.js";
 import {
   buildRepoDashboardRoutes,
   computeRepoTelemetryOffThread,
@@ -14,16 +14,16 @@ import {
   type RepoDashboardResult,
   type RepoTelemetry,
   type RepoTelemetryRequest,
-} from "../src/lib/repo-dashboard-route.js";
+} from "#src/lib/repo-dashboard-route.js";
 import {
   assignmentFacts,
   createRepoLedgerIndex,
   realRepoLedgerIndexFs,
   rotationStampMs,
   type RepoLedgerIndexFs,
-} from "../src/lib/repo-ledger-index.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
+} from "#src/lib/repo-ledger-index.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
 
 const READ_TOKEN = "repo-summary-read-token";
 const NOW = "2026-09-22T12:00:00.000Z";

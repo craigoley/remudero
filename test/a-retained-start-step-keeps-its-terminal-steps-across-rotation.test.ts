@@ -3,9 +3,9 @@ import { test } from "node:test";
 import { appendFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger, ledgerExceedsRotationCeiling, rotateLedger, type LedgerLine } from "../src/lib/ledger.js";
-import * as status from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger, ledgerExceedsRotationCeiling, rotateLedger, type LedgerLine } from "#src/lib/ledger.js";
+import * as status from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // W1-T5966. Rotation retained fix.dispatch but not most of the rows that END a fix round, so after a
 // rotation a finished round read as still in flight: status.ts clears its activeFixRunId only on a

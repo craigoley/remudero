@@ -27,9 +27,9 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { deriveStatus, type DeriveDeps, type GitHub, type PrRef } from "../src/lib/status.js";
-import { computeBoardSnapshot, isRunningRow, type BoardDeps } from "../src/lib/board.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { deriveStatus, type DeriveDeps, type GitHub, type PrRef } from "#src/lib/status.js";
+import { computeBoardSnapshot, isRunningRow, type BoardDeps } from "#src/lib/board.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 const PR_URL = "https://github.com/craigoley/remudero/pull/9314";
 

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import test from "node:test";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { reportLoopLag } from "../src/lib/daemon.js";
-import { runStepsSync, step } from "../src/lib/git-push.js";
-import { startReadPlaneTelemetry, type SyncSpawnCallerTotal } from "../src/lib/read-plane.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { reportLoopLag } from "#src/lib/daemon.js";
+import { runStepsSync, step } from "#src/lib/git-push.js";
+import { startReadPlaneTelemetry, type SyncSpawnCallerTotal } from "#src/lib/read-plane.js";
 
 // W1-T9577: execFileSync faked UNDER the telemetry wrapper; each call advances a fake clock by the pending ms.
 function withTimedSpawns(run: (telemetry: ReturnType<typeof startReadPlaneTelemetry>, setMs: (ms: number) => void) => void): void {

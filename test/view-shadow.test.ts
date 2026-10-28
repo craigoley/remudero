@@ -5,12 +5,13 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
-import { createReadModelTicker, createReadModelWorker, readModelStatusView, runReadModelWorker, type ReadModelView, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { legacyRepositories, repositoriesSourcesPath } from "../src/lib/repositories-view.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
+import { createReadModelTicker, createReadModelWorker, readModelStatusView, runReadModelWorker, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { legacyRepositories, repositoriesSourcesPath } from "#src/lib/repositories-view.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { snapshotCursor } from "#src/lib/read-page.js";
 import {
   VIEW_SHADOW_DIFF_STEP,
   VIEW_SHADOW_SAMPLE_MS,
@@ -33,10 +34,10 @@ import {
   type ShadowLatest,
   type ShadowRequest,
   type ViewShadowState,
-} from "../src/lib/view-shadow.js";
-import { buildReadModelViewRoutes, type ViewBodyEntry, type ViewDefinition } from "../src/lib/views.js";
-import { switchViewsOn } from "./helpers/read-model-switches.js";
-import { SPEC, violations } from "./helpers/openapi-strict.js";
+} from "#src/lib/view-shadow.js";
+import { buildReadModelViewRoutes, viewKey, type ViewBodyEntry, type ViewDefinition } from "#src/lib/views.js";
+import { switchViewsOn } from "#test/helpers/read-model-switches.js";
+import { SPEC, violations } from "#test/helpers/openapi-strict.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const HOUR = 3_600_000;
@@ -121,6 +122,73 @@ function evidenceDb(t: TestCtx): ReadModelDb {
 const NONE: ShadowEvidence = {
   legacyAsOfMs: T0, viewAsOfMs: T0, named: new Set(), namedBeforeHorizon: new Set(), namedInGap: new Set(), rowsInGap: 0, duplicateIds: new Set(), duplicateRows: 0,
 };
+
+/** A producer-owned manifest; exact routing keys change while logical page identities remain scoped. */
+function inboxQualificationFixture(clock: Clock) {
+  const policy = "inbox-current-pages-v1";
+  let snapshotKey = "a".repeat(64);
+  let active = [{ index: 0, incarnation: "first-0" }];
+  const scope = { instance: "core", repository: "craigoley/remudero" };
+  const population = () => ({ policy, generation: policy, snapshotKey, scope,
+    pages: active.map(({ index, incarnation }) => ({
+      key: viewKey(new URLSearchParams(index === 0 ? { section: "needsYou" } : { section: "needsYou", cursor: snapshotCursor({ snapshotKey, section: "needsYou", offset: index }) })),
+      logicalKey: JSON.stringify([scope.instance, scope.repository, "needsYou", index, []]),
+      section: "needsYou", index, incarnation,
+    })),
+  });
+  const history: ViewShadowState = { requests: 41, firstRequestMs: T0 - DAY, samples: 99,
+    diffs: { legacy_horizon: 1, timing: 2, dedupe: 3, real: 4 }, streakSamples: 8,
+    streakSinceMs: T0, lastRealMs: T0, streakKeys: ["historic-cursor"] };
+  const saved: Record<string, ViewShadowState> = { inbox: structuredClone(history) };
+  const shadow = createViewShadow({ clock, log() {}, evidence: () => NONE,
+    qualifications: { inbox: policy },
+    ...{ populations: () => ({ inbox: population() }) },
+    store: { load: () => structuredClone(saved), save: (key, state) => { saved[key] = structuredClone(state); } },
+  });
+  const sample = (index: number, requests = 0) => {
+    const page = population().pages.find(page => page.index === index)!;
+    const data = { snapshotKey, section: page.section, page: { index, of: active.length, total: active.length }, items: [{ id: `page-${index}` }] };
+    return shadow.compare({ view: "inbox", key: page.key, requests, qualificationGeneration: policy,
+      legacy: { data, asOfMs: clock.now(), qualificationGeneration: policy },
+      body: { data, asOf: clock.iso() },
+    });
+  };
+  return { shadow, sample, saved, history, setSnapshot: (key: string) => { snapshotKey = key; },
+    setPages: (pages: typeof active) => { active = pages; } };
+}
+
+test("W1-T10917: Inbox snapshot churn qualifies stable current pages without rewriting history", () => {
+  const clock = steppedClock(), f = inboxQualificationFixture(clock);
+  f.setPages(Array.from({ length: 11 }, (_, index) => ({ index, incarnation: `first-${index}` })));
+  for (let minute = 0; minute <= 60; minute++) {
+    f.setSnapshot(minute.toString(16).padStart(64, "0"));
+    for (let index = 0; index < 11; index++) f.sample(index);
+    if (minute < 60) clock.advance(VIEW_SHADOW_SAMPLE_MS);
+  }
+  const current = f.shadow.readiness().find(row => row.view === "inbox")!;
+  assert.equal(current.keys, 11, "current qualification counts logical pages, not every retired cursor");
+  assert.equal(current.streakSamples, 671, "new qualification starts fresh instead of borrowing historical counters");
+  assert.equal(current.requiredSamples, 11 * 1440);
+  assert.equal(current.ready, false, "one hour is not a full day");
+  assert.deepEqual(f.saved.inbox, f.history, "the complete old measured state remains unchanged");
+});
+
+test("W1-T10917: every active Inbox page earns its own full day and cadence", () => {
+  const clock = steppedClock(), f = inboxQualificationFixture(clock);
+  for (let minute = 0; minute < 3 * 1440; minute++) { f.sample(0); clock.advance(VIEW_SHADOW_SAMPLE_MS); }
+  assert.equal(f.shadow.readiness().find(row => row.view === "inbox")!.ready, true, "positive control: the original page qualified");
+  f.setPages([{ index: 0, incarnation: "first-0" }, { index: 1, incarnation: "first-1" }]);
+  f.sample(1);
+  assert.equal(f.shadow.readiness().find(row => row.view === "inbox")!.ready, false, "old global samples cannot qualify a just-added page");
+  for (let minute = 1; minute <= 1440; minute++) {
+    clock.advance(VIEW_SHADOW_SAMPLE_MS); f.sample(0); f.sample(1);
+  }
+  assert.equal(f.shadow.readiness().find(row => row.view === "inbox")!.ready, true, "both pages now have their own full-day evidence");
+  f.setPages([{ index: 0, incarnation: "first-0" }]); f.sample(0);
+  assert.equal(f.shadow.readiness().find(row => row.view === "inbox")!.ready, true, "retiring a page preserves the still-active page's qualification");
+  f.setPages([{ index: 0, incarnation: "first-0" }, { index: 1, incarnation: "returned-1" }]); f.sample(1);
+  assert.equal(f.shadow.readiness().find(row => row.view === "inbox")!.ready, false, "a returning page cannot reuse its retired incarnation's evidence");
+});
 
 test("a shadow diff names the differing fields and its classification", (t) => {
   const db = evidenceDb(t);

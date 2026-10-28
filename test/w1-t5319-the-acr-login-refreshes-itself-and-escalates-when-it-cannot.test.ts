@@ -7,11 +7,11 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { fixedClock } from "../src/lib/clock.js";
-import type { Escalation } from "../src/lib/escalate.js";
-import { parseHeartbeatPayload, runHostResourcePass, type HostResourcePorts } from "../src/lib/host-resource-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { installFixtureDuGuard } from "./helpers/fixture-du.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { parseHeartbeatPayload, runHostResourcePass, type HostResourcePorts } from "#src/lib/host-resource-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { installFixtureDuGuard } from "#test/helpers/fixture-du.js";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const reason = 'AADSTS700082: session expired; run "az login"\nrequest id: a\\b; path: c:\\new\\tfile';

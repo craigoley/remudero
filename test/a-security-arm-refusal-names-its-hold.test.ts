@@ -7,10 +7,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 // A namespace import, so the file still loads at a base without these exports and each test fails on its own.
-import * as blockers from "../src/lib/pr-blocker.js";
-import { runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import * as blockers from "#src/lib/pr-blocker.js";
+import { runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const NOW = Date.UTC(2026, 9, 15, 8, 30);
 const ago = (minutes: number) => new Date(NOW - minutes * 60_000).toISOString();

@@ -21,8 +21,8 @@ import { join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { test } from "node:test";
 
-import { resolveLedgerUnion, type LedgerGrepFsDeps } from "../src/lib/ledger-grep.js";
-import { mineAutonomyLedgerLines, zeroTouchMergeRate, type MergeRecord } from "../src/lib/autonomy.js";
+import { resolveLedgerUnion, type LedgerGrepFsDeps } from "#src/lib/ledger-grep.js";
+import { mineAutonomyLedgerLines, zeroTouchMergeRate, type MergeRecord } from "#src/lib/autonomy.js";
 
 function tmpStateDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

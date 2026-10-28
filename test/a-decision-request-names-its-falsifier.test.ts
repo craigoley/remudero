@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { outputContractLines } from "../src/lib/compaction.js";
-import { decisionRecordContent } from "../src/lib/feedback-landing.js";
-import { parseDecisionRequest } from "../src/lib/worker.js";
+import { outputContractLines } from "#src/lib/compaction.js";
+import { decisionRecordContent } from "#src/lib/feedback-landing.js";
+import { parseDecisionRequest } from "#src/lib/worker.js";
 
 // A DECISION_REQUEST is always auto-chosen, so the only record of whether the RECOMMENDED option
 // was right is what the worker said would prove it wrong. These pin that the contract asks for it,

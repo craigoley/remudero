@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { dispatchesWithoutNewOwnedPr, orphanedRunIds, readLedgerUnionBounded } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { dispatchesWithoutNewOwnedPr, orphanedRunIds, readLedgerUnionBounded } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // MEASURED 2026-09-29: rotateLedger keeps each step's newest rows in the live file, so every later
 // rotation archives them again. The board's union read did not dedupe, and returned 1,042,796 rows of

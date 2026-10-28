@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 import { enabledWorkerProviders, isWorkerProviderId, WORKER_PROVIDER_IDS, type Config, type WorkerProviderId } from "./config.js";
 import {
   ProviderCapacityBlockedError,
+  providerEligibility,
   selectWorkerProvider,
   type ProviderCapacity,
   type CodexModelPreference,
@@ -485,6 +486,6 @@ export function selectWorkerProviderForPolicy(
     }
   }
   const selection = automatic();
-  const reason = !preferred || !preferred.readable || preferred.windows.length === 0 ? "unreadable" : "below-reserve";
+  const reason = preferred ? providerEligibility(preferred, policy.reservePercent).reason ?? "below-reserve" : "unreadable";
   return { selection, preferenceBypass: { provider: policy.preference, reason } };
 }

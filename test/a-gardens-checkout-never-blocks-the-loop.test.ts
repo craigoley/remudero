@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   ASYNC_PORT_UNDER_SYNC_PASS,
   gardenStatePath,
@@ -28,12 +28,12 @@ import {
   type GardenCheckout,
   type GardenCheckoutAsync,
   type GardenSpec,
-} from "../src/lib/gardener.js";
-import { step } from "../src/lib/git-push.js";
-import { fileConsumerVia, runHostResourcePass, runHostResourcePassAsync, samplesPath, type ConsumerFiling, type HostResourcePorts, type HostSample } from "../src/lib/host-resource-gardener.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { openOpportunityIntakePorts, productionOpportunityIntakePorts } from "../src/lib/opportunity-intake.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/gardener.js";
+import { step } from "#src/lib/git-push.js";
+import { fileConsumerVia, runHostResourcePass, runHostResourcePassAsync, samplesPath, type ConsumerFiling, type HostResourcePorts, type HostSample } from "#src/lib/host-resource-gardener.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { openOpportunityIntakePorts, productionOpportunityIntakePorts } from "#src/lib/opportunity-intake.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   daemonGardenWorkspace,
   gardenCheckout,
@@ -41,8 +41,8 @@ import {
   knowledgeGardenWorkspaceAsync,
   productionMachineFilingJudgePorts,
   type GardenCheckoutOpts,
-} from "../src/run-task.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+} from "#src/run-task.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 
 type Log = (step: string, extra?: Record<string, unknown>) => void;
 type Row = [string, Record<string, unknown> | undefined];

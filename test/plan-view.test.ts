@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { isDispatchBreakerTripped, DEFAULT_MAX_TASK_DISPATCHES, type GitHub, type StatusProjection } from "../src/lib/status.js";
-import { runnableCandidates, type MergedSet } from "../src/lib/drain.js";
-import { createService } from "../src/lib/service.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { isDispatchBreakerTripped, DEFAULT_MAX_TASK_DISPATCHES, type GitHub, type StatusProjection } from "#src/lib/status.js";
+import { runnableCandidates, type MergedSet } from "#src/lib/drain.js";
+import { createService } from "#src/lib/service.js";
 import {
   buildPlanFrontier,
   buildPlanViewRoute,
@@ -21,9 +21,9 @@ import {
   type PlanProgressCache,
   type PlanSectionCache,
   type RatifyCliGateway,
-} from "../src/lib/panel-graph.js";
-import type { PlanIndex } from "../src/lib/plan-index.js";
-import type { TraceGithub } from "../src/lib/trace.js";
+} from "#src/lib/panel-graph.js";
+import type { PlanIndex } from "#src/lib/plan-index.js";
+import type { TraceGithub } from "#src/lib/trace.js";
 
 // ── W1-T315: the Plan tab's progress (done/in-flight/queued) + frontier (next candidates, each
 // carrying WHY) -- proves the FOUR acceptance claims in plan/tasks.d/W1-T315-*.yaml. ──────────

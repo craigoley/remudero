@@ -25,18 +25,18 @@ import {
   appendLedger,
   ledgerExceedsRotationCeiling,
   rotateLedger,
-} from "../src/lib/ledger.js";
-import { dispatchesWithoutNewOwnedPr, isDispatchBreakerTripped, readLedgerLines } from "../src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, runCreditBackfill, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
-import * as sweepModule from "./helpers/sweep-test.js";
-import { escalateCircuitBreak, deriveStrikeHistory } from "../src/run-task.js";
-import type { Task } from "../src/lib/plan.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import { isRatifiedInLedger } from "../src/lib/inbox.js";
-import { priorEscalatedAlertIds } from "../src/lib/ops.js";
-import { alreadyFiledForSignature } from "../src/lib/coverage-improvement.js";
-import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review.js";
-import { verifyStalledTask, type StallEvidence } from "../src/lib/stall-verifier.js";
+} from "#src/lib/ledger.js";
+import { dispatchesWithoutNewOwnedPr, isDispatchBreakerTripped, readLedgerLines } from "#src/lib/status.js";
+import { DEFAULT_SWEEP_POLICY, runCreditBackfill, runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
+import * as sweepModule from "#test/helpers/sweep-test.js";
+import { escalateCircuitBreak, deriveStrikeHistory } from "#src/run-task.js";
+import type { Task } from "#src/lib/plan.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import { isRatifiedInLedger } from "#src/lib/inbox.js";
+import { priorEscalatedAlertIds } from "#src/lib/ops.js";
+import { alreadyFiledForSignature } from "#src/lib/coverage-improvement.js";
+import { parseWhitelistedProof, narrowNameFilteredArgs } from "#src/lib/review.js";
+import { verifyStalledTask, type StallEvidence } from "#src/lib/stall-verifier.js";
 
 // ── W1-T209: "the ledger grows unbounded with no archival, and any rotation that hides a
 // decision-relevant line silently zeroes the dispatch breaker it also backs" (RECON R-9,

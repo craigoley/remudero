@@ -16,10 +16,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { captureFeedback, feedbackEntryPath, type FeedbackOrigin } from "../src/lib/feedback.js";
-import { incidentOrigin, ioIncidentOrigin, memoryIncidentOrigin } from "../src/lib/host-resource-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { captureFeedback, feedbackEntryPath, type FeedbackOrigin } from "#src/lib/feedback.js";
+import { incidentOrigin, ioIncidentOrigin, memoryIncidentOrigin } from "#src/lib/host-resource-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 /** The rendered launcher's own `deploy_code_clean` body — the function the watchdog runs. */
 function renderedCleanFunction(t: TestContext): string {

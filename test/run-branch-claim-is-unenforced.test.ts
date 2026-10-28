@@ -20,8 +20,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 
-import { corroboratesForwardProgress, runBranchClaimGap } from "../src/lib/status.js";
-import type { PrRef } from "../src/lib/status.js";
+import { corroboratesForwardProgress, runBranchClaimGap } from "#src/lib/status.js";
+import type { PrRef } from "#src/lib/status.js";
 
 const TASK_ID = "W1-T2429";
 const TRAILER = `Remudero-Task: ${TASK_ID}`;

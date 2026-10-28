@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import { buildBatchedGithub, type GitHub } from "../src/lib/status.js";
-import { daemonCommand } from "../src/run-task.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import { buildBatchedGithub, type GitHub } from "#src/lib/status.js";
+import { daemonCommand } from "#src/run-task.js";
 
 /**
  * test/gateway-lives-across-ticks.test.ts — R-24 (docs/audits/recon-2026-09-05.md).

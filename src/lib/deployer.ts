@@ -2531,7 +2531,7 @@ export interface RealDeployOpts {
    *  trim, since `git status --porcelain`'s leading status column is significant). Throws on
    *  a non-zero exit, like execFileSync — callers catch where that is expected (e.g. `pgrep`
    *  with no matches). */
-  execFile?: (cmd: string, args: string[]) => string;
+  execFile?: (cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }) => string;
 }
 
 /** Resolve the deploy supervisor's ledger from the state root it is operating on.
@@ -2651,7 +2651,8 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
   const selectedPacket = selectedFile === undefined ? undefined : trustedInstanceRegistryLaunchPacket(selectedInstance);
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const clock = (): number => Date.now();
-  const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
+  const exec = o.execFile ?? ((cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }) =>
+    execFileSync(cmd, args, { encoding: "utf8", ...options }).toString());
   const drive = <R>(steps: DeploySteps<R>): R | Promise<R> => driveDeploySteps(steps, sensorExec !== undefined);
   const execSensor = (cmd: string, args: string[]) => deployStep(() => sensorExec ? sensorExec(cmd, args) : exec(cmd, args));
   function git(args: readonly string[]): string;
@@ -2812,12 +2813,13 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
       // pulled. An unresolved instance still invokes the script bare, so the refusal stands wherever
       // there is no answer rather than being replaced by a guess.
       const script = recycleInstance ? [recycleContainerScript, "--instance", recycleInstance] : [recycleContainerScript];
+      const options = { env: { ...process.env, RMD_RECYCLE_CALLER: "deploy-tick" } };
       const runScript = (command: string[]) => {
-        if (selectedPacket === undefined) return exec("bash", command);
+        if (selectedPacket === undefined) return exec("bash", command, options);
         const packet = selectedPacket.split("\n");
         try {
           return exec("bash", ["-c", 'export RMD_INSTANCE_REGISTRY="$1" RMD_INSTANCE_REGISTRY_DIGEST="$2" RMD_INSTANCE_REGISTRY_LAUNCH_BINDING="$3"; shift 3; exec bash "$@"',
-            "selected-registry-launch", packet[1]!, packet[2]!, packet[3]!, ...command]);
+            "selected-registry-launch", packet[1]!, packet[2]!, packet[3]!, ...command], options);
         } catch {
           // Child/OS errors can quote private argv; unknown launch failure is never a public diagnostic of those bytes.
           throw new InstanceRegistryRuntimeError("launcher_failed");

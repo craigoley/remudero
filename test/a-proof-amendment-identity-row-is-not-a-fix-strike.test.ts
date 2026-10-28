@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { DEFAULT_SWEEP_POLICY, fixLedgerRowsForHead, isProofAmendmentIdentityRow, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import type { Config } from "../src/lib/config-schema.js";
-import { buildProofAmendmentWritePorts, deriveStrikeHistory, priorStrikesFor } from "../src/run-task.js";
+import { DEFAULT_SWEEP_POLICY, fixLedgerRowsForHead, isProofAmendmentIdentityRow, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import type { Config } from "#src/lib/config-schema.js";
+import { buildProofAmendmentWritePorts, deriveStrikeHistory, priorStrikesFor } from "#src/run-task.js";
 
 // W1-T5032 — `recordIdentity` appends an UNNUMBERED `fix.dispatch` row (`kind: proof_amendment`) that exists only
 // for idempotency. `fixLedgerRowsForHead` fed it to both strike tallies, so a worker strike plus the amendment's own

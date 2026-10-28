@@ -6,14 +6,14 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
+import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
 import {
   auditLedgerUnion,
   openLedgerUnion,
   readLedgerUnionRecords,
   readLedgerUnionRecordsSync,
   type LedgerGrepFsDeps,
-} from "../src/lib/ledger-union.js";
+} from "#src/lib/ledger-union.js";
 
 test("ledger union audits malformed rows without losing later records", async () => {
   const dir = tmpStateDir();

@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { dispatchesWithoutNewOwnedPr, readLedgerUnionBounded } from "../src/lib/status.js";
-import { deriveCircuitBrokenBlockers } from "../src/lib/status-board.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { dispatchesWithoutNewOwnedPr, readLedgerUnionBounded } from "#src/lib/status.js";
+import { deriveCircuitBrokenBlockers } from "#src/lib/status-board.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // MEASURED 2026-09-29: `rmd release` reset seven halted tasks and the live dispatcher counted each at
 // 0, yet `rmd status` still listed six of them circuit-broken at 26-113 dispatches. The board reads

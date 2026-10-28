@@ -13,8 +13,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildStatusStream } from "../src/lib/board.js";
-import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
+import { buildStatusStream } from "#src/lib/board.js";
+import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
 
 const ROOT = join(import.meta.dirname, "..");
 const BASELINE_PATH = "scripts/openapi-route-baseline.json";

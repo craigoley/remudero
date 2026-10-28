@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, chmodSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -119,12 +119,20 @@ test("census precheck: a clean change, a deleted file and a changed census suite
 function installHook(dir: string): void {
   mkdirSync(join(dir, "hooks"), { recursive: true });
   mkdirSync(join(dir, "scripts", "lib"), { recursive: true });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module" }));
   mkdirSync(join(dir, "src", "lib"), { recursive: true });
+  mkdirSync(join(dir, "test", "setup"), { recursive: true });
+  assert.equal(lstatSync(join(dir, "test", "setup")).isSymbolicLink(), false,
+    "the fixture owns its preload directory; lending it lets fixture writes change the checkout");
+  writeFileSync(join(dir, "test", "setup", "tmp-hygiene.ts"),
+    `import ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "test/setup/tmp-hygiene.ts")).href)};\n`);
   copyFileSync(join(REPO_ROOT, "src", "lib", "rule-suites.ts"), join(dir, "src", "lib", "rule-suites.ts"));
   copyFileSync(join(REPO_ROOT, "src", "lib", "trust-root-text.ts"), join(dir, "src", "lib", "trust-root-text.ts"));
   copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(dir, "hooks", "pre-push"));
   chmodSync(join(dir, "hooks", "pre-push"), 0o755);
-  for (const script of ["census-precheck.mjs", "clock-signature-ratchet.mjs", "comment-load-ratchet.mjs", "fixture-copy-census.mjs", "house-layout-census.mjs", "deps-interface-census.mjs", "test-repo-root-codemod.mjs", "coverage-session-blanking-check.mjs"]) {
+  for (const script of ["census-precheck.mjs", "clock-signature-ratchet.mjs", "comment-load-ratchet.mjs", "fixture-copy-census.mjs", "house-layout-census.mjs", "deps-interface-census.mjs", "test-repo-root-codemod.mjs", "coverage-session-blanking-check.mjs",
+    // The suite child is judged (W1-T8379): the judge and the two files its argv names.
+    "pure-test-pool.mjs", "pool-run-marker.mjs", "pool-run-tally.mjs"]) {
     copyFileSync(join(REPO_ROOT, "scripts", script), join(dir, "scripts", script));
   }
   for (const lib of ["argv.mjs", "git.mjs", "author-step-capture.mjs", "json-duplicate-keys.mjs", "instrument-surface-census.mjs", "git-spawn-shapes.mjs", "repo-root.mjs", "retained-fixtures.mjs"]) {
@@ -263,6 +271,8 @@ test("the actual classifier sees a complete owned corpus", () => {
     "test/coverage-session-blanking.test.ts": guard,
     "test/setup/tmp-hygiene.ts": `import ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "test/setup/tmp-hygiene.ts")).href)};\n`,
     "test/child.ts": good,
+    // A suite this push joins. Its child is judged (W1-T8379), so a joined path with no file fails instead of passing.
+    "test/every-ci-census-is-asked-before-the-push.test.ts": 'import { test } from "node:test";\ntest("census stand-in", () => undefined);\n',
   };
   const refused = pushFixture(seed, { "test/child.ts": bad })();
   assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);

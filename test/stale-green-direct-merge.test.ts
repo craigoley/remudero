@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import {
   armAndLogOutcome,
   armAutoMergeAtOpen,
@@ -16,7 +16,7 @@ import {
   attemptArm,
   realArmDeps,
   type FixRebaseMergeFacts,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/3997";
 const HEAD = "8c2cd65e7f1069262ad17bb8d50ccb39a8c365ba";

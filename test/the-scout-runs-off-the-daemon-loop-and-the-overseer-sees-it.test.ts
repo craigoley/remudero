@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { gardenSchedule, isRegisteredGardenName, REGISTERED_GARDEN_NAMES } from "../src/lib/garden-registry.js";
-import { SCOUT_MIN_INTERVAL_MS } from "../src/lib/scout-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildRegisteredGarden, GARDEN_BRANCH_RE, GARDEN_NAMES } from "../src/run-task.js";
+import { gardenSchedule, isRegisteredGardenName, REGISTERED_GARDEN_NAMES } from "#src/lib/garden-registry.js";
+import { SCOUT_MIN_INTERVAL_MS } from "#src/lib/scout-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildRegisteredGarden, GARDEN_BRANCH_RE, GARDEN_NAMES } from "#src/run-task.js";
 
 test("W1-T5454: the registry names the scout and its pass interval", () => {
   assert.ok(REGISTERED_GARDEN_NAMES.includes("scout"));

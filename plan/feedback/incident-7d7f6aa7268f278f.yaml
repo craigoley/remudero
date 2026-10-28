@@ -19,10 +19,29 @@ raw: >-
     (none found)
 attachments: []
 origin: incident#7d7f6aa7268f278f2e45c48976b34145686a1d5835b73d49c771bd0cba02d1a3
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/15067
+summary:
+  headline: CI invariant gap on main persisted after automated repair attempt
+  what_happened: The main-branch tripwire check at commit 358b83f found a
+    reconcile gap, and the automatic repair did not clear it. No recently merged
+    change is linked to the failure.
+  decision: Assign an engineer to investigate the main-branch tripwire gap before
+    the next scheduled run.
+  options:
+    - label: Assign an engineer to investigate
+      consequence: An engineer reviews main-tripwire.yml and commit 358b83f to find
+        why the repair failed.
+      intent: reply
+    - label: Keep watching one more run
+      consequence: The gap stays open for now, and the incident escalates if it recurs.
+      intent: keep
+    - label: Dismiss as a one-off
+      consequence: The incident closes without a fix, and the invariant gap may return
+        unnoticed.
+      intent: decline
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

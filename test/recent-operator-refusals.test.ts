@@ -3,9 +3,9 @@ import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { computeRecentActivity, createRecentActivityCache, type BoardDeps } from "../src/lib/board.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
+import { computeRecentActivity, createRecentActivityCache, type BoardDeps } from "#src/lib/board.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
 
 /**
  * THE INCIDENT THIS FILE EXISTS FOR, 2026-07-31.
