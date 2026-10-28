@@ -8,13 +8,13 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { refreshInboxClassification, INBOX_VIEW_SECTIONS, type InboxRefreshMemo } from "../src/lib/inbox-view.js";
-import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
-import { buildPanelGraphRoutes, inboxTriagePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createService } from "../src/lib/service.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { refreshInboxClassification, INBOX_VIEW_SECTIONS, type InboxRefreshMemo } from "#src/lib/inbox-view.js";
+import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { buildPanelGraphRoutes, inboxTriagePath, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createService } from "#src/lib/service.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 

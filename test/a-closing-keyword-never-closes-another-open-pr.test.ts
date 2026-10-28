@@ -1,4 +1,3 @@
-// test/a-closing-keyword-never-closes-another-open-pr.test.ts
 //
 // LIVE 2026-10-11: remudero-console #2035's body said "(root cause and fix: craigoley/remudero#10856)".
 // The fleet merged #2035 at 12:45:52Z, and GitHub closed core #10856, an open PR, at 12:45:54Z (its
@@ -26,13 +25,13 @@ import {
   defuseClosingReferences,
   recordClosingReferenceToLedger,
   type ClosingReferenceGuardResult,
-} from "../src/lib/closing-reference-guard.js";
-import { attemptArm, realArmDeps, realArmDepsAsync } from "../src/lib/arm-auto-merge.js";
-import { runStepsSync } from "../src/lib/git-push.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { Config } from "../src/lib/config.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/closing-reference-guard.js";
+import { attemptArm, realArmDeps, realArmDepsAsync } from "#src/lib/arm-auto-merge.js";
+import { runStepsSync } from "#src/lib/git-push.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const CONSOLE = { owner: "craigoley", repo: "remudero-console" };
 const MERGING = "https://github.com/craigoley/remudero-console/pull/2035";

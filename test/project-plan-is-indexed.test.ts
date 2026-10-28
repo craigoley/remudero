@@ -17,8 +17,8 @@ import {
   type LedgerIndex,
   type PrRef,
   type StatusProjection,
-} from "../src/lib/status.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+} from "#src/lib/status.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 /**
  * R-23 — `projectPlan` INDEXES THE LEDGER ONCE PER PROJECTION.

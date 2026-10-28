@@ -3,17 +3,17 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { runGardenAsync, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec } from "../src/lib/gardener.js";
-import { knowledgeGardenSpec, runGardenPass, type GardenWorkspace } from "../src/lib/knowledge-gardener.js";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
-import { gitBlobSha, repairDuplicateKeyShard } from "../src/lib/plan-shard-repair.js";
-import { taskRulingPin } from "../src/lib/task-linter.js";
-import { startTestGarden, type TestGardenAction, type TestGardenClass, type TestGardenInventory } from "../src/lib/test-gardener.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { knowledgeGardenWorkspaceAsync, runShardRepairPass, shardRepairDir, shardRepairRequester, withShardRepairs } from "../src/run-task.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { runGardenAsync, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec } from "#src/lib/gardener.js";
+import { knowledgeGardenSpec, runGardenPass, type GardenWorkspace } from "#src/lib/knowledge-gardener.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
+import { gitBlobSha, repairDuplicateKeyShard } from "#src/lib/plan-shard-repair.js";
+import { taskRulingPin } from "#src/lib/task-linter.js";
+import { startTestGarden, type TestGardenAction, type TestGardenClass, type TestGardenInventory } from "#src/lib/test-gardener.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { knowledgeGardenWorkspaceAsync, runShardRepairPass, shardRepairDir, shardRepairRequester, withShardRepairs } from "#src/run-task.js";
 
 const proof = "test/no-garden-pass-runs-on-a-sync-driver-beside-the-async-port.test.ts";
 const url = "https://github.com/o/r/pull/9";

@@ -3,11 +3,11 @@ import { test } from "node:test";
 import { appendFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { rotateLedger } from "../src/lib/ledger.js";
-import { DEFAULT_SWEEP_POLICY, dueRepairFilings, mainLatestRunFromLedger } from "../src/lib/sweep.js";
-import { buildLedgerIndex, deriveStatus, recordCredit, type CreditStore, type GitHub } from "../src/lib/status.js";
-import type { Task } from "../src/lib/plan.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { rotateLedger } from "#src/lib/ledger.js";
+import { DEFAULT_SWEEP_POLICY, dueRepairFilings, mainLatestRunFromLedger } from "#src/lib/sweep.js";
+import { buildLedgerIndex, deriveStatus, recordCredit, type CreditStore, type GitHub } from "#src/lib/status.js";
+import type { Task } from "#src/lib/plan.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 // E6 (2026-10-02): the carried core was 91% of the ceiling, so the live file rotated every ~5 min.
 // These pin the rows a rotation stops carrying, and that each live-file reader of them answers the same.

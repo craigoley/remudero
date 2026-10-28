@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createLastSeenStore, hashToken, lastSeenPath, loadLastSeen, saveLastSeen } from "../src/lib/last-seen.js";
+import { createLastSeenStore, hashToken, lastSeenPath, loadLastSeen, saveLastSeen } from "#src/lib/last-seen.js";
 
 function tmpPath(): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-last-seen-"));

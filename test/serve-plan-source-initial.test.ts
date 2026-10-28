@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { serveCommand } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { serveCommand } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // W1-T5639: a REAL `rmd serve` assembly whose initial plan read fails. The board's own projection thread reads the
 // same plan path and may publish a healthy board, while serve itself holds only a placeholder plan. Every plan-derived

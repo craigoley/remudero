@@ -5,9 +5,9 @@
 // (W1-T5748). Both arms now refresh a PR whose own files main changed since its merge base.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { attemptArm, attemptArmAsync, logArmAttribution, realArmDeps, realArmDepsAsync, type ArmDeps } from "../src/lib/arm-auto-merge.js";
-import { runStepsSync as runSync } from "../src/lib/git-push.js";
-import * as safetyModule from "../src/lib/plan-pr-merge-safety.js";
+import { attemptArm, attemptArmAsync, logArmAttribution, realArmDeps, realArmDepsAsync, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import { runStepsSync as runSync } from "#src/lib/git-push.js";
+import * as safetyModule from "#src/lib/plan-pr-merge-safety.js";
 
 // Read through a record so a tree without the W1-T9536 exports still loads and fails per test.
 const safety = safetyModule as unknown as Record<string, any>;

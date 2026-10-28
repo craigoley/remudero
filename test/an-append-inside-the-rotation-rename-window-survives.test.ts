@@ -4,7 +4,7 @@ import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import * as ledger from "../src/lib/ledger.js";
+import * as ledger from "#src/lib/ledger.js";
 
 // W1-T5514. `rotateLedgerLocked` catches up on rows appended since its snapshot, then sheds,
 // stages ~MBs with an fsync, and only then renames over the live path. A row another process

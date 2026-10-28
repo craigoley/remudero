@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { buildBatchedGithub, ghGateway, projectPlan } from "../src/lib/status.js";
-import { daemonCommand } from "../src/run-task.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { buildBatchedGithub, ghGateway, projectPlan } from "#src/lib/status.js";
+import { daemonCommand } from "#src/run-task.js";
 
 /**
  * The daemon's merged-status projection (run-task.ts `daemonCommand` -> `refreshMerged`) must

@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
-import { openReadModel } from "../src/lib/read-model-db.js";
+import type { Clock } from "#src/lib/clock.js";
+import { openReadModel } from "#src/lib/read-model-db.js";
 import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
-import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "../src/lib/ledger-projector.js";
+import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "#src/lib/ledger-projector.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { createReadModelTicker, createReadModelWorker, readModelSwitchesPath, runReadModelViewWorker, type ReadModelBodyEntry, type ReadModelView, type ReadModelViewsInput, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { createReadModelTicker, createReadModelWorker, readModelSwitchesPath, runReadModelViewWorker, type ReadModelBodyEntry, type ReadModelView, type ReadModelViewsInput, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 import {
   VIEW_DEMAND_EVICT_MS,
   VIEW_DEMAND_MAX_KEYS,
@@ -19,8 +19,8 @@ import {
   createDemandBook,
   touchViewDemand,
   type ViewDemandSource,
-} from "../src/lib/view-demand.js";
-import { buildReadModelViewRoutes, viewEtag, type ViewBodySource } from "../src/lib/views.js";
+} from "#src/lib/view-demand.js";
+import { buildReadModelViewRoutes, viewEtag, type ViewBodySource } from "#src/lib/views.js";
 
 const T0 = Date.parse("2026-10-02T12:00:00.000Z");
 const KEY = "id=W1-T1&instance=core";

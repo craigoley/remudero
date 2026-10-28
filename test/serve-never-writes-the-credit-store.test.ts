@@ -8,10 +8,10 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildServeRoutes } from "../src/lib/serve.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { defaultCreditStorePath, loadCreditStore, projectPlan } from "../src/lib/status.js";
-import type { Route } from "../src/lib/service.js";
+import { buildServeRoutes } from "#src/lib/serve.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { defaultCreditStorePath, loadCreditStore, projectPlan } from "#src/lib/status.js";
+import type { Route } from "#src/lib/service.js";
 
 const READ_TOKEN = "read-token";
 const MERGED_PR = "https://github.com/o/r/pull/7";

@@ -25,10 +25,10 @@ import {
   zeroTouchMergeRate,
   CURRENT_ARMING_POSTURE,
   type AutonomyLedgerMining,
-} from "../src/lib/autonomy.js";
-import type { LedgerUnionResult } from "../src/lib/ledger-grep.js";
-import { autonomyRateCommand } from "../src/run-task.js";
-import { configPath } from "../src/lib/config.js";
+} from "#src/lib/autonomy.js";
+import type { LedgerUnionResult } from "#src/lib/ledger-grep.js";
+import { autonomyRateCommand } from "#src/run-task.js";
+import { configPath } from "#src/lib/config.js";
 
 function tmpStateDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

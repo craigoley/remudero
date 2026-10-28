@@ -12,9 +12,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import * as analytics from "../src/lib/analytics-route.js";
-import { ledgerCompactCommand } from "../src/lib/ledger-compact.js";
-import { fixedClock } from "../src/lib/clock.js";
+import * as analytics from "#src/lib/analytics-route.js";
+import { ledgerCompactCommand } from "#src/lib/ledger-compact.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 const clock = fixedClock(Date.parse("2026-10-06T21:00:00.000Z"));
 const OLD = ["ledger.2026-09-20T10-00-00-000Z.ndjson.gz", "ledger.2026-09-20T11-00-00-000Z.ndjson.gz", "ledger.2026-09-20T12-00-00-000Z.ndjson.gz"];

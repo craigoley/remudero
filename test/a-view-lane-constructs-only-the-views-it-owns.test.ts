@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
-import { createReadModelTicker, readModelLaneViews, type ReadModelView, type ReadModelViewFactory, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { createDemandBook } from "../src/lib/view-demand.js";
+import type { Clock } from "#src/lib/clock.js";
+import { createReadModelTicker, readModelLaneViews, type ReadModelView, type ReadModelViewFactory, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { createDemandBook } from "#src/lib/view-demand.js";
 
 const proof = "test/a-view-lane-constructs-only-the-views-it-owns.test.ts";
 

@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GARDEN_PRIORITY_DEGRADED_STEP, type GardenPassSpawn } from "../src/lib/garden-registry.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import * as runTask from "../src/run-task.js";
+import { GARDEN_PRIORITY_DEGRADED_STEP, type GardenPassSpawn } from "#src/lib/garden-registry.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import * as runTask from "#src/run-task.js";
 
 // W1-T5475: the daemon built its garden spawn with `childGardenPassSpawn()` and no options, so a refused
 // `nice` (W1-T5365's garden.priority_degraded note) went to daemon stderr, where no ledger query sees it.

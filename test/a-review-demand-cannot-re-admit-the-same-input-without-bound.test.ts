@@ -12,9 +12,9 @@ import {
   type ClarificationQuestion,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { reviewAttemptsForInput } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { reviewAttemptsForInput } from "#src/run-task.js";
 
 // W1-T5863 — the live #9305 shape: the sweep keys the review `PR-9305`, but the posts were written
 // under `unfiled` with an input digest the count cannot match, so it reads zero while review.posted

@@ -3,9 +3,9 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import type { Clock } from "../src/lib/clock.js";
-import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "../src/lib/ledger-projector.js";
-import { openReadModel, type ReadModelDb } from "../src/lib/read-model-db.js";
+import type { Clock } from "#src/lib/clock.js";
+import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "#src/lib/ledger-projector.js";
+import { openReadModel, type ReadModelDb } from "#src/lib/read-model-db.js";
 import {
   READ_MODEL_LEASE_RENEW_MS,
   READ_MODEL_PASS_SHARE,
@@ -14,9 +14,9 @@ import {
   createReadModelTicker,
   type ReadModelView,
   type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { switchViewsOn } from "./helpers/read-model-switches.js";
+} from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { switchViewsOn } from "#test/helpers/read-model-switches.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 /** The work clock's cost of one applied row. */

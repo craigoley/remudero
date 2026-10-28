@@ -12,9 +12,9 @@ import {
   STANDBY_READY_BOUND_MS,
   createServeSupervisor,
   type GenerationProcess,
-} from "../src/lib/serve-supervisor.js";
-import type { Clock } from "../src/lib/clock.js";
-import type { GenerationMessage } from "../src/lib/serve-generation.js";
+} from "#src/lib/serve-supervisor.js";
+import type { Clock } from "#src/lib/clock.js";
+import type { GenerationMessage } from "#src/lib/serve-generation.js";
 
 const REASON = "worker_projection_failed: allMerged is not iterable";
 const STILL = "serve.cold_start_still_degraded";

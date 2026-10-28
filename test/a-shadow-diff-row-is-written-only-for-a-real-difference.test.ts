@@ -6,8 +6,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
-import * as viewShadow from "../src/lib/view-shadow.js";
+import type { Clock } from "#src/lib/clock.js";
+import * as viewShadow from "#src/lib/view-shadow.js";
 import {
   VIEW_SHADOW_DIFF_STEP,
   createViewShadow,
@@ -15,7 +15,7 @@ import {
   type ShadowLegacy,
   type ShadowStore,
   type ViewShadowState,
-} from "../src/lib/view-shadow.js";
+} from "#src/lib/view-shadow.js";
 
 /** Spelled out, not imported, so the suite loads against a base that has no summary and fails there on its assertions. */
 const VIEW_SHADOW_SUMMARY_STEP = "view.shadow_summary";

@@ -3,12 +3,12 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import * as sweep from "./helpers/sweep-test.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { priorStrikesFor, runFixRung } from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import * as sweep from "#test/helpers/sweep-test.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { priorStrikesFor, runFixRung } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const TASK = "W1-T5542";
 const HEAD = "73dd194";

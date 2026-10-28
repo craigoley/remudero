@@ -7,10 +7,10 @@ import { join } from "node:path";
 import { test, mock } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
-import type { Clock } from "../src/lib/clock.js";
-import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
-import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "../src/lib/ledger-projector.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
+import type { Clock } from "#src/lib/clock.js";
+import { daemonInstanceRegistryPath } from "#src/lib/deployer.js";
+import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "#src/lib/ledger-projector.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
 import {
   ORACLE_AGREE_INTERVAL_MS,
   ORACLE_DRIFT_INTERVAL_MS,
@@ -18,15 +18,15 @@ import {
   ORACLE_SEED_ROWS_PER_MS,
   READ_MODEL_CONSISTENCY_STEP,
   READ_MODEL_SELF_HEALED_STEP,
-} from "../src/lib/read-model-consistency.js";
-import { acquireLease, releaseLease, writeSourceSnapshot, SOURCE_SNAPSHOT_DDL } from "../src/lib/read-model-db.js";
-import { coldAnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { analyticsSourceBodies } from "../src/lib/analytics-view.js";
-import { AGENT_QUALIFICATION_GENERATION, agentViewKey, type AgentProposalsBody, type AgentViewData } from "../src/lib/agent-view.js";
-import { buildReadModelViewRoutes, shownReadiness, viewMode, type ViewBody } from "../src/lib/views.js";
-import { shadowReadiness, viewShadowPath, type ViewShadowState } from "../src/lib/view-shadow.js";
+} from "#src/lib/read-model-consistency.js";
+import { acquireLease, releaseLease, writeSourceSnapshot, SOURCE_SNAPSHOT_DDL } from "#src/lib/read-model-db.js";
+import { coldAnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { analyticsSourceBodies } from "#src/lib/analytics-view.js";
+import { AGENT_QUALIFICATION_GENERATION, agentViewKey, type AgentProposalsBody, type AgentViewData } from "#src/lib/agent-view.js";
+import { buildReadModelViewRoutes, shownReadiness, viewMode, type ViewBody } from "#src/lib/views.js";
+import { shadowReadiness, viewShadowPath, type ViewShadowState } from "#src/lib/view-shadow.js";
 import { readShadowCounters } from "#src/lib/view-shadow-store.js";
-import { createService } from "../src/lib/service.js";
+import { createService } from "#src/lib/service.js";
 import {
   READ_MODEL_CHECK_SHARE,
   READ_MODEL_LEASE_RENEW_MS,
@@ -42,10 +42,10 @@ import {
   readModelStatusView,
   type ReadModelView,
   type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import { buildServeServer, readModelInstances, resolveConsoleSha, stopServeReadModel, type ServeDeps } from "../src/lib/serve.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+} from "#src/lib/read-model-worker.js";
+import { buildServeServer, readModelInstances, resolveConsoleSha, stopServeReadModel, type ServeDeps } from "#src/lib/serve.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";

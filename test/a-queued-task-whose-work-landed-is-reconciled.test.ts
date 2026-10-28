@@ -3,10 +3,10 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runGarden, type GardenerDeps } from "../src/lib/gardener.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { applyPlanActions, filingRef, grepProofHolds, planGardenSpec, planInventory, proofLandingCommit, retirementCandidates } from "../src/lib/plan-gardener.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { runGarden, type GardenerDeps } from "#src/lib/gardener.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { applyPlanActions, filingRef, grepProofHolds, planGardenSpec, planInventory, proofLandingCommit, retirementCandidates } from "#src/lib/plan-gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const shard = "plan/tasks.d/W1-T1-landed.yaml";
 

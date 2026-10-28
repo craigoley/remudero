@@ -4,9 +4,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import * as cli from "../src/run-task.js";
-import { buildBatchedGithub, buildCommitTrailerIndex, type GitHub } from "../src/lib/status.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import * as cli from "#src/run-task.js";
+import { buildBatchedGithub, buildCommitTrailerIndex, type GitHub } from "#src/lib/status.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 type Projection = ReturnType<typeof cli.creditProjectionWithReadState> & { windowShort?: readonly string[] };
 type Candidate = cli.ReconcileCreditCandidate;

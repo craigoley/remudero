@@ -7,7 +7,7 @@
 // FIX_DISPATCH_FAILED_BACKSTOP bounds the retries.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyScannerBlocker, type ScannerBlockerCandidate } from "../src/lib/open-prs-rest.js";
+import { classifyScannerBlocker, type ScannerBlockerCandidate } from "#src/lib/open-prs-rest.js";
 import {
   CODEQL_BLOCKER_DISPATCH_STEP,
   DEFAULT_SWEEP_POLICY,
@@ -17,7 +17,7 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const PR = 7495;
 const TASK = "W1-T3980";

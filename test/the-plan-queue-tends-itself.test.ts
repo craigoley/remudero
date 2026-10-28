@@ -12,11 +12,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
-import { gardenStatePath, readGardenState, runGarden, startGarden, type GardenCheckout } from "../src/lib/gardener.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { loadPlan } from "../src/lib/plan.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { runDaemon, type DaemonDeps, type DaemonSummary } from "#src/lib/daemon.js";
+import { gardenStatePath, readGardenState, runGarden, startGarden, type GardenCheckout } from "#src/lib/gardener.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { loadPlan } from "#src/lib/plan.js";
 import {
   ABANDONED_RETIREMENTS,
   applyPlanActions,
@@ -29,13 +29,13 @@ import {
   planShards,
   PLAN_GARDEN_CLASSES,
   retirementCandidates,
-} from "../src/lib/plan-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { armAutoMergeDetailed } from "../src/lib/arm-auto-merge.js";
-import { loadDefaultPolicy } from "../src/lib/policy.js";
-import { decideSweepArm, DEFAULT_SWEEP_POLICY, deriveDisposition, sweepArmTaskId, type OpenPrView } from "../src/lib/sweep.js";
-import { daemonCommand, GARDEN_BRANCH_RE, gardenCheckout, type RunResult } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/plan-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { armAutoMergeDetailed } from "#src/lib/arm-auto-merge.js";
+import { loadDefaultPolicy } from "#src/lib/policy.js";
+import { decideSweepArm, DEFAULT_SWEEP_POLICY, deriveDisposition, sweepArmTaskId, type OpenPrView } from "#src/lib/sweep.js";
+import { daemonCommand, GARDEN_BRANCH_RE, gardenCheckout, type RunResult } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 interface ShardSpec {
   id: string;

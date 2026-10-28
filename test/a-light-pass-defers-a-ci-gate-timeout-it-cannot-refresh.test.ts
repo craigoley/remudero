@@ -9,9 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   CI_TIMEOUT_REFRESH_BACKSTOP,
   DEFAULT_SWEEP_POLICY,
@@ -22,8 +22,8 @@ import {
   type OpenPrView,
   type SweepDeps,
   type UpdateBranchOutcome,
-} from "./helpers/sweep-test.js";
-import { lightPassActionable } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { lightPassActionable } from "#src/run-task.js";
 
 const PR_NUMBER = 9392;
 const HEAD = "1f9c8198e0b0344153d1c20259ddf6c81f6ffc61";

@@ -9,14 +9,14 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { fixedClock } from "../src/lib/clock.js";
-import * as gardener from "../src/lib/config-gardener.js";
-import * as registry from "../src/lib/garden-registry.js";
-import type { GardenerDeps } from "../src/lib/gardener.js";
-import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../src/lib/learnings.js";
-import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { fixedClock } from "#src/lib/clock.js";
+import * as gardener from "#src/lib/config-gardener.js";
+import * as registry from "#src/lib/garden-registry.js";
+import type { GardenerDeps } from "#src/lib/gardener.js";
+import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "#src/lib/learnings.js";
+import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const NOW_MS = Date.parse("2026-10-01T12:00:00.000Z");
 const WINDOW = { rotationWindowMs: 60 * 24 * 3600 * 1000, minRotations: 4 };

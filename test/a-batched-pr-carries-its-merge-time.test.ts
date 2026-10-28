@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mapBoardPr, type RestPullRow } from "../src/lib/open-prs-rest.js";
-import { shippedSince, type ShippedGithub, type RunSummary } from "../src/lib/retro.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
+import { mapBoardPr, type RestPullRow } from "#src/lib/open-prs-rest.js";
+import { shippedSince, type ShippedGithub, type RunSummary } from "#src/lib/retro.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
 
 const TASK = "W1-T5791";
 const RUN = `${TASK}-1`;

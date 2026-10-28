@@ -15,8 +15,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { deriveStatus, type GitHub } from "../src/lib/status.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { deriveStatus, type GitHub } from "#src/lib/status.js";
 
 /** A minimal task; fields not under test get sensible defaults (mirrors test/status.test.ts). */
 function task(over: Partial<Task> = {}): Task {

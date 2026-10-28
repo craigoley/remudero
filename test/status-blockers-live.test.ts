@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
-import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
+import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "#src/lib/status-board.js";
+import { loadPlanFromYaml, type Plan } from "#src/lib/plan.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
 
 // ── W1-T306: BLOCKERS BY CLASS was listing `sweep.disposed` PRs whose disposition was still
 // `blocked-fixable`/`blocked-ambiguous`/etc. in the LEDGER, even after GitHub confirmed the

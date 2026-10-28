@@ -4,11 +4,11 @@ import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { OPPORTUNITY_EVIDENCE_FILE, OPPORTUNITY_EVIDENCE_MAX_BYTES, OPPORTUNITY_STATES,
-  projectGardenerOpportunityEvidence, readGardenerOpportunityEvidence } from "../src/lib/gardener-opportunity-evidence.js";
-import { createGardenerRuntimeWriter } from "../src/lib/gardener-runtime.js";
-import { buildGardenersRoute } from "../src/lib/gardeners-route.js";
+  projectGardenerOpportunityEvidence, readGardenerOpportunityEvidence } from "#src/lib/gardener-opportunity-evidence.js";
+import { createGardenerRuntimeWriter } from "#src/lib/gardener-runtime.js";
+import { buildGardenersRoute } from "#src/lib/gardeners-route.js";
 
 const stamp = "2026-10-11T12:00:00.000Z";
 const clock = fixedClock(Date.parse(stamp));

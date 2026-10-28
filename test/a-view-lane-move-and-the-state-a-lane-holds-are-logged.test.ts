@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import type { Clock } from "../src/lib/clock.js";
-import { createReadModelTicker, threadViews, type ReadModelView, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import type { Clock } from "#src/lib/clock.js";
+import { createReadModelTicker, threadViews, type ReadModelView, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const proof = "test/a-view-lane-move-and-the-state-a-lane-holds-are-logged.test.ts";
 const intervalMs = 10 * 60_000;

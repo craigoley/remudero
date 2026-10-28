@@ -25,8 +25,8 @@ import {
   readModelWarmProbe,
   supervisedRole,
   type GenerationMessage,
-} from "../src/lib/serve-generation.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/serve-generation.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function overSocket(socketPath: string, path: string): Promise<{ status?: number; body: string }> {
   return new Promise((resolve, reject) => {

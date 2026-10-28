@@ -30,9 +30,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { deriveStatus, projectPlan, indexProseNamedTaskIds, uncreditedBuildWarning } from "../src/lib/status.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { deriveStatus, projectPlan, indexProseNamedTaskIds, uncreditedBuildWarning } from "#src/lib/status.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 const ledgerFile = (lines: Array<Record<string, unknown>>): string => {
   const p = join(mkdtempSync(join(tmpdir(), "rmd-t2392-")), "ledger.ndjson");

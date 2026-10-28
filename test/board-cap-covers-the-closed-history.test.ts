@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BOARD_MAX_PAGES, fetchBoardPrsRest, type GhApiFetcher, type RestPullRow } from "../src/lib/open-prs-rest.js";
+import { BOARD_MAX_PAGES, fetchBoardPrsRest, type GhApiFetcher, type RestPullRow } from "#src/lib/open-prs-rest.js";
 
 /** The closed-PR count this repo had when the cap was raised from 50 pages (5,000 PRs) to 200: 66 full
  *  pages and one of 79 rows. At 50 pages every cold read truncated. */

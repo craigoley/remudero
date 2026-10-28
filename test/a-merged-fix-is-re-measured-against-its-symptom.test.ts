@@ -2,12 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { stringify } from "yaml";
-import { buildGather, recordFollowupHarvest, routeFollowupsToRegistry } from "../src/lib/retro.js";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { realLedgerFs } from "../src/lib/ledger-union.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { buildGather, recordFollowupHarvest, routeFollowupsToRegistry } from "#src/lib/retro.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { realLedgerFs } from "#src/lib/ledger-union.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const now = Date.parse("2026-10-03T12:00:00Z");
 const mergedAt = "2026-10-01T12:00:00Z";

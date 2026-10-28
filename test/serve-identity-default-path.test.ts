@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { resolveServeIdentity } from "../src/lib/serve.js";
+import { resolveServeIdentity } from "#src/lib/serve.js";
 
 // ── W1-T398's regression lock (design (vi)): the overwhelming majority of installs never set
 // `serve.identityCapability` at all, and this guard must not touch that path in any way — no new

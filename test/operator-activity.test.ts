@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writ
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   OPERATOR_ACTIVITY_CONTRACT_VERSION,
   OPERATOR_ACTIVITY_MAX_ITEMS,
@@ -17,10 +17,10 @@ import {
   projectIncidentLifecycle,
   projectOperatorActivityIncidents,
   type IncidentObservation,
-} from "../src/lib/panel-graph.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { readLedgerUnionBounded, type StatusProjection } from "../src/lib/status.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#src/lib/panel-graph.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { readLedgerUnionBounded, type StatusProjection } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const PLAN_YAML = `
 - id: A

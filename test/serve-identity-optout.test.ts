@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { resolveServeIdentity, TRUSTED_PROXY_TAILSCALE } from "../src/lib/serve.js";
+import { resolveServeIdentity, TRUSTED_PROXY_TAILSCALE } from "#src/lib/serve.js";
 
 // ── W1-T398's named opt-out: an operator who genuinely fronts the console with something other
 // than Tailscale Serve must be able to SAY so, distinctly from never having declared anything —

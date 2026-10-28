@@ -16,11 +16,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { ghJsonAsync, ghLinesAsync } from "../src/lib/github-transport.js";
-import type { Plan } from "../src/lib/plan.js";
-import { DEFAULT_SWEEP_POLICY, proofDiscriminationEvidenceFromCheckLog, type CiFailure } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import { ghJsonAsync, ghLinesAsync } from "#src/lib/github-transport.js";
+import type { Plan } from "#src/lib/plan.js";
+import { DEFAULT_SWEEP_POLICY, proofDiscriminationEvidenceFromCheckLog, type CiFailure } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   buildSweepEffects,
   ciFailureRegionReducer,
@@ -31,8 +31,8 @@ import {
   fixRungCiFailures,
   gateVerdictRetention,
   RETAINED_REMEDY_HEADER,
-} from "./helpers/run-task-test.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+} from "#test/helpers/run-task-test.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 
 const JOB = "7001";
 const ROLLUP = [{ name: "coverage-shard (8/8)", conclusion: "FAILURE", detailsUrl: `https://github.com/o/r/actions/runs/1/job/${JOB}` }];

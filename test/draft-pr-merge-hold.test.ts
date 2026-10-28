@@ -32,14 +32,14 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   armAutoMergeAtOpen,
   armIfVerdictPermits,
   armOutcomeReason,
   attemptArm,
-} from "../src/lib/arm-auto-merge.js";
+} from "#src/lib/arm-auto-merge.js";
 
 const NOW = Date.parse("2026-09-14T12:00:00Z");
 const RECENT = "2026-09-14T11:00:00Z";

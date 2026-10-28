@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import { FIXED_NOW_ISO, corpusLedgerPath, loadCorpusGithub, loadCorpusPlan } from "./fixtures/w1-t187/load.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import { FIXED_NOW_ISO, corpusLedgerPath, loadCorpusGithub, loadCorpusPlan } from "#test/fixtures/w1-t187/load.js";
 
 /**
  * W1-T187 acceptance criterion 5 — "the measured end-to-end budget is met — first paint to
