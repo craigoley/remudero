@@ -524,27 +524,43 @@ test("check-proof refuses --repo when its owner/name value is missing or malform
 
 
 test("a check-proof base never expands an ambiguous title without the full-suite opt-in", () => {
-  const markerRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}proof-unrequested-`));
-  const marker = join(markerRoot, "loaded");
+  // The proof child may run inside the reviewer's bwrap sandbox, where only its own cwd (the base
+  // worktree) and a throwaway HOME are writable: a marker at a host /tmp path is invisible there, so
+  // the positive control could never observe it. The unrelated suite therefore writes a RELATIVE
+  // marker (its cwd is the base worktree), and the test pins each base worktree's directory through
+  // `makeDir` and keeps it past the verb's own teardown (`removeWorktree` no-op) to read it back.
+  const MARKER = "unrelated-suite-loaded.marker";
+  const baseDirs: string[] = [];
+  const pinnedBase = () => {
+    const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}proof-unrequested-`));
+    baseDirs.push(dir);
+    return {
+      baseBlobDeps: { makeDir: () => dir, removeWorktree: () => {} },
+      marker: join(dir, MARKER),
+    };
+  };
   const title = "base scope marker new";
   const repo = twoCommitRepo({
     "test/proof.test.ts": 'import { test } from "node:test"; const suffix = "old"; test(`base scope marker ${suffix}`, () => {});\n',
-    "test/unrelated.test.ts": `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "loaded");\n`,
+    "test/unrelated.test.ts": `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(MARKER)}, "loaded");\n`,
   }, {
     "test/proof.test.ts": `import { test } from "node:test"; test(${JSON.stringify(title)}, () => {});\n`,
   });
   try {
-    const result = runCheckProof(["--base", "HEAD~1", "unit test:", title], repo);
+    const refused = pinnedBase();
+    const result = runCheckProof(["--base", "HEAD~1", "unit test:", title], repo, { baseBlobDeps: refused.baseBlobDeps });
     assert.equal(result.code, CHECK_PROOF_EXIT.pass, "the head verdict remains distinct from unknown base evidence");
-    assert.equal(existsSync(marker), false, "the base must not import an unrelated suite without explicit opt-in");
+    assert.equal(existsSync(join(baseDirs[0]!, "test", "unrelated.test.ts")), true, "the base worktree really holds the unrelated suite");
+    assert.equal(existsSync(refused.marker), false, "the base must not import an unrelated suite without explicit opt-in");
     assert.match(result.out, /base:.*UNKNOWN.*unresolvable/);
     assert.match(result.out, /discrimination: unknown/);
     assert.match(result.out, /--allow-full-suite/);
-    const allowed = runCheckProof(["--allow-full-suite", "--base", "HEAD~1", "unit test:", title], repo);
-    assert.equal(allowed.code, CHECK_PROOF_EXIT.pass);
-    assert.equal(existsSync(marker), true, "positive control: explicit opt-in still executes the bounded two-file fixture pool");
+    const optedIn = pinnedBase();
+    const allowed = runCheckProof(["--allow-full-suite", "--base", "HEAD~1", "unit test:", title], repo, { baseBlobDeps: optedIn.baseBlobDeps });
+    assert.equal(allowed.code, CHECK_PROOF_EXIT.pass, allowed.out);
+    assert.equal(existsSync(optedIn.marker), true, `positive control: explicit opt-in still executes the bounded two-file fixture pool\n${allowed.out}`);
   } finally {
     rmSync(repo, { recursive: true, force: true });
-    rmSync(markerRoot, { recursive: true, force: true });
+    for (const dir of baseDirs) rmSync(dir, { recursive: true, force: true });
   }
 });
