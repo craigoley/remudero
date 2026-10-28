@@ -11,6 +11,7 @@ import {
 import { nativeTargetRepositoryResolver, createNativeTargetRepository, createNativeTargetJobRunner, daemonKickPort, daemonTargetJobPort } from "#src/cli/commands/daemon.js";
 import { runDrain, type DrainOpts, type TargetJobRecord } from "#src/lib/drain.js";
 import { runTask } from "#src/run-task.js";
+import { persistRunTaskCredit } from "#src/cli/commands/run-task-verb.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import { runDaemon, type DaemonDeps, type DaemonOpts } from "#src/lib/daemon.js";
 import { requestKick } from "#src/lib/fleet-control.js";
@@ -1258,6 +1259,10 @@ test("W1-T10799: target admission never inherits Core credit or status for the s
   saveCreditStore(defaultCreditStorePath(f.ledgerPath), { "W9-T1": { trailer: {
     source: "trailer", prNumber: 77, prUrl: "https://github.com/craigoley/remudero/pull/77", prState: "MERGED",
   } } });
+  const coreControl = { ...loadPlan(f.targetPlanFile).tasks[0], id: "W8-T2", repo: "remudero", files: ["src/core.ts"] };
+  assert.equal(persistRunTaskCredit({ ledgerPath: f.ledgerPath }, coreControl,
+    { number: 78, url: "https://github.com/craigoley/remudero/pull/78" }, ["src/core.ts"]), "recorded",
+    "the unchanged default Core body writer remains usable");
   const coreStore = readFileSync(defaultCreditStorePath(f.ledgerPath), "utf8");
   const coreCache = JSON.stringify({ tasks: { "W9-T1": { taskId: "W9-T1", status: "merged", merged: true, source: "trailer" } } });
   writeFileSync(join(f.core, "state", "status.json"), coreCache);
@@ -1279,10 +1284,10 @@ test("W1-T10799: target admission never inherits Core credit or status for the s
   assert.equal(readFileSync(join(f.core, "state", "status.json"), "utf8"), beforeWorkerCache, "the worker preserves Core's cache");
   const task = { ...loadPlan(f.targetPlanFile).tasks[0], files: ["src/game.ts"] };
   const pr = { number: 9, url: "https://github.com/craigoley/wreckterra/pull/9" };
-  assert.equal(scope.persistCredit(task, pr, undefined), "unreadable", "unreadable files grant no credit");
-  assert.equal(scope.persistCredit(task, pr, []), "unreadable", "an empty file list grants no credit");
-  assert.equal(scope.persistCredit(task, pr, ["plan/tasks.yaml"]), "plan-only", "a filing grants no implementation credit");
-  assert.equal(scope.persistCredit(task, pr, ["src/game.ts"]), "recorded");
+  assert.equal(persistRunTaskCredit({ ledgerPath: f.ledgerPath, persistCredit: scope.persistCredit }, task, pr, undefined), "unreadable", "unreadable files grant no credit");
+  assert.equal(persistRunTaskCredit({ ledgerPath: f.ledgerPath, persistCredit: scope.persistCredit }, task, pr, []), "unreadable", "an empty file list grants no credit");
+  assert.equal(persistRunTaskCredit({ ledgerPath: f.ledgerPath, persistCredit: scope.persistCredit }, task, pr, ["plan/tasks.yaml"]), "plan-only", "a filing grants no implementation credit");
+  assert.equal(persistRunTaskCredit({ ledgerPath: f.ledgerPath, persistCredit: scope.persistCredit }, task, pr, ["src/game.ts"]), "recorded");
   assert.equal(scope.project(loadPlan(f.targetPlanFile)).get("W9-T1")?.merged, true, "verified target credit remains usable");
   assert.equal(readFileSync(defaultCreditStorePath(f.ledgerPath), "utf8"), coreStore, "target completion never persists credit into Core");
 });
