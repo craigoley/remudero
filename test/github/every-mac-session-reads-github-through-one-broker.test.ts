@@ -483,10 +483,17 @@ test("W1-T10279: the transport's read entry points use a live broker instead of 
   `);
   const cache = join(dir, "cache");
   const brokerDir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
-  const child = spawn(process.execPath, ["--import", "tsx", bootstrap, brokerDir], { cwd: ROOT, stdio: "ignore" });
+  const child = spawn(process.execPath, ["--import", "tsx", bootstrap, brokerDir], { cwd: ROOT, stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString("utf8")).slice(-4096); });
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
   t.after(() => child.kill());
   // Startup may be slow; cancellation and child exit must end this wait as well as the child.
-  await waitForFixtureBroker(brokerDir, child, t.signal);
+  try { await waitForFixtureBroker(brokerDir, child, t.signal); }
+  catch (error) {
+    if (child.exitCode !== null || child.signalCode !== null) await closed;
+    throw new Error(`${String(error)}${stderr ? `; child stderr: ${stderr}` : ""}`, { cause: error });
+  }
   const shim = ghShim([{ when: "", stdout: "FALSIFIER: the real gh ran\n" }]);
   const saved = { cache: process.env.RMD_GH_CACHE_HOME, path: process.env.PATH };
   process.env.RMD_GH_CACHE_HOME = cache;
