@@ -932,6 +932,10 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore, sour
 // it `githubUnavailable` and never removes it (see {@link decoratePrTitle}).
 
 interface RecentActivityState {
+  /** Bounded candidate history includes rows whose task was not yet filed in this plan. */
+  retainedCandidates?: RecentActivityEntry[];
+  /** This identity must not keep an old parsed plan alive between feed reads. */
+  plan?: WeakRef<Plan>;
   /** How many ledger lines have already been scanned/classified, so a render never
    *  re-classifies (or re-fetches GitHub for) a line it already minted an entry from. */
   scannedLines: number;
@@ -998,6 +1002,8 @@ export function computeRecentActivity(deps: BoardDeps, cache: RecentActivityCach
     state.scannedLines = 0;
     state.entries = [];
     state.prByRun = new Map();
+    state.retainedCandidates = [];
+    state.plan = undefined;
   }
   const newLines = lines.slice(state.scannedLines);
   state.scannedLines = lines.length;
@@ -1014,46 +1020,61 @@ export function recentActivityEntries(cache: RecentActivityCache, max = 20): Rec
  * Classifies `newLines` into the feed, each exactly once: {@link computeRecentActivity}'s body, for a caller that hands
  * it each row as it is read rather than a cursor into one growing array (W1-T9436: the board's rows now drop rows).
  */
+function recentCandidateIdentity({ title: _title, prTitle: _prTitle, githubUnavailable: _unavailable, ...entry }: RecentActivityEntry): string {
+  return JSON.stringify(entry);
+}
+
+function appendRecentCandidate(deps: BoardDeps, cache: RecentActivityCache, entry: RecentActivityEntry, historical = false): void {
+  const state = cache.state;
+  // Preserve the existing one-merge-one-row rule, including the later canonical timestamp.
+  if (entry.verb === "merged") {
+    const duplicateIndex = state.entries.findIndex(e => e.verb === "merged" && e.taskId === entry.taskId && e.prUrl === entry.prUrl);
+    if (duplicateIndex >= 0) {
+      const previous = state.entries[duplicateIndex];
+      if (previous && Date.parse(entry.ts) > Date.parse(previous.ts)) state.entries[duplicateIndex] = decoratePrTitle(entry, deps);
+      return;
+    }
+  }
+  const next = decoratePrTitle(entry, deps);
+  const firstLater = historical ? state.entries.findIndex(candidate => Date.parse(candidate.ts) > Date.parse(entry.ts)) : -1;
+  if (firstLater < 0) state.entries.push(next);
+  else state.entries.splice(firstLater, 0, next);
+  if (state.entries.length > RECENT_ACTIVITY_HISTORY_CAP) state.entries.shift();
+}
+
+/** Replay bounded event projections after a plan replacement; never retain raw worker/tool payloads. */
 export function feedRecentActivity(deps: BoardDeps, cache: RecentActivityCache, newLines: ReadonlyArray<Record<string, unknown>>): void {
   const state = cache.state;
-  for (const line of newLines) {
-    const runId = recentRunId(line.run_id);
-    if (line.step === "pr.opened" && runId && typeof line.pr_url === "string") {
-      state.prByRun.set(runId, line.pr_url);
-    }
-    // For OPERATOR_ACTION_STEPS the daemon stamps its own pseudo-id ("DAEMON") on `task_id`; the
-    // task the human actually clicked is in `line.task` instead (W1-T266).
-    const isOperatorAction = typeof line.step === "string" && OPERATOR_ACTION_STEPS.has(line.step);
-    const taskId = isOperatorAction && typeof line.task === "string"
-      ? line.task
-      : typeof line.task_id === "string"
-        ? line.task_id
-        : undefined;
-    if (!taskId) continue;
-    const task = deps.plan.byId.get(taskId);
-    // A pseudo-id (DAEMON/SWEEP/…) is never a real plan task and its housekeeping volume would
-    // bury the feed, so it is dropped — except for the rare operator-action steps above, where a
-    // refusal must still render even if the id it names isn't in the plan.
-    if (!task && !isOperatorAction) continue;
-    const ts = typeof line.ts === "string" ? line.ts : new Date().toISOString();
-    const prUrl = typeof line.pr_url === "string" ? line.pr_url : runId ? state.prByRun.get(runId) : undefined;
-    const entry = recentEntryFromLine(line, taskId, task?.title ?? taskId, ts, prUrl);
-    if (!entry) continue;
-    // One merge, one row: a run's own `verdict: merged` and the sweep's `verdict.merged` credit
-    // both record the same merge, and the console counts merges off this feed. Keep the later
-    // timestamp when both rows exist: the sweep credit records when the merge actually happened.
-    if (entry.verb === "merged") {
-      const duplicateIndex = state.entries.findIndex((e) => e.verb === "merged" && e.taskId === entry.taskId && e.prUrl === entry.prUrl);
-      if (duplicateIndex >= 0) {
-        const previous = state.entries[duplicateIndex];
-        if (previous && Date.parse(entry.ts) > Date.parse(previous.ts)) {
-          state.entries[duplicateIndex] = decoratePrTitle(runId ? { ...entry, runId } : entry, deps);
-        }
-        continue;
+  const retained = state.retainedCandidates ??= [];
+  if (state.plan !== undefined && state.plan.deref() !== deps.plan) {
+    state.entries = state.entries.map(entry => ({ ...entry, title: deps.plan.byId.get(entry.taskId)?.title ?? entry.title }));
+    const existing = new Set(state.entries.map(recentCandidateIdentity));
+    for (const entry of retained) {
+      const task = deps.plan.byId.get(entry.taskId);
+      if (task && !existing.has(recentCandidateIdentity(entry))) {
+        appendRecentCandidate(deps, cache, { ...entry, title: task.title }, true);
+        existing.add(recentCandidateIdentity(entry));
       }
     }
-    state.entries.push(decoratePrTitle(runId ? { ...entry, runId } : entry, deps));
-    if (state.entries.length > RECENT_ACTIVITY_HISTORY_CAP) state.entries.shift();
+  }
+  state.plan = new WeakRef(deps.plan);
+  for (const line of newLines) {
+    const runId = recentRunId(line.run_id);
+    if (line.step === "pr.opened" && runId && typeof line.pr_url === "string") state.prByRun.set(runId, line.pr_url);
+    const isOperatorAction = typeof line.step === "string" && OPERATOR_ACTION_STEPS.has(line.step);
+    const taskId = isOperatorAction && typeof line.task === "string" ? line.task
+      : typeof line.task_id === "string" ? line.task_id : undefined;
+    if (!taskId) continue;
+    const task = deps.plan.byId.get(taskId);
+    const ts = typeof line.ts === "string" ? line.ts : new Date().toISOString();
+    const prUrl = typeof line.pr_url === "string" ? line.pr_url : runId ? state.prByRun.get(runId) : undefined;
+    const projected = recentEntryFromLine(line, taskId, task?.title ?? taskId, ts, prUrl);
+    if (!projected) continue;
+    const entry = runId ? { ...projected, runId } : projected;
+    retained.push(entry);
+    if (retained.length > RECENT_ACTIVITY_HISTORY_CAP) retained.shift();
+    if (!task && !isOperatorAction) continue;
+    appendRecentCandidate(deps, cache, entry);
   }
 }
 
