@@ -14,6 +14,8 @@ import {
 } from "../src/lib/status.js";
 import { buildCreditCandidates, creditCandidatesFromProjection, creditIsReconcilable, runTask } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { buildBatchedGithub, durableDependencyCredit, type CreditStore, type DeriveDeps } from "#src/lib/status.js";
+import { createChangedFilesCache, type ChangedFileEvidence, type ChangedFilesCache } from "#src/lib/changed-files-cache.js";
 
 const id = "W9-T5661";
 const shard = "plan/tasks.d/W9-T5660-deliverable.yaml";
@@ -31,6 +33,163 @@ const projection: StatusProjection = {
 };
 const subjects = new Map([[pr.number, "chore(plan): repair declared proof (#9124)"]]);
 const tasks = new Map([[id, task]]);
+
+function earlyMergeFixture(mode: "ledger" | "explicit", change: {
+  pr?: Partial<PrRef>; evidence?: Partial<Extract<ChangedFileEvidence, { status: "complete" }>>;
+  repository?: [string, string]; store?: (store: CreditStore) => CreditStore;
+  cache?: ChangedFilesCache; deps?: Partial<DeriveDeps>;
+} = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-early-implementation-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const candidate: PrRef = { ...pr, headRefName: `run-${id}-1793132346799`, headRefOid: "a".repeat(40), ...change.pr };
+  const implementationTask = { ...task, repo: "r", files: ["src/implementation.ts"], ...(mode === "explicit" ? { pr: candidate.number } : {}) };
+  const initial: CreditStore = change.store?.({ [id]: { backfillReceipt: { source: "sweep.credit_backfill", prUrl: pr.url, prNumber: pr.number } } }) ??
+    { [id]: { backfillReceipt: { source: "sweep.credit_backfill", prUrl: pr.url, prNumber: pr.number } } };
+  writeFileSync(defaultCreditStorePath(ledgerPath), JSON.stringify(initial));
+  let evidence: ChangedFileEvidence = { status: "complete", repository: "o/r", prNumber: pr.number,
+    headRefOid: "a".repeat(40), prState: "MERGED", source: "github_rest_pull_files_paginated", complete: true,
+    observedAt: Date.now(), freshness: "immutable_merged_head", files: ["src/implementation.ts"], ...change.evidence };
+  let requests = 0;
+  const [owner, repository] = change.repository ?? ["o", "r"];
+  const github = buildBatchedGithub(owner, repository, {
+    fetchAll: () => [candidate], commitTrailerIndex: () => new Map(),
+    changedFilesCache: change.cache ?? { evidence: () => evidence, lookup: () => { requests++; return undefined; }, settle: async () => {} },
+  });
+  const deps: DeriveDeps = { ledgerPath, github, creditOverrideRows: () => [],
+    readLedger: () => mode === "ledger" ? [{ step: "pr.opened", task_id: id, pr_url: candidate.url }] : [], ...change.deps };
+  return { dir, ledgerPath, candidate, implementationTask, initial, github, deps,
+    run: () => deriveStatus(implementationTask, deps), store: () => loadCreditStore(defaultCreditStorePath(ledgerPath)),
+    setEvidence: (next: ChangedFileEvidence) => { evidence = next; }, requests: () => requests,
+    close: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test("native implementation evidence survives ledger merge early return", () => {
+  const f = earlyMergeFixture("ledger");
+  try {
+    assert.equal(durableDependencyCredit(f.store(), id, "o/r", []).state, "unknown");
+    assert.equal(f.run().source, "ledger");
+    assert.equal(f.run().merged, true);
+    assert.equal(f.store()[id]?.trailer?.prNumber, pr.number);
+    assert.equal(durableDependencyCredit(f.store(), id, "o/r", []).state, "merged");
+    assert.equal(f.requests(), 0);
+  } finally { f.close(); }
+});
+
+test("native implementation evidence survives explicit PR merge early return", () => {
+  const f = earlyMergeFixture("explicit", { pr: { body: "No trailer; the accepted build branch owns this implementation." } });
+  try {
+    assert.equal(f.run().source, "pr-field");
+    assert.equal(f.run().merged, true);
+    assert.equal(f.store()[id]?.["head-branch"]?.prNumber, pr.number);
+    assert.equal(durableDependencyCredit(f.store(), id, "o/r", []).state, "merged");
+  } finally { f.close(); }
+});
+
+test("receipt-only merge evidence cannot bypass implementation or ownership", () => {
+  const negatives: Array<Parameters<typeof earlyMergeFixture>[1]> = [
+    { evidence: { files: [] } }, { evidence: { files: [own] } }, { evidence: { files: ["src/x.ts", "src/x.ts"] } },
+    { evidence: { files: ["../src/x.ts"] } }, { evidence: { files: ["src/\0x.ts"] } },
+    { evidence: { files: ["src/x.ts", null] as unknown as string[] } },
+    { evidence: { files: Array.from({ length: 3000 }, (_, index) => `src/file-${index}.ts`) } },
+    { evidence: { repository: "foreign/r" } }, { repository: ["foreign", "r"] }, { repository: ["o", "foreign"] },
+    { evidence: { prNumber: pr.number + 1 } }, { pr: { headRefOid: "b".repeat(40) } }, { pr: { headRefOid: undefined } },
+    { evidence: { prState: "OPEN" as "MERGED" } }, { pr: { state: "OPEN" } },
+    { evidence: { complete: false as true } }, { evidence: { freshness: "stale" as "immutable_merged_head" } },
+    { evidence: { source: "label" as "github_rest_pull_files_paginated" } }, { evidence: { observedAt: NaN } },
+    { evidence: { observedAt: Date.now() + 86400_000 } }, { pr: { url: "https://github.com/foreign/r/pull/9124" } },
+    { pr: { headRefName: "run-W9-T9999-1793132346799" } },
+    { pr: { headRefName: undefined } }, { pr: { headRefName: "chore/no-task", body: `Mention Remudero-Task: ${id}` } },
+    { store: store => ({ [id]: { ...store[id], backfillReceipt: { source: "sweep.credit_backfill", prNumber: 9000, prUrl: pr.url } } }) },
+    { store: store => ({ [id]: { ...store[id], backfillReceipt: { source: "sweep.credit_backfill", prNumber: pr.number, prUrl: "https://github.com/o/r/pull/9000" } } }) },
+    { store: () => ({}) },
+  ];
+  for (const [index, change] of negatives.entries()) for (const mode of ["ledger", "explicit"] as const) {
+    const f = earlyMergeFixture(mode, change);
+    try {
+      f.run();
+      assert.deepEqual(f.store(), f.initial, `${mode} boundary ${index} must not write a canonical slot`);
+      assert.equal(durableDependencyCredit(f.store(), id, "o/r", []).state, "unknown");
+    } finally { f.close(); }
+  }
+});
+
+test("durable merge evidence keeps corrections and refusals", () => {
+  for (const source of ["trailer", "head-branch"] as const) {
+    const f = earlyMergeFixture("ledger", { store: store => ({ [id]: { ...store[id], invalidated: {
+      [source]: { prUrl: pr.url, prNumber: pr.number, reason: "durable-credit-plan-only" },
+    } } }) });
+    try { assert.equal(f.run().merged, true); assert.deepEqual(f.store(), f.initial); }
+    finally { f.close(); }
+  }
+  const correction = earlyMergeFixture("explicit", { store: store => ({ [id]: { ...store[id], correction: {
+    prUrl: "https://github.com/o/r/pull/9000", prNumber: 9000,
+  } } }) });
+  try { assert.equal(correction.run().source, "correction"); assert.deepEqual(correction.store(), correction.initial); }
+  finally { correction.close(); }
+  const override = earlyMergeFixture("ledger", { deps: { creditOverrideRows: () => [{ task: id, pr: pr.number,
+    action: "remove-credit", reason: "verified plan-only", author_class: "operator" }] } });
+  try { assert.equal(override.run().merged, false); assert.deepEqual(override.store(), override.initial); }
+  finally { override.close(); }
+  const filing = earlyMergeFixture("explicit");
+  filing.deps.readLedger = () => [{ step: "pr.opened", task_id: id, pr_url: pr.url, plan_only: true }];
+  try { assert.equal(filing.run().merged, true); assert.deepEqual(filing.store(), filing.initial); }
+  finally { filing.close(); }
+  const debunked = earlyMergeFixture("explicit");
+  debunked.deps.readLedger = () => [{ step: "correction.provenance", task_id: id, claimed_pr_url: pr.url }];
+  try { assert.equal(debunked.run().merged, true); assert.deepEqual(debunked.store(), debunked.initial); }
+  finally { debunked.close(); }
+});
+
+test("receipt-only evidence uses no synchronous file reads or unrelated cache work", () => {
+  const f = earlyMergeFixture("ledger"); let reads = 0;
+  try {
+    f.deps.github = buildBatchedGithub("o", "r", { fetchAll: () => [f.candidate], commitTrailerIndex: () => new Map(),
+      exec: () => { reads++; throw Error("unbudgeted file read"); } });
+    assert.equal(f.run().merged, true); assert.deepEqual(f.store(), f.initial); assert.equal(reads, 0);
+    const forbidden = () => { throw Error("unrelated task must not request implementation evidence"); };
+    const unrelated = earlyMergeFixture("explicit", { store: () => ({}), cache: { lookup: forbidden, evidence: forbidden, settle: async () => {} } });
+    try { assert.equal(unrelated.run().merged, true); assert.deepEqual(unrelated.store(), {}); }
+    finally { unrelated.close(); }
+  } finally { f.close(); }
+});
+
+test("default stored implementation evidence satisfies the strict dependency reader", async () => {
+  const cacheRoot = mkdtempSync(join(tmpdir(), "rmd-real-implementation-cache-"));
+  const cache = createChangedFilesCache(cacheRoot, "o", "r", { fetch: async () => ["src/implementation.ts"] });
+  const f = earlyMergeFixture("ledger", { cache });
+  try {
+    assert.equal(f.run().merged, true);
+    assert.deepEqual(f.store(), f.initial, "a queued cache request is not persistence");
+    await cache.settle();
+    assert.equal(f.run().merged, true);
+    const stored = loadCreditStore(defaultCreditStorePath(f.ledgerPath));
+    assert.equal(stored[id]?.trailer?.source, "trailer");
+    assert.equal(durableDependencyCredit(stored, id, "o/r", []).state, "merged");
+    const forbidden = buildBatchedGithub("o", "r", { fetchAll: () => { throw Error("durable credit must need no PR read"); } });
+    assert.equal(deriveStatus(f.implementationTask, { ...f.deps, github: forbidden }).merged, true);
+  } finally { await cache.settle(); f.close(); rmSync(cacheRoot, { recursive: true, force: true }); }
+});
+
+test("early implementation persistence failures keep the original merge and durable unknown", () => {
+  const throwing = () => { throw Error("private fixture refusal"); };
+  const cases: Array<Parameters<typeof earlyMergeFixture>[1]> = [
+    { cache: { lookup: throwing, evidence: throwing, settle: async () => {} } },
+    { cache: { lookup: throwing, evidence: () => ({ status: "unknown", reason: "cold" }), settle: async () => {} } },
+    { deps: { writeCreditStore: throwing } },
+  ];
+  for (const change of cases) {
+    const f = earlyMergeFixture("ledger", change);
+    try { assert.equal(f.run().merged, true); assert.deepEqual(f.store(), f.initial); }
+    finally { f.close(); }
+  }
+  const f = earlyMergeFixture("explicit");
+  try {
+    const blocked = join(f.dir, "blocked-parent"); writeFileSync(blocked, "a file, not a writable directory");
+    f.deps.creditStorePath = join(blocked, "merge-credit.json"); f.deps.readCreditStore = () => f.initial;
+    assert.equal(f.run().merged, true); assert.deepEqual(f.store(), f.initial);
+    assert.equal(durableDependencyCredit(loadCreditStore(f.deps.creditStorePath), id, "o/r", []).state, "unknown");
+  } finally { f.close(); }
+});
 
 test("test/a-verified-plan-text-credit-is-persisted.test.ts: verified plan-text credit is recorded and survives a newer filing", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-plan-text-credit-"));
