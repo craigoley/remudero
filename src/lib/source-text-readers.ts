@@ -362,3 +362,13 @@ export function discoverSourceTextReaders(
   }
   return out;
 }
+
+/** POSITIVE CONTROL for the census walk: names what a healthy discovery must have seen, by POPULATION
+ *  (some suite reads a `src/` file, some walks `test/`), never by a named suite — a PR that edits any
+ *  one suite must not redden the control. Returns the missing controls; empty means the corpus was seen. */
+export function missingPopulationControls(readers: readonly Pick<SourceTextReader, "walks">[]): string[] {
+  const missing: string[] = [];
+  if (!readers.some((r) => r.walks.some((w) => w.startsWith("src/")))) missing.push("no suite reads a src/ path");
+  if (!readers.some((r) => r.walks.some((w) => w.startsWith("test/")))) missing.push("no suite walks test/");
+  return missing;
+}

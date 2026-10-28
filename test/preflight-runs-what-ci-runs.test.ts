@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import type { AffectedSuitesInput } from "../src/lib/affected-suites.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 import {
   preflightCommand,
   runPreflightCiChecks,
@@ -41,7 +42,8 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
       }
     }
     if (file === "git" && args[0] === "rev-parse") return { status: 0, stdout: `${PINNED_BASE_SHA}\n`, stderr: "" };
-    return { status: 0, stdout: "", stderr: "" };
+    // A judged `node --test` census child (W1-T8379) passes only on a tally: this fake stands for a finished run.
+    return { ...finishJudgedRun(args, opts), stdout: "", stderr: "" };
   };
   return { spawn, calls };
 }
@@ -263,14 +265,14 @@ test("W1-T4108: a failing ci-checks entry FAILS the overall result and names the
 });
 
 test("W1-T4108: preflightCommand runs the new ci-checks and scoped-coverage steps by default, and --no-fast drops both, exactly like the fast gate", async () => {
-  const spawn: PreflightSpawn = (file, args) => {
+  const spawn: PreflightSpawn = (file, args, opts) => {
     const key = [file, ...args].join(" ");
     if (key.includes("commitlint")) return { status: 0, stdout: "", stderr: "" };
     if (key.includes("tsc")) return { status: 0, stdout: "", stderr: "" };
     if (key.includes("git log")) return { status: 0, stdout: "\0feat(x): fine\n", stderr: "" };
     if (file === "git" && args[0] === "rev-parse") return { status: 0, stdout: `${PINNED_BASE_SHA}\n`, stderr: "" };
     if (file === "git" && args[0] === "diff" && args.includes("--name-only")) return { status: 0, stdout: "", stderr: "" };
-    return { status: 0, stdout: "", stderr: "" };
+    return { ...finishJudgedRun(args, opts), stdout: "", stderr: "" };
   };
   const originalLog = console.log;
   const defaultLines: string[] = [];

@@ -13,7 +13,7 @@ import type { ReviewVerdict } from "#src/lib/review.js";
 import type { FixProgressInput } from "#src/lib/fix-progress-judge.js";
 import { test } from "node:test";
 import { buildFixProgressInput as buildBase, failureEvidenceOf, resolveFixProgress } from "#src/lib/fix-progress-judge.js";
-import { buildFixProgressInput, productionFixProgressJudge, runSweep, type SweepDeps } from "#src/lib/sweep.js";
+import { buildFixProgressInput, productionFixProgressJudge, redCheckNames, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 const TAIL = [
@@ -212,3 +212,46 @@ test("the operator fix route preserves the held CI and semantic findings in its 
 
 // The retry classifier's evidence-preservation test lives in test/classify.test.ts: importing src/lib/classify.ts
 // here would need a stryker.conf.json scope entry, which cannot ship beside a src/ change (Standing rule 25).
+
+
+test("fix progress keeps observed shard failures beside aggregate rollup reds", () => {
+  const shard = "test-slow-shard (2/2)";
+  const view: OpenPrView = {
+    prNumber: 14957, prUrl: "https://github.com/o/r/pull/14957", taskId: "PR-14957",
+    headSha: "current-head", checksState: "red", reviewState: "pending", unmetCriteria: [],
+    priorStrikes: 1, autoMergeArmed: false, lastActivityAt: "2026-10-28T00:00:00Z",
+    redRequiredChecks: ["test-slow"],
+    ciFailures: [{ name: shard, conclusion: "FAILURE", logTail: TAIL, tailSource: "log" }],
+  };
+  const reds = redCheckNames(view);
+  assert.deepEqual(reds, ["test-slow", shard], "the aggregate is not a replacement for the observed failed shard");
+  const input = buildFixProgressInput({ taskId: view.taskId, prNumber: view.prNumber,
+    headSha: view.headSha, currentRed: reds, ciFailures: view.ciFailures, ledger: [
+      { task_id: view.taskId, pr_number: view.prNumber, step: "fix.dispatch", round_id: "same-failure",
+        head_sha: "before-head", ci_failures: [{ check: "test-slow" }, { check: shard }] },
+      { task_id: view.taskId, pr_number: view.prNumber, step: "fix.done", round_id: "same-failure",
+        head_sha: "before-head", pushed_head_sha: view.headSha, fix_outcome: "FIXED" },
+    ] });
+  assert.deepEqual(input.rounds[0]?.redAfter, ["test-slow", shard]);
+  assert.equal(input.signals.identicalRedSets, 1, "the same failed shard is no evidence of a shrinking red set");
+  assert.equal(input.failureEvidence?.checks?.[0]?.check, shard);
+  assert.equal(input.failureEvidence?.supplied, true);
+  assert.deepEqual(redCheckNames({ ...view, redRequiredChecks: [shard, "test-slow", shard] }), reds,
+    "overlapping current sources are deduplicated");
+});
+
+test("fix progress preserves log-only and review failures without inventing missing checks", () => {
+  const view: OpenPrView = {
+    prNumber: 14957, prUrl: "https://github.com/o/r/pull/14957", headSha: "current-head",
+    checksState: "red", reviewState: "pending", unmetCriteria: [], priorStrikes: 1,
+    autoMergeArmed: false, lastActivityAt: "2026-10-28T00:00:00Z",
+    ciFailures: [{ name: "test-slow-shard (2/2)", logTail: TAIL, tailSource: "log" }],
+  };
+  assert.deepEqual(redCheckNames(view), ["test-slow-shard (2/2)"]);
+  assert.deepEqual(redCheckNames({ ...view, ciFailures: [], redRequiredChecks: ["test-slow"] }), ["test-slow"]);
+  assert.deepEqual(redCheckNames({ ...view, ciFailures: [], redRequiredChecks: [] }), []);
+  assert.deepEqual(redCheckNames({ ...view, reviewState: "failure", unmetCriteria: [
+    { claim: "the failure remains visible", proof: "unit test: a literal control", met: false,
+      reason: "the current literal control failed", proof_exec: "executed_fail" },
+  ] }), ["review:the failure remains visible:unit test: a literal control", "test-slow-shard (2/2)"]);
+});

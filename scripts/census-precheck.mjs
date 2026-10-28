@@ -47,6 +47,7 @@ import { git } from "./lib/git.mjs";
 import { analyzeSource } from "./test-repo-root-codemod.mjs";
 import { scanSource as scanChildCoverage } from "./coverage-session-blanking-check.mjs";
 import { captureStepSync } from "./lib/author-step-capture.mjs";
+import { describeJudgedRun, judgedNodeTestArgs, judgeRun, prepareJudgedRun } from "./pure-test-pool.mjs";
 import { retainFixture } from "./lib/retained-fixtures.mjs";
 import { measureTree } from "./lib/instrument-surface-census.mjs";
 import {
@@ -567,11 +568,18 @@ function failingSuitesFromTap(stdout, files) {
   lines.forEach((line, i) => {
     if (!/^not ok \d+ - /.test(line)) return;
     let location = null;
+    let exitedProcess = false;
+    let processFailureCode = false;
     for (let j = i + 1; j < lines.length && /^\s/.test(lines[j]); j++) {
       location ??= lines[j].match(/^ {2}location: '(.*):\d+:\d+'$/)?.[1] ?? null;
+      exitedProcess ||= /^ {2}(?:exitCode: [1-9][0-9]*|signal: ['"]SIG[A-Z0-9]+['"])$/.test(lines[j]);
+      processFailureCode ||= /^ {2}code: ['"]ERR_TEST_FAILURE['"]$/.test(lines[j]);
     }
     const file = files.find((f) => location === f || location?.endsWith(`/${f}`));
     if (file === undefined) throw new Error(`the census suite child failed a test its TAP attributes to no suite it was given: ${line}`);
+    if (exitedProcess && processFailureCode) {
+      throw new Error(`the census suite process ${file} did not complete its assertions; a process exit is not base-red evidence`);
+    }
     failing.add(file);
   });
   return [...failing];
@@ -752,9 +760,23 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   };
   try {
     const once = () => {
+      // W1-T8379: a run of this module's own child is JUDGED (scripts/pure-test-pool.mjs): a suite that exits 0
+      // before its own summary is failing, never clean. Only that runner: an injected one may build its own argv
+      // (the pre-push hook's proof-sandbox runner does), so the judge's reporter would never reach its child.
+      // Per run, so `child` and `options` (the reader context hashes both) stay unjudged.
+      if (run !== runCensusChild) return judgedOnce(null);
+      const judged = prepareJudgedRun();
+      try {
+        return judgedOnce(judged);
+      } finally {
+        judged.cleanup();
+      }
+    };
+    const judgedOnce = (judged) => {
+      const judgedChild = judged ? priority.wrap(process.execPath, judgedNodeTestArgs(args, judged.args)) : child;
       const startLoad = load1();
       const startedMs = now();
-      const res = run(child.file, child.args, options);
+      const res = run(judgedChild.file, judgedChild.args, judged ? { ...options, env: { ...options.env, ...judged.env } } : options);
       pending.add(res);
       const finishedMs = now();
       if (TIME_BOUND_CODES.has(res.error?.code) && options.timeout === CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
@@ -782,11 +804,20 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
       if (res.status !== 0 && failing.length === 0) {
         throw new Error(`the census suite child exited ${res.status} but its TAP names no failing suite`);
       }
+      // A nonzero exit keeps the TAP's own reading; only an exit 0 gains the judgment.
+      const verdict = judged && res.status === 0 ? judgeRun(files, { status: 0, pool: false, root, ...judged.read() }) : null;
+      if (verdict && !verdict.complete) {
+        const line = describeJudgedRun("census suite", verdict, { prefix: "census-precheck" });
+        // Incomplete with every file reported (a cancelled test): no suite to name, so not a measurement at all.
+        if (verdict.missing.length === 0) throw new Error(`the census suite child exited 0 but did not finish: ${line}`);
+        console.error(line);
+        for (const file of verdict.missing) if (!failing.includes(file)) failing.push(file);
+      }
       const summary = Object.fromEntries(["pass", "fail", "cancelled", "skipped", "todo"].map((key) => {
         const matches = [...stdout.matchAll(new RegExp(`^# ${key} (\\d+)$`, "gm"))];
         return [key, matches.length === 1 ? Number(matches[0][1]) : null];
       }));
-      const passed = summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
+      const passed = verdict?.complete !== false && summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
       const identities = [...stdout.matchAll(/^( *)(?:not )?ok [0-9]+ - (.+)$/gm)]
         .map((match) => `${match[1].length}:${match[2]}`);
       return { failing, tests: Number(total[1]), identities, passed, elapsedMs: finishedMs - startedMs, finishedMs,
@@ -1114,13 +1145,18 @@ export const PRECHECK_TRIGGERED_SUITES = [
     recognizer: "scripts/citation-anchor-census.mjs", ownFiles: ["scripts/citation-anchor-census.mjs"], gitFree: true, script: "census:citation-anchor", structural: true,
     trigger: ({ changed }) => changed.some((p) => p.startsWith("plan/tasks.d/") || p === "MASTER-PLAN.md" || p === "scripts/citation-anchor-census.mjs"),
     remedy: "anchor each #NNNN citation the shard or MASTER-PLAN.md adds (scripts/citation-anchor-census.mjs)" },
-  // W1-T5702: a new test importing src/run-task.ts is the reach ratchet's own refusal.
+  // Deletions can grow median reach by shrinking its denominator; removed helper edges also move reach.
   { testFile: "test/the-affected-suite-reach-ratchet.test.ts",
     gateRegex: IMPORT_SPECIFIER_RE,
     recognizer: "src/lib/affected-suites.ts", ownFiles: ["scripts/affected-reach-baseline.json"], script: "census:affected-reach", structural: true,
     trigger: (input) =>
-      input.changed.some((p) => ["src/lib/affected-suites.ts", "scripts/affected-reach-baseline.json"].includes(p)) ||
-      addsImport(input, TEST_TS_SCOPE_RE, (spec) => /(?:^|\/)run-task\.[jt]s$/.test(spec)),
+      input.changed.some((p) => ["src/lib/affected-suites.ts", "scripts/affected-reach-baseline.json",
+        "test/the-affected-suite-reach-ratchet.test.ts", "package.json"].includes(p)) ||
+      addsImport(input, TEST_TS_SCOPE_RE, (spec) => /(?:^|\/)run-task\.[jt]s$/.test(spec)) ||
+      addsImport({ ...input, readHead: input.readBase, readBase: input.readHead }, TEST_TS_SCOPE_RE) ||
+      (typeof input.readHead === "function" && typeof input.readBase === "function" &&
+        input.changed.some((p) => /^(?:src|scripts|bin|test)\/.+\.(?:ts|mts|mjs|js|cjs)$/.test(p) &&
+          input.readHead(p) === null && input.readBase(p) !== null)),
     remedy: "import the module the suite tests rather than src/run-task.ts, or record the tighter ceiling in scripts/affected-reach-baseline.json" },
   { testFile: "test/node-24-runtime-compatibility.test.ts",
     gateRegex: NODE24_RUNTIME_RE,

@@ -1,0 +1,103 @@
+- id: W1-T10930
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/console-parity-ratchet.test.ts cost 17.4 PR minute(s) across 6 round(s) on 4 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.22
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/console-parity-ratchet.test.ts"
+  files:
+    - src/run-task.ts
+    - test/worker/run-task/ci-friction-remedy-2e5a2b75f9e37c6a.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/console-parity-ratchet.test.ts"
+      proof: "unit test: W1-T10930: check:test:test/console-parity-ratchet.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/console-parity-ratchet.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/console-parity-ratchet.test.ts cost 17.4 PR minute(s) (seven-day half-life) across 6 fix round(s) on 4 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/run-task.ts: test/console-parity-ratchet.test.ts imports it
+    - test/console-parity-ratchet.test.ts: named by the failing check
+    - the rounds name a failing test: test/console-parity-ratchet.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #15148 (https://github.com/craigoley/remudero/pull/15148) at 2026-10-28T11:31:50.896Z: ci-log round — comment-load-ratchet: test/console-parity-ratchet.test.ts; claims: test/console-parity-ratchet.test.ts; rule-checks: test/console-parity-ratchet.test.ts
+        failing tests: W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/console-parity-ratchet.test.ts:1:3877
+          | ✖ W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped (75.572091ms)
+          |   AssertionError [ERR_ASSERTION]: every real COMMANDS verb needs a route or a CLI_ONLY reason — unmapped: pr-state
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'pr-state'
+          |   + ]
+          |   - []
+          | 
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/console-parity-ratchet.test.ts:129:10)
+    - PR #14363 (https://github.com/craigoley/remudero/pull/14363) at 2026-10-26T17:07:51.671Z: ci-log round — comment-load-ratchet: test/console-parity-ratchet.test.ts; claims: test/console-parity-ratchet.test.ts; rule-checks: test/console-parity-ratchet.test.ts; coverage-shard (2/8): no verb i
+        failing tests: W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped; no verb is unmapped; docs-claims: docs/operator-guide.md's command table covers every COMMANDS registry verb
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/console-parity-ratchet.test.ts:1:3877
+          | ✖ W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped (97.648446ms)
+          |   AssertionError [ERR_ASSERTION]: every real COMMANDS verb needs a route or a CLI_ONLY reason — unmapped: improvement-action
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'improvement-action'
+          |   + ]
+          |   - []
+          | 
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/console-parity-ratchet.test.ts:129:10)
+    - PR #13416 (https://github.com/craigoley/remudero/pull/13416) at 2026-10-22T01:27:28.447Z: ci-log round — comment-load-ratchet: test/console-parity-ratchet.test.ts; claims: test/console-parity-ratchet.test.ts; rule-checks: test/console-parity-ratchet.test.ts
+        failing tests: W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/console-parity-ratchet.test.ts:1:3877
+          | ✖ W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped (97.763857ms)
+          |   AssertionError [ERR_ASSERTION]: every real COMMANDS verb needs a route or a CLI_ONLY reason — unmapped: review-replay
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'review-replay'
+          |   + ]
+          |   - []
+          | 
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/console-parity-ratchet.test.ts:129:10)
+    - PR #13223 (https://github.com/craigoley/remudero/pull/13223) at 2026-10-21T21:13:24.806Z: ci-log round — comment-load-ratchet: test/console-parity-ratchet.test.ts; claims: test/console-parity-ratchet.test.ts; rule-checks: test/console-parity-ratchet.test.ts; coverage-shard (5/8): emissions
+        failing tests: W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped; emissionsCommand counts events out of a GZIPPED rotation, not just plain ones; no tracked source opens a draft pull request; a verb with no attributable prefix is still reported unmeasurable and never as dead; the report states how many verbs the registry declares beside how many it scanned
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/console-parity-ratchet.test.ts:1:3877
+          | ✖ W1-T2926: the real COMMANDS registry and the real declared routes are fully classified — no verb is unmapped (104.56578ms)
+          |   AssertionError [ERR_ASSERTION]: every real COMMANDS verb needs a route or a CLI_ONLY reason — unmapped: keep, reply
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'keep',
+          |   +   'reply'
+          |   + ]
+          |   - []
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.89
+    reasons:
+      - "high-risk verdict at confidence 0.89 — on the change's description/files alone, no diff was read — The excerpts establish repeated failures for unmapped command verbs, but the filing specifies no preventive mechanism connecting the proposed src/run-task.ts change to those failures.; on the change's description/files alone, no diff was read — Acceptance requires eliminating fix rounds without specifying preservation of command-classification enforcement; the supplied record cannot verify whether the proposed remedy prevents omissions or changes enforcement. The escalation rule explicitly includes findings that cannot be verified from what is shown."
+    judged_at: "2026-10-28T14:41:59.037Z"
+    pin: "0ba8a0304a8d7e2d9e9918681985cf73e2cfbafc82819c75d797e10a5fb760ee"

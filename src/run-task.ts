@@ -364,6 +364,7 @@ import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueReva
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
 import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
+import { reconcileManagedImprovementEffects } from "./lib/opportunity-outcomes.js";
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
@@ -825,6 +826,8 @@ import {
   runPreflightCoverage,
   runPreflightFast,
   runTreeAdvisoryLine,
+  judgedTestShellOut,
+  prepareJudgedTestRun,
   shellOut,
   type CiParityStepResult,
   type PreflightFastDeps,
@@ -10758,16 +10761,25 @@ function* fixCensusSnapshotSteps(
   }
   if (!refusal) {
     const reach = "test/the-affected-suite-reach-ratchet.test.ts";
-    const result = yield* step(() => run(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import",
-      "./test/setup/tmp-hygiene.ts", reach],
-      { cwd: scriptsRoot, env, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
-    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-    if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
-      refusal = unavailable(`census suite ${reach}`, result, output);
-    } else if (result.status !== 0) {
-      const reason = String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000);
-      refusal = { text: `census-precheck: this branch grows 1 census count(s) CI will refuse:\n  census-suite: ${reach} fails — ${reason}`,
-        censuses: ["census-suite"], offeredBaselines: [] };
+    // W1-T8379: judged — an exit 0 passes only when the suite reached its own summary (scripts/pure-test-pool.mjs).
+    const judged = prepareJudgedTestRun(["--test", "--test-reporter=tap", "--import", "tsx", "--import",
+      "./test/setup/tmp-hygiene.ts", reach], scriptsRoot, "reach-ratchet census suite");
+    try {
+      const result = yield* step(() => run(process.execPath, judged.args,
+        { cwd: scriptsRoot, env: { ...env, ...judged.env }, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
+      const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+      const stopped = (reason: string) => ({ text: `census-precheck: this branch grows 1 census count(s) CI will refuse:\n  census-suite: ${reach} fails — ${reason}`,
+        censuses: ["census-suite"], offeredBaselines: [] });
+      if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
+        refusal = unavailable(`census suite ${reach}`, result, output);
+      } else if (result.status !== 0) {
+        refusal = stopped(String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000));
+      } else {
+        const verdict = judged.judge(0);
+        if (!verdict.complete) refusal = stopped(verdict.line);
+      }
+    } finally {
+      judged.cleanup();
     }
   }
   log("fix.census_check", { outcome: refusal ? "refused" : unmeasured ? "partially-measured" : "passed",
@@ -19284,7 +19296,11 @@ export function runPreflightCiChecks(repoRoot: string, deps: Pick<PreflightFastD
   const steps: CiParityStepResult[] = PREFLIGHT_CI_CHECKS.map((entry) => {
     const name = `ci-checks:${entry.name}`;
     const { file, args } = entry.argv(repoRoot);
-    const r = withoutNodeTestContextEnv(() => shellOut(spawn, `${name} (predicts CI: ${entry.predictsCiJob})`, file, args, { cwd: repoRoot }));
+    const label = `${name} (predicts CI: ${entry.predictsCiJob})`;
+    // W1-T8379: a census suite's `node --test` child is JUDGED — exit 0 passes only when its file reached its summary.
+    const r = withoutNodeTestContextEnv(() => args[0] === "--test"
+      ? judgedTestShellOut(spawn, label, args, { cwd: repoRoot })
+      : shellOut(spawn, label, file, args, { cwd: repoRoot }));
     return {
       name,
       ok: r.ok,
@@ -27500,9 +27516,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // W1-T4802: the overseer watches every gardener -- liveness, the effect of merged changes and
     // churn -- and folds effect back into each class's Beta record. Off: state/GARDENER_OVERSEER_OFF.
     case "overseer":
-      return () => {
+      return async () => {
         try {
-          runGardenerOverseer(productionGardenerOverseerPorts({ stateDir, repoRoot, owner, repo, fetch: ghJson, log, escalate: raiseDuplicate }));
+          const pass = runGardenerOverseer(productionGardenerOverseerPorts({ stateDir, repoRoot, owner, repo, fetch: ghJson, log, escalate: raiseDuplicate }));
+          if (pass.ran) {
+            try { log("improvement_effects.pass", await reconcileManagedImprovementEffects({ stateDir, repoRoot, repository: `${owner}/${repo}`, log })); }
+            catch (error) {
+              log("improvement_effects.pass_failed", { reason: "Independent improvement follow-up could not be completed.", error: String(error) });
+            }
+          }
         } catch (e) {
           log("gardener_overseer.overseer_failed", { error: String((e as Error)?.message ?? e) });
         }
@@ -41063,9 +41085,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "field-trials",
-    syntax: "rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--json]",
+    syntax: "rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json]",
     summary: "Join the ledger union and GitHub history into observational field-trials aggregates.",
-    detail: "W1-T4574: one operator-invoked, resumable snapshot pass. For each source repository (default config.fleetRepos as core, site and console; only core's ledger is on this host unless --ledger names another) it reads the audited three-form ledger union and up to --max-pages GitHub pages of pull requests, main commits, deployments and per-PR reviews, commits and first-commit check runs; an interrupted sweep resumes from its stored page and only a completed sweep advances its watermark. PRs link to plan tasks by the trailer, branch and ledger credit paths separately; unmatched and ambiguous links are counted. It derives five observational families by source, week and task class: model adoption (requested, selected and served models apart; source merge, runtime boot and first exposure apart), the automation funnel with missing-join and human-touch counts per stage, PR repair and correctness signals with an unknown bucket, flow and recovery times with open work censored (Kaplan-Meier) and DORA commit-to-deploy lead time, and learning-loop yield. A merge is never a deployment and a green check is never correctness. The snapshot is private under --out-dir (default <root>/state/field-trials). With --consent it writes a dated, pseudonymised candidate release that withholds small cells and is refused if any private join key appears; --revoke withdraws one. A failed refresh keeps the last known good release. It writes no ledger line, gates no PR, changes no routing, spends nothing and publishes nothing.",
+    detail: "W1-T4574: one operator-invoked, resumable snapshot pass. For each source repository (default config.fleetRepos as core, site and console; only core's ledger is on this host unless --ledger names another) it reads the audited three-form ledger union and up to --max-pages GitHub pages of pull requests, main commits, deployments and per-PR reviews, commits and first-commit check runs; an interrupted sweep resumes from its stored page and only a completed sweep advances its watermark. PRs link to plan tasks by the trailer, branch and ledger credit paths separately; unmatched and ambiguous links are counted. It derives five observational families by source, week and task class: model adoption (requested, selected and served models apart; source merge, runtime boot and first exposure apart), the automation funnel with missing-join and human-touch counts per stage, PR repair and correctness signals with an unknown bucket, flow and recovery times with open work censored (Kaplan-Meier) and DORA commit-to-deploy lead time, and learning-loop yield. A merge is never a deployment and a green check is never correctness. The snapshot is private under --out-dir (default <root>/state/field-trials). With --consent it writes a dated, pseudonymised candidate release that withholds small cells and is refused if any private join key appears; --revoke withdraws one. W1-T10831: --field-note <out> reads the latest private snapshot without refreshing it and writes a candidate-unreviewed envelope for the site's model-field-note-v1 importer: rows per selected model and task class over whole UTC days from the end of the last exported window, under the site's own disclosure rule and row limit, from sources with a live --consent receipt that are active aggregate-public in the pinned site registry (--site-registry names a newer revision); it never stamps a review. A failed refresh keeps the last known good release. It writes no ledger line, gates no PR, changes no routing, spends nothing and publishes nothing.",
   },
   {
     name: "ci-failures",
