@@ -354,7 +354,10 @@ interface GapRow { ts: string; key: string; trialId: string; gap: ReadinessGap; 
 /** A line is the canonical record for `key` only when it parses, keys itself consistently and names this repo. */
 function canonicalGapRow(line: string, key: string, repo: string | undefined): boolean {
   let row: Record<string, unknown>;
-  try { row = JSON.parse(line) as Record<string, unknown>; } catch { return false; }
+  try { row = JSON.parse(line) as Record<string, unknown>; } catch {
+    // An unparseable line is never the canonical record: it is kept and counted as `unvalidated` by the caller.
+    return false;
+  }
   if (typeof row !== "object" || row === null || Array.isArray(row) || row.key !== key) return false;
   const gap = row.gap as Record<string, unknown> | null | undefined;
   return typeof row.ts === "string" && Number.isFinite(Date.parse(row.ts)) && typeof row.trialId === "string"
@@ -368,19 +371,26 @@ interface AdmissionOwner { host: string; pid: number; nonce: string; row: GapRow
 function readOwner(path: string): AdmissionOwner | "absent" | "unreadable" {
   let text: string;
   try { text = readFileSync(path, "utf8"); } catch (error) {
+    // ENOENT ends the generation chain; every other failure is "unreadable", which the caller reports as pending.
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable";
   }
   try {
     const owner = JSON.parse(text) as AdmissionOwner;
     return typeof owner.host === "string" && Number.isInteger(owner.pid) && typeof owner.nonce === "string"
       && typeof owner.row === "object" && owner.row !== null ? owner : "unreadable";
-  } catch { return "unreadable"; }
+  } catch {
+    // A torn or tampered owner file is explicit "unreadable" evidence (reported as pending), never read as a free slot.
+    return "unreadable";
+  }
 }
 
 /** Dead only when it is provably so: this host, and the kernel has no such process. Anything else may still be writing. */
 function ownerProvablyDead(owner: AdmissionOwner): boolean {
   if (owner.host !== hostname()) return false;
-  try { process.kill(owner.pid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+  try { process.kill(owner.pid, 0); return false; } catch (error) {
+    // Only ESRCH proves the owner gone; EPERM and anything else mean it may still be writing, so it is not dead.
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
 }
 
 /** Publishes `owner` at `path` with its content already in place; false when another writer already holds that generation. */
