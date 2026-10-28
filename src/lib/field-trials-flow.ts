@@ -1245,7 +1245,10 @@ async function controlledEpochFacts(repos: readonly (readonly [string, string])[
   return { rows, merged, mergesObservedThrough: complete ? observedThrough : null, sourceRepos };
 }
 
-const SITE_COMMIT_RE = /^[0-9a-f]{40}$/i;
+/** A full 40-hex git commit id (case-insensitive); a function, not a module-scope regex constant. */
+function isFullCommitSha(value: string): boolean {
+  return value.length === 40 && /^[0-9a-f]+$/i.test(value);
+}
 
 export interface FieldTrialsCommandInput {
   nowIso?: string;
@@ -1312,8 +1315,9 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
   }
   const siteCommit = typeof values["site-parser-commit"] === "string" ? values["site-parser-commit"] : undefined;
   const registeredEpoch = typeof values["controlled-registered"] === "string" ? values["controlled-registered"] : undefined;
-  if ((siteCommit !== undefined && !SITE_COMMIT_RE.test(siteCommit)) || (registeredEpoch !== undefined && values["controlled-epoch"] !== undefined)) {
-    print(`${USAGE} (invalid: ${siteCommit !== undefined && !SITE_COMMIT_RE.test(siteCommit) ? "--site-parser-commit" : "--controlled-registered with --controlled-epoch"})`);
+  const siteCommitInvalid = siteCommit !== undefined && !isFullCommitSha(siteCommit);
+  if (siteCommitInvalid || (registeredEpoch !== undefined && values["controlled-epoch"] !== undefined)) {
+    print(`${USAGE} (invalid: ${siteCommitInvalid ? "--site-parser-commit" : "--controlled-registered with --controlled-epoch"})`);
     return 2;
   }
   const config = (input.resolveConfig ?? loadConfig)();
