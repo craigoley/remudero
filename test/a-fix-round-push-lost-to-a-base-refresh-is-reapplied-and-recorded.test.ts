@@ -271,7 +271,7 @@ async function censusRefreshOwner(t: import("node:test").TestContext) {
     readCiRollup: () => [{ name: "ci-gate", conclusion: "SUCCESS" }],
     readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 1 }),
     reproduceFailingTestsOnMerge: async (_pr, files) => files.map(file => ({ file, outcome: "passes", duration_ms: 1, cached: false })),
-    updateBranch: (_pr, head) => { assert.equal(head, base); updates++; return { ok: true }; },
+    updateBranchAtHead: (_pr, head) => { assert.equal(head, base); updates++; return { ok: true }; },
     log: (step, extra) => rows.push({ step, ...extra }),
   };
   const input = { root, worktreePath: repo.dir, branch: "refresh", prUrl: PR_URL, prNumber: 11133, snapshotPath: snapshot, context };
@@ -303,7 +303,7 @@ test("census baseline refresh respects live owners and the exact head", async t 
         fx.repo.git("update-ref", "refs/remotes/origin/main", fx.base);
         return files.map(file => ({ file, outcome: "passes", duration_ms: 1, cached: false }));
       };
-      if (mode === "update-refused") fx.deps.updateBranch = () => ({ ok: false, error: "expected_head_sha mismatch" });
+      if (mode === "update-refused") fx.deps.updateBranchAtHead = () => ({ ok: false, error: "expected_head_sha mismatch" });
       const before = fx.repo.git("status", "--porcelain=v1");
       const result = await fx.run();
       assert.equal(result.outcome, "held", JSON.stringify(fx.rows)); assert.equal(fx.updates(), 0);

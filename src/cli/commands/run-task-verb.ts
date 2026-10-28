@@ -432,7 +432,9 @@ export interface RunTaskCommandHost {
     
     readMergeFacts?: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
     
-    updateBranch?: (prNumber: number, expectedHeadSha?: string) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
+    updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
+    /** Separate from the historical unleased updater: inherited census recovery requires CAS. */
+    updateBranchAtHead?: (prNumber: number, expectedHeadSha: string) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
     
     readRedBaseRefreshFacts?: (prNumber: number) => RedBaseRefreshFacts | Promise<RedBaseRefreshFacts>;
     
@@ -7776,7 +7778,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           readRedBaseRefreshFacts: (n) => redBaseRefreshFactsFromRest(owner, task.repo, n),
           // W1-T8396: this rung's own checkout already holds the head, so its trial merge needs no fetch of it.
           reproduceFailingTestsOnMerge: buildBaseReproductionProbe(config, worktreePath, ledgerPath, (s, extra) => log(s, extra), { merge: true }),
-          updateBranch: (n, head) => ghUpdateBranch(owner, task.repo, n, undefined, undefined, undefined, head),
+          updateBranch: (n) => ghUpdateBranch(owner, task.repo, n),
           // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
           // reclaim of whatever it abandoned — see runFixRung's own deps doc. W1-T1219: reads
           // `fixSpawnWallClockBoundMs`, its OWN policy row, not the sweep tick's.

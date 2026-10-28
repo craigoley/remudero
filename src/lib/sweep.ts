@@ -4625,7 +4625,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             readRedBaseRefreshFacts: (n: number) => redBaseRefreshFactsFromRest(owner, repo, n),
             reproduceFailingTestsOnMerge: deps.reproduceFailingTestsOnMergeImpl,
 
-            updateBranch: (n: number, head?: string) => ghUpdateBranch(owner, repo, n, undefined, undefined, undefined, head),
+            updateBranch: (n: number) => ghUpdateBranch(owner, repo, n),
+            updateBranchAtHead: (n: number, head: string) => ghUpdateBranch(owner, repo, n, undefined, undefined, undefined, head),
             // W1-T1044: THIS is the call site the measured incident actually hit — a fix-rung
             // worker spawned from a `dispatchFix` disposition ran 8,970s as a direct child of
             // the daemon, parking `await deps.sweep()` (daemon.ts) for the whole of it. The

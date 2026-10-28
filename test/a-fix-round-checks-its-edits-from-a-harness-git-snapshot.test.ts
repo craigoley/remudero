@@ -461,7 +461,7 @@ test("inherited census baseline drift refreshes before another fix worker", asyn
           return files.map(file => ({ file, outcome: "passes" as const, duration_ms: 1, cached: false }));
         } finally { repo.git("worktree", "remove", "--force", trial); }
       },
-      updateBranch: (number, expected) => { assert.equal(number, 1); assert.equal(expected, head); updates++; return { ok: true }; },
+      updateBranchAtHead: (number, expected) => { assert.equal(number, 1); assert.equal(expected, head); updates++; return { ok: true }; },
     },
   });
   assert.equal(outcome.outcome, "base_refreshed", JSON.stringify({ outcome, rows }));

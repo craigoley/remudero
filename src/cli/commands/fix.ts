@@ -2109,7 +2109,7 @@ type InheritedCensusRefreshInput = {
  *  its asynchronous acceptance returns to the sweep, never to a worker on this old checkout. */
 export async function refreshInheritedCensusRefusal(input: InheritedCensusRefreshInput,
   deps: Pick<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"], "branchClaim" | "readLiveState" | "readLiveHead" |
-    "readCiRollup" | "readMergeFacts" | "reproduceFailingTestsOnMerge" | "updateBranch" | "log">,
+    "readCiRollup" | "readMergeFacts" | "reproduceFailingTestsOnMerge" | "updateBranchAtHead" | "log">,
   evidence: Pick<FixCommandHost, "readInheritedCensusContextAsync" | "preserveInheritedCensusWork">,
 ): Promise<{ outcome: "requested" | "held"; reason: string }> {
   const { context } = input;
@@ -2118,7 +2118,7 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
       merge_base: context.mergeBase, baseline_path: context.baselinePath, outcome, reason, ...extra });
   const held = (reason: string) => { log("held", reason); return { outcome: "held" as const, reason }; };
   if (!deps.branchClaim?.verify || !deps.readLiveState || !deps.readLiveHead || !deps.readCiRollup ||
-      !deps.readMergeFacts || !deps.reproduceFailingTestsOnMerge || !deps.updateBranch) return held("native refresh ownership or evidence is not wired");
+      !deps.readMergeFacts || !deps.reproduceFailingTestsOnMerge || !deps.updateBranchAtHead) return held("native refresh ownership or evidence is not wired");
   try {
     const check = async (): Promise<string | undefined> => {
       const claim = deps.branchClaim!.reacquire() ?? deps.branchClaim!.verify!();
@@ -2153,7 +2153,7 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
     if (claim) return held(claim);
     deps.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber: input.prNumber, headSha: context.headSha,
       forcedBy: "fix-base-refresh", nowMs: systemClock.now() }));
-    const updated = await deps.updateBranch(input.prNumber, context.headSha);
+    const updated = await deps.updateBranchAtHead(input.prNumber, context.headSha);
     if (!updated.ok) return held(`exact-head update refused: ${updated.error ?? "unknown result"}`);
     const reason = "native exact-head base refresh requested for inherited census contract; await new head and unchanged gates";
     log("requested", reason);
