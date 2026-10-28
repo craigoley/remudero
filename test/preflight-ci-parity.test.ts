@@ -11,6 +11,7 @@ import { CI_PARITY_TABLE, parseCiJobNames, runCiParityAdmitted, runCiParity as r
 import { preflightCommand } from "#src/run-task.js";
 import { skipInMutationSandbox } from "#test/helpers/mutation-sandbox.js";
 import { coverageParitySpawnResult } from "#test/helpers/coverage-parity-spawn.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -60,7 +61,8 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
     }
     const coverage = coverageParitySpawnResult(file, args, opts);
     if (coverage) return coverage;
-    return { status: 0, stdout: "", stderr: "" };
+    // A judged `node --test` leaf (W1-T8379) passes only on a tally: this fake stands for a finished run.
+    return { ...finishJudgedRun(args, opts), stdout: "", stderr: "" };
   };
   return { spawn, calls };
 }
@@ -435,7 +437,7 @@ test("preflightCommand: --ci-parity ADDS the ci-parity steps after the three han
 });
 
 test("preflightCommand: WITHOUT --ci-parity, none of the ci-parity steps run or print — the shipped hand route is untouched", async () => {
-  const spawn: PreflightSpawn = () => ({ status: 0, stdout: "\0feat(x): fine\n", stderr: "" });
+  const spawn: PreflightSpawn = (_file, args, opts) => ({ ...finishJudgedRun(args, opts), stdout: "\0feat(x): fine\n", stderr: "" });
   const originalLog = console.log;
   const lines: string[] = [];
   console.log = (...args: unknown[]) => {

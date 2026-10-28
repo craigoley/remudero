@@ -26,6 +26,7 @@ import {
 } from "#src/lib/ci-parity.js";
 import type { PreflightSpawn } from "#src/lib/commit-message.js";
 import { preflightCommand } from "#src/run-task.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 /** A spawn recorder: returns a canned result per argv, and records what was asked for. */
 function spawnStub(
@@ -385,10 +386,11 @@ async function runPreflightCapturingLines(
 }
 
 test("W1-T2810: the PASSING verdict carries the context stamp — the stale-green case, which is the one nobody questions", async () => {
-  const spawn: PreflightSpawn = (_file, args) => {
+  const spawn: PreflightSpawn = (_file, args, opts) => {
     if (args.includes("rev-list")) return { status: 0, stdout: "465\n", stderr: "" };
     if (args.includes("reflog")) return { status: 0, stdout: "origin/main@{2026-08-30T01:02:03+00:00}\n", stderr: "" };
-    return { status: 0, stdout: "\0feat(x): fine\n", stderr: "" };
+    // The judged census children (W1-T8379) pass only on a tally: this fake stands for finished runs.
+    return { ...finishJudgedRun(args, opts), stdout: "\0feat(x): fine\n", stderr: "" };
   };
   const { code, lines } = await runPreflightCapturingLines(spawn, { loadavg: () => [8, 8, 8], cpuCount: 4 });
   assert.equal(code, 0, "this fixture is a PASS — the point is that a pass is stamped too");

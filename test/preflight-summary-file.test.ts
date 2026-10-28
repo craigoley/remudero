@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import { buildPreflightSummary, preflightSummaryPath, type CiParityStepResult } from "#src/lib/ci-parity.js";
 import { preflightCommand, readHeadShaForSummary } from "#src/run-task.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 /**
  * A PREFLIGHT RESULT MUST SURVIVE THE CONTAINER THAT PRODUCED IT.
@@ -24,10 +25,11 @@ function fakeSpawn(failing: Set<string>) {
   // Every step's shell-out answers 0 unless its command names something in `failing`. `runPreflight`
   // and `runCiParity` between them shell commitlint, tsc, git and npm; answering uniformly keeps
   // this about the SUMMARY rather than about any one step's semantics.
-  return (file: string, args: string[]) => {
+  return (file: string, args: string[], opts?: unknown) => {
     const key = [file, ...args].join(" ");
     const bad = [...failing].some((f) => key.includes(f));
-    return { status: bad ? 1 : 0, stdout: bad ? "boom" : "", stderr: "" };
+    // A judged `node --test` child (W1-T8379) passes only on a tally: an answering 0 stands for a finished run.
+    return { status: bad ? 1 : finishJudgedRun(args, opts).status, stdout: bad ? "boom" : "", stderr: "" };
   };
 }
 

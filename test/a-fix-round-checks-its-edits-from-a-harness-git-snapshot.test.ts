@@ -101,7 +101,9 @@ test("a CommonJS probe loads the harness snapshot functions without git or async
     `    return require("node:child_process").spawnSync(_file, args, opts);`,
     `  }`,
     `  calls.push({ args, snapshot: opts.env.RMD_CENSUS_SNAPSHOT });`,
-    `  return { status: 0, stdout: "# tests 4\\n# pass 4\\n# fail 0\\n", stderr: "" };`,
+    // The judged reach run (W1-T8379) passes only on a tally: this fake stands for a finished run and writes it.
+    `  const { finishJudgedRun } = require(${JSON.stringify(join(ROOT, "test", "helpers", "judged-pool-run.ts"))});`,
+    `  return { ...finishJudgedRun(args, opts), stdout: "# tests 4\\n# pass 4\\n# fail 0\\n", stderr: "" };`,
     `});`,
     `process.stdout.write(JSON.stringify({ snapshot, checked, calls, budgetCalls }));`,
   ].join("\n"));
