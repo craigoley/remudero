@@ -2,11 +2,8 @@
  * W1-T5892 — THE LIVE COVERAGE FLIP REQUIRES A FRESH NIGHTLY FLOOR.
  *
  * A narrowed pull request reads its absolute coverage floor from another run's full-suite lcov.
- * Before this, ci.yml took the newest COMPLETED coverage-nightly or merge-group run, and each
- * consumer chose independently. Now each coverage shard pins a floor through
- * scripts/coverage-floor.mjs as of the triggering event, before it narrows; the aggregator requires
- * every narrowed shard's pin to name one floor and reads exactly that floor. Without a fresh,
- * successful, complete, compatible floor a shard runs full with a named reason.
+ * One workflow admission publishes a verified floor before tests. All consumers read that pin.
+ * Without a fresh, successful, complete, compatible floor the global decision is full.
  *
  * The helper runs for real, as a subprocess, over real local artifacts; GitHub transport is the
  * shared gh shim. The workflow controls execute the real step bodies from ci.yml and
@@ -17,15 +14,15 @@ import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
 import {
-  agreeOnFloor, buildProvenance, main, MAX_AGE_HOURS, nodeMajor, policyDigest, PRODUCERS, selectFloor, sha256, verifyPin,
+  agreeOnFloor, buildProvenance, consumeFloor, main, MAX_AGE_HOURS, nodeMajor, policyDigest, PRODUCERS, selectFloor, sha256, verifyPin,
   // @ts-expect-error -- plain .mjs script, no type declarations
 } from "#scripts/coverage-floor.mjs";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
+import { ghShim as makeGhShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const REPO = "craigoley/remudero";
@@ -35,7 +32,18 @@ const LCOV = "TN:\nSF:src/a.ts\nDA:1,1\nLF:1\nLH:1\nend_of_record\nSF:src/b.ts\n
 const ALL_GREEN = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [i + 1, 0]));
 const CONSUMER = { repository: REPO, nodeMajor: nodeMajor(), policyDigest: policyDigest(REPO_ROOT) };
 
-const tmp = (kind: string) => mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5892-${kind}-`));
+const owned: string[] = [];
+after(() => { for (const path of owned) rmSync(path, { recursive: true, force: true }); });
+const tmp = (kind: string) => {
+  const path = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5892-${kind}-`));
+  owned.push(path);
+  return path;
+};
+const ghShim: typeof makeGhShim = (...args) => {
+  const shim = makeGhShim(...args);
+  owned.push(shim.dir);
+  return shim;
+};
 
 /** A nightly run listing row and the provenance its producer would have written. */
 function nightly(overrides: { row?: Record<string, unknown>; provenance?: Record<string, unknown>; measuredAt?: Date } = {}) {
@@ -83,7 +91,7 @@ test("W1-T5892: a fresh successful complete nightly is pinned once and verifies 
   assert.equal(pin.decision, "narrow", pin.reason);
   assert.deepEqual(pin.floor, { artifact: "coverage-nightly", run_id: 111, run_attempt: 1, head_sha: HEAD,
     measured_at: provenance.created_at, lcov_sha256: sha256(Buffer.from(LCOV)) });
-  assert.equal(verifyPin(pinDir), join(pinDir, "lcov.info"));
+  assert.equal(verifyPin(pinDir, NOW), join(pinDir, "lcov.info"));
   assert.equal(readFileSync(join(pinDir, "lcov.info"), "utf8"), LCOV);
   assert.equal(existsSync(join(pinDir, ".candidates")), false, "downloaded candidates never ride the published pin");
   assert.ok(calls.some((c) => c.includes(`run list --workflow coverage-nightly.yml --branch main --status success --created <=${NOW.toISOString()}`)),
@@ -92,7 +100,7 @@ test("W1-T5892: a fresh successful complete nightly is pinned once and verifies 
   assert.equal(calls.filter((c) => c.startsWith("run download")).length, 1, "only listed candidates are downloaded");
 });
 
-test("W1-T5892: a floor that finished after the as-of time is invisible, so every shard weighs the same candidates", () => {
+test("W1-T5892: the admission snapshot excludes a floor that finished after its cutoff", () => {
   const late = nightly({ row: { updatedAt: new Date(NOW.getTime() + 60_000).toISOString() } });
   const { pin, calls } = select(late.row, artifact(late.provenance));
   assert.equal(pin.decision, "full");
@@ -134,14 +142,72 @@ test("W1-T5892: failed, partial, expired, future, mismatched and unverifiable fl
   }
 });
 
-test("W1-T5892: the 24-hour bound is inclusive at its boundary and the clock skew is bounded", () => {
+test("W1-T5892: the 24-hour bound is inclusive and future measurements refuse", () => {
   const at = (ms: number) => {
     const n = nightly({ measuredAt: new Date(NOW.getTime() - ms), row: { updatedAt: NOW.toISOString() } });
     return select(n.row, artifact(n.provenance)).pin.decision;
   };
   assert.equal(at(MAX_AGE_HOURS * 3_600_000), "narrow", "exactly 24 hours old still verifies");
   assert.equal(at(MAX_AGE_HOURS * 3_600_000 + 1), "full", "one millisecond past the bound refuses");
-  assert.equal(at(-4 * 60_000), "narrow", "a producer clock four minutes ahead is within the skew");
+  assert.equal(at(0), "narrow", "a measurement exactly at the execution clock verifies");
+  assert.equal(at(-1), "full", "a measurement one millisecond in the future refuses");
+  assert.equal(at(-4 * 60_000), "full", "clock skew cannot admit a future measurement");
+});
+
+test("W1-T5892: empty shells and malformed coverage fields never authorize narrowing", () => {
+  const invalid = [
+    "SF:src/a.ts\nend_of_record\n",
+    "SF:src/a.ts\nLF:0\nLH:0\nend_of_record\n",
+    LCOV.replace("DA:1,1", "DA:bogus,1"),
+    LCOV.replace("DA:1,1", "DA:1,NaN"),
+    LCOV.replace("DA:1,1", "DA:1,-1"),
+    LCOV.replace("DA:1,1", "DA:1,9007199254740992"),
+    LCOV.replace("LF:1", "LF:2"),
+    LCOV.replace("LH:1", "LH:0"),
+    LCOV.replace("LF:1\n", ""),
+    LCOV.replace("DA:1,1", "DA:1,1\nDA:1,1"),
+    LCOV.replace("end_of_record\nSF:", "SF:"),
+    LCOV.replace("src/a.ts", "../outside.ts"),
+    LCOV.replace("DA:1,1", "BRDA:1,0,0,1\nBRF:1\nBRH:0\nDA:1,1"),
+  ];
+  for (const lcov of invalid) {
+    const n = nightly({ provenance: { lcov_sha256: sha256(Buffer.from(lcov)), lcov_sources: 2 } });
+    const result = select(n.row, artifact(n.provenance, lcov));
+    assert.equal(result.pin.decision, "full", lcov);
+    assert.match(result.pin.reason, /lcov is incomplete/);
+  }
+  const lcov = LCOV.replace("DA:1,1", "BRDA:1,0,0,1\nBRF:1\nBRH:1\nDA:1,1");
+  const n = nightly({ provenance: { lcov_sha256: sha256(Buffer.from(lcov)) } });
+  assert.equal(select(n.row, artifact(n.provenance, lcov)).pin.decision, "narrow", "valid branch measurements remain usable");
+});
+
+test("W1-T5892: an old event cannot make a 49-hour-old floor fresh at execution", () => {
+  const execution = new Date();
+  const measuredAt = new Date(execution.getTime() - 49 * 3_600_000);
+  const cutoff = new Date(execution.getTime() - 48 * 3_600_000);
+  const n = nightly({ measuredAt, row: { updatedAt: measuredAt.toISOString() } });
+  const pinDir = join(tmp("old-event"), "pin");
+  const shim = ghShim(routes(pinDir, n.row, artifact(n.provenance)));
+  const decision = join(dirname(pinDir), "decision");
+  const result = spawnSync(process.execPath, [join(REPO_ROOT, "scripts/coverage-floor.mjs"), "select", pinDir,
+    "--as-of", cutoff.toISOString(), "--decision-file", decision], {
+    encoding: "utf8", env: { ...process.env, PATH: `${shim.dir}:${process.env.PATH}`, GITHUB_REPOSITORY: REPO },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(decision, "utf8"), "full\n");
+  assert.match(result.stdout, /older than 24h/);
+  assert.equal(shim.calls().filter((call) => call.startsWith("run download")).length, 1, "the old candidate was actually read");
+});
+
+test("W1-T5892: Node 22 and Node 24 measurements are separate compatible populations", () => {
+  for (const producerNode of [22, 24]) {
+    const n = nightly({ provenance: { node_major: producerNode } });
+    for (const consumerNode of [22, 24]) {
+      const result = select(n.row, artifact(n.provenance), { ...CONSUMER, nodeMajor: consumerNode });
+      assert.equal(result.pin.decision, producerNode === consumerNode ? "narrow" : "full");
+      if (producerNode !== consumerNode) assert.match(result.pin.reason, /measured on Node .* consumer runs Node/);
+    }
+  }
 });
 
 test("W1-T5892: a newer merge-group floor is preferred, and a refused newest falls to the next producer", () => {
@@ -175,12 +241,13 @@ test("W1-T5892: a newer merge-group floor is preferred, and a refused newest fal
 
 test("W1-T5892: the CLI writes the decision for the shard and refuses an altered pin", () => {
   const pinDir = join(tmp("cli"), "coverage-floor-pin");
-  const { row, provenance } = nightly();
+  const { row, provenance } = nightly({ measuredAt: new Date(Date.now() - 3_600_000),
+    row: { updatedAt: new Date(Date.now() - 3_000_000).toISOString() } });
   const gh = ghShim(routes(pinDir, row, artifact(provenance)), { kind: "w1t5892-cli-gh" });
   const out = join(dirname(pinDir), "decision");
   const env = { ...process.env, PATH: `${gh.dir}:${process.env.PATH}`, GITHUB_REPOSITORY: REPO };
   const cli = (...args: string[]) => spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "coverage-floor.mjs"), ...args], { encoding: "utf8", env });
-  const selected = cli("select", pinDir, "--as-of", NOW.toISOString(), "--decision-file", out);
+  const selected = cli("select", pinDir, "--as-of", new Date().toISOString(), "--decision-file", out);
   assert.equal(selected.status, 0, selected.stderr);
   assert.equal(readFileSync(out, "utf8"), "narrow\n");
   assert.match(selected.stdout, /coverage-floor: narrow — pinned coverage-nightly run 111/);
@@ -242,7 +309,8 @@ const step = (doc: typeof CI, job: string, prefix: string) => {
 function checkout(): string {
   const dir = tmp("step");
   for (const f of ["scripts/coverage-floor.mjs", "scripts/lib/argv.mjs", "scripts/lib/repo-root.mjs", "scripts/coverage-merge-ratchet.mjs",
-    ".nvmrc", "package-lock.json", "package.json"]) {
+    ".nvmrc", "package-lock.json", "package.json", "test/setup/tmp-hygiene.ts",
+    "scripts/lib/lcov.mjs", "scripts/lib/coverage-chunk-codec.mjs"]) {
     mkdirSync(dirname(join(dir, f)), { recursive: true });
     cpSync(join(REPO_ROOT, f), join(dir, f));
   }
@@ -285,92 +353,132 @@ test("W1-T5892: coverage-ledger stays the dependency-free choice it was, and pin
   assert.doesNotMatch(JSON.stringify(CI.jobs["coverage-ledger"]), /coverage-floor/);
 });
 
-test("W1-T5892: with the live flag on, a shard narrows only on a floor it pinned as of the event and otherwise runs full naming why", () => {
-  const shard = step(CI, "coverage-ratchet", "Test with coverage");
-  assert.equal(shard.env?.FLOOR_AS_OF, "${{ github.event.pull_request.updated_at }}", "the as-of time is the event's, not the shard's clock");
-  assert.equal(shard.env?.GH_TOKEN, "${{ github.token }}");
-  const body = shard.run!.replaceAll("${{ matrix.shard }}", "1").replaceAll("${{ steps.classify.outputs.class }}", "SOURCE");
-  const asOf = new Date(Date.now() - 60_000).toISOString();
-  const live = { GITHUB_EVENT_NAME: "pull_request", RMD_AFFECTED_SUITE_LIVE: "1", FLOOR_AS_OF: asOf };
+const shardBody = step(CI, "coverage-ratchet", "Test with coverage").run!
+  .replaceAll("${{ matrix.shard }}", "1").replaceAll("${{ steps.classify.outputs.class }}", "SOURCE");
+const aggregateBody = step(CI, "coverage-ratchet-required", "Coverage ratchet").run!
+  .replaceAll("${{ steps.coverage-artifact.outputs.class }}", "SOURCE");
+const live = { GITHUB_EVENT_NAME: "pull_request", RMD_AFFECTED_SUITE_LIVE: "1", GITHUB_RUN_ID: "999" };
+const output = (text: string, key: string) => text.split("\n").filter((line) => line.startsWith(`${key}=`)).at(-1)?.slice(key.length + 1) ?? "";
 
+/** Execute admission and final publication. Only GitHub transport is synthetic. */
+function admit(n = nightly({ measuredAt: new Date(Date.now() - 3_600_000),
+  row: { updatedAt: new Date(Date.now() - 3_000_000).toISOString() } }), files = artifact(n.provenance), published = "success") {
   const cwd = checkout();
-  const fresh = nightly({ measuredAt: new Date(Date.now() - 3_600_000), row: { updatedAt: new Date(Date.now() - 3_000_000).toISOString() } });
-  const narrow = runStep(body, live, routes(join(cwd, "coverage-floor-pin"), fresh.row, artifact(fresh.provenance)), cwd);
-  assert.equal(narrow.status, 0, narrow.out);
-  assert.ok(narrow.calls.includes(`--created <=${asOf}`), "the shard lists candidates as of the event");
-  assert.match(narrow.calls, /--select-candidates/);
-  assert.equal(narrow.read("coverage-selection.txt").trim(), "narrow");
-  assert.equal(JSON.parse(narrow.read("coverage-floor-pin.json")).floor.run_id, 111, "the shard keeps the pin it narrowed on");
-  assert.ok(!existsSync(join(cwd, "coverage-floor-pin")), "the floor lcov is gone before the tests run");
+  const selected = runStep(step(CI, "coverage-floor-admission", "Select one coverage floor").run!, live,
+    routes(join(cwd, "coverage-floor-pin"), n.row, files), cwd);
+  assert.equal(selected.status, 0, selected.out);
+  const selectedOutputs = selected.read("outputs.txt");
+  const decision = output(selectedOutputs, "decision"), reason = output(selectedOutputs, "reason");
+  const finished = runStep(step(CI, "coverage-floor-admission", "Finalize the global floor decision").run!,
+    { DECISION: decision, REASON: reason, PUBLISHED: published });
+  assert.equal(finished.status, 0, finished.out);
+  const env = { ...live, FLOOR_DECISION: output(finished.read("outputs.txt"), "decision"),
+    FLOOR_REASON: output(finished.read("outputs.txt"), "reason"), FLOOR_ARTIFACT: "coverage-floor-pin-1",
+    FLOOR_PIN_DIGEST: output(selectedOutputs, "pin_digest") };
+  const pin = selected.read("coverage-floor-pin/pin.json");
+  const transport: GhShimRoute[] = [{ when: "run download 999 -n coverage-floor-pin-1", writes: [
+    { path: "coverage-floor-pin/pin.json", content: pin },
+    { path: "coverage-floor-pin/lcov.info", content: selected.read("coverage-floor-pin/lcov.info") }] },
+    { when: "run list", stderr: "consumer must never list candidates", exit: 1 }];
+  return { selected, env, pin, transport };
+}
 
-  for (const listing of [[{ when: "run list", stdout: "[]" }], [{ when: "run list", stderr: "HTTP 502", exit: 1 }]]) {
-    const full = runStep(body, live, listing);
-    assert.equal(full.status, 0, full.out);
-    assert.doesNotMatch(full.calls, /--import tsx -e|--select-candidates/, "no floor, no narrow selection");
-    assert.match(full.calls, /--select-all/);
-    assert.match(full.out, /coverage-floor: full — /, "the floor helper names why");
-    assert.match(full.out, /W1-T5892: no fresh verified coverage floor, so this shard runs in full/);
-    assert.equal(full.read("coverage-selection.txt").trim(), "all");
+const seedShards = (pin: string, split = 0) => Array.from({ length: 8 }, (_, i) => {
+  const dir = `coverage-shards/coverage-shard-${i + 1}`;
+  return `mkdir -p ${dir}\necho narrow > ${dir}/selection\ncat > ${dir}/floor-pin.json <<'PIN'\n${i + 1 === split ? pin.replace('"run_id": 111', '"run_id": 112') : pin}PIN\n`;
+}).join("\n");
+
+test("W1-T5892: one admission precedes all shards and every consumer uses its published pin", () => {
+  assert.equal(CI.jobs["coverage-floor-admission"]!.outputs?.decision, "${{ steps.finish.outputs.decision }}");
+  for (const job of ["coverage-ratchet", "coverage-ratchet-required"]) {
+    assert.ok(CI.jobs[job]!.needs?.includes("coverage-floor-admission"), `${job} must wait for admission`);
+    const consumer = step(CI, job, job === "coverage-ratchet" ? "Test with coverage" : "Coverage ratchet");
+    for (const [key, field] of [["FLOOR_DECISION", "decision"], ["FLOOR_ARTIFACT", "artifact"], ["FLOOR_PIN_DIGEST", "pin_digest"]]) {
+      assert.equal(consumer.env?.[key!], `\${{ needs.coverage-floor-admission.outputs.${field} }}`);
+    }
   }
-
-  const off = runStep(body, { GITHUB_EVENT_NAME: "pull_request", RMD_AFFECTED_SUITE_LIVE: "0", FLOOR_AS_OF: asOf });
-  assert.equal(off.status, 0, off.out);
-  assert.doesNotMatch(off.out, /W1-T5892|coverage-floor/, "flag-off behaviour is unchanged");
-  assert.doesNotMatch(off.calls, /^gh /m, "flag off reads no other run");
-  assert.equal(off.read("coverage-selection.txt").trim(), "all");
-
-  assert.match(step(CI, "coverage-ratchet", "Stage this coverage shard").run!,
-    /cp coverage-floor-pin\.json coverage-artifact\/floor-pin\.json/, "the pin rides the shard artifact to the aggregator");
+  const publish = step(CI, "coverage-floor-admission", "Publish the verified admission");
+  assert.equal(publish.with?.name, "coverage-floor-pin-${{ github.run_attempt }}");
+  assert.equal(publish.with?.path, "coverage-floor-pin");
+  const a = admit();
+  assert.equal(a.env.FLOOR_DECISION, "narrow", a.selected.out);
+  assert.equal(a.selected.calls.match(/gh run list/g)?.length, 2);
+  for (let n = 1; n <= 8; n++) {
+    const shard = runStep(shardBody.replaceAll("--shard 1/8", `--shard ${n}/8`), a.env, a.transport);
+    assert.equal(shard.status, 0, shard.out);
+    assert.equal(shard.read("coverage-selection.txt"), "narrow\n");
+    assert.equal(shard.read("coverage-floor-pin.json"), a.pin);
+    assert.doesNotMatch(shard.calls, /gh run list|coverage-floor.mjs select/);
+    assert.equal(existsSync(join(shard.cwd, "coverage-floor-pin")), false, "historical LCOV leaves before tests");
+  }
+  const aggregate = runStep(seedShards(a.pin) + aggregateBody, a.env, a.transport);
+  assert.equal(aggregate.status, 0, aggregate.out);
+  assert.match(aggregate.calls, /coverage-ratchet\.mjs --lcov coverage-floor-pin\/lcov\.info --baseline/);
+  assert.doesNotMatch(aggregate.calls, /--lcov coverage\/lcov\.info|gh run list|run download 111/);
+  for (const evidence of [/absolute floor \(historical baseline\)/, /Added-line coverage of this head/, /Full integration/]) {
+    assert.match(aggregate.read("summary.md"), evidence);
+  }
 });
 
-/** A narrow pin naming `lcov`'s digest, as a shard stages it. */
-const pinFor = (lcov: string, runId = 111) => JSON.stringify({ schema: 1, decision: "narrow", reason: `coverage-nightly run ${runId} verified`,
-  floor: { artifact: "coverage-nightly", run_id: runId, run_attempt: 1, head_sha: HEAD, measured_at: "2026-10-28T10:00:00.000Z",
-    lcov_sha256: sha256(Buffer.from(lcov)) }, refused: [] });
+test("W1-T5892: refused admission and publication failure make every shard full with one named reason", () => {
+  for (const a of [admit(nightly({ row: { conclusion: "failure" } })),
+    admit(nightly({ measuredAt: new Date(Date.now() - 49 * 3_600_000) })),
+    admit(nightly(), artifact("not json")), admit(undefined, undefined, "failure")]) {
+    assert.equal(a.env.FLOOR_DECISION, "full", a.selected.out);
+    assert.ok(a.env.FLOOR_REASON);
+    for (let n = 1; n <= 8; n++) {
+      const shard = runStep(shardBody.replaceAll("--shard 1/8", `--shard ${n}/8`), a.env);
+      assert.equal(shard.status, 0, shard.out);
+      assert.equal(shard.read("coverage-selection.txt"), "all\n");
+      assert.match(shard.calls, /--select-all/);
+      assert.doesNotMatch(shard.calls, /coverage-floor|--select-candidates|gh /);
+      assert.ok(shard.out.includes(a.env.FLOOR_REASON), shard.out);
+    }
+  }
+  for (const env of [{ ...live, RMD_AFFECTED_SUITE_LIVE: "0" }, { ...live, GITHUB_EVENT_NAME: "merge_group" }]) {
+    const owner = runStep(step(CI, "coverage-floor-admission", "Select one coverage floor").run!, env);
+    assert.equal(owner.status, 0, owner.out);
+    assert.doesNotMatch(owner.calls, /coverage-floor|gh /);
+    const shard = runStep(shardBody, env);
+    assert.equal(shard.status, 0, shard.out);
+    assert.equal(shard.read("coverage-selection.txt"), "all\n");
+    assert.doesNotMatch(shard.calls, /coverage-floor|--select-candidates|gh /);
+  }
+});
 
-test("W1-T5892: the aggregator reads exactly the one floor every narrowed shard pinned, and refuses a missing, split or altered pin", () => {
-  const ratchet = step(CI, "coverage-ratchet-required", "Coverage ratchet");
-  assert.doesNotMatch(ratchet.run!, /gh run list/, "the aggregator never chooses its own newest floor");
-  const body = ratchet.run!.replaceAll("${{ steps.coverage-artifact.outputs.class }}", "SOURCE");
-  const seeded = (pins: Record<number, string | null>) => Array.from({ length: 8 }, (_, i) => {
-    const n = i + 1, dir = `coverage-shards/coverage-shard-${n}`;
-    const pin = pins[n];
-    return [`mkdir -p ${dir}; echo ${n in pins ? "narrow" : "all"} > ${dir}/selection`,
-      typeof pin === "string" ? `cat > ${dir}/floor-pin.json <<'PIN'\n${pin}\nPIN` : ""].join("\n");
-  }).join("\n");
-  const pr = { GITHUB_EVENT_NAME: "pull_request" };
-  const served = (lcov: string): GhShimRoute[] => [{ when: "run download 111", writes: [{ path: "coverage-floor-pin/download/lcov.info", content: lcov }] }];
+test("W1-T5892: the final merge group is full when live selection is enabled and flag-off stays unchanged", () => {
+  const classify = CI.jobs["coverage-ratchet"]!.steps.find((s) => s.id === "classify")!;
+  for (const flag of ["0", "1"]) {
+    const r = runStep(classify.run!, { GITHUB_EVENT_NAME: "merge_group", RMD_AFFECTED_SUITE_LIVE: flag });
+    assert.equal(r.status, 0, r.out);
+    assert.equal(output(r.read("outputs.txt"), "class"), flag === "1" ? "SOURCE" : "NO_SRC");
+  }
+  const a = admit();
+  const elapsed = new Date(Date.now() + 25 * 3_600_000);
+  assert.throws(() => verifyPin(join(a.selected.cwd, "coverage-floor-pin"), elapsed), /24h freshness bound/);
+});
 
-  const good = runStep(`${seeded({ 3: pinFor(LCOV), 5: pinFor(LCOV) })}\n${body}`, pr, served(LCOV));
-  assert.equal(good.status, 0, good.out);
-  assert.match(good.calls, /gh run download 111 -n coverage-nightly -D coverage-floor-pin\/download/);
-  assert.match(good.calls, /coverage-ratchet\.mjs --lcov coverage-floor-pin\/lcov\.info --baseline scripts\/coverage-baseline\.json/);
-  assert.doesNotMatch(good.calls, /--lcov coverage\/lcov\.info/, "a narrowed lcov is never held to the absolute floor");
-  assert.match(good.read("summary.md"), /absolute floor \(historical baseline\): pinned coverage-nightly run 111/);
-  assert.match(good.read("summary.md"), /Added-line coverage of this head/);
-  assert.match(good.read("summary.md"), /Full integration/);
-
-  const refusals: Array<[string, Record<number, string | null>, GhShimRoute[], RegExp]> = [
-    ["altered floor", { 3: pinFor(LCOV) }, served(LCOV + "SF:src/z.ts\nend_of_record\n"), /differs from its pinned digest/],
-    ["split pins", { 3: pinFor(LCOV), 5: pinFor(LCOV, 112) }, served(LCOV), /shard 5 pinned coverage-nightly 112 .*another shard pinned coverage-nightly 111/],
-    ["narrowed without a pin", { 3: pinFor(LCOV), 6: null }, served(LCOV), /shard 6 narrowed without a narrow floor pin/],
-    ["expired floor", { 3: pinFor(LCOV) }, [{ when: "run download 111", stderr: "no valid artifacts found to download", exit: 1 }],
-      /cannot download the pinned coverage-nightly run 111/],
+test("W1-T5892: an admitted floor becoming unreadable or split refuses without replacement", () => {
+  const a = admit();
+  const broken: Array<[GhShimRoute[], RegExp]> = [
+    [[{ when: "run download", stderr: "artifact vanished", exit: 1 }], /cannot download the pinned admission/],
+    [[{ when: "run download", writes: [{ path: "coverage-floor-pin/pin.json", content: "{}" }] }], /admission pin differs/],
+    [[{ when: "run download", writes: [{ path: "coverage-floor-pin/pin.json", content: a.pin }] }], /lcov is missing/],
+    [[{ when: "run download", writes: [{ path: "coverage-floor-pin/pin.json", content: a.pin },
+      { path: "coverage-floor-pin/lcov.info", content: LCOV + "corrupt" }] }], /lcov differs/],
   ];
-  for (const [name, pins, gh, why] of refusals) {
-    const r = runStep(`${seeded(pins)}\n${body}`, pr, gh);
-    assert.notEqual(r.status, 0, `${name} refuses`);
-    assert.match(r.out, /W1-T5892: the narrowed shards' pinned floor does not verify; refusing/, name);
-    assert.match(r.out, why, name);
-    assert.doesNotMatch(r.calls, /coverage-ratchet\.mjs|run list/, `${name}: no other floor is chosen`);
+  for (const [transport, why] of broken) {
+    for (const body of [shardBody, seedShards(a.pin) + aggregateBody]) {
+      const r = runStep(body, a.env, transport);
+      assert.notEqual(r.status, 0, r.out);
+      assert.match(r.out, why);
+      assert.doesNotMatch(r.calls, /gh run list|--select-candidates|coverage-ratchet\.mjs/);
+    }
   }
-
-  for (const full of [runStep(`${seeded({})}\n${body}`, pr), runStep(body, pr)]) {
-    assert.equal(full.status, 0, full.out);
-    assert.match(full.calls, /coverage-ratchet\.mjs --lcov coverage\/lcov\.info --baseline/);
-    assert.doesNotMatch(full.calls, /^gh /m, "a full selection reads its own lcov and no pin");
-  }
-  assert.throws(() => agreeOnFloor({ shardsDir: tmp("none"), outDir: tmp("out") }), /no shard narrowed/);
+  const split = runStep(seedShards(a.pin, 5) + aggregateBody, a.env, a.transport);
+  assert.notEqual(split.status, 0);
+  assert.match(split.out, /shard 5 did not consume the workflow admission's pin/);
+  assert.doesNotMatch(split.calls, /coverage-ratchet\.mjs/);
 });
 
 test("W1-T5892: both producers write provenance beside the lcov they upload", () => {
@@ -434,34 +542,17 @@ test("W1-T5892: an unreadable or non-array run listing is refused by name, never
   }
 });
 
-test("W1-T5892: agreeOnFloor downloads the one pinned floor and refuses a split, altered, missing or unreadable pin", () => {
-  const shards = (pins: Record<number, string | null>) => {
-    const dir = tmp("shards");
-    for (let n = 1; n <= 8; n++) {
-      mkdirSync(join(dir, `coverage-shard-${n}`), { recursive: true });
-      writeFileSync(join(dir, `coverage-shard-${n}`, "selection"), n in pins ? "narrow\n" : "all\n");
-      const pin = pins[n];
-      if (typeof pin === "string") writeFileSync(join(dir, `coverage-shard-${n}`, "floor-pin.json"), pin);
-    }
-    return dir;
-  };
-  const serve = (lcov: string) => fakeRun((a) => (a.startsWith("run download 111 -n coverage-nightly") ? { status: 0, files: { "lcov.info": lcov } } : { status: 1 }));
-
-  const outDir = tmp("agree");
-  assert.equal(agreeOnFloor({ shardsDir: shards({ 2: pinFor(LCOV), 7: pinFor(LCOV) }), outDir, run: serve(LCOV) }), join(outDir, "lcov.info"));
-  assert.equal(readFileSync(join(outDir, "lcov.info"), "utf8"), LCOV);
-  assert.equal(existsSync(join(outDir, "download")), false, "the download is removed once copied");
-  assert.equal(JSON.parse(readFileSync(join(outDir, "pin.json"), "utf8")).floor.run_id, 111);
-
-  assert.throws(() => agreeOnFloor({ shardsDir: shards({ 2: pinFor(LCOV), 7: pinFor(LCOV, 112) }), outDir: tmp("o"), run: serve(LCOV) }),
-    /shard 7 pinned coverage-nightly 112 .*another shard pinned coverage-nightly 111/);
-  assert.throws(() => agreeOnFloor({ shardsDir: shards({ 2: pinFor(LCOV) }), outDir: tmp("o"), run: serve(LCOV + "x\n") }), /differs from its pinned digest/);
-  assert.throws(() => agreeOnFloor({ shardsDir: shards({ 2: null }), outDir: tmp("o"), run: serve(LCOV) }), /shard 2 narrowed without a narrow floor pin/);
-  assert.throws(() => agreeOnFloor({ shardsDir: shards({ 2: "{" }), outDir: tmp("o"), run: serve(LCOV) }), /shard 2 narrowed without/);
-  assert.throws(() => agreeOnFloor({ shardsDir: shards({ 2: pinFor(LCOV) }), outDir: tmp("o"), run: fakeRun(() => ({ status: 1, stderr: "gone" })) }),
-    /cannot download the pinned coverage-nightly run 111: gone/);
-  assert.throws(() => agreeOnFloor({ shardsDir: shards({ 2: pinFor(LCOV) }), outDir: tmp("o"), run: fakeRun(() => ({ status: 0 })) }),
-    /differs from its pinned digest/, "a download that leaves no lcov is refused");
+test("W1-T5892: builtin consumers reject absent admission identities and missing shard receipts", () => {
+  assert.throws(() => consumeFloor({ pinDir: tmp("bad"), runId: "bad" }), /no valid admission identity/);
+  const a = admit();
+  const dir = tmp("agree");
+  writeFileSync(join(dir, "pin.json"), a.pin);
+  writeFileSync(join(dir, "lcov.info"), LCOV);
+  assert.throws(() => agreeOnFloor({ shardsDir: tmp("empty"), outDir: dir }), /no shard narrowed/);
+  const shards = tmp("shards");
+  mkdirSync(join(shards, "coverage-shard-2"));
+  writeFileSync(join(shards, "coverage-shard-2", "selection"), "narrow\n");
+  assert.throws(() => agreeOnFloor({ shardsDir: shards, outDir: dir }), /shard 2 did not consume/);
 });
 
 test("W1-T5892: the CLI stamps provenance only for a trusted green run, and select/agree/verify answer through gh", () => {
@@ -503,7 +594,6 @@ test("W1-T5892: the CLI stamps provenance only for a trusted green run, and sele
       row: { updatedAt: new Date(Date.now() - 3_000_000).toISOString() } });
     const pinDir = join(dir, "coverage-floor-pin");
     const shim = ghShim([
-      { when: `-D ${join(dir, "agreed", "download")}`, writes: [{ path: join(dir, "agreed", "download", "lcov.info"), content: LCOV }] },
       ...routes(pinDir, row, artifact(provenance))], { kind: "w1t5892-main-gh" });
     const path = process.env.PATH;
     process.env.PATH = `${shim.dir}:${path}`;
@@ -517,8 +607,8 @@ test("W1-T5892: the CLI stamps provenance only for a trusted green run, and sele
       mkdirSync(join(shardsDir, "coverage-shard-4"), { recursive: true });
       writeFileSync(join(shardsDir, "coverage-shard-4", "selection"), "narrow\n");
       writeFileSync(join(shardsDir, "coverage-shard-4", "floor-pin.json"), readFileSync(join(pinDir, "pin.json")));
-      assert.equal(main(["agree", shardsDir, join(dir, "agreed")], env), 0);
-      assert.equal(logs.at(-1), join(dir, "agreed", "lcov.info"));
+      assert.equal(main(["agree", shardsDir, pinDir], env), 0);
+      assert.equal(logs.at(-1), join(pinDir, "lcov.info"));
     } finally {
       process.env.PATH = path;
     }

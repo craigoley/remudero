@@ -1,25 +1,10 @@
 #!/usr/bin/env node
 // scripts/coverage-floor.mjs — W1-T5892: THE LIVE COVERAGE FLIP REQUIRES A FRESH, VERIFIED FLOOR.
 //
-// A narrowed pull request cannot certify the absolute coverage floor from its own partial lcov, so
-// the aggregator reads a full-suite lcov another run measured. Before this helper, ci.yml took the
-// newest COMPLETED coverage-nightly or merge-group run: a red nightly uploads its measurement before
-// its test-exit gate (coverage-nightly.yml), so completed is not success, and each consumer chose
-// its own "newest" independently. This helper is the single owner of that choice:
-//
-//   provenance  a producer (coverage-nightly, or ci.yml's merge_group aggregator) records who
-//               measured the lcov, on which head, with which runtime and policy, and that every
-//               shard's suite exited 0, beside the lcov it uploads.
-//   select      each coverage shard, before any narrow test, pins the newest candidate that
-//               verifies AS OF the triggering event, or decides `full` with a named reason. The
-//               as-of time is fixed by the event, so all eight shards (and a re-run) weigh the same
-//               candidates. BACKSTOP: a floor older than MAX_AGE_HOURS, or none, never narrows.
-//   agree       the aggregator requires every narrowed shard's pin to name one floor, downloads it
-//               and checks its digest. It never re-selects: a missing, split or altered pin
-//               refuses, and a partial current-head lcov is never relabelled as the absolute floor.
-//
-// Dependency-free (node built-ins, the `gh` CLI). `gh run list --json` fields verified against
-// gh 2.89.0: attempt, conclusion, createdAt, databaseId, event, headBranch, headSha, updatedAt.
+// One workflow admission pins a successful full-suite measurement before any shard narrows.
+// BACKSTOP: freshness uses the execution clock, independently of the candidate snapshot cutoff.
+// Shards and the aggregate read the same published pin; unreadable pins refuse, never re-select.
+// Dependency-free apart from the existing bounded gh transport.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -32,15 +17,17 @@ export const PROVENANCE_SCHEMA = 1;
 export const PIN_SCHEMA = 1;
 /** BACKSTOP: the oldest measurement that may authorize narrowing. Nightly runs daily. */
 export const MAX_AGE_HOURS = 24;
-/** A producer clock ahead of the consumer by more than this is refused as future-dated. */
-export const CLOCK_SKEW_MS = 5 * 60_000;
+/** Future-dated measurements cannot authorize narrowing. */
+export const CLOCK_SKEW_MS = 0;
 export const SHARD_COUNT = 8;
 /** Candidates listed per producer (created at or before the as-of time), and downloaded per producer. */
 const LIST_LIMIT = 20;
 const DOWNLOAD_LIMIT = 2;
-const GH_TIMEOUT_MS = 20_000;
+const GH_TIMEOUT_MS = 4_000;
 /** The runtime, dependency/loader and lcov-generation inputs a floor must share with its consumer. */
-export const COVERAGE_POLICY_FILES = [".nvmrc", "package-lock.json", "scripts/coverage-merge-ratchet.mjs"];
+export const COVERAGE_POLICY_FILES = [".nvmrc", "package-lock.json", "scripts/coverage-merge-ratchet.mjs",
+  "scripts/coverage-floor.mjs", "test/setup/tmp-hygiene.ts", "package.json",
+  "scripts/lib/lcov.mjs", "scripts/lib/coverage-chunk-codec.mjs"];
 
 /** The trusted producers: which workflow, artifact and event may measure main's floor. */
 export const PRODUCERS = [
@@ -68,10 +55,47 @@ export function nodeMajor(version = process.versions.node) {
   return Number(String(version).replace(/^v/, "").split(".")[0]);
 }
 
-/** Source files recorded in an lcov, or 0 when it is not a complete lcov (no closing record). */
+/** Validate complete records and their measured totals; a source-only shell is not coverage. */
 export function lcovSourceCount(text) {
-  if (!/end_of_record\s*$/.test(text)) return 0;
-  return (text.match(/^SF:/gm) ?? []).length;
+  let record = null, sources = 0, measured = 0;
+  const seen = new Set();
+  for (const line of text.split(/\r?\n/)) {
+    if (line === "" || line.startsWith("TN:")) continue;
+    if (line.startsWith("SF:")) {
+      const source = line.slice(3);
+      if (record || !source || source.startsWith("/") || source.includes("\\") ||
+          source.split("/").some((part) => !part || part === "." || part === "..") || seen.has(source)) return 0;
+      seen.add(source);
+      record = { lines: new Map(), branches: new Map(), totals: {} };
+    } else if (line === "end_of_record") {
+      if (!record) return 0;
+      const { lines, branches, totals } = record;
+      if (totals.LF !== lines.size || totals.LH !== [...lines.values()].filter((v) => v > 0).length) return 0;
+      if (branches.size || totals.BRF !== undefined || totals.BRH !== undefined) {
+        if (totals.BRF !== branches.size || totals.BRH !== [...branches.values()].filter((v) => v > 0).length) return 0;
+      }
+      measured += lines.size;
+      sources++;
+      record = null;
+    } else {
+      if (!record) return 0;
+      let match;
+      if ((match = /^DA:([1-9][0-9]*),([0-9]+)(?:,[a-zA-Z0-9]+)?$/.exec(line))) {
+        const n = Number(match[1]), hits = Number(match[2]);
+        if (!Number.isSafeInteger(n) || !Number.isSafeInteger(hits) || record.lines.has(n)) return 0;
+        record.lines.set(n, hits);
+      } else if ((match = /^BRDA:([1-9][0-9]*),([0-9]+),([0-9]+),(-|[0-9]+)$/.exec(line))) {
+        const key = match.slice(1, 4).join(","), hits = match[4] === "-" ? 0 : Number(match[4]);
+        if (!Number.isSafeInteger(hits) || record.branches.has(key)) return 0;
+        record.branches.set(key, hits);
+      } else if ((match = /^(LF|LH|BRF|BRH|FNF|FNH):([0-9]+)$/.exec(line))) {
+        const value = Number(match[2]);
+        if (!Number.isSafeInteger(value) || record.totals[match[1]] !== undefined) return 0;
+        record.totals[match[1]] = value;
+      } else if (!/^FN:[1-9][0-9]*,.+$/.test(line) && !/^FNDA:[0-9]+,.+$/.test(line)) return 0;
+    }
+  }
+  return !record && measured > 0 ? sources : 0;
 }
 
 /** What a producer writes beside its lcov. `shardExits` maps shard number to its suite's exit code. */
@@ -108,7 +132,7 @@ export function refusal({ producer, candidate, provenance: p, lcov, consumer, no
   if (p.repository !== consumer.repository) return `measured in ${p.repository}, not ${consumer.repository}`;
   if (p.run_id !== candidate.databaseId) return `provenance run ${p.run_id} is not run ${candidate.databaseId}`;
   if (p.run_attempt !== candidate.attempt) return `provenance attempt ${p.run_attempt} is not attempt ${candidate.attempt}`;
-  if (p.event !== candidate.event || !producer.ref(String(p.ref))) return `measured on ${p.event} ${p.ref}, not a trusted ref`;
+  if (p.event !== candidate.event || p.ref !== `refs/heads/${candidate.headBranch}` || !producer.ref(String(p.ref))) return `measured on ${p.event} ${p.ref}, not a trusted ref`;
   if (p.head_sha !== candidate.headSha) return `provenance head ${p.head_sha} is not the run's head ${candidate.headSha}`;
   const exits = p.shard_test_exits;
   const shards = exits && typeof exits === "object" ? Object.keys(exits).sort((a, b) => Number(a) - Number(b)) : [];
@@ -126,7 +150,7 @@ export function refusal({ producer, candidate, provenance: p, lcov, consumer, no
   const measured = Date.parse(p.created_at);
   if (!Number.isFinite(measured)) return "provenance carries no measurement time";
   if (measured > now.getTime() + CLOCK_SKEW_MS) return `measured at ${p.created_at}, in the future`;
-  if (Date.parse(candidate.createdAt) > measured) return "measured before its own run was created";
+  if (!Number.isFinite(Date.parse(candidate.createdAt)) || Date.parse(candidate.createdAt) > measured) return "measured before its own run was created";
   if (now.getTime() - measured > MAX_AGE_HOURS * 3_600_000) return `measured at ${p.created_at}, older than ${MAX_AGE_HOURS}h`;
   return null;
 }
@@ -149,9 +173,10 @@ function readJson(path) {
  * Pin one floor into `pinDir`: `pin.json`, and on `narrow` the verified `lcov.info`. Returns the pin.
  * Every candidate weighed and refused is named in `refused`, so a `full` decision leaves evidence.
  */
-export function selectFloor({ pinDir, consumer, now = new Date(), run = spawnSync, log = console.log }) {
-  const asOf = now.toISOString();
+export function selectFloor({ pinDir, consumer, now = new Date(), asOf = now, run = spawnSync, log = console.log }) {
+  const cutoff = asOf.toISOString();
   mkdirSync(pinDir, { recursive: true });
+  rmSync(join(pinDir, "lcov.info"), { force: true });
   // Candidates download beside the pin and are removed before it is published.
   const work = join(pinDir, ".candidates");
   const refused = [];
@@ -159,7 +184,7 @@ export function selectFloor({ pinDir, consumer, now = new Date(), run = spawnSyn
   try {
     for (const producer of PRODUCERS) {
       const listed = gh(["run", "list", "--workflow", producer.workflow, ...producer.list, "--status", "success",
-        "--created", `<=${asOf}`, "--limit", String(LIST_LIMIT),
+        "--created", `<=${cutoff}`, "--limit", String(LIST_LIMIT),
         "--json", "attempt,conclusion,createdAt,databaseId,event,headBranch,headSha,updatedAt"], run);
       if (!listed.ok) {
         refused.push({ artifact: producer.artifact, reason: `cannot list runs: ${listed.stderr.trim().slice(0, 200)}` });
@@ -175,8 +200,9 @@ export function selectFloor({ pinDir, consumer, now = new Date(), run = spawnSyn
         refused.push({ artifact: producer.artifact, reason: "run listing is not a JSON array" });
         continue;
       }
-      // A run that finished after the as-of time is invisible to every shard alike.
-      const settled = rows.filter((row) => Date.parse(row?.updatedAt) <= now.getTime());
+      // The snapshot bounds discovery only. Freshness below always uses the execution clock.
+      const settled = rows.slice(0, LIST_LIMIT).filter((row) => row &&
+        Date.parse(row.createdAt) <= asOf.getTime() && Date.parse(row.updatedAt) <= asOf.getTime());
       for (const row of settled.slice(0, DOWNLOAD_LIMIT)) candidates.push({ producer, row });
     }
     candidates.sort((a, b) => Date.parse(b.row.createdAt) - Date.parse(a.row.createdAt));
@@ -214,48 +240,51 @@ export function selectFloor({ pinDir, consumer, now = new Date(), run = spawnSyn
 }
 
 /** The pinned lcov path when `pinDir` holds an intact `narrow` pin; throws naming what is wrong. */
-export function verifyPin(pinDir) {
+export function verifyPin(pinDir, now = new Date()) {
   const pin = readJson(join(pinDir, "pin.json"));
   if (pin === undefined) throw new Error(`no pinned floor at ${pinDir}/pin.json`);
   if (pin === null || pin.schema !== PIN_SCHEMA) throw new Error("the pinned floor record is malformed");
   if (pin.decision !== "narrow") throw new Error(`the pin decided ${pin.decision}, so no shard may have narrowed`);
+  const measured = Date.parse(pin.floor?.measured_at);
+  if (!Number.isFinite(measured) || measured > now.getTime() + CLOCK_SKEW_MS ||
+      now.getTime() - measured > MAX_AGE_HOURS * 3_600_000) throw new Error("the pinned floor is no longer within the 24h freshness bound");
   const lcovPath = join(pinDir, "lcov.info");
   if (!existsSync(lcovPath)) throw new Error("the pinned floor's lcov is missing");
-  if (sha256(readFileSync(lcovPath)) !== pin.floor?.lcov_sha256) throw new Error("the pinned floor's lcov differs from its pinned digest");
+  const lcov = readFileSync(lcovPath);
+  if (sha256(lcov) !== pin.floor?.lcov_sha256) throw new Error("the pinned floor's lcov differs from its pinned digest");
+  if (!lcovSourceCount(lcov.toString("utf8"))) throw new Error("the pinned floor's lcov is incomplete");
   return lcovPath;
 }
 
-/**
- * The one floor every narrowed shard under `shardsDir` pinned, downloaded into `outDir` and checked
- * against its digest; returns the lcov path. Throws naming the shard when a pin is missing or split.
- */
-export function agreeOnFloor({ shardsDir, outDir, run = spawnSync }) {
-  let agreed = null;
+/** Read the admission's immutable, attempt-specific artifact; no consumer lists producer runs. */
+export function consumeFloor({ pinDir, runId, artifact, digest, run = spawnSync }) {
+  if (!/^[1-9][0-9]*$/.test(String(runId)) || !/^coverage-floor-pin-[1-9][0-9]*$/.test(artifact ?? "") ||
+      !/^[a-f0-9]{64}$/.test(digest ?? "")) throw new Error("the workflow supplied no valid admission identity");
+  rmSync(pinDir, { recursive: true, force: true });
+  const dl = gh(["run", "download", String(runId), "-n", artifact, "-D", pinDir], run);
+  if (!dl.ok) throw new Error(`cannot download the pinned admission: ${dl.stderr.trim().slice(0, 200)}`);
+  const path = join(pinDir, "pin.json");
+  if (!existsSync(path) || sha256(readFileSync(path)) !== digest) throw new Error("the admission pin differs from the workflow's digest");
+  return verifyPin(pinDir);
+}
+
+/** Require every narrowed shard to have consumed the workflow admission's exact pin. */
+export function agreeOnFloor({ shardsDir, outDir }) {
+  const lcovPath = verifyPin(outDir);
+  const admitted = readFileSync(join(outDir, "pin.json"));
+  let narrowed = false;
   for (let n = 1; n <= SHARD_COUNT; n++) {
     const dir = join(shardsDir, `coverage-shard-${n}`);
     const selection = existsSync(join(dir, "selection")) ? readFileSync(join(dir, "selection"), "utf8").trim() : "";
     if (selection !== "narrow") continue;
-    const pin = readJson(join(dir, "floor-pin.json"));
-    if (!pin || pin.schema !== PIN_SCHEMA || pin.decision !== "narrow" || !pin.floor) {
-      throw new Error(`shard ${n} narrowed without a narrow floor pin`);
+    narrowed = true;
+    const path = join(dir, "floor-pin.json");
+    if (!existsSync(path) || !readFileSync(path).equals(admitted)) {
+      throw new Error(`shard ${n} did not consume the workflow admission's pin`);
     }
-    const key = (p) => [p.floor.artifact, p.floor.run_id, p.floor.run_attempt, p.floor.lcov_sha256].join(" ");
-    if (agreed === null) agreed = pin;
-    else if (key(agreed) !== key(pin)) throw new Error(`shard ${n} pinned ${key(pin)}, another shard pinned ${key(agreed)}`);
   }
-  if (agreed === null) throw new Error("no shard narrowed, so there is no pinned floor to read");
-  const { artifact, run_id: runId, lcov_sha256: digest } = agreed.floor;
-  const download = join(outDir, "download");
-  rmSync(download, { recursive: true, force: true });
-  const dl = gh(["run", "download", String(runId), "-n", artifact, "-D", download], run);
-  if (!dl.ok) throw new Error(`cannot download the pinned ${artifact} run ${runId}: ${dl.stderr.trim().slice(0, 200)}`);
-  const source = join(download, "lcov.info");
-  if (!existsSync(source) || sha256(readFileSync(source)) !== digest) throw new Error("the pinned floor's lcov differs from its pinned digest");
-  mkdirSync(outDir, { recursive: true });
-  copyFileSync(source, join(outDir, "lcov.info"));
-  rmSync(download, { recursive: true, force: true });
-  writeFileSync(join(outDir, "pin.json"), JSON.stringify(agreed, null, 2) + "\n");
-  return verifyPin(outDir);
+  if (!narrowed) throw new Error("no shard narrowed, so there is no pinned floor to read");
+  return lcovPath;
 }
 
 /** Shard exits recorded under `<dir>/coverage-shard-N/test-exit`, N = 1..SHARD_COUNT; an absent one is left out. */
@@ -302,11 +331,18 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   if (command === "select" && target) {
     const consumer = { repository: env.GITHUB_REPOSITORY ?? "", nodeMajor: nodeMajor(), policyDigest: policyDigest() };
     const asOf = flag(argv, "--as-of");
-    const now = asOf ? new Date(asOf) : new Date();
-    if (!Number.isFinite(now.getTime())) throw new Error(`--as-of ${asOf} is not a time`);
-    const pin = selectFloor({ pinDir: target, consumer, now });
+    const now = new Date();
+    const cutoff = asOf ? new Date(asOf) : now;
+    if (!Number.isFinite(cutoff.getTime())) throw new Error(`--as-of ${asOf} is not a time`);
+    const pin = selectFloor({ pinDir: target, consumer, now, asOf: cutoff });
     const out = flag(argv, "--decision-file");
     if (out) writeFileSync(out, `${pin.decision}\n`);
+    const githubOutput = flag(argv, "--github-output");
+    if (githubOutput) writeFileSync(githubOutput, `decision=${pin.decision}\nreason=${pin.reason.replace(/[\r\n]/g, " ")}\npin_digest=${sha256(readFileSync(join(target, "pin.json")))}\n`);
+    return 0;
+  }
+  if (command === "consume" && target) {
+    console.log(consumeFloor({ pinDir: target, runId: flag(argv, "--run-id"), artifact: flag(argv, "--artifact"), digest: flag(argv, "--pin-digest") }));
     return 0;
   }
   if (command === "agree" && target && argv[2]) {

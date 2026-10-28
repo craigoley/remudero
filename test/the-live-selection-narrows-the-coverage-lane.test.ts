@@ -14,17 +14,19 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { after, test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+const owned: string[] = [];
+after(() => { for (const path of owned) rmSync(path, { recursive: true, force: true }); });
 const doc = parseYaml(readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")) as {
   env?: Record<string, string>;
   jobs: Record<string, { strategy?: { matrix?: { shard?: unknown[] } }; steps?: Array<{ name?: string; run?: string; env?: Record<string, string> }> }>;
@@ -55,7 +57,7 @@ function nodeStub(selectorOut: string, candidatesExit = 0): string {
   return `#!/usr/bin/env bash
 echo "node $*" >> "$CALL_LOG"
 case "$*" in
-  scripts/coverage-floor.mjs\\ select*) echo narrow > "\${@: -1}" ;;
+  scripts/coverage-floor.mjs\\ consume*) mkdir -p coverage-floor-pin; echo '{}' > coverage-floor-pin/pin.json ;;
   scripts/coverage-floor.mjs\\ agree*) echo "coverage-floor: no shard pin" >&2; exit 1 ;;
   *--import\\ tsx\\ -e*) for last; do :; done; printf '${selectorOut}' > "$last" ;;
   *--select-candidates*) [ ${candidatesExit} = 0 ] || exit ${candidatesExit}; head -n 1 "$3" ;;
@@ -71,6 +73,7 @@ esac
 function run(body: string, env: Record<string, string>, node: string, ghRoutes: GhShimRoute[] = []) {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5705-`));
   const gh = ghShim(ghRoutes, { kind: "w1t5705-gh" });
+  owned.push(dir, gh.dir);
   mkdirSync(join(dir, "bin"));
   for (const [name, text] of [["node", node], ["git", "#!/usr/bin/env bash\necho \"git $*\" >> \"$CALL_LOG\"\n"]]) {
     writeFileSync(join(dir, "bin", name!), text!);
@@ -88,6 +91,7 @@ function run(body: string, env: Record<string, string>, node: string, ghRoutes: 
       GITHUB_OUTPUT: join(dir, "outputs.txt"),
       RUNNER_TEMP: dir,
       CALL_LOG: join(dir, "calls.log"),
+      GITHUB_RUN_ID: "999", FLOOR_DECISION: "narrow", FLOOR_ARTIFACT: "coverage-floor-pin-1", FLOOR_PIN_DIGEST: "fixture",
       ...env,
     },
   });
@@ -163,7 +167,7 @@ const seed = (narrowShard: number) => Array.from({ length: SHARDS }, (_, i) =>
   `mkdir -p coverage-shards/coverage-shard-${i + 1}; echo ${i + 1 === narrowShard ? "narrow" : "all"} > coverage-shards/coverage-shard-${i + 1}/selection`).join("\n");
 
 test("W1-T5705: when narrowed, the absolute-floor step reads only this run's pinned floor, and diff coverage reads the selection", () => {
-  // W1-T5892 owns the floor: each narrowed shard pins it, and this step never lists or picks a newest run.
+  // W1-T5892 owns the floor: one admission publishes it, and this step never lists or picks a newest run.
   // test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts drives the pinned arms.
   const ratchet = step("coverage-ratchet-required", "Coverage ratchet (blocks a PR whose branch coverage is below the absolute floor)");
   assert.equal(ratchet.env?.GH_TOKEN, "${{ github.token }}", "the pinned floor is read with the job token");
@@ -189,6 +193,7 @@ test("W1-T5705: the inline narrow selector runs for real against this repo", () 
   const script = /node --import tsx -e '\n([\s\S]*?)\n\s*' changed-files\.txt "\$\{RUNNER_TEMP\}\/affected\.diff" coverage-narrow-suites\.txt/.exec(coverageBody);
   assert.ok(script, "the coverage shard must invoke node --import tsx -e '<script>' changed-files.txt <diff> coverage-narrow-suites.txt");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5705-real-`));
+  owned.push(dir);
   writeFileSync(join(dir, "changed.txt"), ".github/workflows/ci.yml\n");
   writeFileSync(join(dir, "affected.diff"), "");
   const real = spawnSync(process.execPath, ["--import", "tsx", "-e", script![1]!, join(dir, "changed.txt"), join(dir, "affected.diff"), join(dir, "out.txt")], {
