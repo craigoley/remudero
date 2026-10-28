@@ -251,6 +251,7 @@ test("fix progress preserves log-only and review failures without inventing miss
   assert.deepEqual(redCheckNames({ ...view, ciFailures: [], redRequiredChecks: ["test-slow"] }), ["test-slow"]);
   assert.deepEqual(redCheckNames({ ...view, ciFailures: [], redRequiredChecks: [] }), []);
   assert.deepEqual(redCheckNames({ ...view, reviewState: "failure", unmetCriteria: [
-    { claim: "the failure remains visible", proof: "unit test: a literal control", met: false },
+    { claim: "the failure remains visible", proof: "unit test: a literal control", met: false,
+      reason: "the current literal control failed", proof_exec: "executed_fail" },
   ] }), ["review:the failure remains visible:unit test: a literal control", "test-slow-shard (2/2)"]);
 });
