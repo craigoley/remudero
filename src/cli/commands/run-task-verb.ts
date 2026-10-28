@@ -8174,7 +8174,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       ? "shadow-instance-refused"
       : wipeTestArmDecision.armed
         ? await armAutoMergeAtOpenAsync(prUrl,
-          selectedModeQualification === undefined ? undefined : realArmDepsAsync(() => config, selectedModeQualification), irreversible)
+          realArmDepsAsync(() => config, selectedModeQualification), irreversible)
         : "no-merge-boundary-refused", prUrl);
     // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
     // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped

@@ -9,6 +9,7 @@ import { runPreflightCoverage as runPreflightCoverageEngine, type PreflightCover
 import { FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
 import { preflightCommand } from "../src/run-task.js";
 import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 // ── W1-T1074: `rmd preflight --coverage` — diff-coverage, at author-time, on its OWN base ────
 //
@@ -440,7 +441,8 @@ test("preflightCommand: --coverage ADDS the coverage-mode steps after the three 
 });
 
 test("preflightCommand: WITHOUT --coverage, no coverage-mode step runs or prints — the shipped hand route (and --ci-parity/--fast) is untouched", async () => {
-  const spawn: PreflightSpawn = () => ({ status: 0, stdout: "\0feat(x): fine\n", stderr: "" });
+  // The judged census children (W1-T8379) pass only on a tally: this fake stands for finished runs.
+  const spawn: PreflightSpawn = (_file, args, opts) => ({ ...finishJudgedRun(args, opts), stdout: "\0feat(x): fine\n", stderr: "" });
   const originalLog = console.log;
   const lines: string[] = [];
   console.log = (...args: unknown[]) => {
