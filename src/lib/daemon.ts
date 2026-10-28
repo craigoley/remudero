@@ -8004,7 +8004,7 @@ export function reconstructOrphan(
  * dispatch claim, the drain's own deps), so this module keeps its no-filesystem contract.
  */
 export interface BoundedTargetJobKick { taskId: string; origin: string; repo: string }
-export interface BoundedTargetJobDeps {
+export interface BoundedTargetJobPorts {
   readJob: (origin: string) => TargetJobRead;
   writeJob: (record: TargetJobRecord) => void;
   admit: (repo: string) => TargetJobAdmission;
@@ -8018,7 +8018,7 @@ export interface BoundedTargetJobDeps {
   drain: (plan: Plan, opts: DrainOpts, onDispatch: () => void) => Promise<DrainSummary>;
   clearKick: (taskId: string, repo: string) => void;
   log: (step: string, extra?: Record<string, unknown>) => void;
-  now: () => string;
+  nowIso: () => string;
 }
 /** `ended`/`refused` close the job and its marker; `held` and `resumed` keep both for a later tick. */
 export type BoundedTargetJobOutcome =
@@ -8031,11 +8031,11 @@ const CAPACITY_STOPS: ReadonlySet<StopReason> = new Set<StopReason>([
   "quiet_hours_deferred", "new_build_deferred", "wip_deferred", "stopped", "paused",
 ]);
 
-export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: BoundedTargetJobDeps, baseOpts: DrainOpts = {}): Promise<BoundedTargetJobOutcome> {
+export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: BoundedTargetJobPorts, baseOpts: DrainOpts = {}): Promise<BoundedTargetJobOutcome> {
   const { taskId, origin, repo } = kick;
   const fields = { task: taskId, origin, repo };
   const base = (status: TargetJobStatus, prior?: TargetJobRecord, extra: Partial<TargetJobRecord> = {}): TargetJobRecord =>
-    ({ origin, taskId, repo, attempts: prior?.attempts ?? 0, ...extra, status, updatedAt: deps.now() });
+    ({ origin, taskId, repo, attempts: prior?.attempts ?? 0, ...extra, status, updatedAt: deps.nowIso() });
   const held = (reason: string, step = "target_job.held"): BoundedTargetJobOutcome => { deps.log(step, { ...fields, reason }); return { state: "held", reason }; };
   const close = (record: TargetJobRecord, reason: string, replayed: boolean): BoundedTargetJobOutcome => {
     if (!replayed) deps.writeJob({ ...record, reason });
@@ -8068,7 +8068,7 @@ export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: Boun
   if (prior?.status === "admitted") {
     // A restart or a lost response: recover from the durable record, the native receipts and the dispatch claim.
     const seen = deps.execution(prior);
-    if (seen.state === "ended") return close({ ...prior, status: "ended", updatedAt: deps.now() }, "terminal verdict recorded", false);
+    if (seen.state === "ended") return close({ ...prior, status: "ended", updatedAt: deps.nowIso() }, "terminal verdict recorded", false);
     const claim = await deps.claimHeld(taskId, repo);
     if (claim !== false || seen.state === "running") {
       if (prior.reason !== "resumed") {

@@ -43,7 +43,7 @@ import { censusRunDirs } from "../../lib/run-child-contract.js";
 import { plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import type { RunResult } from "../../lib/run-result.js";
-import { runBoundedTargetJob, type BoundedTargetJobDeps, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
+import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktrees } from "../../lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
@@ -310,7 +310,7 @@ export interface NativeTargetJobContext {
   /** The merged/open-PR projection bound to the TARGET owner and repository, never the core repository's closures. */
   project: (plan: Plan, owner: string, repo: string) => Map<string, StatusProjection>;
   runTask: (taskId: string, target: { planPath: string; owner: string }) => Promise<RunResult>;
-  claimHeld: BoundedTargetJobDeps["claimHeld"];
+  claimHeld: BoundedTargetJobPorts["claimHeld"];
   runDrain?: typeof runDrain;
 }
 
@@ -328,7 +328,7 @@ export function createNativeTargetJobRunner(ctx: NativeTargetJobContext): (kick:
     let planPath = "";
     let projection = new Map<string, StatusProjection>();
     const governors = Object.fromEntries(TARGET_JOB_DAEMON_DEPS.flatMap((key) => (daemonDeps[key] === undefined ? [] : [[key, daemonDeps[key]]]))) as Partial<DrainDeps>;
-    const jobDeps: BoundedTargetJobDeps = {
+    const jobDeps: BoundedTargetJobPorts = {
       readJob: store.read,
       writeJob: store.write,
       admit: (repo) => nativeTargetAdmission(repo, { ...ctx.instances, repoRoot: ctx.repoRoot }),
@@ -342,7 +342,7 @@ export function createNativeTargetJobRunner(ctx: NativeTargetJobContext): (kick:
       claimHeld: ctx.claimHeld,
       // The core ledger's own receipts for THIS origin, read from the dispatch time the durable record kept.
       execution: (record) => readTargetExecution(stateDir, { taskId: record.taskId, origin: record.origin, repo: record.repo,
-        requestedAt: new Date(Date.parse(record.updatedAt) - 60_000).toISOString(), nowMs: ctx.nowMs() }),
+        requestedAt: fixedClock(Date.parse(record.updatedAt) - 60_000).iso(), nowMs: ctx.nowMs() }),
       drain: (plan, opts, onDispatch) => (ctx.runDrain ?? runDrain)(plan, {
         ...governors,
         refreshMerged: () => {
@@ -357,7 +357,7 @@ export function createNativeTargetJobRunner(ctx: NativeTargetJobContext): (kick:
       }, opts),
       clearKick: (taskId, repo) => { clearKick(ctx.root, taskId, repo); },
       log: ctx.log,
-      now: () => new Date(ctx.nowMs()).toISOString(),
+      nowIso: () => clockFromMillisFn(ctx.nowMs).iso(),
     };
     return runBoundedTargetJob(kick, jobDeps);
   };
