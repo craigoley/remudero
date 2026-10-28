@@ -1558,7 +1558,7 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
       seen.set(args.join(" "), { output });
       return output;
     } catch (error) {
-      seen.set(args.join(" "), { error });
+      seen.set(args.join(" "), { error: error });
       return undefined;
     }
   };
