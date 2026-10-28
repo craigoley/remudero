@@ -22,8 +22,9 @@
 
 import { execFileSync } from "node:child_process";
 import { observeSelectedRegistrySync, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
-import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { IMMUTABLE_REVISION_RE, parseAaTrialManifest, type AaTrialManifest, type BenchmarkAaCommandInput, type BenchmarkAaReport } from "./benchmark-aa.js";
@@ -207,21 +208,45 @@ function eligibilityReason(task: ReadinessTask | undefined): string | null {
   return criteria.some((criterion) => parseWhitelistedProof(criterion.proof) !== null) ? null : "no-executable-proof";
 }
 
-/** The population is frozen ONCE, before the first pair: a later run reads it back and never re-derives eligibility. */
-function freezePopulation(protocol: ProspectiveAaProtocol, trialDir: string, tasks: ReadonlyMap<string, ReadinessTask> | null,
-  nowIso: string): { ok: true; population: FrozenPopulation } | { ok: false; reason: string } {
-  const path = join(trialDir, "population.json");
+type PopulationOutcome = { ok: true; population: FrozenPopulation } | { ok: false; reason: string };
+
+/** Reads and validates a population already on disk; never re-derives or widens it. */
+function readStoredPopulation(protocol: ProspectiveAaProtocol, path: string): PopulationOutcome | undefined {
   let stored: FrozenPopulation | undefined;
   try {
     const text = readOptional(path);
     if (text !== undefined) stored = JSON.parse(text) as FrozenPopulation;
   } catch (error) { return { ok: false, reason: `population-unreadable:${(error as Error).message.slice(0, 80)}` }; }
-  if (stored !== undefined) {
-    const { digest, ...body } = stored;
-    if (stored.version !== READINESS_POPULATION_VERSION || digest !== sha256(JSON.stringify(body))
-      || stored.allocationReceiptHash !== protocol.allocationReceiptHash) return { ok: false, reason: "population-changed-since-freeze" };
-    return { ok: true, population: stored };
-  }
+  if (stored === undefined) return undefined;
+  const changed: PopulationOutcome = { ok: false, reason: "population-changed-since-freeze" };
+  if (stored === null || typeof stored !== "object" || Array.isArray(stored)
+    || !Array.isArray(stored.eligible) || !Array.isArray(stored.refused)) return changed;
+  const hash = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  if (stored.version !== READINESS_POPULATION_VERSION || typeof stored.trialId !== "string"
+    || typeof stored.frozenAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(stored.frozenAt)
+    || !Number.isFinite(Date.parse(stored.frozenAt)) || !hash(stored.allocationReceiptHash) || !hash(stored.digest)
+    || stored.consent !== protocol.manifest.cohort.kind || stored.orderMethod !== READINESS_ORDER_METHOD
+    || !Number.isSafeInteger(stored.denominator)
+    || stored.eligible.some((entry) => entry === null || typeof entry !== "object" || Array.isArray(entry)
+      || typeof entry.taskId !== "string" || !hash(entry.criteriaHash))
+    || stored.refused.some((entry) => entry === null || typeof entry !== "object" || Array.isArray(entry)
+      || typeof entry.taskId !== "string" || typeof entry.reason !== "string" || entry.reason.trim().length === 0)) return changed;
+  const { digest, ...body } = stored;
+  if (digest !== sha256(JSON.stringify(body))
+    || stored.trialId !== protocol.trialId || stored.allocationReceiptHash !== protocol.allocationReceiptHash
+    || stored.denominator !== protocol.manifest.tasks.length) return changed;
+  const covered = [...stored.eligible.map((entry) => entry.taskId), ...stored.refused.map((entry) => entry.taskId)].sort();
+  const registered = protocol.manifest.tasks.map((entry) => entry.taskId).sort();
+  if (JSON.stringify(covered) !== JSON.stringify(registered)) return changed;
+  return { ok: true, population: stored };
+}
+
+/** The population is frozen ONCE, before the first pair: a later run reads it back and never re-derives eligibility. */
+function freezePopulation(protocol: ProspectiveAaProtocol, trialDir: string, tasks: ReadonlyMap<string, ReadinessTask> | null,
+  nowIso: string): PopulationOutcome {
+  const path = join(trialDir, "population.json");
+  const existing = readStoredPopulation(protocol, path);
+  if (existing !== undefined) return existing;
   if (tasks === null) return { ok: false, reason: "plan-unreadable-before-freeze" };
   const order = (taskId: string) => sha256(`benchmark-aa-readiness-order-v1\0${protocol.allocationReceiptHash}\0${taskId}`);
   const eligible: FrozenPopulation["eligible"] = [];
@@ -236,7 +261,12 @@ function freezePopulation(protocol: ProspectiveAaProtocol, trialDir: string, tas
     allocationReceiptHash: protocol.allocationReceiptHash, consent: protocol.manifest.cohort.kind, orderMethod: READINESS_ORDER_METHOD,
     denominator: protocol.manifest.tasks.length, eligible, refused };
   const population: FrozenPopulation = { ...body, digest: sha256(JSON.stringify(body)) };
-  writeFileSync(path, `${JSON.stringify(population, null, 2)}\n`, { flag: "wx" });
+  try { writeFileSync(path, `${JSON.stringify(population, null, 2)}\n`, { flag: "wx" }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // A competing driver installed its population between the read and the create: validate that winner, never replace it.
+    return readStoredPopulation(protocol, path) ?? { ok: false, reason: "population-unreadable:winner-vanished" };
+  }
   return { ok: true, population };
 }
 
@@ -335,7 +365,7 @@ export interface BenchmarkAaReadinessResult {
   report: { state: BenchmarkAaReport["state"]; verdict: BenchmarkAaReport["verdict"]; reportHash: string } | null;
   receipt: { state: "emitted"; path: string; reportHash: string } | { state: "withheld"; gaps: ReadinessGap[] };
   nextGap: ReadinessGap | null;
-  followUp: { key: string; state: "recorded" | "already-recorded" } | null;
+  followUp: { key: string; state: "recorded" | "already-recorded" | "pending"; unvalidated?: number } | null;
   /** The driver runs beside ordinary work: it pauses, holds and routes nothing, and never touches the paid pilot. */
   holds: { dispatch: false; pr: false; daemon: false };
   paidPilot: "not-activated";
@@ -347,20 +377,109 @@ function gapOf(reason: string): ReadinessGap {
   return { kind, machineRepairable: repairable, detail: reason };
 }
 
+/** One canonical sidecar row; the owner file carries the exact row its writer intends to append. */
+interface GapRow { ts: string; key: string; trialId: string; gap: ReadinessGap; repo?: string }
+
+/** A line is the canonical record for `key` only when it parses, keys itself consistently and names this repo. */
+function canonicalGapRow(line: string, key: string, repo: string | undefined): boolean {
+  let row: Record<string, unknown>;
+  try { row = JSON.parse(line) as Record<string, unknown>; } catch {
+    // An unparseable line is never the canonical record: it is kept and counted as `unvalidated` by the caller.
+    return false;
+  }
+  if (typeof row !== "object" || row === null || Array.isArray(row) || row.key !== key) return false;
+  const gap = row.gap as Record<string, unknown> | null | undefined;
+  return typeof row.ts === "string" && Number.isFinite(Date.parse(row.ts)) && typeof row.trialId === "string"
+    && typeof gap === "object" && gap !== null && typeof gap.kind === "string" && key === `${row.trialId}:${gap.kind}`
+    && row.repo === repo;
+}
+
+/** Owner generation `n` for one key: published whole by link(2), so a reader never sees a torn owner. */
+interface AdmissionOwner { host: string; pid: number; nonce: string; row: GapRow }
+
+function readOwner(path: string): AdmissionOwner | "absent" | "unreadable" {
+  let text: string;
+  try { text = readFileSync(path, "utf8"); } catch (error) {
+    // ENOENT ends the generation chain; every other failure is "unreadable", which the caller reports as pending.
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable";
+  }
+  try {
+    const owner = JSON.parse(text) as AdmissionOwner;
+    return typeof owner.host === "string" && Number.isInteger(owner.pid) && typeof owner.nonce === "string"
+      && typeof owner.row === "object" && owner.row !== null ? owner : "unreadable";
+  } catch {
+    // A torn or tampered owner file is explicit "unreadable" evidence (reported as pending), never read as a free slot.
+    return "unreadable";
+  }
+}
+
+/** Dead only when it is provably so: this host, and the kernel has no such process. Anything else may still be writing. */
+function ownerProvablyDead(owner: AdmissionOwner): boolean {
+  if (owner.host !== hostname()) return false;
+  try { process.kill(owner.pid, 0); return false; } catch (error) {
+    // Only ESRCH proves the owner gone; EPERM and anything else mean it may still be writing, so it is not dead.
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+/** Publishes `owner` at `path` with its content already in place; false when another writer already holds that generation. */
+function publishOwner(path: string, owner: AdmissionOwner): boolean {
+  const tmp = `${path}.${owner.nonce}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(owner)}\n`, { flag: "wx" });
+  try { linkSync(tmp, path); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return false; throw error; }
+  finally { unlinkSync(tmp); }
+}
+
 /**
- * Records one gap per trial and gap kind in the local sidecar; a second run that finds the same gap does not record it twice.
+ * Records one gap per repo, trial and gap kind in the local sidecar, once, even under competing writers.
  * Recording is NOT filing: a task exists only once the opportunity intake's triage has produced one (benchmark-readiness-intake.ts).
  * `repo` is the GitHub identity of the checkout that observed the gap; the reader refuses a record that lacks it or names another.
+ *
+ * Admission is a chain of exclusively-published owner files (`<hash>.<n>.owner`) beside the sidecar. The writer that publishes the
+ * next generation is the only one that may append; a later writer that finds the key already recorded reports `already-recorded`,
+ * one that finds a possibly-live owner reports `pending` (an explicit outcome, never empty or done). An owner that is provably dead
+ * (this host, no such process) is succeeded by a NEW generation that appends the dead owner's own row; no owner file is ever deleted.
+ * The sidecar descriptor is opened once, so a replaced path keeps appending to the file that was read, not to the replacement.
  */
 export function recordReadinessGap(stateDir: string, trialId: string, gap: ReadinessGap, nowIso: string, repo?: string): BenchmarkAaReadinessResult["followUp"] {
   const path = join(stateDir, READINESS_FOLLOW_UPS_FILE);
   const key = `${trialId}:${gap.kind}`;
+  const mine: GapRow = { ts: nowIso, key, trialId, gap, ...(repo === undefined ? {} : { repo }) };
+  const dir = join(stateDir, `${READINESS_FOLLOW_UPS_FILE}.admissions`);
+  mkdirSync(dir, { recursive: true });
+  const stem = join(dir, createHash("sha256").update(`${repo ?? ""}\0${key}`).digest("hex").slice(0, 32));
   const fd = openSync(path, "a+");
   try {
-    const recorded = readFileSync(fd, "utf8").split("\n").some((line) => line.includes(`"key":${JSON.stringify(key)}`));
-    if (recorded) return { key, state: "already-recorded" };
-    appendFileSync(fd, `${JSON.stringify({ ts: nowIso, key, trialId, gap, ...(repo === undefined ? {} : { repo }) })}\n`);
-    return { key, state: "recorded" };
+    // The first read starts at 0; later readFileSync(fd) calls continue from there, so each returns only what was appended since.
+    let text = "";
+    const recordedState = (): boolean => {
+      text += readFileSync(fd, "utf8");
+      return text.split("\n").some((line) => canonicalGapRow(line, key, repo));
+    };
+    const unvalidated = (): number => text.split("\n").filter((line) => line.includes(`"key":${JSON.stringify(key)}`) && !canonicalGapRow(line, key, repo)).length;
+    const done = (state: "recorded" | "already-recorded" | "pending") => ({ key, state, ...(unvalidated() > 0 ? { unvalidated: unvalidated() } : {}) });
+    const me: Omit<AdmissionOwner, "row"> = { host: hostname(), pid: process.pid, nonce: randomUUID() };
+    for (let attempt = 0; attempt < 8; attempt++) {
+      if (recordedState()) return done("already-recorded");
+      let generation = 0;
+      let last: AdmissionOwner | null = null;
+      for (;; generation++) {
+        const found = readOwner(`${stem}.${generation}.owner`);
+        if (found === "absent") break;
+        if (found === "unreadable") return done("pending");
+        last = found;
+      }
+      if (last !== null && !ownerProvablyDead(last)) return recordedState() ? done("already-recorded") : done("pending");
+      const row = last !== null && canonicalGapRow(JSON.stringify(last.row), key, repo) ? last.row : mine;
+      if (!publishOwner(`${stem}.${generation}.owner`, { ...me, row })) continue;
+      // The owner re-reads: a predecessor may have appended just before it died, and a partial line is kept as evidence.
+      if (recordedState()) return done("already-recorded");
+      const lead = text === "" || text.endsWith("\n") ? "" : "\n";
+      appendFileSync(fd, `${lead}${JSON.stringify(row)}\n`);
+      return done("recorded");
+    }
+    return done("pending");
   } finally { closeSync(fd); }
 }
 
@@ -527,7 +646,7 @@ export async function benchmarkAaReadinessCommand(rest: string[], run: (request:
     print(`  pairs ${result.run.dispatchedPairs} run now, ${result.run.completedBefore} completed before${result.run.stoppedBy ? `; stopped: ${result.run.stoppedBy}` : ""}`);
     for (const refusal of result.refusals) print(`  refused: ${refusal}`);
     if (result.receipt.state === "emitted") print(`  receipt ${result.receipt.reportHash.slice(0, 16)} written to ${result.receipt.path}`);
-    else if (result.nextGap) print(`  next gap: ${result.nextGap.detail}${result.followUp ? ` (gap ${result.followUp.state}; recorded, not a filed task)` : ""}`);
+    else if (result.nextGap) print(`  next gap: ${result.nextGap.detail}${result.followUp ? ` (gap ${result.followUp.state}; ${result.followUp.state === "pending" ? "another writer holds admission" : "recorded"}, not a filed task)` : ""}`);
   }
   return result.state === "receipt-emitted" ? 0 : 1;
 }

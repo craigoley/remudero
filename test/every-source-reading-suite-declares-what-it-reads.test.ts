@@ -7,8 +7,10 @@ import { fileURLToPath } from "node:url";
 import {
   discoverSourceTextReaders,
   isUnplacedSourceReader,
+  missingPopulationControls,
   readerJoins,
   sourceTextReaderOf,
+  type SourceTextReader,
 } from "../src/lib/source-text-readers.js";
 
 /**
@@ -24,12 +26,8 @@ import {
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ROOTS = new Set(["src", "test", "scripts", "deploy", "README.md", ".github"]);
 
-test("every source-reading suite is placed by what it reads or declares it", () => {
-  const readers = discoverSourceTextReaders(REPO_ROOT);
-  // POSITIVE CONTROLS: the two suites the 10-15 incidents reddened must be in the population this walks.
-  const byFile = new Map(readers.map((r) => [r.testFile, r]));
-  assert.ok(byFile.get("test/a-generic-route-has-an-explicit-tool-bound.test.ts")?.walks.includes("src/run-task.ts"));
-  assert.ok(byFile.get("test/a-wall-clock-bound-declares-itself.test.ts")?.walks.includes("test/"));
+export function assertSourceReaderCensus(readers: readonly SourceTextReader[]): void {
+  assert.deepEqual(missingPopulationControls(readers), [], "discovery must see both source and test readers");
   const unplaced = readers.filter(isUnplacedSourceReader).map((r) => r.testFile);
   assert.deepEqual(
     unplaced,
@@ -37,6 +35,10 @@ test("every source-reading suite is placed by what it reads or declares it", () 
     "these suites declare source text as their subject but name no path rmd census-membership can join a diff to. " +
       "Add `// @census-reads: <path or glob> ...` naming what each reads (or `none` when the marker is about a fixture).",
   );
+}
+
+test("every source-reading suite is placed by what it reads or declares it", () => {
+  assertSourceReaderCensus(discoverSourceTextReaders(REPO_ROOT));
 });
 
 test("the meta-census names a marked suite whose read cannot be derived", () => {
