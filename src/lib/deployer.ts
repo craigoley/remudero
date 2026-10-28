@@ -2529,7 +2529,7 @@ export interface RealDeployOpts {
    *  trim, since `git status --porcelain`'s leading status column is significant). Throws on
    *  a non-zero exit, like execFileSync — callers catch where that is expected (e.g. `pgrep`
    *  with no matches). */
-  execFile?: (cmd: string, args: string[]) => string;
+  execFile?: (cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }) => string;
 }
 
 /** Resolve the deploy supervisor's ledger from the state root it is operating on.
@@ -2641,7 +2641,8 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
 } {
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const clock = (): number => Date.now();
-  const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
+  const exec = o.execFile ?? ((cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }) =>
+    execFileSync(cmd, args, { encoding: "utf8", ...options }).toString());
   const drive = <R>(steps: DeploySteps<R>): R | Promise<R> => driveDeploySteps(steps, sensorExec !== undefined);
   const execSensor = (cmd: string, args: string[]) => deployStep(() => sensorExec ? sensorExec(cmd, args) : exec(cmd, args));
   function git(args: readonly string[]): string;
@@ -2799,13 +2800,14 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
       // W1-T8138: the drain wait comes from the lanes in flight, not a constant. With no run history to read
       // (or an operator's own RMD_RECYCLE_WAIT_S) the script keeps its labelled fallback.
       const derived = deriveWaitFromState();
+      const options = { env: { ...process.env, RMD_RECYCLE_CALLER: "deploy-tick" } };
       if (derived && derived.source !== "no_history_fallback") {
         // The derived wait is a DEFAULT: a RMD_RECYCLE_WAIT_S already in the supervisor's environment (an
         // operator's explicit choice) wins, decided by the shell so this file reads no environment itself.
-        exec("bash", ["-c", 'export RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-$1}"; shift; exec bash "$@"', "recycle-wait", String(derived.waitS), ...script]);
+        exec("bash", ["-c", 'export RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-$1}"; shift; exec bash "$@"', "recycle-wait", String(derived.waitS), ...script], options);
         return;
       }
-      exec("bash", script);
+      exec("bash", script, options);
     },
   };
 
