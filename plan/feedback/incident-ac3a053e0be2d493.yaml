@@ -21,8 +21,24 @@ attachments: []
 origin: incident#ac3a053e0be2d493f93b96e151a15ecd78d1044a450ac2bc39610c5fcebe7540
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/15036
+summary:
+  headline: CI plan guard still reports a gap on main after automatic repair failed
+  what_happened: The main-plan-guard CI check found a gap on main commit 7a3775f
+    and its automatic repair attempt did not close it. No recent merged pull
+    request was linked to the failure, so the cause is not yet known.
+  decision: Choose one of the options below to decide how to handle the persistent
+    main-branch CI gap.
+  options:
+    - label: Investigate the gap manually
+      consequence: An engineer checks the plan-guard workflow and commit 7a3775f to
+        find the root cause before any change is made.
+    - label: Re-run the plan-guard check
+      consequence: The check runs again on main, which may clear a transient failure
+        but will not fix a real gap.
+    - label: Accept the gap for now
+      consequence: The gap stays open on main, and the incident remains unresolved
+        until someone fixes it.
 expansion: null
 submission_key: null
 thread_id: null
