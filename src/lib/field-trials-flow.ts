@@ -25,8 +25,7 @@ import { projectRepairCostContext, repairCostCells, repairCostsByPull, type Repa
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
-import { attributeAttemptOutcome, type AttemptOutcome } from "./attempt-outcome-attribution.js";
-import { buildModelFieldNoteCandidate, parseFieldNoteWindows, parseSiteConsentRegistry, PINNED_SITE_CONSENT_REGISTRY,
+import { buildModelFieldNoteCandidate, FIELD_NOTE_WINDOWS_VERSION, parseFieldNoteWindows, parseSiteConsentRegistry, PINNED_SITE_CONSENT_REGISTRY,
   type AdoptionSelectedCell, type FieldNoteWindows } from "./field-trials-field-note.js";
 export type { AdoptionSelectedCell } from "./field-trials-field-note.js";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
@@ -405,8 +404,8 @@ function repairCells(units: RepairUnit[]) {
 }
 
 type AdoptionUnit = Unit & { requested: string | null; selected: string | null; served: string | null; servedMissing: string | null;
-  /** W1-T10831: the joined call's outcome under the shared attribution (W1-T10875); null when no call joined. */
-  outcome: AttemptOutcome | null };
+  /** W1-T10831: a joined boolean worker outcome, regardless of which component caused a failure. */
+  callOutcomeKnown: boolean };
 
 function adoptionCells(units: AdoptionUnit[]) {
   const tally = (values: (string | null)[]) => {
@@ -426,7 +425,7 @@ function selectedCrossTab(units: AdoptionUnit[]): Record<string, AdoptionSelecte
     const cell = Object.hasOwn(out, unit.selected) ? out[unit.selected]! : { assigned: 0, servedKnown: 0, callOutcomeKnown: 0 };
     cell.assigned += 1;
     cell.servedKnown += Number(unit.served !== null);
-    cell.callOutcomeKnown += Number(unit.outcome === "success" || unit.outcome === "model");
+    cell.callOutcomeKnown += Number(unit.callOutcomeKnown);
     Object.defineProperty(out, unit.selected, { value: cell, enumerable: true, configurable: true, writable: true });
   }
   return out;
@@ -673,13 +672,6 @@ function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: M
   });
 }
 
-/** W1-T10875's attribution over a joined call, in the ledger's own field names (as the served-trial cohort reads it). */
-function callOutcomeOf(call: FlowRow): AttemptOutcome {
-  return attributeAttemptOutcome({ ...call.outcomeSignals, success: call.success, served_model: call.servedModel,
-    ...(call.servedModelReason != null ? { served_model_reason: call.servedModelReason } : {}),
-    ...(call.costUsd != null ? { total_cost_usd: call.costUsd } : {}) }).outcome;
-}
-
 function adoptionUnits(ctx: SourceContext): { units: AdoptionUnit[]; transitions: ModelTransition[] } {
   const assignments = ctx.rows.filter((row) => row.step === "worker.assignment" && row.assignmentId !== null);
   const calls = new Map<string, FlowRow>();
@@ -704,7 +696,7 @@ function adoptionUnits(ctx: SourceContext): { units: AdoptionUnit[]; transitions
     units.push(withDigest({ key: `${ctx.label}|${host}|${row.ts?.slice(0, 10) ?? "unknown"}|${stratum(row.taskClass)}`,
       requested: row.requestedModel, selected: row.selectedModel, served,
       servedMissing: served !== null ? null : call === undefined ? "no-attempt" : "not-recorded",
-      outcome: call === undefined ? null : callOutcomeOf(call) }));
+      callOutcomeKnown: typeof call?.success === "boolean" }));
     note(host, row.requestedModel, "firstRequestedAt", row.ts);
     note(host, row.selectedModel, "firstSelectedAt", row.ts);
     note(host, served, "firstServedAt", call?.ts ?? null);
@@ -1216,9 +1208,10 @@ function writeJsonAtomically(path: string, value: unknown): string {
   return sha256(encoded);
 }
 
-function readJson(path: string): unknown {
+function readJson(path: string, missing?: unknown): unknown {
   try { return JSON.parse(readFileSync(path, "utf8")); }
-  catch {
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && missing !== undefined) return missing;
     const reason = "absent-or-unreadable";
     return { unreadable: reason };
   }
@@ -1259,7 +1252,7 @@ function fieldNoteMode(args: { outDir: string; out: string; nowIso: string; json
   consentPath: string | undefined; registryPath: string | undefined }): number {
   const snapshotValue = record(readJson(join(args.outDir, "field-trials-flow-v1.json")));
   const windowsPath = join(args.outDir, "field-trials-field-note-windows.json");
-  const windows = parseFieldNoteWindows(readJson(windowsPath));
+  const windows = parseFieldNoteWindows(readJson(windowsPath, { version: FIELD_NOTE_WINDOWS_VERSION, windows: [] }));
   const consent = typeof args.consentPath === "string" ? parseFieldTrialsConsent(readJson(args.consentPath)) : null;
   const registry = args.registryPath === undefined ? PINNED_SITE_CONSENT_REGISTRY : parseSiteConsentRegistry(readJson(args.registryPath));
   const result = snapshotValue?.version !== FIELD_TRIALS_FLOW_VERSION ? { state: "refused" as const, reason: "no-snapshot" }

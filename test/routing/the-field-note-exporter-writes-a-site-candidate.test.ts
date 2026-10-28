@@ -73,7 +73,7 @@ const wholeUtcDays = (start: string, end: string) => start < end && Date.parse(s
 // ---- end of the pinned copy ------------------------------------------------------------------------------
 
 const DAY = (day: number, hour = 0) => new Date(Date.UTC(2026, 8, day, hour)).toISOString();
-type Call = "served" | "no-call" | "ladder-refusal" | "served-no-outcome";
+type Call = "served" | "served-failure" | "no-call" | "ladder-refusal" | "served-no-outcome";
 type Spec = { model: string; taskClass?: string; day: number; n: number; call: Call; host?: string; label?: string };
 
 /** Ledger rows shaped like production: an assignment, and (unless no-call) the worker.attempt joined by assignment id. */
@@ -86,6 +86,7 @@ function assignmentCallRows(specs: Spec[]): Record<string, unknown>[] {
       benchmark_run: { work: { taskClass: { state: "observed", value: spec.taskClass ?? "implement" } } } };
     const attempt = { ...base, ts: DAY(spec.day, 3), step: "worker.attempt", selection_assignment_id: id,
       ...(spec.call === "served" ? { served_model: spec.model, success: true } : {}),
+      ...(spec.call === "served-failure" ? { served_model: spec.model, success: false, worker_failure: "infra" } : {}),
       ...(spec.call === "served-no-outcome" ? { served_model: spec.model } : {}),
       ...(spec.call === "ladder-refusal" ? { success: false, worker_failure: "deployment-absent" } : {}) };
     return spec.call === "no-call" ? [assignment] : [assignment, attempt];
@@ -122,6 +123,7 @@ test("W1-T10831: the field-note candidate passes the site validator once reviewe
     { model: "claude-opus-5", day: 2, n: 20, call: "served" }, { model: "claude-opus-5", day: 3, n: 10, call: "ladder-refusal" },
     { model: "claude-opus-5", taskClass: "review", day: 3, n: 10, call: "served" },
     { model: "claude-opus-5", taskClass: "review", day: 3, n: 10, call: "served-no-outcome" },
+    { model: "gpt-6.1-sol", taskClass: "review", day: 3, n: 20, call: "served-failure" },
     { model: "gpt-6.1-sol", day: 4, n: 12, call: "served" }] }]);
   const result = candidateOf(snapshot);
   assert.equal(result.state, "candidate");
@@ -141,8 +143,9 @@ test("W1-T10831: the field-note candidate passes the site validator once reviewe
   assert.ok(wholeUtcDays(candidate.note.windowStart, candidate.note.windowEnd));
   assert.deepEqual(candidate.note.sourceRepos, ["remudero"], "core's owner/repo maps to the site's bare repository name");
   assert.deepEqual(candidate.note.rows.map((row) => [row.modelId, row.taskClass, row.assigned, row.servedObserved, row.callOutcomeObserved]), [
-    ["claude-opus-5", "implement", 30, 20, 20], ["gpt-6.1-sol", "implement", 30, 20, 20], ["claude-opus-5", "review", 20, 20, 10],
-  ], "an assignment with no joined call is not served-known, a ladder refusal is no model outcome, day 4 is outside the window");
+    ["claude-opus-5", "implement", 30, 20, 30], ["gpt-6.1-sol", "implement", 30, 20, 20],
+    ["claude-opus-5", "review", 20, 20, 10], ["gpt-6.1-sol", "review", 20, 20, 20],
+  ], "joined true and false outcomes count regardless of attribution; absent outcomes and calls do not; day 4 is excluded");
   assert.deepEqual(candidate.note.rows[0]!.verified, { state: "unavailable", reason: "no-verified-outcome-join" });
   assert.deepEqual(candidate.servedModelGap.rows.find((row) => row.modelId === "gpt-6.1-sol"),
     { modelId: "gpt-6.1-sol", taskClass: "implement", assigned: 30, servedObserved: 20, servedUnknown: 10 });
@@ -198,6 +201,17 @@ test("W1-T10831: the field note honours the consent receipts and carries no priv
     ({ ...entry, revoked: true })) } }), { state: "withheld", reason: "no-aggregate-consent" }, "revoked receipts withdraw every source");
   assert.deepEqual(candidateOf(snapshot, { consent: { version: "field-trials-consent-v1", repos: CONSENT.repos.map((entry) =>
     ({ ...entry, rights: "private" as const })) } }), { state: "withheld", reason: "no-aggregate-consent" });
+  const benchmarkConsent: FieldTrialsConsent = { version: "field-trials-consent-v1", repos: CONSENT.repos.map((entry) =>
+    ({ ...entry, rights: "public-benchmark", publicSourceUrl: "https://example.com/benchmark" })) };
+  assert.deepEqual(candidateOf(snapshot, { consent: benchmarkConsent }), { state: "withheld", reason: "no-aggregate-consent" },
+    "a public-benchmark receipt cannot replace aggregate-opt-in consent");
+  const mixed = candidateOf(snapshot, { consent: { ...CONSENT, repos: [benchmarkConsent.repos[0]!, CONSENT.repos[1]!] } });
+  assert.equal(mixed.state, "candidate");
+  if (mixed.state !== "candidate") return;
+  assert.deepEqual(mixed.candidate.note.sourceRepos, ["remudero-console"]);
+  assert.deepEqual(mixed.candidate.note.rows.map((row) => [row.assigned, row.servedObserved, row.callOutcomeObserved]), [[30, 20, 20]],
+    "only the source with live aggregate-opt-in consent contributes counts");
+  assert.deepEqual(mixed.candidate.withheld.sources.map((source) => source.reason), ["no-aggregate-consent", "no-aggregate-consent"]);
 
   const revokedCore = candidateOf(snapshot, { consent: { version: "field-trials-consent-v1", repos: [{ ...CONSENT.repos[0]!, revoked: true },
     CONSENT.repos[1]!, { repo: "craigoley/remudero-lab", rights: "aggregate-opt-in", receipt: "lab-receipt" }] } });
@@ -245,6 +259,11 @@ test("W1-T10831: the field note honours the consent receipts and carries no priv
     assert.equal(lines.at(-1), "field-trials: field note withheld (no-consent-receipt)");
     assert.equal(existsSync(out), false, "no consent file writes no candidate");
     assert.equal(existsSync(join(outDir, "field-trials-field-note-windows.json")), false, "and records no window");
+    writeFileSync(join(root, "consent.json"), JSON.stringify(benchmarkConsent));
+    assert.equal(await run(["--consent", join(root, "consent.json")]), 0);
+    assert.equal(lines.at(-1), "field-trials: field note withheld (no-aggregate-consent)");
+    assert.equal(existsSync(out), false, "public-benchmark consent writes no candidate");
+    assert.equal(existsSync(join(outDir, "field-trials-field-note-windows.json")), false, "and records no exported window");
     writeFileSync(join(root, "consent.json"), JSON.stringify(CONSENT));
     writeFileSync(join(root, "registry.json"), JSON.stringify({ revision: "owner-2026-09-25-v1", entries: [{ repository: "remudero",
       state: "active", scope: "aggregate-public", approvedOn: "2026-09-25", approvedBy: "owner" }] }));
@@ -298,9 +317,20 @@ test("W1-T10831: consecutive field-note windows never overlap", async () => {
 
     assert.equal(await run(DAY(7, 8)), 0);
     assert.equal(lines.at(-1), "field-trials: field note withheld (no-new-whole-utc-day)", "a re-run inside the same day exports nothing");
-    writeFileSync(windowsPath, JSON.stringify({ version: "something-else" }));
-    assert.equal(await run(DAY(8, 7)), 1);
-    assert.equal(lines.at(-1), "field-trials: field note refused (field-note-windows-invalid)", "a corrupt record never restarts the windows");
+    const savedCandidate = readFileSync(out, "utf8");
+    for (const corrupt of [JSON.stringify({ version: "something-else" }), '{"version":', "", "null", "[]"]) {
+      writeFileSync(windowsPath, corrupt);
+      assert.equal(await run(DAY(8, 7)), 1, `corrupt history must refuse: ${JSON.stringify(corrupt)}`);
+      assert.equal(lines.at(-1), "field-trials: field note refused (field-note-windows-invalid)");
+      assert.equal(readFileSync(out, "utf8"), savedCandidate, "a refused export preserves the existing candidate");
+      assert.equal(readFileSync(windowsPath, "utf8"), corrupt, "a corrupt history is never overwritten with overlapping windows");
+    }
+    rmSync(windowsPath);
+    mkdirSync(windowsPath);
+    assert.equal(await run(DAY(8, 7)), 1, "an unreadable history must refuse, rather than act like an absent file");
+    assert.equal(lines.at(-1), "field-trials: field note refused (field-note-windows-invalid)");
+    assert.equal(readFileSync(out, "utf8"), savedCandidate);
+    assert.ok(statSync(windowsPath).isDirectory(), "a read failure leaves history untouched");
     rmSync(join(outDir, "field-trials-flow-v1.json"));
     assert.equal(await run(DAY(8, 7)), 1);
     assert.equal(lines.at(-1), "field-trials: field note refused (no-snapshot)");

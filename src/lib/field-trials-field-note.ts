@@ -19,7 +19,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { fixedClock } from "./clock.js";
 
-/** Counts per selected model; a ladder refusal contributes no attributable call outcome. */
+/** Counts per selected model; outcome availability is independent of failure attribution. */
 export interface AdoptionSelectedCell { assigned: number; servedKnown: number; callOutcomeKnown: number }
 
 /** Snapshot projection consumed by the exporter; the snapshot producer depends on this contract. */
@@ -165,11 +165,10 @@ export function parseSiteConsentRegistry(value: unknown): SiteConsentRegistry | 
   return valid ? registry as unknown as SiteConsentRegistry : "site-registry-invalid";
 }
 
-/** An absent or unreadable record is no prior window; a malformed one is refused rather than ignored. */
+/** Only a validated record can establish prior windows; the reader handles a missing file. */
 export function parseFieldNoteWindows(value: unknown): FieldNoteWindows | string {
   const windows = record(value);
-  if (windows === undefined || windows.unreadable !== undefined) return { version: FIELD_NOTE_WINDOWS_VERSION, windows: [] };
-  if (windows.version !== FIELD_NOTE_WINDOWS_VERSION || !Array.isArray(windows.windows)
+  if (windows?.version !== FIELD_NOTE_WINDOWS_VERSION || !Array.isArray(windows.windows)
     || !windows.windows.every((entry) => typeof record(entry)?.windowEnd === "string"
       && Number.isFinite(Date.parse(String(record(entry)!.windowEnd))))) return "field-note-windows-invalid";
   return windows as unknown as FieldNoteWindows;
@@ -207,7 +206,7 @@ export function buildModelFieldNoteCandidate(input: ModelFieldNoteInput): ModelF
   const withheldSources: ModelFieldNoteCandidate["withheld"]["sources"] = [];
   for (const source of snapshot.provenance.sources) {
     const grant = consent.repos.find((entry) => entry.repo.toLowerCase() === source.repo.toLowerCase() && entry.revoked !== true
-      && (entry.rights === "aggregate-opt-in" || entry.rights === "public-benchmark"));
+      && entry.rights === "aggregate-opt-in");
     const siteRepo = siteRepoOf(source.repo);
     const site = siteEntries.get(siteRepo);
     const reason = grant === undefined ? "no-aggregate-consent"
