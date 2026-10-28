@@ -307,6 +307,20 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
   const prs = await readJsonAsync(["api", `${api}/pulls?state=all&sort=updated&direction=desc&per_page=100`]) as Array<{ number: number; base: { sha: string } }>;
   const observations: GateRepairObservation[] = [];
   for (const pr of prs) {
+    // Commit-pair comparisons are immutable. Keep at most two reads for this PR;
+    // failed reads still reject the pass and a later inventory always revalidates.
+    const comparisons = new Map<string, Promise<unknown>>();
+    const readComparison = (path: string): Promise<unknown> => {
+      const existing = comparisons.get(path);
+      if (existing) return existing;
+      const read = readJsonAsync(["api", path]);
+      if (comparisons.size >= 2) {
+        const oldest = comparisons.keys().next().value;
+        if (oldest !== undefined) comparisons.delete(oldest);
+      }
+      comparisons.set(path, read);
+      return read;
+    };
     const commits = await readJsonAsync(["api", `${api}/pulls/${pr.number}/commits?per_page=100`]) as Array<{ sha: string }>;
     const runs = new Map<string, { check_runs: Array<CheckRunRef & { name: string; conclusion: string }> }>();
     const corpusCommits: CorpusCommit[] = [];
@@ -324,7 +338,7 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
     const corpus = collectCiFailureCorpus({ prs: [{ number: pr.number, commits: corpusCommits }] });
     for (const pair of corpus.pairs.filter((pair) => pair.state === "repaired")) {
       const comparePath = `${api}/compare/${pair.redSha}...${pair.greenSha}`;
-      const diff = await readJsonAsync(["api", comparePath]) as GateRepairCompare;
+      const diff = await readComparison(comparePath) as GateRepairCompare;
       const unavailable = (reason: string): void => log("gate.repair_evidence_unavailable", {
         pr_number: pr.number, gate: pair.gate, red_sha: pair.redSha, green_sha: pair.greenSha,
         reason, evidence_state: "unknown",
@@ -352,7 +366,7 @@ export async function loadGateRepairObservations(rules: readonly GateRepairRule[
       const repairDiff = files.map(file => `diff --git a/${file.filename} b/${file.filename}\n${
         typeof file.patch === "string" ? file.patch : recoveredGateRepairPatch(file, raw, pair)}`).join("\n");
       for (const rule of implicated) {
-        const before = await readJsonAsync(["api", `${api}/compare/${pr.base.sha}...${pair.redSha}`]) as { merge_base_commit: { sha: string }; files: Array<{ filename: string }> };
+        const before = await readComparison(`${api}/compare/${pr.base.sha}...${pair.redSha}`) as { merge_base_commit: { sha: string }; files: Array<{ filename: string }> };
         const readAt = async (sha: string, path: string): Promise<string | null> => {
           let value: { content?: string; encoding?: string };
           try {

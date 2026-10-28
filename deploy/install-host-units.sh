@@ -778,7 +778,7 @@ watchdog_recycle() {
   echo "rmd-relaunch: ${who} -- ${why}; recycling $container via $script."
   if [ ! -f "$script" ]; then
     out="recycle-container.sh missing at $script"; rc=127
-  elif out="$(env ${envs[@]+"${envs[@]}"} RMD_STATE_DIR="$STATE_DIR" RMD_DAEMON_CONTAINER="$container" \
+  elif out="$(env ${envs[@]+"${envs[@]}"} RMD_RECYCLE_CALLER="watchdog:${who}" RMD_STATE_DIR="$STATE_DIR" RMD_DAEMON_CONTAINER="$container" \
       bash "$script" ${args[@]+"${args[@]}"} 2>&1)"; then
     rc=0
   else

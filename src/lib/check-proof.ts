@@ -327,6 +327,34 @@ export function resolveVitestLeafCandidates(
   return files.length > 0 ? { files, leaf } : undefined;
 }
 
+/** W1-T10919: true when a test runner's report shows it LOADED NO TEST FILE — the top-level TAP plan `1..0` or a
+ *  node `# tests 0` with no top-level `ok`/`not ok` line, or Vitest's own "No test files found". A runner that
+ *  loaded a file and matched no title still prints that file's top-level wrapper, so this never reads a worker's
+ *  miss as an empty scope; and no output at all is no evidence either way. */
+export function runnerLoadedNoTestFile(stdout: string, stderr = ""): boolean {
+  if (/No test files found/i.test(`${stdout}\n${stderr}`)) return true;
+  if (/^(?:not )?ok \d+/m.test(stdout)) return false;
+  return /^1\.\.0\s*$/m.test(stdout) || /^# tests 0\s*$/m.test(stdout);
+}
+
+/** W1-T10919: the `include` a checkout's Vitest config declares, read best-effort from the config's source text for
+ *  the collected-nothing cause line — `undefined` when no config holds a literal `include: [...]`. Diagnostic only:
+ *  the classification never depends on it. */
+export function vitestIncludeOf(cwd: string): string | undefined {
+  for (const name of ["config", "workspace"].flatMap((kind) =>
+    ["ts", "mts", "cts", "js", "mjs", "cjs"].map((ext) => `vitest.${kind}.${ext}`))) {
+    let text: string;
+    try {
+      text = readFileSync(join(cwd, name), "utf8");
+    } catch {
+      continue; // that config spelling is absent: try the next; no config at all just omits the include from the line
+    }
+    const include = /\binclude\s*:\s*\[([^\]]*)\]/.exec(text)?.[1];
+    if (include !== undefined) return `[${include.trim().replace(/\s+/g, " ")}]`;
+  }
+  return undefined;
+}
+
 /** `rmd check-proof <proof>`. */
 /** Opt-in for the one `check-proof` path that would otherwise run the ENTIRE suite — see the
  *  `unresolvable` branch in {@link checkProofCommand}. */
@@ -453,6 +481,9 @@ export function checkProofCommand(
     console.log(`resolved:   NOT — ${headResolution.cited} is absent and its basename names ${headResolution.resolution.candidates.join(", ")}; not guessed`);
 
   let args = w.args as readonly string[];
+  // W1-T10919: the head test files that hold the proof's title, when resolution found any — the evidence that a
+  // run which then loads no file was stopped by the runner's scope, not by a test the worker never wrote.
+  let titledFiles: readonly string[] = [];
   if (w.nameFiltered && w.runner === "vitest") {
     // The registered Vitest target already scopes the run to its own tests/ root. The
     // Node-only grep resolver searches this repo's test/ root and would refuse a valid
@@ -462,6 +493,7 @@ export function checkProofCommand(
       console.log("candidates: delegated to the registered Vitest suite root");
     } else {
       console.log(`candidates: ${narrowed.files.length} file(s) — ${narrowed.files.join(", ")}`);
+      titledFiles = narrowed.files;
       args = [...w.args.slice(0, -1), ...narrowed.files];
       // The executor scopes its run by the files that contain `label`; handing it the leaf makes that the very
       // set printed above, where the prefixed label (a describe name joined to it) is in no file.
@@ -471,6 +503,7 @@ export function checkProofCommand(
     const r = resolveNameFilteredCandidates(process.cwd(), w.label);
     if (r.status === "resolved") {
       console.log(`candidates: ${r.files.length} file(s) — ${r.files.join(", ")}`);
+      titledFiles = r.files;
       args = narrowNameFilteredArgs(w.args, r.files);
     } else {
       console.log(`candidates: ${r.status}${"reason" in r ? ` — ${r.reason}` : ""}`);
@@ -691,6 +724,15 @@ export function checkProofCommand(
   }
   if (outcome === "fail") printFailureOutput("head", diag, w.failureTail);
   console.log(`verdict:    ${outcome}`);
+  // W1-T10919: a no-match whose runner loaded NO file, while head files hold the title, is the runner's scope (an
+  // include glob, an extension, a suite root) — a rebuild on the same tree is refused the same way, every time.
+  if (outcome === "no-match" && w.kind === "test" && titledFiles.length > 0 && diag && runnerLoadedNoTestFile(diag.stdout, diag.stderr)) {
+    const include = w.runner === "vitest" ? vitestIncludeOf(process.cwd()) : undefined;
+    console.log(
+      `cause:      collected-nothing — the runner loaded no test file, though ${titledFiles.join(", ")} hold the\n` +
+        `            proof's title; its scope does not reach them on this tree${include ? ` (include: ${include})` : ""}.`,
+    );
+  }
   if (w.kind === "grep" && outcome !== "pass") {
     // W1-T1224: check-proof calls the classifier rather than deriving a cause of its own —
     // classifyGrepZeroHit( in src/lib/check-proof.ts, above, is the wiring this line exercises.
