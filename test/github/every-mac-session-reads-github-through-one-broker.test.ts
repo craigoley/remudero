@@ -445,7 +445,7 @@ async function waitForFixtureBroker(
 }
 
 test("broker fixture readiness observes owner cancellation and ends its polling", { timeout: 10_000 }, async t => {
-  const child: Pick<ChildProcess, "exitCode" | "signalCode"> = { exitCode: null, signalCode: null };
+  const child: { exitCode: number | null; signalCode: NodeJS.Signals | null } = { exitCode: null, signalCode: null };
   // The falsifier also ends after a missing cancellation check, so it reports an assertion failure rather than leaking a poller.
   const release = setTimeout(() => { child.exitCode = 0; }, 250);
   t.after(() => { clearTimeout(release); child.exitCode = 0; });
