@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { createNativeTargetJobRunner, daemonKickPort, daemonTargetJobPort } from "#src/cli/commands/daemon.js";
 import { fixedClock } from "#src/lib/clock.js";
-import { runDaemon } from "#src/lib/daemon.js";
-import { runDrain, type DrainOpts, type TargetJobRecord } from "#src/lib/drain.js";
+import { runDaemon, type TargetJobRecord } from "#src/lib/daemon.js";
+import { runDrain, type DrainOpts } from "#src/lib/drain.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { loadPlan } from "#src/lib/plan.js";
 import {
@@ -110,7 +110,7 @@ function fixture(t: TestContext, registry = CORE_ONLY) {
       return { taskId, runId, merged: true, costUsd: 0, verdict: "merged" };
     },
     claimHeld: (taskId) => { calls.claims.push(taskId); return state.claimHeld; },
-    runDrain: (plan, deps, opts) => { calls.drains.push(opts); return runDrain(plan, deps, opts); },
+    runDrain: (plan, deps, opts) => { calls.drains.push(opts ?? {}); return runDrain(plan, deps, opts); },
   });
   const service = new ProductBuildService(options);
   /** One real daemon pass over the CORE daemon's own bindings: its kick port, the target-job port and the runner. */

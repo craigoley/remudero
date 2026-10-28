@@ -40,10 +40,10 @@ import { createThreadEventSync, registryThreadItems, type InboxResponderDeps } f
 import type { InboxCausalScope } from "../../lib/inbox-thread.js";
 import { gitRecommendationEvidence, RECOMMENDATION_SEED_PATH } from "../../lib/inbox-recommendation.js";
 import { censusRunDirs } from "../../lib/run-child-contract.js";
-import { plannedSequence, runBoundedTargetJob, runDrain, type BoundedTargetJobDeps, type BoundedTargetJobOutcome, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
+import { plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import type { RunResult } from "../../lib/run-result.js";
-import { daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
+import { runBoundedTargetJob, type BoundedTargetJobDeps, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktrees } from "../../lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
@@ -343,7 +343,7 @@ export function createNativeTargetJobRunner(ctx: NativeTargetJobContext): (kick:
       // The core ledger's own receipts for THIS origin, read from the dispatch time the durable record kept.
       execution: (record) => readTargetExecution(stateDir, { taskId: record.taskId, origin: record.origin, repo: record.repo,
         requestedAt: new Date(Date.parse(record.updatedAt) - 60_000).toISOString(), nowMs: ctx.nowMs() }),
-      runDrain: (plan, opts, onDispatch) => (ctx.runDrain ?? runDrain)(plan, {
+      drain: (plan, opts, onDispatch) => (ctx.runDrain ?? runDrain)(plan, {
         ...governors,
         refreshMerged: () => {
           projection = ctx.project(plan, owner, kick.repo);

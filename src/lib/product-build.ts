@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import type { TargetJobAdmission, TargetJobRead, TargetJobRecord } from "./drain.js";
+import type { TargetJobAdmission, TargetJobRead, TargetJobRecord } from "./daemon.js";
 import { systemClock, type Clock } from "./clock.js";
 import { daemonInstanceRegistryPath } from "./deployer.js";
 import { dispatchClaimRef } from "./dispatch-claim.js";
@@ -517,6 +517,7 @@ export function nativeTargetAdmission(repoName: string, options: ProductBuildIns
     registry = parseInstanceRegistry((options.readText ?? ((file: string) => readFileSync(file, "utf8")))(path)).instances;
     managed = loadManagedRepos(options.repoRoot);
   } catch (error) {
+    // An unreadable registry or malformed managed set is an unknown route, never "no daemon" and never "not enrolled".
     void error; return { state: "unreadable" };
   }
   const wanted = repoName.toLowerCase();

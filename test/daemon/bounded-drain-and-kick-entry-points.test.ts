@@ -72,6 +72,22 @@ const BOUNDED_DRAIN: readonly EntryPoint[] = [
     bounds: "max (DEFAULT_MAX), until, laneCount, wipLimit, headroom governor",
   },
   {
+    what: "createNativeTargetJobRunner (W1-T10799) runs ONE bounded native job for a managed target through runDrain",
+    role: "caller",
+    file: "src/cli/commands/daemon.ts",
+    from: "export function createNativeTargetJobRunner(",
+    calls: ["(ctx.runDrain ?? runDrain)(plan, {", "return runBoundedTargetJob(kick, jobDeps);"],
+    bounds: "runBoundedTargetJob's curation: one task, depth 1, max 1, laneCount 1; the core daemon's own governors from its deps",
+  },
+  {
+    what: "runBoundedTargetJob folds the one kicked task id into the drain's own curated selection",
+    role: "implementation",
+    file: "src/lib/daemon.ts",
+    from: "export async function runBoundedTargetJob(",
+    calls: ["applyCuratedSelection({ ...baseOpts, laneCount: 1, wipLimit: 1 }, { taskIds: [taskId], depth: 1 })"],
+    bounds: "one task, depth 1, max 1, one lane; a closed job's origin never dispatches again",
+  },
+  {
     what: "the admission chain both nextRunnable and runnableCandidates select through",
     role: "implementation",
     file: "src/lib/drain.ts",
@@ -228,10 +244,11 @@ test("W1-T10797: bounded drain and kick entry points are mapped to exact product
     assert.ok(roles.has("caller") && roles.has("implementation"), `${name} has a caller row and an implementation row`);
   }
 
-  // runDrain has ONE production caller (drainCommand). Any other caller must be added to the map.
+  // runDrain has TWO production callers: drainCommand, and (W1-T10799) the core daemon's bounded native job. Any other
+  // caller must be added to the map.
   const runDrainCallers = ["src/run-task.ts", "src/lib/daemon.ts", "src/cli/commands/daemon.ts", "src/lib/serve.ts"]
     .filter((file) => /\brunDrain\b(?!Lanes|Fn)/.test(source(file).replace(/^\s*(?:\/\/|\*).*$/gm, "")));
-  assert.deepEqual(runDrainCallers, ["src/run-task.ts"], "runDrain is called from run-task.ts only");
+  assert.deepEqual(runDrainCallers, ["src/run-task.ts", "src/cli/commands/daemon.ts"], "runDrain is called from run-task.ts and the bounded native job only");
 
   // drain.ts writes, reads and clears no kick. Only runDaemon services one.
   const drainCode = source("src/lib/drain.ts").replace(/^\s*(?:\/\/|\*).*$/gm, "");
