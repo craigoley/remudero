@@ -1280,6 +1280,7 @@ test("W1-T10799: target admission never inherits Core credit or status for the s
   const task = { ...loadPlan(f.targetPlanFile).tasks[0], files: ["src/game.ts"] };
   const pr = { number: 9, url: "https://github.com/craigoley/wreckterra/pull/9" };
   assert.equal(scope.persistCredit(task, pr, undefined), "unreadable", "unreadable files grant no credit");
+  assert.equal(scope.persistCredit(task, pr, []), "unreadable", "an empty file list grants no credit");
   assert.equal(scope.persistCredit(task, pr, ["plan/tasks.yaml"]), "plan-only", "a filing grants no implementation credit");
   assert.equal(scope.persistCredit(task, pr, ["src/game.ts"]), "recorded");
   assert.equal(scope.project(loadPlan(f.targetPlanFile)).get("W9-T1")?.merged, true, "verified target credit remains usable");
