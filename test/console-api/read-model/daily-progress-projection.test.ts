@@ -19,6 +19,7 @@ import { improvementEffectNamespaceDir } from "#src/lib/gardener-opportunity-evi
 import { admitStaticWork, resolveTestSlotDir } from "#src/lib/test-slot.js";
 import { SLOW_LANE_HEAP_MB } from "#src/lib/read-model-slow-lane.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 function record(size = 205): DailyProgressRecord {
   const window = dailyWindow("2026-11-01");
@@ -319,11 +320,6 @@ function activityFixture(root: string): DailyProgressCollectionConfig {
   return { stateDir, expectedRepositories: ["acme/app"], instances: [{ name: "core", repository: "acme/app", root, stateDir }], timeZone: "America/New_York" };
 }
 
-async function ledgerFixture(path: string, lines: Iterable<string | Buffer>, compressed = false): Promise<void> {
-  if (compressed) await pipeline(Readable.from(lines), createGzip(), createWriteStream(path));
-  else await pipeline(Readable.from(lines), createWriteStream(path));
-}
-
 function activityRow(run: string, payload = ""): Record<string, unknown> {
   return { ts: activityAt, step: "worker.finished", repository: "acme/app", task_id: "W1-T7", run_id: run, payload };
 }
@@ -350,14 +346,16 @@ test("daily activity preserves original fields and complete totals across ledger
   await withTempDir("daily-activity-population", async root => {
     const config = activityFixture(root), payload = "private payload".repeat(4096);
     const rows = [activityRow("gzip", payload), activityRow("plain", payload), activityRow("live", payload)];
-    const paths = ["ledger.2026-11-01.ndjson.gz", "ledger.2026-11-02.ndjson", "ledger.ndjson"];
-    for (const [index, path] of paths.entries()) await ledgerFixture(join(config.stateDir, path), [
-      JSON.stringify({ ...activityRow("unrelated", payload), step: "scheduler.tick" }) + "\n",
-      JSON.stringify(rows[index]) + "\n",
-      JSON.stringify({ ...activityRow("future"), ts: "2026-11-03T15:00:00Z" }) + "\n",
-      JSON.stringify({ ...activityRow("foreign"), repository: "other/repo" }) + "\n",
-      JSON.stringify({ ...activityRow("old"), ts: "2026-10-01T15:00:00Z" }) + "\n",
-    ], index === 0);
+    const populations = rows.map(row => [
+      { ...activityRow("unrelated", payload), step: "scheduler.tick" }, row,
+      { ...activityRow("future"), ts: "2026-11-03T15:00:00Z" },
+      { ...activityRow("foreign"), repository: "other/repo" },
+      { ...activityRow("old"), ts: "2026-10-01T15:00:00Z" },
+    ]);
+    writeLedger(populations[2]!, { dir: config.stateDir, rotations: [
+      { at: "2026-11-01T00:00:00.000Z", rows: populations[0]!, gz: true },
+      { at: "2026-11-02T00:00:00.000Z", rows: populations[1]! },
+    ] });
     const saved = await collectActivity(config);
     assert.deepEqual(saved.report.totals, { mergedChanges: { value: 3, precision: "exact" }, completedTasks: { value: 3, precision: "exact" } });
     const events = saved.events.filter(e => e.kind === "activity");
@@ -391,12 +389,13 @@ test("Daily progress activity preserves replay deduplication and source gaps: ex
   await withTempDir("daily-replay-cap", async root => {
     const config = activityFixture(root), isolated = improvementEffectNamespaceDir(config.stateDir, "acme/app", "core");
     mkdirSync(isolated, { recursive: true });
-    await ledgerFixture(join(config.stateDir, "ledger.2026-11-01.ndjson.gz"), activityVariants(50_001), true);
-    await ledgerFixture(join(config.stateDir, "ledger.2026-11-02.ndjson"), activityVariants(50_001));
-    await ledgerFixture(join(config.stateDir, "ledger.ndjson"), (function* () {
+    // Stream exact raw variants: reserialization would obscure whitespace replay evidence.
+    await pipeline(Readable.from(activityVariants(50_001)), createGzip(), createWriteStream(join(config.stateDir, "ledger.2026-11-01.ndjson.gz")));
+    await pipeline(Readable.from(activityVariants(50_001)), createWriteStream(join(config.stateDir, "ledger.2026-11-02.ndjson")));
+    await pipeline(Readable.from((function* () {
       for (const line of activityVariants(50_001)) yield `  ${line.trim()}  \n`;
-    })());
-    await ledgerFixture(join(isolated, "ledger.ndjson"), activityVariants(49_999));
+    })()), createWriteStream(join(config.stateDir, "ledger.ndjson")));
+    await pipeline(Readable.from(activityVariants(49_999)), createWriteStream(join(isolated, "ledger.ndjson")));
     const saved = await collectActivity(config);
     assert.equal(saved.events.filter(e => e.kind === "activity").length, 1, "100000 selected replay rows reconcile to one event");
     const variant = JSON.parse(activityVariants(1).next().value!);
@@ -404,12 +403,12 @@ test("Daily progress activity preserves replay deduplication and source gaps: ex
     const before = readFileSync(join(dailyProgressStorePath(config.stateDir), "manifest.json"));
     const files = readdirSync(dailyProgressStorePath(config.stateDir)).sort();
     const later = fixedClock(activityClock.now() + 3_600_000);
-    await ledgerFixture(join(isolated, "ledger.ndjson"), activityVariants(50_000));
+    await pipeline(Readable.from(activityVariants(50_000)), createWriteStream(join(isolated, "ledger.ndjson")));
     await assert.rejects(collectDailyProgress(config, later), capRefusal, "copies in independent roots still consume the pre-reconciliation cap");
     assert.deepEqual(readFileSync(join(dailyProgressStorePath(config.stateDir), "manifest.json")), before);
     assert.deepEqual(readdirSync(dailyProgressStorePath(config.stateDir)).sort(), files, "refusal occurs before staging or publication");
     rmSync(isolated, { recursive: true });
-    await ledgerFixture(join(config.stateDir, "ledger.ndjson"), activityVariants(100_001));
+    await pipeline(Readable.from(activityVariants(100_001)), createWriteStream(join(config.stateDir, "ledger.ndjson")));
     await assert.rejects(collectDailyProgress(config, later), capRefusal, "100001 raw key-order variants must reach the caller as the original cap error");
     assert.deepEqual(readFileSync(join(dailyProgressStorePath(config.stateDir), "manifest.json")), before);
     assert.deepEqual(readdirSync(dailyProgressStorePath(config.stateDir)).sort(), files);
@@ -419,7 +418,7 @@ test("Daily progress activity preserves replay deduplication and source gaps: ex
 test("Daily progress activity preserves replay deduplication and source gaps: activity source gaps preserve malformed replay audit and availability", async () => {
   await withTempDir("daily-source-gaps", async root => {
     const config = activityFixture(root), row = JSON.stringify(activityRow("positive")) + "\n";
-    await ledgerFixture(join(config.stateDir, "ledger.2026-11-01.ndjson.gz"), ["bad archive\n", row], true);
+    writeFileSync(join(config.stateDir, "ledger.2026-11-01.ndjson.gz"), gzipSync("bad archive\n" + row));
     writeFileSync(join(config.stateDir, "ledger.2026-11-02.ndjson.gz"), "corrupt gzip");
     writeFileSync(join(config.stateDir, "ledger.2026-11-03.ndjson"), "bad archive\n" + row);
     writeFileSync(join(config.stateDir, "ledger.ndjson"), row + "bad archive\n{\"ts\":");
@@ -463,7 +462,7 @@ test("Daily progress activity keeps full counts without retaining unrelated ledg
     const payloadMember = gzipSync(payload + '"}\n');
     const paths = ["ledger.2026-11-01.ndjson.gz", "ledger.2026-11-02.ndjson.gz", "ledger.2026-11-03.ndjson", "ledger.ndjson"];
     for (const [index, path] of paths.entries()) {
-      await ledgerFixture(join(config.stateDir, path), (function* () {
+      await pipeline(Readable.from((function* () {
         const count = index === 0 ? unrelated : index === 1 ? selected : 32;
         for (let i = 0; i < count; i++) {
           const row = activityRow(`${index}:${i}`, payload);
@@ -476,13 +475,13 @@ test("Daily progress activity keeps full counts without retaining unrelated ledg
         const sentinel = activityRow(`last-row:${index}`); expectedIds.push(activityId(sentinel));
         const last = JSON.stringify(sentinel) + "\n";
         yield index < 2 ? gzipSync(last) : last;
-      })());
+      })()), createWriteStream(join(config.stateDir, path)));
     }
-    await ledgerFixture(join(config.stateDir, "ledger.2026-11-04.ndjson.gz"), (function* () {
+    await pipeline(Readable.from((function* () {
       for (let i = 0; i < selected; i++) {
         yield gzipSync(JSON.stringify(activityRow(`1:${i}`)).slice(0, -2)); yield payloadMember;
       }
-    })());
+    })()), createWriteStream(join(config.stateDir, "ledger.2026-11-04.ndjson.gz")));
     assert.ok(paths.every(path => statSync(join(config.stateDir, path)).size > 0));
     assert.ok(readdirSync(config.stateDir).filter(p => p.endsWith(".gz")).every(p => statSync(join(config.stateDir, p)).size < 8 * 1024 * 1024), "compressed fixtures stay bounded on disk");
     // Reserve both processes in the host pool instead of the test's private fixture slot directory.
