@@ -25,6 +25,9 @@ import { projectRepairCostContext, repairCostCells, repairCostsByPull, type Repa
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
+import { attributeAttemptOutcome, type AttemptOutcome } from "./attempt-outcome-attribution.js";
+import { buildModelFieldNoteCandidate, parseFieldNoteWindows, parseSiteConsentRegistry, PINNED_SITE_CONSENT_REGISTRY,
+  type FieldNoteWindows } from "./field-trials-field-note.js";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
@@ -400,7 +403,13 @@ function repairCells(units: RepairUnit[]) {
     incidents: { state: "unavailable" as const, reason: "no-incident-source" } };
 }
 
-type AdoptionUnit = Unit & { requested: string | null; selected: string | null; served: string | null; servedMissing: string | null };
+type AdoptionUnit = Unit & { requested: string | null; selected: string | null; served: string | null; servedMissing: string | null;
+  /** W1-T10831: the joined call's outcome under the shared attribution (W1-T10875); null when no call joined. */
+  outcome: AttemptOutcome | null };
+
+/** W1-T10831: per selected model, assignments, those whose joined call named a served model, and those whose
+ *  joined call ended in an outcome attributable to the model (success or model) — never a ladder refusal. */
+export interface AdoptionSelectedCell { assigned: number; servedKnown: number; callOutcomeKnown: number }
 
 function adoptionCells(units: AdoptionUnit[]) {
   const tally = (values: (string | null)[]) => {
@@ -410,7 +419,20 @@ function adoptionCells(units: AdoptionUnit[]) {
   };
   return { assignments: units.length, requested: tally(units.map((unit) => unit.requested)),
     selected: tally(units.map((unit) => unit.selected)), served: tally(units.map((unit) => unit.served)),
-    servedUnavailable: tally(units.map((unit) => unit.servedMissing)) };
+    servedUnavailable: tally(units.map((unit) => unit.servedMissing)), bySelected: selectedCrossTab(units) };
+}
+
+function selectedCrossTab(units: AdoptionUnit[]): Record<string, AdoptionSelectedCell> {
+  const out: Record<string, AdoptionSelectedCell> = {};
+  for (const unit of units) {
+    if (unit.selected === null) continue;
+    const cell = Object.hasOwn(out, unit.selected) ? out[unit.selected]! : { assigned: 0, servedKnown: 0, callOutcomeKnown: 0 };
+    cell.assigned += 1;
+    cell.servedKnown += Number(unit.served !== null);
+    cell.callOutcomeKnown += Number(unit.outcome === "success" || unit.outcome === "model");
+    Object.defineProperty(out, unit.selected, { value: cell, enumerable: true, configurable: true, writable: true });
+  }
+  return out;
 }
 
 type LearningUnit = Unit & { kind: "gardener-pr" | "evidence-followup" | "judgement";
@@ -654,6 +676,13 @@ function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: M
   });
 }
 
+/** W1-T10875's attribution over a joined call, in the ledger's own field names (as the served-trial cohort reads it). */
+function callOutcomeOf(call: FlowRow): AttemptOutcome {
+  return attributeAttemptOutcome({ ...call.outcomeSignals, success: call.success, served_model: call.servedModel,
+    ...(call.servedModelReason != null ? { served_model_reason: call.servedModelReason } : {}),
+    ...(call.costUsd != null ? { total_cost_usd: call.costUsd } : {}) }).outcome;
+}
+
 function adoptionUnits(ctx: SourceContext): { units: AdoptionUnit[]; transitions: ModelTransition[] } {
   const assignments = ctx.rows.filter((row) => row.step === "worker.assignment" && row.assignmentId !== null);
   const calls = new Map<string, FlowRow>();
@@ -677,7 +706,8 @@ function adoptionUnits(ctx: SourceContext): { units: AdoptionUnit[]; transitions
     const served = call?.servedModel ?? null;
     units.push(withDigest({ key: `${ctx.label}|${host}|${row.ts?.slice(0, 10) ?? "unknown"}|${stratum(row.taskClass)}`,
       requested: row.requestedModel, selected: row.selectedModel, served,
-      servedMissing: served !== null ? null : call === undefined ? "no-attempt" : "not-recorded" }));
+      servedMissing: served !== null ? null : call === undefined ? "no-attempt" : "not-recorded",
+      outcome: call === undefined ? null : callOutcomeOf(call) }));
     note(host, row.requestedModel, "firstRequestedAt", row.ts);
     note(host, row.selectedModel, "firstSelectedAt", row.ts);
     note(host, served, "firstServedAt", call?.ts ?? null);
@@ -1221,7 +1251,38 @@ export interface FieldTrialsCommandInput {
 
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
   + "[--consent <file>] [--case-files <file>] [--finding-evidence <file>] [--finding-evidence-keys <file>] "
-  + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--json]";
+  + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json]";
+
+/**
+ * W1-T10831 `--field-note <out>`: read the latest private snapshot (no refresh), and write a
+ * candidate-unreviewed site field note plus the private record of the window it covered. A withheld
+ * result writes nothing and exits 0; a refusal exits 1.
+ */
+function fieldNoteMode(args: { outDir: string; out: string; nowIso: string; json: boolean; print: (line: string) => void;
+  consentPath: string | undefined; registryPath: string | undefined }): number {
+  const snapshotValue = record(readJson(join(args.outDir, "field-trials-flow-v1.json")));
+  const windowsPath = join(args.outDir, "field-trials-field-note-windows.json");
+  const windows = parseFieldNoteWindows(readJson(windowsPath));
+  const consent = typeof args.consentPath === "string" ? parseFieldTrialsConsent(readJson(args.consentPath)) : null;
+  const registry = args.registryPath === undefined ? PINNED_SITE_CONSENT_REGISTRY : parseSiteConsentRegistry(readJson(args.registryPath));
+  const result = snapshotValue?.version !== FIELD_TRIALS_FLOW_VERSION ? { state: "refused" as const, reason: "no-snapshot" }
+    : typeof windows === "string" ? { state: "refused" as const, reason: windows }
+    : buildModelFieldNoteCandidate({ snapshot: snapshotValue as unknown as FieldTrialsFlowSnapshot, consent, registry,
+      windows, salt: pseudonymSalt(args.outDir), nowIso: args.nowIso });
+  if (result.state === "candidate") {
+    writeJsonAtomically(args.out, result.candidate);
+    const recorded = windows as FieldNoteWindows;
+    writeJsonAtomically(windowsPath, { ...recorded, windows: [...recorded.windows, result.window] });
+  }
+  if (args.json) args.print(JSON.stringify(result.state === "candidate"
+    ? { state: "candidate", releaseId: result.window.releaseId, windowStart: result.window.windowStart, windowEnd: result.window.windowEnd,
+      rows: result.candidate.note.rows.length, withheld: result.candidate.withheld.cells } : result));
+  else args.print(result.state === "candidate"
+    ? `field-trials: field note candidate-unreviewed ${result.window.releaseId} ${result.window.windowStart}..${result.window.windowEnd}: `
+      + `${result.candidate.note.rows.length} rows, ${result.candidate.withheld.cells} cells withheld; written to ${args.out}`
+    : `field-trials: field note ${result.state} (${result.reason})`);
+  return result.state === "refused" ? 1 : 0;
+}
 
 function labelOf(repo: string): string {
   const name = repo.split("/").at(-1)!.toLowerCase();
@@ -1254,7 +1315,8 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
       source: { type: "string", multiple: true }, ledger: { type: "string", multiple: true }, "out-dir": { type: "string" },
       consent: { type: "string" }, "case-files": { type: "string" }, "max-pages": { type: "string" },
       "finding-evidence": { type: "string" }, "finding-evidence-keys": { type: "string" },
-      offline: { type: "boolean" }, revoke: { type: "string" }, json: { type: "boolean" } } }).values;
+      offline: { type: "boolean" }, revoke: { type: "string" }, json: { type: "boolean" },
+      "field-note": { type: "string" }, "site-registry": { type: "string" } } }).values;
   } catch {
     const reason = "arguments-invalid";
     print(`${USAGE} (${reason})`);
@@ -1280,6 +1342,10 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     writeJsonAtomically(manifestPath, manifest);
     print(`field-trials: revoked ${values.revoke}; last known good ${manifest.lastKnownGood?.releaseId ?? "none"}`);
     return 0;
+  }
+  if (typeof values["field-note"] === "string") {
+    return fieldNoteMode({ outDir, out: values["field-note"], nowIso, json: values.json === true, print,
+      consentPath: values.consent as string | undefined, registryPath: values["site-registry"] as string | undefined });
   }
   let caseFiles: TaskCaseFile[] | undefined;
   if (typeof values["case-files"] === "string") {
