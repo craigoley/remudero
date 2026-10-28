@@ -1,0 +1,93 @@
+- id: W1-T10920
+  title: "THE PRE-OPEN GATE HAS NOT PASSED SINCE 2026-10-19 BECAUSE ITS OWN SANDBOX FAILS TYPECHECK — 115 of the gate's fails since then name typecheck while the worker's own `tsc -p tsconfig.json --noEmit` exits 0 on the same tree and CI's typecheck is green, and nobody could say why because the gate keeps only step NAMES; the gate records each failed step's bounded detail, classifies a step its sandbox broke as unmeasured (never handed to the worker as a code fault), and the sandbox is repaired so a clean tree passes"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # the gate hands every build a false "fix typecheck" repair round today; a wrong classification would let a real fault through
+  band_meaning: blast-radius
+  origin: "operator ruling, Craig 2026-10-28: 'file and fix both' (the pre-open gate that never passes and backstops under load); evidence from a read-only host ledger census the same day"
+  plan_refs: [W1-T10921, W1-T10044, W1-T9619, W1-T9556, W1-T9951, W1-T8945]
+  files:
+    - src/lib/preopen-gate.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/run-task.ts
+    - src/lib/review.ts
+    - test/ci/gates/the-preopen-gate-keeps-why-a-step-failed.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-28, read-only, host ledger union (380 gz archives named >= 2026-10-15 plus the live file;
+    positive control: implement.preopen_gate rows on EVERY day 10-14..10-28, 503 unique) at origin/main d03d7d3ef.
+    Real-task gate outcomes (rows whose task is a W1- id), by window:
+    - 10-15 .. 10-19T03:41Z: 46 pass, 40 unmeasured, fails led by rule-checks; typecheck in 3 fails only.
+    - 10-19T03:41Z .. 10-29: 0 pass. Fails: typecheck alone or with rule-checks in ~115; unmeasured 233
+      ("fast gate exceeded its backstop" 227, one bwrap start failure). The last pass is
+      2026-10-19T03:40:32Z (W1-T9856, 535 s); the first fail of the new shape is 2026-10-19T00:01Z, so runs on
+      older engine trees kept passing for a few hours after the change landed.
+    - Not counted: `wt-sbx-*` sandbox smoke rows, which fail `project:unavailable` by design.
+    OBSERVED in worker transcripts written to the ledger after a gate fail (10-25..10-28): "typecheck: PASS ... the
+    harness's typecheck failure is not reproducing in this tree", "`tsc` exits 0 with no diagnostics", and "the
+    other failures (`cli-reference`, `no-shallowing-census`, and rule-checks) are sandbox problems: `tsx` IPC EPERM
+    and an SWC cache-path rejection". PR #14052 (W1-T10188), whose gate failed typecheck, went green on CI's `ci`
+    job. INFERRED: the gate's sandboxed environment fails typecheck (and parts of rule-checks); the code does not.
+    NOT DETERMINED: the exact sandbox fault. The ledger holds no typecheck detail at all since 10-24 (a search for
+    "typecheck: FAIL" / "NOT_RUN" text finds none) because:
+    READ at origin/main d03d7d3ef (symbols, not lines):
+    - src/lib/preopen-gate.ts `readGateSummary` keeps only `steps[].name` where `ok === false`; each step's
+      `detail` (typecheckStep's `typecheck: FAIL — ...\n<tsc output>` or `typecheck: NOT_RUN (<admission note>)`)
+      is dropped, and the summary lives in the gate's throwaway HOME, removed when the gate settles.
+    - src/lib/commit-message.ts `typecheckStep` returns `ok: false` for a NOT_RUN admission refusal, so an
+      admission the sandbox could not grant is indistinguishable from a compile error.
+    - src/cli/commands/run-task-verb.ts logs `PREOPEN_GATE_STEP` with `failed: gate.failedSteps` (names) and
+      hands them to `renderPreopenGatePrompt`, which tells the worker to fix each one: a sandbox fault becomes a
+      worker repair round it cannot complete.
+    Candidates the builder checks first (from the merges that change what the sandbox sees, 10-17..10-19):
+    the engine-tree node_modules hop (W1-T9738 / PR #12595), the test-slot dir and static admission inside the
+    sandbox (test-slot.ts `admitStaticWork`, `acquireTestSlot`), tsx's IPC socket and SWC's cache path under the
+    sandbox's private /tmp and read-only harness bind, and the worktree buildinfo path (typecheck-run.ts
+    `prepareTypecheckRun`).
+  design: |
+    1. Keep the reason. `readGateSummary` returns, per failed step, its name AND a bounded tail of its `detail`
+       (the last lines, capped in bytes; tokens and absolute HOME paths scrubbed with the existing redaction helper
+       if one exists in review.ts, else by replacing the throwaway HOME prefix). The gate row in
+       run-task-verb.ts and run-task.ts carries it as `failed_detail` (a step-name -> tail map). A row stays small.
+    2. Classify before blaming. A failed step is ENVIRONMENT when its detail is a NOT_RUN admission, or an
+       EPERM/EACCES/EROFS/ENOENT error naming a path under the harness, a node_modules root, the sandbox /tmp or a
+       cache dir, or a tsx IPC / SWC cache-path failure, or a bwrap mount error. Match on the producers' own
+       exported markers where they exist (typecheckStep's NOT_RUN prefix, spawnFailureDetail's shape), not free
+       prose. If EVERY failed step is environment, the gate result is `unmeasured` with reason
+       `environment: <steps>`; if some are, those are listed under `environment_steps` and only the rest go to
+       `renderPreopenGatePrompt`. A step with real compiler diagnostics (a `file(line,col): error TS` line) is
+       never environment.
+    3. Repair the sandbox. Reproduce on the Azure host with the real `preopenGateSandboxArgv` around the
+       harness's `preflight --fast` on a clean worktree of main (the build worker runs where bwrap exists); name
+       the fault in the PR body with the recorded detail; fix the bind, env or cache-path cause in
+       preopenGateSandboxArgv / proofSandboxArgv so the clean tree's typecheck and rule-checks pass. Do not widen
+       the allowlist to the daemon's environment and do not drop containment (W1-T9619 stays true).
+    4. The real default. One test spawns the real sandbox when bwrap is present and asserts the clean fixture
+       tree's typecheck step PASSES inside it; where bwrap is absent (CI runners, the Mac) it is skipped with a
+       named reason that the test output prints, never counted as a pass.
+  acceptance:
+    - claim: "a failed gate step keeps a bounded tail of its own detail, and the gate row carries it"
+      proof: 'grep: test("W1-T10920: a failed gate step keeps a bounded tail of why it failed" in test/ci/gates/the-preopen-gate-keeps-why-a-step-failed.test.ts'
+    - claim: "a step the sandbox could not run (a NOT_RUN admission or a sandbox path error) is unmeasured and never handed to the worker"
+      proof: 'grep: test("W1-T10920: a step its sandbox broke is unmeasured, not the build" in test/ci/gates/the-preopen-gate-keeps-why-a-step-failed.test.ts'
+    - claim: "a step with real compiler diagnostics stays a fail handed to the worker"
+      proof: 'grep: test("W1-T10920: a real compile error is still the build" in test/ci/gates/the-preopen-gate-keeps-why-a-step-failed.test.ts'
+    - claim: "where bwrap exists a clean tree's typecheck passes inside the real gate sandbox"
+      proof: 'grep: test("W1-T10920: a clean tree passes typecheck inside the real gate sandbox" in test/ci/gates/the-preopen-gate-keeps-why-a-step-failed.test.ts'
+    - claim: "the gate's ledger row records the failed steps' detail"
+      proof: 'grep: failed_detail in src/cli/commands/run-task-verb.ts'
+  falsifier: |
+    At base readGateSummary returns names only, so the detail case fails, and a NOT_RUN typecheck is a plain fail
+    handed to the worker, so the environment case fails.
+    - Classify by any non-zero step as environment: the real-compile-error case fails.
+    - Classify by free-text substrings of prose instead of the producers' markers: a fixture whose detail names
+      EPERM inside a tsc diagnostic flips the class and the compile-error case fails.
+    - Make the real-sandbox case pass when bwrap is absent: the test must print a named skip, not `ok`.
+    GUARD that held at base and must still hold: test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts
+    and test/a-harness-checkpoint-commit-never-fails-the-preopen-gate.test.ts pass unchanged.
