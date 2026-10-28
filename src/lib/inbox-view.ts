@@ -245,10 +245,15 @@ function pageFilters(params: URLSearchParams): string[][] {
   return [...params].filter(([key]) => key !== "section" && key !== "cursor").sort(([ak, av], [bk, bv]) => ak < bk ? -1 : ak > bk ? 1 : av < bv ? -1 : av > bv ? 1 : 0);
 }
 
-function logicalInboxPage(scope: InboxQualificationScope, section: string, index: number, params: URLSearchParams): string {
+function inboxPageScopeMatches(scope: InboxQualificationScope, params: URLSearchParams): boolean {
   for (const [key, value] of params) {
-    if ((key === "instance" && value !== scope.instance) || ((key === "repository" || key === "repo") && value !== scope.repository)) throw new Error("Inbox page filter belongs to another scope");
+    if ((key === "instance" && value !== scope.instance) || ((key === "repository" || key === "repo") && value !== scope.repository)) return false;
   }
+  return true;
+}
+
+function logicalInboxPage(scope: InboxQualificationScope, section: string, index: number, params: URLSearchParams): string {
+  if (!inboxPageScopeMatches(scope, params)) throw new Error("Inbox page filter belongs to another scope");
   return JSON.stringify([scope.instance, scope.repository, section, index, pageFilters(params)]);
 }
 
@@ -258,9 +263,8 @@ export function inboxShadowSampleKey(data: unknown, params: URLSearchParams, sco
     !INBOX_VIEW_SECTIONS.includes(data.section as InboxViewSection) || !qualificationRecord(data.page) || !Number.isSafeInteger(data.page.index) || (data.page.index as number) < 0 ||
     params.getAll("section").length !== 1 || params.get("section") !== data.section || params.getAll("cursor").length > 1) return undefined;
   const cursor = readSnapshotCursor(params.get("cursor") ?? undefined, data.snapshotKey, data.section);
-  if ("error" in cursor) return undefined;
-  try { return logicalInboxPage(scope, data.section, data.page.index as number, params); }
-  catch { return undefined; } // An unverified scope never receives a normalized identity.
+  if ("error" in cursor || !inboxPageScopeMatches(scope, params)) return undefined;
+  return logicalInboxPage(scope, data.section, data.page.index as number, params);
 }
 
 function populationGeneration(scope: InboxQualificationScope, pages: ShadowPopulation["pages"]): string {

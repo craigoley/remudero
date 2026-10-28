@@ -104,8 +104,10 @@ test("Inbox sampler identities preserve scope filters and exact revision cursors
   assert.notEqual(inboxShadowSampleKey(data, params, { instance: "site", repository: "craigoley/remudero-site" }), key);
   const otherFilter = new URLSearchParams(params); otherFilter.set("label", "chores");
   assert.notEqual(inboxShadowSampleKey(data, otherFilter, scope), key);
-  const foreign = new URLSearchParams(params); foreign.set("instance", "site");
-  assert.equal(inboxShadowSampleKey(data, foreign, scope), undefined, "a foreign declared scope reaches the actual helper's refusal path");
+  for (const [field, value] of [["instance", "site"], ["repository", "craigoley/remudero-site"], ["repo", "craigoley/remudero-site"]]) {
+    const foreign = new URLSearchParams(params); foreign.set(field!, value!);
+    assert.equal(inboxShadowSampleKey(data, foreign, scope), undefined, "a foreign declared scope reaches the actual helper's explicit refusal path");
+  }
   const old = new URLSearchParams(params); old.set("cursor", snapshotCursor({ snapshotKey: "b".repeat(64), section: "needsYou", offset: 10 }));
   assert.equal(inboxShadowSampleKey(data, old, scope), undefined);
   const duplicated = new URLSearchParams(params); duplicated.append("section", "needsYou");
@@ -129,6 +131,7 @@ test("W1-T10917: readiness preserves exact cursors scope and producer generation
   const generation = first[0]!.qualificationGeneration;
   assert.equal(typeof generation, "string"); assert.match(generation!, /^inbox-current-pages-v1:/);
   assert.ok(first.every(entry => entry.qualificationGeneration === generation), "every persisted page binds the same producer population");
+  assert.ok(first.every(entry => entry.body.generatedAt === f.clock.iso()), "one captured clock-port instant stamps the entire committed population");
   const continuation = f.first.bodies.find(body => body.data.section === "needsYou" && body.data.page.index === 1)!;
   assert.ok(continuation, "the genuine classification contains continuation pages");
   const legacy = f.view.compute(new URLSearchParams(continuation.key)); assert.ok(!("error" in legacy));
@@ -185,6 +188,10 @@ test("W1-T10917: readiness preserves exact cursors scope and producer generation
   const metadata = controls.meta("inbox_qualification_population"); assert.equal(typeof metadata, "string", "the control targets actual independent producer metadata");
   controls.prepare("UPDATE meta SET v = ? WHERE k = ?").run("{", "inbox_qualification_population");
   assert.notEqual(warm().qualificationGeneration?.(INBOX_VIEW_NAME), nextGeneration, "readiness never reconstructs missing or malformed producer evidence from cached bodies");
+  let expectedReason: string | undefined;
+  try { JSON.parse("{"); } catch (error) { expectedReason = (error as Error).message; }
+  assert.ok(expectedReason, "positive control: the malformed fixture has a native parser failure");
+  assert.equal(loadCommittedViewBodies(f.state, "core", f.clock.now()).inboxQualificationReason, expectedReason, "the actual warm reader preserves its precise refusal cause");
   controls.prepare("UPDATE meta SET v = ? WHERE k = ?").run(metadata!, "inbox_qualification_population");
   assert.equal(warm().qualificationGeneration?.(INBOX_VIEW_NAME), nextGeneration);
   const lease = controls.prepare("SELECT name, holder FROM lease").all().find(row => row.holder === "inbox-qualified-producer");

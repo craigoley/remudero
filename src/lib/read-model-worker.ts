@@ -1432,7 +1432,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     announce(INBOX_QUALIFICATION_PENDING);
     const home = slots[0];
     try {
-      if (switches.projector !== "on" || !home?.db || !home.lease) throw new Error("Inbox population has no held projector write fence");
+      if (switches.projector !== "on" || home === undefined || home.db === undefined || home.lease === undefined) throw new Error("Inbox population has no held projector write fence");
       const db = home.db, now = clock.now();
       const committed = withWriteTransaction(db, home.lease, () => {
         const raw = db.meta(INBOX_QUALIFICATION_POPULATION_META), previous = raw === undefined ? undefined : parseInboxShadowPopulation(raw);
@@ -1441,7 +1441,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
           const stale = sources.some(source => source.state !== "fresh");
           return { view: built.view, key, version: built.version, generation, qualificationGeneration: population.generation,
             etag: viewEtag(built.view, built.version, stale, data),
-            body: { view: built.view, version: built.version, generatedAt: new Date(now).toISOString(), asOf: oldestAsOf(sources), stale, sources, data } };
+            body: { view: built.view, version: built.version, generatedAt: fixedClock(now).iso(), asOf: oldestAsOf(sources), stale, sources, data } };
         });
         const keep = new Set(entries.map(entry => entry.key)), retired = [...knownKeys(INBOX_VIEW_NAME)].filter(key => !keep.has(key));
         for (const entry of entries) persistBodyInTransaction(db, entry);
@@ -2404,7 +2404,11 @@ export function loadCommittedViewBodies(stateDir: string, home: string, nowMs = 
         inboxPopulation = restoreInboxShadowPopulation(raw, own.map(entry => ({ key: entry.key, data: entry.body.data, sources: entry.body.sources })), nowMs);
         if (own.some(entry => entry.qualificationReason !== undefined || entry.qualificationGeneration !== inboxPopulation!.generation)) throw new Error("Inbox body provenance does not match the committed population");
       }
-    } catch (error) { inboxPopulation = undefined; inboxQualificationReason = (error as Error).message; }
+    } catch (error) {
+      const reason = (error as Error).message;
+      inboxPopulation = undefined;
+      inboxQualificationReason = reason;
+    }
     db.exec("COMMIT");
     return { bodies, ...(inboxPopulation ? { inboxPopulation } : {}), ...(inboxQualificationReason ? { inboxQualificationReason } : {}) };
   } catch (error) {
