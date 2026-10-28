@@ -26,7 +26,6 @@ import { censusPushRefusal } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { unwrapLowPriority } from "../src/lib/test-slot.js";
 import { gitRepo } from "./helpers/git-repo.js";
-import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 // A NAMESPACE import, so a tree without these exports fails each test below rather than the load.
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
@@ -70,8 +69,6 @@ function viaChild(result: RunResult, files = [BOUNDS.testFile, TESTS.testFile]) 
       files,
       run: (cmd: string, args: string[], opts: never) => {
         calls.push({ cmd, args, opts });
-        // The child is judged (W1-T8379): an exit-0 fake stands for a finished run, so it writes that run's tally.
-        if (result.status === 0) finishJudgedRun(args, opts);
         return result;
       },
     }) as string[];

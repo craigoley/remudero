@@ -753,8 +753,11 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   };
   try {
     const once = () => {
-      // W1-T8379: every run is JUDGED (scripts/pure-test-pool.mjs): a suite that exits 0 before its own summary is
-      // failing, never clean. Per run, so `child` and `options` (the reader context hashes both) stay unjudged.
+      // W1-T8379: a run of this module's own child is JUDGED (scripts/pure-test-pool.mjs): a suite that exits 0
+      // before its own summary is failing, never clean. Only that runner: an injected one may build its own argv
+      // (the pre-push hook's proof-sandbox runner does), so the judge's reporter would never reach its child.
+      // Per run, so `child` and `options` (the reader context hashes both) stay unjudged.
+      if (run !== runCensusChild) return judgedOnce(null);
       const judged = prepareJudgedRun();
       try {
         return judgedOnce(judged);
@@ -763,10 +766,10 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
       }
     };
     const judgedOnce = (judged) => {
-      const judgedChild = priority.wrap(process.execPath, judgedNodeTestArgs(args, judged.args));
+      const judgedChild = judged ? priority.wrap(process.execPath, judgedNodeTestArgs(args, judged.args)) : child;
       const startLoad = load1();
       const startedMs = now();
-      const res = run(judgedChild.file, judgedChild.args, { ...options, env: { ...options.env, ...judged.env } });
+      const res = run(judgedChild.file, judgedChild.args, judged ? { ...options, env: { ...options.env, ...judged.env } } : options);
       pending.add(res);
       const finishedMs = now();
       if (TIME_BOUND_CODES.has(res.error?.code) && options.timeout === CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
@@ -795,7 +798,7 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
         throw new Error(`the census suite child exited ${res.status} but its TAP names no failing suite`);
       }
       // A nonzero exit keeps the TAP's own reading; only an exit 0 gains the judgment.
-      const verdict = res.status === 0 ? judgeRun(files, { status: 0, pool: false, root, ...judged.read() }) : null;
+      const verdict = judged && res.status === 0 ? judgeRun(files, { status: 0, pool: false, root, ...judged.read() }) : null;
       if (verdict && !verdict.complete) {
         const line = describeJudgedRun("census suite", verdict, { prefix: "census-precheck" });
         // Incomplete with every file reported (a cancelled test): no suite to name, so not a measurement at all.

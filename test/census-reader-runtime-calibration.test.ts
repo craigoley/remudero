@@ -5,7 +5,6 @@ import { performance } from "node:perf_hooks";
 import { test, type TestContext } from "node:test";
 import { FAST_GATE_CENSUS_REMEASURE_MARGIN } from "#src/lib/ci-parity.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 // @ts-ignore executable gate module.
 import { censusReaderBudget, main as censusMain, runCensusSuitesViaChild } from "#scripts/census-precheck.mjs";
 
@@ -14,13 +13,6 @@ const POLICY = { floorMs: 1000, multiple: 4, remeasureMargin: FAST_GATE_CENSUS_R
 const FILE = "test/reader.test.ts";
 const PASS = "TAP version 13\nok 1 - reader works\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
 const FAIL = `TAP version 13\nnot ok 1 - reader fails\n  ---\n  location: '${FILE}:1:1'\n  ...\n1..1\n# tests 1\n# pass 0\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n`;
-// The suite child is judged (W1-T8379): a fake standing for an exit-0 run writes the tally a finished run leaves.
-type Run = (file: string, args: string[], options: { timeout: number }) => unknown;
-const finished = (run: Run) => ((file, args, options) => {
-  const result = run(file, args, options);
-  if ((result as { status?: unknown } | undefined)?.status === 0) finishJudgedRun(args, options);
-  return result;
-}) as Run;
 // Niced fixture readers starve behind a loaded runner (flake screen, #12600); the wrap is not under test here.
 const priority = { wrap: (file: string, args: string[]) => ({ file, args }) };
 
@@ -37,9 +29,9 @@ test("source-reader calibration prices that reader including startup, not seven 
   const repo = fixture(t), time = [0, 9000, 9001, 9002, 18002], bounds: number[] = [];
   assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
     now: () => time.shift()!, readContext: () => "same-runtime-input",
-    run: finished((_f: string, _a: string[], options: { timeout: number }) => {
+    run: (_f: string, _a: string[], options: { timeout: number }) => {
       bounds.push(options.timeout); return { status: 0, stdout: PASS };
-    }) }), []);
+    } }), []);
   assert.deepEqual(bounds, [120000, 36000]);
   assert.equal(time.length, 0);
 });
@@ -63,19 +55,19 @@ test("source-reader runtime refuses absent stale malformed and other-context cal
 test("source-reader calibration caps its budget rather than rejecting a healthy reader", (t) => {
   const repo = fixture(t), time = [0, 36000, 36001, 36002, 72002], bounds: number[] = [];
   assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
-    now: () => time.shift()!, readContext: () => "same-runtime-input", run: finished((_f: string, _a: string[], options: { timeout: number }) => {
+    now: () => time.shift()!, readContext: () => "same-runtime-input", run: (_f: string, _a: string[], options: { timeout: number }) => {
       bounds.push(options.timeout); return { status: 0, stdout: PASS };
-    }) }), []);
+    } }), []);
   assert.deepEqual(bounds, [120000, 120000]);
   const overrun = [0, 36000, 36001, 36002, 157003, 157004, 278005];
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
-    now: () => overrun.shift()!, readContext: () => "same-runtime-input", run: finished(() => ({ status: 0, stdout: PASS })) }), /exceeded.*120000ms/);
+    now: () => overrun.shift()!, readContext: () => "same-runtime-input", run: () => ({ status: 0, stdout: PASS }) }), /exceeded.*120000ms/);
 });
 
 test("source-reader calibration never retries a failed assertion or learns incomplete output", (t) => {
   const repo = fixture(t); let calls = 0;
   assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
-    readContext: () => "same", run: finished(() => { calls++; return { status: 1, stdout: FAIL }; }) }), [FILE]);
+    readContext: () => "same", run: () => { calls++; return { status: 1, stdout: FAIL }; } }), [FILE]);
   assert.equal(calls, 1);
   for (const result of [
     { status: 0, stdout: PASS.replace("# skipped 0", "# skipped 1") },
@@ -85,13 +77,13 @@ test("source-reader calibration never retries a failed assertion or learns incom
     { status: null, signal: "SIGTERM", stdout: PASS }, { status: null, error: new Error("ETIMEDOUT") },
     { status: 0, stdout: PASS, outputComplete: false }, { status: 0, stdout: PASS + "# tests 1\n" },
   ]) assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY,
-    priority, readContext: () => "same", run: finished(() => result) }), /UNKNOWN|0 tests|summary|exited 2|SIGTERM|ETIMEDOUT|incomplete/);
+    priority, readContext: () => "same", run: () => result }), /UNKNOWN|0 tests|summary|exited 2|SIGTERM|ETIMEDOUT|incomplete/);
 });
 
 test("source-reader qualification rejects source drift without another try", (t) => {
   const repo = fixture(t); let calls = 0;
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
-    readContext: () => calls ? "changed" : "original", run: finished(() => { calls++; return { status: 0, stdout: PASS }; }) }), /inputs changed/);
+    readContext: () => calls ? "changed" : "original", run: () => { calls++; return { status: 0, stdout: PASS }; } }), /inputs changed/);
   assert.equal(calls, 1);
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], priority,
     readerRuntimePolicy: { floorMs: 1000, multiple: 4 }, run: () => assert.fail("no child without a re-measure margin") }), /invalid calibration policy/);
@@ -108,10 +100,10 @@ test("source-reader qualification re-measures one overrun and passes a re-measur
     const time = first === "late" ? [0, 1000, 1001, 1002, 6002, 6003, 10303] : [0, 1000, 1001, 1002, 5002, 6003, 10303],
       bounds: number[] = [];
     assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
-      now: () => time.shift()!, readContext: () => "same", run: finished((_f: string, _a: string[], options: { timeout: number }) => {
+      now: () => time.shift()!, readContext: () => "same", run: (_f: string, _a: string[], options: { timeout: number }) => {
         bounds.push(options.timeout);
         return bounds.length === 2 && first === "stopped" ? OVERRAN : { status: 0, stdout: PASS };
-      }) }), []);
+      } }), []);
     assert.deepEqual(bounds, [120000, 4000, 4400]);
     const runtime = JSON.parse(lines.filter((line) => line.startsWith("census-reader-runtime: ")).at(-1)!.slice(23));
     assert.equal(runtime.budgetMs, 4400);
@@ -124,10 +116,10 @@ test("source-reader qualification refuses a reader that overruns both samples", 
   const repo = fixture(t);
   const late = [0, 1000, 1001, 1002, 6002, 6003, 11003];
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
-    now: () => late.shift()!, readContext: () => "same", run: finished(() => ({ status: 0, stdout: PASS })) }), /exceeded its 4000ms measured budget/);
+    now: () => late.shift()!, readContext: () => "same", run: () => ({ status: 0, stdout: PASS }) }), /exceeded its 4000ms measured budget/);
   let calls = 0;
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
-    readContext: () => "same", run: finished(() => (calls++ === 0 ? { status: 0, stdout: PASS } : OVERRAN)) }), /could not run to completion/);
+    readContext: () => "same", run: () => (calls++ === 0 ? { status: 0, stdout: PASS } : OVERRAN) }), /could not run to completion/);
 });
 
 test("source-reader calibration exercises real native context and children without a synthetic pass", (t) => {
@@ -143,7 +135,7 @@ test("source-reader calibration rejects a changed count or case identity even if
   for (const changed of [PASS.replace("# tests 1", "# tests 2").replace("# pass 1", "# pass 2"), PASS.replace("reader works", "different reader")]) {
     let calls = 0;
     assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
-      readContext: () => "same", run: finished(() => ({ status: 0, stdout: calls++ === 0 ? PASS : changed })) }), /case inventory differs/);
+      readContext: () => "same", run: () => ({ status: 0, stdout: calls++ === 0 ? PASS : changed }) }), /case inventory differs/);
     assert.equal(calls, 2);
   }
 });
@@ -151,7 +143,7 @@ test("source-reader calibration rejects a changed count or case identity even if
 test("source-reader native context refuses a regular file disguised as the dependency donor", (t) => {
   const repo = fixture(t); writeFileSync(join(repo.dir, "node_modules"), "not a donor"); let calls = 0;
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
-    run: finished(() => { calls++; return { status: 0, stdout: PASS }; }) }), /not a directory donor/);
+    run: () => { calls++; return { status: 0, stdout: PASS }; } }), /not a directory donor/);
   assert.equal(calls, 0);
 });
 

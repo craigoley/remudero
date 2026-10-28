@@ -6,7 +6,8 @@ import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { containmentProbeTestLeaf } from "#src/lib/ci-parity.js";
 import { defaultPreflightSpawn, type PreflightSpawn } from "#src/lib/commit-message.js";
-import { checkFixCensusSnapshot, checkFixCensusSnapshotAsync, runPreflightCiChecks } from "#src/run-task.js";
+// Through the test helper, never src/run-task.ts directly: its direct importers are a shrink-only ceiling.
+import { checkFixCensusSnapshot, checkFixCensusSnapshotAsync, runPreflightCiChecks } from "#test/helpers/run-task-test.js";
 import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // @ts-ignore executable gate module.
