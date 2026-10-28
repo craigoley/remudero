@@ -95,6 +95,8 @@ test("W1-T8833: a sweep fix round whose branch gained a main merge mid-round lan
     const rows: Row[] = [];
     let pushed: unknown;
     let ownerReads = 0;
+    let refreshArgs: unknown[] | undefined;
+    const mergedProbe = async () => [];
     // The PRODUCTION adapter, with no push injected: what reaches runFixRung is the entrypoint's own wiring.
     const effects = buildSweepEffects({
       owner: "craigoley",
@@ -114,6 +116,8 @@ test("W1-T8833: a sweep fix round whose branch gained a main merge mid-round lan
       armSessionPrsOverride: false,
       captureRepairFeedbackImpl: () => {},
       ghRunImpl: () => {},
+      ghUpdateBranchImpl: (...args: unknown[]) => { refreshArgs = args; return { ok: true }; },
+      reproduceFailingTestsOnMergeImpl: mergedProbe,
       spawnWallClockBoundMsOverride: 1,
       reclaimWorkerImpl: () => {},
       disarmImpl: () => undefined,
@@ -136,7 +140,12 @@ test("W1-T8833: a sweep fix round whose branch gained a main merge mid-round lan
       captureWorktreeSnapshotImpl: () => ({ headSha: "birth123" }),
       buildFixRungDispatchArgsImpl: () => ({}),
       openTaskIdsFromPlanImpl: () => new Set([TASK]),
-      runFixRungImpl: async (args: { deps: { push: (wt: string, branch: string, sha: string, prior: string) => unknown } }) => {
+      runFixRungImpl: async (args: { deps: { push: (wt: string, branch: string, sha: string, prior: string) => unknown;
+        updateBranchAtHead?: (pr: number, head: string) => { ok: boolean }; reproduceFailingTestsOnMerge?: unknown } }) => {
+        assert.ok(args.deps.updateBranchAtHead, "the actual cold adapter offers an exact-head capability");
+        assert.equal(args.deps.reproduceFailingTestsOnMerge, mergedProbe, "the cold adapter also carries its trial-merge producer");
+        assert.equal((await args.deps.updateBranchAtHead(11133, fx.base)).ok, true);
+        assert.deepEqual(refreshArgs, ["craigoley", "remudero-fixture", 11133, undefined, undefined, undefined, fx.base]);
         // The round's leased push, guarded on the head it was dispatched at, after the refresh moved the remote.
         pushed = await Promise.resolve(args.deps.push(fx.lane.dir, BRANCH, fx.committed, fx.base)).then(() => "landed", (e: unknown) => e);
         return { outcome: "stood_down", strikes: 0, retriggers: 0, reason: "test" };

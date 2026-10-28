@@ -10699,7 +10699,7 @@ function* inheritedCensusContextSteps(
       throw new Error("census snapshot identity invalid");
     }
     const read = function* (args: string[]): Steps<string> {
-      return (yield* step(() => git(root, args, { maxBuffer: 256 * 1024 }))).trim();
+      return (yield* step(() => git(root, args, { maxBuffer: 256 * 1024, timeout: 120_000 }))).trim();
     };
     if ((yield* read(["rev-parse", "HEAD"])) !== identity.headSha ||
         (yield* read(["rev-parse", "origin/main"])) !== identity.mainSha ||
@@ -10728,7 +10728,7 @@ export function checkFixCensusSnapshot(
   log: (step: string, extra?: Record<string, unknown>) => void,
   run: typeof spawnSync = spawnSync,
 ): { refusal?: CensusPushRefusal; unmeasured?: string } | undefined {
-  return runStepsSync(fixCensusSnapshotSteps(root, path, log, (file, args, options) => run(file, args, options)));
+  return runStepsSync(fixCensusSnapshotSteps(root, path, log, (file, args, options) => run(file, args, options), hostWorktreeGit));
 }
 
 /** W1-T7744 — the census check with both children awaited, for the fix rung and the census-push repair, which the
@@ -10740,7 +10740,7 @@ export async function checkFixCensusSnapshotAsync(
   log: (step: string, extra?: Record<string, unknown>) => void,
   run: CensusChildRunner<Promise<CensusChildResult>> = spawnCensusChild,
 ): Promise<{ refusal?: CensusPushRefusal; unmeasured?: string } | undefined> {
-  return runStepsAsync(fixCensusSnapshotSteps(root, path, log, run));
+  return runStepsAsync(fixCensusSnapshotSteps(root, path, log, run, hostWorktreeGitAsync));
 }
 
 /** One census child off the event loop, in `spawnSync`'s result shape: `status` is the exit code (null when killed
@@ -10768,6 +10768,7 @@ function* fixCensusSnapshotSteps(
   path: string | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
   run: CensusChildRunner<CensusChildResult | Promise<CensusChildResult>>,
+  runGit: (root: string, args: string[], options?: HostWorktreeGitOptions) => string | Promise<string>,
 ): Steps<{ refusal?: CensusPushRefusal; unmeasured?: string } | undefined> {
   if (!path) return undefined;
   const env = Object.fromEntries(Object.entries(process.env)
@@ -10827,15 +10828,7 @@ function* fixCensusSnapshotSteps(
         refusal = unavailable(`census suite ${reach}`, result, output);
       } else if (result.status !== 0) {
         refusal = stopped(String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000));
-        refusal.inheritedMain = yield* inheritedCensusContextSteps(root, path,
-          (root, args, options) => {
-            const result = run("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: childTimeBoundMs, maxBuffer: options?.maxBuffer });
-            const checked = (value: CensusChildResult) => {
-              if (value.status !== 0 || value.signal || value.error) throw new Error("inherited census Git evidence unavailable");
-              return String(value.stdout);
-            };
-            return result instanceof Promise ? result.then(checked) : checked(result);
-          });
+        refusal.inheritedMain = yield* inheritedCensusContextSteps(root, path, runGit);
       } else {
         const verdict = judged.judge(0);
         if (!verdict.complete) refusal = stopped(verdict.line);
