@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   PR_BLOCKERS, PR_BLOCKER_OWNERS, blockerFields, finalBlocker, priorBlockersFromLedger,
-} from "../src/lib/pr-blocker.js";
+} from "#src/lib/pr-blocker.js";
 import {
   DEFAULT_SWEEP_POLICY, DISPOSITION_RULES, deriveDisposition, runSweep,
   type OpenPrView, type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const NOW = Date.UTC(2026, 9, 4, 12);
 function pr(over: Partial<OpenPrView> = {}): OpenPrView {

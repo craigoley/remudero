@@ -6,8 +6,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createServeSupervisor, HANDOFF_NEED_MARGIN, type GenerationProcess, type PreparedSlot, type ServeSupervisorOptions } from "../src/lib/serve-supervisor.js";
-import { GENERATION_MESSAGES, onShedWorkersRequest, type GenerationChannel, type GenerationMessage } from "../src/lib/serve-generation.js";
+import { createServeSupervisor, HANDOFF_NEED_MARGIN, type GenerationProcess, type PreparedSlot, type ServeSupervisorOptions } from "#src/lib/serve-supervisor.js";
+import { GENERATION_MESSAGES, onShedWorkersRequest, type GenerationChannel, type GenerationMessage } from "#src/lib/serve-generation.js";
 
 const tick = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const NEED = 5_000;

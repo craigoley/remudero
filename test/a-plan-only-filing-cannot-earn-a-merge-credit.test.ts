@@ -7,8 +7,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isPlanOnlyChangeset } from "../src/lib/status.js";
-import { readMergedPathsByPr } from "../src/run-task.js";
+import { isPlanOnlyChangeset } from "#src/lib/status.js";
+import { readMergedPathsByPr } from "#src/run-task.js";
 
 /** The #3195 shape: a filing opened from the task's OWN run branch. */
 const FILING_PATHS = ["plan/tasks.d/W1-T2371-the-risk-judge-cannot-pass-an-amendment.yaml"];

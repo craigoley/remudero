@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { computeBoardSnapshot } from "../src/lib/board.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { projectConsoleStatusResponse } from "../src/lib/serve.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { resolve, SPEC, violations, type Schema } from "./helpers/openapi-strict.js";
+import { computeBoardSnapshot } from "#src/lib/board.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { projectConsoleStatusResponse } from "#src/lib/serve.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { resolve, SPEC, violations, type Schema } from "#test/helpers/openapi-strict.js";
 
 const NOW = Date.parse("2026-10-07T21:00:00.000Z");
 const iso = (ago: number) => new Date(NOW - ago).toISOString();

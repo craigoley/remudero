@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
+import { gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "#src/lib/gardener.js";
 import {
   CI_GATE_YML,
   demoteInCiGate,
@@ -23,12 +23,12 @@ import {
   loadGateProbes,
   updateTally,
   type GateProbes,
-} from "../src/lib/gate-gardener.js";
-import type { GateFireRateReport } from "../src/lib/gate-fire-rate.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { daemonCommand } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/gate-gardener.js";
+import type { GateFireRateReport } from "#src/lib/gate-fire-rate.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { daemonCommand } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // These unit repositories have no open PRs; the default async reader is exercised separately.
 const gateGardenSpec: typeof sourceGateGardenSpec = (deps, probes, sources = {}) =>

@@ -7,11 +7,11 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import * as backlog from "../src/lib/backlog-gardener.js";
-import { fixedClock } from "../src/lib/clock.js";
-import type { PlanInventory } from "../src/lib/plan-gardener.js";
-import type { Task } from "../src/lib/plan.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import * as backlog from "#src/lib/backlog-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { PlanInventory } from "#src/lib/plan-gardener.js";
+import type { Task } from "#src/lib/plan.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const NOW = new Date("2026-10-10T04:00:00.000Z");
 const ROW = { step: "pr.open_satisfied_by_main", task_id: "W1-T5", branch: "run-W1-T5-1", head_sha: "d".repeat(40), changed_files: ["test/a-regression.test.ts"] };

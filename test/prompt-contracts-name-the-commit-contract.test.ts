@@ -4,14 +4,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { bodyVsDiffContractLines, commitMessageContractLines } from "../src/lib/compaction.js";
-import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildReviewPrompt, reviewerVerdictContract } from "../src/lib/review.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { dispatchAlertFixRun, type AlertFixDispatchDeps } from "../src/run-task.js";
+import { bodyVsDiffContractLines, commitMessageContractLines } from "#src/lib/compaction.js";
+import type { AlertLaneAlert } from "#src/lib/alert-lane.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildReviewPrompt, reviewerVerdictContract } from "#src/lib/review.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { dispatchAlertFixRun, type AlertFixDispatchDeps } from "#src/run-task.js";
 
 const ALERT: AlertLaneAlert = {
   source: "code-scanning",

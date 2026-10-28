@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { realServePolicyDeps, runServePolicyCycle, serveHandoffOpen } from "../src/lib/serve-policy-convergence.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { realServePolicyDeps, runServePolicyCycle, serveHandoffOpen } from "#src/lib/serve-policy-convergence.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // W1-T9504 — 2026-10-14: serve's handoff never fit (need 5.15 GB, ~3.5 GB free), so the supervisor deferred it 75
 // times; each deferral read as a handoff in flight, and every serve-policy tick from 16:03Z held serve's image replace.

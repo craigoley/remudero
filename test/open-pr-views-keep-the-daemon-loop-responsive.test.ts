@@ -6,7 +6,7 @@ import {
   hydrateWorkflowRuns,
   runsForHeadRestArgs,
   type GhApiFetcher,
-} from "../src/lib/open-prs-rest.js";
+} from "#src/lib/open-prs-rest.js";
 
 // W1-T4773: a live profile of remudero-daemon on 2026-09-30 put the open-PR view build at about 55%
 // of its busy loop time, all of it synchronous `gh` children. These tests drive the same two

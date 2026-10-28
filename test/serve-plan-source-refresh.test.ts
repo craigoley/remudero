@@ -6,12 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createService } from "../src/lib/service.js";
-import { planSourceFailed, planSourceLoaded, reloadServePlan, type PlanRead, type PlanSourceHolder } from "../src/lib/serve-plan-reload.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createService } from "#src/lib/service.js";
+import { planSourceFailed, planSourceLoaded, reloadServePlan, type PlanRead, type PlanSourceHolder } from "#src/lib/serve-plan-reload.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 // W1-T5639: a refresh that fails keeps the plan it had, dated, and never certifies a newer generation.
 

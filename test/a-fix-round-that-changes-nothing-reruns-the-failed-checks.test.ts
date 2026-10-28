@@ -3,14 +3,14 @@ import test from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rotateLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import type { Config } from "../src/lib/config.js";
-import type { Plan } from "../src/lib/plan.js";
+import { rotateLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan } from "#src/lib/plan.js";
 import {
   buildSweepEffects, DEFAULT_SWEEP_POLICY, fixRoundTally, fixRungStalledWithoutNewHead, runSweep,
   type OpenPrView, type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 type Row = Record<string, unknown>;
 const HEAD = "a".repeat(40);

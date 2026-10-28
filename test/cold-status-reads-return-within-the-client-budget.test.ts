@@ -12,13 +12,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
-import { boundConsoleReadRoutes, CONSOLE_READ_ROUTE_BUDGET_MS, type ServeDeps } from "../src/lib/serve.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
-import type { Route } from "../src/lib/service.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { TraceGithub } from "../src/lib/trace.js";
+import { boundConsoleReadRoutes, CONSOLE_READ_ROUTE_BUDGET_MS, type ServeDeps } from "#src/lib/serve.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
+import type { Route } from "#src/lib/service.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { TraceGithub } from "#src/lib/trace.js";
 
 function task(over: Partial<Task> = {}): Task {
   return {

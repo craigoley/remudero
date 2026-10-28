@@ -16,12 +16,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { applyExportDeletions, exportGardenCandidates, exportGardenSpec, exportInventory } from "../src/lib/export-gardener.js";
-import { writeAtomic } from "../src/lib/fs-race-safe.js";
-import { adoptionLatestPath, adoptionProposalId } from "../src/lib/measurement-cadence.js";
-import { acceptanceAuthorTimeCheck, parseAcceptanceBlock, parseWhitelistedProof } from "../src/lib/review.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { applyExportDeletions, exportGardenCandidates, exportGardenSpec, exportInventory } from "#src/lib/export-gardener.js";
+import { writeAtomic } from "#src/lib/fs-race-safe.js";
+import { adoptionLatestPath, adoptionProposalId } from "#src/lib/measurement-cadence.js";
+import { acceptanceAuthorTimeCheck, parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const TESTS = "test/export-gardener-removes-unreferenced-exports.test.ts";
 const SOURCE = "src/lib/dead-thing.ts";

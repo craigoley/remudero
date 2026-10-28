@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fetchPrDiff, isDiffTooLarge, type PrDiffSource } from "../src/lib/pr-diff.js";
+import { fetchPrDiff, isDiffTooLarge, type PrDiffSource } from "#src/lib/pr-diff.js";
 
 /**
  * test/a-review-that-cannot-read-its-diff-refuses.test.ts — W1-T3093.

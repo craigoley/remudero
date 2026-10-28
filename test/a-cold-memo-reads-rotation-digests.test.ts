@@ -7,12 +7,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
-import { createLedgerRotationMemo, ledgerRotationEntries } from "../src/lib/ledger-union.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { buildActionResultsRoute } from "../src/lib/action-results.js";
-import { readReportedAnomalies } from "../src/lib/cost-anomaly.js";
-import { createFollowUpHistoryReader } from "../src/lib/follow-up-policy.js";
-import { createLatestMeasurementReader } from "../src/lib/measurement-cadence.js";
+import { createLedgerRotationMemo, ledgerRotationEntries } from "#src/lib/ledger-union.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { buildActionResultsRoute } from "#src/lib/action-results.js";
+import { readReportedAnomalies } from "#src/lib/cost-anomaly.js";
+import { createFollowUpHistoryReader } from "#src/lib/follow-up-policy.js";
+import { createLatestMeasurementReader } from "#src/lib/measurement-cadence.js";
 
 const reduce = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row.keep);
 const noParse = () => { throw new Error("loaded rotations must not be parsed inline"); };

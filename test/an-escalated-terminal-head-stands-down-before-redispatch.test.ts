@@ -40,11 +40,11 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { buildSweepEffects } from "../src/run-task.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { buildSweepEffects } from "#src/run-task.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 const RECENT = "2026-07-19T12:00:00Z";
 const NOW = Date.parse("2026-07-29T18:00:00Z");

@@ -13,10 +13,10 @@ import {
   appendDailyCostCeilingOverrideAudit,
   ledgerExceedsRotationCeiling,
   rotateLedger,
-} from "../src/lib/ledger.js";
-import { deriveAccountUsage, USAGE_CACHE_MAX_AGE_MS, type AccountUsageInput } from "../src/lib/account-usage.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { SWEEP_STALL_MULTIPLIER, judgeSweepLiveness, readSweepPassSummaryTimestamps } from "../src/lib/doctor.js";
+} from "#src/lib/ledger.js";
+import { deriveAccountUsage, USAGE_CACHE_MAX_AGE_MS, type AccountUsageInput } from "#src/lib/account-usage.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { SWEEP_STALL_MULTIPLIER, judgeSweepLiveness, readSweepPassSummaryTimestamps } from "#src/lib/doctor.js";
 
 // ── W1-T275 (OBSERVED LIVE 2026-07-31, feedback recon): the ACCOUNT strip rendered "unknown" on
 // a healthy fleet because the live ledger had just rotated and `daemon.headroom` was absent from

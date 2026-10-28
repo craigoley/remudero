@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { boundGitCall, type AsyncGitRunner } from "../src/lib/git-fetch-retry.js";
+import { boundGitCall, type AsyncGitRunner } from "#src/lib/git-fetch-retry.js";
 
 const MAIN_FETCH = ["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"];
 const execFileAsync = promisify(execFile);

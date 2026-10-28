@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
-import type { FeedbackEntry } from "../src/lib/feedback.js";
+import type { Task } from "#src/lib/plan.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
 import {
   feedbackOriginTag,
   renderTraceChain,
@@ -10,7 +10,7 @@ import {
   traceReverse,
   type TraceGithub,
   type TracePrView,
-} from "../src/lib/trace.js";
+} from "#src/lib/trace.js";
 
 /** A fake TraceGithub driven by a fixture map, keyed by whatever ref was passed. */
 function fakeGithub(byRef: Record<string, TracePrView>): TraceGithub & { calls: string[] } {

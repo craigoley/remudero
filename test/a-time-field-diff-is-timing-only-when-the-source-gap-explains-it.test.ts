@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyShadowDiff, type ShadowEvidence } from "../src/lib/view-shadow.js";
+import { classifyShadowDiff, type ShadowEvidence } from "#src/lib/view-shadow.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const DAY = 24 * 3_600_000;

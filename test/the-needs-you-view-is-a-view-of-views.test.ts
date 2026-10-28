@@ -4,13 +4,13 @@
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
-import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "../src/lib/needs-you-view.js";
-import type { NowDecision } from "../src/lib/now-decisions.js";
-import type { NowAction } from "../src/lib/now-view.js";
-import type { ReadModelInstanceState, ReadModelSwitches, ReadModelWorkerHandle } from "../src/lib/read-model-worker.js";
-import { createService } from "../src/lib/service.js";
-import { buildReadModelViewRoutes, viewEtag, type ViewBodyEntry, type ViewSource } from "../src/lib/views.js";
+import type { Clock } from "#src/lib/clock.js";
+import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "#src/lib/needs-you-view.js";
+import type { NowDecision } from "#src/lib/now-decisions.js";
+import type { NowAction } from "#src/lib/now-view.js";
+import type { ReadModelInstanceState, ReadModelSwitches, ReadModelWorkerHandle } from "#src/lib/read-model-worker.js";
+import { createService } from "#src/lib/service.js";
+import { buildReadModelViewRoutes, viewEtag, type ViewBodyEntry, type ViewSource } from "#src/lib/views.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 const T0 = Date.parse("2026-10-01T09:00:00.000Z");

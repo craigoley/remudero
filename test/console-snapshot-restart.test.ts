@@ -4,11 +4,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
-import { CONSOLE_SNAPSHOT_PERSIST_MIN_MS, createConsoleSnapshotCache, prewarmReadRoutes, type ConsoleResponseStaleness } from "../src/lib/console-snapshot-cache.js";
-import { CONSOLE_SNAPSHOT_CONTRACT, createConsoleSnapshotStore } from "../src/lib/console-snapshot-store.js";
-import { boundConsoleReadRoutes, type ServeDeps } from "../src/lib/serve.js";
-import type { Route } from "../src/lib/service.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import { CONSOLE_SNAPSHOT_PERSIST_MIN_MS, createConsoleSnapshotCache, prewarmReadRoutes, type ConsoleResponseStaleness } from "#src/lib/console-snapshot-cache.js";
+import { CONSOLE_SNAPSHOT_CONTRACT, createConsoleSnapshotStore } from "#src/lib/console-snapshot-store.js";
+import { boundConsoleReadRoutes, type ServeDeps } from "#src/lib/serve.js";
+import type { Route } from "#src/lib/service.js";
 
 class Capture {
   status = 0;

@@ -16,8 +16,8 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 /**
  * W1-T2431 — A COUNTER CANNOT SEE AN ACTION IT DID NOT WRITE. `sweep.check_requeued` is keyed on

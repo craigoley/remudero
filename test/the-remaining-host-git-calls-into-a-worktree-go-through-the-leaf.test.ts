@@ -19,17 +19,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { composeRealDeps } from "../src/lib/composition-root.js";
-import type { Config } from "../src/lib/config.js";
-import { regenerateOrientation } from "../src/lib/orientation.js";
-import { newMonolithIdsAgainstBase } from "../src/lib/relint.js";
-import { buildGather, captureCitationBaselines, stampCitationsAndCommit } from "../src/lib/retro.js";
-import { sweepStrandedReviewWorktrees } from "../src/lib/review-worktree-reclaim.js";
-import { headIsInWorktree, readBaselineRatchetWorktreeState } from "../src/lib/sweep.js";
-import { excludeNodeModulesFromGit, worktreeAdd } from "../src/lib/worker.js";
-import { WorktreePointerRefusedError } from "../src/lib/worktree-git.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import { composeRealDeps } from "#src/lib/composition-root.js";
+import type { Config } from "#src/lib/config.js";
+import { regenerateOrientation } from "#src/lib/orientation.js";
+import { newMonolithIdsAgainstBase } from "#src/lib/relint.js";
+import { buildGather, captureCitationBaselines, stampCitationsAndCommit } from "#src/lib/retro.js";
+import { sweepStrandedReviewWorktrees } from "#src/lib/review-worktree-reclaim.js";
+import { headIsInWorktree, readBaselineRatchetWorktreeState } from "#src/lib/sweep.js";
+import { excludeNodeModulesFromGit, worktreeAdd } from "#src/lib/worker.js";
+import { WorktreePointerRefusedError } from "#src/lib/worktree-git.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const ID = GIT_REPO_FIXTURE_IDENTITY;

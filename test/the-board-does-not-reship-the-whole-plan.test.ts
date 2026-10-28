@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { computeBoardSnapshot, type BoardDeps } from "../src/lib/board.js";
+import { computeBoardSnapshot, type BoardDeps } from "#src/lib/board.js";
 import {
   boundConsoleReadRoute,
   buildServeServer,
@@ -13,14 +13,14 @@ import {
   projectConsoleStatusRoute,
   type ConsoleStatusTaskProjection,
   type ServeDeps,
-} from "../src/lib/serve.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
-import type { Route } from "../src/lib/service.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+} from "#src/lib/serve.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
+import type { Route } from "#src/lib/service.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const READ_TOKEN = "status-size-read-token";
 const WRITE_TOKEN = "status-size-write-token";

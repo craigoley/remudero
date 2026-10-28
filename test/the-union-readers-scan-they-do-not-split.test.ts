@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
 
-import { readLedgerUnionRawLinesSync, readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
+import { readLedgerUnionRawLinesSync, readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
 
 // ── W1-T3335 — THE UNION READERS SCAN, THEY DO NOT SPLIT ──────────────────────────────────────
 //

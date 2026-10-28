@@ -16,8 +16,8 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { deriveStatus, projectPlan, type GitHub, type PrRef } from "../src/lib/status.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { deriveStatus, projectPlan, type GitHub, type PrRef } from "#src/lib/status.js";
 
 /** A minimal task; fields not under test get sensible defaults, mirroring test/status.test.ts's
  *  own convention (`verify: "auto"` by default — a test opts into `verify: "human"` explicitly). */

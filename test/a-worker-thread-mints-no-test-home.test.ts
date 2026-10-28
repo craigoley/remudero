@@ -6,8 +6,8 @@ import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
-import { LIVE_WRITE_SENTINEL_TOKEN } from "../src/lib/live-write-guard.js";
-import { pidIsAlive, pidNamespaceId, setupDirOwnerTag } from "./setup/no-live-remote.js";
+import { LIVE_WRITE_SENTINEL_TOKEN } from "#src/lib/live-write-guard.js";
+import { pidIsAlive, pidNamespaceId, setupDirOwnerTag } from "#test/setup/no-live-remote.js";
 
 const SETUP = new URL("./setup/tmp-hygiene.ts", import.meta.url).href;
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));

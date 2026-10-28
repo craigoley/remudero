@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { commitMessageContractLines, outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
-import { renderImplementPrompt, renderReconPrompt } from "../src/run-task.js";
-import type { Task } from "../src/lib/plan.js";
+import { commitMessageContractLines, outputContractLines, renderAnchorBlock } from "#src/lib/compaction.js";
+import { renderImplementPrompt, renderReconPrompt } from "#src/run-task.js";
+import type { Task } from "#src/lib/plan.js";
 
 // W1-T502: a run's only copy of hours of work is dirty files in a reapable worktree until the
 // terminal commit. This suite drives the REAL render functions (never a re-typed copy of their

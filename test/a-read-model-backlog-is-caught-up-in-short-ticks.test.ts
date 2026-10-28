@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
-import type { Clock } from "../src/lib/clock.js";
-import { LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, readModelDigest } from "../src/lib/ledger-projector.js";
-import { READ_MODEL_LEASE_TTL_MS, acquireLease, openReadModel, type ReadModelDb } from "../src/lib/read-model-db.js";
+import type { Clock } from "#src/lib/clock.js";
+import { LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, readModelDigest } from "#src/lib/ledger-projector.js";
+import { READ_MODEL_LEASE_TTL_MS, acquireLease, openReadModel, type ReadModelDb } from "#src/lib/read-model-db.js";
 import {
   READ_MODEL_LEASE_RENEW_MS,
   READ_MODEL_PASS_SHARE,
@@ -14,8 +14,8 @@ import {
   createReadModelTicker,
   runReadModelWorker,
   type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 /** The work clock's cost of one applied row: time moves only when rows commit. */

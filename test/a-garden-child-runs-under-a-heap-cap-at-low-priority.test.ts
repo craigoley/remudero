@@ -3,8 +3,8 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import * as registry from "../src/lib/garden-registry.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as registry from "#src/lib/garden-registry.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // MEASURED 2026-10-02 (research/loop-stall.md §1a): two garden children at once held ~3.7 GB (backlog) and ~3.6 GB
 // (ci-friction) of RSS plus swap on a 15 GiB host; the daemon's main thread spent 38% of its samples waiting on swap-in.

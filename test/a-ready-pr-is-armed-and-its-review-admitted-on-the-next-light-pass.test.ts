@@ -22,8 +22,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   decideSweepArm,
@@ -32,9 +32,9 @@ import {
   runSweepLightPass,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { lightPassActionable } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { lightPassActionable } from "#src/run-task.js";
 
 const NOW = Date.parse("2026-10-05T18:00:00Z");
 const DEFERRED = "deferred to full sweep (light pass)";

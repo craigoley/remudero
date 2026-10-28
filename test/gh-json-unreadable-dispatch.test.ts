@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { GhJsonUnreadableResponseError, ghJson, ghJsonAsync } from "../src/lib/github-transport.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
-import type { MergedSet } from "../src/lib/drain.js";
+import { GhJsonUnreadableResponseError, ghJson, ghJsonAsync } from "#src/lib/github-transport.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { loadPlanFromYaml, type Plan } from "#src/lib/plan.js";
+import type { MergedSet } from "#src/lib/drain.js";
 
 const NONE_MERGED: MergedSet = () => false;
 

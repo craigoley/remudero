@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService, type SseSend } from "../src/lib/service.js";
+import { createService, type SseSend } from "#src/lib/service.js";
 import { subscribeStatusStream, isStatusStreamResumeGap,
-  DEFAULT_STATUS_STREAM_HEARTBEAT_MS, STATUS_STREAM_RETAINED_WINDOW } from "../src/lib/status-stream-publisher.js";
+  DEFAULT_STATUS_STREAM_HEARTBEAT_MS, STATUS_STREAM_RETAINED_WINDOW } from "#src/lib/status-stream-publisher.js";
 import {
   buildRecentRoute,
   buildStatusRoute,
@@ -26,10 +26,10 @@ import {
   summarizeCounts,
   type BoardDeps,
   type BoardRow,
-} from "../src/lib/board.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
-import { createLastSeenStore, hashToken, type LastSeenStore } from "../src/lib/last-seen.js";
+} from "#src/lib/board.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
+import { createLastSeenStore, hashToken, type LastSeenStore } from "#src/lib/last-seen.js";
 
 // ── W3-T2: the read-only live board's daemon-side wiring (MASTER-PLAN §7, WS-5a) ────────────
 //

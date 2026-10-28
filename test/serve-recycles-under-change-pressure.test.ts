@@ -9,9 +9,9 @@ import {
   RECYCLE_PATIENCE_FREE_MS,
   RECYCLE_RECHECK_MS,
   type StaleCodeExitDeps,
-} from "../src/lib/serve.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import type { SseRoute, SseSend } from "../src/lib/service.js";
+} from "#src/lib/serve.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import type { SseRoute, SseSend } from "#src/lib/service.js";
 
 // ── A merged fix reaches a WATCHED console too ───────────────────────────────────────────────
 //

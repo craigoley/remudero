@@ -12,10 +12,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { builtLedgerSource, createReadModelWorker, READ_MODEL_LEDGER_STALE_MS, type ReadModelInstanceState } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { HOST_PROBE_BUDGET_MS } from "../src/lib/view-freshness.js";
-import { buildReadModelViewRoutes, type ViewBody, type ViewSource } from "../src/lib/views.js";
+import { builtLedgerSource, createReadModelWorker, READ_MODEL_LEDGER_STALE_MS, type ReadModelInstanceState } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { HOST_PROBE_BUDGET_MS } from "#src/lib/view-freshness.js";
+import { buildReadModelViewRoutes, type ViewBody, type ViewSource } from "#src/lib/views.js";
 
 const T0 = Date.parse("2026-10-09T08:00:00.000Z");
 const iso = (ms: number): string => new Date(ms).toISOString();

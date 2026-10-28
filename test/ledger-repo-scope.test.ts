@@ -3,9 +3,9 @@ import { test } from "node:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendLedger, matchesRepoScopedTask, repoScopedTaskKey } from "../src/lib/ledger.js";
-import { escalateCircuitBreak } from "../src/run-task.js";
-import { clearKick, isSafeRepoName, kickFilePath, pendingKicks, requestKick } from "../src/lib/fleet-control.js";
+import { appendLedger, matchesRepoScopedTask, repoScopedTaskKey } from "#src/lib/ledger.js";
+import { escalateCircuitBreak } from "#src/run-task.js";
+import { clearKick, isSafeRepoName, kickFilePath, pendingKicks, requestKick } from "#src/lib/fleet-control.js";
 
 // W1-T429: every task-id-keyed DECISION read on instance-global state was repo-blind — the
 // ledger is one file per INSTANCE, and only `run.start` carried a `repo:` dimension, so two

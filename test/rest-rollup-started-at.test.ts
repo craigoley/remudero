@@ -20,8 +20,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { rollupFromRest } from "../src/lib/open-prs-rest.js";
-import { dedupeRollupByLatestAttempt, stillRedRequiredNames } from "../src/lib/sweep.js";
+import { rollupFromRest } from "#src/lib/open-prs-rest.js";
+import { dedupeRollupByLatestAttempt, stillRedRequiredNames } from "#src/lib/sweep.js";
 
 // ── acceptance 1: both entry shapes carry a real startedAt, from two different source keys ──────
 

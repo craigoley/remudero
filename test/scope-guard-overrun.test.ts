@@ -4,19 +4,19 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { scopeAdvisorySection, type UnwiredAdvisory } from "../src/lib/review.js";
-import { runFixRung, runTask, scopeGuardOutOfScopeFiles } from "./helpers/run-task-test.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { SpawnWorkerArgs } from "../src/lib/worker.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import type { spawnWorker } from "../src/lib/worker.js";
-import type { Config } from "../src/lib/config.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { scopeAdvisorySection, type UnwiredAdvisory } from "#src/lib/review.js";
+import { runFixRung, runTask, scopeGuardOutOfScopeFiles } from "#test/helpers/run-task-test.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { SpawnWorkerArgs } from "#src/lib/worker.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import type { spawnWorker } from "#src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
 
 /**
  * W1-T434 — THE SCOPE GUARD'S PUSH-SITE REFUSAL BECOMES A FLAGGED PUSH.

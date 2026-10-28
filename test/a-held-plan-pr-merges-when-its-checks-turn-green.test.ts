@@ -18,18 +18,18 @@ import {
   armAutoMergeDetailedAsync,
   heldPlanPrFromLedger,
   type ArmDeps,
-} from "../src/lib/arm-auto-merge.js";
-import { selectLightPassPlanMerge, selectLightPassPlanMerges } from "../src/lib/sweep.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#src/lib/arm-auto-merge.js";
+import { selectLightPassPlanMerge, selectLightPassPlanMerges } from "#src/lib/sweep.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import { rotateLedger } from "#src/lib/ledger.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { lightPassActionable } from "../src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { lightPassActionable } from "#src/run-task.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweepLightPass,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-10-13T15:10:00Z");
 const HELD_AT = NOW - 15 * 60_000;

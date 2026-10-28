@@ -3,11 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { ArmAttemptResult, ArmOutcome } from "../src/lib/arm-auto-merge.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import { buildSweepEffects, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { ArmAttemptResult, ArmOutcome } from "#src/lib/arm-auto-merge.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import { buildSweepEffects, runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const PR: OpenPrView = {
   prNumber: 9205,

@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import type { Clock } from "../src/lib/clock.js";
-import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "../src/lib/ledger-projector.js";
-import { READ_MODEL_LEASE_TTL_MS, currentReadModelPath, openReadModel, peekLease } from "../src/lib/read-model-db.js";
+import type { Clock } from "#src/lib/clock.js";
+import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "#src/lib/ledger-projector.js";
+import { READ_MODEL_LEASE_TTL_MS, currentReadModelPath, openReadModel, peekLease } from "#src/lib/read-model-db.js";
 import {
   READ_MODEL_STALL_MS,
   createReadModelTicker,
@@ -17,8 +17,8 @@ import {
   type ReadModelInstanceState,
   type ReadModelViewsInput,
   type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-10-01T08:00:00.000Z");
 const LIVE = "ledger.ndjson";

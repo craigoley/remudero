@@ -10,10 +10,10 @@ import {
   ledgerExceedsRotationCeiling,
   rotateLedger,
   type LedgerLine,
-} from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { reviewOrphansFor } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { reviewOrphansFor } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /**
  * W1-T5949: W1-T5933 taught the sweep's update-branch call two new outcomes, `head-moved` (the

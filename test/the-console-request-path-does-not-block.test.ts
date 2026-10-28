@@ -18,14 +18,14 @@ import {
   CONSOLE_BLOCKING_REQUEST_PATH_BASELINE,
   CONSOLE_READ_ROUTE_BUDGET_MS,
   type ServeDeps,
-} from "../src/lib/serve.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
-import type { Route } from "../src/lib/service.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+} from "#src/lib/serve.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
+import type { Route } from "#src/lib/service.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const READ_TOKEN = "read-token";
 const WRITE_TOKEN = "write-token";

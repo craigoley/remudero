@@ -15,9 +15,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { deriveStatus } from "../src/lib/status.js";
-import type { CreditStore, GitHub, PrRef } from "../src/lib/status.js";
-import type { Task } from "../src/lib/plan.js";
+import { deriveStatus } from "#src/lib/status.js";
+import type { CreditStore, GitHub, PrRef } from "#src/lib/status.js";
+import type { Task } from "#src/lib/plan.js";
 
 const ID = "W1-T444";
 const url = (n: number): string => `https://github.com/craigoley/remudero/pull/${n}`;

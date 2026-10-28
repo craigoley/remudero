@@ -5,7 +5,7 @@ import {
   boundedCorpus,
   harnessRunnerOver,
   replayOptIn,
-} from "../src/lib/replay-harness.js";
+} from "#src/lib/replay-harness.js";
 import {
   REPLAY_RESULT_STEP,
   SEEDED_GOLDENS,
@@ -14,9 +14,9 @@ import {
   replayResultLine,
   type GoldenTask,
   type ReplayOutcome,
-} from "../src/lib/replay.js";
-import { replayPassRateForCycle, renderReplayCalibration } from "../src/lib/retro.js";
-import { COMMANDS, replayGoldensCommand } from "../src/run-task.js";
+} from "#src/lib/replay.js";
+import { replayPassRateForCycle, renderReplayCalibration } from "#src/lib/retro.js";
+import { COMMANDS, replayGoldensCommand } from "#src/run-task.js";
 
 // ── W1-T2689 ──────────────────────────────────────────────────────────────────────────────────
 //
@@ -177,7 +177,7 @@ test("the opt-in is a FLAG, with no env-var or config fallback a retro tick coul
 test("the retro module exposes no spend-bearing symbol — a reporting pass cannot reach the runner", async () => {
   // Structural, over the module's own export surface, rather than a text scan of retro.ts: what
   // matters is what a caller holding `retro` can actually invoke.
-  const retro = await import("../src/lib/retro.js");
+  const retro = await import("#src/lib/retro.js");
   for (const symbol of ["replayGoldensCommand", "harnessRunnerOver", "replayOptIn", "boundedCorpus"]) {
     assert.equal((retro as Record<string, unknown>)[symbol], undefined, `retro must not re-export ${symbol}: a reporting pass may never spawn workers`);
   }

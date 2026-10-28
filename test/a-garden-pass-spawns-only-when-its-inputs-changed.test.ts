@@ -1,24 +1,24 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
-import { gitRepo } from "./helpers/git-repo.js";
-import * as machine from "../src/lib/machine-filing-judge.js";
-import * as registry from "../src/lib/garden-registry.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import * as machine from "#src/lib/machine-filing-judge.js";
+import * as registry from "#src/lib/garden-registry.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { GARDEN_HOURLY_FLAG, GARDEN_PASS_STEP, gardenPacingPath, startGardenOffLoop, type GardenPassSpawn } from "../src/lib/garden-registry.js";
-import { evidenceCoverageStatePath } from "../src/lib/evidence-coverage-gardener.js";
-import { machineJudgeInputs } from "../src/lib/machine-filing-judge.js";
-import { CONFIG_TEND_INTERVAL_MS, configCanariesDue, configCanariesPath } from "../src/lib/config-gardener.js";
-import { gardenEffectsPath, gardenPassDue, gardenPendingSignal, gardenPendingWatchPath, gardenStatePath } from "../src/lib/gardener.js";
-import { boardOpenSnapshotPath } from "../src/lib/board-snapshot-cache.js";
-import { readOriginMainSha } from "../src/lib/inbox.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildRegisteredGarden, registeredGardenDueProbe, type GardenBuildContext } from "../src/run-task.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { GARDEN_HOURLY_FLAG, GARDEN_PASS_STEP, gardenPacingPath, startGardenOffLoop, type GardenPassSpawn } from "#src/lib/garden-registry.js";
+import { evidenceCoverageStatePath } from "#src/lib/evidence-coverage-gardener.js";
+import { machineJudgeInputs } from "#src/lib/machine-filing-judge.js";
+import { CONFIG_TEND_INTERVAL_MS, configCanariesDue, configCanariesPath } from "#src/lib/config-gardener.js";
+import { gardenEffectsPath, gardenPassDue, gardenPendingSignal, gardenPendingWatchPath, gardenStatePath } from "#src/lib/gardener.js";
+import { boardOpenSnapshotPath } from "#src/lib/board-snapshot-cache.js";
+import { readOriginMainSha } from "#src/lib/inbox.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildRegisteredGarden, registeredGardenDueProbe, type GardenBuildContext } from "#src/run-task.js";
 
 // MEASURED 2026-10-01 14:00-15:54Z, after W1-T5114 moved every garden pass into a child process: 322
 // garden.pass rows in about two hours (each garden every 3-4 minutes, median 29 s, all exit 0), about 5.4
@@ -109,11 +109,11 @@ test("the daemon builds each spec garden's due probe from the same registry", as
 });
 
 test("the daemon wires both low-yield gardens to the persistent pacing probe", async (t) => {
-  const fixture = (await import("./helpers/git-repo.js")).gitRepo({ kind: "low-yield-production-probe" });
+  const fixture = (await import("#test/helpers/git-repo.js")).gitRepo({ kind: "low-yield-production-probe" });
   t.after(() => fixture.cleanup());
   const dir = join(fixture.dir, "state");
   mkdirSync(dir);
-  const registry = await import("../src/lib/garden-registry.js");
+  const registry = await import("#src/lib/garden-registry.js");
   const ctx = { config: { root: fixture.dir }, repoRoot: fixture.dir, owner: "o", repo: "r", log: () => {}, raiseDuplicate: () => "" } as unknown as GardenBuildContext;
   for (const name of ["host-resource", "flow-remedy"] as const) {
     const pass = await buildRegisteredGarden(name, ctx);

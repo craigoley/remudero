@@ -6,14 +6,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import * as backlog from "../src/lib/backlog-gardener.js";
-import { fixedClock } from "../src/lib/clock.js";
-import type { GardenerDeps } from "../src/lib/gardener.js";
-import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
-import type { PlanInventory } from "../src/lib/plan-gardener.js";
-import type { Task } from "../src/lib/plan.js";
-import { deriveTaskClass } from "../src/lib/task-class.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import * as backlog from "#src/lib/backlog-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { GardenerDeps } from "#src/lib/gardener.js";
+import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
+import type { PlanInventory } from "#src/lib/plan-gardener.js";
+import type { Task } from "#src/lib/plan.js";
+import { deriveTaskClass } from "#src/lib/task-class.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const NOW_MS = Date.parse("2026-10-01T12:00:00.000Z");
 const CLASS_VALUE_STEP = "dispatch.value.calibrated";

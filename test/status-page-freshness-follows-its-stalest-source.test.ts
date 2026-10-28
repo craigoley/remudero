@@ -5,11 +5,11 @@ import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import test from "node:test";
 
-import { buildStatusRoute } from "../src/lib/board.js";
-import { createConsoleSnapshotCache, RouteResponseBuffer } from "../src/lib/console-snapshot-cache.js";
-import type { Plan } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { buildStatusRoute } from "#src/lib/board.js";
+import { createConsoleSnapshotCache, RouteResponseBuffer } from "#src/lib/console-snapshot-cache.js";
+import type { Plan } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const TTL_MS = 150_000;
 
