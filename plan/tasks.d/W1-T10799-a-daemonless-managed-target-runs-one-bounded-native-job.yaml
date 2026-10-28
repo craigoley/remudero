@@ -27,6 +27,7 @@
     - src/lib/drain.ts
     - test/infra/bounded-target-job.test.ts
     - test/infra/product-build.test.ts
+    - "src/cli/commands/run-task-verb.ts"
   status: queued
   attempts: 0
   rationale: >-
