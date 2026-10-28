@@ -568,11 +568,18 @@ function failingSuitesFromTap(stdout, files) {
   lines.forEach((line, i) => {
     if (!/^not ok \d+ - /.test(line)) return;
     let location = null;
+    let exitedProcess = false;
+    let processFailureCode = false;
     for (let j = i + 1; j < lines.length && /^\s/.test(lines[j]); j++) {
       location ??= lines[j].match(/^ {2}location: '(.*):\d+:\d+'$/)?.[1] ?? null;
+      exitedProcess ||= /^ {2}(?:exitCode: [1-9][0-9]*|signal: ['"]SIG[A-Z0-9]+['"])$/.test(lines[j]);
+      processFailureCode ||= /^ {2}code: ['"]ERR_TEST_FAILURE['"]$/.test(lines[j]);
     }
     const file = files.find((f) => location === f || location?.endsWith(`/${f}`));
     if (file === undefined) throw new Error(`the census suite child failed a test its TAP attributes to no suite it was given: ${line}`);
+    if (exitedProcess && processFailureCode) {
+      throw new Error(`the census suite process ${file} did not complete its assertions; a process exit is not base-red evidence`);
+    }
     failing.add(file);
   });
   return [...failing];
