@@ -6,7 +6,7 @@
  * exceeds the limit that same response reported is a capacity shortfall that is never retried.
  */
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import type { Config } from "#src/lib/config.js";
@@ -93,6 +93,27 @@ test("W1-T10856: a response teaches the deployment its per-minute token ceiling"
   resetLearnedCashCapacity();
   await spawnCash(dir, "p", async () => completion({ "content-type": "application/json" }));
   assert.equal(learnedCashLimit(DEPLOYMENT), 450000);
+});
+
+test("W1-T10856: a state file that cannot be read or written never fails the request it rode on", async (t) => {
+  resetLearnedCashCapacity();
+  t.after(resetLearnedCashCapacity);
+  const { dir } = ownedFixtureDir(t, "cash-capacity-unrecordable");
+  const logged: string[] = [];
+  t.mock.method(console, "error", (line: unknown) => { logged.push(String(line)); });
+  // The state path is a directory by the time the response lands (after the pre-spawn hydrate), so
+  // the record step throws when it reads the file back.
+  const result = await spawnCash(dir, "p", async () => {
+    mkdirSync(join(dir, "state", CASH_TPM_STATE_FILE), { recursive: true });
+    return completion(limitHeaders("20000"));
+  });
+  assert.equal(result.isError, false, result.stderr);
+  assert.equal(learnedCashLimit(DEPLOYMENT), undefined, "nothing was learned from the unrecordable response");
+  const failures = logged.map((line) => JSON.parse(line) as Record<string, unknown>).filter((row) => row.event === "cash.capacity.record_failed");
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.deployment, DEPLOYMENT);
+  assert.equal(typeof failures[0]!.reason, "string");
+  assert.match(String(failures[0]!.reason), /EISDIR/);
 });
 
 test("W1-T10856: a request above the learned ceiling walks the ladder before transport", (t) => {
