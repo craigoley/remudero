@@ -353,6 +353,11 @@ test("a pending main merge gives the census its prospective merged base without 
 });
 
 async function inheritedContractFixture(t: TestContext) {
+  // Only parent changed-source coverage is needed; prevent each unchanged census child from
+  // duplicating its raw V8 dump into the same bounded scratch volume.
+  const coverage = process.env.NODE_V8_COVERAGE;
+  delete process.env.NODE_V8_COVERAGE;
+  t.after(() => { if (coverage === undefined) delete process.env.NODE_V8_COVERAGE; else process.env.NODE_V8_COVERAGE = coverage; });
   const harness = await import("#src/run-task.js");
   const repo = gitRepo({ scope: t, kind: "inherited-census-contract" });
   const f = fixture(repo.dir, true);
@@ -501,4 +506,47 @@ test("census baseline refresh never excuses new growth or an edited baseline", a
   assert.match(refused.refusal.text, /importerCount|new importers/);
   assert.notEqual(refused.refusal.inheritedMain?.state, "inherited");
   assert.equal(readFileSync(join(repo.dir, baselinePath), "utf8"), current, "no ceiling or baseline edit excused new growth");
+});
+
+
+test("a pre-open inherited census refusal cannot buy another worker without a native PR refresh", async t => {
+  const { harness, repo, head, main, base, log } = await inheritedContractFixture(t);
+  let spawned = 0;
+  const root = join(repo.dir, "state", "pre-open"); mkdirSync(root, { recursive: true });
+  const result = await harness.repairCensusRefusedPush({
+    refusal: { text: "trusted census refused", censuses: ["census-suite"], offeredBaselines: [],
+      inheritedMain: { state: "inherited", headSha: head, mainSha: main, mergeBase: base, baselinePath: "scripts/affected-reach-baseline.json" } },
+    task: { id: "W1-T10935TEST", title: "fixture", repo: "remudero", files: ["src/lib/unreached.ts"] },
+    runId: "TEST-pre-open", worktreePath: repo.dir, branch: "inherited-fix", resumeSessionId: "fixture",
+    mount: { model: "sonnet", effort: "medium", maxTurns: 2, contextBudget: 120000 }, settingsFile: join(root, "settings.json"),
+    config: { root, workerProviders: { harnessCommitsFix: true } } as import("#src/lib/config.js").Config,
+    budgetUsd: 1, ledgerPath: join(root, "ledger.ndjson"),
+    spawn: async () => { spawned++; throw new Error("must not buy another worker"); }, account: result => result, log, say: () => {},
+  });
+  assert.equal(result.outcome, "refused"); assert.equal(result.strikes, 0); assert.equal(spawned, 0);
+  assert.match(result.reason, /no PR exists yet/);
+});
+
+
+test("a pre-open census repair stops on newly witnessed inherited drift before its second worker", async t => {
+  const { harness, repo, log } = await inheritedContractFixture(t);
+  let spawned = 0;
+  const root = join(repo.dir, "state", "pre-open-new"); mkdirSync(root, { recursive: true });
+  const result = await harness.repairCensusRefusedPush({
+    refusal: { text: "trusted census refused", censuses: ["census-suite"], offeredBaselines: [] },
+    task: { id: "W1-T10935TEST", title: "fixture", repo: "remudero", files: ["src/lib/unreached.ts"] },
+    runId: "TEST-pre-open", worktreePath: repo.dir, branch: "inherited-fix", resumeSessionId: "fixture",
+    mount: { model: "sonnet", effort: "medium", maxTurns: 2, contextBudget: 120000 }, settingsFile: join(root, "settings.json"),
+    config: { root, workerProviders: { harnessCommitsFix: true } } as import("#src/lib/config.js").Config,
+    budgetUsd: 1, ledgerPath: join(root, "ledger.ndjson"),
+    spawn: async () => {
+      spawned++;
+      return { sessionId: "fixture", costUsd: 0, numTurns: 1, text: "FIX_OUTCOME: FIXED", blocks: [], stderr: "", subtype: "success",
+        isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: "sonnet", effort: "medium",
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false };
+    }, account: result => result, log, say: () => {},
+  });
+  assert.equal(result.outcome, "refused"); assert.equal(result.strikes, 1); assert.equal(spawned, 1);
+  assert.equal(result.refusal.inheritedMain?.state, "inherited");
+  assert.match(result.reason, /no PR exists yet/);
 });

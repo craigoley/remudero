@@ -2151,10 +2151,14 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
     if (!live.ok || live.headSha !== context.headSha || live.headRefName !== input.branch) return held("PR head changed before update");
     const claim = deps.branchClaim.verify();
     if (claim) return held(claim);
+    deps.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber: input.prNumber, headSha: context.headSha,
+      forcedBy: "fix-base-refresh", nowMs: systemClock.now() }));
     const updated = await deps.updateBranch(input.prNumber, context.headSha);
     if (!updated.ok) return held(`exact-head update refused: ${updated.error ?? "unknown result"}`);
     const reason = "native exact-head base refresh requested for inherited census contract; await new head and unchanged gates";
     log("requested", reason);
+    deps.log("fix.base_refreshed", { pr_number: input.prNumber, head_sha: context.headSha, main_sha: context.mainSha,
+      red_checks: ["pre-push census-precheck"], test_files: [reach], matching_base_files: [context.baselinePath], method: "merge", reason });
     return { outcome: "requested", reason };
   } catch (error) { return held(`native refresh evidence unavailable: ${String(error).slice(0, 512)}`); }
 }
@@ -4816,12 +4820,6 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       // parent validates it on the gate-log evidence and opens the one proof-only plan PR. Best-effort, logged either way.
       if (proofRepairRound && proofDiscriminationNow) {
         amendProofs(proofDiscriminationNow);
-      }
-      if (censusCheck?.refusal?.inheritedMain?.state === "inherited" && censusSnapshotPath && prNumber !== undefined) {
-        const refresh = await refreshInheritedCensusRefusal({ root: opts.config.root, worktreePath: opts.worktreePath,
-          branch: opts.branch, prUrl: opts.prUrl, prNumber, snapshotPath: censusSnapshotPath, context: censusCheck.refusal.inheritedMain }, deps, host);
-        logFixDone();
-        return { outcome: refresh.outcome === "requested" ? "base_refreshed" : "stood_down", review, strikes, retriggers, reason: refresh.reason };
       }
       logFixDone();
       if (censusCheck?.refusal) {

@@ -12977,10 +12977,31 @@ export interface FixRoundBranchClaim {
 export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => InflightLockHandle | string): FixRoundBranchClaim {
   let held: InflightLockHandle | undefined = first;
   let last = first;
+  let verificationRequired = false;
+  const verify = () => {
+    verificationRequired = true;
+    if (!held) return "branch claim is not held";
+    try {
+      const fd = fs.openSync(held.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      let raw: string;
+      try {
+        if (!fs.fstatSync(fd).isFile()) return "branch claim identity is unreadable";
+        const bytes = Buffer.alloc(4097);
+        const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
+        if (length > 4096) return "branch claim identity is unreadable";
+        raw = bytes.subarray(0, length).toString("utf8");
+      } finally { fs.closeSync(fd); }
+      const info = parseInflightLockInfo(raw);
+      if (!info || !info.host || !info.startedAt || info.run_id !== held.info.run_id || info.pid !== held.info.pid ||
+          info.host !== held.info.host || info.startedAt !== held.info.startedAt) return "branch claim belongs to another owner";
+      return undefined;
+    } catch { return "branch claim identity is unavailable"; }
+  };
   return {
     id: () => held?.info.run_id,
     release: () => {
-      held?.release();
+      // A refresh that verified ownership must not later unlink an unknown or replacement holder.
+      if (!verificationRequired || verify() === undefined) held?.release();
       held = undefined;
     },
     reacquire: () => {
@@ -12991,24 +13012,7 @@ export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => Inf
       return undefined;
     },
     last: () => last,
-    verify: () => {
-      if (!held) return "branch claim is not held";
-      try {
-        const fd = fs.openSync(held.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-        let raw: string;
-        try {
-          if (!fs.fstatSync(fd).isFile()) return "branch claim identity is unreadable";
-          const bytes = Buffer.alloc(4097);
-          const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
-          if (length > 4096) return "branch claim identity is unreadable";
-          raw = bytes.subarray(0, length).toString("utf8");
-        } finally { fs.closeSync(fd); }
-        const info = parseInflightLockInfo(raw);
-        if (!info || !info.host || !info.startedAt || info.run_id !== held.info.run_id || info.pid !== held.info.pid ||
-            info.host !== held.info.host || info.startedAt !== held.info.startedAt) return "branch claim belongs to another owner";
-        return undefined;
-      } catch { return "branch claim identity is unavailable"; }
-    },
+    verify,
   };
 }
 

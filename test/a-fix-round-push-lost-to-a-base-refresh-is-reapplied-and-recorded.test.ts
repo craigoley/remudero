@@ -282,11 +282,15 @@ async function censusRefreshOwner(t: import("node:test").TestContext) {
 }
 
 test("census baseline refresh respects live owners and the exact head", async t => {
-  for (const mode of ["foreign-owner", "unknown-owner", "head-changed", "branch-changed", "ci-in-flight", "no-ci", "merge-unknown", "context-changed", "update-refused"] as const) {
+  for (const mode of ["foreign-owner", "unknown-owner", "oversize-owner", "malformed-owner", "directory-owner", "released-owner", "head-changed", "branch-changed", "ci-in-flight", "no-ci", "merge-unknown", "context-changed", "update-refused"] as const) {
     await t.test(mode, async t => {
       const fx = await censusRefreshOwner(t);
       if (mode === "foreign-owner") writeFileSync(fx.lock.path, JSON.stringify({ ...fx.lock.info, run_id: "FOREIGN-live" }));
       if (mode === "unknown-owner") unlinkSync(fx.lock.path);
+      if (mode === "oversize-owner") writeFileSync(fx.lock.path, "x".repeat(4097));
+      if (mode === "malformed-owner") writeFileSync(fx.lock.path, "not a holder");
+      if (mode === "directory-owner") { unlinkSync(fx.lock.path); mkdirSync(fx.lock.path); }
+      if (mode === "released-owner") fx.claim.release();
       if (mode === "head-changed") {
         let reads = 0;
         fx.deps.readLiveHead = () => ({ ok: true, headSha: ++reads === 1 ? fx.base : fx.main, headRefName: "refresh" });
@@ -304,7 +308,10 @@ test("census baseline refresh respects live owners and the exact head", async t 
       const result = await fx.run();
       assert.equal(result.outcome, "held", JSON.stringify(fx.rows)); assert.equal(fx.updates(), 0);
       assert.equal(fx.repo.git("status", "--porcelain=v1"), before, "refusal keeps unpublished work unchanged");
-      if (mode === "foreign-owner") assert.equal(JSON.parse(readFileSync(fx.lock.path, "utf8")).run_id, "FOREIGN-live");
+      if (mode === "foreign-owner") {
+        fx.claim.release(); // the real outer finally must preserve a holder this refresh rejected
+        assert.equal(JSON.parse(readFileSync(fx.lock.path, "utf8")).run_id, "FOREIGN-live");
+      }
     });
   }
 });
@@ -355,4 +362,16 @@ test("census refresh retains failed merged checks overlaps unavailable reads and
       if (mode === "tracked-only") assert.match(String(fx.rows.find(row => row.outcome === "work-preserved")!.recovery_ref), /^refs\/rmd-recovery\//);
     });
   }
+});
+
+
+test("the native census refresh sends its expected head to the actual REST adapter", async () => {
+  const { ghUpdateBranch } = await import("#src/run-task.js");
+  const { withLiveWritesAllowed } = await import("#src/lib/live-write-guard.js");
+  let argv: string[] = [];
+  const result = withLiveWritesAllowed(() => ghUpdateBranch("fixture", "repo", 1,
+    ((_file: string, args: readonly string[]) => { argv = [...args]; return "{}"; }) as unknown as typeof import("node:child_process").execFileSync,
+    "fix-rung", () => {}, PRIOR));
+  assert.equal(result.ok, true);
+  assert.deepEqual(argv, ["api", "--method", "PUT", "repos/fixture/repo/pulls/1/update-branch", "-f", `expected_head_sha=${PRIOR}`]);
 });
