@@ -2213,6 +2213,7 @@ const prFileSources = new Map<string, string>();
 export const SWEEP_EFFECT_SURFACE = [
   "headRehome",
   "readerAgreement",
+  "codeScanningRoundBoundMs",
   "fixProgressJudge", // W1-T7096
   "reproduceFailingTestsOnMain",
   "readTestImportClosure", // W1-T8396
@@ -2376,6 +2377,7 @@ export function productionDispatchBreakJudge(opts: {
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "readerAgreement"
+  | "codeScanningRoundBoundMs"
   | "fixProgressJudge"
   | "reproduceFailingTestsOnMain"
   | "readTestImportClosure"
@@ -2884,6 +2886,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
+    codeScanningRoundBoundMs: spawnWallClockBoundMs,
     readOpenEscalations: () => issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
     readTaskContractRevision,
@@ -6691,7 +6694,7 @@ export interface SweepPolicy {
  *  default, never to unbounded spend, and the cost ceiling bounds RUNAWAY spend, not a budget.
  *  Several rows are COLLECTED from `plan/policy.yaml` rather than written as source literals, each a
  *  RELOCATION and never a retune. // Why: FROZEN AT IMPORT (W1-T331) — docs/forensics/sweep.md. */
-const POLICY_SWEEP = loadDefaultPolicy().values.sweep;
+const { sweep: POLICY_SWEEP, fixSpawnWallClockBoundMs: POLICY_FIX_ROUND_BOUND_MS } = loadDefaultPolicy().values;
 
 /** W1-T1049 — reads `plan/policy.yaml`'s `sweep.reviewLanes` row DIRECTLY, never through
  *  `policy.ts`'s schema, which is outside this task's declared files. Validated like every other
@@ -14387,6 +14390,7 @@ export interface SweepDeps {
   appendLine?: (path: string, line: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void;
   /** Injected clock for the stale window (default Date.now). */
   now?: () => number;
+  codeScanningRoundBoundMs?: number;
   /** One console/ledger-adjacent line per disposition (optional). */
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Preview only: derive dispositions, take NO effects, write NO ledger lines. Returns the same
@@ -15090,8 +15094,8 @@ export function riskJudgeCodeScanning(
   };
 }
 
-/** W1-T5633 — has this head already been ruled on to a terminal outcome the sweep must not redo? A
- *  false-positive ruling, or a fix dispatch (or its escalation). The hydration skips such a head. */
+/** W1-T5633/W1-T10386 — false-positive rulings and legacy dispatches skip hydration. Dispatches
+ *  carrying alert numbers stay readable so a changed alert set can re-arm the path. */
 export function codeScanningHeadSettled(
   lines: ReadonlyArray<Record<string, unknown>>,
   prNumber: number,
@@ -15099,7 +15103,44 @@ export function codeScanningHeadSettled(
 ): boolean {
   return lines.some(line => line.step === CODE_SCANNING_FALSE_POSITIVE_STEP &&
     line.pr_number === prNumber && line.head_sha === headSha) ||
-    codeScanningDispatchRead(lines, prNumber, headSha).kind === "held";
+    (codeScanningDispatchRead(lines, prNumber, headSha).kind === "held" &&
+      !lines.some(line => line.step === CODE_SCANNING_FIX_DISPATCH_STEP &&
+        line.pr_number === prNumber && line.head_sha === headSha && Array.isArray(line.alert_numbers)));
+}
+
+function sameCodeScanningAlerts(line: Record<string, unknown>, alerts: readonly CodeqlHeadAlert[]): boolean {
+  return Array.isArray(line.alert_numbers) && line.alert_numbers.every(n => Number.isSafeInteger(n) && n > 0) &&
+    [...new Set(line.alert_numbers)].sort().join(",") === [...new Set(alerts.map(a => a.alertNumber))].sort().join(",");
+}
+
+function emptyCodeScanningRounds(
+  lines: ReadonlyArray<Record<string, unknown>>, pr: OpenPrView, alerts: readonly CodeqlHeadAlert[], now: number, roundBoundMs: number,
+): string[] {
+  const outcomes: string[] = [];
+  const taskId = fixLedgerTaskIdFor(pr);
+  for (let at = 0; at < lines.length; at++) {
+    const intent = lines[at];
+    if (intent.step !== CODE_SCANNING_FIX_DISPATCH_STEP || intent.pr_number !== pr.prNumber ||
+        intent.head_sha !== pr.headSha || intent.escalated === true || !sameCodeScanningAlerts(intent, alerts)) continue;
+    const next = lines.findIndex((line, index) => index > at && line.step === CODE_SCANNING_FIX_DISPATCH_STEP &&
+      line.pr_number === pr.prNumber && line.head_sha === pr.headSha);
+    const rung = lines.slice(at + 1, next < 0 ? undefined : next).filter(line =>
+      taskId !== undefined && line.task_id === taskId && String(line.step).startsWith("fix.") &&
+      (line.pr_number === undefined || line.pr_number === pr.prNumber) &&
+      (line.head_sha === undefined || line.head_sha === pr.headSha));
+    if (rung.some(line => typeof line.pushed_head_sha === "string" && line.pushed_head_sha !== pr.headSha)) continue;
+    const terminal = rung.findLast(line => line.step === "fix.commit_refused" || line.step === "fix.refused") ??
+      rung.findLast(line => line.step === "fix.done");
+    if (terminal !== undefined) {
+      outcomes.push(`${terminal.step}: ${terminal.reason ?? terminal.subtype ?? "no new head"}`);
+    } else if (!rung.some(line => line.step === "fix.dispatch")) {
+      const latest = rung.at(-1) ?? intent;
+      if (typeof latest.ts === "string" && now - Date.parse(latest.ts) >= roundBoundMs) {
+        outcomes.push("no fix worker followed the preparation within fixSpawnWallClockBoundMs");
+      }
+    }
+  }
+  return outcomes;
 }
 
 type CodeScanningDispatchRead = { kind: "none" | "held" } | { kind: "retry"; reason: string };
@@ -15227,7 +15268,7 @@ export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeql
 type CodeScanningGate =
   | { kind: "proceed" }
   | { kind: "hold"; reason: string }
-  | { kind: "fix"; reason: string; alerts: readonly CodeqlHeadAlert[] };
+  | { kind: "fix" | "escalate"; reason: string; alerts: readonly CodeqlHeadAlert[] };
 
 /** W1-T5633 — decide the `mergeable` arm's code-scanning question for one head. See the block comment
  *  above. The ruling is read back from its ledger row, so a judgment that lands after the pass that
@@ -15235,15 +15276,18 @@ type CodeScanningGate =
 async function codeScanningGateForHead(
   pr: OpenPrView,
   lines: ReadonlyArray<Record<string, unknown>>,
-  deps: Pick<SweepDeps, "judgeCodeScanningAlerts" | "postCodeScanningRuling" | "ledgerPath" | "runId">,
+  deps: Pick<SweepDeps, "judgeCodeScanningAlerts" | "postCodeScanningRuling" | "ledgerPath" | "runId" | "now" | "codeScanningRoundBoundMs">,
   appendLine: typeof appendLedger,
   log: (step: string, extra?: Record<string, unknown>) => void,
   pool: HandedOffHeadJudgmentPool,
 ): Promise<CodeScanningGate> {
-  const mine = (line: Record<string, unknown>) => line.pr_number === pr.prNumber && line.head_sha === pr.headSha;
-  if (lines.some((line) => line.step === CODE_SCANNING_FALSE_POSITIVE_STEP && mine(line))) return { kind: "proceed" };
-  const dispatch = codeScanningDispatchRead(lines, pr.prNumber, pr.headSha, deps.runId);
   const observed = pr.codeqlHeadAlerts;
+  const mine = (line: Record<string, unknown>) => line.pr_number === pr.prNumber && line.head_sha === pr.headSha &&
+    (observed?.headSha !== pr.headSha || !Array.isArray(line.alert_numbers) || sameCodeScanningAlerts(line, observed.alerts));
+  if (lines.some((line) => line.step === CODE_SCANNING_FALSE_POSITIVE_STEP && mine(line))) return { kind: "proceed" };
+  const dispatchLines = lines.filter(line => line.step !== CODE_SCANNING_FIX_DISPATCH_STEP ||
+    line.pr_number !== pr.prNumber || line.head_sha !== pr.headSha || mine(line));
+  const dispatch = codeScanningDispatchRead(dispatchLines, pr.prNumber, pr.headSha, deps.runId);
   if (observed === undefined || observed.headSha !== pr.headSha) {
     return dispatch.kind !== "none"
       ? { kind: "hold", reason: "a code-scanning fix was already dispatched for this head — awaiting its outcome" }
@@ -15251,6 +15295,14 @@ async function codeScanningGateForHead(
   }
   const alerts = observed.alerts;
   const head = pr.headSha.slice(0, 7);
+  const escalated = dispatchLines.some(line => line.step === CODE_SCANNING_FIX_DISPATCH_STEP && mine(line) && line.escalated === true);
+  if (escalated) return { kind: "hold", reason: `code-scanning fix already escalated for head ${head} and these alerts` };
+  const emptyRounds = emptyCodeScanningRounds(lines, pr, alerts, (deps.now ?? Date.now)(),
+    deps.codeScanningRoundBoundMs ?? POLICY_FIX_ROUND_BOUND_MS);
+  if (emptyRounds.length > 0) {
+    return { kind: "escalate", alerts, reason: `code-scanning round at head ${pr.headSha} landed nothing: ` +
+      `${emptyRounds.join("; ")}; ${alerts.map(a => `alert #${a.alertNumber} ${a.ruleId} at ${a.path}:${a.line}`).join(", ")}` };
+  }
   if (dispatch.kind === "held") {
     return { kind: "hold", reason: `a code-scanning fix was already dispatched for head ${head} — awaiting its outcome` };
   }
@@ -20486,17 +20538,19 @@ export async function runSweep(
                 standDownReason = codeScanning.reason;
                 break;
               }
-              if (codeScanning.kind === "fix") {
+              if (codeScanning.kind === "fix" || codeScanning.kind === "escalate") {
                 const fixTaskId = pr.taskId;
-                const unfixable = fixTaskId === undefined ||
+                const unfixable = codeScanning.kind === "escalate" ? codeScanning.reason : fixTaskId === undefined ||
                   !fixHeadAcceptable(pr.headRefName, fixTaskId, isSyntheticOrchestratorLaneId(fixTaskId))
                   ? "the head is not this PR task's rmd-owned run branch, so no fix worker may push to it"
                   : undefined;
                 if (unfixable !== undefined) {
                   // A fix that cannot be dispatched must still never sit silent: ask once per head.
-                  const reason = `CodeQL reported a new high alert and ${unfixable} (${codeScanning.reason})`;
+                  const reason = codeScanning.kind === "escalate" ? codeScanning.reason
+                    : `CodeQL reported a new high alert and ${unfixable} (${codeScanning.reason})`;
                   appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
-                    pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, escalated: true, reason });
+                    pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, escalated: true, reason,
+                    alert_numbers: codeScanning.alerts.map(a => a.alertNumber) });
                   await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
                   acted = false;
                   standDownReason = reason;
