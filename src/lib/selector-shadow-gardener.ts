@@ -127,6 +127,9 @@ export interface SelectorShadowReport {
   floor: SelectorShadowSelectionReport;
   narrow: SelectorShadowSelectionReport;
   narrowRuns: number;
+  /** W1-T5891: complete runs that executed a narrowed selection. Every failure in one sits inside the
+   *  selection by construction, so they are counted here and left out of every other figure. */
+  narrowed: number;
   impact: SelectorShadowImpactReport;
   /** W1-T5952: flake verdicts per selection, outside each selection's `failures`. */
   flakes: { floor: number; narrow: number; impact?: number };
@@ -301,6 +304,9 @@ export async function readCoverageShardLogsAsync(
 /** The job's own verdict, carried beside its log lines so a report can tell a retry-recovered
  *  first-pass failure (the job still concluded `success`) from one that failed the shard. */
 const SELECTOR_SHADOW_JOB_MARK = "SELECTOR-SHADOW-JOB: conclusion=";
+/** W1-T5891: the mode ci.yml's coverage step actually ran, printed once selection settles. Anchored at
+ *  the log timestamp so the step's echoed source (`echo "COVERAGE-SELECTION: ${SELECTION}"`) never matches. */
+const COVERAGE_SELECTION_LINE = /^(?:\S+Z )?COVERAGE-SELECTION: (narrow|all)$/;
 const FLAKE_RETRY_FILES = /^(?:\S+Z )?FLAKE-RETRY-FILES: retrying \d+ failed file\(s\)(?: uninstrumented)? — (.+)$/;
 const FLAKE_RETRY_RECOVERED = /^(?:\S+Z )?FLAKE-RETRY-RECOVERED: /;
 /** W1-T6406: test-with-retry.mjs's per-attempt headline, which names the failing tests. Only the two
@@ -313,6 +319,7 @@ const FLAKE_NO_NAME = "(no test name parsed from output)";
  *  the workflow's echoed source and nested test output never match). */
 function isSelectorShadowEvidenceLine(line: string): boolean {
   return line.includes("AFFECTED-SUITES-SHADOW: ") || line.startsWith(SELECTOR_SHADOW_JOB_MARK) ||
+    COVERAGE_SELECTION_LINE.test(line) ||
     (line.includes("W1-T2428 fast-lane: class=") && line.includes("skipping Test with coverage")) ||
     FLAKE_RETRY_FILES.test(line) || FLAKE_RETRY_RECOVERED.test(line) || FLAKE_RETRY_HEADLINE.test(line);
 }
@@ -447,8 +454,9 @@ export function readSelectorShadowRuns(
 }
 
 /** Version 3 keeps each coverage job's conclusion and its retry lines; a version-2 entry lacks
- *  them, so it would still count retry-recovered flakes as misses and is read again. */
-export const SELECTOR_SHADOW_READER_VERSION = 3;
+ *  them, so it would still count retry-recovered flakes as misses and is read again. Version 4 keeps
+ *  the COVERAGE-SELECTION marker (W1-T5891); a version-3 entry dropped it and would read as a full run. */
+export const SELECTOR_SHADOW_READER_VERSION = 4;
 
 /** Reading many run logs must yield the daemon event loop between bounded GitHub calls. */
 export async function readSelectorShadowRunsAsync(
@@ -610,6 +618,17 @@ export interface SelectorShadowObservation {
   impactDistance?: number;
   failures: SelectorShadowFailure[];
   recovered: number;
+  /** W1-T5891: a shard ran the narrowed selection, so this run is no evidence about misses. */
+  narrowed?: true;
+}
+
+/** W1-T5891: any shard that reports `narrow` narrows the run — the full suite did not execute.
+ *  A run with no marker (every run before the marker existed) counts as `all`. */
+function ranNarrowedSelection(log: string): boolean {
+  return log.split(/\r?\n/).some((line) => {
+    const prefix = /^coverage-shard \([1-8]\/8\)\t(.*)$/.exec(line);
+    return prefix !== null && COVERAGE_SELECTION_LINE.exec(prefix[1]!)?.[1] === "narrow";
+  });
 }
 
 type SelectorShadowReading = { kind: "skipped" | "incomplete" } | { kind: "complete"; observation: SelectorShadowObservation };
@@ -647,10 +666,11 @@ function selectorShadowReading(run: SelectorShadowRun, source: SelectorShadowObs
     ...(impact.impactSize === undefined ? {} : { impactSize: impact.impactSize }),
     ...(impact.impactFallback === undefined ? {} : { impactFallback: impact.impactFallback }),
     ...(impact.impactDistance === undefined ? {} : { impactDistance: impact.impactDistance }), failures, recovered,
+    ...(ranNarrowedSelection(run.log) ? { narrowed: true as const } : {}),
   } };
 }
 
-type SelectorShadowFold = Pick<SelectorShadowReport, "runsComplete" | "recovered" | "floor" | "narrow" | "narrowRuns" | "impact" | "flakes" | "misses" | "unattributed">;
+type SelectorShadowFold = Pick<SelectorShadowReport, "runsComplete" | "recovered" | "floor" | "narrow" | "narrowRuns" | "narrowed" | "impact" | "flakes" | "misses" | "unattributed">;
 
 /** The reason a missed failure is unattributed, or undefined when the diff plausibly caused it. The
  *  stored reason wins; the retry and mass reasons are re-derived from the row, so they also apply to
@@ -665,7 +685,8 @@ export function selectorShadowUnattributedReason(
   return missedFiles.size > SELECTOR_SHADOW_MASS_FAILURE_FILES ? "mass" : undefined;
 }
 
-function foldSelectorShadowObservations(observations: readonly SelectorShadowObservation[], fullSuiteSize: number): SelectorShadowFold {
+function foldSelectorShadowObservations(all: readonly SelectorShadowObservation[], fullSuiteSize: number): SelectorShadowFold {
+  const observations = all.filter((run) => run.narrowed !== true);
   const floorVerdicts: Array<"selected" | "missed"> = [];
   const narrowVerdicts: Array<"selected" | "missed"> = [];
   const impactVerdicts: Array<"selected" | "missed"> = [];
@@ -715,7 +736,7 @@ function foldSelectorShadowObservations(observations: readonly SelectorShadowObs
   }
   const impact = selectionReport(impactVerdicts, impactSizes, fullSuiteSize);
   return {
-    runsComplete: observations.length, recovered, flakes, misses, unattributed,
+    runsComplete: observations.length, narrowed: all.length - observations.length, recovered, flakes, misses, unattributed,
     floor: selectionReport(floorVerdicts, floorSizes, fullSuiteSize),
     narrow: selectionReport(narrowVerdicts, narrowSizes, fullSuiteSize),
     narrowRuns: narrowSizes.length,
@@ -743,7 +764,8 @@ function selectorShadowVerdict(fold: SelectorShadowFold, runsIncomplete?: number
   return { verdict, impact, reason: `narrow: ${narrowVerdict}, ${fold.narrow.failures} failures across ${fold.narrowRuns} complete runs; ${reason}; ` +
     `impact: ${impact.verdict}, ${impact.failures} failures across ` +
     `${impact.runs} non-fallback complete runs, ${Object.values(impact.fallbacks).reduce((sum, n) => sum + n, 0)} fallback runs; ` +
-    `need ${SELECTOR_SHADOW_MIN_FAILURES} impact-observed failures across ${SELECTOR_SHADOW_MIN_RUNS} complete runs and a measured impact size` };
+    `need ${SELECTOR_SHADOW_MIN_FAILURES} impact-observed failures across ${SELECTOR_SHADOW_MIN_RUNS} complete runs and a measured impact size` +
+    (fold.narrowed > 0 ? `; ${fold.narrowed} narrowed run(s) excluded as evidence (W1-T5891)` : "") };
 }
 
 function selectorShadowWindowReport(readings: readonly SelectorShadowReading[], fullSuiteSize: number): SelectorShadowReport {
@@ -774,13 +796,14 @@ function selectorShadowObservationRow(o: SelectorShadowObservation): Record<stri
     ...(o.impactFallback === undefined ? {} : { impact_fallback: o.impactFallback }),
     ...(o.impactDistance === undefined ? {} : { impact_distance: o.impactDistance }),
     failures: o.failures, recovered: o.recovered,
+    ...(o.narrowed === true ? { narrowed: true } : {}),
   };
 }
 
 function selectorShadowObservationFromRow(row: Record<string, unknown>): SelectorShadowObservation | undefined {
   if (!nonnegativeInteger(row.ci_run_id) || typeof row.head_sha !== "string" || (row.source !== "live" && row.source !== "replay") ||
       typeof row.full_run !== "boolean" || !nonnegativeInteger(row.floor_size) || !nonnegativeInteger(row.recovered) ||
-      (row.narrow_size !== undefined && !nonnegativeInteger(row.narrow_size)) ||
+      (row.narrow_size !== undefined && !nonnegativeInteger(row.narrow_size)) || (row.narrowed !== undefined && row.narrowed !== true) ||
       !validImpactFields(row.impact_size, row.impact_fallback) || !validImpactDistance(row.impact_size, row.impact_distance) ||
       !Array.isArray(row.failures)) return undefined;
   const failures: SelectorShadowFailure[] = [];
@@ -805,6 +828,7 @@ function selectorShadowObservationFromRow(row: Record<string, unknown>): Selecto
     ...(row.impact_fallback === undefined ? {} : { impactFallback: row.impact_fallback as string }),
     ...(row.impact_distance === undefined ? {} : { impactDistance: row.impact_distance as number }),
     failures, recovered: row.recovered,
+    ...(row.narrowed === true ? { narrowed: true as const } : {}),
   };
 }
 

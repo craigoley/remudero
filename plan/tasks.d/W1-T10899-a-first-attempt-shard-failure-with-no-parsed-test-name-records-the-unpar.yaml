@@ -1,0 +1,30 @@
+- id: W1-T10899
+  title: A first-attempt shard failure with no parsed test name records the unparsed output's failure shape instead of the unnamed placeholder
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=c6dd2a1be75849e2
+  # backlog gardener: placed=2026-10-28T07:14:28.745Z
+  attempts: 0
+  files:
+    - scripts/test-with-retry.mjs
+    - scripts/flake-retry-aggregate.mjs
+  acceptance:
+    - claim: When the first attempt fails and no test name parses from its output, test-with-retry classifies the failure (for example coverage report error, timeout or cancelled shard) and writes that class in the FLAKE-RETRY line instead of the bare unnamed placeholder
+      proof: "grep: unparsed-failure-class in scripts/test-with-retry.mjs"
+    - claim: flake-retry-aggregate groups an unnamed first-attempt failure by its failure class so one cause stays one entry rather than an anonymous bucket
+      proof: "grep: unparsed-failure-class in scripts/flake-retry-aggregate.mjs"
+  origin: followup:W1-T10140-1793132210568:2026-10-27T20:40:27.285Z:0
+  rationale: >-
+    From the 2026-10-27 follow-up on https://github.com/craigoley/remudero/pull/14958, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: fix the unnamed first-attempt flake in `scripts/test-with-retry.mjs`
+    (around line 440) and `scripts/flake-retry-aggregate.mjs`. Widen `files:` to include them,
+    because the cause is there. — from W1-T10140 (run W1-T10140-1793132210568,
+    https://github.com/craigoley/remudero/pull/14958)

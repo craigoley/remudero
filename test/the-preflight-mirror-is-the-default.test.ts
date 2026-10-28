@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { preflightCommand, preflightSummarySentence, type PreflightTier } from "../src/run-task.js";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 // ── W1-T3737 — THE LOCAL CI MIRROR IS BUILT, AND THE DEFAULT RAN THREE OF ITS TWENTY CHECKS ───
 //
@@ -63,9 +64,11 @@ test("the passing summary names its mirrored coverage", () => {
 /** Drives the real command with a recording spawn and returns every command line it attempted. */
 async function runPreflightCommand(argv: string[]): Promise<{ code: number; ran: string[]; lines: string[] }> {
   const ran: string[] = [];
-  const spawn: PreflightSpawn = (file, args) => {
-    ran.push([file, ...args].join(" "));
-    return { status: 0, stdout: "\0feat(x): fine\n", stderr: "" };
+  const spawn: PreflightSpawn = (file, args, opts) => {
+    // A judged run's tally sits in its own fresh directory, so the comparison below reads it by shape.
+    ran.push([file, ...args].join(" ").replace(/rmd-pool-run-[^/]+/g, "rmd-pool-run-<dir>"));
+    // The judged census children (W1-T8379) pass only on a tally: this fake stands for finished runs.
+    return { ...finishJudgedRun(args, opts), stdout: "\0feat(x): fine\n", stderr: "" };
   };
   const lines: string[] = [];
   const originalLog = console.log;

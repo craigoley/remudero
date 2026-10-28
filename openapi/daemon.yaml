@@ -8731,7 +8731,7 @@ components:
 
     GardenerOpportunityReport:
       type: object
-      required: [version, repository, readAt, coverage, countSemantics, state, total, counts, oldestReconciledAt, latestReconciledAt]
+      required: [version, repository, readAt, coverage, countSemantics, state, total, counts, oldestReconciledAt, latestReconciledAt, improvementEffects]
       properties:
         version:
           type: integer
@@ -8767,6 +8767,12 @@ components:
         latestReconciledAt:
           type: [string, "null"]
           format: date-time
+
+        improvementEffects:
+          type: array
+          maxItems: 512
+          items:
+            $ref: "#/components/schemas/SavedImprovementEffect"
 
     GardenerOpportunityUnavailable:
       type: object
@@ -10463,6 +10469,7 @@ components:
         - snapshotId
         - isCurrentSnapshot
         - assessment
+        - improvementFollowUp
         - findingCount
         - urgentFindings
         - opportunities
@@ -10946,6 +10953,10 @@ components:
                 summary: *a1
               description: Checks and totals describe the entire saved evidence set. Only findings are paged; findingCount
                 names the complete population. Each source retains its own measurement time and code revision.
+            - type: "null"
+        improvementFollowUp:
+          oneOf:
+            - $ref: "#/components/schemas/CodeHealthImprovementFollowUp"
             - type: "null"
         findingCount:
           oneOf:
@@ -15839,6 +15850,178 @@ components:
       properties:
         quietHours:
           type: boolean
+
+    CodeHealthImprovementFollowUp:
+      type: object
+      additionalProperties: false
+      required: [state, expectedScopes, observedScopes, totalKnown, moreAvailable, items, reason]
+      properties:
+        state: {type: string, enum: [reported, partial, unavailable, not_collected]}
+        expectedScopes: {type: integer, minimum: 0, maximum: 256}
+        observedScopes: {type: integer, minimum: 0, maximum: 256}
+        totalKnown: {type: integer, minimum: 0}
+        moreAvailable: {type: boolean}
+        reason: {type: [string, "null"], maxLength: 1024}
+        items:
+          type: array
+          maxItems: 40
+          items:
+            type: object
+            additionalProperties: false
+            required: [instance, assessment, currentEvidence]
+            properties:
+              instance: {type: string, minLength: 1, maxLength: 128}
+              assessment: {$ref: "#/components/schemas/SavedImprovementEffect"}
+              currentEvidence:
+                type: object
+                additionalProperties: false
+                required: [state, reason]
+                properties:
+                  state: {type: string, enum: [matches_latest_analysis, newer_analysis_available, collection_failed, collection_unavailable, analysis_behind_current_revision, older_measurement, not_measured, not_collected]}
+                  reason: {type: string, minLength: 1, maxLength: 1024}
+    SavedImprovementEffect:
+      description: A bounded saved producer assessment of a static code-quality improvement. Reads do not reverify
+        merges or refresh measurement clocks. Helped describes the targeted rule findings only; no causal or
+        delivery-time benefit is established.
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - verification
+        - repository
+        - opportunityId
+        - threadId
+        - baselineSnapshotId
+        - taskIds
+        - planPrUrl
+        - expectedEffect
+        - stage
+        - verdict
+        - reason
+        - evaluatedAt
+        - measuredAt
+        - freshness
+        - observed
+        - observationWindow
+        - afterSnapshotId
+        - analyzedSha
+        - mergePrUrls
+        - causalClaim
+      properties:
+        version:
+          type: string
+          enum:
+            - improvement-effect-v1
+        verification:
+          type: string
+          enum:
+            - reported-producer-assessment
+        repository:
+          type: string
+        opportunityId:
+          type: string
+        threadId:
+          type: string
+        baselineSnapshotId:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        taskIds:
+          type: array
+          maxItems: 64
+          items:
+            type: string
+        planPrUrl:
+          oneOf:
+            - type: string
+            - type: "null"
+        expectedEffect:
+          type: string
+        stage:
+          type: string
+          enum:
+            - conversation_saved
+            - plan_pr_opened
+            - tasks_filed
+            - merged
+            - measured
+        verdict:
+          type: string
+          enum:
+            - helped
+            - hurt
+            - unchanged
+            - insufficient_evidence
+        reason:
+          type: string
+        evaluatedAt:
+          type: string
+          format: date-time
+        measuredAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        freshness:
+          type: string
+          enum:
+            - fresh
+            - stale
+            - not_collected
+        observed:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required:
+                - before
+                - after
+                - denominator
+              properties:
+                before:
+                  type: integer
+                  minimum: 0
+                after:
+                  type: integer
+                  minimum: 0
+                denominator:
+                  type: integer
+                  minimum: 1
+            - type: "null"
+        observationWindow:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required:
+                - before
+                - after
+              properties:
+                before:
+                  type: string
+                  format: date-time
+                after:
+                  type: string
+                  format: date-time
+            - type: "null"
+        afterSnapshotId:
+          oneOf:
+            - type: string
+              pattern: ^[a-f0-9]{64}$
+            - type: "null"
+        analyzedSha:
+          oneOf:
+            - type: string
+              pattern: ^[a-f0-9]{40}$
+            - type: "null"
+        mergePrUrls:
+          type: array
+          maxItems: 64
+          items:
+            type: string
+        causalClaim:
+          type: boolean
+          enum:
+            - false
+
+
 
   responses:
     Unauthorized:

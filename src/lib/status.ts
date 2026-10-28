@@ -3594,8 +3594,26 @@ export const PROJECTION_STEP_READS: ReadonlySet<string> = new Set([
   "pr.opened", "review.posted", PLAN_ONLY_REVIEW_MARKER_STEP, "daemon.boot", "verdict", "verdict.merged",
   "escalation.issue_opened", ...WORKER_RESULT_STEPS,
 ]);
-/** W1-T8676: the reasons `workerErrorVerdict` (src/run-task.ts) gives a non-budget worker error. */
+/** W1-T8676: the reasons `workerErrorVerdict` (src/run-task.ts) gives a non-budget worker error. W1-T9034: only the
+ *  fallback for a verdict row carrying neither `stage` nor `subtype`, since `failOnWorkerError` may overwrite it. */
 const WORKER_ERROR_REASON = /^worker (?:error at |ended by signal )/;
+/** W1-T9034: every stage `failOnWorkerError` (src/cli/commands/run-task-verb.ts) is called with. A new call site
+ *  adds its stage here, or its `failed` verdict reads as task-caused and never takes the provider_recovered release. */
+export const WORKER_ERROR_VERDICT_STAGES: ReadonlySet<string> = new Set([
+  "recon", "implement", "implement.resumed", "implement.continued", "implement.preopen_continued",
+]);
+
+/** W1-T9034: a `failed` verdict row `workerErrorVerdict` wrote, read off its structured fields (a worker stage and an
+ *  `error_*` subtype, never a budget breach), whatever reason text `failOnWorkerError` left on it. */
+function isWorkerErrorVerdict(line: Record<string, unknown>): boolean {
+  if (line.verdict !== "failed") return false;
+  const { stage, subtype, reason } = line;
+  if (typeof stage === "string" || typeof subtype === "string") {
+    return typeof stage === "string" && WORKER_ERROR_VERDICT_STAGES.has(stage) && typeof subtype === "string" &&
+      subtype.startsWith("error_") && subtype !== "error_max_budget_usd";
+  }
+  return typeof reason === "string" && WORKER_ERROR_REASON.test(reason);
+}
 
 /** W1-T8676: the first worker result row (any task) from `provider` that ended clean strictly after `afterMs`. */
 function firstCleanWorkerResultAfter(
@@ -3707,8 +3725,7 @@ export function independentFailureLatch(
       stageByRun.set(line.run_id, line.stage);
       revisionByRun.set(line.run_id, line.pre_dispatch_contract_revision);
       const verdictMs = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
-      if (line.verdict === "failed" && typeof line.reason === "string" && WORKER_ERROR_REASON.test(line.reason) &&
-        Number.isFinite(verdictMs)) workerErrorByRun.set(line.run_id, { ms: verdictMs, provider: line.provider });
+      if (isWorkerErrorVerdict(line) && Number.isFinite(verdictMs)) workerErrorByRun.set(line.run_id, { ms: verdictMs, provider: line.provider });
       // W1-T4655/W1-T4701: a thrown run's verdict keeps the streak, as its verdict-less row did.
       const thrownRunEnding = typeof line.stage === "string" && THROWN_RUN_VERDICT_STAGES.has(line.stage);
       if (!thrownRunEnding && !isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;

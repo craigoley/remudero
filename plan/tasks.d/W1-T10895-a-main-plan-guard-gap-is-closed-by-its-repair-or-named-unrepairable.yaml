@@ -1,0 +1,37 @@
+- id: W1-T10895
+  title: "A MAIN-PLAN-GUARD MAIN-RUN GAP IS CLOSED BY ITS REPAIR OR NAMED UNREPAIRABLE — the reconciler's ci row reports 'main-plan-guard.yml run covering main commit <sha>: gap persists after its repair attempt' (incidents ac3a053e0be2, 700b08ef1305, 18260a562622, 63ec27b12fa2, a74ab7f876b2, 9a41e8bcd5f5 and others), the same defect W1-T10887 covers for codeql.yml, so each commit pages a human"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high
+  band_meaning: span
+  origin: feedback#incident-ac3a053e0be2d493
+  files:
+    - src/lib/state-reconciler.ts
+    - src/lib/main-run-gaps.ts
+    - test/a-main-plan-guard-gap-is-closed-by-its-repair-or-named-unrepairable.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Risk:high/span rationale (#588 merits test): one test asserts a single invariant, the reconciler ci row and main-run-gaps
+    judging must agree, which is unsatisfiable piecewise across the two files.
+    Incident ac3a053e0be2 (invariant reconcile.ci, count 1): 'main-plan-guard.yml run covering main commit 7a3775f5:
+    gap persists after its repair attempt'. W1-T10887 fixes this for codeql.yml only; at least ten incidents show the
+    same bare reason for main-plan-guard.yml. main-plan-guard runs on every push to main, so a missing run for a commit
+    is either in flight, was skipped, or cannot be recreated by workflow_dispatch (which covers the dispatch-time head,
+    not the old commit). The ci row must judge the repair by the same rule for every MAIN_GUARD workflow.
+    Coordinate with W1-T10887: share its fix rather than duplicating; this task only adds the main-plan-guard case.
+  design: |
+    Reproduce with a reader where main-plan-guard.yml has no run for an older commit and the repair dispatch yields a
+    run only for the current head. Then either (a) treat an in-flight run for the repaired head as not-a-gap, or
+    (b) when the commit is no longer main's head and a newer verdict run exists, close the gap as superseded, or
+    (c) escalate once naming the repaired head and run state. Keep the one-repair-per-gap bound.
+  acceptance:
+    - claim: "a main-plan-guard.yml gap whose repair yields only a head-sha run is closed as superseded or in flight, or escalates once naming the repaired head, never the bare 'gap persists after its repair attempt'"
+      proof: "unit test: test/a-main-plan-guard-gap-is-closed-by-its-repair-or-named-unrepairable.test.ts"
+  falsifier: |
+    At origin/main the new test fails: such a reader escalates with the bare reason 'gap persists after its repair attempt'.
