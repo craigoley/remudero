@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readActorEvidence } from "./actor-evidence.js";
 import { ledgerRowActor, type LedgerLine } from "./ledger.js";
 
 /**
@@ -20,6 +21,7 @@ export const INTERVENTION_INCIDENT_KIND = "intervention";
 /** Fleet-control ledger steps whose non-fleet writer is, by definition, a hand action. */
 export const CONTROL_INTERVENTION_STEPS: ReadonlySet<string> = new Set([
   "fleet.pause",
+  "recycle.invoked",
   "fleet.resume",
   "dispatch.breaker_released",
   "automerge.hold_engaged",
@@ -117,6 +119,8 @@ function controlCauseClass(row: Record<string, unknown>, atMs: number, all: read
       const kind = isFleetAutomationActor(ledgerRowActor(pause)) ? "automation-pause" : "foreign-pause";
       return `${kind}:${normalizeClassToken(pause.reason) || "no-reason"}`;
     }
+    case "recycle.invoked":
+      return `hand-recycle:${readActorEvidence(row.actor_evidence)?.caller_class ?? "actor unrecorded"}`;
     case "fleet.pause":
       return `hand-pause:${normalizeClassToken(row.reason) || "no-reason"}`;
     case "dispatch.breaker_released": {
@@ -156,11 +160,15 @@ export function deriveControlInterventions(rows: readonly Record<string, unknown
   const timeline = [...rows].filter((r) => Number.isFinite(tsMs(r))).sort((a, b) => tsMs(a) - tsMs(b));
   for (const row of timeline) {
     const step = String(row.step);
-    const control = CONTROL_INTERVENTION_STEPS.has(step) ||
+    const recycle = step === "recycle.invoked";
+    const automatedRecycle = recycle && typeof row.caller === "string" &&
+      (row.caller === "deploy-tick" || /^(?:watchdog|sre-runbook):.+$/.test(row.caller));
+    if (automatedRecycle) continue;
+    const control = recycle || CONTROL_INTERVENTION_STEPS.has(step) ||
       (step === "cli.invoked" && typeof row.verb === "string" && CONTROL_INTERVENTION_VERBS.has(row.verb));
     if (!control) continue;
     const actor = ledgerRowActor(row);
-    if (isFleetAutomationActor(actor)) continue;
+    if (!recycle && isFleetAutomationActor(actor)) continue;
     const key = `${step}\u0000${String(row.ts)}\u0000${controlTarget(row)}\u0000${String(row.run_id ?? "")}`;
     if (seen.has(key)) continue;
     seen.add(key);
