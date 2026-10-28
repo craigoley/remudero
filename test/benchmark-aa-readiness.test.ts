@@ -3,16 +3,18 @@
 // replay and reports missingness instead of zeros. Every case runs in rmd- temp state roots with a fake attempt
 // dispatcher, a fake grader, injected runtime pins and a fixed clock: nothing spawns a worker, reads a real ledger or spends.
 import assert from "node:assert/strict";
-import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
   API_BILLING_REFUSAL, listProspectiveAaRegistrations, prospectiveAaDir, prospectiveAaLedgerRows, runProspectiveAa, runProspectiveAaPair,
 } from "../src/lib/benchmark-aa-prospective.js";
 import {
-  benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, READINESS_FOLLOW_UPS_FILE, runBenchmarkAaReadiness,
+  benchmarkAaReadinessCommand, deriveRuntimePins, recordReadinessGap, registryInstanceRoots, READINESS_FOLLOW_UPS_FILE, runBenchmarkAaReadiness,
   runtimePinRefusals,
   type BenchmarkAaReadinessInput, type ReadinessTask, type RuntimePins,
 } from "../src/lib/benchmark-aa-readiness.js";
@@ -286,7 +288,7 @@ test("calibration refuses API billing without blocking PR flow", async () => {
   assert.deepEqual(result.holds, { dispatch: false, pr: false, daemon: false }, "ordinary dispatch, PRs and the daemon are never held");
   const trialDir = prospectiveAaDir(stateDir, TRIAL);
   assert.equal(existsSync(join(trialDir, "controls.ndjson")), false, "the trial is not paused and nothing is held");
-  assert.deepEqual(readdirSync(stateDir).sort(), ["benchmark-aa-prospective", READINESS_FOLLOW_UPS_FILE].sort(),
+  assert.deepEqual(readdirSync(stateDir).sort(), ["benchmark-aa-prospective", READINESS_FOLLOW_UPS_FILE, `${READINESS_FOLLOW_UPS_FILE}.admissions`].sort(),
     "no paid-pilot protocol, hold or control file is written");
   assert.deepEqual(readdirSync(trialDir), ["protocol.json"]);
   assert.equal(result.nextGap?.machineRepairable, false, "api billing is an operator setting, not a machine repair");
@@ -614,4 +616,187 @@ test("registration pin refusals preserve truthful idempotent readiness gaps", as
   assert.ok(invalid.refusals.includes("registration-refused:manifest-version-unsupported"));
   assert.equal(pinReads, 0, "malformed manifests reach the existing parser before their stack is inspected");
   assert.equal(existsSync(join(invalidRoot, "benchmark-aa-prospective")), false);
+});
+
+const GAP = { kind: "stage-missing", machineRepairable: true, detail: "stage-missing:a:verified:1" };
+const GAP_KEY = `${TRIAL}:${GAP.kind}`;
+const REPO = "craigoley/remudero";
+
+function followUpRows(stateDir: string): string[] {
+  return readFileSync(join(stateDir, READINESS_FOLLOW_UPS_FILE), "utf8").split("\n").filter((line) => line !== "");
+}
+
+function ownerStem(stateDir: string, repo: string | undefined = REPO): string {
+  return join(stateDir, `${READINESS_FOLLOW_UPS_FILE}.admissions`, createHash("sha256").update(`${repo ?? ""}\0${GAP_KEY}`).digest("hex").slice(0, 32));
+}
+
+function deadPid(): number {
+  const child = spawnSync(process.execPath, ["-e", "0"]);
+  assert.ok(child.pid);
+  return child.pid;
+}
+
+function owner(pid: number, host = hostname(), at = "2026-10-02T09:00:00.000Z") {
+  const row = { ts: at, key: GAP_KEY, trialId: TRIAL, gap: GAP, repo: REPO };
+  return `${JSON.stringify({ host, pid, nonce: "n-dead", row })}\n`;
+}
+
+test("competing calibration gap writers admit one record", async (t) => {
+  const stateDir = root();
+  const path = join(stateDir, READINESS_FOLLOW_UPS_FILE);
+  writeFileSync(path, "");
+  const read = fs.readFileSync;
+  const outcomes: string[] = [];
+  let barrier = 0;
+  // Both writers cross the same pre-append barrier: the second runs to completion between the first's read and its claim.
+  t.mock.method(fs, "readFileSync", (...args: Parameters<typeof read>) => {
+    const text = read(...args);
+    if (barrier === 0 && typeof args[0] === "number") {
+      barrier = 1;
+      outcomes.push(recordReadinessGap(stateDir, TRIAL, GAP, "2026-10-02T09:00:01.000Z", REPO)!.state);
+      barrier = 2;
+    }
+    return text;
+  });
+  syncBuiltinESMExports();
+  try {
+    outcomes.push(recordReadinessGap(stateDir, TRIAL, GAP, "2026-10-02T09:00:00.000Z", REPO)!.state);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+  assert.equal(barrier, 2, "the competing writer ran inside the first writer's read-to-claim window");
+  assert.deepEqual(outcomes, ["recorded", "already-recorded"], "the inner writer owned admission; the outer one saw the key it had read as absent");
+  assert.equal(followUpRows(stateDir).length, 1, "one canonical row, not two");
+  assert.equal((JSON.parse(followUpRows(stateDir)[0]!) as { key: string }).key, GAP_KEY);
+  // Sequential positive control: the same writer again reports already-recorded and appends nothing.
+  assert.equal(recordReadinessGap(stateDir, TRIAL, GAP, "2026-10-02T09:00:02.000Z", REPO)!.state, "already-recorded");
+  assert.equal(followUpRows(stateDir).length, 1);
+  // A writer meeting a live owner that has not yet appended gets an explicit pending, not a second row.
+  const other = root();
+  const append = fs.appendFileSync;
+  let during = "";
+  t.mock.method(fs, "appendFileSync", (...args: Parameters<typeof append>) => {
+    during = recordReadinessGap(other, TRIAL, GAP, "2026-10-02T09:00:03.000Z", REPO)!.state;
+    return append(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.equal(recordReadinessGap(other, TRIAL, GAP, "2026-10-02T09:00:00.000Z", REPO)!.state, "recorded");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+  assert.equal(during, "pending", "a competitor behind a live owner is told pending");
+  assert.equal(followUpRows(other).length, 1);
+});
+
+test("a writer that loses the owner-file race yields to the winner and never appends", (t) => {
+  const write = fs.writeFileSync;
+  const row = { ts: "2026-10-02T09:00:00.000Z", key: GAP_KEY, trialId: TRIAL, gap: GAP, repo: REPO };
+  for (const winnerAppended of [false, true]) {
+    const stateDir = root();
+    const path = join(stateDir, READINESS_FOLLOW_UPS_FILE);
+    // The winner publishes generation 0 between the loser's scan (absent) and its link(2).
+    t.mock.method(fs, "writeFileSync", (...args: Parameters<typeof write>) => {
+      if (String(args[0]).endsWith(".tmp")) {
+        t.mock.restoreAll();
+        syncBuiltinESMExports();
+        write(`${ownerStem(stateDir)}.0.owner`, `${JSON.stringify({ host: hostname(), pid: process.pid, nonce: "n-winner", row })}\n`);
+        if (winnerAppended) appendFileSync(path, `${JSON.stringify(row)}\n`);
+      }
+      return write(...args);
+    });
+    syncBuiltinESMExports();
+    let state: string | undefined;
+    try {
+      state = recordReadinessGap(stateDir, TRIAL, GAP, "2026-10-02T09:00:05.000Z", REPO)?.state;
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+    assert.equal(state, winnerAppended ? "already-recorded" : "pending", "the loser reports the winner's outcome explicitly");
+    assert.equal(readdirSync(join(stateDir, `${READINESS_FOLLOW_UPS_FILE}.admissions`)).filter((name) => name.endsWith(".tmp")).length, 0, "the loser's temp file is removed");
+    assert.equal(existsSync(`${ownerStem(stateDir)}.1.owner`), false, "the winner's live ownership is never taken over");
+    assert.equal(winnerAppended ? followUpRows(stateDir).length : readFileSync(path, "utf8").length, winnerAppended ? 1 : 0, "the loser appended nothing");
+  }
+});
+
+test("an owner-file publish failure other than EEXIST propagates and cleans up", (t) => {
+  const stateDir = root();
+  t.mock.method(fs, "linkSync", () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); });
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => recordReadinessGap(stateDir, TRIAL, GAP, "2026-10-02T09:00:00.000Z", REPO), /denied/);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+  assert.equal(readdirSync(join(stateDir, `${READINESS_FOLLOW_UPS_FILE}.admissions`)).length, 0, "no owner and no temp file is left behind");
+  assert.equal(readFileSync(join(stateDir, READINESS_FOLLOW_UPS_FILE), "utf8"), "", "nothing was recorded");
+});
+
+test("interrupted calibration gap admission resumes safely", () => {
+  const stateDir = root();
+  mkdirSync(join(stateDir, `${READINESS_FOLLOW_UPS_FILE}.admissions`), { recursive: true });
+  const dead = owner(deadPid(), hostname(), "2026-10-02T08:30:00.000Z");
+  writeFileSync(`${ownerStem(stateDir)}.0.owner`, dead);
+  // Owner died after claiming and before appending, leaving a torn trailing line from an earlier crash.
+  writeFileSync(join(stateDir, READINESS_FOLLOW_UPS_FILE), '{"key":"torn');
+  const resumed = recordReadinessGap(stateDir, TRIAL, GAP, "2026-10-02T09:00:00.000Z", REPO);
+  assert.equal(resumed?.state, "recorded", "the unrecorded gap is admitted, not suppressed");
+  const rows = followUpRows(stateDir);
+  assert.equal(rows[0], '{"key":"torn', "the torn line is kept as evidence");
+  assert.equal(rows.length, 2);
+  assert.equal((JSON.parse(rows[1]!) as { ts: string }).ts, "2026-10-02T08:30:00.000Z", "the dead owner's own row is the one admitted");
+  assert.equal(readFileSync(`${ownerStem(stateDir)}.0.owner`, "utf8"), dead, "the dead owner's file is never deleted");
+  assert.equal(existsSync(`${ownerStem(stateDir)}.1.owner`), true, "recovery took a new generation");
+  assert.equal(recordReadinessGap(stateDir, TRIAL, GAP, "2026-10-02T09:00:05.000Z", REPO)!.state, "already-recorded", "a second restart does not replay");
+  assert.equal(followUpRows(stateDir).length, 2);
+
+  // An owner that died AFTER appending leaves one row; the restart reports it instead of appending again.
+  const appended = root();
+  mkdirSync(join(appended, `${READINESS_FOLLOW_UPS_FILE}.admissions`), { recursive: true });
+  writeFileSync(`${ownerStem(appended)}.0.owner`, dead);
+  appendFileSync(join(appended, READINESS_FOLLOW_UPS_FILE), `${JSON.stringify({ ts: "2026-10-02T08:30:00.000Z", key: GAP_KEY, trialId: TRIAL, gap: GAP, repo: REPO })}\n`);
+  assert.equal(recordReadinessGap(appended, TRIAL, GAP, "2026-10-02T09:00:00.000Z", REPO)!.state, "already-recorded");
+  assert.equal(followUpRows(appended).length, 1);
+
+  // Ownership that may still be live (this process, or another host) is pending and untouched.
+  for (const [pid, host] of [[process.pid, hostname()], [deadPid(), "another-host"]] as const) {
+    const held = root();
+    mkdirSync(join(held, `${READINESS_FOLLOW_UPS_FILE}.admissions`), { recursive: true });
+    writeFileSync(`${ownerStem(held)}.0.owner`, owner(pid, host));
+    assert.equal(recordReadinessGap(held, TRIAL, GAP, "2026-10-02T09:00:00.000Z", REPO)!.state, "pending");
+    assert.equal(followUpRows(held).length, 0, "pending ownership appends nothing");
+    assert.equal(existsSync(`${ownerStem(held)}.1.owner`), false, "contested ownership is never taken over");
+  }
+});
+
+test("calibration gap admission preserves replaced and corrupt evidence", () => {
+  const stateDir = root();
+  const path = join(stateDir, READINESS_FOLLOW_UPS_FILE);
+  // A line that merely mentions the key, an unparseable one, and another repo's row are none of them this repo's canonical record.
+  const lookalike = `{"key":"${GAP_KEY}","note":"not canonical"}`;
+  const foreign = JSON.stringify({ ts: "2026-10-02T08:00:00.000Z", key: GAP_KEY, trialId: TRIAL, gap: GAP, repo: "someone/else" });
+  writeFileSync(path, `${lookalike}\n{"key":"${GAP_KEY}"\n${foreign}\n`);
+  const result = recordReadinessGap(stateDir, TRIAL, GAP, "2026-10-02T09:00:00.000Z", REPO);
+  assert.equal(result?.state, "recorded");
+  assert.equal(result?.unvalidated, 3, "the three uncanonical lines naming the key are reported");
+  const rows = followUpRows(stateDir);
+  assert.equal(rows.length, 4, "prior corrupt evidence is preserved and one canonical row is added");
+  assert.deepEqual(rows.slice(0, 3), [lookalike, `{"key":"${GAP_KEY}"`, foreign]);
+  assert.equal((JSON.parse(rows[3]!) as { repo: string }).repo, REPO);
+  // An unreadable owner file is explicit pending evidence, never read as free.
+  const unreadable = root();
+  mkdirSync(join(unreadable, `${READINESS_FOLLOW_UPS_FILE}.admissions`), { recursive: true });
+  writeFileSync(`${ownerStem(unreadable)}.0.owner`, "{not json");
+  assert.equal(recordReadinessGap(unreadable, TRIAL, GAP, "2026-10-02T09:00:00.000Z", REPO)!.state, "pending");
+  assert.equal(readFileSync(`${ownerStem(unreadable)}.0.owner`, "utf8"), "{not json");
+  // Without a repo identity the admission is keyed and validated without one.
+  const bare = root();
+  assert.equal(recordReadinessGap(bare, TRIAL, GAP, "2026-10-02T09:00:00.000Z")!.state, "recorded");
+  assert.equal(recordReadinessGap(bare, TRIAL, GAP, "2026-10-02T09:00:01.000Z")!.state, "already-recorded");
+  assert.equal(followUpRows(bare).length, 1);
+  assert.equal(existsSync(`${ownerStem(bare, "")}.0.owner`), true);
 });
