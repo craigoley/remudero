@@ -6,7 +6,7 @@
   verify: auto
   principles: { tdd: strict }
   budget_usd: 14.00
-  risk: high  # Rule 19: one concern spans the PR-open refusal class, the non-worker strike set and the dispatch skip that reads it; no conclusive verdict for a real miss changes
+  risk: high  # Rule 19: one concern spans the PR-open refusal class, the non-worker strike set and the existing W1-T3959 hold that reads it; no conclusive verdict for a real miss changes
   band_meaning: span
   priority: 1
   status: queued
@@ -17,8 +17,9 @@
     - src/lib/pr-open.ts
     - src/lib/check-proof.ts
     - src/lib/non-worker-verdict.ts
-    - src/lib/drain.ts
-    - src/lib/daemon.ts
+    - src/lib/dispatch-repair.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/cli/commands/daemon.ts
     - test/review/a-proof-that-collects-nothing-is-not-retried-on-the-same-base.test.ts
   rationale: |
     RE-VERIFIED 2026-10-28 on origin/main d03d7d3ef by direct read.
@@ -57,35 +58,42 @@
     W1-T10897 (queued) makes a consumer daemon see its own run branches. That stops the five
     separate branches, but not the identical rebuild after the branch grace.
   design: |
-    1. Classify case (b) in check-proof, where the evidence is. When a test proof's run completes
-       with zero non-skipped leaves, AND the head tree has at least one test file containing the
-       proof's title, or its declared path exists:
-       - Print a `cause: collected-nothing` line. It names the file(s) holding the title and, when it
-         can be read, the runner's include pattern from its config (vitest.config.*, or the package
-         test script for node --test).
-       - Exit code 3 is unchanged for every other caller.
-       Use the same corpus resolution check-proof already prints as `candidates:`, so no second
-       resolver is added. This covers BOTH runners in use: a vitest `1..0` or "No test files found",
-       and node --test `# tests 0`.
-    2. In `openPullRequestChecked`, a refusal whose result carries that cause gets a new
-       `PrOpenRefusalClass` value, "proof-collected-nothing". Its message names the declared file and
-       the include pattern. `recordRefusedPrOpen` writes `refusal_class: "proof-collected-nothing"`
-       plus `base_sha` and `runner_config_digest`: the sha256 of the runner-config blobs the cause
-       read, at the merge base. A real miss (case a) is unchanged: `branch-gap`.
-    3. In `streakRefusal` (non-worker-verdict.ts), that verdict is a non-worker class,
-       `proof_collected_nothing`. It is excluded from the breaker and from the lifetime count, and
-       it never resets a streak. Keep the W1-T7742 contract: rows from before this task carry no
-       class and are left as they were.
-    4. In the dispatcher (drain.ts / daemon.ts, beside `stillBlockedByPushedRunBranch`), a task whose
-       latest terminal verdict is `proof-collected-nothing` is skipped, with ledger reason
-       `proof-collected-nothing-same-runner-scope`. It stays skipped while BOTH of these hold:
-       - origin/main's runner-config digest still equals the recorded `runner_config_digest`;
-       - the task's shard is unchanged since the refusal.
-       When main changes the runner config (as PORTAL-T44 did) or the shard is amended, the task is
-       dispatchable on the next tick with no operator release. This is no-hard-thresholds: no timer
-       and no count, only the evidence that would change the outcome.
-    5. The skip row is written once per state change, not once per tick: log only when the decision
-       flips.
+    1. Classify case (b) in check-proof, where the evidence is. A test proof whose run reports
+       `no-match`, whose candidate resolution found at least one head test file holding the proof's
+       title (the files check-proof already prints as `candidates:`), and whose runner loaded ZERO
+       files prints a `cause: collected-nothing` line. The line names those files and, when it can
+       read one, the runner's include pattern. "Loaded zero files" means the top-level TAP plan is
+       `1..0` with no top-level `ok`/`not ok` line, or the runner said "No test files found". That
+       covers vitest's `1..0` and a node --test run reporting `# tests 0` with no file wrapper. A
+       node name-filtered run that LOADED its file but matched no title still emits the file
+       wrapper, so it stays a real miss. Exit code 3 is unchanged for every caller.
+    2. In `openPullRequestChecked`, a refusal whose check-proof output carries that cause gets a new
+       `PrOpenRefusalClass` value, "proof-collected-nothing". Its message names the files and the
+       include pattern. The error carries `runnerConfigDigest`: the sha256 of
+       `git ls-tree HEAD -- <runner config paths>` in the run worktree (the vitest.config.* and
+       vitest.workspace.* variants, and package.json). That is what the run's runner actually read.
+       A real miss (case a) is unchanged: `branch-gap`.
+    3. The run's `pr_open.refused` verdict row (run-task-verb.ts) already carries `refusal_class`;
+       it also carries `runner_config_digest`. In `streakRefusal` (non-worker-verdict.ts), a
+       `pr_open.refused` verdict with `refusal_class: "proof-collected-nothing"` is the non-worker
+       class `proof_collected_nothing`: excluded from the breaker, never resetting a streak. Keep
+       the W1-T7742 contract: rows from before this task carry no class and are left as they were.
+    4. HOLD through the EXISTING W1-T3959 mechanism, never a second one. At that refusal,
+       run-task-verb.ts writes the task's prior-refusal record (dispatch-repair.ts
+       `writePriorRefusal`): escalated, `preDispatchContractRevision` = the task's current
+       revision, plus a new optional `runnerConfigDigest`. `terminalPreDispatchRefusalRevisions`
+       gains an optional reader for the TARGET repo's current runner-config digest, computed the
+       same way from `git ls-tree origin/main -- <paths>`. It is read lazily, at most once per
+       selection pass, and only when some record carries a digest. A record whose digest differs
+       from that reading, or whose reading failed, is left out of the held map, which fails open. So
+       the daemon's existing `isTerminalPreDispatchRefusalHeld` holds the task while BOTH the shard
+       and main's runner config are unchanged, and releases it on the next pass when either moves
+       (as PORTAL-T44 did), with no operator release. No timer and no count (no-hard-thresholds).
+       daemon.ts wires the reader to the target's checkout: the repo root for a self-target, the
+       managed `repos/<repo>` checkout for a consumer.
+    5. The hold is reported under the existing `held-pre-dispatch-refusal` filter name. The record's
+       verdict text, `proof-collected-nothing: <files> (<include>)`, says why, so no new filter
+       reason reaches the census tallies.
   prompt: |
     Read the rationale and design. Write the failing tests first, in
     test/review/a-proof-that-collects-nothing-is-not-retried-on-the-same-base.test.ts, through
@@ -110,10 +118,12 @@
       refusal is `branch-gap`.
     - Map the new class back to `branch-gap` in `openPullRequestChecked`: the first case must fail.
     - Return undefined from `streakRefusal` for the new verdict: the strike case must fail.
-    - Make the dispatch skip ignore the runner-config digest, so it skips forever: the dispatch case
-      must fail when the digest changes.
-    - Make the skip key on the base sha alone: the same case must fail, because an unrelated merge
-      to main would release a build that is refused again.
+    - Make `terminalPreDispatchRefusalRevisions` ignore the runner-config digest, so the record holds
+      forever: the dispatch case must fail when the digest changes.
+    - Key the hold on main's head sha instead of the runner-config digest: the same case must fail,
+      because an unrelated merge to main would release a build that is refused again.
+    - Hold when the digest read fails: the dispatch case must fail, because an unreadable digest
+      must fail open.
     GUARDS that held at base and must still hold:
     - an exit-1 proof still opens with its failing proof named;
     - exit 4 is still `proof_inconclusive` (W1-T10742);
