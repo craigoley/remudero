@@ -2665,6 +2665,7 @@ export async function readDeployFactsAsync(sensors: DeployFactSensors): Promise<
     try {
       (facts as unknown as Record<string, unknown>)[name] = await get();
     } catch (error) {
+      // Kept, not erased: the snapshot reader rethrows it, so the row records `reconcile.unreadable`.
       facts.thrown[name] = error;
     }
   };

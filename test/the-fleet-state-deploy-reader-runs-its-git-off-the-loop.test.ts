@@ -59,7 +59,7 @@ function installFixture(t: TestContext) {
   return { root, repo, sha, opts, stub };
 }
 
-function latchFree(deploy: DeployStateReader["deploy"]): DeployStateReader {
+function latchFree<D>(deploy: D): Omit<DeployStateReader, "deploy"> & { deploy: D } {
   return { deploy, requestDeploy: () => {}, deployRequested: () => false, failedAt: () => undefined, clearFailure: () => {} };
 }
 
@@ -134,6 +134,7 @@ test("W1-T9552: a deploy fact that throws replays as the same unreadable row", a
   assert.deepEqual(asyncEvents, syncEvents);
   assert.deepEqual(asyncEvents.map((e) => [e.pipeline, e.step]), [["image", "reconcile.unreadable"]]);
   await assert.rejects(readDeployFactsAsync({ newestBakedSha: failing }), /registry exploded/, "no baked sha read, no rows");
+  assert.deepEqual(await readDeployFactsAsync({}), { thrown: {} }, "no baked sha, no further reads");
 });
 
 test("W1-T9552: an unpublished image reads its build state and its dispatch is awaited", async () => {
