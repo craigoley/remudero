@@ -19,13 +19,16 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import {
-  closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
+  closeSync, existsSync, fsyncSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { RmdError } from "./errors.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { RMD_TMP_PREFIX } from "./tmp.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, matchedLinesAreAllComments, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
@@ -890,11 +893,18 @@ function scopeWorkParts(path: string): string[] {
 }
 
 interface ScopeWorkEntry { path: string; data: string | null; mode: number }
+/** W1-T10387: `base`/`baseMode` are the path at the HEAD the asking round started from; a legacy record has neither. */
+interface SavedScopeWorkEntry extends ScopeWorkEntry { base?: string | null; baseMode?: number }
 
-export interface ScopeWorkIo { run: (script: string, input: string) => string | Promise<string> }
+export interface ScopeWorkIo {
+  run: (script: string, input: string) => string | Promise<string>;
+  git?: (worktreePath: string, args: readonly string[], encoding: "utf8" | "latin1") => string;
+}
 // BACKSTOP: bound the rare recovery subprocess and its private IPC, never truncate saved work.
 const SCOPE_WORK_IO_TIMEOUT_MS = 30_000;
 const SCOPE_WORK_IO_MAX_BYTES = 64 * 1024 * 1024;
+const scopeWorkGit = (worktreePath: string, args: readonly string[], encoding: "utf8" | "latin1") =>
+  hostWorktreeGit(worktreePath, args, { encoding, maxBuffer: SCOPE_WORK_IO_MAX_BYTES });
 const scopeWorkIo: ScopeWorkIo = { async run(script, input) {
   const command = execFileLoopBounded("python3", ["-I", "-c", script], {
     encoding: "utf8", timeout: SCOPE_WORK_IO_TIMEOUT_MS, maxBuffer: SCOPE_WORK_IO_MAX_BYTES,
@@ -1030,7 +1040,51 @@ class MissingScopeWorkError extends ScopeRecoveryError {
   }
 }
 
-function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
+/** W1-T10387: an overlapping edit is reported, never resolved by picking a side. */
+export class ScopeRecoveryConflictError extends ScopeRecoveryError {
+  readonly recoveryStatus = "conflicted";
+  constructor(readonly conflictedPaths: string[], readonly replayedPaths: string[]) {
+    super(`scope recovery conflicted on ${conflictedPaths.join(", ")}: left as the merge produced them; re-apply the round's ` +
+      `change to them${replayedPaths.length ? ` (replayed: ${replayedPaths.join(", ")})` : ""}`);
+    this.name = "ScopeRecoveryConflictError";
+  }
+}
+
+/** Each path's bytes and mode in `rev`'s tree, or null where the tree lacks it. Only a regular blob is a base. */
+function scopeWorkTree(worktreePath: string, rev: string, paths: string[], io: ScopeWorkIo): Map<string, { data: string; mode: number } | null> {
+  const git = io.git ?? scopeWorkGit;
+  const found = new Map<string, { data: string; mode: number } | null>(paths.map((path) => [path, null]));
+  for (const row of git(worktreePath, ["ls-tree", "-z", rev, "--", ...paths], "utf8").split("\0").filter(Boolean)) {
+    const [, mode, type, oid, path] = /^(\d+) (\w+) ([0-9a-f]+)\t(.*)$/s.exec(row) ?? [];
+    if (!found.has(path!)) continue;
+    if (type !== "blob" || (mode !== "100644" && mode !== "100755")) throw new ScopeRecoveryError(`scope recovery requires a regular path at ${rev}: ${path}`);
+    const data = Buffer.from(git(worktreePath, ["cat-file", "blob", oid!], "latin1"), "latin1").toString("base64");
+    found.set(path!, { data, mode: mode === "100755" ? 0o755 : 0o644 });
+  }
+  return found;
+}
+
+/** `git merge-file` of ours <- base -> theirs: the merged bytes, or null when the file conflicts or cannot be merged. */
+function mergeScopeWork(worktreePath: string, ours: string, base: string, theirs: string, io: ScopeWorkIo): string | null {
+  const directory = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}scope-merge-`));
+  try {
+    const files = Object.entries({ ours, base, theirs }).map(([name, data]) => {
+      writeFileSync(join(directory, name), Buffer.from(data, "base64"));
+      return join(directory, name);
+    });
+    try {
+      return Buffer.from((io.git ?? scopeWorkGit)(worktreePath, ["merge-file", "-p", ...files], "latin1"), "latin1").toString("base64");
+    } catch (error) {
+      // git exits with the conflict count (or 255 for a binary file); a missing exit status is not a merge answer.
+      if (typeof (error as { status?: unknown }).status === "number") return null;
+      throw error;
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function readScopeWork(input: ScopeAmendmentWork): SavedScopeWorkEntry[] {
   const file = scopeWorkRecoveryPath(input);
   let text: string;
   try {
@@ -1044,11 +1098,12 @@ function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
       saved.digest !== createHash("sha256").update(saved.payload).digest("hex")) {
     throw new Error("scope recovery identity or digest did not verify");
   }
-  const entries: ScopeWorkEntry[] = JSON.parse(saved.payload);
+  const entries: SavedScopeWorkEntry[] = JSON.parse(saved.payload);
   const paths = [...new Set(input.paths)].sort();
   if (!Array.isArray(entries) || entries.length !== paths.length || entries.some((entry, i) =>
     entry.path !== paths[i] || (entry.data !== null && typeof entry.data !== "string") ||
-    !Number.isInteger(entry.mode) || entry.mode < 0 || entry.mode > 0o777)) {
+    !Number.isInteger(entry.mode) || entry.mode < 0 || entry.mode > 0o777 ||
+    ("base" in entry && ((entry.base !== null && typeof entry.base !== "string") || !Number.isInteger(entry.baseMode))))) {
     throw new Error("scope recovery paths or file content did not verify");
   }
   return entries;
@@ -1064,7 +1119,12 @@ export async function saveScopeAmendmentWork(input: ScopeAmendmentWork, io: Scop
   } catch (error) {
     if (!(error instanceof MissingScopeWorkError)) throw error;
   }
-  const entries = await scopeWorkFiles(input.worktreePath, [...new Set(input.paths)].sort().map((path) => ({ path, data: null, mode: 0 })), false, io);
+  const paths = [...new Set(input.paths)].sort();
+  const worktreePath = input.worktreePath;
+  const edited = await scopeWorkFiles(worktreePath, paths.map((path) => ({ path, data: null, mode: 0 })), false, io);
+  const bases = scopeWorkTree(worktreePath, "HEAD", paths, io);
+  const entries: SavedScopeWorkEntry[] = edited.map((entry) => ({ ...entry,
+    base: bases.get(entry.path)?.data ?? null, baseMode: bases.get(entry.path)?.mode ?? 0 }));
   const payload = JSON.stringify(entries);
   const text = JSON.stringify({ identity: scopeWorkIdentity(input), payload,
     digest: createHash("sha256").update(payload).digest("hex") });
@@ -1095,8 +1155,42 @@ export async function saveScopeAmendmentWork(input: ScopeAmendmentWork, io: Scop
   return file;
 }
 
+/** W1-T10387: replays the asking round's edit onto the merged file (ours = HEAD, base = the saved base, theirs = the
+ *  saved edit), never a whole-file snapshot: #13324's recovery wrote a pre-#13318 copy of sweep.ts over the merge and
+ *  reverted #13318. A conflicting path, or every path of a record with no base, is left as the merge produced it. */
 export async function restoreScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): Promise<string[]> {
   const entries = readScopeWork(input);
-  await scopeWorkFiles(input.worktreePath, entries, true, io);
-  return entries.map((entry) => entry.path);
+  const legacy = entries.filter((entry) => !("base" in entry)).map((entry) => entry.path);
+  if (legacy.length) {
+    throw new ScopeRecoveryError(`saved scope work has no base, so it cannot be replayed; ${legacy.join(", ")} left as the merge ` +
+      "produced them — re-apply the round's change to them");
+  }
+  const merged = scopeWorkTree(input.worktreePath, "HEAD", entries.map((entry) => entry.path), io);
+  const writes: ScopeWorkEntry[] = [];
+  const replayed: string[] = [];
+  const conflicted: string[] = [];
+  for (const entry of entries) {
+    const ours = merged.get(entry.path) ?? null;
+    const base = entry.base ?? null;
+    if ((ours?.data ?? null) === base) {
+      writes.push({ path: entry.path, data: entry.data, mode: entry.mode });
+      replayed.push(entry.path);
+      continue;
+    }
+    // The round left the path as it found it, or main already holds the round's bytes: the merge stands.
+    const kept = entry.data === base || entry.data === (ours?.data ?? null);
+    const data = kept ? ours?.data ?? null : ours === null || entry.data === null || base === null ? null
+      : mergeScopeWork(input.worktreePath, ours.data, base, entry.data, io);
+    if (!kept && data === null) {
+      conflicted.push(entry.path);
+      continue;
+    }
+    const roundMode = entry.data !== null && base !== null && (entry.mode & 0o111) !== (entry.baseMode! & 0o111);
+    const mode = data === null ? 0 : roundMode ? entry.mode : ours!.mode;
+    if (data !== (ours?.data ?? null) || (ours !== null && mode !== ours.mode)) writes.push({ path: entry.path, data, mode });
+    replayed.push(entry.path);
+  }
+  if (writes.length) await scopeWorkFiles(input.worktreePath, writes, true, io);
+  if (conflicted.length) throw new ScopeRecoveryConflictError(conflicted, replayed);
+  return replayed;
 }
