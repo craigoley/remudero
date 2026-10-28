@@ -118,7 +118,7 @@ set -euo pipefail
 # purpose, to drive a single script in isolation); test/recycle-container.test.ts asserts this
 # fallback, host-update.sh's own fallback, and deploy/runtime-env-vars.sh's real array never
 # disagree, so the fallback cannot silently go stale either.
-RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)
+RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_CASH_EASTUS_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)
 RMD_DERIVED_RUNTIME_ENV_VARS=(RMD_READ_MODEL_DB_DIR RMD_WORKER_HOME_DIR RMD_TEST_SLOT_DIR)
 RUNTIME_ENV_VARS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/runtime-env-vars.sh" || true
 if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; then
@@ -128,6 +128,7 @@ fi
 # The isolated-script fixtures intentionally have no sibling runtime-env-vars.sh. Keep
 # their host-only key path deterministic without making it a container runtime name.
 : "${RMD_OPENWEIGHT_API_KEY_PATH:=${HOME:-/root}/.local/share/remudero/secrets/openweight-api-key}"
+: "${RMD_CASH_EASTUS_API_KEY_PATH:=${HOME:-/root}/.local/share/remudero/secrets/cash-eastus-api-key}"
 
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
@@ -1180,6 +1181,30 @@ if [ "${CASH_KEY_REQUIRED}" -eq 1 ]; then
   CAPTURED_SOURCE_set RMD_OPENWEIGHT_API_KEY "durable-host-secret"
 fi
 
+# The second account is optional. Keep a captured value; otherwise recover its host-only key
+# through the same regular-file, mode-0600 and one-nonempty-line checks used at boot.
+read_eastus_cash_secret() {
+  local path="$1" mode value
+  [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
+  if mode="$(stat -c '%a' "$path" 2>/dev/null)"; then :
+  elif mode="$(stat -f '%Lp' "$path" 2>/dev/null)"; then :
+  else mode=""; fi
+  [ "$mode" = 600 ] || return 1
+  value="$(awk 'NF { count++; last=$0 } END { if (count == 1) print last; else exit 1 }' "$path" 2>/dev/null)" || return 1
+  value="${value%$'\r'}"
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+if [ -z "$(CAPTURED_get RMD_CASH_EASTUS_API_KEY)" ]; then
+  if EASTUS_CASH_KEY="$(read_eastus_cash_secret "$RMD_CASH_EASTUS_API_KEY_PATH")"; then
+    CAPTURED_set RMD_CASH_EASTUS_API_KEY "$EASTUS_CASH_KEY"
+    CAPTURED_SOURCE_set RMD_CASH_EASTUS_API_KEY durable-host-secret
+  else
+    echo "recycle-container: RMD_CASH_EASTUS_API_KEY: eastus cash key unavailable; that deployment stays unavailable" >&2
+  fi
+fi
+echo "recycle-container: RMD_CASH_EASTUS_API_KEY captured from $(CAPTURED_SOURCE_get RMD_CASH_EASTUS_API_KEY) (name only)"
+
 # ── APP AUTH IS A DURABLE CREDENTIAL, SO THE GH_TOKEN REFUSAL DOES NOT APPLY TO IT ──────────────
 # The refusal below exists for exactly ONE reason, stated in its own text: GH_TOKEN lives only in
 # the outgoing container's environment and is never written to disk, so removing that container
@@ -1320,6 +1345,9 @@ RUN_ENV_ARGS=()
 for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
   if [ "${name}" = "GH_TOKEN" ]; then
     RUN_ENV_ARGS+=(-e "GH_TOKEN=")
+  elif [ "${name}" = "RMD_CASH_EASTUS_API_KEY" ]; then
+    export RMD_CASH_EASTUS_API_KEY="$(CAPTURED_get "${name}")"
+    RUN_ENV_ARGS+=(-e "${name}")
   else
     RUN_ENV_ARGS+=(-e "${name}=$(CAPTURED_get "${name}")")
   fi
