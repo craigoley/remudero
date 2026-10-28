@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.08
   status: queued
@@ -29,10 +29,12 @@
     Previous remedy W1-T10520: src/lib/fix-lane-gardener.ts, test/gardeners/fix-lane-fixed-still-red.test.ts; did not fall: share of PR-hours 1.9% (9.410033888888892/483.90462611111116) before, 2.5% (12.19897388888889/492.2841458333331) after, over 1 day(s) each side. Take a structurally different remedy.
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.91
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
     reasons:
-      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The record supplies recurring outcomes and aggregate PR-hours, but no verified root cause or concrete replacement mechanism; it requests a structurally different remedy after the previous remedy failed its effect measurement.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for test text, not demonstrated recovery behavior. The supplied evidence therefore cannot verify the proposed remedy, meeting the gates state's explicit escalation condition."
-    judged_at: "2026-10-27T01:27:05.161Z"
-    pin: "ad8d9fe7a907a3d15876f7400f222db6c15380448f841eee40ba8ec1269f363d"
+      - "The declared files are only src/lib/fix-lane-gardener.ts and its test file. The description doesn't indicate any touch on secrets, auth, permissions, deletion, or merge/deploy/review policy."
+      - "Acceptance is a grep for a named test in the declared test file, so it can be verified from what is shown."
+      - "The fix-lane family has 6 merged, 0 declined (Beta mean 0.96). The failed previous remedy W1-T10520 is an effectiveness concern handled by the existing rung-reopen process, not a danger signal."
+    judged_at: "2026-10-28T03:43:51.964Z"
+    pin: "524828ce5bd33d7214fc23f4fe9016e817a2c958ce21c6f82e16168e5a5058db"
