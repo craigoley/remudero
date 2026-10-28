@@ -76,6 +76,31 @@ test("W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.t
       assert.equal(census(rawResult.text).status, 0);
     }
   }
+
+  const forInTagged = "const of = String.raw; const keys = []; for (const key in of`"
+    + fixtureImport("./fixture.js") + "`) keys.push(key); keys.join(',');";
+  const forInTaggedResult = rewriteSource(forInTagged, "test/ci/suites/fixture.test.ts");
+  assert.equal(census(forInTagged).status, 0);
+  assert.equal(forInTaggedResult.text, forInTagged, "the for-in right operand is an of tag");
+  assert.equal(forInTaggedResult.rewritten, 0);
+  assert.equal(forInTaggedResult.unresolved.length, 1);
+  assert.match(forInTaggedResult.unresolved[0], /raw spelling/);
+  assert.equal(runInNewContext(forInTaggedResult.text), runInNewContext(forInTagged));
+
+  const observedRaw = "let raw; const of = (parts) => { raw = String.raw(parts); return { key: 1 }; }; "
+    + "for (const key in of`" + fixtureImport("./fixture.js") + "`) {} raw;";
+  const observedResult = rewriteSource(observedRaw, "test/ci/suites/fixture.test.ts");
+  assert.equal(runInNewContext(observedResult.text), fixtureImport("./fixture.js"));
+  assert.equal(observedResult.rewritten, 0);
+  assert.match(observedResult.unresolved[0], /raw spelling/);
+
+  const forInOrdinary = "const keys = []; for (const key in `"
+    + fixtureImport("./fixture.js") + "`) keys.push(key); keys.join(',');";
+  const forInOrdinaryResult = rewriteSource(forInOrdinary, "test/ci/suites/fixture.test.ts");
+  assert.equal(forInOrdinaryResult.rewritten, 1, "the ordinary template can become location-free");
+  assert.deepEqual(forInOrdinaryResult.unresolved, []);
+  assert.equal(census(forInOrdinaryResult.text).status, 1);
+  assert.equal(runInNewContext(forInOrdinaryResult.text), runInNewContext(forInOrdinary));
 });
 
 test("fixture-only files are written by the codemod CLI", (t) => {

@@ -132,12 +132,12 @@ export function stringLiteralMask(text) {
           i += point.length;
         }
         const word = text.slice(start, i);
-        // A for header has one `of` operator; an `of` on its right can be a template tag.
-        const loopOperator = word === "of" && parens.at(-1) === true
+        // Once a for-in or for-of separator is consumed, a name on its right may be a template tag.
+        const loopOperator = (word === "of" || word === "in") && parens.at(-1) === true
           && !["(", "const", "let", "var", "."].includes(prev);
         if (loopOperator) parens[parens.length - 1] = false;
         beforePrev = prev;
-        prev = loopOperator ? "<for-of>" : prev === "." ? `.${word}` : word;
+        prev = loopOperator ? `<for-${word}>` : prev === "." ? `.${word}` : word;
         continue;
       }
       if (c === '"' || c === "'") { quoted(c); prev = c; continue; }
@@ -150,7 +150,7 @@ export function stringLiteralMask(text) {
         prev = "`";
         continue;
       }
-      if (c === "/" && (prev === "" || "(,=:[!&|?{};<>+-*%~^".includes(prev) || /^(return|typeof|case|in|of|<for-of>|delete|void|throw|new|else|do)$/.test(prev))) {
+      if (c === "/" && (prev === "" || "(,=:[!&|?{};<>+-*%~^".includes(prev) || /^(return|typeof|case|in|of|<for-(?:of|in)>|delete|void|throw|new|else|do)$/.test(prev))) {
         regex();
         prev = "/";
         continue;
