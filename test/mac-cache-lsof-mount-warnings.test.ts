@@ -6,11 +6,11 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "deploy", "mac", "cache-reclaim.py");
+const SCRIPT = join(REPO_ROOT, "deploy", "mac", "cache-reclaim.py");
 
 function unexplained(stderr: string, path: string): boolean {
   const r = spawnSync("python3", ["-c",
