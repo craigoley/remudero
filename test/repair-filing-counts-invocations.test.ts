@@ -3,8 +3,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   dispatchFixSpent,
@@ -17,7 +17,7 @@ import {
   type RepairFilingCapture,
   type SweepDeps,
   type SweepPolicy,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 /**
  * W1-T2231 — `acted: true` proves only that the `blocked-fixable`/`conflicted` lane was

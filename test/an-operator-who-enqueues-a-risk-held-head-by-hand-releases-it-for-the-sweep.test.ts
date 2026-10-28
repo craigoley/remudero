@@ -3,11 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { Config } from "../src/lib/config.js";
-import { readArmTimeline, type ArmReprobeFacts, type ArmTimeline, type ArmTimelineEvent } from "../src/lib/arm-auto-merge.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import { readArmTimeline, type ArmReprobeFacts, type ArmTimeline, type ArmTimelineEvent } from "#src/lib/arm-auto-merge.js";
 import {
   buildSweepEffects,
   isFleetAppAuthor,
@@ -15,8 +15,8 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#test/helpers/sweep-test.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // W1-T5911 — LIVE 2026-10-05, #9391 (head d931064b): the W1-T5403 risk judge escalated the head
 // (#9395), the operator read the diff and enqueued it by hand (AddedToMergeQueueEvent by cao825 at

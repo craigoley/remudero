@@ -19,9 +19,9 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { callerReachableSuites, type CallerReachableSuitesReport } from "../src/lib/ci-parity.js";
-import { callerSweepCommand } from "../src/run-task.js";
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import { callerReachableSuites, type CallerReachableSuitesReport } from "#src/lib/ci-parity.js";
+import { callerSweepCommand } from "#src/run-task.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
 
 /** A `spawn` that must NEVER be called — proves a code path takes no shortcuts through it. */
 const spawnThatMustNotRun: PreflightSpawn = ((...args: unknown[]) => {
@@ -107,7 +107,7 @@ test("W1-T3215 a suite naming only the CALLER of a changed symbol is still reach
 //              stays far below the whole-file fallback's 76 ─────────────────────────────────────
 
 test("W1-T3215 a prewarmBoardGithub change lists serve-prewarm-clientgate, the suite the one-hop sweep missed", async () => {
-  const { defaultPreflightSpawn } = await import("../src/lib/commit-message.js");
+  const { defaultPreflightSpawn } = await import("#src/lib/commit-message.js");
   const repoRoot = process.cwd();
   const report = callerReachableSuites(["prewarmBoardGithub"], repoRoot, defaultPreflightSpawn);
   const [entry] = report.entries;

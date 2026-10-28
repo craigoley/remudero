@@ -10,16 +10,16 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
-import { readClassificationSnapshot, triageFleetLane } from "../src/lib/fleet-lane.js";
-import { INBOX_CLASSIFICATION_RESTAMP_MS, refreshInboxClassification } from "../src/lib/inbox-view.js";
-import { buildInboxRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { runSlowLaneWorker, threadSlowLane, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
-import { runReadModelWorker } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { ghShim, type GhShim } from "./helpers/gh-shim.js";
-import { allowGhRefusals } from "./setup/tmp-hygiene.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import { readClassificationSnapshot, triageFleetLane } from "#src/lib/fleet-lane.js";
+import { INBOX_CLASSIFICATION_RESTAMP_MS, refreshInboxClassification } from "#src/lib/inbox-view.js";
+import { buildInboxRoute, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { runSlowLaneWorker, threadSlowLane, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
+import { runReadModelWorker } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
+import { allowGhRefusals } from "#test/setup/tmp-hygiene.js";
 
 allowGhRefusals("the real slow lane thread re-runs test setup, which puts the refusal stub ahead of this file's shim on that thread's PATH; an empty plan classifies the same with its board read refused");
 

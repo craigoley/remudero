@@ -3,16 +3,16 @@ import fs, { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSy
 import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { boardOpenSnapshotPath } from "../src/lib/board-snapshot-cache.js";
-import { feedbackDir, listFeedback } from "../src/lib/feedback.js";
-import { queuedFeedbackDir } from "../src/lib/feedback-landing.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { createNowView, NOW_REFRESH_MS, nowDependencyVerificationGates, type NowViewContext, type NowViewOptions } from "../src/lib/now-view.js";
-import type { BoardPrRest } from "../src/lib/open-prs-rest.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { acquireLease } from "../src/lib/read-model-db.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { boardOpenSnapshotPath } from "#src/lib/board-snapshot-cache.js";
+import { feedbackDir, listFeedback } from "#src/lib/feedback.js";
+import { queuedFeedbackDir } from "#src/lib/feedback-landing.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { createNowView, NOW_REFRESH_MS, nowDependencyVerificationGates, type NowViewContext, type NowViewOptions } from "#src/lib/now-view.js";
+import type { BoardPrRest } from "#src/lib/open-prs-rest.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { acquireLease } from "#src/lib/read-model-db.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const PROPOSAL = "https://github.com/o/r/pull/9";
 

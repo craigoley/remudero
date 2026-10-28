@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { buildAnalyticsTimeSeries } from "../src/lib/analytics-timeseries.js";
-import { isProducedSpendRow, SPEND_STEP_ROLES, spendAmountUsd } from "../src/lib/spend-rows.js";
-import { terminalVerdictFields } from "../src/run-task.js";
+import { deriveAnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { buildAnalyticsTimeSeries } from "#src/lib/analytics-timeseries.js";
+import { isProducedSpendRow, SPEND_STEP_ROLES, spendAmountUsd } from "#src/lib/spend-rows.js";
+import { terminalVerdictFields } from "#src/run-task.js";
 
 /**
  * W1-T4066 — a cost is counted once, at the row of the step that PRODUCED it. The old rule ("a row with a string

@@ -24,9 +24,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { breakerGateFor } from "../src/run-task.js";
-import { corroboratesForwardProgress, type PrRef } from "../src/lib/status.js";
-import { EXCHANGE_TIMEOUT_MS } from "../src/lib/github-app.js";
+import { breakerGateFor } from "#src/run-task.js";
+import { corroboratesForwardProgress, type PrRef } from "#src/lib/status.js";
+import { EXCHANGE_TIMEOUT_MS } from "#src/lib/github-app.js";
 
 const CLEAR = "W1-CLEAR";
 const TRIPPED = "W1-TRIPPED";

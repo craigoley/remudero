@@ -8,10 +8,10 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hashInstallInputs, installHashMarkerPath } from "../src/lib/install-hash.js";
-import { runServeSupervisor, serveArgsOf } from "../src/lib/serve-supervisor-main.js";
-import { SERVE_HANDOFF_SPACING_BASE_MS, type ServeSupervisor, type ServeSupervisorOptions } from "../src/lib/serve-supervisor.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { hashInstallInputs, installHashMarkerPath } from "#src/lib/install-hash.js";
+import { runServeSupervisor, serveArgsOf } from "#src/lib/serve-supervisor-main.js";
+import { SERVE_HANDOFF_SPACING_BASE_MS, type ServeSupervisor, type ServeSupervisorOptions } from "#src/lib/serve-supervisor.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "serve-container.sh");

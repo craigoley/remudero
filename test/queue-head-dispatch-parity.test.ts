@@ -3,10 +3,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { IDLE_REASON_ID_CAP, nextRunnable, runnableCandidates, tallyDispatchFilters, type MergedSet } from "../src/lib/drain.js";
-import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
-import type { GitHub } from "../src/lib/status.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { IDLE_REASON_ID_CAP, nextRunnable, runnableCandidates, tallyDispatchFilters, type MergedSet } from "#src/lib/drain.js";
+import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "#src/lib/status-board.js";
+import type { GitHub } from "#src/lib/status.js";
 
 // W1-T1205 — `rmd status`'s QUEUE HEAD promised "next dispatchables" but derived them from a
 // WEAKER predicate set than the dispatcher's own (`runnableCandidates`, drain.ts): it bound only

@@ -23,8 +23,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { loadProposalRegistry } from "../src/lib/inbox.js";
-import type { KnowledgeItem } from "../src/lib/knowledge-inventory.js";
+import { loadProposalRegistry } from "#src/lib/inbox.js";
+import type { KnowledgeItem } from "#src/lib/knowledge-inventory.js";
 import {
   citationStatus,
   CITATION_TOKEN_RE,
@@ -33,9 +33,9 @@ import {
   staleCitationProposalId,
   stageStaleCitationProposal,
   type Citation,
-} from "../src/lib/knowledge-gardener.js";
-import type { InjectableSkill } from "../src/lib/skill-workshop.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/knowledge-gardener.js";
+import type { InjectableSkill } from "#src/lib/skill-workshop.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 function tmpRoot(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));

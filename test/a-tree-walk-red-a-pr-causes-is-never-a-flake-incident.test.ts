@@ -8,10 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { censusWalksOf, discoverCensusCandidates } from "../src/lib/ci-parity.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { runFlakeIncidentGardener } from "../src/lib/flake-incident-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { censusWalksOf, discoverCensusCandidates } from "#src/lib/ci-parity.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { runFlakeIncidentGardener } from "#src/lib/flake-incident-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = Date.parse("2026-10-10T18:00:00Z");
 /** A census the registry models: catch-erasure-census, walks src/. */

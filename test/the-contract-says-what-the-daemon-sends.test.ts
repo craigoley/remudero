@@ -10,20 +10,20 @@
 // and status. The validator is STRICT on one axis JSON Schema is not: a key the body carries that
 // the schema never declares is a violation, because "the contract says what the daemon sends" is
 // exactly the claim an undeclared key falsifies. Its own positive/negative control runs first.
-import type { PrQueueRow } from "../src/lib/board.js";
-import type { BlockedPrBlocker, MergeHeldRow } from "../src/lib/status-board.js";
-import type { ConsoleModelApproval } from "../src/lib/serve.js";
+import type { PrQueueRow } from "#src/lib/board.js";
+import type { BlockedPrBlocker, MergeHeldRow } from "#src/lib/status-board.js";
+import type { ConsoleModelApproval } from "#src/lib/serve.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { captureFeedback, setFeedbackStatus } from "../src/lib/feedback.js";
-import { prActionSwitchOffPath } from "../src/lib/fleet-control.js";
-import { buildServeRoutes, buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { declaredBody, operation, resolve, SPEC, violations, type Schema } from "./helpers/openapi-strict.js";
+import { captureFeedback, setFeedbackStatus } from "#src/lib/feedback.js";
+import { prActionSwitchOffPath } from "#src/lib/fleet-control.js";
+import { buildServeRoutes, buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { declaredBody, operation, resolve, SPEC, violations, type Schema } from "#test/helpers/openapi-strict.js";
 
 const READ_TOKEN = "contract-read-token";
 const WRITE_TOKEN = "contract-write-token";

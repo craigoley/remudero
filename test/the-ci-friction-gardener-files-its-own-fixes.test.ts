@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { newTestPath } from "../src/lib/plan.js";
+import { newTestPath } from "#src/lib/plan.js";
 import { setTimeout as wait } from "node:timers/promises";
 
 import {
@@ -19,13 +19,13 @@ import {
   readGardenState,
   runGarden,
   type GardenCheckout,
-} from "../src/lib/gardener.js";
-import type { Escalation } from "../src/lib/escalate.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { daemonCommand } from "../src/run-task.js";
-import { rule15SplitViolation } from "../src/lib/ci-parity.js";
-import { criterionFieldTampered, planOnlyDiff } from "../src/lib/review.js";
+} from "#src/lib/gardener.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { daemonCommand } from "#src/run-task.js";
+import { rule15SplitViolation } from "#src/lib/ci-parity.js";
+import { criterionFieldTampered, planOnlyDiff } from "#src/lib/review.js";
 import {
   appendCiFrictionTrendRow,
   CI_FRICTION_GARDEN_CLASSES,
@@ -50,8 +50,8 @@ import {
   readGateFireRateReport,
   runPrIndex,
   type CiFrictionGardenSources,
-} from "../src/lib/ci-friction-gardener.js";
-import type { CiFrictionRemedyTask, OwnerSearch } from "../src/lib/ci-friction-remedy.js";
+} from "#src/lib/ci-friction-gardener.js";
+import type { CiFrictionRemedyTask, OwnerSearch } from "#src/lib/ci-friction-remedy.js";
 
 /** Every cause is owned by one source file, so a draft always has a surface to name. */
 const ANY_OWNER: OwnerSearch = { filesContaining: () => [{ file: "src/lib/owner.ts", hits: 1 }], fileExists: () => true };
@@ -59,11 +59,11 @@ const ANY_OWNER: OwnerSearch = { filesContaining: () => [{ file: "src/lib/owner.
 function queued(origins: readonly string[]): { tasks: CiFrictionRemedyTask[] } {
   return { tasks: origins.map((origin, i) => ({ id: `W1-T80${i}`, origin, status: "queued", retired: false, files: ["src/lib/owner.ts"] })) };
 }
-import type { GardenerDeps } from "../src/lib/gardener.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { gateFireRatesPath, type GateFireRateReport } from "../src/lib/gate-fire-rate.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import type { GardenerDeps } from "#src/lib/gardener.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { gateFireRatesPath, type GateFireRateReport } from "#src/lib/gate-fire-rate.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 test("the ci-friction plan census reads fetched main, times a build by its trailer, and degrades on a dead remote", () => {
   const author = gitRepo({ kind: "ci-friction-author" });

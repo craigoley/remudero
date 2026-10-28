@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isRotationLockHolderStale, LEDGER_ROTATION_SMOOTHING_WINDOW_MS } from "../src/lib/ledger.js";
-import { createLedgerRotationMemo } from "../src/lib/ledger-union.js";
-import { isHolderStale } from "../src/lib/fs-race-safe.js";
-import { readLedgerUnionBounded, readLedgerUnionMemoized } from "../src/lib/status.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { isRotationLockHolderStale, LEDGER_ROTATION_SMOOTHING_WINDOW_MS } from "#src/lib/ledger.js";
+import { createLedgerRotationMemo } from "#src/lib/ledger-union.js";
+import { isHolderStale } from "#src/lib/fs-race-safe.js";
+import { readLedgerUnionBounded, readLedgerUnionMemoized } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 // W1-T4820. MEASURED 2026-09-29 on the fleet corpus: the board's union read returned 1,042,796 rows, of
 // which 676,741 were distinct. Re-measured 2026-09-30 on a copy of the fleet host's seven-day window

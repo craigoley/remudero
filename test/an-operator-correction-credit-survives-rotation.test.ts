@@ -20,10 +20,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { rotateLedger } from "../src/lib/ledger.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { defaultCreditStorePath, loadCreditStore, projectPlan, type CreditStore } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { rotateLedger } from "#src/lib/ledger.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { defaultCreditStorePath, loadCreditStore, projectPlan, type CreditStore } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const CORRECTED_PR = "https://github.com/craigoley/remudero/pull/6492";
 

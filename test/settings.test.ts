@@ -10,9 +10,9 @@ import {
   SANDBOX_KEYS,
   validateWorkerSettings,
   WorkerSettingsError,
-} from "../src/lib/settings.js";
-import { workerHomeDir, type Config } from "../src/lib/config.js";
-import { resolveServiceTokens, serviceTokensPath } from "../src/lib/serve.js";
+} from "#src/lib/settings.js";
+import { workerHomeDir, type Config } from "#src/lib/config.js";
+import { resolveServiceTokens, serviceTokensPath } from "#src/lib/serve.js";
 
 const GOOD = {
   permissions: { deny: ["Read(~/.ssh/**)"], allow: [], ask: [] },

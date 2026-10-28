@@ -11,17 +11,17 @@ import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ghExec, ghExecFile, ghJson } from "../src/lib/github-transport.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { ghRefusalCount } from "./setup/tmp-hygiene.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { ledgerPathFor } from "../src/lib/ledger-path.js";
-import { buildWorkerEnv } from "../src/lib/env.js";
-import { main } from "../src/run-task.js";
-import { formatReservationAnchorMessage, gitRemoteRefReserver } from "../src/lib/task-id-reservation.js";
-import { gitTriageClaimReserver } from "../src/lib/auto-triage.js";
-import { gitDispatchClaimReserver, gitRepairClaimReserver } from "../src/lib/dispatch-claim.js";
+import { ghExec, ghExecFile, ghJson } from "#src/lib/github-transport.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { ghRefusalCount } from "#test/setup/tmp-hygiene.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { ledgerPathFor } from "#src/lib/ledger-path.js";
+import { buildWorkerEnv } from "#src/lib/env.js";
+import { main } from "#src/run-task.js";
+import { formatReservationAnchorMessage, gitRemoteRefReserver } from "#src/lib/task-id-reservation.js";
+import { gitTriageClaimReserver } from "#src/lib/auto-triage.js";
+import { gitDispatchClaimReserver, gitRepairClaimReserver } from "#src/lib/dispatch-claim.js";
 import {
   assertClaimRefPushAllowed,
   assertLedgerPathNotLive,
@@ -36,7 +36,7 @@ import {
   liveWritesExempt,
   withLiveWritesAllowed,
   type LiveWriteBoundary,
-} from "../src/lib/live-write-guard.js";
+} from "#src/lib/live-write-guard.js";
 
 test("the cli test harness never resolves the live ledger path", async (t) => {
   const home = mkdtempSync(join(tmpdir(), "rmd-ledger-guard-home-"));

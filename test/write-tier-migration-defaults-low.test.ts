@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService, type Route, type WriteTier } from "../src/lib/service.js";
+import { createService, type Route, type WriteTier } from "#src/lib/service.js";
 
 // ── W1-T404 acceptance 7: "an existing write credential resolves to the LOW tier, so the change
 // cannot ship as a silent grant of everything" ──

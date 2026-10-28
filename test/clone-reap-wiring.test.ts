@@ -8,9 +8,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { CloneReapSummary } from "../src/lib/clone-reaper.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import { logCloneReapSurvey } from "../src/run-task.js";
+import type { CloneReapSummary } from "#src/lib/clone-reaper.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import { logCloneReapSurvey } from "#src/run-task.js";
 
 const CONFIG = { root: "/nonexistent-repo-root-for-wiring-test" } as never;
 

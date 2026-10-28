@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import type { Escalation } from "../src/lib/escalate.js";
-import { evaluateIo, runHostResourcePass, sampleFromPayload, type HeartbeatRead, type HostResourcePorts, type IncidentHandoff } from "../src/lib/host-resource-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { evaluateIo, runHostResourcePass, sampleFromPayload, type HeartbeatRead, type HostResourcePorts, type IncidentHandoff } from "#src/lib/host-resource-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const MIN = 60_000;
 const START = Date.parse("2026-10-09T12:00:00.000Z");

@@ -22,7 +22,7 @@ import {
   GITHUB_POSTURE_SQUASH_MERGE_COMMIT_MESSAGE_EXPECTED,
   type GithubPostureBaseline,
   type GithubPostureGateway,
-} from "../src/lib/github-posture.js";
+} from "#src/lib/github-posture.js";
 
 function repoPayload(squashMergeCommitMessage: string | undefined): unknown {
   const base: Record<string, unknown> = {

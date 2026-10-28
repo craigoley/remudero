@@ -13,7 +13,7 @@ import {
   deriveAnalyticsSnapshotFromCheckpointedLedger,
   type AnalyticsSnapshotReader,
   type AnalyticsTimer,
-} from "../src/lib/analytics-route.js";
+} from "#src/lib/analytics-route.js";
 
 const noTimers = (): AnalyticsTimer => ({ unref: () => {}, cancel: () => {} });
 

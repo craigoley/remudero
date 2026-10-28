@@ -3,8 +3,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildOpenPrViews } from "../src/run-task.js";
-import { taskIdFromRunBranch } from "../src/lib/status.js";
+import { buildOpenPrViews } from "#src/run-task.js";
+import { taskIdFromRunBranch } from "#src/lib/status.js";
 
 /**
  * W1-T453: `buildOpenPrViews` resolved a PR's task id from the `Remudero-Task:` body

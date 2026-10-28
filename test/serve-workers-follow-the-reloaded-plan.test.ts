@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { threadId, Worker } from "node:worker_threads";
 
-import { createBoardProjectionWorker } from "../src/lib/board-worker.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { packPlanBlobs, reloadServePlan } from "../src/lib/serve-plan-reload.js";
-import { PLAN_PIN_ADOPT_FAILED_STEP, PLAN_PIN_ADOPTED_STEP, publishThreadPlan, threadPlanPin, threadStrictPlan } from "../src/lib/thread-plan.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { createBoardProjectionWorker } from "#src/lib/board-worker.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { packPlanBlobs, reloadServePlan } from "#src/lib/serve-plan-reload.js";
+import { PLAN_PIN_ADOPT_FAILED_STEP, PLAN_PIN_ADOPTED_STEP, publishThreadPlan, threadPlanPin, threadStrictPlan } from "#src/lib/thread-plan.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 type Row = [string, Record<string, unknown>];
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));

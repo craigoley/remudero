@@ -30,11 +30,11 @@ import {
   ghGateway,
   projectPlan,
   type BatchedPr,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Plan } from "../src/lib/plan.js";
+import type { Plan } from "#src/lib/plan.js";
 
 /** One `git log --format=%H%x00%s%x00%b%x1e` record, exactly as the real reader parses it. */
 function commit(sha: string, subject: string, body: string): string {

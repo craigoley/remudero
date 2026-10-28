@@ -161,7 +161,8 @@ test("every browser-launching suite EXCEPT W1-T1027's falsifier routes its tests
 
   for (const f of suites) {
     const src = readFileSync(join(REPO_ROOT, f), "utf8");
-    const wired = src.includes('browserTest as test } from "./browser-absence.js"');
+    // The wrapper may be imported relatively or through the `#test/*` subpath alias (W1-T9864).
+    const wired = /browserTest as test \} from "(?:\.\/|#test\/)browser-absence\.js"/.test(src);
     if (f === THE_FALSIFIER) {
       assert.equal(wired, false, `${f} must NEVER skip on an absent browser — that absence is its finding`);
       continue;

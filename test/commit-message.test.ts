@@ -16,9 +16,9 @@ import {
   splitRangeCommitMessages,
   typecheckStep,
   wrapBodyLines,
-} from "../src/lib/commit-message.js";
-import { commitMessageContractLines, outputContractLines } from "../src/lib/compaction.js";
-import { renderFixPrompt } from "../src/run-task.js";
+} from "#src/lib/commit-message.js";
+import { commitMessageContractLines, outputContractLines } from "#src/lib/compaction.js";
+import { renderFixPrompt } from "#src/run-task.js";
 
 // ── W1-T136/W1-T137 class: machine-built commit messages must pass the REAL gate ──
 //

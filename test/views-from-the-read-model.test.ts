@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fixedClock, systemClock, type Clock } from "../src/lib/clock.js";
+import { fixedClock, systemClock, type Clock } from "#src/lib/clock.js";
 import {
   createReadModelTicker,
   createReadModelWorker,
@@ -13,11 +13,11 @@ import {
   type ReadModelBodyEntry,
   type ReadModelSwitches,
   type ReadModelWorkerHandle,
-} from "../src/lib/read-model-worker.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { createService } from "../src/lib/service.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { buildReadModelViewRoutes, buildViewRoutes, viewEtag, viewKey, type ReadModelViewRoutesOptions, type ViewDefinition, type ViewSource } from "../src/lib/views.js";
+} from "#src/lib/read-model-worker.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { createService } from "#src/lib/service.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { buildReadModelViewRoutes, buildViewRoutes, viewEtag, viewKey, type ReadModelViewRoutesOptions, type ViewDefinition, type ViewSource } from "#src/lib/views.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";

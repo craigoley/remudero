@@ -4,9 +4,9 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { CI_FRICTION_LEDGER_STEPS, ciFrictionRoundsFromLedger, priceCiFrictionCauses, readCiFrictionLedgerRecords, readCiFrictionPlanTasks } from "../src/lib/ci-friction-gardener.js";
-import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { CI_FRICTION_LEDGER_STEPS, ciFrictionRoundsFromLedger, priceCiFrictionCauses, readCiFrictionLedgerRecords, readCiFrictionPlanTasks } from "#src/lib/ci-friction-gardener.js";
+import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const rows = [
   { step: "pr.opened", run_id: "run-a", pr_url: "https://github.com/a/b/pull/1", ts: "2026-09-20T12:00:00Z" },

@@ -22,7 +22,7 @@ import {
   cadenceMarkerRows,
   type CadenceMarkerDef,
   type LivenessState,
-} from "../src/lib/status-board.js";
+} from "#src/lib/status-board.js";
 
 const HOUR = 3_600_000;
 const RETRO: CadenceMarkerDef = { name: "retro", file: "last-retro.json", policyKey: "retro" };

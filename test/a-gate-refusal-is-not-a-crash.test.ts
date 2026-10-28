@@ -9,8 +9,8 @@ import {
   DAEMON_EXIT_STALE,
   daemonExitCode,
   daemonExitCodeForSummary,
-} from "../src/lib/daemon.js";
-import { PushFailedError, defaultPushExec } from "../src/lib/git-push.js";
+} from "#src/lib/daemon.js";
+import { PushFailedError, defaultPushExec } from "#src/lib/git-push.js";
 
 // ── W1-T3310 — A GATE REFUSAL IS NOT A CRASH ──────────────────────────────────────────────────
 //

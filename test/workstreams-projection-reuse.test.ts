@@ -4,10 +4,10 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { canonicalProjection } from "../src/lib/board-projection.js";
-import type { Clock } from "../src/lib/clock.js";
-import type { Task } from "../src/lib/plan.js";
-import { createReadModelTicker, ledgerSource, type ReadModelInstanceState } from "../src/lib/read-model-worker.js";
+import { canonicalProjection } from "#src/lib/board-projection.js";
+import type { Clock } from "#src/lib/clock.js";
+import type { Task } from "#src/lib/plan.js";
+import { createReadModelTicker, ledgerSource, type ReadModelInstanceState } from "#src/lib/read-model-worker.js";
 import {
   buildBatchedGithub,
   DEFAULT_LIVENESS_BOUND_MS,
@@ -18,12 +18,12 @@ import {
   type BatchedPr,
   type GitHub,
   type StatusProjection,
-} from "../src/lib/status.js";
-import { threadPlan } from "../src/lib/thread-plan.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { createWorkstreamsProjectionReuse, fileIdentity, WORKSTREAMS_REUSE_AUDIT_MS } from "../src/lib/workstreams-projection-reuse.js";
-import { createWorkstreamsView, WORKSTREAMS_DEBOUNCE_MS, WORKSTREAMS_VIEW_NAME } from "../src/lib/workstreams-view.js";
-import { switchViewsOn } from "./helpers/read-model-switches.js";
+} from "#src/lib/status.js";
+import { threadPlan } from "#src/lib/thread-plan.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { createWorkstreamsProjectionReuse, fileIdentity, WORKSTREAMS_REUSE_AUDIT_MS } from "#src/lib/workstreams-projection-reuse.js";
+import { createWorkstreamsView, WORKSTREAMS_DEBOUNCE_MS, WORKSTREAMS_VIEW_NAME } from "#src/lib/workstreams-view.js";
+import { switchViewsOn } from "#test/helpers/read-model-switches.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 const NOW = Date.parse("2026-10-07T12:00:00.000Z");

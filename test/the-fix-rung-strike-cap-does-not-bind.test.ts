@@ -3,9 +3,9 @@ import { test } from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { appendLedger } from "../src/lib/ledger.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { appendLedger } from "#src/lib/ledger.js";
 
 // ── W1-T2520 — THE FIX-RUNG STRIKE CAP DOES NOT BIND ─────────────────────────────────────────
 //

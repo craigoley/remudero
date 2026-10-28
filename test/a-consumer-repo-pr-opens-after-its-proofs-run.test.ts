@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { defaultProofRunner, openPullRequestChecked, type OpenPullRequestProofRunner } from "../src/lib/pr-open.js";
+import { defaultProofRunner, openPullRequestChecked, type OpenPullRequestProofRunner } from "#src/lib/pr-open.js";
 
 const CONSOLE = { owner: "craigoley", repo: "remudero-console" } as const;
 const IDENTITY = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.invalid" };

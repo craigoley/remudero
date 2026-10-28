@@ -12,7 +12,7 @@ import type { ServerResponse } from "node:http";
 import { rmSync } from "node:fs";
 import { test } from "node:test";
 
-import { adaptLiveAnalyticsMetrics } from "../src/lib/analytics-live-metrics.js";
+import { adaptLiveAnalyticsMetrics } from "#src/lib/analytics-live-metrics.js";
 import {
   buildAnalyticsRoute,
   createAnalyticsSnapshotCache,
@@ -20,16 +20,16 @@ import {
   deriveAnalyticsSnapshotFromCheckpointedLedger,
   writeAnalyticsCheckpoint,
   type AnalyticsCheckpoint,
-} from "../src/lib/analytics-route.js";
-import { fixedClock } from "../src/lib/clock.js";
+} from "#src/lib/analytics-route.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   accumulateUsageLine,
   buildUsageProjection,
   usageTelemetryState,
   windowKind,
   withLiveProviderWindows,
-} from "../src/lib/usage-telemetry.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#src/lib/usage-telemetry.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const NOW = "2026-09-24T12:00:00.000Z";
 

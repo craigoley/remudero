@@ -27,8 +27,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { boardColdStartGate, serveCommand } from "../src/run-task.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { boardColdStartGate, serveCommand } from "#src/run-task.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 // This file's `buildBatchedGithub` fake answers every call in-memory and never shells `gh` —
 // real callers get the real `buildBatchedGithub`, which is a real, possibly-slow (and, off this

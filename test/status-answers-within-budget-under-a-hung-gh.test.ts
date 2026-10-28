@@ -10,10 +10,10 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
 
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import { buildServeServer, CONSOLE_READ_ROUTE_BUDGET_MS, type ServeDeps } from "../src/lib/serve.js";
-import { buildBatchedGithub, type GitHub } from "../src/lib/status.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import { buildServeServer, CONSOLE_READ_ROUTE_BUDGET_MS, type ServeDeps } from "#src/lib/serve.js";
+import { buildBatchedGithub, type GitHub } from "#src/lib/status.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const GH_HANG_S = 4;
 

@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Clock } from "../src/lib/clock.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import type { Escalation } from "../src/lib/escalate.js";
-import { gardenEffectsPath, gardenStatePath, readGardenEffects, runGarden, type GardenSpec } from "../src/lib/gardener.js";
-import { runSelectorShadowGardener } from "../src/lib/selector-shadow-gardener.js";
+import type { Clock } from "#src/lib/clock.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { gardenEffectsPath, gardenStatePath, readGardenEffects, runGarden, type GardenSpec } from "#src/lib/gardener.js";
+import { runSelectorShadowGardener } from "#src/lib/selector-shadow-gardener.js";
 import {
   GARDENER_OVERSEER_OFF,
   ciFrictionEffectReading,
@@ -20,7 +20,7 @@ import {
   startGardenerOverseer,
   type GardenerOverseerPorts,
   type GardenerPrInfo,
-} from "../src/lib/gardener-overseer.js";
+} from "#src/lib/gardener-overseer.js";
 
 const HOUR = 3_600_000;
 const T0 = Date.parse("2026-09-20T00:00:00Z");

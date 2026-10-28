@@ -10,15 +10,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { fixedClock } from "../src/lib/clock.js";
-import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, feedbackLegacyView, feedbackViewBodies, materializeFeedbackView } from "../src/lib/feedback-view.js";
-import { INBOX_VIEW_NAME, INBOX_VIEW_SECTIONS, INBOX_VIEW_VERSION, inboxLegacyView, inboxViewBodies, refreshInboxClassification } from "../src/lib/inbox-view.js";
-import { buildInboxRoute, inboxLanes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createReadModelTicker, createReadModelWorker, loadCommittedViewBodies, readModelSwitchesPath, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { buildReadModelViewRoutes, renderView, viewKey, type ViewSource } from "../src/lib/views.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { allowGhRefusals } from "./setup/tmp-hygiene.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, feedbackLegacyView, feedbackViewBodies, materializeFeedbackView } from "#src/lib/feedback-view.js";
+import { INBOX_VIEW_NAME, INBOX_VIEW_SECTIONS, INBOX_VIEW_VERSION, inboxLegacyView, inboxViewBodies, refreshInboxClassification } from "#src/lib/inbox-view.js";
+import { buildInboxRoute, inboxLanes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createReadModelTicker, createReadModelWorker, loadCommittedViewBodies, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { buildReadModelViewRoutes, renderView, viewKey, type ViewSource } from "#src/lib/views.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { allowGhRefusals } from "#test/setup/tmp-hygiene.js";
 
 allowGhRefusals("the real slow lane thread re-runs test setup, which puts the refusal stub ahead on that thread's PATH; an empty plan classifies the same with its board read refused");
 

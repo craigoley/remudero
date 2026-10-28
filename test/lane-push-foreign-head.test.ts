@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { LanePushForeignHeadError, gitPushEmptyCommit } from "../src/lib/git-push.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { LanePushForeignHeadError, gitPushEmptyCommit } from "#src/lib/git-push.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 
 /**
  * W1-T1288 — A LANE PUSH CARRIES A LEASE NAMING THE HEAD IT BELIEVED IT WAS BUILDING ON.

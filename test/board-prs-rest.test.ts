@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { boardPrsRestArgs, fetchBoardPrsRest, mapBoardPr } from "../src/lib/open-prs-rest.js";
-import { buildBatchedGithub, type BatchedPr, type GitHub } from "../src/lib/status.js";
+import { boardPrsRestArgs, fetchBoardPrsRest, mapBoardPr } from "#src/lib/open-prs-rest.js";
+import { buildBatchedGithub, type BatchedPr, type GitHub } from "#src/lib/status.js";
 
 /**
  * The board gateway's PR enumeration moved off `gh pr list --state all --limit 1000 --json …`

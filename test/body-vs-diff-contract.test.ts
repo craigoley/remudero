@@ -21,8 +21,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { bodyVsDiffContractLines, outputContractLines, WORKER_PR_AUTHORITY_LINES } from "../src/lib/compaction.js";
-import { bodyContradictsDiff, changesetClaimsDisagreeing, claimsChangesetContext, noClaimIsAboutChangeset } from "../src/lib/review.js";
+import { bodyVsDiffContractLines, outputContractLines, WORKER_PR_AUTHORITY_LINES } from "#src/lib/compaction.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing, claimsChangesetContext, noClaimIsAboutChangeset } from "#src/lib/review.js";
 
 /** A typical implement changeset: two source files and a test. */
 const DIFF = ["src/lib/compaction.ts", "src/run-task.ts", "test/body-vs-diff-contract.test.ts"];
@@ -129,7 +129,7 @@ test("the contract reaches the implement worker's prompt, and is one shared lite
   assert.ok(implement.includes(WORKER_PR_AUTHORITY_LINES.join("\n")), "the implement worker is told where its PR authority ends");
 
   // And the fix rung — the prompt most prone to a stale body, because it amends an existing PR.
-  const { renderFixPrompt } = await import("../src/run-task.js");
+  const { renderFixPrompt } = await import("#src/run-task.js");
   const fix = renderFixPrompt({
     task: { id: "W1-T1", title: "t", acceptance: [] } as never,
     branch: "run-W1-T1-1",

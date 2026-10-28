@@ -4,13 +4,13 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { FLAKE_INCIDENT_POLICY } from "../src/lib/flake-incident-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { FLAKE_INCIDENT_POLICY } from "#src/lib/flake-incident-gardener.js";
 import {
   DURATION_WINDOW_RUNS, loadTestManifestProbe, manifestLastCommitMs,
   testGardenInventory, testManifestProposalHistoryPath,
-} from "../src/lib/test-gardener.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+} from "#src/lib/test-gardener.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 const NOW = Date.UTC(2026, 9, 13, 12);
 const DAY = 24 * 3_600_000;

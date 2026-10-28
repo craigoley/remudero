@@ -17,13 +17,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
 
-import * as feedback from "../src/lib/feedback.js";
-import * as landing from "../src/lib/feedback-landing.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import * as panelGraph from "../src/lib/panel-graph.js";
-import { createService } from "../src/lib/service.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as feedback from "#src/lib/feedback.js";
+import * as landing from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import * as panelGraph from "#src/lib/panel-graph.js";
+import { createService } from "#src/lib/service.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const QUEUE_DIR = join("state", "feedback-landing-pending", "plan", "feedback");
 

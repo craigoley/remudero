@@ -7,17 +7,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
 import {
   FLAKE_INCIDENT_MAIN_INHERITED_STEP as GARDENER_STEP, flakeIncidentOrigin, runFlakeIncidentGardener, type FlakeIncidentSources,
-} from "../src/lib/flake-incident-gardener.js";
-import { selectorShadowGardenPass } from "../src/lib/garden-registry.js";
+} from "#src/lib/flake-incident-gardener.js";
+import { selectorShadowGardenPass } from "#src/lib/garden-registry.js";
 import {
   buildMainHealthRung, MAIN_INHERITED_HINT_SOURCE_STEP, mainInheritedHintReader, type MainHealthRungDeps,
-} from "../src/lib/main-health-rung.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/main-health-rung.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const TEST_FILE = "test/the-core-fleet-fills-the-child-entry-store.test.ts";
 const TITLE = "the store-fill fixture carries every child entry";

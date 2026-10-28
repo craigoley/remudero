@@ -7,14 +7,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { caseFileCommand, parseCasePrSnapshot } from "../src/lib/report-commands.js";
-import { surveyPullRequestBoard } from "../src/lib/pr-board.js";
-import { daemonSreRunbookHost } from "../src/lib/sre-runbooks.js";
-import { classifyRollupSupersession, type RollupCheckEntry } from "../src/lib/sweep.js";
-import type { Task } from "../src/lib/plan.js";
-import type { StatusProjection } from "../src/lib/status.js";
-import { boardCommand } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { caseFileCommand, parseCasePrSnapshot } from "#src/lib/report-commands.js";
+import { surveyPullRequestBoard } from "#src/lib/pr-board.js";
+import { daemonSreRunbookHost } from "#src/lib/sre-runbooks.js";
+import { classifyRollupSupersession, type RollupCheckEntry } from "#src/lib/sweep.js";
+import type { Task } from "#src/lib/plan.js";
+import type { StatusProjection } from "#src/lib/status.js";
+import { boardCommand } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const OLD = "2026-09-30T10:00:00Z";
 const NEW = "2026-09-30T11:00:00Z";

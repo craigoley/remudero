@@ -12,8 +12,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { GATE_GARDEN_CLASSES, gateGardenSpec, loadGateProbes } from "../src/lib/gate-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { GATE_GARDEN_CLASSES, gateGardenSpec, loadGateProbes } from "#src/lib/gate-gardener.js";
 import {
   GARDEN_PENDING_RELEASE_MS,
   gardenStatePath,
@@ -22,8 +22,8 @@ import {
   readGardenState,
   runGarden,
   type PrState,
-} from "../src/lib/gardener.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const probes = loadGateProbes(ROOT);
