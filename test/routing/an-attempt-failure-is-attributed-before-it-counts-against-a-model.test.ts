@@ -130,6 +130,30 @@ test("W1-T10875: a provider-invoked contract or truncation failure is the model"
   assert.deepEqual(evidence.outcomeAttribution, { success: 1, model: 1, "pre-request-refusal": 0, infrastructure: 0, unknown: 0 });
 });
 
+test("W1-T10875: projectFlowRow keeps only bounded observed cells of terminal_evidence", () => {
+  const projected = projectFlowRow(attempt("cells", { success: false, terminal_evidence: {
+    state: "observed",
+    invocation: { state: "observed", value: "not-started", reason: "free text that must not ride along" },
+    allowanceRefused: { state: "observed", value: true },
+    reservedUsd: { state: "observed", value: 0.25 },
+    settledUsd: { state: "unavailable", value: Number.POSITIVE_INFINITY },
+    ignored: { state: "observed", value: "not a named key" },
+  } }), "fp-cells");
+  assert.deepEqual(projected.outcomeSignals, { terminal_evidence: {
+    invocation: { state: "observed", value: "not-started" },
+    allowanceRefused: { state: "observed", value: true },
+    reservedUsd: { state: "observed", value: 0.25 },
+    settledUsd: { state: "unavailable" },
+  } });
+  // A cell without a string state, or that is not an object, is dropped whole; an object value is dropped from its cell.
+  const dropped = projectFlowRow(attempt("dropped", { success: false, terminal_evidence: {
+    invocation: { value: "not-started" }, allowanceRefused: "yes", reservedUsd: { state: "observed", value: { nested: 1 } },
+  } }), "fp-dropped");
+  assert.deepEqual(dropped.outcomeSignals, { terminal_evidence: { reservedUsd: { state: "observed" } } });
+  // The projected cells still decide: an observed not-started invocation is a pre-request refusal.
+  assert.deepEqual(attributeAttemptOutcome({ success: false, ...projected.outcomeSignals }), { outcome: "pre-request-refusal", signal: "invocation-not-started" });
+});
+
 test("W1-T10875: an attempt the signals cannot place is unknown and counted in neither", () => {
   const thrown = { step: "worker.attempt", ...attemptAssignmentJoin("asg", true), success: false,
     worker_failure: "spawn-threw-before-result", pre_selection: false, error_class: "TypeError" };
