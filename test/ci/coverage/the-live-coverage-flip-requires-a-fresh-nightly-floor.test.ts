@@ -21,7 +21,7 @@ import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
 import {
-  agreeOnFloor, buildProvenance, MAX_AGE_HOURS, nodeMajor, policyDigest, PRODUCERS, selectFloor, sha256, verifyPin,
+  agreeOnFloor, buildProvenance, main, MAX_AGE_HOURS, nodeMajor, policyDigest, PRODUCERS, selectFloor, sha256, verifyPin,
   // @ts-expect-error -- plain .mjs script, no type declarations
 } from "#scripts/coverage-floor.mjs";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -407,4 +407,122 @@ test("W1-T5892: both producers write provenance beside the lcov they upload", ()
   assert.equal(np.producer, "coverage-nightly");
   assert.equal(np.run_id, 111);
   assert.equal(np.shard_test_exits[7], 1, "the nightly records a red shard, so its floor can never be pinned");
+});
+
+// ── the helper's own entry points, in process ───────────────────────────────────────────────
+
+/** A `run` that answers `gh` from `answer` (argv joined) and, for a download, writes `files` into its `-D` dir. */
+function fakeRun(answer: (args: string) => { status: number; stdout?: string; stderr?: string; files?: Record<string, string> }) {
+  return ((_cmd: string, args: readonly string[]) => {
+    const a = answer(args.join(" "));
+    const d = args.indexOf("-D");
+    if (d !== -1 && a.files) for (const [name, content] of Object.entries(a.files)) {
+      mkdirSync(args[d + 1]!, { recursive: true });
+      writeFileSync(join(args[d + 1]!, name), content);
+    }
+    return { status: a.status, stdout: a.stdout ?? "", stderr: a.stderr ?? "" };
+  }) as unknown as typeof spawnSync;
+}
+
+test("W1-T5892: an unreadable or non-array run listing is refused by name, never narrowed on", () => {
+  for (const [listing, why] of [[{ status: 1, stderr: "HTTP 502" }, /cannot list runs: HTTP 502/], [{ status: 0, stdout: "not json" }, /not a JSON array/],
+    [{ status: 0, stdout: "{}" }, /not a JSON array/]] as const) {
+    const pin = selectFloor({ pinDir: join(tmp("list"), "pin"), consumer: CONSUMER, now: NOW, run: fakeRun(() => listing), log: () => {} });
+    assert.equal(pin.decision, "full");
+    assert.equal(pin.refused.length, 2, "both producers are named");
+    for (const r of pin.refused) assert.match(r.reason, why);
+  }
+});
+
+test("W1-T5892: agreeOnFloor downloads the one pinned floor and refuses a split, altered, missing or unreadable pin", () => {
+  const shards = (pins: Record<number, string | null>) => {
+    const dir = tmp("shards");
+    for (let n = 1; n <= 8; n++) {
+      mkdirSync(join(dir, `coverage-shard-${n}`), { recursive: true });
+      writeFileSync(join(dir, `coverage-shard-${n}`, "selection"), n in pins ? "narrow\n" : "all\n");
+      const pin = pins[n];
+      if (typeof pin === "string") writeFileSync(join(dir, `coverage-shard-${n}`, "floor-pin.json"), pin);
+    }
+    return dir;
+  };
+  const serve = (lcov: string) => fakeRun((a) => (a.startsWith("run download 111 -n coverage-nightly") ? { status: 0, files: { "lcov.info": lcov } } : { status: 1 }));
+
+  const outDir = tmp("agree");
+  assert.equal(agreeOnFloor({ shardsDir: shards({ 2: pinFor(LCOV), 7: pinFor(LCOV) }), outDir, run: serve(LCOV) }), join(outDir, "lcov.info"));
+  assert.equal(readFileSync(join(outDir, "lcov.info"), "utf8"), LCOV);
+  assert.equal(existsSync(join(outDir, "download")), false, "the download is removed once copied");
+  assert.equal(JSON.parse(readFileSync(join(outDir, "pin.json"), "utf8")).floor.run_id, 111);
+
+  assert.throws(() => agreeOnFloor({ shardsDir: shards({ 2: pinFor(LCOV), 7: pinFor(LCOV, 112) }), outDir: tmp("o"), run: serve(LCOV) }),
+    /shard 7 pinned coverage-nightly 112 .*another shard pinned coverage-nightly 111/);
+  assert.throws(() => agreeOnFloor({ shardsDir: shards({ 2: pinFor(LCOV) }), outDir: tmp("o"), run: serve(LCOV + "x\n") }), /differs from its pinned digest/);
+  assert.throws(() => agreeOnFloor({ shardsDir: shards({ 2: null }), outDir: tmp("o"), run: serve(LCOV) }), /shard 2 narrowed without a narrow floor pin/);
+  assert.throws(() => agreeOnFloor({ shardsDir: shards({ 2: "{" }), outDir: tmp("o"), run: serve(LCOV) }), /shard 2 narrowed without/);
+  assert.throws(() => agreeOnFloor({ shardsDir: shards({ 2: pinFor(LCOV) }), outDir: tmp("o"), run: fakeRun(() => ({ status: 1, stderr: "gone" })) }),
+    /cannot download the pinned coverage-nightly run 111: gone/);
+  assert.throws(() => agreeOnFloor({ shardsDir: shards({ 2: pinFor(LCOV) }), outDir: tmp("o"), run: fakeRun(() => ({ status: 0 })) }),
+    /differs from its pinned digest/, "a download that leaves no lcov is refused");
+});
+
+test("W1-T5892: the CLI stamps provenance only for a trusted green run, and select/agree/verify answer through gh", () => {
+  const dir = tmp("cli-main");
+  const lcov = join(dir, "lcov.info");
+  writeFileSync(lcov, LCOV);
+  const env = { GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: "222", GITHUB_RUN_ATTEMPT: "1", GITHUB_EVENT_NAME: "merge_group",
+    GITHUB_REF: "refs/heads/gh-readonly-queue/main/pr-1-x", GITHUB_SHA: HEAD };
+  const out = join(dir, "provenance.json");
+  const logs: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => void logs.push(a.join(" "));
+  try {
+    assert.equal(main(["provenance", "--producer", "coverage-merged", "--lcov", lcov, "--out", out, "--matrix-result", "success"], env), 0);
+    assert.equal(JSON.parse(readFileSync(out, "utf8")).run_id, 222);
+    const nightlyOut = join(dir, "nightly.json");
+    const shardDir = join(dir, "shards");
+    for (let n = 1; n <= 8; n++) { mkdirSync(join(shardDir, `coverage-shard-${n}`), { recursive: true }); writeFileSync(join(shardDir, `coverage-shard-${n}`, "test-exit"), "0\n"); }
+    assert.equal(main(["provenance", "--producer", "coverage-nightly", "--lcov", lcov, "--out", nightlyOut, "--shards-dir", shardDir],
+      { ...env, GITHUB_EVENT_NAME: "schedule", GITHUB_REF: "refs/heads/main" }), 0);
+    assert.deepEqual(JSON.parse(readFileSync(nightlyOut, "utf8")).shard_test_exits, ALL_GREEN);
+    for (const [argv, e, why] of [
+      [["--matrix-result", "failure"], env, /the coverage shards concluded failure/],
+      [["--matrix-result", "success"], { ...env, GITHUB_EVENT_NAME: "pull_request" }, /a pull_request run is not a coverage-merged producer/],
+    ] as const) {
+      const skipped = join(dir, `skip-${logs.length}.json`);
+      assert.equal(main(["provenance", "--producer", "coverage-merged", "--lcov", lcov, "--out", skipped, ...argv], e), 0);
+      assert.equal(existsSync(skipped), false);
+      assert.match(logs.at(-1)!, why);
+    }
+    assert.equal(main(["provenance", "--producer", "coverage-merged", "--lcov", join(dir, "absent"), "--out", join(dir, "n.json"), "--all-shards-succeeded"], env), 0);
+    assert.match(logs.at(-1)!, /no lcov was staged/);
+    assert.throws(() => main(["provenance", "--producer", "elsewhere", "--lcov", lcov, "--out", out], env), /usage: coverage-floor\.mjs provenance/);
+    assert.throws(() => main(["select", join(dir, "p"), "--as-of", "yesterday"], env), /--as-of yesterday is not a time/);
+    assert.throws(() => main(["nonsense"], env), /usage: coverage-floor\.mjs provenance\|select/);
+
+    // select and agree shell the real `gh`, answered here by the shared shim on PATH.
+    const { row, provenance } = nightly({ measuredAt: new Date(Date.now() - 3_600_000),
+      row: { updatedAt: new Date(Date.now() - 3_000_000).toISOString() } });
+    const pinDir = join(dir, "coverage-floor-pin");
+    const shim = ghShim([
+      { when: `-D ${join(dir, "agreed", "download")}`, writes: [{ path: join(dir, "agreed", "download", "lcov.info"), content: LCOV }] },
+      ...routes(pinDir, row, artifact(provenance))], { kind: "w1t5892-main-gh" });
+    const path = process.env.PATH;
+    process.env.PATH = `${shim.dir}:${path}`;
+    try {
+      const decision = join(dir, "decision");
+      assert.equal(main(["select", pinDir, "--as-of", new Date().toISOString(), "--decision-file", decision], { ...env, GITHUB_REPOSITORY: REPO }), 0);
+      assert.equal(readFileSync(decision, "utf8"), "narrow\n");
+      assert.equal(main(["verify", pinDir], env), 0);
+      assert.equal(logs.at(-1), join(pinDir, "lcov.info"));
+      const shardsDir = join(dir, "agree-shards");
+      mkdirSync(join(shardsDir, "coverage-shard-4"), { recursive: true });
+      writeFileSync(join(shardsDir, "coverage-shard-4", "selection"), "narrow\n");
+      writeFileSync(join(shardsDir, "coverage-shard-4", "floor-pin.json"), readFileSync(join(pinDir, "pin.json")));
+      assert.equal(main(["agree", shardsDir, join(dir, "agreed")], env), 0);
+      assert.equal(logs.at(-1), join(dir, "agreed", "lcov.info"));
+    } finally {
+      process.env.PATH = path;
+    }
+  } finally {
+    console.log = log;
+  }
 });
