@@ -175,16 +175,19 @@ test("cash positive429 continues each real protocol with identical payload and f
   });
 });
 
-test("cash429 cannot exceed existing turns or infer a cooldown from missing invalid zero or over-window headers", async t => {
+test("cash429 cannot exceed existing turns or infer a cooldown from missing invalid zero or over-window headers under fixture wall-clock latency", async t => {
   for (const model of cashModels) await t.test(model, async child => {
+    // The header controls must reach their fake POST even when fixture work advances the wall clock.
+    let wallMs = 0;
+    child.mock.method(Date, "now", () => wallMs += 101);
     for (const headers of ([{}, { "retry-after-ms": "0" }, { "retry-after-ms": "-1" },
       { "retry-after-ms": "9999999999999999" }, { "retry-after-ms": "bad", "retry-after": "1" }, { "retry-after-ms": "1000" }] as Array<Record<string, string>>)) {
       const f = cashFixture(child); let calls = 0;
-      // A frozen clock keeps the 100 ms window from being consumed by reservation I/O on a loaded
-      // runner (which timed out before the POST: calls 0). Every header here is over-window against it.
-      const result = await spawnOpenWeightWorker({ ...f.args, requestTimeoutMs: 100, clock: fixedClock(Date.now()),
+      // Freeze the request clock so reservation I/O cannot consume the 100 ms header window.
+      const result = await spawnOpenWeightWorker({ ...f.args, clock: fixedClock(0), requestTimeoutMs: 100,
         fetchImpl: async () => { calls++; return new Response(null, { status: 429, headers }); } }, f.config, { model, effort: "low" });
       assert.equal(calls, 1); assert.equal(result.isError, true);
+      assert.match(result.stderr, /HTTP 429/, "the header refusal, not fixture setup timeout, is under test");
     }
     const f = cashFixture(child); let calls = 0;
     const result = await spawnOpenWeightWorker({ ...f.args, maxTurns: 2,
