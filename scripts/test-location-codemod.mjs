@@ -68,6 +68,9 @@ const RUNTIME_SHAPES = [
   [/["'`]test\/[A-Za-z0-9_./-]+\.test\.ts["'`]/, "read of another test by its test/<name> path"],
 ];
 
+const IDENT_START = /[$_\p{ID_Start}]/u;
+const IDENT_PART = /[$_\u200c\u200d\p{ID_Continue}]/u;
+
 /**
  * A mask over `text`: 1 in ordinary string/template text, 2 in tagged template text (whose raw spelling
  * is observable), 0 in code and comments.
@@ -119,9 +122,13 @@ export function stringLiteralMask(text) {
       const d = text[i + 1];
       if (c === "/" && d === "/") { while (i < n && text[i] !== "\n") i += 1; continue; }
       if (c === "/" && d === "*") { const end = text.indexOf("*/", i + 2); i = end < 0 ? n : end + 2; continue; }
-      if (/[a-zA-Z_$]/.test(c)) {
+      if (IDENT_START.test(String.fromCodePoint(text.codePointAt(i)))) {
         const start = i;
-        while (i < n && /[\w$]/.test(text[i])) i += 1;
+        while (i < n) {
+          const point = String.fromCodePoint(text.codePointAt(i));
+          if (!IDENT_PART.test(point)) break;
+          i += point.length;
+        }
         const word = text.slice(start, i);
         prev = prev === "." ? `.${word}` : word;
         continue;
@@ -129,7 +136,8 @@ export function stringLiteralMask(text) {
       if (c === '"' || c === "'") { quoted(c); prev = c; continue; }
       if (c === "`") {
         const keyword = /^(return|throw|yield|await|case|typeof|void|delete|new|in|of)$/.test(prev);
-        const tagged = /[\w)$\]`]$/.test(prev) && !keyword;
+        const tail = Array.from(prev).at(-1) ?? "";
+        const tagged = (IDENT_PART.test(tail) || tail === ")" || tail === "]" || tail === "`") && !keyword;
         i += 1;
         template(tagged ? 2 : 1);
         prev = "`";

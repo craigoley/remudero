@@ -75,6 +75,18 @@ test("tagged templates retain observable raw spelling and report unresolved impo
   assert.equal(runInNewContext(result.text), runInNewContext(source));
 });
 
+test("Unicode identifier tags retain the raw fixture value", () => {
+  for (const name of ["τ", "𝛕", "τ2"]) {
+    const source = `const ${name} = String.raw; ${name}\`` + fixtureImport("./fixture.js") + "`;";
+    assert.equal(census(source).status, 0);
+    const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
+    assert.equal(result.text, source);
+    assert.equal(result.rewritten, 0);
+    assert.equal(result.unresolved.length, 1);
+    assert.match(result.unresolved[0], /raw spelling/);
+    assert.equal(runInNewContext(result.text), runInNewContext(source));
+  }
+});
 
 test("returned templates keep their values while becoming location-free", () => {
   for (const trivia of [" ", " /* fixture */ ", " /* a comment longer than the old lookbehind window */ /* next */ "]) {
