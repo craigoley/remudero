@@ -7,7 +7,7 @@
   principles:
     tdd: strict
   budget_usd: 10
-  risk: medium
+  risk: high
   band_meaning: span
   origin: operator-approved-followups:2026-10-28
   plan_refs:
@@ -46,14 +46,22 @@
     schedule, worker stop or live/public release. Before building, reconcile current
     task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
     in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
   acceptance:
     - claim: an invoked request with unreadable reply and no usage retains its reserve as held unknown
-      proof: "unit test: W1-T10954: an invoked request with unreadable reply and no usage retains its
-        reserve as held unknown"
+      proof: 'grep: test("W1-T10954: an invoked request with unreadable reply and no usage retains its
+        reserve as held unknown" in test/routing/an-uncertain-cash-charge-stays-reserved.test.ts'
     - claim: real and duplicate settlement evidence affects only its exact request once while preserving
         all caps
-      proof: "unit test: W1-T10954: real and duplicate settlement evidence affects only its exact request
-        once while preserving all caps"
+      proof: 'grep: test("W1-T10954: real and duplicate settlement evidence affects only its exact request
+        once while preserving all caps" in
+        test/a-completed-openweight-request-settles-its-reservation.test.ts'
+    - claim: The real default production path invokes recordCashAccounting; an unused export, declaration
+        or re-export is insufficient.
+      proof: "grep: recordCashAccounting( in src/lib/worker-provider.ts"
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

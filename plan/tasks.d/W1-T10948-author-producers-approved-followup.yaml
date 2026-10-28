@@ -43,21 +43,27 @@
     tiers, each at most 120 seconds, within the existing 32-phase/one-hour maximum; no check becomes
     skippable or new time/unchanged-failure retry is granted. Cover real default children,
     parser/default/catch arms, cancellation, clean owner release and isolated HOME/TMP/auth context.
-    No ambient real credentials or fleet state in fixtures.
+    No ambient real credentials or fleet state in fixtures. Register census-parent-budget.test.ts
+    beside PRECHECK_PARITY in scripts/census-precheck.mjs and prove its real pre-push execution; it
+    is a real rule suite, not an exclusion.
   note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
     this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
     grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
     schedule, worker stop or live/public release. Before building, reconcile current
     task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
     in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
   acceptance:
     - claim: the budgeted census retains native completeness judgment and serial child ownership
-      proof: "unit test: W1-T10948: the budgeted census retains native completeness judgment and serial
-        child ownership"
+      proof: 'grep: test("W1-T10948: the budgeted census retains native completeness judgment and serial
+        child ownership" in test/ci/census-parent-budget.test.ts'
     - claim: static tiers defer only unstarted work while failed and incomplete native results cannot
         become PASS
-      proof: "unit test: W1-T10948: static tiers defer only unstarted work while failed and incomplete
-        native results cannot become PASS"
+      proof: 'grep: test("W1-T10948: static tiers defer only unstarted work while failed and incomplete
+        native results cannot become PASS" in test/ci/author-rule-owner.test.ts'
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

@@ -7,7 +7,7 @@
   principles:
     tdd: strict
   budget_usd: 8
-  risk: medium
+  risk: high
   band_meaning: span
   origin: operator-approved-followups:2026-10-28
   plan_refs:
@@ -45,14 +45,21 @@
     schedule, worker stop or live/public release. Before building, reconcile current
     task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
     in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
   acceptance:
     - claim: the real default report reader respects a byte bound and preserves valid multibyte evidence
-      proof: "unit test: W1-T10962: the real default report reader respects a byte bound and preserves
-        valid multibyte evidence"
+      proof: 'grep: test("W1-T10962: the real default report reader respects a byte bound and preserves
+        valid multibyte evidence" in test/infra/bounded-file-tail.test.ts'
     - claim: truncated or unreadable worker and gardener output stays explicit and cannot become a
         complete success
-      proof: "unit test: W1-T10962: truncated or unreadable worker and gardener output stays explicit and
-        cannot become a complete success"
+      proof: 'grep: test("W1-T10962: truncated or unreadable worker and gardener output stays explicit and
+        cannot become a complete success" in test/worker.test.ts'
+    - claim: The real default production path invokes readBoundedFileTail; an unused export, declaration
+        or re-export is insufficient.
+      proof: "grep: readBoundedFileTail( in src/lib/worker.ts"
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

@@ -42,12 +42,12 @@
     in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
   acceptance:
     - claim: the default full-source architecture scan completes within its unchanged heap bound
-      proof: "unit test: W1-T10946: the default full-source architecture scan completes within its
-        unchanged heap bound"
+      proof: 'grep: test("W1-T10946: the default full-source architecture scan completes within its
+        unchanged heap bound" in test/architecture-fitness.test.ts'
     - claim: planted forbidden imports remain detected and removal of the memory fix restores the measured
         retention failure
-      proof: "unit test: W1-T10946: planted forbidden imports remain detected and removal of the memory
-        fix restores the measured retention failure"
+      proof: 'grep: test("W1-T10946: planted forbidden imports remain detected and removal of the memory
+        fix restores the measured retention failure" in test/architecture-fitness.test.ts'
   falsifier: Add the exact named real-path controls in the computed test folders using package aliases
     and the shared root helper. Establish the failing current-main behavior, restore the smallest
     fix, and require complete verified-file TAP. Delete each load-bearing guard and require the

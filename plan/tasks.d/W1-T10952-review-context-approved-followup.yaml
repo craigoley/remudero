@@ -8,7 +8,7 @@
   principles:
     tdd: strict
   budget_usd: 10
-  risk: medium
+  risk: high
   band_meaning: span
   origin: operator-approved-followups:2026-10-28
   plan_refs:
@@ -45,14 +45,21 @@
     schedule, worker stop or live/public release. Before building, reconcile current
     task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
     in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
   acceptance:
     - claim: review reuse rejects changed source or execution context while a genuine compatible result
         remains reusable
-      proof: "unit test: W1-T10952: review reuse rejects changed source or execution context while a
-        genuine compatible result remains reusable"
+      proof: 'grep: test("W1-T10952: review reuse rejects changed source or execution context while a
+        genuine compatible result remains reusable" in test/review-engine-revision-rearm.test.ts'
     - claim: default proof children preserve TAP completeness and isolated authentication boundaries
-      proof: "unit test: W1-T10952: default proof children preserve TAP completeness and isolated
-        authentication boundaries"
+      proof: 'grep: test("W1-T10952: default proof children preserve TAP completeness and isolated
+        authentication boundaries" in test/proof-spawner-env-isolation.test.ts'
+    - claim: The real default production path invokes withoutNodeTestContext; an unused export,
+        declaration or re-export is insufficient.
+      proof: "grep: withoutNodeTestContext( in src/lib/run-child.ts"
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

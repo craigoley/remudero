@@ -47,15 +47,21 @@
     schedule, worker stop or live/public release. Before building, reconcile current
     task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
     in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
   acceptance:
     - claim: a real journal write or flush failure prevents the matching destructive phase and remains
         visible as failure
-      proof: "unit test: W1-T10958: a real journal write or flush failure prevents the matching
-        destructive phase and remains visible as failure"
+      proof: 'grep: test("W1-T10958: a real journal write or flush failure prevents the matching
+        destructive phase and remains visible as failure" in
+        test/mac-janitor-dependency-health.test.ts'
     - claim: successful journaling does not bypass six-hour active-work reference and parent-folder
         protections
-      proof: "unit test: W1-T10958: successful journaling does not bypass six-hour active-work reference
-        and parent-folder protections"
+      proof: 'grep: test("W1-T10958: successful journaling does not bypass six-hour active-work reference
+        and parent-folder protections" in
+        test/deploy/the-janitor-preserves-idle-work-before-it-retires-a-checkout.test.ts'
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

@@ -1,15 +1,19 @@
 - id: W1-T10782
-  title: "Serve names native CPU time for its sampled worker threads without turning unreadable counters into zero"
+  title: Serve names native CPU time for its sampled worker threads without turning unreadable
+    counters into zero
   repo: remudero
   depends_on: []
   type: implement
   verify: auto
-  principles: {tdd: strict}
-  budget_usd: 8.00
-  risk: medium
+  principles:
+    tdd: strict
+  budget_usd: 8
+  risk: high
   band_meaning: span
-  origin: "operator-approved bounded Core/serve resource attribution follow-through, 2026-10-26"
-  plan_refs: [W1-T6266, W1-T9403]
+  origin: operator-approved bounded Core/serve resource attribution follow-through, 2026-10-26
+  plan_refs:
+    - W1-T6266
+    - W1-T9403
   files:
     - src/lib/worker-heaps.ts
     - test/memory/serve-worker-cpu-counters.test.ts
@@ -35,18 +39,23 @@
     Keep every runtime limit, sampling cadence, relief decision, owner override and activation
     boundary unchanged. This task does not recover or duplicate the retained W1-T6266 report.
   acceptance:
-    - claim: "a real Worker's CPU counters increase after native work, and exit leaves them unmeasured"
-      proof: "unit test: serve worker CPU: native work increases only the live worker's cumulative counters"
-    - claim: "unreadable counters stay unknown independently of heap availability"
-      proof: "unit test: serve worker CPU: unreadable counters remain unknown and do not suppress heap samples"
-    - claim: "a timed-out native read stays single-flight until it settles"
+    - claim: a real Worker's CPU counters increase after native work, and exit leaves them unmeasured
+      proof: "unit test: serve worker CPU: native work increases only the live worker's cumulative
+        counters"
+    - claim: unreadable counters stay unknown independently of heap availability
+      proof: "unit test: serve worker CPU: unreadable counters remain unknown and do not suppress heap
+        samples"
+    - claim: a timed-out native read stays single-flight until it settles
       proof: "unit test: serve worker CPU: a timed-out native read is single-flight until it settles"
-    - claim: "the existing nested-worker transport preserves the counters"
+    - claim: the existing nested-worker transport preserves the counters
       proof: "unit test: serve worker CPU: nested worker transport preserves CPU counters"
-    - claim: "exit during a pending native read discards its counters"
+    - claim: exit during a pending native read discards its counters
       proof: "unit test: serve worker CPU: exit during a native read discards counters"
   falsifier: |
     Run the new physical suite against the unmodified worker-heaps source: each named control
     must fail for missing CPU evidence. Restore the fix and require a complete passing TAP
     summary on Node 22 and 24. Remove the pending-request guard and the native-call-count
     assertion must fail. Remove nested CPU propagation and the nested-worker assertion must fail.
+  note: " Operator-requested filing preserves the existing reserved ID and all five native controls.
+    Scope spans one worker sampler and its native/nested transport tests; high/span honestly records
+    the review breadth. Old focused results remain old-head evidence."

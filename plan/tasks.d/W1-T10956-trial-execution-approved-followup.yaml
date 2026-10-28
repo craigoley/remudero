@@ -9,7 +9,7 @@
   principles:
     tdd: strict
   budget_usd: 12
-  risk: medium
+  risk: high
   band_meaning: span
   origin: operator-approved-followups:2026-10-28
   plan_refs:
@@ -55,15 +55,23 @@
     schedule, worker stop or live/public release. Before building, reconcile current
     task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
     in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
   acceptance:
     - claim: attempt metrics join actual execution and measured identity without substituting router
         selection for provider evidence
-      proof: "unit test: W1-T10956: attempt metrics join actual execution and measured identity without
-        substituting router selection for provider evidence"
+      proof: 'grep: test("W1-T10956: attempt metrics join actual execution and measured identity without
+        substituting router selection for provider evidence" in
+        test/routing/worker-attribution-and-accounting-follow-actual-execution.test.ts'
     - claim: cost and resource drilldowns preserve missing evidence and keep non-dispatch reviews outside
         coding cohorts
-      proof: "unit test: W1-T10956: cost and resource drilldowns preserve missing evidence and keep
-        non-dispatch reviews outside coding cohorts"
+      proof: 'grep: test("W1-T10956: cost and resource drilldowns preserve missing evidence and keep
+        non-dispatch reviews outside coding cohorts" in test/model-canary-metrics.test.ts'
+    - claim: The real default production path invokes sdkRequestedEffort; an unused export, declaration or
+        re-export is insufficient.
+      proof: "grep: sdkRequestedEffort( in src/lib/worker.ts"
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

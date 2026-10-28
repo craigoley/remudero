@@ -48,15 +48,20 @@
     schedule, worker stop or live/public release. Before building, reconcile current
     task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
     in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
   acceptance:
     - claim: a genuine bounded profile requires the larger of 10 GiB and all declared allocations on each
         actual filesystem
-      proof: "unit test: W1-T10947: a genuine bounded profile requires the larger of 10 GiB and all
-        declared allocations on each actual filesystem"
+      proof: 'grep: test("W1-T10947: a genuine bounded profile requires the larger of 10 GiB and all
+        declared allocations on each actual filesystem" in test/mac-author-admission.test.ts'
     - claim: unbounded profiles, full coverage, missing allocation evidence and stale identity retain
         their existing refusals
-      proof: "unit test: W1-T10947: unbounded profiles, full coverage, missing allocation evidence and
-        stale identity retain their existing refusals"
+      proof: 'grep: test("W1-T10947: unbounded profiles, full coverage, missing allocation evidence and
+        stale identity retain their existing refusals" in
+        test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts'
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

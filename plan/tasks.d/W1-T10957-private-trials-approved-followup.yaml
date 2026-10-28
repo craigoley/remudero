@@ -49,15 +49,26 @@
     schedule, worker stop or live/public release. Before building, reconcile current
     task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
     in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
   acceptance:
     - claim: the existing private coding executor contains filesystem and credential effects and closes
         its real descendants
-      proof: "unit test: W1-T10957: the existing private coding executor contains filesystem and
-        credential effects and closes its real descendants"
+      proof: 'grep: test("W1-T10957: the existing private coding executor contains filesystem and
+        credential effects and closes its real descendants" in test/model-canary-command.test.ts'
     - claim: paired trial results retain correctness, native resource and missing-identity evidence
         without changing schedules
-      proof: "unit test: W1-T10957: paired trial results retain correctness, native resource and
-        missing-identity evidence without changing schedules"
+      proof: 'grep: test("W1-T10957: paired trial results retain correctness, native resource and
+        missing-identity evidence without changing schedules" in
+        test/routing/model-canary-coding-isolation.test.ts'
+    - claim: The real default production path invokes scoreCodingControl; an unused export, declaration or
+        re-export is insufficient.
+      proof: "grep: scoreCodingControl( in src/lib/model-canary-runner.ts"
+    - claim: The real default production path invokes codingLedgerSave; an unused export, declaration or
+        re-export is insufficient.
+      proof: "grep: codingLedgerSave( in src/lib/model-canary-command.ts"
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

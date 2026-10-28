@@ -8,7 +8,7 @@
   principles:
     tdd: strict
   budget_usd: 10
-  risk: medium
+  risk: high
   band_meaning: span
   origin: operator-approved-followups:2026-10-28
   plan_refs:
@@ -42,21 +42,36 @@
     learning count or a repeated failure class cannot establish learning efficacy. PR15262 supplies
     one real successful review with one assignment despite two posting lines; use this as a counter
     control without launching a new review. Leave PR-repair ownership with its current lane.
+    Existing review-flow observation is the maintained production facade that constructs
+    ciRemedyExecutionObserver for the actual daily collector. The real goal-measurement path invokes
+    the canonical imported parser as parseGoalObservation before emitting accepted evidence.
+    Exercise both defaults; a declaration or re-export alone is not production use.
   note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
     this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
     grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
     schedule, worker stop or live/public release. Before building, reconcile current
     task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
     in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
   acceptance:
     - claim: duplicate review notifications count as one delivered exact review and cohort denominators
         remain separate
-      proof: "unit test: W1-T10955: duplicate review notifications count as one delivered exact review and
-        cohort denominators remain separate"
+      proof: 'grep: test("W1-T10955: duplicate review notifications count as one delivered exact review
+        and cohort denominators remain separate" in test/review-flow-observation.test.ts'
     - claim: missing exposure, cost or preventive-work evidence remains unavailable rather than a
         successful learning claim
-      proof: "unit test: W1-T10955: missing exposure, cost or preventive-work evidence remains unavailable
-        rather than a successful learning claim"
+      proof: 'grep: test("W1-T10955: missing exposure, cost or preventive-work evidence remains
+        unavailable rather than a successful learning claim" in
+        test/fix-lane/daily-component-execution.test.ts'
+    - claim: The real default production path invokes ciRemedyExecutionObserver; an unused export,
+        declaration or re-export is insufficient.
+      proof: "grep: ciRemedyExecutionObserver( in src/lib/review-flow-observation.ts"
+    - claim: The real default production path invokes parseGoalObservation; an unused export, declaration
+        or re-export is insufficient.
+      proof: "grep: parseGoalObservation( in src/lib/goals.ts"
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

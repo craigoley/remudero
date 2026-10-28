@@ -8,7 +8,7 @@
   principles:
     tdd: strict
   budget_usd: 10
-  risk: medium
+  risk: high
   band_meaning: span
   origin: operator-approved-followups:2026-10-28
   plan_refs:
@@ -46,15 +46,24 @@
     schedule, worker stop or live/public release. Before building, reconcile current
     task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
     in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
   acceptance:
     - claim: cold and warm compiler runs preserve diagnostics and maintain correctly scoped incremental
         state
-      proof: "unit test: W1-T10950: cold and warm compiler runs preserve diagnostics and maintain
-        correctly scoped incremental state"
+      proof: 'grep: test("W1-T10950: cold and warm compiler runs preserve diagnostics and maintain
+        correctly scoped incremental state" in
+        test/npm-run-typecheck-is-incremental-and-slotted.test.ts'
     - claim: native parent and checker child fit the recorded joint memory reservation without increased
         fanout
-      proof: "unit test: W1-T10950: native parent and checker child fit the recorded joint memory
-        reservation without increased fanout"
+      proof: 'grep: test("W1-T10950: native parent and checker child fit the recorded joint memory
+        reservation without increased fanout" in
+        test/a-tight-typecheck-runs-fewer-checkers-with-the-same-diagnostics.test.ts'
+    - claim: The real default production path invokes compilerEnvironment; an unused export, declaration
+        or re-export is insufficient.
+      proof: "grep: compilerEnvironment( in src/lib/typecheck-run.ts"
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require

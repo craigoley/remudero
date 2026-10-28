@@ -51,15 +51,21 @@
     schedule, worker stop or live/public release. Before building, reconcile current
     task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
     in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
   acceptance:
     - claim: one immutable admission requires complete compatible producer and shard-union evidence before
         narrowing
-      proof: "unit test: W1-T10951: one immutable admission requires complete compatible producer and
-        shard-union evidence before narrowing"
+      proof: 'grep: test("W1-T10951: one immutable admission requires complete compatible producer and
+        shard-union evidence before narrowing" in
+        test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts'
     - claim: narrowed or malformed executions stay visible without diluting current or retained
         full-execution evidence
-      proof: "unit test: W1-T10951: narrowed or malformed executions stay visible without diluting current
-        or retained full-execution evidence"
+      proof: 'grep: test("W1-T10951: narrowed or malformed executions stay visible without diluting
+        current or retained full-execution evidence" in
+        test/gardeners/a-narrowed-coverage-run-is-not-shadow-evidence.test.ts'
   falsifier: "Add the exact named real-path controls in the computed test folders using package
     aliases and the shared root helper. Establish the failing current-main behavior, restore the
     smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
