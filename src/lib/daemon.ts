@@ -4771,7 +4771,7 @@ export async function runDaemon(
         abandoned_detached_sweep_actions: abandoned.length,
         in_flight_reviews: latchStarted ? latchStarted.reviews.size : reviewsAtFreshness,
         abandoned_in_flight_reviews: abandonedReviews,
-        detached_children_left_running: childrenLeft,
+        detached_children_left_running: childWorkLeftRunning(),
         detached_work_placement: Object.fromEntries(Object.entries(placements).map(([kind, p]) => [kind, p.placement])),
         review_passes: reviewPasses,
         duration_ms: Math.max(0, nowMs - drainStartedAtMs),

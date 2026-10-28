@@ -1096,7 +1096,8 @@ const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v)
 /**
  * The drain cost of each kind, read from the rows a drain already writes. A `*_drain.completed` row's `waited_on` names each unit
  * the drain waited on with `settled_after_ms` (or `abandoned`); an older row without it is attributed through the
- * `daemon.detached_action_abandoned` rows before it (`action_kind`, `age_ms`) and, for reviews, through `in_flight_reviews`.
+ * `daemon.detached_action_abandoned` rows in its interval and, for reviews, through `in_flight_reviews`.
+ * An action's age bounds its overlap with that interval; its lifetime before the drain is never drain cost.
  * A unit the drain RELEASED was not waited on and costs nothing. An unparseable line is skipped, and counted nowhere.
  */
 export function measureDrainCosts(rows: ReadonlyArray<string | Record<string, unknown>>): MeasuredDrainCosts {
@@ -1109,7 +1110,7 @@ export function measureDrainCosts(rows: ReadonlyArray<string | Record<string, un
     cost.waitedMs += waitedMs;
     if (abandoned) cost.abandoned += 1;
   };
-  let abandonedSince: Array<{ kind: string; ageMs: number }> = [];
+  let abandonedSince: Array<{ kind: string; ageMs: number; at: number; runId: unknown }> = [];
   for (const entry of rows) {
     let row: Record<string, unknown>;
     if (typeof entry === "string") {
@@ -1121,8 +1122,9 @@ export function measureDrainCosts(rows: ReadonlyArray<string | Record<string, un
       }
     } else row = entry;
     if (row === null || typeof row !== "object") continue;
+    if (row.step === "daemon.freshness_drain.started" || row.step === "daemon.memory_drain.started") abandonedSince = [];
     if (row.step === "daemon.detached_action_abandoned") {
-      abandonedSince.push({ kind: String(row.action_kind), ageMs: num(row.age_ms) });
+      abandonedSince.push({ kind: String(row.action_kind), ageMs: num(row.age_ms), at: Date.parse(String(row.ts)), runId: row.run_id });
       continue;
     }
     if (row.step !== "daemon.freshness_drain.completed" && row.step !== "daemon.memory_drain.completed") continue;
@@ -1131,11 +1133,18 @@ export function measureDrainCosts(rows: ReadonlyArray<string | Record<string, un
       for (const item of row.waited_on as Array<Record<string, unknown>>) {
         if (item === null || typeof item !== "object" || item.released === true) continue;
         const abandoned = item.abandoned === true;
-        add(item.what === "review" ? "review" : String(item.kind), num(item.settled_after_ms) || (abandoned ? durationMs : 0), abandoned);
+        add(item.what === "review" ? "review" : String(item.kind), Math.min(durationMs, num(item.settled_after_ms) || (abandoned ? durationMs : 0)), abandoned);
       }
     } else {
       if (num(row.in_flight_reviews) > 0) add("review", durationMs, num(row.abandoned_in_flight_reviews) > 0);
-      for (const item of abandonedSince) add(item.kind, item.ageMs, true);
+      const endedAt = Date.parse(String(row.ts));
+      const startedAt = endedAt - durationMs;
+      for (const item of abandonedSince) {
+        if (item.runId !== undefined && row.run_id !== undefined && item.runId !== row.run_id) continue;
+        const timed = Number.isFinite(endedAt) && Number.isFinite(item.at);
+        if (timed && (item.at < startedAt || item.at > endedAt)) continue;
+        add(item.kind, Math.min(item.ageMs, timed ? item.at - startedAt : durationMs), true);
+      }
     }
     abandonedSince = [];
   }
@@ -1190,7 +1199,11 @@ export function detachedWorkModeNow(
   if (policy.mode !== "auto") return runChildModeFor(policy.mode, emptyRunChildModeEvidence()).mode;
   try {
     const union = readUnion(stateRoot);
-    return runChildModeFor("auto", createRunChildModeTracker(runChildModeWindow(union.rows), undefined, union.unread).evidence()).mode;
+    const evidence = createRunChildModeTracker(runChildModeWindow(union.rows), undefined, union.unread).evidence();
+    const decision = runChildModeFor("auto", evidence);
+    // Build runs retain `on` after W1-T9089. Detached work still has an in-process path and must demote on contract loss.
+    if (decision.decision && (decision.decision.evidence.lost > 0 || decision.decision.evidence.misidentified > 0)) return "shadow";
+    return decision.mode;
   } catch (error) {
     void error; // An evidence read that throws decides nothing: the work stays in process, as under mode off.
     return "off";

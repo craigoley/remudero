@@ -42664,6 +42664,9 @@ export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, re
  */
 type DetachedFixRuntimePorts = Partial<Pick<FixDispatchChildPorts, "hold" | "log" | "dispatcher">> & {
   planPath?: string;
+  planSnapshot?: (options: { allowStale?: boolean }) => SyncedPlan;
+  config?: Config;
+  github?: GitHub;
   readPr?: (args: string[]) => Promise<unknown>;
 };
 export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void }, ports: DetachedFixRuntimePorts = {}): Promise<RunResult> {
@@ -42691,7 +42694,7 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
   const inputs = work.inputs ?? {};
   // Every read is lazy: the child reads its envelope first, and an unreadable one refuses before any config, plan or PR is read.
   let configMemo: ReturnType<typeof loadConfig> | undefined;
-  const cfg = () => (configMemo ??= loadConfig());
+  const cfg = () => (configMemo ??= ports.config ?? loadConfig());
   let selfMemo: ReturnType<typeof resolveOwnerRepo> | undefined;
   const self = () => (selfMemo ??= resolveOwnerRepo());
   const repoName = (): string => (typeof inputs.repo === "string" ? inputs.repo : self().repo);
@@ -42700,7 +42703,14 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     appendLedger(ledgerPath(), { run_id: ctx.runId, task_id: ctx.taskId, step, lane: "sweep-fix", ...extra });
   };
   let planMemo: ReturnType<typeof loadPlan> | undefined;
-  const planNow = () => (planMemo ??= loadPlan(ports.planPath ?? (repoName() === self().repo ? join(repoRoot, "plan", "tasks.yaml") : join(cfg().root, "repos", repoName(), "plan", "tasks.yaml"))));
+  const planNow = (): Plan => {
+    if (planMemo) return planMemo;
+    const planPath = ports.planPath ?? (repoName() === self().repo ? join(repoRoot, "plan", "tasks.yaml") : join(cfg().root, "repos", repoName(), "plan", "tasks.yaml"));
+    const synced = syncPlanOrRefuse(planPath, { allowStale: false, log: ports.log ?? log, say: () => {}, planSnapshot: ports.planSnapshot });
+    if ("error" in synced) throw new Error(synced.error);
+    return planMemo = synced.plan;
+  };
+  let projection: Map<string, StatusProjection> | undefined;
   await runFixDispatchChild(inputs, {
     log: ports.log ?? log,
     ...(ctx.onPhase === undefined ? {} : { onPhase: ctx.onPhase }),
@@ -42721,8 +42731,11 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
       const plan = planNow();
       const task = plan.byId.get(taskId);
       if (task === undefined) return { found: false };
+      projection ??= projectPlan(plan, { ledgerPath: ledgerPath(), github: ports.github ?? buildBatchedGithub(self().owner, repoName()) });
+      const status = projection.get(taskId);
+      if (!status || status.indeterminate) throw new Error(`task ${taskId}'s merge projection is unreadable`);
       const digest = riskJudgePlanContextDigestFor(plan)({ taskId });
-      return { found: true, merged: task.status === "merged" || task.status === "done",
+      return { found: true, merged: status.merged,
         retired: task.status === "blocked" && task.retirement !== undefined, ...(digest === undefined ? {} : { contextDigest: digest }) };
     },
     dispatcher: ports.dispatcher ?? (() => buildSweepEffects({ productionProgressJudge: true, owner: self().owner, repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,

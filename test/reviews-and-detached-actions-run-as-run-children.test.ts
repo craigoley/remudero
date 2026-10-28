@@ -6,6 +6,8 @@ import { setImmediate as flush } from "node:timers/promises";
 import { test } from "node:test";
 
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { configPath, type Config } from "#src/lib/config.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { riskJudgePlanContextDigestFor } from "#src/lib/risk-judge.js";
@@ -22,7 +24,7 @@ import { runChildMain } from "#src/run-child-main.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import {
   adoptChildWork, buildFixDispatchEnvelope, childWorkCount, childWorkHoldsReviewKey, childWorkLeftRunning, detachedSweepActionCount,
-  drainDetachedSweepActions, installDetachedWorkHost, readFixDispatchEnvelope, resetChildWork, reviewAdmissionBound, runFixDispatchChild, runSweep,
+  detachSweepAction, drainDetachedSweepActions, installDetachedWorkHost, readFixDispatchEnvelope, resetChildWork, reviewAdmissionBound, runFixDispatchChild, runSweep,
   type BuildSweepEffectsDeps, type DetachedActionKind, type FixDispatchChildPorts, type FixDispatchEnvelope, type OpenPrView, type SweepDeps,
 } from "#src/lib/sweep.js";
 import type { SweepCommandHost } from "#src/cli/commands/sweep.js";
@@ -101,6 +103,23 @@ test("W1-T9114: the inventory moves a kind only on a measured drain cost", () =>
   assert.equal(retro.placement, "process");
   assert.match(retro.reason, /runAutomatedRetroSubprocess/);
   assert.equal(detachedWorkPlacement("not-a-kind", on()).placement, "process");
+
+  const legacy = (duration: number, age: number) => measureDrainCosts([
+    { step: "daemon.freshness_drain.started", ts: "2026-10-12T12:00:00.000Z" },
+    { step: "daemon.detached_action_abandoned", ts: new Date(Date.parse("2026-10-12T12:00:00.000Z") + duration).toISOString(),
+      action_kind: "fix-dispatch", age_ms: age },
+    { step: "daemon.freshness_drain.completed", ts: new Date(Date.parse("2026-10-12T12:00:00.000Z") + duration).toISOString(), duration_ms: duration },
+  ]);
+  const oldAction = 12_000 * 60_000;
+  assert.equal(legacy(0, oldAction)["fix-dispatch"]?.waitedMs, 0, "an old action at a zero-duration drain measured no wait");
+  assert.equal(detachedWorkPlacement("fix-dispatch", on({ measured: legacy(0, oldAction) })).placement, "process");
+  assert.equal(legacy(2_000, oldAction)["fix-dispatch"]?.waitedMs, 2_000, "only the corresponding drain interval counts");
+  assert.equal(legacy(2_000, 500)["fix-dispatch"]?.waitedMs, 500, "an action admitted during the drain costs only its overlap");
+  const unrelated = measureDrainCosts([
+    { step: "daemon.detached_action_abandoned", ts: "2026-10-12T11:00:00Z", action_kind: "fix-dispatch", age_ms: oldAction },
+    { step: "daemon.memory_drain.completed", ts: "2026-10-12T12:00:02Z", duration_ms: 2_000 },
+  ]);
+  assert.equal(unrelated["fix-dispatch"], undefined, "a row outside this drain cannot move a kind");
 });
 
 test("W1-T9114: a spec that cannot be read is malformed, never a build run", () => {
@@ -307,6 +326,106 @@ test("W1-T9114: a restart does not drain child reviews or fix dispatches", async
     const bareRow = bare.find((r) => r.step === "daemon.freshness_drain.completed");
     assert.equal((bareRow?.detached_work_placement as Record<string, string>).review, "process");
   } finally { installDetachedWorkHost(undefined); f.cleanup(); }
+});
+
+test("W1-T9114: the completed drain counts children after settlements and new admissions", async () => {
+  const f = fixture();
+  let finishReview!: () => void;
+  let finishNewReview!: () => void;
+  let finishNewFix!: () => void;
+  let finishProcess!: () => void;
+  const oldReview = adoptChildWork({ runId: "old-review", taskId: "A", work: review,
+    settled: new Promise<void>((resolve) => { finishReview = resolve; }) }, f.log);
+  const processWork = new Promise<void>((resolve) => { finishProcess = resolve; });
+  detachSweepAction(processWork, { actionKind: "fix-dispatch", taskId: "A", phase: "worker" });
+  const newChildren: Promise<void>[] = [];
+  try {
+    const planPath = join(f.root, "tasks.yaml");
+    writeFileSync(planPath, "[]");
+    const summary = await runDaemon(loadPlan(planPath), {
+      now: fixedClock(Date.parse("2026-10-12T12:00:00Z")).date,
+      adoptRunChildren: () => [], refreshMerged: () => () => true, openPrCount: () => 0,
+      runOne: async (id) => result(id), sleep: async () => { await flush(); },
+      checkFreshness: (): DaemonFreshness => ({ stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40) }),
+      sweep: async () => {}, sweepLight: async () => {}, sleepUntilSweepWake: async () => "timeout",
+      log: (step, fields) => {
+        f.log(step, fields);
+        if (step !== "daemon.freshness_drain.started") return;
+        assert.deepEqual(childWorkLeftRunning(), { review: 1 });
+        finishReview();
+        newChildren.push(adoptChildWork({ runId: "new-review", taskId: "A", work: { ...review, reviewKey: "new-review-key" },
+          settled: new Promise<void>((resolve) => { finishNewReview = resolve; }) }, f.log));
+        newChildren.push(adoptChildWork({ runId: "new-fix", taskId: "A", work: fix,
+          settled: new Promise<void>((resolve) => { finishNewFix = resolve; }) }, f.log));
+        void oldReview.then(finishProcess);
+      },
+    }, { laneCount: 1, wipLimit: 1, pollIntervalMs: 5 });
+    assert.equal(summary.stopReason, "stale");
+    const completed = f.rows.find((row) => row.step === "daemon.freshness_drain.completed");
+    assert.ok(completed);
+    assert.deepEqual(completed.detached_children_left_running, { review: 1, "fix-dispatch": 1 });
+    assert.deepEqual(completed.detached_children_left_running, childWorkLeftRunning(), "the completed row describes the exit, not drain admission");
+    assert.equal(f.rows.some(row => row.step === "daemon.child_work_settled" && row.run_id === "old-review"), true);
+  } finally {
+    finishReview(); finishProcess(); finishNewReview?.(); finishNewFix?.();
+    await Promise.all([oldReview, ...newChildren]);
+    await drainDetachedSweepActions();
+    f.cleanup();
+  }
+});
+
+test("W1-T9114: detached auto mode demotes on lost and misidentified children", async () => {
+  const f = fixture();
+  try {
+    const healthy = [
+      { step: "daemon.start", ts: "2026-10-12T12:00:00Z" },
+      { step: "run_child.shadow", ts: "2026-10-12T12:01:00Z", contract: "ok", tree_peak_bytes: 100, class_estimate_bytes: 200 },
+      { step: "daemon.start", ts: "2026-10-12T12:02:00Z" },
+      { step: "run_child.adoption_pass", ts: "2026-10-12T12:02:01Z", live: 1, adopted: 1, misidentified: 0, unreadable: 0 },
+    ];
+    const mode = (rows: Array<Record<string, unknown>>) => detachedWorkModeNow(f.stateRoot, () => "auto", () => ({ rows, unread: [] }));
+    assert.equal(mode(healthy), "on", "the ordinary boot-cycle evidence promotes detached work too");
+    const promoted = [...healthy, { step: "run_child.mode_decision", ts: "2026-10-12T12:02:02Z", to: "on" }];
+    assert.equal(mode(promoted), "on");
+    for (const detail of ["process exited without a terminal status", "pid was reused by another process"]) {
+      for (const ts of ["2026-10-12T12:01:30Z", "2026-10-12T12:02:03Z"]) {
+        assert.equal(mode([...promoted, { step: "run_child.lost", ts, detail }]), "shadow", detail);
+      }
+    }
+    assert.equal(mode([...promoted, { step: "run_child.adoption_pass", ts: "2026-10-12T12:02:04Z",
+      live: 1, adopted: 0, misidentified: 1, unreadable: 0 }]), "shadow", "identity mismatches in adoption also demote");
+    for (const detail of ["OOM kill", "container stopped"]) {
+      assert.equal(mode([...promoted, { step: "run_child.lost", ts: "2026-10-12T12:02:03Z", detail }]), "on", "outside kills keep their existing classification");
+    }
+    mkdirSync(f.stateRoot, { recursive: true });
+    const ledger = join(f.stateRoot, "ledger.ndjson");
+    const writeRows = (rows: Array<Record<string, unknown>>) => writeFileSync(ledger, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+    const spawned: string[] = [];
+    const host = createDetachedWorkHost({ stateRoot: f.stateRoot, repoDir: f.root, root: f.root, repo: "fixture", log: f.log,
+      readMode: () => "auto", readLedger: () => [{ step: "daemon.freshness_drain.completed", duration_ms: 1_000, waited_on: [
+        { what: "review", kind: "review", settled_after_ms: 1_000 }, { what: "detached", kind: "fix-dispatch", settled_after_ms: 1_000 },
+      ] }],
+      spawn: (async (input: { work?: DetachedWorkSpec }) => {
+        spawned.push(input.work!.kind);
+        return { started: true, runId: `auto-${input.work!.kind}`, dir: f.root, pid: 1,
+          settled: Promise.resolve(result("A")), abort: async () => ({}) };
+      }) as unknown as typeof spawnRunChild,
+      probe: (async () => ({ started: false, reason: "fixture probe" })) as unknown as typeof startRunChildProbe,
+    });
+    const askBoth = async () => [
+      await host.spawnReview({ pr: { prNumber: 7, headSha: review.headSha! }, reviewKey: "review-key", reviewAttemptId: undefined }),
+      await host.spawnFix({ pr: { prNumber: 8, headSha: fix.headSha! }, fixKey: "fix-key", envelope: {} }),
+    ];
+    writeRows(promoted);
+    assert.equal((await askBoth()).every(child => child !== undefined), true, "the production union admits both child kinds before loss");
+    assert.deepEqual(spawned, ["review", "fix-dispatch"]);
+    for (const detail of ["process exited without a terminal status", "pid was reused by another process"]) {
+      writeRows([...promoted, { step: "run_child.lost", ts: "2026-10-12T12:02:03Z", detail }]);
+      assert.equal(host.mode(), "shadow");
+      assert.deepEqual(await askBoth(), [undefined, undefined], "neither review nor fix work moves after demotion");
+      assert.deepEqual(spawned, ["review", "fix-dispatch"]);
+    }
+  } finally { f.cleanup(); }
 });
 
 test("W1-T9114: the production host starts a review as a child only where the ledger measured a drain wait", async () => {
@@ -633,7 +752,7 @@ test("W1-T9114: the run path maps live PR evidence and reads the canonical task 
   const argv = [...process.argv];
   process.argv.push("--repo-root", REPO_ROOT);
   try {
-    const { runDetachedWork } = await import("#src/run-task.js");
+    const { runDetachedWork, GitFetchError } = await import("#src/run-task.js");
     const planPath = join(f.root, "tasks.yaml");
     const task = { id: FIX_TASK, title: "fix child fixture", repo: "remudero", type: "implement", verify: "auto",
       depends_on: [], status: "queued", files: ["src/lib/sweep.ts"], design: "the original canonical design" };
@@ -649,8 +768,25 @@ test("W1-T9114: the run path maps live PR evidence and reads the canonical task 
     const dispatched: OpenPrView[] = [];
     let built = 0;
     let live: unknown = { state: "OPEN", mergedAt: null, headRefOid: FIX_HEAD };
+    let taskMerged = false;
+    let boardUnreadable = false;
+    const winner = { number: 9380, url: "https://github.com/craigoley/remudero/pull/9380", state: "MERGED" as const, merged: true };
+    const github = fakeGitHub({
+      findMergedByTrailer: () => taskMerged ? winner : null,
+      listMergedHeadBranches: () => taskMerged ? [winner] : [],
+      listOpenHeadBranches: () => [],
+      headRefName: () => `${FIX_BRANCH}-winner`,
+      prBody: () => `Remudero-Task: ${FIX_TASK}`,
+      readFailed: () => boardUnreadable,
+    });
+    let planReads = 0;
     const ports = {
-      planPath, hold: () => undefined, log: f.log,
+      planPath, planSnapshot: (options: { allowStale?: boolean }) => {
+        planReads += 1;
+        assert.equal(options.allowStale, false, "a detached fix must refuse when the canonical plan cannot refresh");
+        return { plan: loadPlan(planPath), staleDispatch: false };
+      },
+      config: { root: f.root, claudeBin: "/bin/true" } as Config, github, hold: () => undefined, log: f.log,
       readPr: async (args: string[]) => { reads.push(args); return live; },
       dispatcher: () => {
         built += 1;
@@ -662,6 +798,7 @@ test("W1-T9114: the run path maps live PR evidence and reads the canonical task 
     assert.deepEqual(reads, [["pr", "view", envelope.pr.prUrl, "--json", "state,mergedAt,headRefOid"]]);
     assert.equal(built, 1);
     assert.deepEqual(dispatched, [envelope.pr]);
+    assert.equal(planReads, 1, "the dispatcher and recheck share this dispatch's one fresh plan");
 
     const refused = async (reason: RegExp) => {
       await assert.rejects(runDetachedWork(work, ctx, ports), reason);
@@ -682,12 +819,12 @@ test("W1-T9114: the run path maps live PR evidence and reads the canonical task 
     await refused(/live state could not be read/);
     live = { state: "OPEN", mergedAt: "", headRefOid: FIX_HEAD };
 
+    boardUnreadable = true;
+    await refused(/merge projection is unreadable/);
+    boardUnreadable = false;
+
     writeFileSync(planPath, "[]");
     await refused(/canonical context changed/);
-    for (const status of ["merged", "done"]) {
-      writePlan({ status });
-      await refused(/already merged/);
-    }
     writePlan({ status: "blocked", retirement: "retired" });
     await refused(/is retired/);
     writePlan({ design: "the canonical design changed after the producer decided" });
@@ -699,6 +836,25 @@ test("W1-T9114: the run path maps live PR evidence and reads the canonical task 
       /could not read its evidence \(fixture PR read failed\)/);
     assert.equal(built, 1);
     assert.equal(dispatched.length, 1);
+
+    await assert.rejects(runDetachedWork(work, ctx, { ...ports, planSnapshot: () => { throw new GitFetchError("fixture plan refresh failed"); } }),
+      /could not read its evidence.*fixture plan refresh failed/);
+    assert.equal(built, 1);
+    assert.equal(dispatched.length, 1);
+
+    for (const status of ["merged", "done"]) {
+      writePlan({ status });
+      await runDetachedWork(work, ctx, ports);
+    }
+    assert.equal(dispatched.length, 3, "YAML completion decorations cannot manufacture GitHub merge credit");
+    assert.equal(built, 3);
+    writePlan();
+    taskMerged = true;
+    await assert.rejects(runDetachedWork(work, ctx, ports), /already merged/);
+    assert.equal(dispatched.length, 3, "another PR's actual merge prevents dispatch");
+    assert.equal(built, 3, "a merged task never reconstructs the dispatcher");
+    assert.equal(loadPlan(planPath).byId.get(FIX_TASK)?.status, "queued", "the queued YAML cannot overrule another PR's merge credit");
+    assert.equal(github.calls.some(call => call.method === "listMergedHeadBranches"), true, "the child refreshed the board-wide merge projection");
   } finally {
     process.argv.splice(0, process.argv.length, ...argv);
     f.cleanup();
