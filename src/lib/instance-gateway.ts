@@ -18,12 +18,13 @@
  * `deploy/serve-container.sh` makes from the registry's `state_dir`. Its checkout (and plan) is
  * `repos/<repo>`, where the daemon clones every repo it manages (`join(config.root, "repos", repo)`).
  */
-import { readFileSync } from "node:fs";
+import { accessSync, constants, readFileSync, readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { observeSelectedRegistry, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
-import { access } from "node:fs/promises";
-import { join } from "node:path";
+import { access, readdir, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { coldAnalyticsSnapshot, createAnalyticsSnapshotCache, type AnalyticsSnapshot, type AnalyticsSnapshotCache } from "./analytics-route.js";
-import { buildRecentRoute, buildStatusRoute, type BoardDeps } from "./board.js";
+import { buildRecentRoute, buildStatusRoute, STALE_SOURCE_HEADER, type BoardDeps } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
 import { escalate, ghIssueGateway, type IssueGateway } from "./escalate.js";
 import { evaluateFleetLiveness, livenessEscalation, readLivenessRows, type InstanceLiveness, type LivenessInstance, type ReadLastRows } from "./fleet-liveness.js";
@@ -58,6 +59,7 @@ import {
   type IssueCloser,
 } from "./panel-actions.js";
 import { loadPlan, type Plan } from "./plan.js";
+import { planSourceFailed, planSourceLoaded, type PlanSourceOutcome } from "./serve-plan-reload.js";
 import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
 import { buildGardenersRoute } from "./gardeners-route.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -79,7 +81,7 @@ export interface InstanceStateRoot {
   planPath: string;
 }
 
-export type InstanceAvailability = { ok: true } | { ok: false; reason: string };
+export type InstanceAvailability = { ok: true; staleReason?: string } | { ok: false; reason: string };
 
 export interface InstanceGatewayOptions {
   selectedRegistryObserver?: SelectedRegistryObserver;
@@ -163,6 +165,7 @@ export function guardInstanceRoute(route: Route, instance: string, availability:
         sendJson(res, 503, { error: "instance_unavailable", status: "unavailable", instance, reason: state.reason });
         return;
       }
+      if (state.staleReason) res.setHeader(STALE_SOURCE_HEADER, state.staleReason);
       await route.handler(req, res, ctx);
     },
   };
@@ -262,6 +265,89 @@ function registryInstances(opts: InstanceGatewayOptions): RegistryInstance[] {
   }
 }
 
+function instancePlanFingerprint(path: string, metadata: unknown): string {
+  return createHash("sha256").update(JSON.stringify({ path, metadata })).digest("hex");
+}
+
+/** Boot keeps the existing synchronous load; requests use the asynchronous version below. */
+function initialInstancePlanIdentity(path: string): string {
+  const dir = join(dirname(path), "tasks.d");
+  let names: string[];
+  try { names = readdirSync(dir).sort(); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; names = []; }
+  const metadata = [path, ...names.map(name => join(dir, name))].map(file => {
+    accessSync(file, constants.R_OK);
+    const info = statSync(file);
+    return [file, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode];
+  });
+  return instancePlanFingerprint(path, metadata);
+}
+
+/** Complete mounted-file identity, including permission changes after a failed parse. */
+async function instancePlanIdentity(path: string): Promise<string> {
+  const dir = join(dirname(path), "tasks.d");
+  let names: string[];
+  try { names = (await readdir(dir)).sort(); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; names = []; }
+  const metadata = await Promise.all([path, ...names.map(name => join(dir, name))].map(async file => {
+    await access(file, constants.R_OK);
+    const info = await stat(file);
+    return [file, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode];
+  }));
+  return instancePlanFingerprint(path, metadata);
+}
+
+/** One coalesced refresh per instance. The existing synchronous loader runs only when its verified source changes. */
+function instancePlanReader(root: InstanceStateRoot, board: BoardDeps, opts: InstanceGatewayOptions): () => Promise<InstanceAvailability> {
+  let source: PlanSourceOutcome | undefined;
+  let attemptedIdentity: string | undefined;
+  let lastFailure: string | undefined;
+  let pending: Promise<InstanceAvailability> | undefined;
+  let retryAfter = 0;
+  const fail = (error: unknown, step: string): void => {
+    const context = step === "serve.instance_unavailable" || source?.state === "unavailable" ? new Error(`plan ${root.planPath} is unreadable: ${String((error as Error)?.message ?? error)}`) : error;
+    source = planSourceFailed(source, context, opts.clock);
+    const reason = (source as Exclude<PlanSourceOutcome, { state: "loaded" }>).failure.reason;
+    retryAfter = (opts.clock ?? systemClock).now() + LIVENESS_CHECK_MS;
+    if (reason !== lastFailure) opts.log?.(step, { instance: root.instance, reason });
+    lastFailure = reason;
+  };
+  try {
+    const before = initialInstancePlanIdentity(root.planPath);
+    attemptedIdentity = before;
+    const next = (opts.loadPlan ?? loadPlan)(root.planPath);
+    if (initialInstancePlanIdentity(root.planPath) !== before) throw new Error("instance plan source changed during startup");
+    board.plan = next; source = planSourceLoaded(source, before, opts.clock);
+  } catch (error) { fail(error, "serve.instance_unavailable"); }
+  const current = (): InstanceAvailability => source?.state === "loaded" ? { ok: true }
+    : source?.state === "stale" ? { ok: true, staleReason: "instance plan retained after a failed refresh" }
+    : { ok: false, reason: source?.failure.reason ?? "instance plan has not been verified" };
+  return () => {
+    if (pending) return pending;
+    pending = (async () => {
+      let captured = false;
+      try {
+        const before = await instancePlanIdentity(root.planPath);
+        captured = true;
+        if (before !== attemptedIdentity || source?.state !== "loaded" && (opts.clock ?? systemClock).now() >= retryAfter) {
+          attemptedIdentity = before;
+          const next = (opts.loadPlan ?? loadPlan)(root.planPath);
+          if (await instancePlanIdentity(root.planPath) !== before) throw new Error("instance plan source changed during refresh");
+          board.plan = next;
+          source = planSourceLoaded(source, before, opts.clock);
+          lastFailure = undefined;
+          opts.log?.("serve.instance_plan_reloaded", { instance: root.instance, identity: before, tasks: next.tasks.length });
+        }
+      } catch (error) {
+        if (!captured) attemptedIdentity = undefined;
+        fail(error, "serve.instance_plan_reload_failed");
+      }
+      return current();
+    })().finally(() => { pending = undefined; });
+    return pending;
+  };
+}
+
 /**
  * Every `/v1/i/<instance>/…` route. `coreRoutes` are the gateway's own, already-built routes; each
  * other instance is built here from its own state root. Never throws for one instance's state.
@@ -280,17 +366,12 @@ export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: I
       continue;
     }
     const root = instanceStateRoot(instance, stateBase);
-    let plan: Plan = { tasks: [], byId: new Map() };
+    const plan: Plan = { tasks: [], byId: new Map() };
     let startupReason: string | undefined;
-    try {
-      plan = (opts.loadPlan ?? loadPlan)(root.planPath);
-    } catch (error) {
-      startupReason = `plan ${root.planPath} is unreadable: ${String((error as Error).message ?? error)}`;
-      opts.log?.("serve.instance_unavailable", { instance: instance.name, reason: startupReason });
-    }
-    const github: GitHub =
-      startupReason === undefined && opts.github ? opts.github(instance.repo) : { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
+    const github: GitHub = opts.github ? opts.github(instance.repo) :
+      { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
     const board: BoardDeps = { plan, ledgerPath: root.ledgerPath, github };
+    const readPlan = instancePlanReader(root, board, opts);
     let currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot;
     if (startupReason === undefined) {
       try {
@@ -308,8 +389,13 @@ export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: I
       }
     }
     const probe = opts.probe ?? probeInstanceState;
-    const availability = (): Promise<InstanceAvailability> =>
-      startupReason === undefined ? probe(root) : Promise.resolve({ ok: false, reason: startupReason });
+    const availability = async (): Promise<InstanceAvailability> => {
+      if (startupReason !== undefined) return { ok: false, reason: startupReason };
+      const plan = await readPlan();
+      if (!plan.ok) return plan;
+      const state = await probe(root);
+      return state.ok ? plan : state;
+    };
     const routes = [
       ...mountUnderInstance(instanceRouteSet(root, board, opts, instance.repo, currentAnalyticsSnapshot), instance.name),
       // W1-T5339: built from this instance's own state; never core's handlers or core's data.
