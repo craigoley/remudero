@@ -9,16 +9,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Clock } from "../src/lib/clock.js";
-import { CI_FRICTION_EFFECT_MAX_WINDOW_MS, type CiFrictionRemedyTask } from "../src/lib/ci-friction-remedy.js";
-import { FLOW_LADDER, ladderOf, type Episode } from "../src/lib/flow-remedy-gardener.js";
-import { ciFrictionEffectReading, runGardenerOverseer, type GardenerOverseerPorts } from "../src/lib/gardener-overseer.js";
-import { gardenEffectsPath, readGardenEffects } from "../src/lib/gardener.js";
+import type { Clock } from "#src/lib/clock.js";
+import { CI_FRICTION_EFFECT_MAX_WINDOW_MS, type CiFrictionRemedyTask } from "#src/lib/ci-friction-remedy.js";
+import { FLOW_LADDER, ladderOf, type Episode } from "#src/lib/flow-remedy-gardener.js";
+import { ciFrictionEffectReading, runGardenerOverseer, type GardenerOverseerPorts } from "#src/lib/gardener-overseer.js";
+import { gardenEffectsPath, readGardenEffects } from "#src/lib/gardener.js";
 import {
   ciFrictionRoundsMetric, flakeIncidentMetric, ledgerMergeTimes, measureRemedy, mergeCredit, prHoursMetric, runBranchTaskId,
   type FlakeLedgerRow,
-} from "../src/lib/remedy-effect.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/remedy-effect.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;

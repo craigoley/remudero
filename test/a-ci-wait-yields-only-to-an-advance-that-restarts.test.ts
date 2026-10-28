@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { DaemonFreshness } from "../src/lib/daemon.js";
-import { DEPLOY_RESTART_SCORE_THRESHOLD } from "../src/lib/deploy-judge.js";
-import { ciWaitFreshness, waitForCiGreen, type PollDeps } from "../src/run-task.js";
+import type { DaemonFreshness } from "#src/lib/daemon.js";
+import { DEPLOY_RESTART_SCORE_THRESHOLD } from "#src/lib/deploy-judge.js";
+import { ciWaitFreshness, waitForCiGreen, type PollDeps } from "#src/run-task.js";
 
 // W1-T5037 — MEASURED 2026-09-28..30: ~31 of 113 build verdicts were freshness_yield handoffs of a CI wait.
 // Since W1-T4945 a busy daemon defers a low-weight advance until idle, and a run waiting on CI makes it busy,

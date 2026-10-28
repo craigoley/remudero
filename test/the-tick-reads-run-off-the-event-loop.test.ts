@@ -6,17 +6,17 @@ import { execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
-import { startReadPlane, startReadPlaneTelemetry, freezeReadGeneration, onePassPerGeneration } from "../src/lib/read-plane.js";
+import { startReadPlane, startReadPlaneTelemetry, freezeReadGeneration, onePassPerGeneration } from "#src/lib/read-plane.js";
 import { createTickReadProducer, buildBoardReviewDaemonHooks, applyTickCreditUpdates, buildDaemonReadRefresher,
-  buildInboxDraftHook, daemonCommand, projectionReadinessAccessors, tickReadReverificationDeps } from "../src/run-task.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
-import { defaultCreditStorePath, loadCreditStore, type StatusProjection } from "../src/lib/status.js";
-import { runSweep, type OpenPrView } from "./helpers/sweep-test.js";
-import { runReadPlaneWorker, readPlaneWorkerInput, readPlaneWorkerLog } from "../src/lib/read-plane.worker.js";
-import { boardOpenSnapshotPath } from "../src/lib/board-snapshot-cache.js";
-import { ghShim } from "./helpers/gh-shim.js";
+  buildInboxDraftHook, daemonCommand, projectionReadinessAccessors, tickReadReverificationDeps } from "#src/run-task.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { runDaemon, type DaemonDeps, type DaemonSummary } from "#src/lib/daemon.js";
+import { defaultCreditStorePath, loadCreditStore, type StatusProjection } from "#src/lib/status.js";
+import { runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
+import { runReadPlaneWorker, readPlaneWorkerInput, readPlaneWorkerLog } from "#src/lib/read-plane.worker.js";
+import { boardOpenSnapshotPath } from "#src/lib/board-snapshot-cache.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 function fixture() {
   const root = makeTempDir("read-plane");

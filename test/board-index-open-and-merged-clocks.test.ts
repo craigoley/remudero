@@ -37,11 +37,11 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { refreshInstallationToken } from "../src/lib/github-app.js";
+import { refreshInstallationToken } from "#src/lib/github-app.js";
 import { test } from "node:test";
-import { buildBatchedGithub, type BatchedPr } from "../src/lib/status.js";
-import { fetchBoardPrsRest, type RestPullRow } from "../src/lib/open-prs-rest.js";
-import { DEFAULT_WORKER_QUIET_FLOOR_MS } from "../src/lib/worker.js";
+import { buildBatchedGithub, type BatchedPr } from "#src/lib/status.js";
+import { fetchBoardPrsRest, type RestPullRow } from "#src/lib/open-prs-rest.js";
+import { DEFAULT_WORKER_QUIET_FLOOR_MS } from "#src/lib/worker.js";
 
 const STATUS_SRC = readFileSync(new URL("../src/lib/status.ts", import.meta.url), "utf8");
 const REST_SRC = readFileSync(new URL("../src/lib/open-prs-rest.ts", import.meta.url), "utf8");

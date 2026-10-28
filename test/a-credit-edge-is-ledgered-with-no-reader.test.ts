@@ -9,9 +9,9 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildAccountUsageRoute, CREDIT_STATE_STEP } from "../src/lib/account-usage.js";
-import { runSlowLaneWorker, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { buildAccountUsageRoute, CREDIT_STATE_STEP } from "#src/lib/account-usage.js";
+import { runSlowLaneWorker, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const CAPTURED = new URL("./fixtures/account-usage/claude-json.json", import.meta.url);
 

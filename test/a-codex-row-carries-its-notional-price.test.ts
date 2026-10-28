@@ -5,14 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { groupSpendByAccount } from "../src/lib/ledger.js";
-import { architectLaneShare, architectLaneShareTable } from "../src/lib/retro.js";
-import { isCashSpendProducer, isProducedSpendRow, notionalSpendUsd, spendAmountUsd } from "../src/lib/spend-rows.js";
-import { deriveDayCostUsd } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
-import { codexNotionalCostUsd, spawnCodexWorker } from "../src/lib/worker-provider.js";
+import { deriveAnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { groupSpendByAccount } from "#src/lib/ledger.js";
+import { architectLaneShare, architectLaneShareTable } from "#src/lib/retro.js";
+import { isCashSpendProducer, isProducedSpendRow, notionalSpendUsd, spendAmountUsd } from "#src/lib/spend-rows.js";
+import { deriveDayCostUsd } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
+import { codexNotionalCostUsd, spawnCodexWorker } from "#src/lib/worker-provider.js";
 
 /**
  * W1-T5629 — A CODEX ROW CARRIES ITS NOTIONAL PRICE, NOT A HARD-CODED $0.

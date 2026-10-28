@@ -6,9 +6,9 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { computeBoardSnapshot, type BoardDeps } from "../src/lib/board.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub, PrRef, StatusProjection } from "../src/lib/status.js";
+import { computeBoardSnapshot, type BoardDeps } from "#src/lib/board.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { GitHub, PrRef, StatusProjection } from "#src/lib/status.js";
 
 function task(id: string): Task {
   return { id, title: `Task ${id}`, repo: "remudero", depends_on: [], type: "implement", risk: "medium", verify: "auto", status: "queued", attempts: 0 };

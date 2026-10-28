@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { rotateLedger, RENDER_RELEVANT_LEDGER_STEPS, RENDER_STEP_RETENTION_WINDOW_MS } from "../src/lib/ledger.js";
-import { DEFAULT_LIVENESS_BOUND_MS } from "../src/lib/status.js";
+import { rotateLedger, RENDER_RELEVANT_LEDGER_STEPS, RENDER_STEP_RETENTION_WINDOW_MS } from "#src/lib/ledger.js";
+import { DEFAULT_LIVENESS_BOUND_MS } from "#src/lib/status.js";
 
 // ── W1-T282 taught the NOW panel to open a run on any lane's start step, not just `run.start`. None
 // of the six new ones was retained, so `rotateLedger` dropped them and a long-running lane could

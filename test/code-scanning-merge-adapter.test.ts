@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 // @ts-expect-error — trusted metadata script is plain ESM, outside tsconfig source roots.
-import {readSecurityMergeDecision, publishSecurityMergeDecision} from '../src/lib/code-scanning-merge-adapter.mjs';
+import {readSecurityMergeDecision, publishSecurityMergeDecision} from '#src/lib/code-scanning-merge-adapter.mjs';
 const head='a'.repeat(40),other='b'.repeat(40);
 const target={owner:'craigoley',repo:'remudero',prNumber:11468,expectedHead:head};
 const pr=()=>({state:'open',head:{sha:head},base:{sha:other,ref:'main',repo:{full_name:'craigoley/remudero'}},changed_files:1});

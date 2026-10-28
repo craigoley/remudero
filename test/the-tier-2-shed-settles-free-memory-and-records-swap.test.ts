@@ -15,9 +15,9 @@ import { test } from "node:test";
 import {
   cgroupSwapCurrent, createServeSupervisor, HANDOFF_NEED_MARGIN, SHED_SETTLE_CAP_MS, SHED_SETTLE_READ_INTERVAL_MS,
   type GenerationProcess, type PreparedSlot, type ServeSupervisorOptions,
-} from "../src/lib/serve-supervisor.js";
-import { GENERATION_MESSAGES, type GenerationMessage } from "../src/lib/serve-generation.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/serve-supervisor.js";
+import { GENERATION_MESSAGES, type GenerationMessage } from "#src/lib/serve-generation.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const tick = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const GB = 1e9;

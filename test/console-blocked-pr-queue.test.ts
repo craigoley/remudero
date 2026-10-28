@@ -19,9 +19,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { computeBoardSnapshot, type BoardDeps } from "../src/lib/board.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
+import { computeBoardSnapshot, type BoardDeps } from "#src/lib/board.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
 
 function task(over: Partial<Task> = {}): Task {
   return {

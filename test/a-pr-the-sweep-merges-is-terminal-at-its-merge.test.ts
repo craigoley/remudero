@@ -3,9 +3,9 @@
 // #12289's fix round read "fix already dispatched for this head" until then.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { logArmAttribution } from "../src/lib/arm-auto-merge.js";
-import { PR_TERMINAL_STEP } from "../src/lib/ledger-carry.js";
-import { fixRungStalledWithoutNewHead } from "../src/lib/sweep.js";
+import { logArmAttribution } from "#src/lib/arm-auto-merge.js";
+import { PR_TERMINAL_STEP } from "#src/lib/ledger-carry.js";
+import { fixRungStalledWithoutNewHead } from "#src/lib/sweep.js";
 
 const TASK = "W1-T9802";
 const IMPL_HEAD = "b".repeat(40);

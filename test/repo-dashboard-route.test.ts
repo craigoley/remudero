@@ -4,10 +4,10 @@ import type { AddressInfo } from "node:net";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createService } from "../src/lib/service.js";
-import { buildRepoDashboardRoute } from "../src/lib/repo-dashboard-route.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { loadManagedRepos } from "../src/lib/managed-repos.js";
+import { createService } from "#src/lib/service.js";
+import { buildRepoDashboardRoute } from "#src/lib/repo-dashboard-route.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadManagedRepos } from "#src/lib/managed-repos.js";
 
 const READ_TOKEN = "repo-dashboard-read-token";
 const UNMEASURED = {

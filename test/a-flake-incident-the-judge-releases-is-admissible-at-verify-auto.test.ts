@@ -9,14 +9,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { runFlakeIncidentGardener } from "../src/lib/flake-incident-gardener.js";
-import { machineShardFilingRefusal } from "../src/lib/machine-filing.js";
-import { renderRuledShard } from "../src/lib/machine-filing-judge.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml } from "../src/lib/plan.js";
-import type { FilingRiskRuling } from "../src/lib/risk-judge.js";
-import { lintTask, promoteIntroducedPlanOnlyDiagnostics, taskRulingPin } from "../src/lib/task-linter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { runFlakeIncidentGardener } from "#src/lib/flake-incident-gardener.js";
+import { machineShardFilingRefusal } from "#src/lib/machine-filing.js";
+import { renderRuledShard } from "#src/lib/machine-filing-judge.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml } from "#src/lib/plan.js";
+import type { FilingRiskRuling } from "#src/lib/risk-judge.js";
+import { lintTask, promoteIntroducedPlanOnlyDiagnostics, taskRulingPin } from "#src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const TEST_FILE = "test/the-roster-is-named-not-numbered.test.ts";
 const TITLE = "runPreflightFast over ONLY the roster's admitted projection passes on a clean HEAD";

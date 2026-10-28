@@ -16,16 +16,16 @@ import {
   type OpenPrView,
   type RollupCheckEntry,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 import {
   buildOpenPrViews,
   buildSweepEffects,
   cancelledRequiredChecks,
   fetchCiFailures,
   type CiFailureFetchOptions,
-} from "../src/run-task.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
+} from "#src/run-task.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
 
 // W1-T4226: `fetchCiFailures`'s own annotation/job-log reads go through its CiFailureFetchOptions
 // seam, never the refused real gh — every failing check's evidence is READ, as in production.

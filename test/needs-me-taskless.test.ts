@@ -3,8 +3,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { projectPlan, type GitHub, type PrRef } from "../src/lib/status.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { projectPlan, type GitHub, type PrRef } from "#src/lib/status.js";
 
 /**
  * W1-T283: NEEDS ME's render set was `for (const task of plan.tasks) ...` alone (status.ts's

@@ -7,8 +7,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { test } from "node:test";
-import { readModelCommand, readModelSwitchesPath } from "../src/lib/read-model-cli.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { readModelCommand, readModelSwitchesPath } from "#src/lib/read-model-cli.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 test("a view switch keeps the push and github keys it does not set", (t) => {
   const stateDir = makeTempDir("switch-keys");

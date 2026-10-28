@@ -24,9 +24,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildPanelGraphRoutes, type PanelGraphDeps, type RatifyCliGateway } from "../src/lib/panel-graph.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { TraceGithub } from "../src/lib/trace.js";
+import { buildPanelGraphRoutes, type PanelGraphDeps, type RatifyCliGateway } from "#src/lib/panel-graph.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { TraceGithub } from "#src/lib/trace.js";
 
 
 // ── extraction (verbatim from the shipped shell) ────────────────────────────────────────────

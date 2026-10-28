@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { ciFrictionLadder, ciFrictionRecordVerdict, ciFrictionShardStem, ciFrictionShardYaml, gitCiFrictionOwnerSearch } from "../src/lib/ci-friction-gardener.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { ciFrictionLadder, ciFrictionRecordVerdict, ciFrictionShardStem, ciFrictionShardYaml, gitCiFrictionOwnerSearch } from "#src/lib/ci-friction-gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const TEST = "test/census-reads-files.test.ts";
 const SOURCE = "src/lib/dispatch-governor.ts";

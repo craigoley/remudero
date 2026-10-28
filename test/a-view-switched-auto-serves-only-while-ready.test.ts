@@ -5,14 +5,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setImmediate as nextTurn, setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { readModelCommand, readReadModelSwitches as readCliSwitches } from "../src/lib/read-model-cli.js";
+import { readModelCommand, readReadModelSwitches as readCliSwitches } from "#src/lib/read-model-cli.js";
 import {
   createReadModelTicker, createReadModelWorker, readModelSwitchesPath, readReadModelSwitches, VIEW_AUTO_DEMOTED_STEP, VIEW_AUTO_PROMOTED_STEP, type ReadModelBodyEntry, type ReadModelWorkerHandle, type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import { createService } from "../src/lib/service.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { withViewShadow, type ShadowRequest } from "../src/lib/view-shadow.js";
-import { buildReadModelViewRoutes, READ_MODEL_STATUS_VIEW, viewEtag, viewMode, type ViewBodySource, type ViewDefinition } from "../src/lib/views.js";
+} from "#src/lib/read-model-worker.js";
+import { createService } from "#src/lib/service.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { withViewShadow, type ShadowRequest } from "#src/lib/view-shadow.js";
+import { buildReadModelViewRoutes, READ_MODEL_STATUS_VIEW, viewEtag, viewMode, type ViewBodySource, type ViewDefinition } from "#src/lib/views.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 const VIEW = "legacy-view";

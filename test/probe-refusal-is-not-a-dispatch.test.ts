@@ -7,7 +7,7 @@ import {
   dispatchesWithoutNewOwnedPr,
   isDispatchBreakerTripped,
   isLifetimeDispatchCapExceeded,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 
 // ── W1-T2423: A PROBE REFUSAL IS COUNTED AS A DISPATCH THAT PRODUCED NOTHING.
 //

@@ -70,7 +70,7 @@ function scan(file: string, src: string): RealPreflightHit[] {
       hits.push({ file, call: `preflightCommand(${args})`, shape: "preflightCommand without spawn" });
     }
   }
-  const importsMain = /import\s*\{[^}]*\bmain\b[^}]*\}\s*from\s*["']\.\.\/src\/run-task(\.js|\.ts)?["']/.test(src);
+  const importsMain = /import\s*\{[^}]*\bmain\b[^}]*\}\s*from\s*["'](\.\.\/|#)src\/run-task(\.js|\.ts)?["']/.test(src);
   const preflightArgv = /[[,]\s*["']preflight["']\s*[,\]]/.test(src);
   if (importsMain && preflightArgv) {
     for (const m of src.matchAll(/(?<![\w.])main\(/g)) {
@@ -139,4 +139,6 @@ test("the scanner flags each real-preflight shape and passes each seam-injected 
     0,
   );
   assert.equal(scan("x", imp + 'process.argv = ["node", "rmd", "lint-plan"];\nawait main({});').length, 0, "other verbs");
+  const aliasImp = 'import { main } from "#src/run-task.js";\n';
+  assert.equal(scan("x", aliasImp + 'run(["preflight"]);\nawait main({});').length, 1, "subpath-alias import");
 });

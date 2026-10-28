@@ -4,11 +4,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { createConsoleSnapshotCache, RouteResponseBuffer } from "../src/lib/console-snapshot-cache.js";
-import { createConsoleSnapshotStore } from "../src/lib/console-snapshot-store.js";
-import { bearerTokenId } from "../src/lib/panel-actions.js";
-import type { Route } from "../src/lib/service.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { createConsoleSnapshotCache, RouteResponseBuffer } from "#src/lib/console-snapshot-cache.js";
+import { createConsoleSnapshotStore } from "#src/lib/console-snapshot-store.js";
+import { bearerTokenId } from "#src/lib/panel-actions.js";
+import type { Route } from "#src/lib/service.js";
 
 const clock = fixedClock(1_790_000_000_000);
 const request = { method: "GET", url: "/v1/status", headers: { authorization: "Bearer fixture-reader" } } as IncomingMessage;

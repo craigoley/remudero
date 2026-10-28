@@ -9,8 +9,8 @@ import {
   TRAILER_ALL_LIMIT,
   type GitHub,
   type PrRef,
-} from "../src/lib/status.js";
-import { resolveAlreadySatisfied, type AlreadySatisfiedClaim } from "../src/run-task.js";
+} from "#src/lib/status.js";
+import { resolveAlreadySatisfied, type AlreadySatisfiedClaim } from "#src/run-task.js";
 
 /**
  * W1-T441: `findMergedByTrailer` returns AT MOST ONE merged PR and takes the NEWEST, but the

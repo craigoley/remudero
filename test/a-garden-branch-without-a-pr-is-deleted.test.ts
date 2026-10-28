@@ -9,11 +9,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gardenCheckout } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gardenCheckout } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 function fixture(fetcher: (args: string[]) => unknown, log: (step: string, extra?: Record<string, unknown>) => void) {
   const seed = gitRepo({ kind: "garden-head-seed" });

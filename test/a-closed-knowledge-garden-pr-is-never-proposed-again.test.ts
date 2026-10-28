@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { GardenStateUnreadableError } from "../src/lib/gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { GardenStateUnreadableError } from "#src/lib/gardener.js";
 import {
   gardenerStatePath,
   initialGardenerState,
@@ -20,9 +20,9 @@ import {
   runGardenPass,
   type GardenWorkspace,
   type PrState,
-} from "../src/lib/knowledge-gardener.js";
-import { learningUsagePath } from "../src/lib/knowledge-value.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/knowledge-gardener.js";
+import { learningUsagePath } from "#src/lib/knowledge-value.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 type Usage = { offered: number; used: number };
 type Rows = Array<[string, Record<string, unknown> | undefined]>;

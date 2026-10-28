@@ -20,8 +20,8 @@ import {
   ledgerCarriedPrefixPath,
   ledgerExceedsRotationCeiling,
   rotateLedger,
-} from "../src/lib/ledger.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#src/lib/ledger.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const T0 = Date.parse("2026-09-23T10:00:00.000Z");
 const CEILING = 4000;

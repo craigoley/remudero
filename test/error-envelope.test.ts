@@ -7,8 +7,8 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { GENERIC_EXIT_CODE, RmdError, exitCodeFor, isRmdError, type RmdErrorKind } from "../src/lib/errors.js";
-import { PlanError } from "../src/lib/plan.js";
+import { GENERIC_EXIT_CODE, RmdError, exitCodeFor, isRmdError, type RmdErrorKind } from "#src/lib/errors.js";
+import { PlanError } from "#src/lib/plan.js";
 
 /** A second, independent adopter with its OWN distinct code — proves `exitCodeFor` reads the
  *  envelope generically (any declared code flows through), not a hardcoded PlanError special case. */

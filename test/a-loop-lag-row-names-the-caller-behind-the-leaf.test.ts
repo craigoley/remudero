@@ -5,11 +5,11 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { reportLoopLag } from "../src/lib/daemon.js";
-import { ghExecFile } from "../src/lib/github-transport.js";
-import { startReadPlaneTelemetry } from "../src/lib/read-plane.js";
-import { hostWorktreeGit } from "../src/lib/worktree-git.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { reportLoopLag } from "#src/lib/daemon.js";
+import { ghExecFile } from "#src/lib/github-transport.js";
+import { startReadPlaneTelemetry } from "#src/lib/read-plane.js";
+import { hostWorktreeGit } from "#src/lib/worktree-git.js";
 
 // W1-T7745: a slow execFileSync UNDER the telemetry wrapper; each call advances a fake clock by `pending`.
 function withSlowSpawn(run: (telemetry: ReturnType<typeof startReadPlaneTelemetry>, setMs: (ms: number) => void) => void): void {

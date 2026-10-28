@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { aggregateLearningsInjection, type LearningsInjectionTotals } from "../src/lib/digest.js";
-import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
+import { aggregateLearningsInjection, type LearningsInjectionTotals } from "#src/lib/digest.js";
+import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "#src/lib/status-board.js";
 
 // ── W1-T940: THE INJECTION DROP LIST IS LEDGER-ONLY ─────────────────────────────────────────
 //

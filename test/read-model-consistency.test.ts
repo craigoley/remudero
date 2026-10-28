@@ -3,10 +3,10 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import { ACTIVITY_RING_ROWS, createLedgerProjector, openProjectorReadModel, readModelDigest } from "../src/lib/ledger-projector.js";
-import { readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "../src/lib/ledger-union.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import { ACTIVITY_RING_ROWS, createLedgerProjector, openProjectorReadModel, readModelDigest } from "#src/lib/ledger-projector.js";
+import { readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "#src/lib/ledger-union.js";
 import {
   ORACLE_AGREE_INTERVAL_MS,
   ORACLE_CLOSED_LAG_MS,
@@ -29,9 +29,9 @@ import {
   healRecurs,
   type ConsistencyCheckOptions,
   type OracleWindow,
-} from "../src/lib/read-model-consistency.js";
+} from "#src/lib/read-model-consistency.js";
 import { acquireLease, flushReadModelTransactions, type ReadModelDb, type ReadModelLease } from "#src/lib/read-model-db.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";

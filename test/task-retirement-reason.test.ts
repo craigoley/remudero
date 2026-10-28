@@ -25,11 +25,11 @@ import {
   unmetDependencies,
   type Plan,
   type Task,
-} from "../src/lib/plan.js";
-import { nextRunnable, tallyDispatchFilters } from "../src/lib/drain.js";
-import { lintPlanCommand } from "../src/run-task.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
+} from "#src/lib/plan.js";
+import { nextRunnable, tallyDispatchFilters } from "#src/lib/drain.js";
+import { lintPlanCommand } from "#src/run-task.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "#src/lib/status-board.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

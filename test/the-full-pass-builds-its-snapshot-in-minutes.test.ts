@@ -13,14 +13,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import type { EscalationAnswerGateway } from "../src/lib/escalation-answers.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildSweepHook } from "./helpers/run-task-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import type { Config } from "#src/lib/config.js";
+import type { EscalationAnswerGateway } from "#src/lib/escalation-answers.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildSweepHook } from "#test/helpers/run-task-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const NOW = Date.UTC(2026, 9, 15, 6, 0);
 const at = (minutes: number) => new Date(NOW + minutes * 60_000).toISOString();

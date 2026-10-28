@@ -17,13 +17,13 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DECLARED_BRANCH_GUARDS_FILE } from "../src/lib/branch-reaper.js";
+import { DECLARED_BRANCH_GUARDS_FILE } from "#src/lib/branch-reaper.js";
 import {
   DECLARED_BRANCH_GUARDS,
   planReverseBranchDrift,
   reapBranchesCommand,
   type BranchCitationHit,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const hit = (file: string, line: number, name: string): BranchCitationHit => ({ file, line, name });
 

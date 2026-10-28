@@ -36,9 +36,9 @@ import {
   UNATTRIBUTABLE_REPO,
   type AutonomyLedgerMining,
   type MergeRecord,
-} from "../src/lib/autonomy.js";
-import type { LedgerUnionResult } from "../src/lib/ledger-grep.js";
-import { autonomyRateCommand } from "../src/run-task.js";
+} from "#src/lib/autonomy.js";
+import type { LedgerUnionResult } from "#src/lib/ledger-grep.js";
+import { autonomyRateCommand } from "#src/run-task.js";
 
 function tmpDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

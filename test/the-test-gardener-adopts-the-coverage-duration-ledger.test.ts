@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   applyTestGardenActions, DURATION_ADOPTION_CADENCE_MS, DURATION_WINDOW_RUNS,
   loadTestManifestProbe, refreshTestManifestProposalAsync,
   testGardenCheapFingerprint, testGardenInventory, testGardenSpec,
-} from "../src/lib/test-gardener.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/test-gardener.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const FAST = "scripts/test-tier-manifest.json";
 const COVERAGE = "scripts/test-tier-coverage-manifest.json";

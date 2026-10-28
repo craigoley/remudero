@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildStatusBoard, type ServiceName, type StatusBoardDeps } from "../src/lib/status-board.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { buildStatusBoard, type ServiceName, type StatusBoardDeps } from "#src/lib/status-board.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // ── W1-T3241: `head vs origin/main` was gated on `daemonRow.running`, and `running` reads false
 // whenever `livenessState` cannot even ASK the question — `sensed === false`, the state EVERY read

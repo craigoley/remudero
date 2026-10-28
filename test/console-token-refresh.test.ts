@@ -20,7 +20,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 
-import { buildReadyServeServer, buildServeRoutes, buildServeServer, buildVersionRoute, type ServeDeps } from "../src/lib/serve.js";
+import { buildReadyServeServer, buildServeRoutes, buildServeServer, buildVersionRoute, type ServeDeps } from "#src/lib/serve.js";
 import {
   GH_APP_ID_ENV,
   GH_APP_INSTALLATION_ID_ENV,
@@ -28,11 +28,11 @@ import {
   TOKEN_REFRESHED_STEP,
   TOKEN_REFRESH_FAILED_STEP,
   type RefreshOptions,
-} from "../src/lib/github-app.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+} from "#src/lib/github-app.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 const READ_TOKEN = "ctr-read-token";
 const WRITE_TOKEN = "ctr-write-token";

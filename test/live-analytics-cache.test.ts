@@ -4,8 +4,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { createLiveAnalyticsSnapshotCache, readLiveStatusSnapshot } from "../src/lib/live-analytics-snapshot-cache.js";
+import { buildAnalyticsRoute, deriveAnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { createLiveAnalyticsSnapshotCache, readLiveStatusSnapshot } from "#src/lib/live-analytics-snapshot-cache.js";
 
 function responseCapture(): { response: ServerResponse; body: () => unknown } {
   let raw = "";

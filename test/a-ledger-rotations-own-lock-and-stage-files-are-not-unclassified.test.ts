@@ -5,14 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { LEDGER_FILENAME, LEDGER_ROTATION_LOCK_SUFFIX, LEDGER_STAGE_TAGS } from "../src/lib/ledger-path.js";
-import { ledgerRotationLockPath } from "../src/lib/ledger.js";
+import { LEDGER_FILENAME, LEDGER_ROTATION_LOCK_SUFFIX, LEDGER_STAGE_TAGS } from "#src/lib/ledger-path.js";
+import { ledgerRotationLockPath } from "#src/lib/ledger.js";
 import {
   auditLedgerUnion,
   readLedgerUnionRawLinesSync,
   readLedgerUnionRecordsSync,
   resolveLedgerUnion,
-} from "../src/lib/ledger-union.js";
+} from "#src/lib/ledger-union.js";
 
 function row(marker: string): string {
   return JSON.stringify({ ts: "2026-10-04T12:00:00.000Z", step: "run.start", marker });

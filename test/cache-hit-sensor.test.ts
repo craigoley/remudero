@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { aggregateCacheHitTotals, cacheHitRatio, renderDigest, summarize, type CacheHitTotals } from "../src/lib/digest.js";
-import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
+import { aggregateCacheHitTotals, cacheHitRatio, renderDigest, summarize, type CacheHitTotals } from "#src/lib/digest.js";
+import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "#src/lib/status-board.js";
 
 // ── W1-T929: THE CACHE-HIT RATIO IS LEDGERED BUT NEVER READ ────────────────────────────────
 //

@@ -33,9 +33,9 @@ import { mkdtempSync, mkdirSync, readFileSync, existsSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { isQueueDispatchRunStart, DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import { laneRunStartFields } from "../src/run-task.js";
-import { deriveCircuitBrokenBlockers, deriveDispatchCadence } from "../src/lib/status-board.js";
+import { isQueueDispatchRunStart, DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import { laneRunStartFields } from "#src/run-task.js";
+import { deriveCircuitBrokenBlockers, deriveDispatchCadence } from "#src/lib/status-board.js";
 
 const tmp = (p: string) => mkdtempSync(join(tmpdir(), p));
 
@@ -67,7 +67,7 @@ async function driveLane(lane: "triage" | "retro"): Promise<Array<Record<string,
   console.error = () => {};
   console.log = () => {};
   try {
-    const rt = await import("../src/run-task.js");
+    const rt = await import("#src/run-task.js");
     const cfg = { root } as never;
     const spawn = (async () => {
       throw new Error("this test never pays for a worker");
@@ -182,7 +182,7 @@ test("reader: deriveDispatchCadence ignores lane rows, so the queue-head bound i
 // ── reader 3: the duration pairing must not count a lane run as terminal-less ────────────────
 
 test("reader: taskDurations does not count a verdict-less lane run as a run with no terminal state", async () => {
-  const { deriveTaskDurations } = (await import("../src/lib/analytics-route.js")) as unknown as {
+  const { deriveTaskDurations } = (await import("#src/lib/analytics-route.js")) as unknown as {
     deriveTaskDurations?: (l: Array<Record<string, unknown>>) => { noTerminalCount: number };
   };
   if (!deriveTaskDurations) return; // not exported on this build — the wiring test below still holds
@@ -201,7 +201,7 @@ test("reader: taskDurations does not count a verdict-less lane run as a run with
 // ── the task-id-keyed readers need nothing, and that is asserted rather than assumed ─────────
 
 test("the task-id-keyed readers are untouched: a lane id is never a plan task id", async () => {
-  const { dispatchesEver } = await import("../src/lib/status.js");
+  const { dispatchesEver } = await import("#src/lib/status.js");
   const lines = [
     IMPL("W1-T1", "2026-08-20T00:00:00.000Z"),
     LANE("RETRO", "2026-08-20T01:00:00.000Z", "retro"),

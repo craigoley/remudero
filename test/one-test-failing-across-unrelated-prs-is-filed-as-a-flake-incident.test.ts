@@ -6,15 +6,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   FLAKE_INCIDENT_POLICY, flakeIncidentOrigin, runFlakeIncidentGardener, testSourcePaths,
-} from "../src/lib/flake-incident-gardener.js";
-import { selectorShadowGardenPass } from "../src/lib/garden-registry.js";
+} from "#src/lib/flake-incident-gardener.js";
+import { selectorShadowGardenPass } from "#src/lib/garden-registry.js";
 import {
   readSelectorShadowRunsAsync, SELECTOR_SHADOW_SHARDS, selectorShadowFlakeEvidence, selectorShadowFlakeLedger,
-} from "../src/lib/selector-shadow-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/selector-shadow-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const TEST_FILE = "test/operator-agent-scan-routes-never-block-the-loop.test.ts";
 const TITLE = "after a rotation lands the emergency status answers within budget and sees the new stop";

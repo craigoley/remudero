@@ -10,12 +10,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runGarden, type GardenCheckout, type GardenerDeps } from "../src/lib/gardener.js";
-import { ciFrictionGardenSpec, ciFrictionShardStem, type CiFrictionGardenSources } from "../src/lib/ci-friction-gardener.js";
-import type { OwnerSearch } from "../src/lib/ci-friction-remedy.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { lintTask } from "../src/lib/task-linter.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { runGarden, type GardenCheckout, type GardenerDeps } from "#src/lib/gardener.js";
+import { ciFrictionGardenSpec, ciFrictionShardStem, type CiFrictionGardenSources } from "#src/lib/ci-friction-gardener.js";
+import type { OwnerSearch } from "#src/lib/ci-friction-remedy.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { lintTask } from "#src/lib/task-linter.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 function fixture(kind: string, ownerFile: string, gate = "gate") {
   const repo = gitRepo({ kind });

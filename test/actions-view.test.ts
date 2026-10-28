@@ -4,16 +4,16 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildActionResultsRoute } from "../src/lib/action-results.js";
-import { ACTIONS_VIEW_NAME, createActionsView, type ActionsData } from "../src/lib/actions-view.js";
-import type { Clock } from "../src/lib/clock.js";
-import { isFactStep, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { createReadModelTicker, ledgerSource, type ReadModelInstanceState, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { STATUS_BOARD_MIN_ROTATIONS, STATUS_BOARD_WINDOW_MS } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import type { ViewBodyEntry } from "../src/lib/views.js";
-import { writeLedger, type LedgerFixture } from "./helpers/ledger-fixture.js";
-import { switchViewsOn } from "./helpers/read-model-switches.js";
+import { buildActionResultsRoute } from "#src/lib/action-results.js";
+import { ACTIONS_VIEW_NAME, createActionsView, type ActionsData } from "#src/lib/actions-view.js";
+import type { Clock } from "#src/lib/clock.js";
+import { isFactStep, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { createReadModelTicker, ledgerSource, type ReadModelInstanceState, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { STATUS_BOARD_MIN_ROTATIONS, STATUS_BOARD_WINDOW_MS } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import type { ViewBodyEntry } from "#src/lib/views.js";
+import { writeLedger, type LedgerFixture } from "#test/helpers/ledger-fixture.js";
+import { switchViewsOn } from "#test/helpers/read-model-switches.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 

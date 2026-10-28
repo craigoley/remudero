@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { callSiteKey, enclosingTestTitle, numberCallSites } from "./helpers/test-call-site-key.js";
+import { callSiteKey, enclosingTestTitle, numberCallSites } from "#test/helpers/test-call-site-key.js";
 
 // ── W1-T5622: the operator-gated reachability census keys a witness by its enclosing TEST TITLE ──
 //

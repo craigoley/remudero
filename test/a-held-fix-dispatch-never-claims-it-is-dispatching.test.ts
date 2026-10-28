@@ -1,4 +1,3 @@
-// test/a-held-fix-dispatch-never-claims-it-is-dispatching.test.ts
 //
 // LIVE 2026-10-10: #10551 (W1-T7243, head 3644414) was disposed `conflicted`, blocker_owner
 // `conflict-rebase`, every ~2 minutes for hours with the reason "… dispatching the bounded
@@ -18,10 +17,10 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { finalBlocker } from "../src/lib/pr-blocker.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#test/helpers/sweep-test.js";
+import { finalBlocker } from "#src/lib/pr-blocker.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = Date.parse("2026-10-10T11:13:00Z");
 const PR = 10551;

@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import * as guard from "../src/lib/live-write-guard.js";
+import * as guard from "#src/lib/live-write-guard.js";
 
 const { assertLedgerPathNotLive, discoverLiveLedgerRoot, isTestRunner, LIVE_LEDGER_DENY_ROOT_ENV } = guard;
 

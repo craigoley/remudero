@@ -5,10 +5,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import * as blockers from "../src/lib/pr-blocker.js";
-import { runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import * as blockers from "#src/lib/pr-blocker.js";
+import { runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const NOW = Date.UTC(2026, 9, 9, 20);
 const HOLD = { step: "automerge.hold_engaged", pr_number: 71, by: "Craig Oley", reason: "hold pending W1-T7092 corrections", authority: "interactive-cli" };

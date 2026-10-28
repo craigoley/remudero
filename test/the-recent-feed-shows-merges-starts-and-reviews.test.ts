@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { writeFileSync } from "node:fs";
 import { test } from "node:test";
-import { buildRecentRoute, computeRecentActivity, createRecentActivityCache, type BoardDeps } from "../src/lib/board.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { buildRecentRoute, computeRecentActivity, createRecentActivityCache, type BoardDeps } from "#src/lib/board.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 /**
  * /v1/recent never showed a merge on the live fleet. The console's "Just merged" panel and its

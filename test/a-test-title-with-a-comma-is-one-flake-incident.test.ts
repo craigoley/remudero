@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 
-import { selectorShadowFlakeEvidence } from "../src/lib/selector-shadow-gardener.js";
+import { selectorShadowFlakeEvidence } from "#src/lib/selector-shadow-gardener.js";
 
 const TITLE =
   "runPreflightFast over ONLY the roster's admitted projection passes on a clean HEAD — the roster itself asserts nothing, the measured bound does";
