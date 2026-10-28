@@ -1,0 +1,64 @@
+- id: W1-T10917
+  title: Qualify Inbox readiness against stable current pages while retaining snapshot cursors and measured history
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 3
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  author_class: machine
+  budget_usd: 3
+  principles:
+    tdd: strict
+  origin: console-followup:inbox-readiness-population-20261028
+  plan_refs:
+    - §7B
+  files:
+    - src/lib/inbox-view.ts
+    - src/lib/view-shadow.ts
+    - src/lib/view-shadow-store.ts
+    - src/lib/read-model-worker.ts
+    - src/lib/read-model-db.ts
+    - src/lib/views.ts
+    - test/view-shadow.test.ts
+    - test/shadow-counter-history-is-not-rewritten.test.ts
+    - test/shadow-readiness-accrues-without-console-traffic.test.ts
+    - test/inbox-shadow-reuses-its-paged-snapshot.test.ts
+    - test/the-inbox-and-feedback-views-answer-from-memory.test.ts
+    - test/read-model-worker.test.ts
+  rationale: |-
+    The operator explicitly approved this repair on October 28: "Approve the Inbox readiness repair, preserving history, cursors and full-day validation." This is operator authority for this bounded product-readiness correction, not a model verdict or permission to weaken qualification. The fresh complete subject audit at main4f417ccc read all19open heads and actual remote refs: no equivalent task or changes in the relevant four source seams. Related W1-T6017 concerns per-instance evidence, not churn of qualification membership; this task retains its boundary.
+    The existing Inbox producer includes each classification snapshot in continuation cursor keys. The worker removes retired bodies, but shadow_key membership survives successful comparisons. Readiness multiplies all retained keys by1440, so healthy revisions continuously expand its evidence obligation. A closed private native-function reproduction with61snapshots and11currentpages produced131historical keys,671same comparisons and0real differences: required188640samples instead of15840for the11logicalpages. A separate observed live metadata inventory contained907198keys and required1306365120samples. These observations do not themselves permit a cutover, deletion, smaller statistical floor or claim that other shadow views are healthy.
+    Prometheus recommends bounded measurement dimensions and warns that each distinct label combination creates a separate series: https://prometheus.io/docs/practices/instrumentation/ and https://prometheus.io/docs/practices/naming/ . This is an instrumentation analogy only. Exact routing identity and Remudero's own sampling, traffic and full-day gates remain authoritative.
+  design: |-
+    Implement inbox-current-pages-v1 as an explicitly new qualification generation, reusing the maintained producer/read-model/shadow/store path. Full request/cursor keys stay exact and revision-bound for lookup, routing and409 restart/refusal. Only a successfully verified current Inbox body may supply a separate logical qualification identity. Retain repository, instance, section, page offset/ordinal and every supported filter dimension; invalid, stale, foreign or unknown identities never pool or earn a comparison.
+    Capture the complete active logical page set from the same completed producer snapshot that publishes the exact bodies. Treat missing/incomplete/changed/mismatched generation or active membership as NOT READY. Do not infer the active population from whichever pages happened to receive requests or samples. Repeated healthy snapshot revisions for the same scope and logical page keep the same qualification obligation, with the existing one-minute sample cadence. No stale cursor is normalized into a usable route.
+    Every newly active or reintroduced logical page must earn a fresh full-day, zero-real-diff window and1440cadence samples of its own. Never lend a view-wide scalar streak or another page/repository/instance/generation's samples to a new page. Keep the existing global rule-of-three traffic floor, real-difference behavior, sampling cadence, fairness and producer generation matching. A genuine real diff or any unqualified source remains refusal. Empty or unreadable population is not readiness.
+    Preserve all pre-existing per-view counters, raw cursor-key membership, historical generations, ledger evidence and current routing bodies. Old counters cannot qualify the new generation. Retiring an inactive logical page retains its evidence/history while removing only its current qualification obligation; reappearance cannot borrow old evidence. Persistence failure or busy/uncommitted counter saves must continue disabling readiness. Native lease fences and counter-only fail-fast behavior remain. No wholesale history hydration/rewrite/prune/zero, no invented COMPLETE source and no live migration/cutover here.
+    Use bounded indexed current-generation/per-page evidence in the existing native counter store; a small additive schema inside read-model-db.ts is permitted if required, with backward-compatible readers and real restart/transaction controls. Expose current active obligation, retained historical evidence and the precise blocker through the existing readiness counts/reason fields, retaining the public contract. Keep unrelated views' behavior unchanged.
+    Drive the real Inbox page producer, worker, comparator and native persistence in private deterministic fixtures. Prove healthy snapshot churn remains bounded; no cross-scope pooling; unseen/late/reappearing pages block despite abundant older samples; source/cursor/generation failures do not earn samples; old exact cursors still409; a real difference still blocks; interrupted/busy/failing persistence and restart cannot fabricate evidence; legacy history bytes/counts are retained. Keep positive controls for genuine matching pages and unrelated legacy views. Run caller and population census suites in addition to direct imports.
+    Remove the logical identity/population wiring and require the snapshot-churn regression to fail; remove per-page gating and require the late-page control to fail; restore each fix. Commit before source-positive diff coverage and verify every changed source SF plus its own targeted DA-zero rejection. Retain canonical literal proofs, committed-tree first author, stored-body validation, governed review, all hosted checks and protected merge.
+    Not authorized by this task: readiness threshold/cadence/traffic-floor changes, reusing historical pooled samples, counter cleanup/deletion, switch/cutover enablement, deployment or restart, actions/permissions/providers/billing/budgets/service settings, CI infrastructure, Azure-memory policy, another model builder or induced gardener pass. The existing #15078 owner and source claim remain separate.
+  acceptance:
+    - claim: Healthy classification snapshot churn keeps qualification on the complete current logical Inbox page set while preserving raw cursor history
+      proof: "unit test: W1-T10917: Inbox snapshot churn qualifies stable current pages without rewriting history"
+    - claim: Every active new or reintroduced page earns its own fresh full-day cadence; global traffic and real-difference gates remain
+      proof: "unit test: W1-T10917: every active Inbox page earns its own full day and cadence"
+    - claim: Exact cursor fences and repository instance section page filter and producer-generation boundaries remain authoritative
+      proof: "unit test: W1-T10917: readiness preserves exact cursors scope and producer generation"
+    - claim: Incomplete unreadable busy or uncommitted current qualification evidence refuses and survives restart without borrowing history
+      proof: "unit test: W1-T10917: current Inbox qualification refuses incomplete and uncommitted evidence"
+  note: Human approval recorded from the direct October28 request in this Console follow-ups chat. Machine-authored task; operator ruling is pinned to this exact contract, not represented as a model judgment. Scope breadth is high/span; implementation changes no operational authority. Budget3 stays capped; manual source implementation starts only after the filing is merged and native exclusive ownership admits.
+  risk_ruling:
+    verdict: operator
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Direct operator instruction October28: Approve the Inbox readiness repair, preserving history, cursors and full-day validation. This is an operator ruling, not a model verdict."
+      - Bounded existing Inbox/read-model/shadow implementation and tests only. Preserve exact request/cursor/scope validation, all history, new per-page fresh full-day/cadence and existing traffic/real-diff gates; normal ownership, review, CI and protected merge remain. No cutover, deployment, service, provider, spending-setting or permission change.
+    judged_at: 2026-10-28T11:23:06.808Z
+    pin: 5912ee969619550e3e334a8e58cfba6fdee5ec0e6779d6aa5f724bc1861cb7ee
+    operator_release_pin: 4d0bae4c6c75a3794b46aab6c7a8738b272ce9e09a2c0cda7c33f184e4b5127a
