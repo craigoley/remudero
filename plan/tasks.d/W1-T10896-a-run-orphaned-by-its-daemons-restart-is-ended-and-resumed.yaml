@@ -16,6 +16,7 @@
     - src/cli/commands/daemon.ts
     - src/lib/daemon.ts
     - test/dispatch/a-run-orphaned-by-its-daemons-restart-is-ended-and-resumed.test.ts
+    - "src/cli/commands/run-task-verb.ts"
   status: queued
   attempts: 0
   rationale: |

@@ -16,6 +16,7 @@ import { ledgerRunBelongsToTask, readLedgerUnionRecordsSync, realLedgerFs, type 
 import { loadManagedRepos } from "./managed-repos.js";
 import { DEFAULT_LIVENESS_BOUND_MS } from "./non-worker-verdict.js";
 import { ProductIntentStore } from "./product-intent-store.js";
+import { productPlanOrigin, verifyProductPlanEvidence } from "./product-plan-operation.js";
 import {
   productIdSchema, productRequestIdSchema, type ProductStoreCode, type StoredProduct,
 } from "./product-intent.js";
@@ -29,8 +30,8 @@ export const PRODUCT_BUILD_LIMITS = { requestBytes: 4 * 1024 } as const;
 /** The four receipts a README-only repository needs, at its exact head, before any source task is filed. */
 export const BOOTSTRAP_CHECKS = ["test", "typecheck", "build", "security"] as const;
 
-/** Names a durable, reviewed handoff: the target task's `origin:` must carry exactly this. */
-export const productPlanOrigin = (productId: string, planEvidenceId: string) => `product-plan#${productId}/${planEvidenceId}`;
+/** Names a durable, reviewed handoff: the target task's `origin:` must carry exactly this. Defined with the shared plan rule. */
+export { productPlanOrigin };
 /** The trusted bootstrap-receipt evidence id: bound to the exact head so a moved head never inherits it. */
 export const bootstrapEvidenceId = (head: string, check: (typeof BOOTSTRAP_CHECKS)[number]) => `bootstrap:${head}:${check}`;
 /** The reviewed starter PR's own evidence id, bound to the head its merge produced. */
@@ -57,7 +58,7 @@ export interface ProductBuildReceipt {
 export type ProductBuildCode = ProductStoreCode
   | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable"
   | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified"
-  | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded"
+  | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "concurrency_exceeded"
   | "fleet_halted" | "kick_failed";
 export type ProductBuildResult =
   | { ok: true; value: { receipt: ProductBuildReceipt; replayed: boolean }; code?: never }
@@ -171,6 +172,10 @@ export interface ProductBuildOptions {
   /** The existing guarded repo-scoped kick marker, written under the TARGET daemon's root; its admission still decides. */
   kick?: (root: string, taskId: string, origin: string, repo: string) => void;
   clock?: Clock;
+  /** The GitHub transport the shared plan rule reads through; defaults to the bounded `ghTextAsync`. */
+  planText?: (args: string[], opts?: { maxBuffer?: number; timeout?: number }) => Promise<string>;
+  /** The login a genuine remudero-review status is posted by; defaults to the fleet's configured reviewer identity. */
+  planTrustedReviewer?: string;
 }
 
 /**
@@ -431,17 +436,25 @@ export class ProductBuildService {
       if (read.state === "unreadable") throw new Fault("task_unreadable");
       if (read.state === "absent") throw new Fault("task_not_found");
       const task = read.task;
-      if (task.origin !== productPlanOrigin(product.id, input.planEvidenceId) || task.status !== "queued") throw new Fault("task_stale");
+      if (task.status !== "queued") throw new Fault("task_stale");
+      // A plan record that carries its reviewed pull request is re-verified against GitHub NOW, by the rule the case applies.
+      const reviewed = plan.references.find((item) => item.label === `Reviewed task ${input.taskId}`);
+      const pullRequest = reviewed === undefined ? undefined : Number(/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)$/.exec(reviewed.url)?.[1]);
+      const verdict = await verifyProductPlanEvidence({ product, planEvidenceId: input.planEvidenceId, taskId: input.taskId, purpose: "admit",
+        ...(pullRequest !== undefined && Number.isSafeInteger(pullRequest) ? { pullRequest } : {}), targetHead: inspected.head,
+        task: { origin: task.origin, budgetUsd: task.budgetUsd }, text: this.options.planText, trustedReviewer: this.options.planTrustedReviewer });
+      if (!verdict.ok) throw new Fault(verdict.code);
       if (task.merged) throw new Fault("task_merged");
       if (task.claimed) throw new Fault("task_claimed");
-      const budget = product.brief.resourceEnvelope?.budgetUsd;
-      if (budget === undefined || task.budgetUsd === undefined || task.budgetUsd > budget) throw new Fault("budget_exceeded");
+      // Showing the envelope is not enforcing it: no more builds may be active for this product than it allows.
+      const allowed = product.brief.resourceEnvelope?.maxConcurrentBuilds;
+      if (allowed === undefined || this.activeBuilds(product, daemon.root, subject) >= allowed) throw new Fault("concurrency_exceeded");
 
       // The request's own time is taken BEFORE the marker exists, so the daemon's dispatch row is never earlier.
       const requestedAt = this.clock.iso();
       try { this.kick(daemon.root, input.taskId, origin, subject.name); }
       catch (error) { throw Object.assign(new Fault("kick_failed"), { cause: error }); }
-      const queued = this.append(actor, product, requestKey, { id: operationId, outcome: "queued", url: `https://github.com/${subject.owner}/${subject.name}` }, requestedAt);
+      const queued = this.append(actor, product, requestKey, { id: operationId, outcome: "queued", url: `https://github.com/${subject.owner}/${subject.name}`, taskId: input.taskId }, requestedAt);
       product = queued;
     }
     const queuedEvidence = product.stageEvidence.find((item) => item.id === operationId);
@@ -502,11 +515,27 @@ export class ProductBuildService {
     return this.readProduct(actor, product.id);
   }
 
-  private append(actor: string, product: StoredProduct, requestId: string, item: { id: string; outcome: ProductBuildOutcome; url: string }, observedAt = this.clock.iso()): StoredProduct {
+  /**
+   * Every build without a native terminal observation still holds the product envelope. A quiet
+   * started run may still be executing: the liveness bound is not an end receipt. Missing or
+   * unreadable task/ledger evidence likewise cannot release capacity.
+   */
+  private activeBuilds(product: StoredProduct, daemonRoot: string, subject: BuildRepository): number {
+    return product.stageEvidence.filter((item) => item.stage === "build" && /^pbuild_[a-f0-9]{64}$/.test(item.id)).filter((item) => {
+      const taskId = item.references.find((ref) => ref.label.startsWith("Build task "))?.label.slice("Build task ".length);
+      if (taskId === undefined) return true;
+      const seen = readTargetExecution(join(daemonRoot, "state"), { taskId, origin: productBuildKickOrigin(product.id, item.id), repo: subject.name,
+        requestedAt: item.observedAt, nowMs: this.clock.now() });
+      return seen.state !== "ended" && seen.state !== "refused";
+    }).length;
+  }
+
+  private append(actor: string, product: StoredProduct, requestId: string, item: { id: string; outcome: ProductBuildOutcome; url: string; taskId?: string }, observedAt = this.clock.iso()): StoredProduct {
     const saved = this.store.transition(actor, {
       version: "product-intent-v1", requestId, id: product.id, expectedRevision: product.revision, expectedObjectiveRevision: product.objectiveRevision,
       stageEvidence: [{ id: item.id, stage: "build", outcome: item.outcome, objectiveRevision: product.objectiveRevision,
-        observedAt, references: [{ label: "Target repository", url: item.url }] }],
+        observedAt, references: [{ label: "Target repository", url: item.url },
+          ...(item.taskId === undefined ? [] : [{ label: `Build task ${item.taskId}`, url: item.url }])] }],
     });
     if (!saved.ok) throw new Fault(saved.code);
     return this.readProduct(actor, product.id);

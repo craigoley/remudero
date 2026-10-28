@@ -27,6 +27,9 @@ import { projectRepairCostContext, repairCostCells, repairCostsByPull, type Repa
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
+import { buildModelFieldNoteCandidate, FIELD_NOTE_WINDOWS_VERSION, parseFieldNoteWindows, parseSiteConsentRegistry, PINNED_SITE_CONSENT_REGISTRY,
+  type AdoptionSelectedCell, type FieldNoteWindows } from "./field-trials-field-note.js";
+export type { AdoptionSelectedCell } from "./field-trials-field-note.js";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
@@ -404,7 +407,9 @@ function repairCells(units: RepairUnit[]) {
     incidents: { state: "unavailable" as const, reason: "no-incident-source" } };
 }
 
-type AdoptionUnit = Unit & { requested: string | null; selected: string | null; served: string | null; servedMissing: string | null };
+type AdoptionUnit = Unit & { requested: string | null; selected: string | null; served: string | null; servedMissing: string | null;
+  /** W1-T10831: a joined boolean worker outcome, regardless of which component caused a failure. */
+  callOutcomeKnown: boolean; verifiedOutcome: boolean | null };
 
 function adoptionCells(units: AdoptionUnit[]) {
   const tally = (values: (string | null)[]) => {
@@ -414,7 +419,23 @@ function adoptionCells(units: AdoptionUnit[]) {
   };
   return { assignments: units.length, requested: tally(units.map((unit) => unit.requested)),
     selected: tally(units.map((unit) => unit.selected)), served: tally(units.map((unit) => unit.served)),
-    servedUnavailable: tally(units.map((unit) => unit.servedMissing)) };
+    servedUnavailable: tally(units.map((unit) => unit.servedMissing)), bySelected: selectedCrossTab(units) };
+}
+
+function selectedCrossTab(units: AdoptionUnit[]): Record<string, AdoptionSelectedCell> {
+  const out: Record<string, AdoptionSelectedCell> = {};
+  for (const unit of units) {
+    if (unit.selected === null) continue;
+    const cell = Object.hasOwn(out, unit.selected) ? out[unit.selected]!
+      : { assigned: 0, servedKnown: 0, callOutcomeKnown: 0, verifiedOutcomes: 0, verifiedSuccesses: 0 };
+    cell.assigned += 1;
+    cell.servedKnown += Number(unit.served !== null);
+    cell.callOutcomeKnown += Number(unit.callOutcomeKnown);
+    cell.verifiedOutcomes += Number(unit.verifiedOutcome !== null);
+    cell.verifiedSuccesses += Number(unit.verifiedOutcome === true);
+    Object.defineProperty(out, unit.selected, { value: cell, enumerable: true, configurable: true, writable: true });
+  }
+  return out;
 }
 
 type LearningUnit = Unit & { kind: "gardener-pr" | "evidence-followup" | "judgement";
@@ -658,8 +679,10 @@ function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: M
   });
 }
 
-function adoptionUnits(ctx: SourceContext): { units: AdoptionUnit[]; transitions: ModelTransition[] } {
+function adoptionUnits(ctx: SourceContext, caseFiles: readonly TaskCaseFile[] | undefined): { units: AdoptionUnit[]; transitions: ModelTransition[] } {
   const assignments = ctx.rows.filter((row) => row.step === "worker.assignment" && row.assignmentId !== null);
+  const filesByTask = new Map<string, TaskCaseFile[]>();
+  for (const file of caseFiles ?? []) filesByTask.set(file.taskId, [...(filesByTask.get(file.taskId) ?? []), file]);
   const calls = new Map<string, FlowRow>();
   for (const row of ctx.rows) {
     if ((row.step === "worker.attempt" || row.step === "verdict") && row.assignmentId !== null) calls.set(row.assignmentId, row);
@@ -679,9 +702,14 @@ function adoptionUnits(ctx: SourceContext): { units: AdoptionUnit[]; transitions
     const call = calls.get(row.assignmentId!);
     const host = stratum(row.host);
     const served = call?.servedModel ?? null;
+    const { coverage } = joinVerifiedTaskOutcomes([{ assignmentId: row.assignmentId!, taskId: row.taskId, runId: row.runId,
+      assignedAt: row.ts, taskClass: row.taskClass, selectedModel: row.selectedModel, servedModel: served,
+      billingMode: null, costUsd: null, attempted: call !== undefined }], filesByTask.get(row.taskId ?? "") ?? [], ctx.asOf);
     units.push(withDigest({ key: `${ctx.label}|${host}|${row.ts?.slice(0, 10) ?? "unknown"}|${stratum(row.taskClass)}`,
       requested: row.requestedModel, selected: row.selectedModel, served,
-      servedMissing: served !== null ? null : call === undefined ? "no-attempt" : "not-recorded" }));
+      servedMissing: served !== null ? null : call === undefined ? "no-attempt" : "not-recorded",
+      callOutcomeKnown: typeof call?.success === "boolean",
+      verifiedOutcome: coverage.completed > 0 ? true : coverage.endedWithoutCompletion > 0 ? false : null }));
     note(host, row.requestedModel, "firstRequestedAt", row.ts);
     note(host, row.selectedModel, "firstSelectedAt", row.ts);
     note(host, served, "firstServedAt", call?.ts ?? null);
@@ -859,7 +887,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
       units.flow.push(flow);
     }
     units.repair.push(...repairUnits(ctx, taskOf, classOf, rowsByTask));
-    const adoption = adoptionUnits(ctx);
+    const adoption = adoptionUnits(ctx, input.caseFiles);
     units.adoption.push(...adoption.units);
     transitions.push(...adoption.transitions);
     units.learning.push(...learningUnits(ctx, storeOf));
@@ -1194,9 +1222,10 @@ function writeJsonAtomically(path: string, value: unknown): string {
   return sha256(encoded);
 }
 
-function readJson(path: string): unknown {
+function readJson(path: string, missing?: unknown): unknown {
   try { return JSON.parse(readFileSync(path, "utf8")); }
-  catch {
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && missing !== undefined) return missing;
     const reason = "absent-or-unreadable";
     return { unreadable: reason };
   }
@@ -1319,7 +1348,38 @@ export interface FieldTrialsCommandInput {
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
   + "[--consent <file>] [--case-files <file>] [--finding-evidence <file>] [--finding-evidence-keys <file>] "
   + "[--controlled-registered <epoch-id> | --controlled-epoch <file>] [--controlled-protocol <file>] [--site-parser-commit <sha>] "
-  + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--json]";
+  + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json]";
+
+/**
+ * W1-T10831 `--field-note <out>`: read the latest private snapshot (no refresh), and write a
+ * candidate-unreviewed site field note plus the private record of the window it covered. A withheld
+ * result writes nothing and exits 0; a refusal exits 1.
+ */
+function fieldNoteMode(args: { outDir: string; out: string; nowIso: string; json: boolean; print: (line: string) => void;
+  consentPath: string | undefined; registryPath: string | undefined }): number {
+  const snapshotValue = record(readJson(join(args.outDir, "field-trials-flow-v1.json")));
+  const windowsPath = join(args.outDir, "field-trials-field-note-windows.json");
+  const windows = parseFieldNoteWindows(readJson(windowsPath, { version: FIELD_NOTE_WINDOWS_VERSION, windows: [] }));
+  const consent = typeof args.consentPath === "string" ? parseFieldTrialsConsent(readJson(args.consentPath)) : null;
+  const registry = args.registryPath === undefined ? PINNED_SITE_CONSENT_REGISTRY : parseSiteConsentRegistry(readJson(args.registryPath));
+  const result = snapshotValue?.version !== FIELD_TRIALS_FLOW_VERSION ? { state: "refused" as const, reason: "no-snapshot" }
+    : typeof windows === "string" ? { state: "refused" as const, reason: windows }
+    : buildModelFieldNoteCandidate({ snapshot: snapshotValue as unknown as FieldTrialsFlowSnapshot, consent, registry,
+      windows, salt: pseudonymSalt(args.outDir), nowIso: args.nowIso });
+  if (result.state === "candidate") {
+    writeJsonAtomically(args.out, result.candidate);
+    const recorded = windows as FieldNoteWindows;
+    writeJsonAtomically(windowsPath, { ...recorded, windows: [...recorded.windows, result.window] });
+  }
+  if (args.json) args.print(JSON.stringify(result.state === "candidate"
+    ? { state: "candidate", releaseId: result.window.releaseId, windowStart: result.window.windowStart, windowEnd: result.window.windowEnd,
+      rows: result.candidate.note.rows.length, withheld: result.candidate.withheld.cells } : result));
+  else args.print(result.state === "candidate"
+    ? `field-trials: field note candidate-unreviewed ${result.window.releaseId} ${result.window.windowStart}..${result.window.windowEnd}: `
+      + `${result.candidate.note.rows.length} rows, ${result.candidate.withheld.cells} cells withheld; written to ${args.out}`
+    : `field-trials: field note ${result.state} (${result.reason})`);
+  return result.state === "refused" ? 1 : 0;
+}
 
 function labelOf(repo: string): string {
   const name = repo.split("/").at(-1)!.toLowerCase();
@@ -1367,7 +1427,8 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
       consent: { type: "string" }, "case-files": { type: "string" }, "max-pages": { type: "string" },
       "finding-evidence": { type: "string" }, "finding-evidence-keys": { type: "string" }, "controlled-epoch": { type: "string" },
       "controlled-registered": { type: "string" }, "controlled-protocol": { type: "string" }, "site-parser-commit": { type: "string" },
-      offline: { type: "boolean" }, revoke: { type: "string" }, json: { type: "boolean" } } }).values;
+      offline: { type: "boolean" }, revoke: { type: "string" }, json: { type: "boolean" },
+      "field-note": { type: "string" }, "site-registry": { type: "string" } } }).values;
   } catch {
     const reason = "arguments-invalid";
     print(`${USAGE} (${reason})`);
@@ -1400,6 +1461,10 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     writeJsonAtomically(manifestPath, manifest);
     print(`field-trials: revoked ${values.revoke}; last known good ${manifest.lastKnownGood?.releaseId ?? "none"}`);
     return 0;
+  }
+  if (typeof values["field-note"] === "string") {
+    return fieldNoteMode({ outDir, out: values["field-note"], nowIso, json: values.json === true, print,
+      consentPath: values.consent as string | undefined, registryPath: values["site-registry"] as string | undefined });
   }
   let caseFiles: TaskCaseFile[] | undefined;
   if (typeof values["case-files"] === "string") {
