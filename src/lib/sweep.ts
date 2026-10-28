@@ -16666,6 +16666,7 @@ export interface FixDispatchChildPorts {
   readTask: (taskId: string) => { found: false } | { found: true; merged: boolean; retired: boolean; contextDigest?: string };
   /** The fleet hold on worker admission now (STOP, PAUSE), or `undefined` when none holds. */
   hold: () => string | undefined;
+  claimFixAdmission: NonNullable<SweepDeps["claimFixAdmission"]>;
   /** Reconstructs the sweep's live dependencies in this process. A reconstruction that cannot be read throws, and the child refuses. */
   dispatcher: () => Pick<SweepDeps, "dispatchFix"> & Partial<Pick<SweepDeps, "fixProgressJudge">>;
   log: (step: string, extra?: Record<string, unknown>) => void;
@@ -16723,23 +16724,36 @@ export async function runFixDispatchChild(inputs: Record<string, unknown>, deps:
     deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason: rechecked.reason });
     throw new Error(`fix dispatch refused: ${rechecked.reason}`);
   }
-  let effects: ReturnType<FixDispatchChildPorts["dispatcher"]>;
+  let grant: ReturnType<FixDispatchChildPorts["claimFixAdmission"]>;
   try {
-    effects = deps.dispatcher();
+    grant = deps.claimFixAdmission(envelope.pr);
+    if (grant?.admitted !== true) throw new Error(grant?.reason ?? "no readable admission grant");
   } catch (error) {
-    const reason = `the live dependencies could not be reconstructed (${String((error as Error)?.message ?? error)})`;
+    const reason = `worker admission refused (${String((error as Error)?.message ?? error)})`;
     deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason });
     throw new Error(`fix dispatch refused: ${reason}`);
   }
-  const outcome = await effects.dispatchFix(
-    envelope.pr, { ...envelope.evidence, ...(effects.fixProgressJudge === undefined ? {} : { progressJudge: effects.fixProgressJudge }) },
-    (phase) => {
-      deps.onPhase?.(phase);
-      deps.log("sweep.fix.child_phase", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, phase });
-    },
-  );
-  const declined = fixClaimDeclinedReason(outcome);
-  if (declined !== undefined) throw new Error(`fix dispatch refused: ${declined}`);
+  try {
+    let effects: ReturnType<FixDispatchChildPorts["dispatcher"]>;
+    try {
+      effects = deps.dispatcher();
+    } catch (error) {
+      const reason = `the live dependencies could not be reconstructed (${String((error as Error)?.message ?? error)})`;
+      deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason });
+      throw new Error(`fix dispatch refused: ${reason}`);
+    }
+    const outcome = await effects.dispatchFix(
+      envelope.pr, { ...envelope.evidence, ...(effects.fixProgressJudge === undefined ? {} : { progressJudge: effects.fixProgressJudge }) },
+      (phase) => {
+        deps.onPhase?.(phase);
+        deps.log("sweep.fix.child_phase", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, phase });
+      },
+    );
+    const declined = fixClaimDeclinedReason(outcome);
+    if (declined !== undefined) throw new Error(`fix dispatch refused: ${declined}`);
+  } finally {
+    grant.release?.();
+  }
 }
 
 /** Installs (or, with `undefined`, removes) the process's detached-work host. */

@@ -41643,7 +41643,8 @@ import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js"
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
 import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, runChildModeIsOn, spawnRunChild, type DetachedWorkSpec, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
-import { installDetachedWorkHost, runFixDispatchChild, type FixDispatchChildPorts } from "./lib/sweep.js";
+import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, runFixDispatchChild, type FixDispatchChildPorts } from "./lib/sweep.js";
+import { classEstimate, classTypical } from "./lib/host-memory-learning.js";
 import { type RunChildMode } from "./lib/policy.js";
 import {
   escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
@@ -42662,7 +42663,9 @@ export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, re
  * repository, the plan-filing flag and the review attempt id. A kind this entry does not host throws, which the child writes as a
  * failed status through the closed failure union; an unknown kind is never read as success.
  */
-type DetachedFixRuntimePorts = Partial<Pick<FixDispatchChildPorts, "hold" | "log" | "dispatcher">> & {
+type DetachedFixRuntimePorts = Partial<Pick<FixDispatchChildPorts, "hold" | "log" | "claimFixAdmission">> & {
+  dispatcher?: (plan: Plan) => ReturnType<FixDispatchChildPorts["dispatcher"]>;
+  readFixPressure?: SweepDeps["readFixPressure"];
   planPath?: string;
   planSnapshot?: (options: { allowStale?: boolean }) => SyncedPlan;
   config?: Config;
@@ -42713,6 +42716,13 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
   let projection: Map<string, StatusProjection> | undefined;
   await runFixDispatchChild(inputs, {
     log: ports.log ?? log,
+    claimFixAdmission: ports.claimFixAdmission ?? ((pr) => createSweepFixAdmissionController({
+      surface: "full", queueDepth: 1, hostWorkerBudget: DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget,
+      activeWorkers: activeWorkerCount(), readActiveWorkers: activeWorkerCount, reviewReservations: 0,
+      readPressure: ports.readFixPressure ?? (() => productionFixPressure(DEFAULT_SWEEP_POLICY.memoryFloorMib, ledgerPath(), classEstimate("fix").estimateMib)),
+      readEstimate: classEstimate, readTypical: classTypical, readResidents: () => productionFixAdmissionResidents(cfg().root),
+      log: ports.log ?? log,
+    }).claim(pr)),
     ...(ctx.onPhase === undefined ? {} : { onPhase: ctx.onPhase }),
     hold: ports.hold ?? (() => {
       const stopped = stopDetail(cfg().root);
@@ -42738,8 +42748,8 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
       return { found: true, merged: status.merged,
         retired: task.status === "blocked" && task.retirement !== undefined, ...(digest === undefined ? {} : { contextDigest: digest }) };
     },
-    dispatcher: ports.dispatcher ?? (() => buildSweepEffects({ productionProgressJudge: true, owner: self().owner, repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
-      plan: planNow(), log, policy: DEFAULT_SWEEP_POLICY })),
+    dispatcher: () => ports.dispatcher ? ports.dispatcher(planNow()) : buildSweepEffects({ productionProgressJudge: true, owner: self().owner, repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
+      plan: planNow(), log, policy: DEFAULT_SWEEP_POLICY }),
   });
   return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
 }

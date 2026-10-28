@@ -256,7 +256,7 @@ test("W1-T9114: a terminal review child settles once", async () => {
 
 // The drain half is proved for BOTH moved kinds through the production host factory: a live review child and a live fix-dispatch child
 // are adopted, and the restart returns while both still run. The title is the proof's verbatim grep target. The fix child is the one
-// the sweep's governed producer spawns (see the producer test below); here it is the adopted half of the same contract.
+// the sweep's governed producer spawns; the final cases execute that producer's child across the restart too.
 test("W1-T9114: a restart does not drain child reviews or fix dispatches", async () => {
   const f = fixture();
   try {
@@ -325,6 +325,7 @@ test("W1-T9114: a restart does not drain child reviews or fix dispatches", async
     assert.equal(noHost.stopReason, "stale");
     const bareRow = bare.find((r) => r.step === "daemon.freshness_drain.completed");
     assert.equal((bareRow?.detached_work_placement as Record<string, string>).review, "process");
+    await proveFreshFixAdmissionAcrossRestart();
   } finally { installDetachedWorkHost(undefined); f.cleanup(); }
 });
 
@@ -617,6 +618,129 @@ const fixPr = (over: Partial<OpenPrView> = {}): OpenPrView => ({
   unmetCriteria: UNMET, priorStrikes: 0, lastActivityAt: "2026-10-05T22:00:00Z", headSha: FIX_HEAD, headRefName: FIX_BRANCH, autoMergeArmed: false, ...over,
 });
 
+async function proveFreshFixAdmissionAcrossRestart() {
+  const { runDetachedWork } = await import("#src/run-task.js");
+  for (const admission of ["refused", "unreadable", "throws", "admitted"] as const) {
+    const f = fixture();
+    const clock = fixedClock(Date.parse("2026-10-12T12:00:00Z"));
+    let releaseRead!: () => void;
+    let finishReview!: (value: RunResult) => void;
+    const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
+    const reviewDone = new Promise<RunResult>(resolve => { finishReview = resolve; });
+    let childDone: Promise<number> | undefined;
+    const children: ReturnType<typeof f.add>[] = [];
+    try {
+      const planPath = join(f.root, "tasks.yaml");
+      const task = { id: FIX_TASK, title: "fresh child admission", repo: "remudero", type: "implement", verify: "auto",
+        depends_on: [], status: "queued", risk: "low", files: ["src/lib/sweep.ts"] };
+      const writePlan = (risk: string) => writeFileSync(planPath, JSON.stringify([{ ...task, risk }]));
+      writePlan("low");
+      const ledger = [{ step: "daemon.freshness_drain.completed", duration_ms: 1000, waited_on: [
+        { what: "review", kind: "review", settled_after_ms: 1000 },
+        { what: "detached", kind: "fix-dispatch", settled_after_ms: 1000 },
+      ] }];
+      let planReads = 0;
+      let dispatches = 0;
+      let pressureReads = 0;
+      let enteredRead!: () => void;
+      const reading = new Promise<void>(resolve => { enteredRead = resolve; });
+      const ports = {
+        planPath, config: { root: f.root, claudeBin: "/bin/true" } as Config,
+        github: fakeGitHub(), hold: () => undefined, log: f.log,
+        planSnapshot: (options: { allowStale?: boolean }) => {
+          assert.equal(options.allowStale, false);
+          planReads++;
+          return { plan: loadPlan(planPath), staleDispatch: false };
+        },
+        readPr: async () => { enteredRead(); await readGate; return { state: "OPEN", mergedAt: null, headRefOid: FIX_HEAD }; },
+        readFixPressure: () => {
+          pressureReads++;
+          assert.equal(planReads, 1, "admission follows this child's fresh canonical read");
+          return { availableMib: 4096, floorMib: 0,
+            ...(admission === "refused" ? { reason: "fresh capacity observation refused" } : {}) };
+        },
+        ...(admission === "unreadable" ? { claimFixAdmission: () => undefined as never } : {}),
+        ...(admission === "throws" ? { claimFixAdmission: () => { throw new Error("admission evidence unreadable"); } } : {}),
+        dispatcher: (plan: Plan) => {
+          assert.equal(plan.byId.get(FIX_TASK)?.risk, "high", "the child reconstructs with the current canonical risk, not the producer's low risk");
+          return { dispatchFix: () => { dispatches++; } };
+        },
+      };
+      const spawn = (async (input: { taskId: string; work: DetachedWorkSpec }) => {
+        const child = f.add(`restart-${admission}-${input.work.kind}`, input.work, {}, input.taskId);
+        children.push(child);
+        let settled: Promise<RunResult> = reviewDone;
+        if (input.work.kind === "fix-dispatch") {
+          childDone = runChildMain(["--run-dir", child.dir], {
+            env: {}, signals: { on() {}, off() {} }, clock: clock.now, stderr: () => {},
+            loadRunPath: async () => ({ runDetachedWork: (work: DetachedWorkSpec, ctx: Parameters<typeof runDetachedWork>[1]) => runDetachedWork(work, ctx, ports) }),
+          });
+          settled = childDone.then(code => {
+            const status = readStatus(child.dir);
+            assert.ok(status.ok);
+            if (code !== 0) throw new Error(status.value.failure?.message);
+            return status.value.result!;
+          });
+        }
+        return { started: true, runId: child.status.runId, dir: child.dir, pid: process.pid, settled, abort: async () => assert.fail("restart must leave the child running") };
+      }) as unknown as typeof spawnRunChild;
+      const host = createDetachedWorkHost({ stateRoot: f.stateRoot, root: f.root, repoDir: f.root, repo: "remudero",
+        readMode: () => "on", readLedger: () => ledger, spawn, log: f.log });
+      installDetachedWorkHost(host);
+      const launchedReview = await host.spawnReview({ pr: { prNumber: 7, headSha: review.headSha! }, reviewKey: "restart-review", reviewAttemptId: undefined });
+      assert.ok(launchedReview);
+      void adoptChildWork({ ...launchedReview, taskId: FIX_TASK, work: review }, f.log);
+      await runSweep([fixPr()], {
+        arm: () => {}, close: () => {}, escalate: () => {}, log: f.log, runId: "restart-producer", now: clock.now,
+        ledgerPath: join(f.stateRoot, "ledger.ndjson"), readLedger: () => [{ step: "fix.dispatch", task_id: FIX_TASK, head_sha: "old-head" }],
+        appendLine: () => {}, detachFixWait: true, planContextDigestFor: riskJudgePlanContextDigestFor(loadPlan(planPath)),
+        dispatchFix: () => assert.fail("the producer must dispatch through its child"),
+      });
+      await reading;
+      assert.equal(planReads, 0, "the child has not yet read the canonical plan");
+      const restarted = await runDaemon(loadPlan(planPath), {
+        adoptRunChildren: f.adopt, refreshMerged: () => () => true, openPrCount: () => 0, now: clock.date,
+        runOne: async id => result(id), sleep: async () => { await flush(); }, log: f.log,
+        checkFreshness: () => ({ stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40) }),
+        sweep: async () => {}, sweepLight: async () => {}, sleepUntilSweepWake: async () => "timeout",
+        readLedgerLines: () => ledger.map(row => JSON.stringify(row)),
+      }, { laneCount: 1, wipLimit: 1, pollIntervalMs: 5 });
+      assert.equal(restarted.stopReason, "stale");
+      assert.deepEqual(f.rows.findLast(row => row.step === "daemon.freshness_drain.completed")?.detached_children_left_running,
+        { review: 1, "fix-dispatch": 1 }, "the restart exits with the producer's actual fix child still checking live evidence");
+      writePlan("high");
+      releaseRead();
+      assert.equal(await childDone, admission === "admitted" ? 0 : 1);
+      const status = readStatus(children[1]!.dir);
+      assert.ok(status.ok);
+      assert.equal(status.value.state, admission === "admitted" ? "done" : "failed");
+      assert.equal(planReads, 1);
+      assert.equal(dispatches, admission === "admitted" ? 1 : 0);
+      if (admission === "admitted" || admission === "refused") {
+        assert.ok(pressureReads >= 2, "the runtime's default admission controller reads fresh capacity at construction and claim");
+        const capacity = f.rows.filter(row => row.step === "sweep.fix_capacity");
+        assert.equal(capacity.at(-1)?.fixes_admitted, admission === "admitted" ? 1 : 0);
+        assert.equal(capacity.at(-1)?.fixes_refused, admission === "refused" ? 1 : 0);
+        assert.equal(capacity.at(-1)?.pending_reservations, 0, "the child's admission reservation is released on settlement");
+      }
+      if (admission !== "admitted") {
+        assert.match(status.value.failure!.message, /worker admission refused/);
+        assert.equal(status.value.result, undefined, "a refused grant cannot become a success-shaped child result");
+        assert.equal(f.rows.some(row => row.step === "sweep.fix.child_refused" && /admission refused/.test(String(row.reason))), true);
+      }
+    } finally {
+      releaseRead?.();
+      finishReview(result(FIX_TASK));
+      await childDone;
+      const reviewChild = children[0];
+      if (reviewChild) writeStatus(reviewChild.dir, { ...reviewChild.status, state: "done", result: result(FIX_TASK) });
+      await flush();
+      installDetachedWorkHost(undefined);
+      f.cleanup();
+    }
+  }
+}
+
 test("W1-T9114: a fix dispatch the sweep decides is spawned as a child before any claim and held by the registry", async () => {
   resetChildWork();
   const dir = mkdtempSync(join(tmpdir(), "rmd-fix-producer-"));
@@ -765,13 +889,15 @@ test("W1-T9114: the fix child rechecks, dispatches through the sweep's own dispa
     const rows: Array<Record<string, unknown>> = [];
     const phases: string[] = [];
     let built = 0;
+    let held = 0;
     const deps: FixDispatchChildPorts = {
       hold: () => undefined, readLivePr: async () => live, readTask: () => task, log: (step, extra) => { rows.push({ step, ...extra }); },
+      claimFixAdmission: () => { held++; return { admitted: true, release: () => { held--; } }; },
       onPhase: (phase) => { phases.push(phase); },
       dispatcher: () => { built += 1; return { dispatchFix: over.dispatch ?? (async (pr, evidence, onPhase) => { onPhase?.("admission"); onPhase?.("worker"); calls.push({ pr, evidence }); }), fixProgressJudge: judge }; },
       ...over,
     };
-    return { deps, calls, rows, phases, built: () => built };
+    return { deps, calls, rows, phases, built: () => built, held: () => held };
   };
   const wire = (): Record<string, unknown> => ({ envelope: JSON.parse(JSON.stringify(envelope)) });
 
@@ -783,6 +909,10 @@ test("W1-T9114: the fix child rechecks, dispatches through the sweep's own dispa
   assert.equal(ok.calls[0]!.evidence.progressJudge, judge, "the judge is the child's own, rebuilt there");
   assert.deepEqual(ok.phases, ["admission", "worker"], "the phases reach the owned status sink");
   assert.deepEqual(ok.rows.filter((r) => r.step === "sweep.fix.child_phase").map((r) => r.phase), ["admission", "worker"]);
+  assert.equal(ok.held(), 0, "successful dispatch releases the child's grant");
+  const throwing = harness({ dispatch: () => { throw new Error("dispatch failed before the worker started"); } });
+  await assert.rejects(runFixDispatchChild(wire(), throwing.deps), /dispatch failed before the worker started/);
+  assert.equal(throwing.held(), 0, "a throwing dispatcher releases the child's grant");
 
   const refusals: Array<[string, Partial<FixDispatchChildPorts> & { dispatch?: SweepDeps["dispatchFix"] }, RegExp, Record<string, unknown>?]> = [
     ["a fleet hold", { hold: () => "STOP: operator" }, /admission is held: STOP/],
@@ -804,6 +934,7 @@ test("W1-T9114: the fix child rechecks, dispatches through the sweep's own dispa
   for (const [name, over, pattern, inputs] of refusals) {
     const h = harness(over);
     await assert.rejects(runFixDispatchChild(inputs ?? wire(), h.deps), pattern, name);
+    assert.equal(h.held(), 0, `${name}: no admission grant is leaked`);
     assert.equal(h.calls.length, 0, `${name}: nothing was dispatched`);
     if (inputs === undefined && name !== "a reconstruction that throws" && name !== "a declined claim") {
       assert.equal(h.built(), 0, `${name}: the live dependencies were not even rebuilt`);
@@ -854,6 +985,7 @@ test("W1-T9114: the run path maps live PR evidence and reads the canonical task 
         return { plan: loadPlan(planPath), staleDispatch: false };
       },
       config: { root: f.root, claudeBin: "/bin/true" } as Config, github, hold: () => undefined, log: f.log,
+      claimFixAdmission: () => ({ admitted: true as const }),
       readPr: async (args: string[]) => { reads.push(args); return live; },
       dispatcher: () => {
         built += 1;
