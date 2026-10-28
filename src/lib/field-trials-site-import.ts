@@ -143,7 +143,7 @@ export function syncFieldNoteSiteImport(input: SiteImportInput, deps: SiteImport
   try {
     const siteDir = join(workDir, "site");
     const url = deps.siteUrl ?? `https://github.com/${SITE_IMPORT_OWNER}/${SITE_IMPORT_REPO}.git`;
-    const clone = run("git", ["clone", "--quiet", "--depth", "1", "--branch", SITE_IMPORT_BASE, url, siteDir], workDir);
+    const clone = run("git", ["clone", "--quiet", "--single-branch", "--branch", SITE_IMPORT_BASE, url, siteDir], workDir);
     if (clone.status !== 0) return { state: "site-checkout-failed", reason: `git-clone-exit-${clone.status}: ${clone.stderr.trim()}` };
     const released = readReleases(siteDir);
     if (typeof released === "string") return { state: "site-checkout-failed", reason: released };

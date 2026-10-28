@@ -29,7 +29,8 @@ const BLOB = "b".repeat(40);
 // The site's collector-staged key set (remudero-site lib/model-field-note.ts collectorStagedKeys, read 2026-10-28).
 const SITE_STAGED_KEYS = ["schema", "releaseId", "status", "publicationScope", "evidence", "publishedAt", "windowStart",
   "windowEnd", "asOf", "sourceDigest", "sourceRepos", "consentRegistryRevision", "rows", "stagedBy", "stagedAt"].sort();
-type Mode = "staged" | "unchanged" | "refused" | "no-daily-stage" | "absent" | "outside-data" | "garbled";
+type Mode = "staged" | "unchanged" | "refused" | "no-daily-stage" | "absent" | "outside-data" | "garbled" | "usage"
+  | "staged-nothing" | "dir-script";
 
 function git(cwd: string, ...args: string[]) {
   const result = spawnSync("git", ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", ...args], { cwd, encoding: "utf8" });
@@ -45,13 +46,18 @@ function siteRepository(root: string, mode: Mode, released: Record<string, unkno
   writeFileSync(join(dir, "data", "model-field-note.json"), "null\n");
   writeFileSync(join(dir, "data", "model-field-note-history.json"), JSON.stringify({ schema: "model-field-note-history-v1", releases: released }));
   if (mode === "no-daily-stage") writeFileSync(join(dir, "scripts", "import-model-field-note.mjs"), "// operator import only\n");
-  else if (mode !== "absent") writeFileSync(join(dir, "scripts", "import-model-field-note.mjs"), `import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+  else if (mode === "dir-script") {
+    mkdirSync(join(dir, "scripts", "import-model-field-note.mjs"));
+    writeFileSync(join(dir, "scripts", "import-model-field-note.mjs", "keep"), "");
+  } else if (mode !== "absent") writeFileSync(join(dir, "scripts", "import-model-field-note.mjs"), `import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const [flag, candidatePath, summaryPath] = process.argv.slice(2);
 if (flag !== "--daily-stage") process.exit(2);
 const note = JSON.parse(readFileSync(candidatePath, "utf8"));
 appendFileSync(${JSON.stringify(seen)}, JSON.stringify(note) + "\\n");
 const mode = ${JSON.stringify(mode)};
 if (mode === "garbled") { console.log("not json"); process.exit(0); }
+if (mode === "usage") { console.error("usage: --daily-stage"); process.exit(2); }
+if (mode === "staged-nothing") { console.log(JSON.stringify({ outcome: "staged", releaseId: note.releaseId })); process.exit(0); }
 if (mode === "unchanged") { console.log(JSON.stringify({ outcome: "unchanged", releaseId: note.releaseId })); process.exit(3); }
 if (mode === "refused") {
   console.log(JSON.stringify({ outcome: "refused", reason: "model field note refused: cross-release differencing risk; overlaps fn-prior" }));
@@ -145,6 +151,27 @@ async function dailyPass(root: string, nowIso: string, days: number[], siteImpor
   const ledger = readFileSync(join(stateDir, "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   return { code, lines, outDir, row: ledger.filter((row) => row.step === "field-trials.site-import").at(-1),
     refreshRows: ledger.filter((row) => row.step === "field-trials.refresh").length };
+}
+
+/** An offline pass, or one without a valid consent file, withholds without touching the site at all. */
+async function withheldPass(root: string, consent: string | null, offline: boolean) {
+  const stateDir = join(root, `state-${String(consent !== null)}-${String(offline)}`), outDir = join(stateDir, "field-trials");
+  mkdirSync(outDir, { recursive: true });
+  const consentPath = join(root, "consent-variant.json");
+  if (consent !== null) writeFileSync(consentPath, consent);
+  const code = await fieldTrialsCommand(["--source", "core=craigoley/remudero", "--ledger", `core=${stateDir}`, "--out-dir", outDir,
+    ...(consent !== null ? ["--consent", consentPath] : []), ...(offline ? ["--offline"] : []),
+    "--refresh-step", "routing-review=0", "--refresh-step", "case-files=0", "--refresh-script-blob", BLOB],
+  buildFieldTrialsFlowSnapshot, { nowIso: DAY(4, 7), print: () => {}, printError: () => {}, resolveConfig: () => ({ root }),
+    fetch: async () => ({ ok: true, items: [] }), refreshIssues: { create: () => { throw new Error("no alert expected"); }, listOpen: () => [] },
+    readLedger: async () => {
+      const fixture = writeLedger(rowsFor([1]));
+      try { return await readFieldTrialsLedger(fixture.dir, Date.parse(DAY(4, 7))); }
+      finally { rmSync(fixture.dir, { recursive: true, force: true }); }
+    },
+    siteImport: { run: () => { throw new Error("no site checkout expected"); } } });
+  const rows = readFileSync(join(stateDir, "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  return { code, row: rows.find((row) => row.step === "field-trials.site-import") };
 }
 
 const seenCandidates = (seen: string) => existsSync(seen)
@@ -268,7 +295,7 @@ test("W1-T10832: a refused or unchanged stage opens no PR", async () => {
   }
 });
 
-test("W1-T10832: every unhealthy site-import arm is a recorded outcome, never a throw or a PR", () => {
+test("W1-T10832: every unhealthy site-import arm is a recorded outcome, never a throw or a PR", async () => {
   const root = tempRoot("arms");
   try {
     const note = { schema: "model-field-note-v1", releaseId: "fn-2026-09-01-2026-09-04-abcdefabcdef", status: "published",
@@ -282,6 +309,13 @@ test("W1-T10832: every unhealthy site-import arm is a recorded outcome, never a 
         { fetch: github.fetch, ...(mode ? { siteUrl: siteRepository(root, mode).url } : {}), ...deps });
       return { outcome, calls: github.calls };
     };
+    const valid = JSON.stringify({ version: "field-trials-consent-v1",
+      repos: [{ repo: "craigoley/remudero", rights: "aggregate-opt-in", receipt: "owner-2026-10-27-test" }] });
+    for (const [consent, offline, reason] of [[null, false, "no-consent-receipt"], ['{"version":"x"}', false, "consent-invalid"],
+      [valid, true, "offline-pass"]] as const) {
+      const pass = await withheldPass(root, consent, offline);
+      assert.deepEqual([pass.code, pass.row?.state, pass.row?.reason], [0, "withheld", reason], `${reason}: withheld before any site read`);
+    }
     const missing = sync(null, { siteUrl: pathToFileURL(join(root, "no-such-site")).href });
     assert.equal(missing.outcome.state, "site-checkout-failed");
     assert.match((missing.outcome as { reason: string }).reason, /^git-clone-exit-/);
@@ -311,6 +345,9 @@ test("W1-T10832: every unhealthy site-import arm is a recorded outcome, never a 
     git(historyless, "commit", "-qam", "drop history");
     const noHistory = sync(null, { siteUrl: pathToFileURL(historyless).href });
     assert.match(JSON.stringify(noHistory.outcome), /"state":"site-checkout-failed".*site-history-unreadable: ENOENT/);
+    assert.match(JSON.stringify(sync("usage").outcome), /"state":"stage-failed".*stage-exit-2: usage: --daily-stage/);
+    assert.match(JSON.stringify(sync("staged-nothing").outcome), /stage-reported-staged-but-changed-nothing/);
+    assert.match(JSON.stringify(sync("dir-script").outcome), /"state":"stage-failed".*stage-script-unreadable: EISDIR/);
     assert.deepEqual(readdirSync(join(root, "work")), [], "every pass removes its own scratch checkout");
   } finally {
     rmSync(root, { recursive: true, force: true });
