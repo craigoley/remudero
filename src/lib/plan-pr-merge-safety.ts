@@ -348,10 +348,23 @@ function* mergedTreePlanSteps(
     if (merged.status === 1) return { state: "conflict" };
     if (merged.status !== 0) return gitStepUnreadable("git merge-tree", merged);
     if (!/^[0-9a-f]{40,64}$/.test(tree)) return { state: "unreadable", error: `git merge-tree exited ${merged.status} without a tree` };
-    const listing = yield* gitStep(git, ["ls-tree", "--name-only", tree, `${join(plan.planDir, "tasks.d")}/`]);
+    // One listing that carries each blob id, and the batch reads by id. A `<tree>:<path>` request
+    // re-resolves the path through tasks.d's tree once per shard: 4,577 shards took ~10 s that way
+    // against 0.2 s by id, and the host's 60 s bound killed the read 74 times in 48 h (2026-10-28).
+    const shardDir = `${join(plan.planDir, "tasks.d")}/`;
+    const listing = yield* gitStep(git, ["ls-tree", tree, "--", plan.monolith, shardDir]);
     if (listing.status !== 0) return gitStepUnreadable("git ls-tree", listing);
-    const paths = [plan.monolith, ...listing.stdout.split("\n").filter((p) => p.endsWith(".yaml")).sort()];
-    const batch = yield* gitStep(git, ["cat-file", "--batch"], paths.map((p) => `${tree}:${p}`).join("\n") + "\n");
+    const ids = new Map<string, string>();
+    for (const line of listing.stdout.split("\n").filter(Boolean)) {
+      const entry = /^\d{6} [a-z]+ ([0-9a-f]{40,64})\t(.+)$/.exec(line);
+      if (!entry) return withStderr({ state: "unreadable", error: `git ls-tree gave an unusable line: ${line}` }, listing);
+      ids.set(entry[2]!, entry[1]!);
+    }
+    const shards = [...ids.keys()].filter((p) => p.startsWith(shardDir) && p.endsWith(".yaml")).sort();
+    const paths = [plan.monolith, ...shards];
+    // a monolith the listing lacks is still requested by path, so git itself says it is missing.
+    const request = paths.map((p) => ids.get(p) ?? `${tree}:${p}`).join("\n") + "\n";
+    const batch = yield* gitStep(git, ["cat-file", "--batch"], request);
     if (batch.status !== 0) return gitStepUnreadable("git cat-file --batch", batch);
     let texts: string[];
     try {
