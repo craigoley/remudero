@@ -125,6 +125,7 @@ export function readTargetExecution(stateDir: string, query: ExecutionQuery, fsD
   if (!kick) return { state: "none" };
   if (kick.step === KICK_REFUSED_STEP) return { state: "refused" };
   const start = rows.find((row) => row.step === RUN_START_STEP && row.task_id === query.taskId &&
+    typeof row.repo === "string" && row.repo.toLowerCase() === query.repo.toLowerCase() &&
     ledgerRunBelongsToTask(query.taskId, row.run_id) && at(row) >= at(kick));
   if (!start) return { state: "dispatched" };
   const runId = start.run_id as string;

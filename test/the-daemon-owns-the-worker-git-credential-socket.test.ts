@@ -835,6 +835,62 @@ const TARGET_PLAN = `
   status: queued
 `;
 
+test("W1-T10799: a missing target clone creates its parent and a failed clone never dispatches", async (t) => {
+  const root = ownedFixtureDir(t, "bounded-target-clone-failure").dir;
+  const home = join(root, "home");
+  const coreRoot = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root: coreRoot }));
+  mkdirSync(join(coreRoot, "state"), { recursive: true });
+  const selfPlan = join(root, "self-plan.yaml");
+  writeFileSync(selfPlan, "[]\n");
+  const checkout = gitRepo({ scope: t, kind: "bounded-clone-core" }).dir;
+  mkdirSync(join(checkout, ".remudero"));
+  writeFileSync(join(checkout, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
+  writeFileSync(join(checkout, ".remudero", "daemon-instances.yaml"), CORE_ONLY_REGISTRY);
+  const reposDir = join(coreRoot, "repos");
+  const cloneDir = join(reposDir, "wreckterra");
+  const gh = ghShim([{ when: "repo clone", stderr: "target clone denied by fixture", exit: 1 }], { kind: "bounded-target-clone" });
+  t.after(() => rmSync(gh.dir, { recursive: true, force: true }));
+  const previous = { HOME: process.env.HOME, PATH: process.env.PATH, CI: process.env.CI, GITHUB_ACTIONS: process.env.GITHUB_ACTIONS };
+  process.env.HOME = home;
+  process.env.PATH = `${gh.dir}:${previous.PATH ?? ""}`;
+  delete process.env.CI;
+  delete process.env.GITHUB_ACTIONS;
+  const origin = "product:prd_clone/op_1";
+  const dispatched: string[] = [];
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", selfPlan, "--max", "0"], {
+      repoRoot: checkout,
+      githubFactory: () => OFFLINE_GITHUB,
+      startGithubAppRefresh: () => ({ armed: false }),
+      runTask: (async (taskId: string) => {
+        dispatched.push(taskId);
+        throw new Error("a failed clone must never reach runTask");
+      }) as never,
+      runDaemon: (async (_plan: unknown, daemonDeps: DaemonDeps) => {
+        assert.equal(existsSync(reposDir), false, "the clone's parent is absent before the job starts");
+        await assert.rejects(
+          daemonDeps.runTargetJob!({ taskId: "W9-T1", origin, repo: "wreckterra" }, daemonDeps),
+          /target clone denied by fixture/,
+        );
+        assert.ok(statSync(reposDir).isDirectory(), "the production clone path creates the missing parent");
+        assert.equal(existsSync(cloneDir), false, "the failed clone leaves no target checkout");
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      }) as never,
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(gh.calls().filter((call) => call.startsWith("repo clone ")), [`repo clone craigoley/wreckterra ${cloneDir}`]);
+    assert.deepEqual(dispatched, [], "clone failure spends no task attempt");
+    assert.deepEqual(fileTargetJobStore(coreRoot).read(origin), { state: "absent" }, "no admission is recorded before plan sync");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 // The core daemon's OWN composition root, not a hand-wired runner: it binds the job to the target clone, reads the
 // target's dispatch claim from that clone's origin, and hands the job's worker the daemon's one credential socket.
 test("W1-T10799: the core daemon's own wiring runs the job over the target clone, its claim and its credential socket", async (t) => {

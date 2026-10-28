@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
@@ -10,7 +10,7 @@ import {
 import { createNativeTargetJobRunner, daemonKickPort, daemonTargetJobPort } from "#src/cli/commands/daemon.js";
 import { runDrain, type DrainOpts, type TargetJobRecord } from "#src/lib/drain.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
-import { runDaemon } from "#src/lib/daemon.js";
+import { runDaemon, type DaemonDeps, type DaemonOpts } from "#src/lib/daemon.js";
 import { requestKick } from "#src/lib/fleet-control.js";
 import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
 import { DEFAULT_LIVENESS_BOUND_MS } from "#src/lib/non-worker-verdict.js";
@@ -100,7 +100,7 @@ function targetDaemonRows(daemonRoot: string) {
   return {
     path: join(dir, "ledger.ndjson"),
     daemon: (atMs: number, step: string, extra: Record<string, unknown> = {}) => append(atMs, { run_id: "DAEMON-1", task_id: "DAEMON", step, lane: "daemon", ...extra }),
-    run: (atMs: number, runId: string, step: string, extra: Record<string, unknown> = {}) => append(atMs, { run_id: runId, task_id: "W9-T1", step, lane: "run-task", ...extra }),
+    run: (atMs: number, runId: string, step: string, extra: Record<string, unknown> = {}) => append(atMs, { run_id: runId, task_id: "W9-T1", step, lane: "run-task", repo: "wreckterra", ...extra }),
   };
 }
 const buildRows = async (f: ReturnType<typeof fixture>, operationId: string) => {
@@ -447,7 +447,7 @@ test("W1-T10615: only the target daemon's evidence of this request's own run rea
   const blind = await observedBuild(t, { state: "none", branches: [] });
   writeFileSync(join(blind.f.daemonRoot, "state", "ledger.2026-10-26T01-00-05-000Z.ndjson"), [
     { ts: "2026-10-26T01:00:01.000Z", run_id: "DAEMON-1", task_id: "DAEMON", step: "console.kick_dispatched", task: "W9-T1", origin: blind.origin, repo: "wreckterra" },
-    { ts: "2026-10-26T01:00:02.000Z", run_id: RUN_ID, task_id: "W9-T1", step: "run.start" },
+    { ts: "2026-10-26T01:00:02.000Z", run_id: RUN_ID, task_id: "W9-T1", step: "run.start", repo: "wreckterra" },
   ].map((row) => JSON.stringify(row)).join("\n") + "\n");
   mkdirSync(join(blind.f.daemonRoot, "state", "ledger.ndjson"));
   assert.equal(await blind.observe(REQUESTED_MS + 3_000), "queued", "an unreadable live file is never a complete corpus");
@@ -726,7 +726,7 @@ function nativeFixture(t: TestContext, registry = CORE_ONLY) {
     appendLedger(ledgerPath, { run_id: "DAEMON-1", task_id: "DAEMON", step, lane: "daemon", ...extra });
   };
   const calls = { runTask: [] as string[], drains: [] as DrainOpts[], claims: [] as string[], durable: [] as string[][] };
-  const state = { claimHeld: false as boolean | undefined, syncError: undefined as string | undefined, daemonDeps: {} as Record<string, unknown>,
+  const state = { claimHeld: false as boolean | undefined, syncError: undefined as string | undefined, daemonDeps: {} as Partial<DaemonDeps>, daemonOpts: {} as DaemonOpts,
     drainThrows: undefined as "before" | "after" | undefined };
   const runner = createNativeTargetJobRunner({
     root: core, repoRoot: checkout, log, nowMs: () => Date.now(), instances: { registryPath },
@@ -738,7 +738,7 @@ function nativeFixture(t: TestContext, registry = CORE_ONLY) {
       const jobs = join(core, "state", "target-jobs");
       calls.durable.push(existsSync(jobs) ? readdirSync(jobs).map((name) => String((JSON.parse(readFileSync(join(jobs, name), "utf8")) as TargetJobRecord).status)) : []);
       const runId = `${taskId}-${Date.now()}`;
-      appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step: "run.start", lane: "run-task" });
+      appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step: "run.start", lane: "run-task", repo: "wreckterra" });
       appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step: "verdict", lane: "run-task", verdict: "merged" });
       return { taskId, runId, merged: true, costUsd: 0, verdict: "merged" };
     },
@@ -764,7 +764,8 @@ function nativeFixture(t: TestContext, registry = CORE_ONLY) {
       runTargetJob: (kick, daemonDeps) => runner(kick, { ...daemonDeps, ...over }),
       checkStop: () => (++ticks > 3 ? "enough ticks" : undefined),
       sleep: async () => {}, log,
-    }, { headroomEnabled: false, max: 5 });
+      ...state.daemonDeps,
+    }, { headroomEnabled: false, max: 5, ...state.daemonOpts });
     return { lines: lines.slice(from), spawned };
   };
   const record = (origin: string) => fileTargetJobStore(core).read(origin);
@@ -799,6 +800,71 @@ test("W1-T10799: one managed target without a daemon reaches one bounded native 
   const again = await f.drive();
   assert.deepEqual(f.calls.runTask, ["W9-T1"], "a further pass finds nothing left to run");
   assert.deepEqual(again.lines.filter((line) => line.step.startsWith("target_job.")), []);
+});
+
+test("W1-T10799: bounded target jobs share the core WIP budget and reserve its last slot", async (t) => {
+  const f = nativeFixture(t);
+  const request = await nativeStarted(f);
+  const otherOrigin = "product:prd_other/op_2";
+  requestKick(f.core, "W9-T3", otherOrigin, "wreckterra");
+  f.state.daemonOpts = { laneCount: 3, wipLimit: 2 };
+  f.state.daemonDeps.openPrCount = () => 2;
+  const full = await f.drive();
+  assert.deepEqual(f.calls.runTask, [], "a free local lane cannot bypass full shared WIP");
+  assert.ok(full.lines.some((line) => line.step === "target_job.capacity_deferred" && line.extra.origin === request.origin));
+  assert.equal(f.record(request.origin).state, "absent");
+
+  // An adaptive admission is authoritative even if the static pair reports spare WIP.
+  f.state.daemonDeps.openPrCount = () => 0;
+  f.state.daemonDeps.readQueueAdmission = () => ({ wipLimit: 2, observedOpenCount: 2 });
+  await f.drive();
+  assert.deepEqual(f.calls.runTask, [], "the shared admission reading bounds the target job too");
+
+  f.state.daemonDeps.readQueueAdmission = () => ({ wipLimit: 2, observedOpenCount: 1 });
+  f.state.daemonDeps.checkStop = () => f.calls.runTask.length > 0 ? "one job observed" : undefined;
+  const oneSlot = await f.drive();
+  assert.deepEqual(f.calls.runTask, ["W9-T1"], "only one of the simultaneous requests occupies the last slot");
+  assert.ok(oneSlot.lines.some((line) => line.step === "target_job.capacity_deferred" && line.extra.origin === otherOrigin));
+  assert.ok(existsSync(nativeMarker(f.core, "wreckterra", "W9-T3")), "the waiting request keeps its marker");
+  assert.equal(f.record(otherOrigin).state, "absent", "a waiting request never receives an admission record");
+});
+
+test("W1-T10799: unknown native receipts and an absent claim never respend an admitted job", async (t) => {
+  const f = nativeFixture(t);
+  const request = await nativeStarted(f);
+  const landed: TargetJobRecord = { origin: request.origin, taskId: "W9-T1", repo: "wreckterra", status: "admitted", attempts: 1, updatedAt: new Date().toISOString() };
+  fileTargetJobStore(f.core).write(landed);
+  f.state.claimHeld = false;
+  const archive = join(f.core, "state", `ledger.${new Date().toISOString().replaceAll(":", "-")}.ndjson.gz`);
+  writeFileSync(archive, "unreadable gzip receipt corpus");
+  const unknown = await f.drive();
+  assert.deepEqual(f.calls.runTask, [], "an absent claim cannot turn unknown receipts into permission to spend again");
+  assert.ok(unknown.lines.some((line) => line.step === "target_job.unknown"));
+  assert.deepEqual(f.record(request.origin), { state: "found", record: landed });
+  assert.ok(existsSync(nativeMarker(f.core, "wreckterra", "W9-T1")));
+
+  rmSync(archive);
+  await f.drive();
+  assert.deepEqual(f.calls.runTask, ["W9-T1"], "a complete corpus with no run and a free claim can recover the job");
+});
+
+test("W1-T10799: a foreign repository's native run cannot satisfy this origin's receipt", async (t) => {
+  const f = nativeFixture(t);
+  const request = await nativeStarted(f);
+  f.log("console.kick_dispatched", { task: "W9-T1", origin: request.origin, repo: "wreckterra" });
+  const read = () => readTargetExecution(join(f.core, "state"), { taskId: "W9-T1", origin: request.origin, repo: "wreckterra", requestedAt: request.receipt.queuedAt, nowMs: Date.now() });
+  const foreignRun = `W9-T1-${Date.now()}`;
+  appendLedger(f.ledgerPath, { run_id: foreignRun, task_id: "W9-T1", step: "run.start", repo: "gammaterra" });
+  assert.deepEqual(read(), { state: "dispatched" }, "the same task id in another repository is not this run");
+  appendLedger(f.ledgerPath, { run_id: foreignRun, task_id: "W9-T1", step: "verdict", verdict: "merged" });
+  assert.deepEqual(read(), { state: "dispatched" }, "the other repository's verdict cannot end this job");
+  appendLedger(f.ledgerPath, { run_id: "W9-T1-unscoped", task_id: "W9-T1", step: "run.start" });
+  assert.deepEqual(read(), { state: "dispatched" }, "a start without repository identity is insufficient");
+  const ownRun = `W9-T1-${Date.now() + 1}`;
+  appendLedger(f.ledgerPath, { run_id: ownRun, task_id: "W9-T1", step: "run.start", repo: "Wreckterra" });
+  assert.deepEqual(read(), { state: "running", runId: ownRun });
+  appendLedger(f.ledgerPath, { run_id: ownRun, task_id: "W9-T1", step: "verdict", verdict: "merged" });
+  assert.deepEqual(read(), { state: "ended", runId: ownRun });
 });
 
 test("W1-T10799: replay after restart or lost response resumes the same native job", async (t) => {
@@ -885,7 +951,7 @@ test("W1-T10799: native receipts distinguish queued admitted running and refused
   assert.deepEqual(read(Date.now()), { state: "dispatched" });
   assert.equal(await outcome(), "admitted");
   const runId = `W9-T1-${Date.now()}`;
-  appendLedger(join(stateDir, "ledger.ndjson"), { run_id: runId, task_id: "W9-T1", step: "run.start", lane: "run-task" });
+  appendLedger(join(stateDir, "ledger.ndjson"), { run_id: runId, task_id: "W9-T1", step: "run.start", lane: "run-task", repo: "wreckterra" });
   assert.deepEqual(read(Date.now()), { state: "running", runId });
   assert.equal(await outcome(), "running");
 

@@ -6654,7 +6654,8 @@ export async function runDaemon(
       const [job, ...waiting] = deps.pendingTargetJobs();
       if (job) {
         const laneTarget = enforcedLaneTarget(children.size, tickQueueAdmission?.wipLimit);
-        if (children.size > 0 || laneTarget < 1) {
+        const wipBudget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
+        if (children.size > 0 || laneTarget < 1 || wipBudget < 1) {
           log("target_job.capacity_deferred", { task: job.taskId, origin: job.origin, repo: job.repo, in_flight: children.size });
         } else {
           for (const other of waiting) log("target_job.capacity_deferred", { task: other.taskId, origin: other.origin, repo: other.repo, reason: "lane reserved by another job" });
@@ -8070,6 +8071,7 @@ export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: Boun
     const seen = deps.execution(prior);
     if (seen.state === "ended") return close({ ...prior, status: "ended", updatedAt: deps.nowIso() }, "terminal verdict recorded", false);
     const claim = await deps.claimHeld(taskId, repo);
+    if (seen.state === "unknown") return held("native execution receipts unreadable", "target_job.unknown");
     if (claim !== false || seen.state === "running") {
       if (prior.reason !== "resumed") {
         // `updatedAt` stays the dispatch time: the native receipts are correlated from it.
