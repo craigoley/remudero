@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import { createConnection } from "node:net";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -21,6 +21,7 @@ import { buildWorkerEnv } from "../src/lib/env.js";
 import { mintScopedToken } from "../src/lib/github-app.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { fileTargetJobStore } from "../src/lib/product-build.js";
 import {
   daemonGitCredentialSocketPath,
   realScopedMint,
@@ -43,6 +44,7 @@ import {
 import { buildSweepHook, daemonCommand, gitCredentialFixSpawn, runTask, unwireOwnCheckoutCredentialHelper } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { ownedFixtureDir } from "./helpers/owned-fixture-dir.js";
 
 /** `git credential fill` for one owner/repo URL, asynchronously, with its stdin closed. */
 function credentialFill(cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
@@ -808,4 +810,118 @@ test("an unreadable or half-wired checkout neither stops the boot repair nor hid
 
   const gone = join(tmpdir(), `${RMD_TMP_PREFIX}never-created`);
   assert.equal(sharesHarnessCheckout(gone, `${gone}/.`), true, "a path that does not exist still compares by its resolved form");
+});
+
+// ── W1-T10799: a managed target with no daemon of its own, run as the core daemon's bounded job ─
+
+/** Core drives remudero; the two enrolled targets have NO live instance of their own. */
+const CORE_ONLY_REGISTRY = "instances:\n  core:\n    github_repo: craigoley/remudero\n";
+
+/** The target repository's own plan: the product task, and an ordinary one the job must never touch. */
+const TARGET_PLAN = `
+- id: W9-T1
+  title: the product's first source task
+  repo: wreckterra
+  type: implement
+  depends_on: []
+  status: queued
+  origin: product-plan#prd_x/plan-approved-1
+  budget_usd: 10
+- id: W9-T3
+  title: an ordinary queued task of the same plan
+  repo: wreckterra
+  type: implement
+  depends_on: []
+  status: queued
+`;
+
+// The core daemon's OWN composition root, not a hand-wired runner: it binds the job to the target clone, reads the
+// target's dispatch claim from that clone's origin, and hands the job's worker the daemon's one credential socket.
+test("W1-T10799: the core daemon's own wiring runs the job over the target clone, its claim and its credential socket", async (t) => {
+  const root = ownedFixtureDir(t, "bounded-target-daemon").dir;
+  const home = join(root, "home");
+  const coreRoot = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root: coreRoot }));
+  mkdirSync(join(coreRoot, "state"), { recursive: true });
+  const selfPlan = join(root, "self-plan.yaml");
+  writeFileSync(selfPlan, "[]\n");
+
+  // The target's origin carries its own plan; its clone sits where the core daemon keeps managed clones.
+  const origin = gitRepo({ bare: true, scope: t, kind: "bounded-job-origin" });
+  const seed = gitRepo({ seedCommit: false, scope: t, kind: "bounded-job-seed" });
+  seed.addRemote("origin", origin.dir);
+  mkdirSync(join(seed.dir, "plan"));
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), TARGET_PLAN);
+  seed.git("add", "-A");
+  seed.git("commit", "-q", "-m", "seed");
+  seed.git("push", "-q", "-u", "origin", "main");
+  const checkout = join(root, "checkout");
+  execFileSync("git", ["clone", "-q", origin.dir, checkout], { stdio: "pipe" });
+  mkdirSync(join(checkout, ".remudero"));
+  writeFileSync(join(checkout, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra", "craigoley/gammaterra"] }));
+  writeFileSync(join(checkout, ".remudero", "daemon-instances.yaml"), CORE_ONLY_REGISTRY);
+  const reposDir = join(coreRoot, "repos");
+  mkdirSync(reposDir);
+  execFileSync("git", ["clone", "-q", origin.dir, join(reposDir, "wreckterra")], { stdio: "pipe" });
+  // A clone whose `.git` is a symlink is one the pinned host git refuses to read: its claim is unknown, never free.
+  mkdirSync(join(reposDir, "gammaterra"));
+  symlinkSync(join(reposDir, "wreckterra", ".git"), join(reposDir, "gammaterra", ".git"));
+
+  // Both jobs already dispatched once, so each must recover from its durable record and its claim, never respend blindly.
+  const origins: Record<string, string> = { wreckterra: "product:prd_x/op_1", gammaterra: "product:prd_x/op_2" };
+  const store = fileTargetJobStore(coreRoot);
+  for (const repo of Object.keys(origins)) {
+    store.write({ origin: origins[repo]!, taskId: "W9-T1", repo, status: "admitted", attempts: 1, updatedAt: new Date().toISOString() });
+  }
+
+  const socketPath = daemonGitCredentialSocketPath(join(coreRoot, "state"));
+  const previous = { HOME: process.env.HOME, CI: process.env.CI, GITHUB_ACTIONS: process.env.GITHUB_ACTIONS };
+  process.env.HOME = home;
+  delete process.env.CI;
+  delete process.env.GITHUB_ACTIONS;
+  const outcomes: Record<string, unknown> = {};
+  const taskCalls: Array<{ taskId: string; opts: Record<string, unknown> }> = [];
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", selfPlan, "--max", "0"], {
+      repoRoot: checkout,
+      githubFactory: () => OFFLINE_GITHUB,
+      startGithubAppRefresh: () => ({ armed: true, ready: Promise.resolve() }),
+      gitCredentialMint: async (repo: string) => ({ ok: true, token: `scoped-for-${repo}` }),
+      runTask: (async (taskId: string, opts: Record<string, unknown>) => {
+        taskCalls.push({ taskId, opts });
+        return { taskId, runId: `${taskId}-wired`, merged: true, costUsd: 0, verdict: "merged" };
+      }) as never,
+      runDaemon: (async (_plan: unknown, daemonDeps: DaemonDeps) => {
+        for (const repo of ["wreckterra", "gammaterra"]) {
+          outcomes[repo] = await daemonDeps.runTargetJob!({ taskId: "W9-T1", origin: origins[repo]!, repo }, {} as DaemonDeps);
+        }
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      }) as never,
+    });
+    assert.equal(code, 0);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dirname(socketPath), { recursive: true, force: true });
+  }
+
+  // A claim the target's origin does not hold is free: the one job entered the maintained drain and ended.
+  assert.equal((outcomes.wreckterra as { state: string }).state, "ended", "a readable, absent claim lets the recovered job dispatch once");
+  assert.deepEqual(taskCalls.map((call) => call.taskId), ["W9-T1"], "exactly one dispatch across both recovered jobs");
+  assert.equal(taskCalls[0]!.opts.planPath, join(reposDir, "wreckterra", "plan", "tasks.yaml"), "the target clone's own plan, derived as resolveDaemonTarget derives it");
+  assert.equal(taskCalls[0]!.opts.owner, "craigoley", "bound to the verified target owner");
+  assert.equal(taskCalls[0]!.opts.gitCredentialSocketPath, socketPath, "the job's worker gets the daemon's one credential socket");
+  const ended = store.read(origins.wreckterra!);
+  assert.ok(ended.state === "found" && ended.record.status === "ended");
+
+  // A claim that cannot be read is unknown: the job resumes from its record and is never dispatched a second time.
+  assert.equal((outcomes.gammaterra as { state: string }).state, "resumed", "an unreadable claim is held, never read as free");
+  const resumed = store.read(origins.gammaterra!);
+  assert.ok(resumed.state === "found" && resumed.record.status === "admitted" && resumed.record.reason === "resumed");
+  const ledger = readFileSync(join(coreRoot, "state", "ledger.ndjson"), "utf8").split("\n").filter((line) => line.includes("target_job.resumed"));
+  assert.equal(ledger.length, 1, "the resumption is ledgered once");
+  assert.ok(ledger[0]!.includes('"claim":"unknown"'), "and it records that the claim could not be read");
 });
