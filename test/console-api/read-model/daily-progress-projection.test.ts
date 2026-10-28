@@ -16,7 +16,7 @@ import { boardClosedCollectionPath, boardClosedRowsDigest, createBoardSnapshotCa
 import { buildBatchedGithub } from "#src/lib/status.js";
 import { collectDailyProgress, type DailyProgressCollectionConfig } from "#src/lib/daily-progress-collector.js";
 import { improvementEffectNamespaceDir } from "#src/lib/gardener-opportunity-evidence.js";
-import { admitStaticWork, resolveTestSlotDir } from "#src/lib/test-slot.js";
+import { admitStaticWork, readMemoryHeadroom, resolveTestSlotDir, TEST_SLOT_DIR_ENV, type StaticAdmission } from "#src/lib/test-slot.js";
 import { SLOW_LANE_HEAP_MB } from "#src/lib/read-model-slow-lane.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
@@ -454,6 +454,31 @@ test("Daily progress activity preserves replay deduplication and source gaps: ac
   });
 });
 
+function assertHeapAdmission(admission: StaticAdmission, dir: string, memoryBytes: number, headroom: number | undefined): void {
+  assert.equal(admission.outcome, "admitted", admission.note);
+  assert.equal(admission.executionAllowed, true, admission.note);
+  assert.equal(admission.childEnvironment?.[TEST_SLOT_DIR_ENV], dir, `capacity reservation must be recorded: ${admission.note}`);
+  assert.ok(headroom !== undefined && Number.isFinite(headroom) && headroom >= memoryBytes,
+    `measured headroom ${headroom} must cover parent plus child reservation ${memoryBytes}: ${admission.note}`);
+}
+
+test("daily heap proof refuses unavailable or unrecorded capacity before spawning", () => {
+  const dir = "/unused-admission-control", memoryBytes = 2_048;
+  const admitted: StaticAdmission = { outcome: "admitted", executionAllowed: true, waitedMs: 0,
+    note: "admission control", childEnvironment: { [TEST_SLOT_DIR_ENV]: dir }, release() {} };
+  assert.doesNotThrow(() => assertHeapAdmission(admitted, dir, memoryBytes, memoryBytes));
+  for (const outcome of ["open", "wait_bound_exceeded", "inherited", "slot"] as const) {
+    assert.throws(() => assertHeapAdmission({ ...admitted, outcome }, dir, memoryBytes, memoryBytes),
+      assert.AssertionError, `${outcome} does not verify this workload's capacity`);
+  }
+  assert.throws(() => assertHeapAdmission({ ...admitted, executionAllowed: false }, dir, memoryBytes, memoryBytes), assert.AssertionError);
+  assert.throws(() => assertHeapAdmission({ ...admitted, childEnvironment: undefined }, dir, memoryBytes, memoryBytes), assert.AssertionError);
+  assert.throws(() => assertHeapAdmission({ ...admitted, childEnvironment: { [TEST_SLOT_DIR_ENV]: "/wrong-pool" } }, dir, memoryBytes, memoryBytes), assert.AssertionError);
+  for (const headroom of [undefined, NaN, Infinity, memoryBytes - 1]) {
+    assert.throws(() => assertHeapAdmission(admitted, dir, memoryBytes, headroom), assert.AssertionError);
+  }
+});
+
 test("Daily progress activity keeps full counts without retaining unrelated ledger rows; Daily progress activity preserves replay deduplication and source gaps; Daily progress collection stays inside the unchanged slow-lane heap", async t => {
   await withTempDir("daily-heap-workload", async root => {
     const config = activityFixture(root), payload = "x".repeat(64 * 1024), selected = 6_000, unrelated = 18_000;
@@ -486,11 +511,13 @@ test("Daily progress activity keeps full counts without retaining unrelated ledg
     assert.ok(readdirSync(config.stateDir).filter(p => p.endsWith(".gz")).every(p => statSync(join(config.stateDir, p)).size < 8 * 1024 * 1024), "compressed fixtures stay bounded on disk");
     // Reserve both processes in the host pool instead of the test's private fixture slot directory.
     const dir = resolveTestSlotDir({ ...process.env, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "" }).dir;
+    const memoryBytes = process.resourceUsage().maxRSS * 1024 + (SLOW_LANE_HEAP_MB + 256) * 1024 ** 2;
+    let measuredHeadroom: number | undefined;
     const admission = admitStaticWork("daily-progress-heap-proof", {
-      dir, memoryBytes: process.resourceUsage().maxRSS * 1024 + (SLOW_LANE_HEAP_MB + 256) * 1024 ** 2,
+      dir, memoryBytes, memoryHeadroom: () => (measuredHeadroom = readMemoryHeadroom()),
     });
-    assert.ok(admission.executionAllowed, admission.note);
     try {
+      assertHeapAdmission(admission, dir, memoryBytes, measuredHeadroom);
       const code = `
         import assert from "node:assert/strict";
         import { collectDailyProgress } from "#src/lib/daily-progress-collector.js";
