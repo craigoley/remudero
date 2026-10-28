@@ -546,12 +546,12 @@ test("W1-T6012: a changed or unavailable instance plan source never publishes a 
       const latest = await get("/v1/i/site/status"); assert.deepEqual(taskIds(latest.body), ["SITE-T3"]); assert.equal(latest.stale, null);
     });
   });
-  await t.test("unreadable shard preserves evidence until its permissions recover", async t => {
+  await t.test("a non-file shard preserves evidence until its file is restored", async t => {
     await withReloadGateway(t, {}, paths => { mkdirSync(join(paths.checkout, "plan", "tasks.d")); }, async (get, paths) => {
       assert.deepEqual(taskIds((await get("/v1/i/site/status")).body), ["SITE-T1"]);
-      const shard = join(paths.checkout, "plan", "tasks.d", "denied.yaml"); writeFileSync(shard, task("SITE-T2", "remudero-site")); chmodSync(shard, 0);
-      try { const refused = await get("/v1/i/site/status"); assert.equal(refused.status, 200); assert.deepEqual(taskIds(refused.body), ["SITE-T1"]); assert.ok(refused.stale); }
-      finally { chmodSync(shard, 0o600); }
+      const shard = join(paths.checkout, "plan", "tasks.d", "denied.yaml"); mkdirSync(shard);
+      const refused = await get("/v1/i/site/status"); assert.equal(refused.status, 200); assert.deepEqual(taskIds(refused.body), ["SITE-T1"]); assert.ok(refused.stale);
+      rmSync(shard, { recursive: true }); writeFileSync(shard, task("SITE-T2", "remudero-site"));
       const recovered = await get("/v1/i/site/status"); assert.deepEqual(taskIds(recovered.body), ["SITE-T1", "SITE-T2"]); assert.equal(recovered.stale, null);
     });
   });
@@ -655,10 +655,9 @@ test("W1-T6012: newly recognized history keeps its event position and never disp
 test("W1-T6012: an unreadable shard directory recovers on the next qualified read", async t => {
   await withReloadGateway(t, {}, paths => mkdirSync(join(paths.checkout, "plan", "tasks.d")), async (get, paths) => {
     assert.deepEqual(taskIds((await get("/v1/i/site/status")).body), ["SITE-T1"]);
-    const dir = join(paths.checkout, "plan", "tasks.d"); chmodSync(dir, 0);
-    try {
-      const retained = await get("/v1/i/site/status"); assert.equal(retained.status, 200); assert.deepEqual(taskIds(retained.body), ["SITE-T1"]); assert.ok(retained.stale);
-    } finally { chmodSync(dir, 0o700); }
+    const dir = join(paths.checkout, "plan", "tasks.d"); rmSync(dir, { recursive: true }); writeFileSync(dir, "not a directory\n");
+    const retained = await get("/v1/i/site/status"); assert.equal(retained.status, 200); assert.deepEqual(taskIds(retained.body), ["SITE-T1"]); assert.ok(retained.stale);
+    unlinkSync(dir); mkdirSync(dir);
     const recovered = await get("/v1/i/site/status"); assert.equal(recovered.status, 200); assert.deepEqual(taskIds(recovered.body), ["SITE-T1"]); assert.equal(recovered.stale, null);
   });
 });

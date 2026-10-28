@@ -318,7 +318,10 @@ function instancePlanReader(root: InstanceStateRoot, board: BoardDeps, opts: Ins
     const next = (opts.loadPlan ?? loadPlan)(root.planPath);
     if (initialInstancePlanIdentity(root.planPath) !== before) throw new Error("instance plan source changed during startup");
     board.plan = next; source = planSourceLoaded(source, before, opts.clock);
-  } catch (error) { fail(error, "serve.instance_unavailable"); }
+  } catch (error) {
+    // fail preserves the reason in the unavailable source outcome returned by current().
+    fail(error, "serve.instance_unavailable");
+  }
   const current = (): InstanceAvailability => source?.state === "loaded" ? { ok: true }
     : source?.state === "stale" ? { ok: true, staleReason: "instance plan retained after a failed refresh" }
     : { ok: false, reason: source?.failure.reason ?? "instance plan has not been verified" };
@@ -339,6 +342,7 @@ function instancePlanReader(root: InstanceStateRoot, board: BoardDeps, opts: Ins
           opts.log?.("serve.instance_plan_reloaded", { instance: root.instance, identity: before, tasks: next.tasks.length });
         }
       } catch (error) {
+        // fail retains the last good plan and exposes a stale or unavailable outcome with its reason.
         if (!captured) attemptedIdentity = undefined;
         fail(error, "serve.instance_plan_reload_failed");
       }
