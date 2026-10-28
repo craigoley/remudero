@@ -26,9 +26,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
-import { runnableCandidates } from "../src/lib/drain.js";
-import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
+import { loadPlan, type Plan, type Task } from "#src/lib/plan.js";
+import { runnableCandidates } from "#src/lib/drain.js";
+import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "#src/lib/status-board.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const NOW_MS = Date.parse("2026-08-26T00:00:00.000Z");

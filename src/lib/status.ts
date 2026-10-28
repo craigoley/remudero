@@ -296,6 +296,9 @@ export interface GitHub {
   changedFiles?(prUrl: string): string[] | undefined;
   /** Qualified merged-head evidence, or named unknown; this read never schedules GitHub work. */
   changedFileEvidence?(prUrl: string): ChangedFileEvidence;
+  /** Configured repository and immutable implementation evidence. A cold read may request only the
+   * existing bounded changed-files cache; an absent cache never falls back to synchronous REST. */
+  implementationCreditEvidence?(prUrl: string): { repository: string; evidence: ChangedFileEvidence };
   /** Is auto-merge already armed on this PR? OPTIONAL (W1-T155); omitted ⇒ fail-soft "not armed". */
   autoMergeArmed?(prUrl: string): boolean;
   /** OPTIONAL (W1-T154): force this gateway's fetch NOW rather than lazily, so serve boot never pays a cold
@@ -2869,6 +2872,44 @@ function derivePrPrecedence(
     };
   }
 
+  // Only repair the observed receipt-only class. The receipt selects work to verify; it never proves
+  // implementation. Keep these early rungs' projection precedence and ordinary no-extra-read cost.
+  const persistEarlyImplementation = (pr: PrRef): void => {
+    try {
+      const receipt = durableCredit?.backfillReceipt;
+      if (!receipt || durableCredit?.trailer || durableCredit?.["head-branch"] ||
+          receipt.source !== "sweep.credit_backfill" || receipt.prUrl !== pr.url || receipt.prNumber !== pr.number ||
+          pr.state !== "MERGED" || quarantinedUrls.has(pr.url) ||
+          Object.values(durableCredit.invalidated ?? {}).some(mark => mark.prNumber === pr.number) ||
+          debunkedTrailerUrls(ledgerLines, task.id, ledgerIndex).has(pr.url) ||
+          isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex, pr.headRefOid)) return;
+      if (!deps.github.implementationCreditEvidence) return;
+      const head = deps.github.headRefName(pr.url), body = deps.github.prBody(pr.url);
+      const trailer = creditsByAnchoredTrailer(pr.state, head, body, task.id,
+        deps.github.creditedByCommitTrailer?.(task.id, pr.url) ?? false);
+      const source = trailer ? "trailer" : ownsBranch(head, task.id) ? "head-branch" : undefined;
+      if (!source) return;
+      const context = deps.github.implementationCreditEvidence(pr.url);
+      if (!context || context.repository.split("/")[1] !== task.repo ||
+          creditPrProblem({ prUrl: pr.url, prNumber: pr.number }, context.repository)) return;
+      const evidence = context.evidence;
+      if (evidence.status !== "complete" || evidence.repository !== context.repository ||
+          evidence.prNumber !== pr.number || evidence.prState !== "MERGED" || evidence.complete !== true ||
+          evidence.source !== "github_rest_pull_files_paginated" || evidence.freshness !== "immutable_merged_head" ||
+          !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(pr.headRefOid ?? "") || evidence.headRefOid !== pr.headRefOid ||
+          !Number.isFinite(evidence.observedAt) || evidence.observedAt < 0 || evidence.observedAt > (deps.now ?? Date.now)() ||
+          // The existing cache qualifies only below GitHub's 3,000-file pagination ceiling.
+          !Array.isArray(evidence.files) || evidence.files.length === 0 || evidence.files.length >= 3000 ||
+          new Set(evidence.files).size !== evidence.files.length || !evidence.files.every(file =>
+            typeof file === "string" && !file.includes("\0") && file.split("/").every(part => part !== "" && part !== "." && part !== "..")) ||
+          isPlanOnlyChangeset(evidence.files)) return;
+      writeCreditStore(recordCredit(creditStore, task.id, { source, prUrl: pr.url, prNumber: pr.number, prState: "MERGED" }));
+    } catch {
+      // Evidence or persistence is unavailable. The known merge remains the projection's answer;
+      // only a later real stored canonical slot can satisfy the strict dependency reader.
+    }
+  };
+
   // (a) ledger `pr.opened` -> query that PR. A MERGED resolution returns immediately; a NON-merged one is
   // stashed rather than returned — SIBLING CREDIT (P29(i)): a later redispatch's own closed or open PR must
   // never permanently mask an earlier sibling run's already-merged credit found at rung (c).
@@ -2880,7 +2921,7 @@ function derivePrPrecedence(
     if (pr) {
       const result: StatusProjection = { taskId: task.id, source: "ledger", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
       if (result.merged) {
-        if (!overrides.excludes(pr.number)) return result;
+        if (!overrides.excludes(pr.number)) { persistEarlyImplementation(pr); return result; }
       } else {
         ownResult = result;
       }
@@ -2896,7 +2937,7 @@ function derivePrPrecedence(
     if (pr) {
       const result: StatusProjection = { taskId: task.id, source: "pr-field", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
       if (result.merged) {
-        if (!overrides.excludes(pr.number)) return result;
+        if (!overrides.excludes(pr.number)) { persistEarlyImplementation(pr); return result; }
       } else if (!ownResult) {
         ownResult = result;
       }
@@ -3553,8 +3594,26 @@ export const PROJECTION_STEP_READS: ReadonlySet<string> = new Set([
   "pr.opened", "review.posted", PLAN_ONLY_REVIEW_MARKER_STEP, "daemon.boot", "verdict", "verdict.merged",
   "escalation.issue_opened", ...WORKER_RESULT_STEPS,
 ]);
-/** W1-T8676: the reasons `workerErrorVerdict` (src/run-task.ts) gives a non-budget worker error. */
+/** W1-T8676: the reasons `workerErrorVerdict` (src/run-task.ts) gives a non-budget worker error. W1-T9034: only the
+ *  fallback for a verdict row carrying neither `stage` nor `subtype`, since `failOnWorkerError` may overwrite it. */
 const WORKER_ERROR_REASON = /^worker (?:error at |ended by signal )/;
+/** W1-T9034: every stage `failOnWorkerError` (src/cli/commands/run-task-verb.ts) is called with. A new call site
+ *  adds its stage here, or its `failed` verdict reads as task-caused and never takes the provider_recovered release. */
+export const WORKER_ERROR_VERDICT_STAGES: ReadonlySet<string> = new Set([
+  "recon", "implement", "implement.resumed", "implement.continued", "implement.preopen_continued",
+]);
+
+/** W1-T9034: a `failed` verdict row `workerErrorVerdict` wrote, read off its structured fields (a worker stage and an
+ *  `error_*` subtype, never a budget breach), whatever reason text `failOnWorkerError` left on it. */
+function isWorkerErrorVerdict(line: Record<string, unknown>): boolean {
+  if (line.verdict !== "failed") return false;
+  const { stage, subtype, reason } = line;
+  if (typeof stage === "string" || typeof subtype === "string") {
+    return typeof stage === "string" && WORKER_ERROR_VERDICT_STAGES.has(stage) && typeof subtype === "string" &&
+      subtype.startsWith("error_") && subtype !== "error_max_budget_usd";
+  }
+  return typeof reason === "string" && WORKER_ERROR_REASON.test(reason);
+}
 
 /** W1-T8676: the first worker result row (any task) from `provider` that ended clean strictly after `afterMs`. */
 function firstCleanWorkerResultAfter(
@@ -3666,8 +3725,7 @@ export function independentFailureLatch(
       stageByRun.set(line.run_id, line.stage);
       revisionByRun.set(line.run_id, line.pre_dispatch_contract_revision);
       const verdictMs = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
-      if (line.verdict === "failed" && typeof line.reason === "string" && WORKER_ERROR_REASON.test(line.reason) &&
-        Number.isFinite(verdictMs)) workerErrorByRun.set(line.run_id, { ms: verdictMs, provider: line.provider });
+      if (isWorkerErrorVerdict(line) && Number.isFinite(verdictMs)) workerErrorByRun.set(line.run_id, { ms: verdictMs, provider: line.provider });
       // W1-T4655/W1-T4701: a thrown run's verdict keeps the streak, as its verdict-less row did.
       const thrownRunEnding = typeof line.stage === "string" && THROWN_RUN_VERDICT_STAGES.has(line.stage);
       if (!thrownRunEnding && !isEnvironmentalBlock(line.verdict, line.stage)) environmentalStreak = 0;
@@ -5741,6 +5799,20 @@ export function buildBatchedGithub(
     changedFileEvidence(prUrl) {
       const row = index().byUrl.get(prUrl);
       return opts.changedFilesCache?.evidence?.(prUrl, row?.state, row?.headRefOid) ?? { status: "unknown", reason: "qualified_cache_unavailable" };
+    },
+    implementationCreditEvidence(prUrl) {
+      const repository = `${owner}/${repo}`;
+      const unknown = (reason: string): { repository: string; evidence: ChangedFileEvidence } =>
+        ({ repository, evidence: { status: "unknown", reason } });
+      if (!opts.changedFilesCache || creditPrProblem({ prUrl, prNumber: prNumberFromRef(prUrl) }, repository))
+        return unknown("qualified_cache_unavailable");
+      const row = index().byUrl.get(prUrl);
+      if (row?.state !== "MERGED" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(row.headRefOid ?? ""))
+        return unknown("missing_merged_head");
+      const evidence = opts.changedFilesCache.evidence?.(prUrl, row.state, row.headRefOid) ??
+        { status: "unknown" as const, reason: "qualified_cache_unavailable" };
+      if (evidence.status === "unknown") opts.changedFilesCache.lookup(prUrl, row.state, row.headRefOid);
+      return { repository, evidence };
     },
     autoMergeArmed(prUrl) {
       return index().byUrl.get(prUrl)?.autoMergeRequest != null;

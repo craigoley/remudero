@@ -3,13 +3,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runDaemon } from "../src/lib/daemon.js";
-import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger, rotateLedger, type LedgerLine } from "../src/lib/ledger.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { RunResult } from "../src/run-task.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { DECISION_RELEVANT_LEDGER_STEPS, appendLedger, rotateLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "#src/lib/status-board.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { RunResult } from "#src/run-task.js";
 
 // ── W1-T4939: the idle-lane account must survive a daemon restart ───────────────────────────
 //

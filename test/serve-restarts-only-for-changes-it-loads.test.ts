@@ -3,9 +3,9 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { assessGatewayCheckout, gateStaleCodeExit, type StaleCodeExitDeps } from "../src/lib/serve.js";
-import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead } from "../src/lib/serve-restart-relevance.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { assessGatewayCheckout, gateStaleCodeExit, type StaleCodeExitDeps } from "#src/lib/serve.js";
+import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead } from "#src/lib/serve-restart-relevance.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T4463: serve restarts only when the move from its boot sha touches a path it loads.
 

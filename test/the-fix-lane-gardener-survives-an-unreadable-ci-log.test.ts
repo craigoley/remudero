@@ -3,10 +3,10 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { fixedClock } from "../src/lib/clock.js";
-import { actionsJobIdOf, fixLaneGardenSpec, readFixLaneEvidence } from "../src/lib/fix-lane-gardener.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { actionsJobIdOf, fixLaneGardenSpec, readFixLaneEvidence } from "#src/lib/fix-lane-gardener.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const NOW = Date.UTC(2026, 9, 10, 12);
 const at = (hour: number) => fixedClock(NOW + hour * 3_600_000).iso();

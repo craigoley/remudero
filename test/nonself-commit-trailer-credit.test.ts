@@ -5,7 +5,7 @@ import {
   buildBatchedGithub,
   buildCommitTrailerIndex,
   type BatchedPr,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 
 function commit(subject: string, taskId: string): string {
   return `deadbeef\x00${subject}\x00Remudero-Task: ${taskId}\x1e`;

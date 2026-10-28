@@ -535,6 +535,62 @@ export function importedWalkerWalksArea(content, testDir, root, areas) {
   return false;
 }
 
+// ── W1-T4787: A SUITE THAT CLONES THE REPOSITORY WALKS EVERY AREA ─────────────────────────────
+// test/a-gate-run-leaves-the-tracked-tree-clean.test.ts runs the fast gate inside
+// `isolatedCheckout(REPO_ROOT)` (test/helpers/isolated-checkout.ts), a `git clone` of the whole
+// tree. It names no area and no enumeration idiom, so selector-shadow run 36525454210 saw it missed
+// for #7740's src change. A clone copies every area, so it needs no area name to count.
+
+/** The repository itself, spelled as a clone source: narrower than {@link REPO_ROOT_MARKER}, whose
+ *  `repoDir` names the DESTINATION of most fixture clones in this tree. */
+const CLONE_SOURCE_IS_REPO = /^(?:REPO_ROOT|repoRoot|process\.cwd\s*\(\s*\))$|\bimport\.meta\b|^(?:join|resolve)\s*\(\s*REPO_ROOT\b/;
+
+/** Whether a `"clone"` argv in `content` clones the repository: its SOURCE, the first element after
+ *  `"clone"` that is not a `-` option literal, is plainly the repository, never a fixture remote. */
+function clonesRepoArgv(content) {
+  for (const m of content.matchAll(/["'`]clone["'`]\s*,/g)) {
+    const rest = content.slice(m.index + m[0].length, m.index + 400);
+    const end = rest.indexOf("]");
+    const source = (end === -1 ? rest : rest.slice(0, end)).split(",").map((a) => a.trim())
+      .find((a) => a.length > 0 && !/^["'`]-/.test(a));
+    if (source !== undefined && CLONE_SOURCE_IS_REPO.test(source)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether the suite `content` (in `testDir`) clones the repository: by a clone argv of its own, or
+ * by calling a name it imports from a `test/helpers/` module, with a repository-rooted argument,
+ * when that helper's own clone argv clones its repository parameter. A `.js` specifier resolves
+ * to its `.ts` source.
+ */
+export function clonesTheRepository(content, testDir, root) {
+  const bare = withoutRelativePathLiterals(content);
+  if (clonesRepoArgv(bare)) return true;
+  for (const m of content.matchAll(/\bimport\s*\{([^}]*)\}\s*from\s*["'](\.[^"']+)["']/g)) {
+    const names = m[1].split(",").map((n) => n.trim().replace(/^type\s+/, "").split(/\s+as\s+/).pop() ?? "")
+      .filter((n) => /^[A-Za-z_$][\w$]*$/.test(n));
+    if (names.length === 0) continue;
+    const abs = normalize(join(testDir, m[2]));
+    // Only a SHARED TEST HELPER: an imported src or scripts module is a suite's subject, not its walker.
+    if (!relative(root, abs).split(sep).join("/").startsWith("test/helpers/")) continue;
+    let moduleContent;
+    for (const candidate of [abs, abs.replace(/\.js$/, ".ts")]) {
+      try {
+        moduleContent = fs.readFileSync(candidate, "utf8");
+        break;
+      } catch (err) {
+        if ((err && /** @type {{code?: string}} */ (err).code) !== "ENOENT") throw err;
+      }
+    }
+    if (moduleContent === undefined || !clonesRepoArgv(withoutRelativePathLiterals(moduleContent))) continue;
+    for (const name of names) {
+      if (enumerationCalls(bare, new RegExp(`\\b${name}\\s*\\(`, "g")).some((arg) => REPO_ROOT_MARKER.test(arg))) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * The suites a diff joins that name none of its symbols — enumerated from the tree at run time,
  * never a registry. Listed when relevant to the changed areas: enumerates a population and names
@@ -578,7 +634,9 @@ export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
       (enumeratesPopulation(content) && namesAreaLoosely(content, areas)) ||
       importedWalkerWalksArea(content, dirname(abs), root, areas);
     const readsAChangedFile = [...sourceTextPathsRead(content)].some((p) => changed.has(p));
-    if ((rulesJoin && isRuleSuitePath(rel, content)) || walksAnArea || readsAChangedFile) out.push(rel);
+    if ((rulesJoin && isRuleSuitePath(rel, content)) || walksAnArea || readsAChangedFile ||
+      // A root-level file (CLAUDE.md) has no area; its readers alone run for it (W1-T4397).
+      (areas.size > 0 && clonesTheRepository(content, dirname(abs), root))) out.push(rel);
   }
   out.sort();
   return out;

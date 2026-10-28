@@ -3,12 +3,12 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildRegisteredGarden, type GardenBuildContext } from "../src/run-task.js";
-import { GARDEN_PASS_STEP, REGISTERED_GARDEN_NAMES, boundedGardenPassSpawn, childGardenPassSpawn, isRegisteredGardenName, startGardenOffLoop } from "../src/lib/garden-registry.js";
-import { gardenStatePath, initialGardenState, readGardenState } from "../src/lib/gardener.js";
-import { GARDEN_ACTION_CLASSES } from "../src/lib/knowledge-gardener.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { buildRegisteredGarden, type GardenBuildContext } from "#src/run-task.js";
+import { GARDEN_PASS_STEP, REGISTERED_GARDEN_NAMES, boundedGardenPassSpawn, childGardenPassSpawn, isRegisteredGardenName, startGardenOffLoop } from "#src/lib/garden-registry.js";
+import { gardenStatePath, initialGardenState, readGardenState } from "#src/lib/gardener.js";
+import { GARDEN_ACTION_CLASSES } from "#src/lib/knowledge-gardener.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 function fixture(t: { after: (fn: () => void) => void }) {

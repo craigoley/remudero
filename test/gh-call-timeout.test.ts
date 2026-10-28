@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { buildBatchedGithub, classifyGhFailure, ghGateway, GH_CALL_TIMEOUT_MS } from "../src/lib/status.js";
+import { buildBatchedGithub, classifyGhFailure, ghGateway, GH_CALL_TIMEOUT_MS } from "#src/lib/status.js";
 
 /**
  * A `gh` CALL WITH NO CEILING PARKS THE WHOLE DAEMON, because both gateways in `lib/status.ts`

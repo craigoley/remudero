@@ -3,12 +3,12 @@ import { test } from "node:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAX_RETAINED_LINES_PER_STEP, ledgerExceedsRotationCeiling, rotateLedger } from "../src/lib/ledger.js";
+import { MAX_RETAINED_LINES_PER_STEP, ledgerExceedsRotationCeiling, rotateLedger } from "#src/lib/ledger.js";
 import {
   DEFAULT_MAX_TASK_DISPATCHES,
   createDispatchBreakerCache,
   evaluateDispatchBreakerDetailed,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 
 // ── W1-T2425: the anti-rotation guard is PROCESS-LOCAL while the hazard CROSSES PROCESSES.
 //

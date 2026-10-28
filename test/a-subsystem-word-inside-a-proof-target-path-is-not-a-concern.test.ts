@@ -9,11 +9,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { runFlakeIncidentGardener } from "../src/lib/flake-incident-gardener.js";
-import { parseTasksFromYaml, type Task } from "../src/lib/plan.js";
-import { lintTask, sizingViolation, subsystemsOf } from "../src/lib/task-linter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { runFlakeIncidentGardener } from "#src/lib/flake-incident-gardener.js";
+import { parseTasksFromYaml, type Task } from "#src/lib/plan.js";
+import { lintTask, sizingViolation, subsystemsOf } from "#src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const TEST_FILE = "test/a-daemon-that-cannot-hold-its-heap-says-so.test.ts";
 const NOW = Date.parse("2026-10-10T20:00:00Z");

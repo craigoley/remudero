@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,16 +15,42 @@ const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const REACH = "test/the-affected-suite-reach-ratchet.test.ts";
 const SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";
 const IMPORT_CLI = `import ${JSON.stringify("../src/run-task.js")};\n`;
+// W1-T10820: a real snapshot carries package.json, and an importer in a nested test folder reaches
+// src/run-task.ts through the alias, which resolves from any depth where a "../" specifier does not.
+const IMPORT_ALIAS = `import { run } from ${JSON.stringify("#src/run-task.js")};\n`;
 
-function fixture(root = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-"))) {
+/** The always-on skill census is gitFree and joins every nonempty diff, so a precheck over this tree runs it:
+ *  the tree carries a healthy stand-in and, when `linkModules` is set, the dependency donor it runs from. */
+const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
+
+/** The snapshot precheck runs the reach ratchet from the round's own tree, so a tree that must be refused for a new
+ *  importer carries a stand-in suite that fails exactly when `test/new.test.ts` exists (the base tree lacks it). */
+const REACH_STAND_IN = [
+  // The real tree records this suite as a run-task importer, so the stand-in keeps counting as one.
+  IMPORT_CLI.trimEnd(),
+  'import assert from "node:assert/strict";',
+  'import { existsSync } from "node:fs";',
+  'import { test } from "node:test";',
+  'test("reach stand-in refuses the new importer", () => {',
+  '  assert.equal(existsSync("test/new.test.ts"), false, "importerCount: new importer test/new.test.ts");',
+  "});", "",
+].join("\n");
+
+function fixture(root = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-")), linkModules = false, reachText = IMPORT_ALIAS) {
   const baseline = JSON.parse(readFileSync(join(ROOT, "scripts/affected-reach-baseline.json"), "utf8"));
   const texts: Record<string, string> = {
     "src/run-task.ts": "export {};\n",
     "src/lib/affected-suites.ts": "export {};\n",
-    [REACH]: "export {};\n",
+    // A module no suite reaches keeps the fixture's median reach under the real tree's recorded one.
+    "src/lib/unreached.ts": "export {};\n",
+    [SKILL_CENSUS]: 'import { test } from "node:test";\ntest("skill census stand-in", () => undefined);\n',
     "scripts/affected-reach-baseline.json": JSON.stringify(baseline),
+    "package.json": JSON.stringify({ imports: JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).imports }),
   };
-  for (const path of baseline.importers) texts[path] = IMPORT_CLI;
+  if (linkModules) symlinkSync(join(ROOT, "node_modules"), join(root, "node_modules"), "dir");
+  for (const path of baseline.importers) texts[path] = IMPORT_ALIAS;
+  // After the loop: the baseline lists this suite as an importer, and the loop would overwrite the stand-in.
+  texts[REACH] = reachText;
   for (const [path, text] of Object.entries(texts)) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), text);
@@ -75,7 +101,9 @@ test("a CommonJS probe loads the harness snapshot functions without git or async
     `    return require("node:child_process").spawnSync(_file, args, opts);`,
     `  }`,
     `  calls.push({ args, snapshot: opts.env.RMD_CENSUS_SNAPSHOT });`,
-    `  return { status: 0, stdout: "# tests 4\\n# pass 4\\n# fail 0\\n", stderr: "" };`,
+    // The judged reach run (W1-T8379) passes only on a tally: this fake stands for a finished run and writes it.
+    `  const { finishJudgedRun } = require(${JSON.stringify(join(ROOT, "test", "helpers", "judged-pool-run.ts"))});`,
+    `  return { ...finishJudgedRun(args, opts), stdout: "# tests 4\\n# pass 4\\n# fail 0\\n", stderr: "" };`,
     `});`,
     `process.stdout.write(JSON.stringify({ snapshot, checked, calls, budgetCalls }));`,
   ].join("\n"));
@@ -96,15 +124,16 @@ test("a CommonJS probe loads the harness snapshot functions without git or async
 });
 
 test("test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts: no git on PATH, edited census inputs and a new importer are refused", () => {
-  const f = fixture();
+  const f = fixture(undefined, true, REACH_STAND_IN);
   const reachArgs = ["--test", "--test-reporter=tap", "--import", "tsx"];
   const clean = run(REACH, reachArgs, f.env);
   assert.equal(clean.status, 0, clean.text);
-  assert.match(clean.text, /^# tests 4$/m);
+  assert.match(clean.text, /^# tests 6$/m);
   writeFileSync(join(f.root, "test/new.test.ts"), IMPORT_CLI);
   const refused = run(REACH, reachArgs, f.env);
   assert.equal(refused.status, 1, refused.text);
-  assert.match(refused.text, /importerCount: 934 > 933; new importers: test\/new.test.ts/);
+  const recorded = JSON.parse(readFileSync(join(ROOT, "scripts/affected-reach-baseline.json"), "utf8")).importerCount;
+  assert.ok(refused.text.includes(`importerCount: ${recorded + 1} > ${recorded}; new importers: test/new.test.ts`), refused.text);
   assert.doesNotMatch(refused.text, /ENOENT|git /);
   const precheck = spawnSync(process.execPath, [join(ROOT, "scripts/census-precheck.mjs"), "--root", f.root],
     { cwd: ROOT, env: f.env, encoding: "utf8", timeout: 60_000 });

@@ -15,7 +15,7 @@
   origin: "Operator-approved eleven-existing-file source-only remudero-ops compatibility, 2026-10-24; no live selection or image/recycle release."
   prompt: |
     Implement dormant explicit private-registry configuration plumbing in only these
-    twenty-four existing files for at most USD 12. Real host/container launch composition
+    twenty-six existing files for at most USD 12. Real host/container launch composition
     and daemon default readers must agree on one validated selected file. Preserve
     genuine absent-selection legacy behavior, supported mixed versions, independently
     authenticated owner/admin override and opt-in SHADOW policies. Selected unknown
@@ -35,7 +35,7 @@
       src: https://docs.docker.com/engine/storage/bind-mounts/
     - claim: The maintained default mode reader currently reads the repository-layout default and collapses unreadable legacy text to undefined
       src: https://github.com/craigoley/remudero/blob/c8b43c9fff993c98dff0971e5b83ddb0a4057af9/src/lib/instance-mode.ts
-  files: [src/lib/deployer.ts, src/lib/instance-mode.ts, src/lib/config-schema.ts, deploy/recycle-container.sh, deploy/serve-container.sh, test/deployer.test.ts, test/shadow-instance-safety.test.ts, test/recycle-container.test.ts, test/serve-launch-uniformity.test.ts, test/env-var-registry.test.ts, docs/instance-registry-selection-contract.md, src/lib/instance-registry-selection.ts, src/cli/commands/daemon.ts, src/cli/commands/run-task-verb.ts, src/run-task.ts, src/lib/worker-provider.ts, src/lib/worker.ts, test/one-registry-for-the-fleet.test.ts, src/lib/baked-runtime-inputs.ts, .github/workflows/acr-build.yml, deploy/install-host-units.sh, test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts, test/deploy-scripts-use-mktemp.test.ts, test/codex-worker-home-redirection.test.ts]
+  files: [src/lib/deployer.ts, src/lib/instance-mode.ts, src/lib/config-schema.ts, deploy/recycle-container.sh, deploy/serve-container.sh, test/deployer.test.ts, test/shadow-instance-safety.test.ts, test/recycle-container.test.ts, test/serve-launch-uniformity.test.ts, test/env-var-registry.test.ts, docs/instance-registry-selection-contract.md, src/lib/instance-registry-selection.ts, src/cli/commands/daemon.ts, src/cli/commands/run-task-verb.ts, src/run-task.ts, src/lib/worker-provider.ts, src/lib/worker.ts, test/one-registry-for-the-fleet.test.ts, src/lib/baked-runtime-inputs.ts, .github/workflows/acr-build.yml, deploy/install-host-units.sh, test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts, test/deploy-scripts-use-mktemp.test.ts, test/codex-worker-home-redirection.test.ts, test/helpers/gh-shim.ts, test/the-gh-shim-answers-its-routes-verbatim.test.ts]
   rationale: |
     The operator approved this exact eleven-existing-file scope, USD 12, high/span,
     and four behavioral proofs for normal automated filing and dormant source work.
@@ -74,7 +74,7 @@
        Census the real callers/catches before changing shared helpers; a fixture-only
        port or observer does not prove the daemon uses the chosen file. A synchronous
        seam cannot claim fresh asynchronous authority. Amend scope normally before
-       a demonstrated consequential change outside these twenty-four existing paths.
+       a demonstrated consequential change outside these twenty-six existing paths.
     2. Genuine absence preserves the exact legacy reader, rendered arguments and
        supported old launcher/image behavior. Presence is not truthiness: empty,
        relative, missing, unreadable, symlink, malformed, oversized, unsupported,
@@ -158,6 +158,6 @@
     action: proceed
     confidence: 1
     reasons:
-      - "Operator explicitly approved exactly twenty-four existing paths, USD 12/high/span and four behavioral proofs for dormant source-only compatibility; legacy defaults, opt-in SHADOW and owner override preserved. No live selection, automatic image/recycle release, worker stop, schedule, gate waiver or cutover is authorized."
-    judged_at: "2026-10-27T17:34:38.616Z"
-    pin: "1acd006f6270c96e5eed7ccaf722ba97152bdbc7fe76ae76c0959e72e624ae91"
+      - "Operator explicitly approved exactly twenty-six existing paths, USD 12/high/span and four behavioral proofs for dormant source-only compatibility; legacy defaults, opt-in SHADOW and owner override preserved. No live selection, automatic image/recycle release, worker stop, schedule, gate waiver or cutover is authorized."
+    judged_at: "2026-10-28T18:09:43.269708+00:00"
+    pin: "9033b0143dc539d31584d2740acdf88d30435a876f9d8796325db344fdf2abaa"

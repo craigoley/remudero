@@ -6,8 +6,8 @@ import { test } from "node:test";
 
 // A NAMESPACE import: `testTreeId` does not exist at the merge base, and a named import would fail the whole file at
 // load, which the reviewer reads as "never ran" rather than as a red.
-import * as gardener from "../src/lib/knowledge-gardener.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as gardener from "#src/lib/knowledge-gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /**
  * W1-T6276 — THE GARDENER READS TEST-PINNED LEARNINGS ONCE PER TEST TREE. testPinnedLearnings walked and read every

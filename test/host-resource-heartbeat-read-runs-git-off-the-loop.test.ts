@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   gitHeartbeatSource,
   HOST_RESOURCE_MIN_INTERVAL_MS,
@@ -15,8 +15,8 @@ import {
   startHostResourceGardener,
   type HeartbeatRead,
   type HostResourcePorts,
-} from "../src/lib/host-resource-gardener.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/host-resource-gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REF_PREFIX = "refs/remotes/origin/heartbeat-";
 const FETCH_ARGS = ["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/heartbeat-*:refs/remotes/origin/heartbeat-*"];

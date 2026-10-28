@@ -7,17 +7,17 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   cachedMountHeadroomSweep, configGardenSpec, configInventory, configMeasurementOffLoop,
   configMountSweepCachePath, mountRecommendationSource, readConfigGardenLedgerRows,
   runConfigGarden, serveConfigMeasurement, startConfigGarden, type ConfigInventory,
-} from "../src/lib/config-gardener.js";
-import { gardenStatePath, type GardenerDeps } from "../src/lib/gardener.js";
-import type { MountHeadroomCell } from "../src/lib/mount-recommender.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildRegisteredGarden, type GardenBuildContext } from "../src/run-task.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#src/lib/config-gardener.js";
+import { gardenStatePath, type GardenerDeps } from "#src/lib/gardener.js";
+import type { MountHeadroomCell } from "#src/lib/mount-recommender.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildRegisteredGarden, type GardenBuildContext } from "#src/run-task.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const execFileAsync = promisify(execFile);
 const NOW = Date.parse("2026-10-01T12:00:00.000Z");

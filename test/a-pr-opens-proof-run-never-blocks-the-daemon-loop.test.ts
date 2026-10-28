@@ -7,12 +7,12 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 // Namespace imports: the async exports are absent at the merge base, so each test fails alone
 // there instead of the whole file failing at link time.
-import * as prOpen from "../src/lib/pr-open.js";
-import * as runTask from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as prOpen from "#src/lib/pr-open.js";
+import * as runTask from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /** A fixture `rmd`: sleeps 2 s on SLOW, exits 3 on FAIL, kills itself with SIGTERM on SIGNAL, passes otherwise. */
 function fixtureRmd(dir: string): string {

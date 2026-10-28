@@ -1,20 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import * as flow from "../src/lib/flow-gardener.js";
-import * as remedy from "../src/lib/flow-remedy-gardener.js";
-import { feedbackContentDigest, type AdmissionSettings } from "../src/lib/contributor-admission.js";
+import * as flow from "#src/lib/flow-gardener.js";
+import * as remedy from "#src/lib/flow-remedy-gardener.js";
+import { feedbackContentDigest, type AdmissionSettings } from "#src/lib/contributor-admission.js";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fixedClock } from "../src/lib/clock.js";
-import type { GardenerDeps } from "../src/lib/gardener.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { flowGardenPass } from "../src/lib/garden-registry.js";
-import { buildRegisteredGarden } from "../src/run-task.js";
-import type { Config } from "../src/lib/config-schema.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { GardenerDeps } from "#src/lib/gardener.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { flowGardenPass } from "#src/lib/garden-registry.js";
+import { buildRegisteredGarden } from "#src/run-task.js";
+import type { Config } from "#src/lib/config-schema.js";
 
 const now = Date.parse("2026-10-11T12:00:00Z");
 const settings: AdmissionSettings = { mode: "shadow", disposition: "shadow", repositoryId: 111,

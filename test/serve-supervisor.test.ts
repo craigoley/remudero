@@ -28,11 +28,11 @@ import {
   type GenerationProcess,
   type PreparedSlot,
   type ServeSupervisorOptions,
-} from "../src/lib/serve-supervisor.js";
-import type { GenerationMessage } from "../src/lib/serve-generation.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { systemClock } from "../src/lib/clock.js";
-import { loadHostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
+} from "#src/lib/serve-supervisor.js";
+import type { GenerationMessage } from "#src/lib/serve-generation.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { systemClock } from "#src/lib/clock.js";
+import { loadHostMemoryBudgetPolicy } from "#src/lib/host-memory-shadow.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const tick = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));

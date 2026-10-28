@@ -592,7 +592,10 @@ export function daemonSreRunbookHost(opts: {
       return { ok: true, observed: `${container} reported drifted` };
     },
     async recycle(container) {
-      execFileSync("bash", [join(opts.repoDir, "deploy", "recycle-container.sh"), "--container", container], { stdio: "ignore" });
+      execFileSync("bash", [join(opts.repoDir, "deploy", "recycle-container.sh"), "--container", container], {
+        stdio: "ignore",
+        env: { ...process.env, RMD_RECYCLE_CALLER: "sre-runbook:recycle-stale-container" },
+      });
     },
     async lock(path) {
       if (!existsSync(path)) return { present: false, holderDead: false, observed: `${path} absent` };

@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { remoteHeadSha, seedDirtyFleetRepo } from "./helpers/dirty-fleet-repo.js";
+import { remoteHeadSha, seedDirtyFleetRepo } from "#test/helpers/dirty-fleet-repo.js";
 
-import type { Config } from "../src/lib/config.js";
-import type { Plan } from "../src/lib/plan.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan } from "#src/lib/plan.js";
 import {
   buildSweepEffects,
   DEFAULT_SWEEP_POLICY,
@@ -20,9 +20,9 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#test/helpers/sweep-test.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 const NOW = Date.parse("2026-09-07T12:00:00.000Z");
 const GIT_ENV = {

@@ -19,15 +19,15 @@ import { test } from "node:test";
 import { parse } from "yaml";
 
 import type { components } from "../packages/api-client/src/schema.js";
-import * as feedback from "../src/lib/feedback.js";
-import { appendThreadMessage } from "../src/lib/inbox-thread.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import * as panelActions from "../src/lib/panel-actions.js";
-import * as panelGraph from "../src/lib/panel-graph.js";
-import * as skillRun from "../src/lib/panel-skill-run.js";
-import { createService, type Route } from "../src/lib/service.js";
-import { skillsDir } from "../src/lib/skill.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as feedback from "#src/lib/feedback.js";
+import { appendThreadMessage } from "#src/lib/inbox-thread.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import * as panelActions from "#src/lib/panel-actions.js";
+import * as panelGraph from "#src/lib/panel-graph.js";
+import * as skillRun from "#src/lib/panel-skill-run.js";
+import { createService, type Route } from "#src/lib/service.js";
+import { skillsDir } from "#src/lib/skill.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 type Schema = { properties?: Record<string, { type?: unknown; enum?: unknown[]; description?: string }> };
 type Spec = {

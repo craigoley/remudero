@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService, type IdentityAuth, type Route } from "../src/lib/service.js";
+import { createService, type IdentityAuth, type Route } from "#src/lib/service.js";
 
 // ── W1-T371: tailnet-identity auth, additive to the bearer tokens (MASTER-PLAN §7's
 // auth-endgame -- the "preferred" half of W1-T202; token-paste-once, the "acceptable" half,

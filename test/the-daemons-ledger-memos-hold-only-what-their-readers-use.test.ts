@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import fs, { rmSync, writeFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import * as command from "../src/run-task.js";
-import * as sweep from "../src/lib/sweep.js";
-import { createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRecordsSync, realLedgerFs } from "../src/lib/ledger-union.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import * as command from "#src/run-task.js";
+import * as sweep from "#src/lib/sweep.js";
+import { createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRecordsSync, realLedgerFs } from "#src/lib/ledger-union.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const names = ["dispatchSelectionLedgerUnion", "terminalUnionScans", "mergeLogEvidenceByRoot",
   "dispatchFilingCache", "baseReproductionHostCache"];

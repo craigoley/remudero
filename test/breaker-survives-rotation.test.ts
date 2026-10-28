@@ -3,8 +3,8 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendLedger, ledgerExceedsRotationCeiling, rotateLedger, type LedgerLine } from "../src/lib/ledger.js";
-import { createDispatchBreakerCache, evaluateDispatchBreaker } from "../src/lib/status.js";
+import { appendLedger, ledgerExceedsRotationCeiling, rotateLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { createDispatchBreakerCache, evaluateDispatchBreaker } from "#src/lib/status.js";
 
 // ── W1-T206: "an ABSENT ledger does not silently report a dispatch-breaker count of zero
 // for a task that has dispatch history elsewhere -- absence reads as indeterminate rather

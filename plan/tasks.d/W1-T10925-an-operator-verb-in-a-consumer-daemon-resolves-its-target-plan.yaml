@@ -1,0 +1,84 @@
+- id: W1-T10925
+  title: "AN OPERATOR VERB RUN INSIDE A CONSUMER DAEMON RESOLVES THE ENGINE'S PLAN — `rmd release PORTAL-T45` in remudero-site-daemon loaded the engine checkout's plan/tasks.yaml, exited 2 with \"unknown task\" and wrote no dispatch.breaker_released row, so the breaker kept tripping; per-task verbs resolve the instance's target-repo plan by default and a miss names every plan searched"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # Rule 19: one resolver wired into verbs in run-task.ts and report-commands.ts plus the daemon's boot record; a wrong root writes an operator row against the wrong plan or repo
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-28: the operator's sanctioned breaker release for site task PORTAL-T45 wrote nothing; read-only host evidence"
+  plan_refs: [W1-T4691, W1-T10897, W1-T8920, W1-T9619, W1-T9688]
+  files:
+    - src/lib/repo-location.ts
+    - src/run-task.ts
+    - src/lib/report-commands.ts
+    - src/cli/commands/daemon.ts
+    - test/dispatch/an-operator-verb-in-a-consumer-daemon-resolves-its-target-plan.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-28, read-only, at origin/main 170ef90ef.
+    - The operator ran `docker exec -w /home/node/Remudero/remudero remudero-site-daemon bin/rmd release PORTAL-T45
+      --reason ...` at about 11:49Z. No dispatch.breaker_released row exists in the site ledger
+      (~/rmd-site-state/state/ledger.ndjson), and dispatch.circuit_broken for PORTAL-T45 kept being written every
+      ~70 s through 13:14Z.
+    - releaseCommand (src/run-task.ts) loads join(repoRoot, "plan", "tasks.yaml"). repoRoot comes from
+      resolveRepoRoot (src/lib/repo-location.ts): --repo-root, else the toplevel of cwd. Inside the site container
+      cwd is the ENGINE checkout (origin craigoley/remudero), so PORTAL-T45 is not found and the verb exits 2.
+      The global `--repo-root /home/node/Remudero/repos/remudero-site` works around it (that checkout is at site
+      main 617b14e and holds the shard).
+    - The daemon knows its target only from its launch argv (`daemon --repo remudero-site`); a docker-exec'd verb
+      has no such flag, and the site config.json carries no repo field. daemon.ts already derives
+      targetCheckoutRoot = join(config.root, "repos", target.repo) for a non-self target.
+    - The same `join(repoRoot, "plan", "tasks.yaml")` read appears in approveCommand, approveBatchCommand,
+      correctCommand, ratifyCommand, checkAcceptanceCommand, inboxActionCliCommand, proposalVerdictCliCommand,
+      proofQueueAuditCommand and capabilityInspectCommand. caseFileCommand and trace (src/lib/report-commands.ts)
+      read the plan of their root the same way. claimCommand checks the plan on origin/main and pushes its ref
+      through dispatchClaimReserverFor(repoRoot), which in a consumer container is the engine's origin, not the
+      target repo where the site daemon reads PORTAL claims.
+    - Same class as W1-T10897 (the consumer daemon's run-branch listing reads the engine's origin). That task is
+      already dispatched and owns the run-branch reader; this task does not touch it.
+    - W1-T9688 (queued) also edits src/lib/repo-location.ts and src/run-task.ts, but only to correct how
+      buildSweepEffects' lazy paths call resolveOwnerRepo. It resolves no plan root and wires no operator verb;
+      this task adds the verb plan-root resolver and leaves resolveOwnerRepo's sweep callers alone.
+  design: |
+    1. ONE resolver in src/lib/repo-location.ts names the plan root a per-task verb acts on. Precedence:
+       (a) an explicit --repo-root wins, as today;
+       (b) the cwd toplevel, when its plan holds the task id;
+       (c) the running instance's TARGET checkout, when the cwd plan does not hold the id and the instance targets
+           another repo.
+       A self-targeting instance and the operator's Mac checkout resolve exactly as today.
+    2. The instance's target is read from a durable record the daemon writes at boot under config.root/state
+       (owner, repo, checkout path), or from the instance registry row named by RMD_INSTANCE_NAME if that row
+       already carries the repo. Pick whichever exists; do not add a second source of truth. A missing or
+       unreadable record means "no target", never a guess.
+    3. Wire the resolver into every verb listed in the rationale. A claim for a consumer task reserves its ref on
+       the TARGET repo's origin.
+    4. When no plan holds the id, the error names every plan path that was searched and the exact --repo-root that
+       would resolve it, if the target record names one.
+    5. The test builds a fixture config root with an engine checkout and a target checkout, and a boot record naming
+       the target. Only the target plan holds PORTAL-T999. It runs `rmd release PORTAL-T999` with cwd in the engine
+       checkout and asserts the breaker_released row is written for PORTAL-T999 with the target's repo. Set a git
+       identity in the fixture (doctrine git-fixture-identity).
+  acceptance:
+    - claim: "a release run from the engine checkout inside a consumer instance writes the row for the target task"
+      proof: 'grep: test("W1-T10925: a release in a consumer instance resolves the target plan" in test/dispatch/an-operator-verb-in-a-consumer-daemon-resolves-its-target-plan.test.ts'
+    - claim: "a self-targeting instance and an explicit --repo-root resolve exactly as before"
+      proof: 'grep: test("W1-T10925: a self-targeting instance and --repo-root are unchanged" in test/dispatch/an-operator-verb-in-a-consumer-daemon-resolves-its-target-plan.test.ts'
+    - claim: "an unknown id names every plan searched and the --repo-root that would resolve it"
+      proof: 'grep: test("W1-T10925: a miss names every plan searched and the repo-root to use" in test/dispatch/an-operator-verb-in-a-consumer-daemon-resolves-its-target-plan.test.ts'
+    - claim: "a claim for a consumer task reserves its ref on the target repo"
+      proof: 'grep: test("W1-T10925: a consumer claim reserves on the target repo" in test/dispatch/an-operator-verb-in-a-consumer-daemon-resolves-its-target-plan.test.ts'
+    - claim: "releaseCommand resolves its plan through the shared resolver"
+      proof: 'grep: resolveVerbPlanRoot( in src/run-task.ts'
+  falsifier: |
+    At base releaseCommand reads the engine plan, so the first case exits 2 with "unknown task" and writes no row.
+    - Resolve only from the target record, ignoring cwd: the self-targeting case fails.
+    - Wire release but not claim: the claim case reserves on the engine origin and fails.
+    - Guess a target from the repos/ directory listing when no record exists: a fixture with two consumer
+      checkouts and no record must refuse, and that case fails.
+    GUARD that held at base and must still hold: the #271 fixture (a checkout's bin/rmd invoked from inside a
+    different work tree gates the cwd tree) passes unchanged.

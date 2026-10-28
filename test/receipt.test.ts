@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildReceipt, type ReceiptLedgerLine } from "../src/lib/receipt.js";
+import { buildReceipt, type ReceiptLedgerLine } from "#src/lib/receipt.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -176,7 +176,7 @@ test("buildReceipt scopes strictly to the given task id — a shared ledger neve
 // ── `rmd receipt <pr>` — the CLI wiring around buildReceipt (design item 3), driven with
 // injected deps so the resolution + refusal paths are exercised with zero network. ────────
 test("receiptCommand resolves the task id from the PR body's Remudero-Task trailer and prints buildReceipt's predicate", async () => {
-  const { receiptCommand } = await import("../src/run-task.js");
+  const { receiptCommand } = await import("#src/run-task.js");
   const printed: string[] = [];
   const realLog = console.log;
   console.log = (...a: unknown[]) => void printed.push(a.map(String).join(" "));
@@ -206,7 +206,7 @@ test("receiptCommand resolves the task id from the PR body's Remudero-Task trail
 });
 
 test("receiptCommand rejects an unknown flag before any network call — fail loud, no gh spawn", async () => {
-  const { receiptCommand } = await import("../src/run-task.js");
+  const { receiptCommand } = await import("#src/run-task.js");
   const realError = console.error;
   const errors: string[] = [];
   console.error = (...a: unknown[]) => void errors.push(a.map(String).join(" "));
@@ -230,7 +230,7 @@ test("receiptCommand rejects an unknown flag before any network call — fail lo
 });
 
 test("receiptCommand refuses (never guesses) when the PR body carries no Remudero-Task trailer", async () => {
-  const { receiptCommand } = await import("../src/run-task.js");
+  const { receiptCommand } = await import("#src/run-task.js");
   const realError = console.error;
   const errors: string[] = [];
   console.error = (...a: unknown[]) => void errors.push(a.map(String).join(" "));

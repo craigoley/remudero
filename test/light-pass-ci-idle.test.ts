@@ -25,8 +25,8 @@ import {
   inFlightTaskIdsFrom,
   lightPassActionable,
   runIsAwaitingExternal,
-} from "../src/run-task.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
+} from "#src/run-task.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
 
 const TASK = "W1-TWAIT";
 

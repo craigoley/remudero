@@ -1,0 +1,152 @@
+id: fb-dep-review-2c0184950469bc3f
+ts: 2026-10-28T14:41:12.245Z
+raw: |-
+  Migrate dependency major proposed by Dependabot PR #15178: chore(deps-dev): bump @stryker-mutator/core from 9.6.1 to 10.1.1
+
+  Dependabot proposed a parseable semver-major dependency update. rmd must migrate the
+  runtime, manifests, source, and tests together on an owned task branch instead of holding
+  the bot PR open or editing Dependabot's branch.
+
+  PR: https://github.com/craigoley/remudero/pull/15178
+  Major target(s): @stryker-mutator/core 9.6.1 -> 10.1.1
+  Red checks observed on the proposal: none
+
+  Dependabot proposal body:
+
+  Bumps [@stryker-mutator/core](https://github.com/stryker-mutator/stryker-js/tree/HEAD/packages/core) from 9.6.1 to 10.1.1.
+  <details>
+  <summary>Release notes</summary>
+  <p><em>Sourced from <a href="https://github.com/stryker-mutator/stryker-js/releases">@​stryker-mutator/core's releases</a>.</em></p>
+  <blockquote>
+  <h2>v10.1.1</h2>
+  <h2><a href="https://github.com/stryker-mutator/stryker-js/compare/v10.1.0...v10.1.1">10.1.1</a> (2026-10-23)</h2>
+  <p>Due to the below provenance issue in the release process, this is a re-release of <a href="https://github.com/stryker-mutator/stryker-js/releases/tag/v10.1.0">v10.1.0</a>.</p>
+  <p>For more information on the provenance issue, see: <a href="https://redirect.github.com/sigstore/sigstore-js/issues/1708">sigstore/sigstore-js#1708</a> and <a href="https://redirect.github.com/npm/cli/issues/10078">npm/cli#10078</a></p>
+  <h2>v10.1.0</h2>
+  <h1><a href="https://github.com/stryker-mutator/stryker-js/compare/v10.0.0...v10.1.0">10.1.0</a> (2026-10-23)</h1>
+  <h3>Bug Fixes</h3>
+  <ul>
+  <li><strong>core:</strong> prevent test runners racing to populate shared caches on startup (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6251">#6251</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/c931a93237816901f1e9f48da411170beeb3dfca">c931a93</a>), closes <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6250">#6250</a></li>
+  <li><strong>instrumenter:</strong> crash when mutating ts non null expression in babel &gt;= 8 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6221">#6221</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/e873a24ea7fe828a790a1b4e8c50bc46bbb3c99e">e873a24</a>), closes <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6185">#6185</a></li>
+  <li><strong>vitest-runner:</strong> do not select tests whose name only starts with a filtered name (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6246">#6246</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/6ad4adbe21a30dcc1cdb4c22ab4304e02fe9d32e">6ad4adb</a>)</li>
+  <li><strong>vitest-runner:</strong> report mutant collection failures instead of surviving mutants (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6269">#6269</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/cf5695e88fac6063dc0fc172f4443fa513cd85f0">cf5695e</a>)</li>
+  </ul>
+  <h3>Features</h3>
+  <ul>
+  <li>add opt-in mutation-phase test timing diagnostics with sidecar reporter (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5866">#5866</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/201dce8efee34fa04e05b6474800a5d2fc8791d3">201dce8</a>)</li>
+  <li><strong>core:</strong> cli option for command runner (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6006">#6006</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/aa7f3bb0a322eaaef4c626d3a491ed471c6e7be1">aa7f3bb</a>), closes <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5153">#5153</a></li>
+  <li><strong>core:</strong> report mutant <code>duration</code> in the mutation report (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6252">#6252</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/7284a4a20daca496e49dfb9e534a4d2be41d0c2e">7284a4a</a>), closes <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5866">#5866</a> <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5866">#5866</a></li>
+  <li><strong>vitest-runner:</strong> report test locations (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6188">#6188</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/f2a49ff02437e3b7fe2682dba808ac93039895bf">f2a49ff</a>), closes <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6186">#6186</a></li>
+  <li><strong>vitest-runner:</strong> support vitest pool options (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6268">#6268</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/3073ea2c4ef0402953347cff92db8f6b62d64de9">3073ea2</a>), closes <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6236">#6236</a> <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5982">#5982</a> <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6223">#6223</a></li>
+  <li><strong>vitest-runner:</strong> support vitest v5 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6214">#6214</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/10e2cca959ea1e33fca94164186577b3074e7629">10e2cca</a>)</li>
+  </ul>
+  <h2>v10.0.0</h2>
+  <h1><a href="https://github.com/stryker-mutator/stryker-js/compare/v9.6.1...v10.0.0">10.0.0</a> (2026-08-14)</h1>
+  <h3>Bug Fixes</h3>
+  <ul>
+  <li><strong>deps:</strong> update babel monorepo to v7.29.7 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6068">#6068</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/c10cb949e4851a2774d86c6537f05bf43aef0897">c10cb94</a>)</li>
+  <li><strong>deps:</strong> update dependency ajv to v8.20.0 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5992">#5992</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/0ead8cef6cdb1b89ab617096c3af4c02fa995054">0ead8ce</a>)</li>
+  <li><strong>deps:</strong> update dependency angular-html-parser to ~10.10.0 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6069">#6069</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/82f4e1f42bb1cbe564ad0b827763f49d9d4323ea">82f4e1f</a>)</li>
+  <li><strong>deps:</strong> update dependency angular-html-parser to ~10.11.0 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6132">#6132</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/81706f0cac9d8ab870179a2f67e07a701603b2fe">81706f0</a>)</li>
+  <li><strong>deps:</strong> update dependency angular-html-parser to ~10.6.0 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5962">#5962</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/4a47b39941bfbeecbb32031f7160dc0cb262ecc4">4a47b39</a>)</li>
+  <li><strong>deps:</strong> update dependency semver to v7.8.5 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6075">#6075</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/f66c2fcde4dc7b0546880d261afac7edbc0527f4">f66c2fc</a>)</li>
+  <li><strong>deps:</strong> update dependency weapon-regex to v2 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6077">#6077</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/b357f40a064462f0d6b38704d0b9c6f8fa878bd1">b357f40</a>)</li>
+  <li><strong>deps:</strong> update mutation-testing-elements monorepo to v3.8.0 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6095">#6095</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/d62fd7518c7d5697801afc093578dd30d8dad835">d62fd75</a>)</li>
+  <li><strong>deps:</strong> update mutation-testing-elements monorepo to v3.8.4 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6118">#6118</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/29ede696a930a99869c2d3366f94ba7cd323fe60">29ede69</a>)</li>
+  <li><strong>instrumenter:</strong> parse svelte template expressions as TS when file uses lang=&quot;ts&quot; (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6024">#6024</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/e81abcc92c282f40baec58c6a34d341b2c9e3191">e81abcc</a>)</li>
+  <li><strong>mocha-runner:</strong> prefer project-mocha over bundled mocha (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6138">#6138</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/e602725018f827c08873f414dd07751af68e22a7">e602725</a>), closes <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6127">#6127</a></li>
+  <li><strong>vitest-runner:</strong> fix noisy vitest options &amp; setup file warnings (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6098">#6098</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/58c4b850fff61a7de232a42103f5745d01a46493">58c4b85</a>)</li>
+  </ul>
+  <h3>Features</h3>
+  <!-- raw HTML omitted -->
+  </blockquote>
+  <p>... (truncated)</p>
+  </details>
+  <details>
+  <summary>Changelog</summary>
+  <p><em>Sourced from <a href="https://github.com/stryker-mutator/stryker-js/blob/master/packages/core/CHANGELOG.md">@​stryker-mutator/core's changelog</a>.</em></p>
+  <blockquote>
+  <h2><a href="https://github.com/stryker-mutator/stryker-js/compare/v10.1.0...v10.1.1">10.1.1</a> (2026-10-23)</h2>
+  <p><strong>Note:</strong> Version bump only for package <code>@​stryker-mutator/core</code></p>
+  <h1><a href="https://github.com/stryker-mutator/stryker-js/compare/v10.0.0...v10.1.0">10.1.0</a> (2026-10-23)</h1>
+  <h3>Bug Fixes</h3>
+  <ul>
+  <li><strong>core:</strong> prevent test runners racing to populate shared caches on startup (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6251">#6251</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/c931a93237816901f1e9f48da411170beeb3dfca">c931a93</a>), closes <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6250">#6250</a></li>
+  </ul>
+  <h3>Features</h3>
+  <ul>
+  <li>add opt-in mutation-phase test timing diagnostics with sidecar reporter (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5866">#5866</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/201dce8efee34fa04e05b6474800a5d2fc8791d3">201dce8</a>)</li>
+  <li><strong>core:</strong> cli option for command runner (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6006">#6006</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/aa7f3bb0a322eaaef4c626d3a491ed471c6e7be1">aa7f3bb</a>), closes <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5153">#5153</a></li>
+  <li><strong>core:</strong> report mutant <code>duration</code> in the mutation report (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6252">#6252</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/7284a4a20daca496e49dfb9e534a4d2be41d0c2e">7284a4a</a>), closes <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5866">#5866</a> <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5866">#5866</a></li>
+  </ul>
+  <h1><a href="https://github.com/stryker-mutator/stryker-js/compare/v9.6.1...v10.0.0">10.0.0</a> (2026-08-14)</h1>
+  <h3>Bug Fixes</h3>
+  <ul>
+  <li><strong>deps:</strong> update dependency ajv to v8.20.0 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5992">#5992</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/0ead8cef6cdb1b89ab617096c3af4c02fa995054">0ead8ce</a>)</li>
+  <li><strong>deps:</strong> update mutation-testing-elements monorepo to v3.8.0 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6095">#6095</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/d62fd7518c7d5697801afc093578dd30d8dad835">d62fd75</a>)</li>
+  <li><strong>deps:</strong> update mutation-testing-elements monorepo to v3.8.4 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6118">#6118</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/29ede696a930a99869c2d3366f94ba7cd323fe60">29ede69</a>)</li>
+  </ul>
+  <h3>Features</h3>
+  <ul>
+  <li><strong>babel:</strong> update babel to major version 8 (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6104">#6104</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/291b7ead950e8c0b46da0db77a7a6ece32547114">291b7ea</a>)</li>
+  <li><strong>core:</strong> save partial incremental report on unexpected exit (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5986">#5986</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/d091b1a869e86c1581b09b2e32fb8a15aee68a82">d091b1a</a>)</li>
+  <li>empty-expression-mutator (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6012">#6012</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/cc087380173e411ed4ba1960c2571db77eb0cce3">cc08738</a>), closes <a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/5765">#5765</a></li>
+  <li><strong>node:</strong> drop support for Node.js 20, require Node.js 22 or higher (<a href="https://redirect.github.com/stryker-mutator/stryker-js/issues/6002">#6002</a>) (<a href="https://github.com/stryker-mutator/stryker-js/commit/425cb9f7306d4c86b30a90f955c82429a465487b">425cb9f</a>)</li>
+  </ul>
+  <h3>BREAKING CHANGES</h3>
+  <ul>
+  <li><strong>node:</strong> Node.js 20 is no longer supported, please use Node.js 22 or higher.</li>
+  </ul>
+  </blockquote>
+  </details>
+  <details>
+  <summary>Commits</summary>
+  <ul>
+  <li><a href="https://github.com/stryker-mutator/stryker-js/commit/959127763e5bbe2eb65f5341a8161780d6d8a476"><code>9591277</code></a> v10.1.1</li>
+  <li><a href="https://github.com/stryker-mutator/stryker-js/commit/d6148ff81eb0fadc9f4f60af31da9846ed0b4add"><code>d6148ff</code></a> v10.1.0</li>
+  <li><a href="https://github.com/stryker-mutator/stryker-js/commit/c931a93237816901f1e9f48da411170beeb3dfca"><code>c931a93</code></a> fix(core): prevent test runners racing to populate shared caches on startup (...</li>
+  <li><a href="https://github.com/stryker-mutator/stryker-js/commit/7284a4a20daca496e49dfb9e534a4d2be41d0c2e"><code>7284a4a</code></a> feat(core): report mutant <code>duration</code> in the mutation report (<a href="https://github.com/stryker-mutator/stryker-js/tree/HEAD/packages/core/issues/6252">#6252</a>)</li>
+  <li><a href="https://github.com/stryker-mutator/stryker-js/commit/841941385dbb1489752db145fc7aa9bbb02aeeec"><code>8419413</code></a> chore(deps): update dependency prettier to v3.9.4 (<a href="https://github.com/stryker-mutator/stryker-js/tree/HEAD/packages/core/issues/6089">#6089</a>)</li>
+  <li><a href="https://github.com/stryker-mutator/stryker-js/commit/aa7f3bb0a322eaaef4c626d3a491ed471c6e7be1"><code>aa7f3bb</code></a> feat(core): cli option for command runner (<a href="https://github.com/stryker-mutator/stryker-js/tree/HEAD/packages/core/issues/6006">#6006</a>)</li>
+  <li><a href="https://github.com/stryker-mutator/stryker-js/commit/201dce8efee34fa04e05b6474800a5d2fc8791d3"><code>201dce8</code></a> feat: add opt-in mutation-phase test timing diagnostics with sidecar reporter...</li>
+  <li><a href="https://github.com/stryker-mutator/stryker-js/commit/61c7a5975c5186a5b9a5daa5b03e91c9e39afe30"><code>61c7a59</code></a> chore(deps): update dependency <code>@​types/semver</code> to v7.8.0 (<a href="https://github.com/stryker-mutator/stryker-js/tree/HEAD/packages/core/issues/6165">#6165</a>)</li>
+  <li><a href="https://github.com/stryker-mutator/stryker-js/commit/cb3bd8fe25d5215422c9b632357062d3a43fcf92"><code>cb3bd8f</code></a> v10.0.0</li>
+  <li><a href="https://github.com/stryker-mutator/stryker-js/commit/aadfdc9713c5ce2fc380d934bc05ce01d4b89b30"><code>aadfdc9</code></a> chore(deps): update typescript-eslint monorepo to v8.67.0 (<a href="https://github.com/stryker-mutator/stryker-js/tree/HEAD/packages/core/issues/5984">#5984</a>)</li>
+  <li>Additional commits viewable in <a href="https://github.com/stryker-mutator/stryker-js/commits/v10.1.1/packages/core">compare view</a></li>
+  </ul>
+  </details>
+  <br />
+
+
+  [![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=@stryker-mutator/core&package-manager=npm_and_yarn&previous-version=9.6.1&new-version=10.1.1)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)
+
+  Dependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.
+
+  [//]: # (dependabot-automerge-start)
+  [//]: # (dependabot-automerge-end)
+
+  ---
+
+  <details>
+  <summary>Dependabot commands and options</summary>
+  <br />
+
+  You can trigger Dependabot actions by commenting on this PR:
+  - `@dependabot rebase` will rebase this PR
+  - `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it
+  - `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency
+  - `@dependabot ignore this major version` will close this PR and stop Dependabot creating any more for this major version (unless you reopen the PR or upgrade to it yourself)
+  - `@dependabot ignore this minor version` will close this PR and stop Dependabot creating any more for this minor version (unless you reopen the PR or upgrade to it yourself)
+  - `@dependabot ignore this dependency` will close this PR and stop Dependabot creating any more for this dependency (unless you reopen the PR or upgrade to it yourself)
+
+
+  </details>
+attachments: []
+origin: repair#dep-review
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: dep-review:migration:craigoley/remudero:@stryker-mutator/core@10
+thread_id: null

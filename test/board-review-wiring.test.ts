@@ -33,11 +33,11 @@ import {
   boardReviewReportPath,
   buildBoardReviewDaemonHooks,
   defaultBoardReviewItems,
-} from "../src/run-task.js";
-import { boardReviewMarkerPath, readBoardReviewMarker, type BoardItem } from "../src/lib/board-review.js";
-import type { Config } from "../src/lib/config.js";
-import type { Policy } from "../src/lib/policy.js";
-import type { OpenPrRest } from "../src/lib/open-prs-rest.js";
+} from "#src/run-task.js";
+import { boardReviewMarkerPath, readBoardReviewMarker, type BoardItem } from "#src/lib/board-review.js";
+import type { Config } from "#src/lib/config.js";
+import type { Policy } from "#src/lib/policy.js";
+import type { OpenPrRest } from "#src/lib/open-prs-rest.js";
 
 const NOW = new Date("2026-08-26T16:00:00Z");
 
@@ -190,8 +190,8 @@ void test("the policy row can switch the rung off without touching code", () => 
 // ── THE REAL DAEMON TICK, end to end ──────────────────────────────────────────────────────────
 
 void test("runDaemon calls the pair and ledgers board_review.fired then board_review.ran", async () => {
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = tmp("rmd-br-daemon-");
   try {
     const planFile = join(dir, "tasks.yaml");
@@ -228,8 +228,8 @@ void test("runDaemon calls the pair and ledgers board_review.fired then board_re
 });
 
 void test("a throwing rung costs one logged tick, never the daemon", async () => {
-  const { runDaemon } = await import("../src/lib/daemon.js");
-  const { loadPlan } = await import("../src/lib/plan.js");
+  const { runDaemon } = await import("#src/lib/daemon.js");
+  const { loadPlan } = await import("#src/lib/plan.js");
   const dir = tmp("rmd-br-throw-");
   try {
     const planFile = join(dir, "tasks.yaml");
@@ -360,7 +360,7 @@ function planWithOrigin(taskId: string, origin: string | undefined) {
 }
 
 void test("boardItemsFromOpenPrs marks an item whose origin lookup names a board-review proposal, and boardItemsInScope excludes it while open", async () => {
-  const { boardItemsInScope } = await import("../src/lib/board-review.js");
+  const { boardItemsInScope } = await import("#src/lib/board-review.js");
   const rows: OpenPrRest[] = [
     { number: 100, url: "u100", headRefName: "b100", headRefOid: "s100", updatedAt: "", body: "", autoMergeRequest: null,
       createdAt: "2026-08-26T00:00:00Z", isDraft: false, statusCheckRollup: [] },

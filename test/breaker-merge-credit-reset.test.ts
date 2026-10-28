@@ -38,7 +38,7 @@ import {
   isDispatchBreakerTripped,
   isMergeCreditLine,
   readLedgerLines,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 
 const T = "W1-T377";
 

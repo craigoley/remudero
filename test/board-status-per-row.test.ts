@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildBatchedGithub, GH_CALL_TIMEOUT_MS, type BatchedPr } from "../src/lib/status.js";
-import { deriveReviewState } from "../src/lib/board.js";
-import { DEFAULT_BOARD_POLL_TTL_MS } from "../src/lib/serve.js";
+import { buildBatchedGithub, GH_CALL_TIMEOUT_MS, type BatchedPr } from "#src/lib/status.js";
+import { deriveReviewState } from "#src/lib/board.js";
+import { DEFAULT_BOARD_POLL_TTL_MS } from "#src/lib/serve.js";
 
 // W1-T2217: the board's `GET /v1/status` request path used to call `github.reviewState(prUrl)`
 // for EVERY row carrying a `prUrl` on EVERY tick past the TTL — including rows fed by the COLD

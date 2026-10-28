@@ -9,9 +9,9 @@ import {
   runPreflight,
   typecheckStep,
   type PreflightSpawn,
-} from "../src/lib/commit-message.js";
-import { main, preflightCommand } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/commit-message.js";
+import { main, preflightCommand } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /** Sentinel thrown by the mocked `process.exit` so main()'s flat if-ladder cannot run on
  *  past the verb under test — the same shape test/w1-t143-diff-coverage.test.ts uses,

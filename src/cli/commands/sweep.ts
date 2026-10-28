@@ -29,8 +29,8 @@ import { applyMergeProbeEvidence, probeOpenPrMerges } from "../../lib/merge-prob
 import type { ComposedRealGraph } from "../../lib/composition-root.js";
 import type { EscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { readEscalationAnswers } from "../../lib/escalation-answers.js";
-import { buildBehindMainByPr, buildBehindMainByPrAsync, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
-import { DEFAULT_SWEEP_POLICY, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, type BuildSweepEffectsDeps, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
+import { buildBehindMainByPr, buildBehindMainByPrAsync, createDistanceProbeSequence, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
+import { DEFAULT_SWEEP_POLICY, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
 import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { reviewCommand as reviewCommandFromModule, runReview as runReviewFromModule, type ReviewCommandDeps, type ReviewCommandHost } from "./review.js";
@@ -866,6 +866,7 @@ export function buildSweepHook(
   // branch as a fresh first pass. Unreadable/absent reads as `{}`, i.e. today's cold-boot behavior.
   const branchReapStatePath = join(config.root, "state", automaticBranchReapStateFileName(repo));
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
+  const nextDistanceProbe = createDistanceProbeSequence();
   return async (continueReviewAdmissions = () => true) => {
     const prelude = createFullPreludeTimer((fields) => log("sweep.full_prelude", fields));
     const triageRuntime = buildEscalationTriageRuntime({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo },
@@ -960,7 +961,7 @@ export function buildSweepHook(
       const updatedForWorkflow = await prelude.time("updated_for_workflow", () => updatedForWorkflowFromLedger(ledgerPath));
       const freshBaseChangedFiles = new Map<number, BaseChangedFiles>();
       const behindMainByPr = await prelude.time("behind_main", () => tickRead?.behindMainByPr
-        ?? buildBehindMainByPrAsync(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles));
+        ?? buildBehindMainByPrAsync(owner, repo, prsForFixRung, undefined, nextDistanceProbe(), freshBaseChangedFiles));
       const baseChangedFilesByPr = tickRead?.baseChangedFilesByPr ?? freshBaseChangedFiles;
       applyMergeProbeEvidence(prsForFixRung, await prelude.time("merge_probes", () =>
         probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr })));
@@ -1208,8 +1209,16 @@ export function buildSweepLightHook(
       const admissionWaiters = new Set((Array.isArray(lastAdmission?.waiting) ? lastAdmission.waiting : [])
         .flatMap((entry) => typeof entry?.pr_number === "number" && typeof entry.head_sha === "string"
           ? [`${entry.pr_number}@${entry.head_sha}`] : []));
-      const earlyReviewPrs = ordinaryPrs.filter((pr) => !pr.autoMergeArmed &&
-        !admissionWaiters.has(`${pr.prNumber}@${pr.headSha}`) && isReviewLaneDisposition(deriveDisposition(pr).disposition));
+      const reviewCandidates = ordinaryPrs.filter((pr) => isReviewLaneDisposition(deriveDisposition(pr).disposition));
+      const earlyCandidates = reviewCandidates.filter((pr) => !pr.autoMergeArmed &&
+        !admissionWaiters.has(`${pr.prNumber}@${pr.headSha}`));
+      const earlyCandidateNumbers = new Set(earlyCandidates.map((pr) => pr.prNumber));
+      const oldestDelayedReview = orderPendingReviews(reviewCandidates
+        .filter((pr) => !earlyCandidateNumbers.has(pr.prNumber)).map((pr) => ({ pr })))[0]?.pr;
+      // An older guarded head keeps its place. Younger candidates join the same post-refresh
+      // batch instead of taking all review capacity before that batch can enter admission.
+      const earlyReviewPrs = earlyCandidates.filter((pr) => oldestDelayedReview === undefined ||
+        orderPendingReviews([{ pr }, { pr: oldestDelayedReview }])[0]!.pr === pr);
       const earlyNumbers = new Set(earlyReviewPrs.map((pr) => pr.prNumber));
       const laterOrdinaryPrs = ordinaryPrs.filter((pr) => !earlyNumbers.has(pr.prNumber));
       const earlyReviews = earlyReviewPrs.length > 0

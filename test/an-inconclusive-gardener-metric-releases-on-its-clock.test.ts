@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   GARDEN_PENDING_RELEASE_MS,
   gardenStatePath,
@@ -16,8 +16,8 @@ import {
   type GardenSpec,
   type GardenState,
   type Outcome,
-} from "../src/lib/gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const mergeSeenAt = "2026-10-08T07:00:01.000Z";
 const dueAt = Date.parse(mergeSeenAt) + GARDEN_PENDING_RELEASE_MS;

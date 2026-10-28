@@ -13,16 +13,16 @@ import {
   resolveServiceTokens,
   routesMissingScopeClassification,
   type ServeDeps,
-} from "../src/lib/serve.js";
-import { buildStatusStream } from "../src/lib/board.js";
-import { createService, type Method, type Route, type Scope } from "../src/lib/service.js";
-import { InvalidSecretFileError } from "../src/lib/fs-race-safe.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import type { Plan } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
+} from "#src/lib/serve.js";
+import { buildStatusStream } from "#src/lib/board.js";
+import { createService, type Method, type Route, type Scope } from "#src/lib/service.js";
+import { InvalidSecretFileError } from "#src/lib/fs-race-safe.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { Plan } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

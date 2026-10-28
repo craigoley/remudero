@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { gatePrewarmOnClients } from "../src/lib/serve.js";
-import type { SseRoute } from "../src/lib/service.js";
-import type { GitHub } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
+import { gatePrewarmOnClients } from "#src/lib/serve.js";
+import type { SseRoute } from "#src/lib/service.js";
+import type { GitHub } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
 
 // ── A POLLING READER IS A VIEWER ─────────────────────────────────────────────────────────────
 //

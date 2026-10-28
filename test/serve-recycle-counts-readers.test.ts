@@ -9,8 +9,8 @@ import {
   RECYCLE_PATIENCE_BASE_MS,
   RECYCLE_PATIENCE_FREE_MS,
   stampReadWith,
-} from "../src/lib/serve.js";
-import type { Route } from "../src/lib/service.js";
+} from "#src/lib/serve.js";
+import type { Route } from "#src/lib/service.js";
 
 // ── A POLLING CONSOLE IS A WATCHER ───────────────────────────────────────────────────────────
 //

@@ -6,12 +6,12 @@ import { Worker } from "node:worker_threads";
 import {
   freezeReadGeneration, freshReadGeneration, onePassPerGeneration, startReadPlane, TICK_READ_MAX_AGE_MS,
   type ReadGeneration,
-} from "../src/lib/read-plane.js";
-import { daemonCommand } from "../src/run-task.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/read-plane.js";
+import { daemonCommand } from "#src/run-task.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // W1-T5762: the 10-04 22:05Z boot published its tick-read generation at ~22:08Z, its own full pass
 // was skipped (one already in flight), and the next consumer came from a dispatch phase that ran to

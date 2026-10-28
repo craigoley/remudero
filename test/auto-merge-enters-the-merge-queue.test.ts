@@ -19,10 +19,10 @@ import {
   baseBranchRequiresMergeQueue,
   realArmDeps,
   type ArmDeps,
-} from "../src/lib/arm-auto-merge.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { armOutcomeArmed } from "../src/lib/sweep.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/arm-auto-merge.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { armOutcomeArmed } from "#src/lib/sweep.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/5";
 

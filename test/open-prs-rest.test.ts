@@ -34,15 +34,15 @@ import {
   rollupFromRest,
   singlePrRestArgs,
   type GhApiFetcher,
-} from "../src/lib/open-prs-rest.js";
-import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { fixCommand, routeFix, buildSweepEffects, type RegisteredFixOwnerSnapshot } from "../src/run-task.js";
-import { ghJson, type GhRateLimitReading } from "../src/lib/worker.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import type { Config } from "../src/lib/config.js";
-import { isInPlanScope } from "../src/lib/plan-architect.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/open-prs-rest.js";
+import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { fixCommand, routeFix, buildSweepEffects, type RegisteredFixOwnerSnapshot } from "#src/run-task.js";
+import { ghJson, type GhRateLimitReading } from "#src/lib/worker.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import type { Config } from "#src/lib/config.js";
+import { isInPlanScope } from "#src/lib/plan-architect.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";
@@ -1521,7 +1521,7 @@ test("hydrateMergeConflictEvidence is bounded by a hard cap — it reuses MERGE_
 });
 
 test("buildOpenPrViews wires mergeConflict ONLY for a PR already read mergeState dirty — a clean/unknown PR pays no extra request", async () => {
-  const { buildOpenPrViews } = await import("../src/run-task.js");
+  const { buildOpenPrViews } = await import("#src/run-task.js");
   const dir = mkdtempSync(join(tmpdir(), "rmd-mergeconflict-"));
   const ledgerPath = join(dir, "ledger.ndjson");
   appendFileSync(ledgerPath, "");

@@ -4,11 +4,11 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
-import { createReadModelTicker, createReadModelWorker, readModelSwitchesPath, type ReadModelBodyEntry, type ReadModelSwitches, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
-import { createService } from "../src/lib/service.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { withViewShadow, type ShadowRequest } from "../src/lib/view-shadow.js";
-import { buildReadModelViewRoutes, viewEtag, type ViewBodySource, type ViewDefinition } from "../src/lib/views.js";
+import { createReadModelTicker, createReadModelWorker, readModelSwitchesPath, type ReadModelBodyEntry, type ReadModelSwitches, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { createService } from "#src/lib/service.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { withViewShadow, type ShadowRequest } from "#src/lib/view-shadow.js";
+import { buildReadModelViewRoutes, viewEtag, type ViewBodySource, type ViewDefinition } from "#src/lib/views.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 const SILENT_WORKER = new URL("data:text/javascript,setInterval(() => {}, 1000)");

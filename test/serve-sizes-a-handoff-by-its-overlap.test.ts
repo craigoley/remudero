@@ -21,9 +21,9 @@ import {
   type GenerationProcess,
   type PreparedSlot,
   type ServeSupervisorOptions,
-} from "../src/lib/serve-supervisor.js";
-import type { GenerationMessage } from "../src/lib/serve-generation.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/serve-supervisor.js";
+import type { GenerationMessage } from "#src/lib/serve-generation.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /** Waits at or past this many milliseconds (a memory retry, the drain backstop) never end; shorter ones end at once. */
 const NEVER_MS = 60_000;
