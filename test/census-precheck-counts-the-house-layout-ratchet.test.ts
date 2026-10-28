@@ -108,6 +108,8 @@ function installHook(dir: string): void {
     "house-layout-census.mjs",
     "deps-interface-census.mjs",
     "test-repo-root-codemod.mjs", "coverage-session-blanking-check.mjs",
+    // The suite child is judged (W1-T8379): the judge and the two files its argv names.
+    "pure-test-pool.mjs", "pool-run-marker.mjs", "pool-run-tally.mjs",
   ]) {
     copyFileSync(join(REPO_ROOT, "scripts", script), join(dir, "scripts", script));
   }

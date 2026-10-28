@@ -1,0 +1,24 @@
+- id: W1-T10906
+  title: "Name the mechanism that makes the capped-repair progress-judge test cost PRs CI rounds"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - test/a-capped-repair-waits-for-an-available-progress-judge.test.ts
+    - src/lib/sweep.ts
+  acceptance:
+    - claim: "The test file records the reproduced failure mechanism in a ROOT CAUSE comment, or states that no failure reproduces in isolation and names the inherited-red source instead"
+      proof: "grep: ROOT CAUSE in test/a-capped-repair-waits-for-an-available-progress-judge.test.ts"
+  origin: "followup:W1-T10776-1793105524671:2026-10-27T12:55:31.321Z:0"
+  rationale: >-
+    From the 2026-10-27 follow-up on W1-T10776-1793105524671, ratified via rmd approve:
+  
+    follow-up harvest [research]: read
+    `test/a-capped-repair-waits-for-an-available-progress-judge.test.ts` and its use of
+    `src/lib/sweep.ts`, to find the flakiness or failure mechanism before implementing. — from
+    W1-T10776 (run W1-T10776-1793105524671)

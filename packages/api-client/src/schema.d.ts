@@ -3457,6 +3457,7 @@ export interface components {
       counts: Record<string, number>;
       oldestReconciledAt: string | null;
       latestReconciledAt: string | null;
+      improvementEffects: (SavedImprovementEffect)[];
     };
     GardenerOpportunityUnavailable: {
       version: 1;
@@ -4482,6 +4483,7 @@ export interface components {
           healthy: (boolean) | (null);
         };
       }) | (null);
+      improvementFollowUp: (CodeHealthImprovementFollowUp) | (null);
       findingCount: (number) | (null);
       urgentFindings: {
         value: (number) | (null);
@@ -6596,6 +6598,53 @@ export interface components {
     /** The quiet-hours flag as written. */
     QuietHoursResult: {
       quietHours: boolean;
+    };
+    CodeHealthImprovementFollowUp: {
+      state: "reported" | "partial" | "unavailable" | "not_collected";
+      expectedScopes: number;
+      observedScopes: number;
+      totalKnown: number;
+      moreAvailable: boolean;
+      reason: string | null;
+      items: ({
+        instance: string;
+        assessment: SavedImprovementEffect;
+        currentEvidence: {
+          state: "matches_latest_analysis" | "newer_analysis_available" | "collection_failed" | "collection_unavailable" | "analysis_behind_current_revision" | "older_measurement" | "not_measured" | "not_collected";
+          reason: string;
+        };
+      })[];
+    };
+    /** A bounded saved producer assessment of a static code-quality improvement. Reads do not reverify merges or refresh measurement clocks. Helped describes the targeted rule findings only; no causal or delivery-time benefit is established. */
+    SavedImprovementEffect: {
+      version: "improvement-effect-v1";
+      verification: "reported-producer-assessment";
+      repository: string;
+      opportunityId: string;
+      threadId: string;
+      baselineSnapshotId: string;
+      taskIds: (string)[];
+      planPrUrl: (string) | (null);
+      expectedEffect: string;
+      stage: "conversation_saved" | "plan_pr_opened" | "tasks_filed" | "merged" | "measured";
+      verdict: "helped" | "hurt" | "unchanged" | "insufficient_evidence";
+      reason: string;
+      evaluatedAt: string;
+      measuredAt: (string) | (null);
+      freshness: "fresh" | "stale" | "not_collected";
+      observed: ({
+        before: number;
+        after: number;
+        denominator: number;
+      }) | (null);
+      observationWindow: ({
+        before: string;
+        after: string;
+      }) | (null);
+      afterSnapshotId: (string) | (null);
+      analyzedSha: (string) | (null);
+      mergePrUrls: (string)[];
+      causalClaim: false;
     };
   };
   securitySchemes: {
