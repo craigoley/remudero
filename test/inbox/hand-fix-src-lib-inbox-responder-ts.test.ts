@@ -36,7 +36,6 @@ test("W1-T10462: hand_fix:src/lib/inbox-responder.ts is prevented, not retried",
     await run();
     const read = readAllThreads({ threadStorePath });
     assert.equal(read.status, "ok");
-    if (read.status === "unresolved") throw new Error(read.reason);
     const healthy = read.threads.get(inboxThreadId(items[1].proposalId))!;
     assert.equal(healthy.at(-1)?.role, "escalation", "a failed earlier thread must not strand a later reply");
     assert.equal(healthy.at(-1)?.extra?.did?.action, "decline");
