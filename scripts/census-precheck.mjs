@@ -31,6 +31,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
+import { listRuleSuites } from "../src/lib/ci-parity.ts";
 import { isTrustRootPath, scanTrustRootText, trustRootFor } from "../src/lib/trust-root-text.ts";
 import { createHash } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -1448,6 +1449,28 @@ export function precheckParityVerdict({ population, baseline, baseBaseline = nul
   };
 }
 
+/** W1-T10798: test/every-ci-census-is-asked-before-the-push.test.ts, asked before the push. A diff that moves a test,
+ *  PRECHECK_PARITY or the shrink-only baseline must leave no CI census unasked and no stale baseline row. `population`
+ *  is CI's census population on this tree; absent (snapshot mode) the check is not measured and returns []. */
+export function censusParityViolations({ changed, readHead, population }) {
+  if (!population) return [];
+  if (!changed.some((p) => p === PRECHECK_PARITY_BASELINE || p === "scripts/census-precheck.mjs" || p.startsWith("test/"))) return [];
+  const text = readHead(PRECHECK_PARITY_BASELINE);
+  if (text === null) return [];
+  let baseline;
+  try {
+    baseline = JSON.parse(text).ciOnly;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(baseline)) return [];
+  const verdict = precheckParityVerdict({ population, baseline });
+  return [
+    ...verdict.unasked.map((p) => `census-parity: ${p} is a CI census nothing asks before the push — model it in PRECHECK_PARITY (scripts/census-precheck.mjs); ${PRECHECK_PARITY_BASELINE} may only shrink`),
+    ...verdict.stale.map((p) => `census-parity: ${p} is baselined but precheck now asks it or CI no longer runs it — delete the row from ${PRECHECK_PARITY_BASELINE}`),
+  ];
+}
+
 /** The script-level gates CI runs as their own steps (W1-T5737). The question W1-T5616 asked of every census
  *  SUITE, asked of every ci.yml script: `npm run --silent <script>` or `node scripts/<name>.mjs`, counted when the
  *  enclosing step's id or the script's own name says ratchet, census, budget, monotonic, parity or signal. Each is
@@ -1702,6 +1725,9 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       testFiles: listFixtureCopyFiles(root),
       srcFiles: listHouseLayoutSrcFiles(root),
     });
+    if (!snapshot) {
+      violations = [...violations, ...censusParityViolations({ changed, readHead: readers.readHead, population: ciCensusPopulation(listRuleSuites(root)) })];
+    }
     const instrument = evaluateInstrumentSurface({
       changed,
       readHead: readers.readHead,
