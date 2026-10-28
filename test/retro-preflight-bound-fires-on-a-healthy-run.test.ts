@@ -435,6 +435,23 @@ test("W1-T10885: retro process-group cleanup preserves ordinary results and spaw
   } finally { mocked.mock.restore(); }
 });
 
+test("W1-T10885: a non-Error signal refusal remains a typed cleanup failure", async t => {
+  const kill = process.kill.bind(process);
+  const denial = "fixture non-Error signal refusal";
+  const mocked = t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid < 0) throw denial;
+    return kill(pid, signal);
+  });
+  try {
+    const result = await runRetroPrepublishCommand(process.execPath, ["-e", "process.exit(0)"], options(5_000));
+    assert.equal(result.status, 0);
+    assert.ok(result.cleanupError instanceof Error);
+    assert.equal(result.cleanupError.cause, denial);
+    assert.equal((result.error as NodeJS.ErrnoException).code, "EPROCESSGROUP");
+    assert.equal(result.error?.cause, result.cleanupError);
+  } finally { mocked.mock.restore(); }
+});
+
 test("W1-T10885: errored zero-exit enumeration cannot start a suite or repair", async () => {
   for (const timedOut of [true, false]) {
     let calls = 0, repairs = 0;
