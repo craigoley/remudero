@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { buildActionResultsRoute, tornRowCouldBeExternalEffect } from "../src/lib/action-results.js";
-import type { ExternalEffectResult } from "../src/lib/action-reconciliation.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { buildActionResultsRoute, tornRowCouldBeExternalEffect } from "#src/lib/action-results.js";
+import type { ExternalEffectResult } from "#src/lib/action-reconciliation.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const effect: ExternalEffectResult = {
   version: "external-effect-v1",

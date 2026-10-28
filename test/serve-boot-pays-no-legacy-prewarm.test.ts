@@ -3,13 +3,13 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { buildActionResultsRoute, buildActionResultsProjection } from "../src/lib/action-results.js";
-import { buildOperatorActivityRoute, buildOperatorActivityProjection } from "../src/lib/panel-graph.js";
-import { RouteResponseBuffer } from "../src/lib/console-snapshot-cache.js";
-import { boundConsoleReadRoutes, buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import type { Route } from "../src/lib/service.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { oldestAsOf, type ViewBodyEntry, type ViewBodySource, type ViewSource } from "../src/lib/views.js";
+import { buildActionResultsRoute, buildActionResultsProjection } from "#src/lib/action-results.js";
+import { buildOperatorActivityRoute, buildOperatorActivityProjection } from "#src/lib/panel-graph.js";
+import { RouteResponseBuffer } from "#src/lib/console-snapshot-cache.js";
+import { boundConsoleReadRoutes, buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import type { Route } from "#src/lib/service.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { oldestAsOf, type ViewBodyEntry, type ViewBodySource, type ViewSource } from "#src/lib/views.js";
 
 function fixture(t: TestContext) {
   const root = makeTempDir("serve-no-legacy-prewarm");

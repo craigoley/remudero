@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { pendingPrActions } from "../src/lib/fleet-control.js";
-import { buildPrActionRoute } from "../src/lib/panel-actions.js";
-import { createConfirmNonceStore, makeConfirmNonceRoute } from "../src/lib/service.js";
+import { pendingPrActions } from "#src/lib/fleet-control.js";
+import { buildPrActionRoute } from "#src/lib/panel-actions.js";
+import { createConfirmNonceStore, makeConfirmNonceRoute } from "#src/lib/service.js";
 
 // The request-path harness lives beside this route-level test rather than in a shared fixture: the
 // proof must continue to exercise the real high-tier confirmation contract, not a lower-tier mock.
@@ -10,7 +10,7 @@ import { mkdtempSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createService, type IdentityProvider } from "../src/lib/service.js";
+import { createService, type IdentityProvider } from "#src/lib/service.js";
 
 const OPERATOR_HEADER = "x-test-operator";
 const HIGH_OPERATOR: IdentityProvider = {

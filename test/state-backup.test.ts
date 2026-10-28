@@ -9,7 +9,7 @@ import {
   StateBackupError,
   restoreState,
   snapshotState,
-} from "../src/lib/ledger.js";
+} from "#src/lib/ledger.js";
 
 // ── W1-T234: state/ holds the ledger, the run locks, the service tokens and the proposals
 // register — and until this task none of it was backed up. These three tests are this

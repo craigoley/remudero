@@ -5,17 +5,17 @@ import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { describeActorEvidence, gatherActorEvidence, readActorEvidence, type ActorEvidenceProbe } from "../src/lib/actor-evidence.js";
+import { describeActorEvidence, gatherActorEvidence, readActorEvidence, type ActorEvidenceProbe } from "#src/lib/actor-evidence.js";
 import {
   checkSharedPause, isRecyclePauseDetail, pauseDetail, pauseFilePath, readSharedPauseAnchor,
   realSharedPauseGitDeps, requestFleetPause, requestPause,
-} from "../src/lib/fleet-control.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { armPause, controlStatusBody } from "../src/lib/panel-actions.js";
-import { buildStatusBoard, renderStatusBoardText } from "../src/lib/status-board.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/fleet-control.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { armPause, controlStatusBody } from "#src/lib/panel-actions.js";
+import { buildStatusBoard, renderStatusBoardText } from "#src/lib/status-board.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { daemonInstanceRegistryPath } from "#src/lib/deployer.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 
 const RMD = fileURLToPath(new URL("../bin/rmd", import.meta.url));
 const CLAIMED_SESSION = "operator-claimed-session";

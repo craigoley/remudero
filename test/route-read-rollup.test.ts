@@ -12,18 +12,18 @@ import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
-import type { Plan } from "../src/lib/plan.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
+import type { Plan } from "#src/lib/plan.js";
 import {
   ROUTE_READS_FILE, buildRouteReadsRoute, createRouteReadRollup, legacyLayersOf, routeReadCaller, worstPhase, type RouteReadsRow, type RouteReadsSummary,
-} from "../src/lib/route-read-rollup.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import type { Route, SseRoute } from "../src/lib/service.js";
-import type { GitHub } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { TraceGithub } from "../src/lib/trace.js";
+} from "#src/lib/route-read-rollup.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import type { Route, SseRoute } from "#src/lib/service.js";
+import type { GitHub } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { TraceGithub } from "#src/lib/trace.js";
 
 
 function stateDir(t: { after: (fn: () => void) => void }): string {

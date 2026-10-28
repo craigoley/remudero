@@ -6,10 +6,10 @@ import {
   ACCOUNT_ATTRIBUTION_EPOCH,
   groupSpendByAccount,
   type LedgerLine,
-} from "../src/lib/ledger.js";
-import { workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
-import { workerErrorVerdict, noPrVerdict, checkPrOwnership } from "../src/run-task.js";
-import type { PrHeadGateway } from "../src/run-task.js";
+} from "#src/lib/ledger.js";
+import { workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
+import { workerErrorVerdict, noPrVerdict, checkPrOwnership } from "#src/run-task.js";
+import type { PrHeadGateway } from "#src/run-task.js";
 
 // ── W1-T268: THE LEDGER GETS AN ACCOUNT DIMENSION, WITH A HARD START DATE ──────────────
 //

@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { IncomingMessage } from "node:http";
 
-import { gatePrewarmOnClients, DEFAULT_BOARD_PREWARM_MS } from "../src/lib/serve.js";
-import type { SseRoute, SseSend } from "../src/lib/service.js";
-import type { GitHub } from "../src/lib/status.js";
+import { gatePrewarmOnClients, DEFAULT_BOARD_PREWARM_MS } from "#src/lib/serve.js";
+import type { SseRoute, SseSend } from "#src/lib/service.js";
+import type { GitHub } from "#src/lib/status.js";
 
 const INTERVAL = 20;
 const SEND: SseSend = () => {};

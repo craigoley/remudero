@@ -7,12 +7,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { armAutoMergeDetailed, armAutoMergeDetailedAsync, type ArmDeps } from "../src/lib/arm-auto-merge.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { OpenPrView } from "../src/lib/sweep.js";
-import { buildSweepEffects } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { armAutoMergeDetailed, armAutoMergeDetailedAsync, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { OpenPrView } from "#src/lib/sweep.js";
+import { buildSweepEffects } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const PR_URL = "https://github.com/craigoley/remudero/pull/9155";
 const HEAD = "634285b5634285b5634285b5634285b5634285b5";

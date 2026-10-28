@@ -13,9 +13,9 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { rule15SplitViolation } from "../src/lib/ci-parity.js";
-import { runGarden, type GardenCheckout, type GardenerDeps } from "../src/lib/gardener.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { rule15SplitViolation } from "#src/lib/ci-parity.js";
+import { runGarden, type GardenCheckout, type GardenerDeps } from "#src/lib/gardener.js";
 import {
   HOT_FILE_REMEDIES,
   backfillConflictedFiles,
@@ -30,10 +30,10 @@ import {
   readMainHistory,
   type HotFileGardenSources,
   type MainCommit,
-} from "../src/lib/hot-file-gardener.js";
-import { planOnlyDiff } from "../src/lib/review.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/hot-file-gardener.js";
+import { planOnlyDiff } from "#src/lib/review.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 
 const at = (h: number, m: number): string => new Date(Date.UTC(2026, 8, 29, h, m)).toISOString();
 

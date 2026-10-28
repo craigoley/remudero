@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { readLedgerLines } from "../src/lib/status.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   reviewAdmissionBound,
@@ -25,8 +25,8 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "./helpers/sweep-test.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#test/helpers/sweep-test.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = Date.parse("2026-10-06T12:00:00Z");
 

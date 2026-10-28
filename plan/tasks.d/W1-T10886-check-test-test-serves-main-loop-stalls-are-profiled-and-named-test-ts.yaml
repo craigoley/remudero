@@ -6,7 +6,8 @@
   verify: human
   risk: low
   priority: 1.21
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/serves-main-loop-stalls-are-profiled-and-named.test.ts"
@@ -111,3 +112,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  amendment: |
+    Queue disposition: withdraw this inferred-owner remedy while preserving every original
+    observation, criterion and proof. The named timeout is a missing runtime.loop_stall_profile
+    row from the profiler/serve path. This test imports only RUNTIME_LOOP_LAG_STEP from
+    incident-invariants.ts, used by the separate disabled-profiler control; that constant is
+    not the producer of the missing profile. The other retained observations include distinct
+    deploy-fixture, object-retention and scope/ruling failures. They do not establish one defect
+    repairable in the declared incident-invariants.ts surface. No remedy credit is claimed.
+    A future task must establish the actual per-failure source mechanism and an executable
+    failure/healthy control before releasing a production repair; no gate or limit is waived.

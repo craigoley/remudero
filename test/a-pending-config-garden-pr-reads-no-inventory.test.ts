@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { CONFIG_GARDEN_CLASSES, CONFIG_GARDEN_LEDGER_STEPS, configGardenSpec, runConfigGarden, type ConfigInventory } from "../src/lib/config-gardener.js";
-import { GARDEN_PENDING_RELEASE_MS, gardenEffectsPath, gardenNeedsInventory, gardenStatePath, type GardenerDeps, type PrState } from "../src/lib/gardener.js";
-import { gatherRuns, type LedgerRecord } from "../src/lib/retro.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { CONFIG_GARDEN_CLASSES, CONFIG_GARDEN_LEDGER_STEPS, configGardenSpec, runConfigGarden, type ConfigInventory } from "#src/lib/config-gardener.js";
+import { GARDEN_PENDING_RELEASE_MS, gardenEffectsPath, gardenNeedsInventory, gardenStatePath, type GardenerDeps, type PrState } from "#src/lib/gardener.js";
+import { gatherRuns, type LedgerRecord } from "#src/lib/retro.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /**
  * W1-T5668 — a pending garden PR keeps `gardenPassDue` true, but the pass then returns on an unchanged cheap

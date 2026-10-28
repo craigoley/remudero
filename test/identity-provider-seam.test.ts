@@ -9,7 +9,7 @@ import {
   type CloudflareAccessKeyCache,
   type IdentityProvider,
   type Route,
-} from "../src/lib/service.js";
+} from "#src/lib/service.js";
 
 // ── W1-T430: the auth/identity seam (MASTER-PLAN §6A) ──
 //

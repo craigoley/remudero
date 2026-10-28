@@ -27,10 +27,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildControlStatusRoute, type ControlStatusDeps, type FleetControlStatus } from "../src/lib/panel-actions.js";
-import { requestPause, requestStop } from "../src/lib/fleet-control.js";
-import { DEFAULT_LIVENESS_BOUND_MS } from "../src/lib/status.js";
+import { createService } from "#src/lib/service.js";
+import { buildControlStatusRoute, type ControlStatusDeps, type FleetControlStatus } from "#src/lib/panel-actions.js";
+import { requestPause, requestStop } from "#src/lib/fleet-control.js";
+import { DEFAULT_LIVENESS_BOUND_MS } from "#src/lib/status.js";
 
 const READ_TOKEN = "control-status-liveness-read-token";
 const WRITE_TOKEN = "control-status-liveness-write-token";

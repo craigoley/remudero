@@ -10,10 +10,10 @@ import {
   deriveStepPrefixes,
   emissionsReport,
   EMISSIONS_ALLOWLIST,
-} from "../src/lib/emissions.js";
-import { configPath } from "../src/lib/config.js";
-import { emissionsCommand, ledgerCorpusFiles } from "../src/run-task.js";
-import { rotationStampIso } from "../src/lib/ledger-grep.js";
+} from "#src/lib/emissions.js";
+import { configPath } from "#src/lib/config.js";
+import { emissionsCommand, ledgerCorpusFiles } from "#src/run-task.js";
+import { rotationStampIso } from "#src/lib/ledger-grep.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 

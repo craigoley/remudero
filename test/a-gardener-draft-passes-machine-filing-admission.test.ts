@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { renderDefuseShard, type GateGardenAction } from "../src/lib/gate-gardener.js";
-import { machineShardFilingRefusal } from "../src/lib/machine-filing.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations } from "../src/lib/plan.js";
-import { scoutShard } from "../src/lib/scout-gardener.js";
+import { renderDefuseShard, type GateGardenAction } from "#src/lib/gate-gardener.js";
+import { machineShardFilingRefusal } from "#src/lib/machine-filing.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations } from "#src/lib/plan.js";
+import { scoutShard } from "#src/lib/scout-gardener.js";
 
 const FIXTURE = "test/some-expiring.test.ts";
 const symptom = (files: string[]) => ({ step: "ci.some_step_failed", older: 2, newer: 3, total: 5, files });

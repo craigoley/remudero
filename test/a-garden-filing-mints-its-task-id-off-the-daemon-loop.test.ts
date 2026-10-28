@@ -7,21 +7,21 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { ciFrictionGardenSpec } from "../src/lib/ci-friction-gardener.js";
-import { FLOW_LADDER, flowGardenSpec, ladderGardenSpec } from "../src/lib/flow-remedy-gardener.js";
-import { runFlowGardener } from "../src/lib/flow-gardener.js";
-import { gateGardenSpec, loadGateProbes } from "../src/lib/gate-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { ciFrictionGardenSpec } from "#src/lib/ci-friction-gardener.js";
+import { FLOW_LADDER, flowGardenSpec, ladderGardenSpec } from "#src/lib/flow-remedy-gardener.js";
+import { runFlowGardener } from "#src/lib/flow-gardener.js";
+import { gateGardenSpec, loadGateProbes } from "#src/lib/gate-gardener.js";
 import {
   GardenMintBudget, GardenMintTimedOutError, prepareGardenTaskIds, runGarden, runGardenAsync,
   type GardenCheckout, type GardenerDeps, type GardenSpec, type GardenTaskIdMinter,
-} from "../src/lib/gardener.js";
-import { fileConsumerVia } from "../src/lib/host-resource-gardener.js";
-import { hotFileGardenSpec } from "../src/lib/hot-file-gardener.js";
-import { scoutGardenSpec } from "../src/lib/scout-gardener.js";
-import { LoopBoundedChildTimeout } from "../src/lib/loop-bounded-child.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ciLearningTaskIdMinter } from "../src/run-task.js";
+} from "#src/lib/gardener.js";
+import { fileConsumerVia } from "#src/lib/host-resource-gardener.js";
+import { hotFileGardenSpec } from "#src/lib/hot-file-gardener.js";
+import { scoutGardenSpec } from "#src/lib/scout-gardener.js";
+import { LoopBoundedChildTimeout } from "#src/lib/loop-bounded-child.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ciLearningTaskIdMinter } from "#src/run-task.js";
 
 const NOW = Date.now();
 const HOUR = 3_600_000;

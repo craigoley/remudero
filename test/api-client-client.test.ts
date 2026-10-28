@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService, type Route, type SseRoute } from "../src/lib/service.js";
+import { createService, type Route, type SseRoute } from "#src/lib/service.js";
 import { createDaemonClient, type StatusProjection, type StatusSnapshot } from "../packages/api-client/src/client.js";
 import {
   buildAnswerQuestionRoute,
@@ -10,20 +10,20 @@ import {
   buildResumeRoute,
   buildStopRoute,
   type IssueCloser,
-} from "../src/lib/panel-actions.js";
-import { buildFeedbackInboxRoute, buildPanelGraphRoutes, buildSubmitFeedbackRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { buildPanelSkillsRoutes, type PanelSkillsDeps } from "../src/lib/panel-skills.js";
-import { buildPanelSkillRunRoutes, type PanelSkillRunDeps } from "../src/lib/panel-skill-run.js";
-import { buildRepoDashboardRoute } from "../src/lib/repo-dashboard-route.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { skillsDir } from "../src/lib/skill.js";
-import { setFeedbackStatus } from "../src/lib/feedback.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import type { GitHub } from "../src/lib/status.js";
+} from "#src/lib/panel-actions.js";
+import { buildFeedbackInboxRoute, buildPanelGraphRoutes, buildSubmitFeedbackRoute, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { buildPanelSkillsRoutes, type PanelSkillsDeps } from "#src/lib/panel-skills.js";
+import { buildPanelSkillRunRoutes, type PanelSkillRunDeps } from "#src/lib/panel-skill-run.js";
+import { buildRepoDashboardRoute } from "#src/lib/repo-dashboard-route.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { skillsDir } from "#src/lib/skill.js";
+import { setFeedbackStatus } from "#src/lib/feedback.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import type { GitHub } from "#src/lib/status.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
+import { landQueuedFeedback } from "#test/helpers/land-queued-feedback.js";
 
 // ── W3-T2: @remudero/api-client's FIRST runtime layer (MASTER-PLAN §7A) ─────────────────────
 //

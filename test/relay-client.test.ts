@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
-import { createService, type Route } from "../src/lib/service.js";
-import { runRelayClient, type RelayClientHandle } from "../src/lib/relay-client.js";
+import { createService, type Route } from "#src/lib/service.js";
+import { runRelayClient, type RelayClientHandle } from "#src/lib/relay-client.js";
 
 // ── W1-T431: the Tier-2 relay CLIENT (MASTER-PLAN §7A/§6A, D-11) ──
 //

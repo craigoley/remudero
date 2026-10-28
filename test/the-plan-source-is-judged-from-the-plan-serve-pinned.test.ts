@@ -6,11 +6,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { gitPlanBehind, planSource } from "../src/lib/now-view.js";
-import type { Plan } from "../src/lib/plan.js";
-import { publishThreadPlan, threadPlanPinnedRef } from "../src/lib/thread-plan.js";
-import { PLAN_BUDGET_MS } from "../src/lib/view-freshness.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitPlanBehind, planSource } from "#src/lib/now-view.js";
+import type { Plan } from "#src/lib/plan.js";
+import { publishThreadPlan, threadPlanPinnedRef } from "#src/lib/thread-plan.js";
+import { PLAN_BUDGET_MS } from "#src/lib/view-freshness.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /** A generation's checkout: HEAD at its boot commit while origin/main has gained one plan-only commit. */
 function generationSlot(t: { after(fn: () => void): void }): { dir: string; planPath: string; boot: string; merged: string; mergedMs: number } {

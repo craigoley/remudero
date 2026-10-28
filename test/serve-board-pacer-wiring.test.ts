@@ -27,13 +27,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildBatchedGithub } from "../src/lib/status.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
 import {
   createGhCallPacer,
   DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS,
   DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS,
-} from "../src/lib/open-prs-rest.js";
-import { DEFAULT_BOARD_POLL_TTL_MS } from "../src/lib/serve.js";
+} from "#src/lib/open-prs-rest.js";
+import { DEFAULT_BOARD_POLL_TTL_MS } from "#src/lib/serve.js";
 // @source-text-subject: this file pins WHERE the daemon verb's wiring lives in source; the verb moved from src/run-task.ts to src/cli/commands/daemon.ts (W1-T9333), so it reads both.
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/daemon.ts", import.meta.url)), "utf8") + "\n" + readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");

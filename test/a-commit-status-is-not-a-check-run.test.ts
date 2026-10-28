@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { reportPrChecks } from "../src/run-task.js";
-import { classifyCheckState, fetchPrChecks, summarizePrChecks } from "../src/lib/pr-checks.js";
+import { reportPrChecks } from "#src/run-task.js";
+import { classifyCheckState, fetchPrChecks, summarizePrChecks } from "#src/lib/pr-checks.js";
 
 // W1-T3083: two hand-rolled rollup queries read as confident wrong answers in opposite directions.
 // (a) A commit status carries `state`, not `conclusion`, so a query on `conclusion` alone dropped

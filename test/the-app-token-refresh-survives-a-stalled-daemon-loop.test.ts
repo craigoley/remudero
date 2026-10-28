@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { mock, test } from "node:test";
-import * as appModule from "../src/lib/github-app.js";
+import * as appModule from "#src/lib/github-app.js";
 
 const app = appModule as unknown as Record<string, any>;
 const { EXCHANGE_TIMEOUT_MS, REFRESH_MARGIN_MS, INSTALLATION_TOKEN_LIFETIME_MS, GH_APP_ID_ENV, GH_APP_INSTALLATION_ID_ENV, GH_APP_PRIVATE_KEY_PATH_ENV } = appModule;

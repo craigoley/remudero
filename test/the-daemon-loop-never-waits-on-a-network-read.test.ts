@@ -17,19 +17,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { IssueGateway } from "../src/lib/escalate.js";
-import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync } from "../src/lib/git-fetch-retry.js";
-import { buildMainHealthRung } from "../src/lib/main-health-rung.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync } from "#src/lib/git-fetch-retry.js";
+import { buildMainHealthRung } from "#src/lib/main-health-rung.js";
 import {
   checkReviewerCodeFreshness,
   checkReviewerCodeFreshnessAsync,
   checkServiceFreshness,
   checkServiceFreshnessAsync,
   type ServiceFreshness,
-} from "../src/lib/self-sync.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildReviewerCodeFreshnessGate } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/self-sync.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildReviewerCodeFreshnessGate } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const HEAD = "a".repeat(40);
 const MAIN = "b".repeat(40);

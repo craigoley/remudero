@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildActionResultsProjection } from "../src/lib/action-results.js";
-import type { LedgerLines } from "../src/lib/status.js";
+import { buildActionResultsProjection } from "#src/lib/action-results.js";
+import type { LedgerLines } from "#src/lib/status.js";
 
 test("unit test: action-results route never exposes raw connector evidence", () => {
   const rows = [{

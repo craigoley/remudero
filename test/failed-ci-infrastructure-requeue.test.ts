@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { readLedgerLines } from "../src/lib/status.js";
-import { buildSweepEffects } from "../src/run-task.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { buildSweepEffects } from "#src/run-task.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
 import {
   ARTIFACT_FINALIZE_INTERMEDIARY_403,
   DEFAULT_SWEEP_POLICY,
@@ -16,7 +16,7 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const TRANSCRIPT = [
   "Artifact upload completed successfully!",

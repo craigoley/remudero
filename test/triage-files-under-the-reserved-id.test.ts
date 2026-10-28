@@ -20,9 +20,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { triageCommand } from "../src/run-task.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { triageCommand } from "#src/run-task.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");

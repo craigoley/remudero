@@ -7,9 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
-import type { Clock } from "../src/lib/clock.js";
+import { createService } from "#src/lib/service.js";
+import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
+import type { Clock } from "#src/lib/clock.js";
 import {
   AUTOMATION_TRIGGER_VERSION,
   completeAutomationTriggerRun,
@@ -23,7 +23,7 @@ import {
   startAutomationTriggerRun,
   submitAutomationTrigger,
   type AutomationTriggerRegistry,
-} from "../src/lib/automation-trigger.js";
+} from "#src/lib/automation-trigger.js";
 
 const READ_TOKEN = "replay-read-token";
 const WRITE_TOKEN = "replay-write-token";

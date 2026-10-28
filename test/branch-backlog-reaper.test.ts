@@ -23,8 +23,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { planBranchReap, type BranchFacts } from "../src/lib/status.js";
-import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "../src/run-task.js";
+import { planBranchReap, type BranchFacts } from "#src/lib/status.js";
+import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "#src/run-task.js";
 
 const f = (name: string, over: Partial<BranchFacts> = {}): BranchFacts => ({
   name,

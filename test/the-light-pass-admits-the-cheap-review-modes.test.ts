@@ -19,7 +19,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { readLedgerLines } from "../src/lib/status.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   isReviewLaneDisposition,
@@ -27,9 +27,9 @@ import {
   type OpenPrView,
   type ReviewReuseInputs,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
-import { lightPassActionable } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { lightPassActionable } from "#src/run-task.js";
 
 const NOW = Date.parse("2026-10-14T21:00:00Z");
 const RECENT = "2026-10-14T20:50:00Z";

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService, type Route } from "../src/lib/service.js";
+import { createService, type Route } from "#src/lib/service.js";
 
 // ── W1-T404 acceptance 2: "a bookkeeping route still accepts the ordinary write grant, so the
 // common path is not made ceremonious" ──

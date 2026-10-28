@@ -26,6 +26,14 @@ export const SCRATCH_PREFIX = "mq-canary/";
 export const REPLAY_PREFIX = "mq-canary-replay/";
 const SCRATCH_RE = /^mq-canary\/\d{4}-\d{2}-\d{2}(?:-[a-z0-9]+)?$/;
 const MINUTE_MS = 60_000;
+/** MEASURED 2026-10-27 over 24h of this repo's Actions jobs: 114 GitHub-hosted jobs ran at once with
+ *  queue time p99 4 s, so the account's concurrency cap is at least that. The old default, 20, is the
+ *  Free plan's documented cap and sized every dry run to zero groups. A floor, not a ceiling. */
+export const DEFAULT_RUNNER_SLOTS = 114;
+/** How many recent green pull_request CI runs price one group; the costliest of them is the price. */
+export const GROUP_COST_SAMPLE_RUNS = 10;
+/** Job statuses that hold or wait for a runner. */
+const BUSY_JOB_STATUSES = new Set(["in_progress", "queued", "waiting", "pending"]);
 
 export class RehearsalRefusal extends Error {
   constructor(reason) {
@@ -94,12 +102,13 @@ const median = (xs) => {
 
 /**
  * The sample size comes from what was read first, never from a fixed count. The window offers
- * `freeJobSlots x windowMinutes` slot-minutes. One group costs about `jobsPerRun x groupCiMinutes`
- * job-minutes. The queue builds at most `maxEntriesToBuild` of the groups at once.
+ * `freeJobSlots x windowMinutes` slot-minutes. One group costs the measured job-minutes of a CI run,
+ * `budget.jobMinutesPerRun`; jobs x wall-clock counted skipped jobs and idle shards as runner time.
+ * The queue builds at most `maxEntriesToBuild` of the groups at once.
  */
-export function sizeSample({ candidates, groupCiMinutes, budget, maxEntriesToBuild, windowMinutes }) {
+export function sizeSample({ candidates, budget, maxEntriesToBuild, windowMinutes }) {
   const slotMinutes = budget.freeJobSlots * windowMinutes;
-  const groupCost = Math.max(1, budget.jobsPerRun) * groupCiMinutes;
+  const groupCost = Number.isFinite(budget.jobMinutesPerRun) ? budget.jobMinutesPerRun : 0;
   const size = groupCost > 0 ? Math.min(candidates, Math.floor(slotMinutes / groupCost)) : 0;
   return { size, concurrent: Math.min(maxEntriesToBuild, size), slotMinutes, groupCost: groupCost > 0 ? groupCost : undefined };
 }
@@ -208,7 +217,7 @@ export async function tearDown(seam, created) {
  * is interrupted.
  */
 export async function runRehearsal(seam, opts = {}) {
-  const { live = false, runnerSlots = 20, windowMinutes = 120, pollMs = 3 * MINUTE_MS, aborted = () => false } = opts;
+  const { live = false, runnerSlots = DEFAULT_RUNNER_SLOTS, windowMinutes = 120, pollMs = 3 * MINUTE_MS, aborted = () => false } = opts;
   const result = { live, startedAt: new Date(seam.now()).toISOString(), groups: [], teardown: [] };
   result.identity = await seam.readIdentity();
   const source = await seam.readRuleset(SOURCE_RULESET_ID);
@@ -224,7 +233,7 @@ export async function runRehearsal(seam, opts = {}) {
   const ciMinutes = median(candidates.map((c) => c.ciMinutes).filter((m) => m > 0));
   result.groupCiMinutes = ciMinutes === undefined ? undefined : Math.round(ciMinutes * 10) / 10;
   result.budget = budget;
-  result.sizing = sizeSample({ candidates: candidates.length, groupCiMinutes: result.groupCiMinutes, budget,
+  result.sizing = sizeSample({ candidates: candidates.length, budget,
     maxEntriesToBuild: result.queue.max_entries_to_build ?? 1, windowMinutes });
   const { sample, conflictPair } = pickSample(candidates, result.sizing.size);
   Object.assign(result, { sample: sample.map((c) => c.number), conflictPair });
@@ -303,7 +312,7 @@ export function renderReport(result, notes = []) {
     `- merge_queue parameters copied from ruleset ${SOURCE_RULESET_ID} (read only): \`${JSON.stringify(result.queue)}\``,
     `- required checks: ${(result.requiredChecks ?? []).map((c) => `\`${c}\``).join(", ") || "none"}`, "",
     "## Sample", "", `- observed CI duration per run (median): ${cell(result.groupCiMinutes)} min`,
-    `- runner budget: ${result.budget?.runnerSlots} slots, at least ${result.budget?.busyJobs} busy (one per in-progress or queued run), ${result.budget?.jobsPerRun} jobs per CI run`,
+    `- runner budget: ${result.budget?.runnerSlots} slots, ${result.budget?.busyJobs} jobs busy (running or queued), ${cell(result.budget?.jobMinutesPerRun)} job-min per CI run (the costliest of the last ${GROUP_COST_SAMPLE_RUNS} green pull_request runs)`,
     `- sizing: ${result.sizing?.slotMinutes} free slot-min in the window / ${cell(result.sizing?.groupCost)} job-min per group = ${result.sizing?.size} group(s), up to ${result.sizing?.concurrent} building at once`,
     `- sample: ${(result.sample ?? []).map((n) => `#${n}`).join(", ") || "none"}`,
     `- conflicting pair: ${result.conflictPair ? `${result.conflictPair.prs.map((n) => `#${n}`).join(" x ")} (${result.conflictPair.files.join(", ")})` : "none in the sample"}`, "",
@@ -326,7 +335,13 @@ export function renderReport(result, notes = []) {
   return out.join("\n");
 }
 
-const sum = (rows) => rows.reduce((n, r) => n + r, 0);
+/** Runner minutes a job held: zero for a skipped job or one that never started. */
+export function jobRunnerMinutes(job) {
+  if (job.conclusion === "skipped") return 0;
+  const start = Date.parse(job.started_at);
+  const end = Date.parse(job.completed_at);
+  return Number.isFinite(start) && Number.isFinite(end) && end > start ? (end - start) / MINUTE_MS : 0;
+}
 
 /**
  * The real seam, built only on src/lib/github-transport.ts. Reads go through `ghJson`, which applies the
@@ -367,13 +382,24 @@ export function createGhSeam({ owner = "craigoley", repo = "remudero", pacer = c
           ciMinutes: starts.length && ends.length ? (Math.max(...ends) - Math.min(...starts)) / MINUTE_MS : 0 };
       }).filter((pr) => pr.green);
     },
+    // A run is not a job: one CI run holds up to ~40 runners, a policy run one for seconds. Count jobs.
     readRunnerBudget: async () => {
-      const running = await read(["api", `${r}/actions/runs?status=in_progress&per_page=1`]);
-      const queued = await read(["api", `${r}/actions/runs?status=queued&per_page=1`]);
-      const recent = await read(["api", `${r}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=1`]);
-      const ci = recent.workflow_runs[0];
-      const jobs = ci ? (await read(["api", `${r}/actions/runs/${ci.id}/jobs?per_page=1`])).total_count : 1;
-      return { busyJobs: sum([running.total_count, queued.total_count]), jobsPerRun: jobs };
+      const jobsOf = async (runId) => (await read(["api", `${r}/actions/runs/${runId}/jobs?filter=latest&per_page=100`])).jobs ?? [];
+      let busyJobs = 0;
+      for (const status of ["in_progress", "queued"]) {
+        for (const run of (await read(["api", `${r}/actions/runs?status=${status}&per_page=100`])).workflow_runs ?? []) {
+          busyJobs += (await jobsOf(run.id)).filter((j) => BUSY_JOB_STATUSES.has(j.status)).length;
+        }
+      }
+      const recent = await read(["api",
+        `${r}/actions/workflows/ci.yml/runs?event=pull_request&status=success&per_page=${GROUP_COST_SAMPLE_RUNS}`]);
+      const costs = [];
+      for (const run of recent.workflow_runs ?? []) {
+        const minutes = (await jobsOf(run.id)).reduce((n, j) => n + jobRunnerMinutes(j), 0);
+        if (minutes > 0) costs.push(minutes);
+      }
+      // The costliest, not the median: a plan-only run costs ~65 job-min and a source run ~259.
+      return { busyJobs, jobMinutesPerRun: costs.length === 0 ? undefined : Math.round(Math.max(...costs) * 10) / 10 };
     },
     createBranch: (name, sha) => write("POST", `${r}/git/refs`, { ref: `refs/heads/${name}`, sha }),
     deleteBranch: (name) => write("DELETE", `${r}/git/refs/heads/${name}`),
@@ -424,13 +450,13 @@ export function createGhSeam({ owner = "craigoley", repo = "remudero", pacer = c
 const HELP = `merge-queue-canary (W1-T7736): rehearse the merge queue on a scratch branch.
   --live             create the scratch branch, ruleset and replay PRs (default: dry run, reads only)
   --report <path>    write the markdown report there
-  --runner-slots N   concurrent job slots the account's runners allow (default 20)
+  --runner-slots N   concurrent job slots the account's runners allow (default ${DEFAULT_RUNNER_SLOTS}, the 2026-10-27 observed floor)
   --window-min N     the rehearsal window in minutes (default 120)
   --note <text>      a line for the report's Notes section (repeatable)`;
 
 export async function main(argv, { seam = createGhSeam(), write = writeFileSync, log = console.log, onSignal = process.once.bind(process) } = {}) {
   const { values, helpRequested } = parseArgv(argv, { live: { type: "boolean" }, report: { type: "string" }, note: { type: "string", multiple: true },
-    "runner-slots": { type: "string", default: "20" }, "window-min": { type: "string", default: "120" } }, { helpText: HELP });
+    "runner-slots": { type: "string", default: String(DEFAULT_RUNNER_SLOTS) }, "window-min": { type: "string", default: "120" } }, { helpText: HELP });
   if (helpRequested) return 0;
   let stop = false;
   for (const signal of ["SIGINT", "SIGTERM"]) onSignal(signal, () => { stop = true; });

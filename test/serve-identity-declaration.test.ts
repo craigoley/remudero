@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { resolveServeIdentity, TRUSTED_PROXY_TAILSCALE, DEFAULT_SERVE_HOST } from "../src/lib/serve.js";
+import { resolveServeIdentity, TRUSTED_PROXY_TAILSCALE, DEFAULT_SERVE_HOST } from "#src/lib/serve.js";
 
 // ── W1-T398: enabling `identityCapability` used to silently inherit the loopback-trust
 // assumption `resolveServeIdentity` hardcoded — nothing recorded WHICH proxy the operator meant

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyGhFailure, type GitHub, type PrRef } from "../src/lib/status.js";
-import { resolveAlreadySatisfied, type AlreadySatisfiedClaim } from "../src/run-task.js";
+import { classifyGhFailure, type GitHub, type PrRef } from "#src/lib/status.js";
+import { resolveAlreadySatisfied, type AlreadySatisfiedClaim } from "#src/run-task.js";
 
 /**
  * W1-T119's law, applied to rung (c). `resolveAlreadySatisfied` collapsed THREE states into one

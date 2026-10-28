@@ -3,12 +3,12 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { clockFromMillisFn } from "../src/lib/clock.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 import {
   GARDEN_DECISION_PENDING_RELEASE_MS, gardenPassDue, gardenPendingSignal, gardenPendingWatchPath, gardenStatePath, runGarden,
   type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec,
-} from "../src/lib/gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // OBSERVED 2026-10-09 on the fleet host: gate and export answered "due" on every 60 s poll while a PR was
 // pending, about 55-60 passes an hour each and about 550 s of child CPU an hour, and each such pass only asked

@@ -28,8 +28,8 @@ import {
   IMPLEMENT_ROLE_LINES,
   outputContractLines,
   renderAnchorBlock,
-} from "../src/lib/compaction.js";
-import { parseLearningsUsed, type LearningsUsedResult } from "../src/lib/worker.js";
+} from "#src/lib/compaction.js";
+import { parseLearningsUsed, type LearningsUsedResult } from "#src/lib/worker.js";
 import {
   aggregateCitationEvidence,
   changedCitationStamps,
@@ -37,8 +37,8 @@ import {
   mineLedgerCitations,
   stampCitations,
   type LedgerRecord,
-} from "../src/lib/retro.js";
-import type { LearningEntry } from "../src/lib/learnings.js";
+} from "#src/lib/retro.js";
+import type { LearningEntry } from "#src/lib/learnings.js";
 
 function entry(id: string, overrides: Partial<LearningEntry> = {}): LearningEntry {
   return {

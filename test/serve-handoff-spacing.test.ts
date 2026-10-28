@@ -5,8 +5,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createServeSupervisor, decayedPressure, handoffSpacingMs, type GenerationProcess, type PreparedSlot, type ServeSupervisorOptions } from "../src/lib/serve-supervisor.js";
-import type { GenerationMessage } from "../src/lib/serve-generation.js";
+import { createServeSupervisor, decayedPressure, handoffSpacingMs, type GenerationProcess, type PreparedSlot, type ServeSupervisorOptions } from "#src/lib/serve-supervisor.js";
+import type { GenerationMessage } from "#src/lib/serve-generation.js";
 
 const MIN = 60_000;
 const settle = async (): Promise<void> => {

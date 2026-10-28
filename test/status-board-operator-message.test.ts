@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { OPERATOR_MESSAGE_PARTS, type OperatorMessage } from "../src/lib/operator-message.js";
+import { OPERATOR_MESSAGE_PARTS, type OperatorMessage } from "#src/lib/operator-message.js";
 import {
   boardMessageFooter,
   projectBoardSection,
   renderStatusBoardText,
   type BoardSectionMessage,
   type StatusBoardModel,
-} from "../src/lib/status-board.js";
+} from "#src/lib/status-board.js";
 
 // ── W1-T2806 ────────────────────────────────────────────────────────────────────────────────────
 // docs/operator-message-standard.md is NORMATIVE and names `renderStatusBoardText` as its FIRST

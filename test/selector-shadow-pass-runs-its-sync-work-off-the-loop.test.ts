@@ -7,11 +7,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { GardenMintBudget } from "../src/lib/gardener.js";
-import * as shadow from "../src/lib/selector-shadow-gardener.js";
-import { ciLearningTaskIdMinter } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { GardenMintBudget } from "#src/lib/gardener.js";
+import * as shadow from "#src/lib/selector-shadow-gardener.js";
+import { ciLearningTaskIdMinter } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const execAsync = promisify(execFile);
 

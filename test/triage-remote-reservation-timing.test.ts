@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { triageCommand } from "../src/run-task.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { triageCommand } from "#src/run-task.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 // W1-T1011 (REOPENED BY W1-T2326): THE ORDERING THIS FILE PROVES. `rmd triage` mints a task id
 // and reserves it on TWO stores — a LOCAL one (this process's own sandbox, released on every exit

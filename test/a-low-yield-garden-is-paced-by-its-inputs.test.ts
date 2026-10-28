@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import * as registry from "../src/lib/garden-registry.js";
-import * as host from "../src/lib/host-resource-gardener.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import * as registry from "#src/lib/garden-registry.js";
+import * as host from "#src/lib/host-resource-gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const MINUTE = 60_000;
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));

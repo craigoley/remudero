@@ -16,9 +16,9 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = Date.parse("2026-10-11T13:40:00Z");
 const HEAD = "28a3134dab0e";

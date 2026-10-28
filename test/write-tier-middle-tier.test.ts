@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService, type IdentityProvider, type Route } from "../src/lib/service.js";
+import { createService, type IdentityProvider, type Route } from "#src/lib/service.js";
 
 // ── W1-T404 acceptance 3: "a reversible-but-disruptive route is refused the low grant and
 // accepted by the middle one, so the third tier is distinguishable from both poles" ──

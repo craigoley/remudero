@@ -6,10 +6,10 @@ import { test } from "node:test";
 
 import { parse as parseYaml } from "yaml";
 
-import { applyBacklogActions, backlogInventory, type BacklogAction, type BacklogDisposition, type BacklogSources } from "../src/lib/backlog-gardener.js";
-import { fixedClock } from "../src/lib/clock.js";
-import type { PlanInventory } from "../src/lib/plan-gardener.js";
-import type { Task } from "../src/lib/plan.js";
+import { applyBacklogActions, backlogInventory, type BacklogAction, type BacklogDisposition, type BacklogSources } from "#src/lib/backlog-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { PlanInventory } from "#src/lib/plan-gardener.js";
+import type { Task } from "#src/lib/plan.js";
 
 const SIGNATURE = "0123456789abcdef";
 const OLD_SIGNATURE = "fedcba9876543210";

@@ -14,17 +14,17 @@ import {
   armIfVerdictPermits,
   armAutoMergeDetailed,
   type ArmDeps,
-} from "../src/lib/arm-auto-merge.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/arm-auto-merge.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   deriveDisposition,
   MERGEABLE_PLAN_PR_REASON,
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { buildSweepEffects } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { buildSweepEffects } from "#src/run-task.js";
 
 const PR_URL = "https://github.com/craigoley/remudero/pull/10141";
 const HEAD = "630b5d245922108bb15f88f2781f40e681e2f64b";

@@ -20,8 +20,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import {
   GH_APP_READ_BUCKET,
   GH_SEARCH_BUCKET,
@@ -30,7 +30,7 @@ import {
   readGhReadCadenceStampMs,
   routeInteractiveGhRead,
   type GhAppTokenMint,
-} from "../src/lib/github-transport.js";
+} from "#src/lib/github-transport.js";
 
 function withCache(fn: (env: NodeJS.ProcessEnv) => Promise<void> | void): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-interactive-read-`));

@@ -6,9 +6,9 @@ import { test } from "node:test";
 import {
   commitWorkerEdits, fixRungScopeStandDownReason, harnessCommitForShellLessWorker,
   readRegistrationChanges, renderFixPrompt, scopeGuardOutOfScopeFiles,
-} from "../src/run-task.js";
-import * as sweep from "../src/lib/sweep.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/run-task.js";
+import * as sweep from "#src/lib/sweep.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const declared = ["src/lib/worker.ts"];
 const ledger = "src/lib/ledger.ts";

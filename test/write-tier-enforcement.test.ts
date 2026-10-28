@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService, type Route } from "../src/lib/service.js";
+import { createService, type Route } from "#src/lib/service.js";
 
 // ── W1-T404 acceptance 1: "a high-consequence route refuses a credential that carries only the
 // ordinary write grant, and says which tier it required" ──

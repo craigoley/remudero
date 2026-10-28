@@ -5,10 +5,10 @@ import {tmpdir} from 'node:os';
 import {dirname,join} from 'node:path';
 import {test} from 'node:test';
 import {parse} from 'yaml';
-import {ghShim} from './helpers/gh-shim.js';
-import {ghStubPath} from './helpers/gh-stub.js';
+import {ghShim} from '#test/helpers/gh-shim.js';
+import {ghStubPath} from '#test/helpers/gh-stub.js';
 // @ts-expect-error — trusted metadata producer is plain ESM outside tsconfig roots.
-import {runSecurityMergeProducer,createSecurityMetadataReader} from '../scripts/security-merge-producer.mjs';
+import {runSecurityMergeProducer,createSecurityMetadataReader} from '#scripts/security-merge-producer.mjs';
 const head='a'.repeat(40),base='b'.repeat(40);
 const repository={full_name:'craigoley/remudero'};
 

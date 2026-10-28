@@ -13,16 +13,16 @@ import {
   realArmDeps,
   runTask,
   type ArmDeps,
-} from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import { decideAutoMergeArm, judgeReview } from "../src/lib/review.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import { decideAutoMergeArm, judgeReview } from "#src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 

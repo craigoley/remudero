@@ -20,8 +20,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { reviewCommand, reviewPrNumber, reviewViewArgs } from "../src/run-task.js";
-import { mapRestPr, type RestPullRow } from "../src/lib/open-prs-rest.js";
+import { reviewCommand, reviewPrNumber, reviewViewArgs } from "#src/run-task.js";
+import { mapRestPr, type RestPullRow } from "#src/lib/open-prs-rest.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const OWNER = "craigoley";

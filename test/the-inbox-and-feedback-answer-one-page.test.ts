@@ -3,12 +3,12 @@ import type { AddressInfo } from "node:net";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { readPage, readPageRequest } from "../src/lib/read-page.js";
-import { createService } from "../src/lib/service.js";
-import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
+import { buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { readPage, readPageRequest } from "#src/lib/read-page.js";
+import { createService } from "#src/lib/service.js";
+import type { GitHub } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { landQueuedFeedback } from "#test/helpers/land-queued-feedback.js";
 
 // GET /v1/inbox was 1.99 MB on the fleet host (2026-09-30): 665 proposals in the four lanes, 623 of them
 // again under `fleet`, while the operator's own `needsYou` lanes were 42 items (82 KB). A console page
@@ -142,7 +142,7 @@ test("a read page resumes at the cursor position when the item it names has left
 });
 
 test("a cached read keys on its whole query so two queries never share a body", async () => {
-  const { createConsoleSnapshotCache } = await import("../src/lib/console-snapshot-cache.js");
+  const { createConsoleSnapshotCache } = await import("#src/lib/console-snapshot-cache.js");
   let calls = 0;
   const route = {
     method: "GET" as const,

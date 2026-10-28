@@ -117,7 +117,8 @@ test("all heartbeat fixture runners install the native namespace boundary", () =
   for (const caller of callers) {
     const source = readFileSync(fileURLToPath(new URL(`./${caller}.test.ts`, import.meta.url)), "utf8");
     assert.ok(source.includes('"scripts"') || source.includes("scripts/fleet-heartbeat.sh"), `${caller}: positive subject control`);
-    assert.match(source, /import \{ installFixtureDuGuard \} from "\.\/helpers\/fixture-du\.js";/, `${caller}: guard import`);
+    // The helper may be imported relatively or through the `#test/*` subpath alias (W1-T9864).
+    assert.match(source, /import \{ installFixtureDuGuard \} from "(?:\.\/|#test\/)helpers\/fixture-du\.js";/, `${caller}: guard import`);
     assert.match(source, /installFixtureDuGuard\((?:binDir|bin), \[(?:dir|root)\]\);/, `${caller}: owned namespace installation`);
   }
   const acr = readFileSync(fileURLToPath(new URL("./w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts", import.meta.url)), "utf8");

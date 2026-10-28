@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   DURATION_ADOPTION_CADENCE_MS,
   DURATION_WINDOW_RUNS,
@@ -24,8 +24,8 @@ import {
   testGardenInventory,
   testManifestProposalHistoryPath,
   testManifestProposalPath,
-} from "../src/lib/test-gardener.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/test-gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const probePromise = loadTestManifestProbe(REPO_ROOT);

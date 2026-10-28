@@ -14,8 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { adaptLiveAnalyticsMetrics, type LiveProviderSnapshot } from "../src/lib/analytics-live-metrics.js";
-import { buildAnalyticsRoute, createAnalyticsSnapshotCache, deriveAnalyticsSnapshot, type AnalyticsSnapshot } from "../src/lib/analytics-route.js";
+import { adaptLiveAnalyticsMetrics, type LiveProviderSnapshot } from "#src/lib/analytics-live-metrics.js";
+import { buildAnalyticsRoute, createAnalyticsSnapshotCache, deriveAnalyticsSnapshot, type AnalyticsSnapshot } from "#src/lib/analytics-route.js";
 
 const NOW = "2026-09-22T18:00:00.000Z";
 

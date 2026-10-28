@@ -5,17 +5,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { buildServeRoutes, buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { daemonCommand } from "../src/run-task.js";
-import type { DaemonDeps } from "../src/lib/daemon.js";
+import { buildServeRoutes, buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { daemonCommand } from "#src/run-task.js";
+import type { DaemonDeps } from "#src/lib/daemon.js";
 import {
   bearerTokenId,
   DRAIN_FEEDBACK_VERDICTS,
   type IssueCloser,
   type PanelActionDeps,
-} from "../src/lib/panel-actions.js";
-import type { GitHub } from "../src/lib/status.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+} from "#src/lib/panel-actions.js";
+import type { GitHub } from "#src/lib/status.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 import {
   consumeDrainNow,
   clearPrAction,
@@ -31,12 +31,12 @@ import {
   requestStop,
   setQuietHours,
   stopDetail,
-} from "../src/lib/fleet-control.js";
-import { runDrain, type DrainDeps } from "../src/lib/drain.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { RunResult } from "../src/lib/run-result.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/fleet-control.js";
+import { runDrain, type DrainDeps } from "#src/lib/drain.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { RunResult } from "#src/lib/run-result.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // ── W3-T5: human-in-the-loop panel actions (MASTER-PLAN §7) ────────────────────────────────
 //

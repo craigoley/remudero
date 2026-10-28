@@ -14,10 +14,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { DeployDeps, MountPlanDrift, ResourcePolicyDrift } from "../src/lib/deployer.js";
-import type { Escalation } from "../src/lib/escalate.js";
-import { SERVE_POLICY_CONTAINER, realServePolicyDeps, runServePolicyCycle } from "../src/lib/serve-policy-convergence.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { DeployDeps, MountPlanDrift, ResourcePolicyDrift } from "#src/lib/deployer.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { SERVE_POLICY_CONTAINER, realServePolicyDeps, runServePolicyCycle } from "#src/lib/serve-policy-convergence.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const NOW = Date.parse("2026-10-07T12:00:00.000Z");
