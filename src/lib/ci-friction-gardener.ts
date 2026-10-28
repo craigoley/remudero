@@ -141,6 +141,16 @@ function isCiFrictionSelfFile(file: string): boolean {
   return file.startsWith("src/lib/ci-friction-") && file.endsWith(".ts") && !file.slice("src/lib/".length).includes("/");
 }
 
+/** A red round on a pull request whose every hand-fixed file is the gardener's own source (a `check:test:<file>` red
+ *  while the gardener itself is being developed) is that development, not friction to file a task against.
+ *  A round on any PR with no hand-fix record, or one touching another file, is kept. */
+export function withoutGardenerDevelopmentRounds(rounds: readonly CiFrictionRound[], fixes: readonly CiFrictionHandFix[]): CiFrictionRound[] {
+  const own = new Set<number>();
+  const other = new Set<number>();
+  for (const fix of fixes) for (const file of fix.files) (isCiFrictionSelfFile(file) ? own : other).add(fix.pr);
+  return rounds.filter((round) => !(own.has(round.pr) && !other.has(round.pr)));
+}
+
 /** A manual change records file overlap, not proof that a particular check failed or was repaired.
  * Preserve it as its own median-proxy observation under the existing repeated-file threshold.
  * A PR already carrying positive priced failure cost — a ledger round, or a red run on a gate the measured
@@ -1691,8 +1701,8 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const records = sources.ledgerRecords();
       const plan = sources.planState();
       const ownerSearch = sources.ownerSearch.pin?.() ?? sources.ownerSearch;
-      const ledgerRounds = withoutBirthRounds(ciFrictionRoundsFromLedger(records), ownerSearch);
       const hand = sources.handFixes?.();
+      const ledgerRounds = withoutGardenerDevelopmentRounds(withoutBirthRounds(ciFrictionRoundsFromLedger(records), ownerSearch), hand?.fixes ?? []);
       if (hand?.state === "unmeasured") deps.log("ci-friction.hand_fixes_unmeasured", { reason: hand.reason });
       const gateFireRates = sources.gateFireRates?.();
       const unnamedGates = ciFrictionGatePricedPrs(gateFireRates).unnamed;
@@ -1758,7 +1768,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       if (!ws.branch) throw new Error("ci-friction gardener: filing workspace has no branch for task-id reservation");
       const taskId = (heldIds ?? prepareGardenTaskIds(ws, 1, sources.mintTaskId) as string[])[0]!;
       const records = sources.ledgerRecords();
-      const ledgerRounds = withoutBirthRounds(ciFrictionRoundsFromLedger(records), sources.ownerSearch);
+      const ledgerRounds = withoutGardenerDevelopmentRounds(withoutBirthRounds(ciFrictionRoundsFromLedger(records), sources.ownerSearch), sources.handFixes?.().fixes ?? []);
       const contents = ciFrictionShardYaml(
         { price: action.price, rung: action.rung, owner: action.decision.owner, rounds: remedyRoundsOf([
           ...ledgerRounds, ...ciFrictionHandFixRounds(sources.handFixes?.().fixes ?? [], ledgerRounds,
