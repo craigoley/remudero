@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { fieldTrialsCommand, buildFieldTrialsFlowSnapshot } from "#src/lib/field-trials-flow.js";
+import { emptyRepoStore } from "#src/lib/field-trials-github.js";
 import { parseRefreshSteps, recordFieldTrialsRefresh } from "#src/lib/field-trials-refresh.js";
 import type { IssueGateway } from "#src/lib/escalate.js";
 
@@ -234,3 +235,60 @@ test("a partial snapshot never becomes the last good snapshot on a later failed 
     assert.equal(outcomes(f.stateDir).length, 2);
   } finally { f.close(); }
 });
+
+for (const scenario of [
+  { name: "successful steps", routing: "0", cases: "0", previousCases: false },
+  { name: "failed routing review", routing: "7", cases: "0", previousCases: false },
+  { name: "failed case files with a previous file", routing: "0", cases: "8", previousCases: true },
+  { name: "failed case files without a previous file", routing: "0", cases: "8", previousCases: false },
+  { name: "skipped routing review", routing: "skipped", cases: "0", previousCases: false },
+]) {
+  test(`the refresh command persists and ledgers ${scenario.name} in process`, async () => {
+    const f = fixture();
+    const priorAsOf = "2026-10-18T04:28:00.000Z";
+    const store = emptyRepoStore();
+    store.cursors.pulls = { ...store.cursors.pulls, state: "complete", reason: null, asOf: priorAsOf, pagesRead: 1 };
+    writeFileSync(join(f.outDir, "field-trials-github-v1.json"), JSON.stringify({
+      version: "field-trials-github-v1", repos: { "o/r": store } }));
+    const args = ["--offline", "--source", "core=o/r", "--ledger", `core=${f.stateDir}`, "--out-dir", f.outDir,
+      "--refresh-script-blob", blob];
+    const input = { print: () => {}, printError: () => {}, resolveConfig: () => ({ root: f.dir }) };
+    const snapshotPath = join(f.outDir, "field-trials-flow-v1.json");
+    try {
+      assert.equal(await fieldTrialsCommand([...args, "--refresh-step", "routing-review=0", "--refresh-step", "case-files=0"],
+        buildFieldTrialsFlowSnapshot, { ...input, nowIso: priorAsOf }), 0);
+      const prior = JSON.parse(readFileSync(snapshotPath, "utf8"));
+      assert.equal(prior.state, "observed", "the real ledger reader and builder produce a healthy source");
+      assert.equal(prior.refresh.lastGoodSnapshotAsOf, priorAsOf);
+      const casePath = join(f.outDir, "case-files-latest.json");
+      if (scenario.previousCases) writeFileSync(casePath, "[]");
+      assert.equal(await fieldTrialsCommand([...args,
+        "--refresh-step", `routing-review=${scenario.routing}`, "--refresh-step", `case-files=${scenario.cases}`,
+        ...(scenario.previousCases ? ["--case-files", casePath] : [])],
+      buildFieldTrialsFlowSnapshot, { ...input, nowIso }), 0);
+      const partial = scenario.routing !== "0" || scenario.cases !== "0";
+      const expectedSteps = parseRefreshSteps([`routing-review=${scenario.routing}`, `case-files=${scenario.cases}`], false);
+      const expectedFallback = scenario.cases !== "0" && scenario.previousCases ? "previous" : "none";
+      const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
+      assert.equal(snapshot.asOf, nowIso);
+      assert.equal(snapshot.state, partial ? "observed-partial" : "observed");
+      assert.deepEqual(snapshot.reasons, expectedSteps.filter(step => step.state !== "ok")
+        .map(step => `refresh-${step.name}-${step.state}`));
+      assert.deepEqual(snapshot.refresh.steps, expectedSteps);
+      assert.equal(snapshot.refresh.state, partial ? "partial" : "ok");
+      assert.equal(snapshot.refresh.caseFilesFallback, expectedFallback);
+      assert.equal(snapshot.refresh.lastGoodSnapshotAsOf, partial ? priorAsOf : nowIso);
+      assert.equal(snapshot.refresh.scriptBlob, blob);
+      assert.equal(snapshot.refresh.snapshotAsOf, nowIso);
+      const rows = outcomes(f.stateDir);
+      assert.equal(rows.length, 2, "each command invocation appends exactly one collector outcome");
+      assert.equal(rows[1].asOf, nowIso);
+      assert.equal(rows[1].snapshotAsOf, nowIso);
+      assert.equal(rows[1].lastGoodSnapshotAsOf, partial ? priorAsOf : nowIso);
+      assert.equal(rows[1].state, partial ? "partial" : "ok");
+      assert.equal(rows[1].scriptBlob, blob);
+      assert.equal(rows[1].caseFilesFallback, expectedFallback);
+      assert.deepEqual(rows[1].steps, expectedSteps);
+    } finally { f.close(); }
+  });
+}

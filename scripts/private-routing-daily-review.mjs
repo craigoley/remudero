@@ -87,13 +87,16 @@ async function readSource(source, asOf, resolutions, openUnion) {
   if (reportSteps.size) {
     // Only audited report steps reach the union parser. Consume fingerprints on delivery so
     // replays, concurrent appends and unrelated rows cannot enlarge the retained population.
+    const admittedRows = new WeakSet();
     for await (const row of openUnion(source.stateDir, {
       since: `${since}T00:00:00Z`, step: [...reportSteps], dedupe: false,
       onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
       onAcceptedRecord: (row, raw) => {
-        if (reportSeen.delete(createHash("sha256").update(raw).digest("hex"))) rows.push(row);
+        if (reportSeen.delete(createHash("sha256").update(raw).digest("hex"))) admittedRows.add(row);
       },
-    })) { /* Report records are delivered through the raw-line identity callback. */ }
+    })) {
+      if (admittedRows.delete(row)) rows.push(row);
+    }
   }
   const reasons = [];
   if (reportSeen.size) reasons.push("ledger-source-changed-during-review");
