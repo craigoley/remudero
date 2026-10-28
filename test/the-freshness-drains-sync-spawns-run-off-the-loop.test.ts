@@ -16,6 +16,7 @@ import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import type { Config } from "#src/lib/config.js";
 import type { Plan } from "#src/lib/plan.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 
 async function withoutSyncSpawn<T>(run: () => T | Promise<T>): Promise<T> {
@@ -50,7 +51,7 @@ test("the census precheck can report its serial child backstops before the paren
       return { status: 2, signal: null, stdout: "census suites NOT MEASURED (time bound)", stderr: "" };
     }
     assert.equal(options.timeout, 120_000, "the standalone reach suite keeps its own bound");
-    return { status: 0, signal: null, stdout: "# tests 1\n# fail 0\n", stderr: "" };
+    return { ...finishJudgedRun(args, options), signal: null, stdout: "# tests 1\n# fail 0\n", stderr: "" };
   };
   const result = await checkFixCensusSnapshotAsync("/fixture", "/fixture/snapshot.json", (_step, fields) => {
     events.push(String(fields?.outcome));
