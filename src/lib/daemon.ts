@@ -459,7 +459,8 @@ export function restartWorkHistory(rawLines: readonly string[], nowMs: number): 
 /** The step a pre-PR handoff writes beside its verdict, and the daemon re-writes for a receipt the live ledger
  *  holds only as a verdict row: verdicts keep the newest 200, so a parked checkpoint aged out of resumption. */
 export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
-export const CHECKPOINT_HANDOFF_REASONS: ReadonlySet<string> = new Set(["freshness_yield", "quiet_worker_round_ended"]);
+/** W1-T10896: `orphaned-by-restart` is the boot sweep's verdict for a run its own daemon restarted under. */
+export const CHECKPOINT_HANDOFF_REASONS: ReadonlySet<string> = new Set(["freshness_yield", "quiet_worker_round_ended", "orphaned-by-restart"]);
 
 /** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
  *  restore, which consumed nothing (W1-T7806). A matching checkpoint drop consumes the receipt;
