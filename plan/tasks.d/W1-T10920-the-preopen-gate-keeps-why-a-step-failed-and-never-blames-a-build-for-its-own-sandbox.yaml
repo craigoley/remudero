@@ -63,11 +63,14 @@
        `environment: <steps>`; if some are, those are listed under `environment_steps` and only the rest go to
        `renderPreopenGatePrompt`. A step with real compiler diagnostics (a `file(line,col): error TS` line) is
        never environment.
-    3. Repair the sandbox. Reproduce on the Azure host with the real `preopenGateSandboxArgv` around the
-       harness's `preflight --fast` on a clean worktree of main (the build worker runs where bwrap exists); name
-       the fault in the PR body with the recorded detail; fix the bind, env or cache-path cause in
-       preopenGateSandboxArgv / proofSandboxArgv so the clean tree's typecheck and rule-checks pass. Do not widen
-       the allowlist to the daemon's environment and do not drop containment (W1-T9619 stays true).
+    3. Repair the sandbox when it can be seen. A builder running where bwrap exists (a fleet worker on the Azure
+       host) reproduces with the real `preopenGateSandboxArgv` around the harness's `preflight --fast` on a clean
+       worktree of main, names the fault in the PR body, and fixes the bind, env or cache-path cause in
+       preopenGateSandboxArgv / proofSandboxArgv. A builder without bwrap (CI, a Mac session) ships items 1, 2
+       and 4 and says so: from then on every gate row carries `failed_detail`, which names the fault, and
+       W1-T10921's alert carries it to the operator, so the repair is a follow-up read off live rows rather than
+       a guess. Either way: do not widen the allowlist to the daemon's environment and do not drop containment
+       (W1-T9619 stays true).
     4. The real default. One test spawns the real sandbox when bwrap is present and asserts the clean fixture
        tree's typecheck step PASSES inside it; where bwrap is absent (CI runners, the Mac) it is skipped with a
        named reason that the test output prints, never counted as a pass.
