@@ -67,7 +67,7 @@ import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../
 import { type Plan } from "../../lib/plan.js";
 import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
-import { terminalPreDispatchRefusalRevisions } from "../../lib/dispatch-repair.js";
+import { runnerConfigDigest, terminalPreDispatchRefusalRevisions } from "../../lib/dispatch-repair.js";
 import { loadMounts, mountsPath } from "../../lib/mounts.js";
 import { loadPolicy, policyPath } from "../../lib/policy.js";
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
@@ -1625,7 +1625,8 @@ export async function daemonCommand(
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
           ? daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness
           : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
-        readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
+        // W1-T10919: a hold earned by the runner's scope lifts when main's runner config moves, read off the target's checkout.
+        readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state"), () => runnerConfigDigest(targetCheckoutRoot, "origin/main")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
         // paths, so the reload always reads the SAME source the boot did (origin/main, never the

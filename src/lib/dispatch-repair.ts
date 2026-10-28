@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -58,6 +59,23 @@ export interface PriorRefusal {
   /** W1-T3959: the parsed admission/linter contract that earned a terminal hold. Absent is a
    * legacy record, never evidence that the current task was already handled. */
   preDispatchContractRevision?: string;
+  /** W1-T10919: the {@link runnerConfigDigest} of the tree whose test runner loaded no file for this task's proof.
+   *  Present, the hold also requires the target's CURRENT runner config to still read this digest. */
+  runnerConfigDigest?: string;
+}
+
+/** W1-T10919: the files that decide which tests a runner loads — every Vitest config spelling and package.json. */
+export const RUNNER_CONFIG_PATHS: readonly string[] = [
+  "package.json",
+  ...["config", "workspace"].flatMap((kind) => ["ts", "mts", "cts", "js", "mjs", "cjs"].map((ext) => `vitest.${kind}.${ext}`)),
+];
+
+/** W1-T10919: sha256 of `git ls-tree <rev> -- <RUNNER_CONFIG_PATHS>` in `dir` — the runner-scope inputs as git blob
+ *  ids, so the refused tree and origin/main are measured in the same units. `undefined` when git cannot read `rev`. */
+export function runnerConfigDigest(dir: string, rev: string): string | undefined {
+  const listed = spawnSync("git", ["-C", dir, "ls-tree", rev, "--", ...RUNNER_CONFIG_PATHS], { encoding: "utf8", timeout: 15_000 });
+  if (listed.status !== 0 || typeof listed.stdout !== "string") return undefined;
+  return createHash("sha256").update(listed.stdout).digest("hex");
 }
 
 /** BACKSTOP: bounds one selection pass's state materialization, never normal admission. Entries
@@ -148,6 +166,7 @@ export function readPriorRefusal(stateRoot: string, taskId: string): PriorRefusa
         (typeof (raw as { preDispatchContractRevision?: unknown }).preDispatchContractRevision === "string" &&
           (raw as { preDispatchContractRevision: string }).preDispatchContractRevision.length > 0))
     ) {
+      const digest = (raw as { runnerConfigDigest?: unknown }).runnerConfigDigest;
       return {
         verdict: (raw as { verdict: string }).verdict,
         attempts: (raw as { attempts: number }).attempts,
@@ -155,6 +174,7 @@ export function readPriorRefusal(stateRoot: string, taskId: string): PriorRefusa
         ...(typeof (raw as { preDispatchContractRevision?: unknown }).preDispatchContractRevision === "string"
           ? { preDispatchContractRevision: (raw as { preDispatchContractRevision: string }).preDispatchContractRevision }
           : {}),
+        ...(typeof digest === "string" && digest.length > 0 ? { runnerConfigDigest: digest } : {}),
       };
     }
     return undefined; // present but not this shape: read as "never refused before".
@@ -169,7 +189,12 @@ export function readPriorRefusal(stateRoot: string, taskId: string): PriorRefusa
  * over-cap record is absent from the result, deliberately re-offering work rather than suppressing
  * it on an assumption.
  */
-export function terminalPreDispatchRefusalRevisions(stateRoot: string): ReadonlyMap<string, string> {
+export function terminalPreDispatchRefusalRevisions(
+  stateRoot: string,
+  /** W1-T10919: the target's CURRENT runner-config digest. Read lazily, at most once, and only for a record that
+   *  carries one; such a record stays held only while this reading equals it. Absent or undefined fails open. */
+  currentRunnerConfigDigest?: () => string | undefined,
+): ReadonlyMap<string, string> {
   let entries: string[];
   try {
     entries = readdirSync(join(stateRoot, "dispatch-repair"))
@@ -182,10 +207,17 @@ export function terminalPreDispatchRefusalRevisions(stateRoot: string): Readonly
     return new Map();
   }
   const out = new Map<string, string>();
+  let current: { digest: string | undefined } | undefined;
   for (const entry of entries) {
     const taskId = entry.slice(0, -".json".length);
     const prior = readPriorRefusal(stateRoot, taskId);
-    if (prior?.escalated === true && prior.preDispatchContractRevision) out.set(taskId, prior.preDispatchContractRevision);
+    if (prior?.escalated !== true || !prior.preDispatchContractRevision) continue;
+    if (prior.runnerConfigDigest !== undefined) {
+      current ??= { digest: currentRunnerConfigDigest?.() };
+      // The runner's scope moved, or could not be read: the refusal's cause may be gone, so re-offer the task.
+      if (current.digest !== prior.runnerConfigDigest) continue;
+    }
+    out.set(taskId, prior.preDispatchContractRevision);
   }
   return out;
 }
