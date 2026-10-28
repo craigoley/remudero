@@ -37,3 +37,14 @@
   note: |
     Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-28 at priority normal (2), as an observation proposal first.
     Read-only: no baseline edit, threshold change, exemption or re-measure is authorized by this task. Any repair is a separate filing.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "The filed scope declares one recon report and explicitly prohibits baseline edits, threshold changes, exemptions and re-measurement; any repair requires a separate filing."
+      - "The acceptance requires refusal-level evidence, three-SHA measurements, a positive control and a falsifier before recommending any repair, consistent with the stated observation-before-class-wide-repair doctrine."
+      - "The supplied gates identify an operator-authored filing; the declared scope requests no secrets access, deletion, irreversible action or merge, deploy, infrastructure or review policy change."
+      - "the judge said proceed, but W1-T10945: at verify: auto it fails lint (proof-dialect)"
+    judged_at: "2026-10-28T22:19:16.251Z"
+    pin: "a25316d8ee85a73d99a6d7d8f7f0561911e91416c3faed4a002a93382c81fef2"
