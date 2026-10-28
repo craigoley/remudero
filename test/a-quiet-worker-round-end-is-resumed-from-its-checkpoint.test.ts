@@ -132,7 +132,7 @@ test("W1-T10896: the daemon resumes only the exact orphaned head", (t) => {
   assert.equal(verdict.head_sha, origin.head, "the receipt names origin's exact pushed head");
   assert.equal(blocked(node.rawLines()), false, "the exact pushed head is a resumable checkpoint");
   const pending = pendingWorkerBoundaryHandoffs(node.rawLines());
-  assert.deepEqual(pending.get(ORPHAN_TASK), { branch: ORPHAN_BRANCH, headSha: origin.head });
+  assert.deepEqual(pending.get(ORPHAN_TASK), { branch: ORPHAN_BRANCH, headSha: origin.head, resumePhase: "preopen" });
   // A re-push moves the tip off the receipt, so that head blocks again.
   const moved = `${"f".repeat(40)}\trefs/heads/${ORPHAN_BRANCH}\n`;
   assert.equal(runBranchDispatchOpts(runBranchStateFrom(moved, undefined, pending), [], () => {}).hasPushedRunBranch!(ORPHAN_TASK), true);

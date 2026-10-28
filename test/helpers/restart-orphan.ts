@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
@@ -9,7 +9,7 @@ import {
 } from "#src/lib/dispatch-claim.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { makeTempDir } from "#src/lib/tmp.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY, type GitRepo } from "#test/helpers/git-repo.js";
 
 export const TASK = "W1-T10838";
 export const RUN_ID = `${TASK}-946684799000`;
@@ -21,6 +21,9 @@ export const MINT_ISO = "2000-01-01T00:00:00.000Z";
 export const DEAD_PID = 2_147_483_646;
 export const LOCAL = hostname();
 export const OTHER_HOST = "0123456789ab";
+export const ORPHAN_PLAN = `- id: ${TASK}\n  title: restart orphan fixture\n  repo: remudero\n  type: implement\n` +
+  "  verify: auto\n  risk: medium\n  origin: test\n  status: queued\n  files: [src/change.ts]\n" +
+  '  acceptance:\n    - claim: the change exists\n      proof: "grep: value = 42 in src/change.ts"\n';
 
 export function anchorMessage(pid: number, host: string, iso: string): string {
   return `rmd-dispatch claim ${pid}@${host} ${iso}`;
@@ -97,15 +100,29 @@ export function instance(t: TestContext, seed: Array<Record<string, unknown>>): 
 }
 
 /** A real bare remote holding the orphan's claim and its pushed run branch, read through the real git reserver. */
-export function gitRemote(t: TestContext): { reserver: DispatchClaimReserver; head: string; claimTip: () => string } {
+export function gitRemote(t: TestContext): { reserver: DispatchClaimReserver; head: string; claimTip: () => string; client: GitRepo; remote: GitRepo } {
   const remote = gitRepo({ bare: true, scope: t });
   const client = gitRepo({ scope: t });
+  client.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
+  client.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
   client.addRemote("origin", remote.dir);
+  mkdirSync(join(client.dir, "src"));
+  mkdirSync(join(client.dir, "plan"));
+  writeFileSync(join(client.dir, "plan/tasks.yaml"), ORPHAN_PLAN);
+  writeFileSync(join(client.dir, "src/change.ts"), "export const value = 1;\n");
+  client.git("add", "src/change.ts", "plan/tasks.yaml");
+  client.git("commit", "-q", "-m", "feat: seed fixture");
+  client.git("push", "origin", "main");
   const tree = client.git("rev-parse", "HEAD^{tree}");
   const anchor = client.git("commit-tree", tree, "-m", anchorMessage(DEAD_PID, LOCAL, MINT_ISO));
   client.git("push", "origin", `${anchor}:${dispatchClaimRef(TASK)}`);
-  const head = client.git("commit-tree", tree, "-p", "HEAD", "-m", "the orphan's finished work");
+  client.git("checkout", "-q", "-b", BRANCH);
+  writeFileSync(join(client.dir, "src/change.ts"), "export const value = 42;\n");
+  client.git("add", "src/change.ts");
+  client.git("commit", "-q", "-m", "fix: retain the orphan's finished work");
+  const head = client.git("rev-parse", "HEAD");
   client.git("push", "origin", `${head}:refs/heads/${BRANCH}`);
+  client.git("checkout", "-q", "main");
   const env = {
     ...process.env,
     GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
@@ -116,7 +133,8 @@ export function gitRemote(t: TestContext): { reserver: DispatchClaimReserver; he
     const r = spawnSync("git", args, { cwd: client.dir, env, encoding: "utf8", timeout: 10_000 });
     return { status: r.status ?? 128, stdout: r.stdout, stderr: r.stderr };
   };
-  return { reserver: gitDispatchClaimReserver({ run }), head, claimTip: () => client.git("ls-remote", "origin", dispatchClaimRef(TASK)) };
+  return { reserver: gitDispatchClaimReserver({ run }), head, client, remote,
+    claimTip: () => client.git("ls-remote", "origin", dispatchClaimRef(TASK)) };
 }
 
 export const sweepRows = (rows: Array<Record<string, unknown>>) =>
