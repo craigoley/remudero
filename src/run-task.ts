@@ -10828,7 +10828,15 @@ function* fixCensusSnapshotSteps(
         refusal = unavailable(`census suite ${reach}`, result, output);
       } else if (result.status !== 0) {
         refusal = stopped(String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000));
-        refusal.inheritedMain = yield* inheritedCensusContextSteps(root, path, runGit);
+        refusal.inheritedMain = yield* inheritedCensusContextSteps(root, path,
+          (root, args, options) => {
+            const result = run("git", ["-C", root, ...args], { encoding: "utf8", env, timeout: childTimeBoundMs, maxBuffer: options?.maxBuffer });
+            const checked = (value: CensusChildResult) => {
+              if (value.status !== 0 || value.signal || value.error) throw new Error("inherited census Git evidence unavailable");
+              return String(value.stdout);
+            };
+            return result instanceof Promise ? result.then(checked) : checked(result);
+          });
       } else {
         const verdict = judged.judge(0);
         if (!verdict.complete) refusal = stopped(verdict.line);

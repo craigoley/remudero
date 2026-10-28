@@ -2140,15 +2140,19 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
       return deps.branchClaim!.verify!();
     };
     const before = await check();
+    if (before) return held(before);
     const reach = "test/the-affected-suite-reach-ratchet.test.ts";
     const trial = await deps.reproduceFailingTestsOnMerge({ prNumber: input.prNumber, headSha: context.headSha } as OpenPrView, [reach], context.mainSha);
     if (trial.setup_error || trial.length !== 1 || trial[0]?.file !== reach || trial[0].outcome !== "passes") return held("unchanged reach check did not pass on the trial merge");
     const saved = await evidence.preserveInheritedCensusWork(input.root, input.worktreePath, input.branch, context);
     log("work-preserved", "saved work is durable; current checkout is unchanged", saved);
     const after = await check();
+    if (after) return held(after);
     // Last read plus API CAS protects a concurrent remote head even after the asynchronous trial.
     const live = await deps.readLiveHead(input.prUrl);
+    if (!live.ok || live.headSha !== context.headSha || live.headRefName !== input.branch) return held("PR head changed before update");
     const claim = deps.branchClaim.verify();
+    if (claim) return held(claim);
     deps.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber: input.prNumber, headSha: context.headSha,
       forcedBy: "fix-base-refresh", nowMs: systemClock.now() }));
     const updated = await deps.updateBranchAtHead(input.prNumber, context.headSha);
