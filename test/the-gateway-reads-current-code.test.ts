@@ -649,6 +649,19 @@ test("W1-T10898: asynchronous local reads preserve checkout decisions", async ()
   assert.equal(guarded.state.head, head);
   assert.equal(guarded.state.behindBy, "unknown");
   assert.equal(guarded.restartDue, false);
+  const changingEnv: Record<string, string | undefined> = {};
+  let guardRaised = false;
+  const becameGuarded = await assessGatewayCheckout({repoDir: gateway.tree, env: changingEnv, clock: CLOCK,
+    fetch: async () => { await Promise.resolve(); changingEnv.CI = "true"; guardRaised = true; }});
+  assert.equal(guardRaised, true, "the existing guard changes after the initial probe, across an awaited fetch");
+  assert.equal(becameGuarded.state.head, "unknown");
+  assert.equal(becameGuarded.state.dirty, "unknown");
+  assert.equal(becameGuarded.state.behindBy, "unknown");
+  assert.equal(becameGuarded.state.detail, "guarded");
+  assert.equal(becameGuarded.restartDue, false);
+  assert.equal(becameGuarded.targetSha, undefined);
+  assert.equal(becameGuarded.reloadPlanAt, undefined);
+
   const failedFetch = await assessGatewayCheckout({repoDir: gateway.tree, env: {}, supervised: true, clock: CLOCK,
     fetch: async () => { throw new Error("origin unavailable"); }});
   assert.equal(failedFetch.state.head, head);
