@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildModelFieldNoteCandidate, PINNED_SITE_CONSENT_REGISTRY, SITE_MIN_CELL, SITE_ROW_LIMIT, type FieldNoteWindows,
+import { buildModelFieldNoteCandidate, PINNED_SITE_CONSENT_REGISTRY, SITE_MIN_CELL, SITE_ROW_LIMIT, SITE_SAFE_ID_RE, type FieldNoteWindows,
   type ModelFieldNoteCandidate, type SiteConsentRegistry } from "#src/lib/field-trials-field-note.js";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand, projectFlowRow, SMALL_CELL_MIN, type FieldTrialsConsent,
   type FieldTrialsFlowSnapshot } from "#src/lib/field-trials-flow.js";
@@ -159,6 +159,9 @@ test("W1-T10831: small cells and complements are withheld from the field note", 
   assert.deepEqual(result.candidate.withheld.reasons, { "assigned-below-twice-min-cell": 2, "served-observed-or-complement-small": 1,
     "call-outcome-or-complement-small": 1, "model-id-not-site-safe": 1 }, "each failing cell is withheld and counted by reason");
   assert.equal(result.candidate.withheld.cells, 5);
+  assert.equal(SITE_SAFE_ID_RE.test("model:colon"), false, "core's model pattern admits a colon; the site's does not");
+  assert.equal(SITE_SAFE_ID_RE.test("gpt-6.1-sol"), true);
+  assert.equal(SITE_SAFE_ID_RE.source, siteSafeId.source, "core's copy of the site's safeId is the pinned one");
 
   const many = Array.from({ length: SITE_ROW_LIMIT + 2 }, (_, i) => ({ model: `model-${String(i).padStart(2, "0")}`, day: 1,
     n: 20 + (i % 3) * 10, call: "served" as const }));
@@ -294,6 +297,14 @@ test("W1-T10831: consecutive field-note windows never overlap", async () => {
     rmSync(join(outDir, "field-trials-flow-v1.json"));
     assert.equal(await run(DAY(8, 7)), 1);
     assert.equal(lines.at(-1), "field-trials: field note refused (no-snapshot)");
+
+    const empty = snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: [] }]);
+    assert.deepEqual(candidateOf(empty), { state: "withheld", reason: "no-observed-assignment-day" }, "no day observed is no window");
+    assert.deepEqual(candidateOf({ ...empty, state: "unavailable" }), { state: "refused", reason: "snapshot-unavailable" });
+    const legacy = snapshotOf(DAY(4, 6), [{ label: "core", repo: "craigoley/remudero", specs: firstDays }]);
+    for (const partition of Object.values(legacy.families.adoption)) delete (partition.cells as { bySelected?: unknown }).bySelected;
+    assert.deepEqual(candidateOf(legacy), { state: "refused", reason: "snapshot-predates-selected-model-cross-tab" },
+      "a snapshot written before the cross-tab cannot be read as zero served-known assignments");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

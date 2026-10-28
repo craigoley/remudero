@@ -22,9 +22,9 @@ import type { AdoptionSelectedCell, FieldTrialsConsent, FieldTrialsFlowSnapshot 
 export const MODEL_FIELD_NOTE_SCHEMA = "model-field-note-v1" as const;
 export const FIELD_NOTE_CANDIDATE_VERSION = "model-field-note-candidate-v1" as const;
 export const FIELD_NOTE_WINDOWS_VERSION = "field-note-windows-v1" as const;
-/** PINNED CONTRACT: the site validator's `minCell` (lib/model-field-note.ts). */
+/** PRIMARY CONTROL (a pinned contract): the site validator's `minCell` (lib/model-field-note.ts). */
 export const SITE_MIN_CELL = 10;
-/** PINNED CONTRACT: the site validator's row ceiling. */
+/** PRIMARY CONTROL (a pinned contract): the site validator's row ceiling; rows past it are withheld and counted. */
 export const SITE_ROW_LIMIT = 24;
 /** PINNED CONTRACT: the site validator's `safeId`, which every modelId, taskClass, repo and releaseId must match. */
 export const SITE_SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
