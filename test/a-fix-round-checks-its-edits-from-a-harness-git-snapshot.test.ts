@@ -26,6 +26,8 @@ const SKILL_CENSUS = "test/rules/every-applies-to-skill-is-selectable-and-bounde
 /** The snapshot precheck runs the reach ratchet from the round's own tree, so a tree that must be refused for a new
  *  importer carries a stand-in suite that fails exactly when `test/new.test.ts` exists (the base tree lacks it). */
 const REACH_STAND_IN = [
+  // The real tree records this suite as a run-task importer, so the stand-in keeps counting as one.
+  IMPORT_CLI.trimEnd(),
   'import assert from "node:assert/strict";',
   'import { existsSync } from "node:fs";',
   'import { test } from "node:test";',
@@ -34,20 +36,21 @@ const REACH_STAND_IN = [
   "});", "",
 ].join("\n");
 
-function fixture(root = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-")), linkModules = false, reachText = "export {};\n") {
+function fixture(root = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-")), linkModules = false, reachText = IMPORT_ALIAS) {
   const baseline = JSON.parse(readFileSync(join(ROOT, "scripts/affected-reach-baseline.json"), "utf8"));
   const texts: Record<string, string> = {
     "src/run-task.ts": "export {};\n",
     "src/lib/affected-suites.ts": "export {};\n",
     // A module no suite reaches keeps the fixture's median reach under the real tree's recorded one.
     "src/lib/unreached.ts": "export {};\n",
-    [REACH]: reachText,
     [SKILL_CENSUS]: 'import { test } from "node:test";\ntest("skill census stand-in", () => undefined);\n',
     "scripts/affected-reach-baseline.json": JSON.stringify(baseline),
     "package.json": JSON.stringify({ imports: JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).imports }),
   };
   if (linkModules) symlinkSync(join(ROOT, "node_modules"), join(root, "node_modules"), "dir");
   for (const path of baseline.importers) texts[path] = IMPORT_ALIAS;
+  // After the loop: the baseline lists this suite as an importer, and the loop would overwrite the stand-in.
+  texts[REACH] = reachText;
   for (const [path, text] of Object.entries(texts)) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), text);
