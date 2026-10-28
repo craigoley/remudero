@@ -1233,7 +1233,6 @@ export async function serveGhReadBroker(opts: {
   };
   let stopped!: () => void;
   const closed = new Promise<void>((resolve) => (stopped = resolve));
-  const timer = setInterval(beat, intervalS * 1000);
   const connections = new Set<Socket>();
   const server: Server = createServer((conn: Socket) => {
     connections.add(conn);
@@ -1277,6 +1276,8 @@ export async function serveGhReadBroker(opts: {
     server.once("error", reject);
     server.listen(socketPath, () => resolve());
   });
+  // A refused bind must not leave a heartbeat timer keeping the failed server process alive.
+  const timer = setInterval(beat, intervalS * 1000);
   chmodSync(socketPath, 0o600);
   beat();
   let closing: Promise<void> | undefined;

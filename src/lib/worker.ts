@@ -352,6 +352,8 @@ export interface WorkerResult {
   budgetSettledUsd?: number;
   budgetRefused?: boolean;
   cashAllowanceResetAt?: string;
+  /** W1-T10384: which limit refused when `budgetRefused`: the shared fleet cap or the Foundry Claude sub-cap. */
+  cashAllowanceLimit?: "fleet" | "foundry-claude";
   /** W1-T4079: set when a cash attempt found its deployment absent (HTTP 404), so the ladder walks. */
   openWeightDeploymentAbsent?: string;
   /** Opaque join key for the immutable, pre-execution routing assignment. A terminal worker row
@@ -2402,9 +2404,14 @@ export async function runOpenWeightWalkingLadder(
   throw lastRefusal;
 }
 
-/** True when a Foundry Sonnet attempt failed at zero cost, so the Luna ladder may still carry it. */
+/** True when a Foundry Sonnet attempt failed at zero cost, or was stopped by the Foundry Claude sub-cap,
+ *  so the Luna ladder may still carry it. */
 function sonnetRefusedBeforeTransport(result: WorkerResult): boolean {
   if (!result.isError) return false;
+  // W1-T10384: the Foundry Claude sub-cap binds below the fleet cap, so Luna still has room even
+  // after earlier requests billed (already settled, never charged again). A fleet refusal has none.
+  if (result.budgetRefused === true && result.cashAllowanceLimit === "foundry-claude") return true;
+  if (result.budgetRefused === true && result.cashAllowanceLimit === "fleet") return false;
   if ((result.budgetSettledUsd ?? 0) > 0) return false;
   return result.budgetRefused === true || result.openWeightDeploymentAbsent !== undefined ||
     (result.budgetReservedUsd ?? 0) === 0;
