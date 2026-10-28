@@ -485,7 +485,7 @@ export class ProductBuildService {
   }
 
   /**
-   * Builds this product started that are still holding the envelope: queued with no daemon row yet, running, or unreadable.
+   * Builds this product started that are still holding the envelope: queued with no daemon row yet, dispatched before its run starts, running, or unreadable.
    * `dispatched` is the daemon's own admission already consuming the kick before its run row exists, and `ended`, `silent` and
    * `refused` are over. A record that never named its task (written before it did) cannot be read, so it counts: an unreadable
    * build is never "finished".
@@ -496,7 +496,7 @@ export class ProductBuildService {
       if (taskId === undefined) return true;
       const seen = readTargetExecution(join(daemonRoot, "state"), { taskId, origin: productBuildKickOrigin(product.id, item.id), repo: subject.name,
         requestedAt: item.observedAt, nowMs: this.clock.now() });
-      return ["none", "unknown", "running"].includes(seen.state);
+      return ["none", "unknown", "dispatched", "running"].includes(seen.state);
     }).length;
   }
 
