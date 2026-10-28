@@ -5,20 +5,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { threadId } from "node:worker_threads";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
 import {
   computeFeedbackProjectionSync,
   indexedDischargeGithub,
   serveConsoleProjections,
   startConsoleProjectionWorker,
   type FeedbackProjectionOutcome,
-} from "../src/lib/console-projection-worker.js";
-import { CONSOLE_SNAPSHOT_VIEWER_IDLE_MS, consoleProjectionWorker, createConsoleSnapshotCache } from "../src/lib/console-snapshot-cache.js";
-import { captureFeedback } from "../src/lib/feedback.js";
-import { buildFeedbackInboxRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import type { Route } from "../src/lib/service.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
-import { feedbackDischargeState, feedbackOriginTag } from "../src/lib/trace.js";
+} from "#src/lib/console-projection-worker.js";
+import { CONSOLE_SNAPSHOT_VIEWER_IDLE_MS, consoleProjectionWorker, createConsoleSnapshotCache } from "#src/lib/console-snapshot-cache.js";
+import { captureFeedback } from "#src/lib/feedback.js";
+import { buildFeedbackInboxRoute, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import type { Route } from "#src/lib/service.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
+import { feedbackDischargeState, feedbackOriginTag } from "#src/lib/trace.js";
 
 function fixture(): { root: string; planPath: string } {
   const root = mkdtempSync(join(tmpdir(), "rmd-projection-worker-"));

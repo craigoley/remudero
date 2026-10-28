@@ -3,17 +3,17 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { ciFrictionRecordVerdict } from "../src/lib/ci-friction-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { ciFrictionRecordVerdict } from "#src/lib/ci-friction-gardener.js";
 import {
   defectEventsOf, FIXLANE_REPORT_FILE, FIXLANE_REPORT_STEP, fixLaneGardenSpec, interventionsFromPullRequest, OPERATOR_INTERVENTION_HOURS,
   readOperatorInterventions, type FixLaneSources, type InterventionRead, type OperatorIntervention,
-} from "../src/lib/fix-lane-gardener.js";
-import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
-import { gardenSchedule, REGISTERED_GARDEN_NAMES } from "../src/lib/garden-registry.js";
-import type { GardenerDeps } from "../src/lib/gardener.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/fix-lane-gardener.js";
+import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
+import { gardenSchedule, REGISTERED_GARDEN_NAMES } from "#src/lib/garden-registry.js";
+import type { GardenerDeps } from "#src/lib/gardener.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const HOUR = 3_600_000;
 const NOW = Date.UTC(2026, 9, 10, 12);

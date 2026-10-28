@@ -17,12 +17,12 @@ import {
   deriveAnalyticsSnapshotFromStream,
   writeAnalyticsCheckpoint,
   type AnalyticsSnapshot,
-} from "../src/lib/analytics-route.js";
-import { fiveLedgerBackedHistoricalSeries, generateFiveLedgerBackedHistoricalSeries } from "../src/lib/analytics-timeseries.js";
-import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
-import { clockFromIsoFn, fixedClock } from "../src/lib/clock.js";
-import { terminalVerdictFields } from "../src/run-task.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/analytics-route.js";
+import { fiveLedgerBackedHistoricalSeries, generateFiveLedgerBackedHistoricalSeries } from "#src/lib/analytics-timeseries.js";
+import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
+import { clockFromIsoFn, fixedClock } from "#src/lib/clock.js";
+import { terminalVerdictFields } from "#src/run-task.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 function tmpStateDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

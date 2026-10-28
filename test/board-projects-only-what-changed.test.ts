@@ -12,10 +12,10 @@ import {
   sameTaskProjectionStamp,
   taskProjectionStamp,
   type BoardDeps,
-} from "../src/lib/board.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { PrRef } from "../src/lib/status.js";
-import { fakeGitHub, type FakeGitHub } from "./helpers/fake-github.js";
+} from "#src/lib/board.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { PrRef } from "#src/lib/status.js";
+import { fakeGitHub, type FakeGitHub } from "#test/helpers/fake-github.js";
 
 // ── The board pass re-derives what MOVED, not the corpus ─────────────────────────────────────
 //

@@ -11,14 +11,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, rmSync } from "node:fs";
-import { fixedClock, systemClock } from "../src/lib/clock.js";
+import { fixedClock, systemClock } from "#src/lib/clock.js";
 import {
   LEDGER_FUTURE_STAMP_STEP,
   LEDGER_FUTURE_STAMP_TOLERANCE_MS,
   appendLedger,
-} from "../src/lib/ledger.js";
-import { captureConsoleError } from "./helpers/captured-console.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#src/lib/ledger.js";
+import { captureConsoleError } from "#test/helpers/captured-console.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const THIRTEEN_MONTHS_MS = 13 * 30 * 24 * 60 * 60_000;
 

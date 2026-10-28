@@ -5,9 +5,9 @@ import {
   createBoardSnapshotCache,
   type BoardDeps,
   type PrQueueRow,
-} from "../src/lib/board.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
+} from "#src/lib/board.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
 
 function task(id: string): Task {
   return {

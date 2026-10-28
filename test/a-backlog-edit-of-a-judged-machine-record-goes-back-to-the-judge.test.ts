@@ -11,12 +11,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { applyBacklogActions, backlogGardenSpec, backlogLandingGuard, type BacklogAction, type BacklogEvidence } from "../src/lib/backlog-gardener.js";
-import { machineShardFilingRefusal } from "../src/lib/machine-filing.js";
-import { needsMachineJudgement } from "../src/lib/machine-filing-judge.js";
-import { parseTasksFromYaml } from "../src/lib/plan.js";
-import { lintTask, machineAuthorVerifyViolation } from "../src/lib/task-linter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { applyBacklogActions, backlogGardenSpec, backlogLandingGuard, type BacklogAction, type BacklogEvidence } from "#src/lib/backlog-gardener.js";
+import { machineShardFilingRefusal } from "#src/lib/machine-filing.js";
+import { needsMachineJudgement } from "#src/lib/machine-filing-judge.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
+import { lintTask, machineAuthorVerifyViolation } from "#src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const REL = "plan/tasks.d/w1-t5161-selector-shadow-miss.yaml";
 /** W1-T5161 as main carried it on 2026-10-10: judged `proceed`, banded 4 by this gardener. */

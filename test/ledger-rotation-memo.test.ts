@@ -5,9 +5,9 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { createLedgerRotationMemo, LEDGER_ROTATION_LOAD_LINES_PER_TURN } from "../src/lib/ledger-union.js";
-import { readLedgerUnionBounded, readLedgerUnionMemoized } from "../src/lib/status.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { createLedgerRotationMemo, LEDGER_ROTATION_LOAD_LINES_PER_TURN } from "#src/lib/ledger-union.js";
+import { readLedgerUnionBounded, readLedgerUnionMemoized } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const identity = (rows: Array<Record<string, unknown>>) => rows;
 

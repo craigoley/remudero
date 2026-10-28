@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
-import { COMMANDS, HANDLERS, derivePrOwnerVerdict, prOwnerCommand } from "../src/run-task.js";
+import { COMMANDS, HANDLERS, derivePrOwnerVerdict, prOwnerCommand } from "#src/run-task.js";
 
 function tmpStateDir(): string {
   return mkdtempSync(join(tmpdir(), "rmd-pr-owner-"));

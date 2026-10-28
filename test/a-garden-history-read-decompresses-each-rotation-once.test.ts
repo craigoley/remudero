@@ -6,13 +6,13 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   CI_FRICTION_LEDGER_STEPS, ciFrictionRotationDigests, readCiFrictionLedgerRecords,
-} from "../src/lib/ci-friction-gardener.js";
-import { FLAKE_INCIDENT_GARDEN_NAME, runFlakeIncidentGardener } from "../src/lib/flake-incident-gardener.js";
-import { ledgerRotationDigests, readLedgerUnionRecordsSync, realLedgerFs, type LedgerGrepFsDeps } from "../src/lib/ledger-union.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#src/lib/ci-friction-gardener.js";
+import { FLAKE_INCIDENT_GARDEN_NAME, runFlakeIncidentGardener } from "#src/lib/flake-incident-gardener.js";
+import { ledgerRotationDigests, readLedgerUnionRecordsSync, realLedgerFs, type LedgerGrepFsDeps } from "#src/lib/ledger-union.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 function countingFs() {
   const counts = { gunzips: 0, archiveReads: 0 };

@@ -30,11 +30,11 @@ import { test } from "node:test";
 
 const require = createRequire(import.meta.url);
 
-import { buildSweepEffects, dispatchFixCatchOutcome, fixDispatchSignalDeath } from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView } from "./helpers/sweep-test.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { buildSweepEffects, dispatchFixCatchOutcome, fixDispatchSignalDeath } from "#src/run-task.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 
 const GIT_ENV = {
   ...process.env,

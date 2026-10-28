@@ -20,8 +20,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
-import { buildBatchedGithub, deriveStatus, ghGateway, type BatchedPr } from "../src/lib/status.js";
+import type { Task } from "#src/lib/plan.js";
+import { buildBatchedGithub, deriveStatus, ghGateway, type BatchedPr } from "#src/lib/status.js";
 
 function task(id: string): Task {
   return {

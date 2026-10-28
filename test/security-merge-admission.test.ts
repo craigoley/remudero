@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {securityMergeHead,securityMergeHeadAsync,SecurityMergeRefused} from '../src/lib/security-merge-admission.js';
-import {exitCodeFor,isRmdError} from '../src/lib/errors.js';
+import {securityMergeHead,securityMergeHeadAsync,SecurityMergeRefused} from '#src/lib/security-merge-admission.js';
+import {exitCodeFor,isRmdError} from '#src/lib/errors.js';
 const head='a'.repeat(40),base='b'.repeat(40),url='https://github.com/craigoley/remudero/pull/11468';
 const pr={state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:{full_name:'craigoley/remudero'}},changed_files:1};
 const clean={id:1,name:'CodeQL',head_sha:head,status:'completed',conclusion:'success',

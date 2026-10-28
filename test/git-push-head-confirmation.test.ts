@@ -7,14 +7,14 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { gitPushRunBranch, LanePushForeignHeadError, type PushExec, type GitCapture } from "../src/lib/git-push.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { pushFixRound, runFixRung } from "./helpers/run-task-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { gitPushRunBranch, LanePushForeignHeadError, type PushExec, type GitCapture } from "#src/lib/git-push.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { pushFixRound, runFixRung } from "#test/helpers/run-task-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 /**
  * W1-T2610 — `gitPushRunBranch` CANNOT TELL "I PUSHED MY COMMIT" FROM "I HAD NOTHING TO PUSH".

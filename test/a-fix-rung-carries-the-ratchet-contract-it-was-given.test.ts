@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ratchetContractLines } from "../src/lib/compaction.js";
-import { renderFixPrompt, type FixEvidence } from "../src/run-task.js";
+import { ratchetContractLines } from "#src/lib/compaction.js";
+import { renderFixPrompt, type FixEvidence } from "#src/run-task.js";
 
 const TASK = { id: "W1-T3064", title: "Fix-rung ratchet contract fixture" };
 

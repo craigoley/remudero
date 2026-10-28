@@ -9,9 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { GitHub } from "../src/lib/status.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
-import { creditProjectionWithReadState, defaultCreditedMergedIds, planReconcileCommand } from "../src/run-task.js";
+import type { GitHub } from "#src/lib/status.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
+import { creditProjectionWithReadState, defaultCreditedMergedIds, planReconcileCommand } from "#src/run-task.js";
 
 const SHARD = "- id: W1-T1234\n  title: t\n  status: queued\n  attempts: 0\n";
 

@@ -15,14 +15,14 @@ import {
   githubGenerationOf,
   type BoardDirtRules,
   type BoardProjection,
-} from "../src/lib/board-projection.js";
-import type { Clock } from "../src/lib/clock.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+} from "#src/lib/board-projection.js";
+import type { Clock } from "#src/lib/clock.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "#src/lib/ledger-projector.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, flushReadModelTransactions, type ReadModelDb, type ReadModelLease } from "#src/lib/read-model-db.js";
-import { DEFAULT_LIVENESS_BOUND_MS, ENVIRONMENTAL_BLOCK_COOLDOWN_MS, projectPlan, WORKER_ACTIVITY_STAND_IN_STEP, type GitHub, type PrRef } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { DEFAULT_LIVENESS_BOUND_MS, ENVIRONMENTAL_BLOCK_COOLDOWN_MS, projectPlan, WORKER_ACTIVITY_STAND_IN_STEP, type GitHub, type PrRef } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void | Promise<void>) => void };

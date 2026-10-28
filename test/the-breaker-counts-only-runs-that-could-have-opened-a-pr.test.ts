@@ -8,7 +8,7 @@ import {
   dispatchesWithoutNewOwnedPr,
   evaluateDispatchBreakerDetailed,
   isDispatchBreakerTripped,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 
 const TASK = "W1-T4660";
 

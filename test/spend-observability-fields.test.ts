@@ -49,20 +49,20 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { realRiskJudge, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeInput } from "../src/lib/risk-judge.js";
-import { laneRunStartFields, runFixRung, runTask } from "./helpers/run-task-test.js";
-import { buildDigest } from "../src/lib/digest.js";
-import { groupSpendByAccount } from "../src/lib/ledger.js";
-import { liveRunSpend } from "../src/lib/status-stream-publisher.js";
-import { collectWorkerResult, workerLedgerFields } from "../src/lib/worker.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
+import { realRiskJudge, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeInput } from "#src/lib/risk-judge.js";
+import { laneRunStartFields, runFixRung, runTask } from "#test/helpers/run-task-test.js";
+import { buildDigest } from "#src/lib/digest.js";
+import { groupSpendByAccount } from "#src/lib/ledger.js";
+import { liveRunSpend } from "#src/lib/status-stream-publisher.js";
+import { collectWorkerResult, workerLedgerFields } from "#src/lib/worker.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
 
 // W1-T4226: the fix rung reads the live PR body after CI goes green; every runFixRung below
 // injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.
@@ -564,7 +564,7 @@ async function reconReuseDispatchOnce(
   process.env.PATH = `${fakeBinDir}:${savedPath}`;
   const dateNowSpy = t.mock.method(Date, "now", () => ts);
 
-  const { withLiveWritesAllowed } = await import("../src/lib/live-write-guard.js");
+  const { withLiveWritesAllowed } = await import("#src/lib/live-write-guard.js");
   try {
     const res = await withLiveWritesAllowed(() =>
       runTask(RECON_REUSE_TASK_ID, {

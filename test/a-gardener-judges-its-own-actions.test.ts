@@ -23,8 +23,8 @@ import {
   type GardenState,
   type GardenEffect,
   type Outcome,
-} from "../src/lib/gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 type C = "a" | "b";
 interface Inv {

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   FLOW_FILINGS_PER_DAY_MAX,
   FLOW_REGRESSION_FACTOR,
@@ -18,12 +18,12 @@ import {
   runFlowGardener,
   type FlowGardenSources,
   type FlowStageStat,
-} from "../src/lib/flow-gardener.js";
-import { flowGardenPass, gardenSchedule, REGISTERED_GARDEN_NAMES } from "../src/lib/garden-registry.js";
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { lintTask } from "../src/lib/task-linter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/flow-gardener.js";
+import { flowGardenPass, gardenSchedule, REGISTERED_GARDEN_NAMES } from "#src/lib/garden-registry.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { lintTask } from "#src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const NOW = Date.parse("2026-10-06T12:00:00.000Z");
 const MIN = 60_000;

@@ -9,9 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { flakeIncidentOrigin, runFlakeIncidentGardener } from "../src/lib/flake-incident-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { flakeIncidentOrigin, runFlakeIncidentGardener } from "#src/lib/flake-incident-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const FILE = "test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts";
 const ORIGIN = flakeIncidentOrigin(FILE, "");

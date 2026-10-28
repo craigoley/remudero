@@ -3,17 +3,17 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { Config } from "../src/lib/config.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { Config } from "#src/lib/config.js";
 // @ts-expect-error — the trusted security metadata adapter is plain ESM.
-import * as securityMergeAdapter from "../src/lib/code-scanning-merge-adapter.mjs";
+import * as securityMergeAdapter from "#src/lib/code-scanning-merge-adapter.mjs";
 const { publishSecurityMergeDecision, readSecurityMergeDecision, readSecurityMergeDecisionSync } = securityMergeAdapter;
 import {
   buildSweepEffects, classifyMergeRefusal, runSweep, type ArmedStalledPr, type OpenPrView, type RollupCheckEntry, type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#test/helpers/sweep-test.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const HEAD = "8620862086208620862086208620862086208620";
 const TASK = "W1-T8620";

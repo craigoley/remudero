@@ -3,9 +3,9 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { armAutoMerge, armIfVerdictPermits, armOutcomeReason, type ArmDeps, type ArmOutcome } from "../src/run-task.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { armAutoMerge, armIfVerdictPermits, armOutcomeReason, type ArmDeps, type ArmOutcome } from "#src/run-task.js";
 
 // ── THE DEFECT ───────────────────────────────────────────────────────────────────────
 // `armIfVerdictPermits` ran 35 lines ABOVE the `log("review.posted", …)` call in the same

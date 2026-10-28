@@ -15,8 +15,8 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { StateBackupError, snapshotState } from "../src/lib/ledger.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { StateBackupError, snapshotState } from "#src/lib/ledger.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const WHOLE = '{"step":"run.start","task":"W1-T5545"}\n{"step":"run.end","task":"W1-T5545"}\n';
 const TORN = '{"step":"run.st';

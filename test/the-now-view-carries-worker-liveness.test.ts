@@ -4,9 +4,9 @@
 // processes" while /now (which reads `phase`) showed live workers.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { BoardRow, BoardSnapshot } from "../src/lib/board.js";
-import { assembleNowView, type NowHealth } from "../src/lib/now-view.js";
-import type { Plan } from "../src/lib/plan.js";
+import type { BoardRow, BoardSnapshot } from "#src/lib/board.js";
+import { assembleNowView, type NowHealth } from "#src/lib/now-view.js";
+import type { Plan } from "#src/lib/plan.js";
 
 const NOW_MS = Date.parse("2026-10-05T15:05:00.000Z");
 

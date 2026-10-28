@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { mock, test } from "node:test";
 
-import { buildWorkerEnv } from "../src/lib/env.js";
+import { buildWorkerEnv } from "#src/lib/env.js";
 import {
   EXCHANGE_TIMEOUT_MS,
   GH_APP_ID_ENV,
@@ -26,7 +26,7 @@ import {
   refreshInstallationToken,
   signAppJwt,
   startInstallationTokenRefresh,
-} from "../src/lib/github-app.js";
+} from "#src/lib/github-app.js";
 
 function keyPair() {
   return generateKeyPairSync("rsa", {

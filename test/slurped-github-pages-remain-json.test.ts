@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { test } from "node:test";
-import { ghJson, splitGhHeaderBlock, type GhRateLimitReading } from "../src/lib/github-transport.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { ghJson, splitGhHeaderBlock, type GhRateLimitReading } from "#src/lib/github-transport.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const args = ["api", "repos/acme/app/pulls?state=open&per_page=100", "--paginate", "--slurp"];
 function header(remaining: number, newline = "\n") {

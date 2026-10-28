@@ -14,9 +14,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import * as analytics from "../src/lib/analytics-route.js";
-import * as ledger from "../src/lib/ledger.js";
-import { fixedClock } from "../src/lib/clock.js";
+import * as analytics from "#src/lib/analytics-route.js";
+import * as ledger from "#src/lib/ledger.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 const clock = fixedClock(Date.parse("2026-10-06T21:00:00.000Z"));
 

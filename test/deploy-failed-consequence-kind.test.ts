@@ -27,7 +27,7 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildStatusBoard, type StatusBoardDeps } from "../src/lib/status-board.js";
+import { buildStatusBoard, type StatusBoardDeps } from "#src/lib/status-board.js";
 
 const NOW_MS = Date.parse("2026-08-12T18:04:00.000Z");
 const FAILED_HEAD = "db6acf9096caf2f850ec57efb5561046e6a24eee";

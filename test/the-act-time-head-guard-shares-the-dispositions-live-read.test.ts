@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readLedgerLines } from "../src/lib/status.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY, liveHeadShaFrom, runSweep,
   type LiveStateResult, type OpenPrView, type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#test/helpers/sweep-test.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const NOW = Date.UTC(2026, 9, 9, 7, 30);
 const HEAD = "snapshot-head";

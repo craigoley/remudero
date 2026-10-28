@@ -9,13 +9,13 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { attemptArm, attemptArmAsync, logArmAttribution, realArmDeps, realArmDepsAsync, type ArmDeps } from "../src/lib/arm-auto-merge.js";
-import { runStepsAsync as runAsync, runStepsSync as runSync } from "../src/lib/git-push.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { attemptArm, attemptArmAsync, logArmAttribution, realArmDeps, realArmDepsAsync, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import { runStepsAsync as runAsync, runStepsSync as runSync } from "#src/lib/git-push.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 // Read off a dynamic import so this file still LOADS on a tree without the module, and fails per test.
-const safety = (await import("../src/lib/plan-pr-merge-safety.js").catch(() => ({}))) as Record<string, any>;
+const safety = (await import("#src/lib/plan-pr-merge-safety.js").catch(() => ({}))) as Record<string, any>;
 const runStepsSync = (steps: unknown): any => runSync(steps as never);
 const runStepsAsync = (steps: unknown): Promise<any> => runAsync(steps as never);
 

@@ -228,6 +228,14 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "as test/env-var-registry.test.ts below",
   ),
   refusedForPredicate(
+    "test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts",
+    "c",
+    "W1-T10820's alias-resolution suite. Its real-tree assertion runs `git ls-files` over src/, scripts/, bin/ and test/ " +
+      "to build the selector's import graph, then asserts every tracked suite importing #src/run-task.js is an importer " +
+      "of src/run-task.ts. It keeps no grandfather baseline or exemption table, so a single new miss anywhere reddens it " +
+      "rather than only a NEW one; it stays mandatory in the normal full CI run",
+  ),
+  refusedForPredicate(
     "test/dependency-declarations-match-use.test.ts",
     "a",
     "enumerates package.json's dependency/override maps and .dependency-cruiser.cjs, two fixed config files, " +

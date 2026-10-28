@@ -8,17 +8,17 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { INBOX_STALE_AFTER_MS } from "../src/lib/nav-badge-view.js";
-import { fleetLaneStorePath, persistedInboxPath, readPersistedInbox } from "../src/lib/fleet-lane.js";
-import { inboxThreadId } from "../src/lib/inbox-thread.js";
-import { inboxLegacyView, refreshInboxClassification, type InboxRefreshMemo } from "../src/lib/inbox-view.js";
-import { buildInboxAttentionCensusRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadRoute, buildInboxThreadsRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { createViewShadow, legacyViewSampler, type ShadowPairedRead, type ShadowRequest } from "../src/lib/view-shadow.js";
-import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
-import { createService, type Route } from "../src/lib/service.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { INBOX_STALE_AFTER_MS } from "#src/lib/nav-badge-view.js";
+import { fleetLaneStorePath, persistedInboxPath, readPersistedInbox } from "#src/lib/fleet-lane.js";
+import { inboxThreadId } from "#src/lib/inbox-thread.js";
+import { inboxLegacyView, refreshInboxClassification, type InboxRefreshMemo } from "#src/lib/inbox-view.js";
+import { buildInboxAttentionCensusRoute, buildInboxRoute, buildInboxThreadReplyRoute, buildInboxThreadRoute, buildInboxThreadsRoute, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createViewShadow, legacyViewSampler, type ShadowPairedRead, type ShadowRequest } from "#src/lib/view-shadow.js";
+import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
+import { createService, type Route } from "#src/lib/service.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 type TestCtx = { after: (fn: () => void | Promise<void>) => void };
 

@@ -4,7 +4,7 @@
 // unavailable profile or source never reads as a quiet success.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
+import type { Clock } from "#src/lib/clock.js";
 import {
   AUTOMATION_TRIGGER_ACTIVATION_STATES,
   AUTOMATION_TRIGGER_MAX_RUNS_PER_TRIGGER,
@@ -25,7 +25,7 @@ import {
   webhookTriggerRequest,
   type AutomationTriggerProfileResolution,
   type AutomationTriggerRegistry,
-} from "../src/lib/automation-trigger.js";
+} from "#src/lib/automation-trigger.js";
 
 const START = "2026-10-14T09:00:00.000Z";
 

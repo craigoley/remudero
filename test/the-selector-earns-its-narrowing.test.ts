@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   SELECTOR_SHADOW_MIN_FAILURES,
   SELECTOR_SHADOW_MIN_RUNS,
@@ -25,11 +25,11 @@ import {
   startSelectorShadowGardener,
   type SelectorShadowRecord,
   type SelectorShadowRun,
-} from "../src/lib/selector-shadow-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import { daemonCommand } from "../src/run-task.js";
+} from "#src/lib/selector-shadow-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import { daemonCommand } from "#src/run-task.js";
 
 function run(id: number, record: SelectorShadowRecord, overrides: Partial<SelectorShadowRun> = {}): SelectorShadowRun {
   const log = Array.from({ length: SELECTOR_SHADOW_SHARDS }, (_, shard) =>

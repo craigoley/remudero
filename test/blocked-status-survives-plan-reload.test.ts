@@ -3,11 +3,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runDaemon } from "../src/lib/daemon.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { deriveStatus, type GitHub } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { RunResult } from "../src/lib/run-result.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { deriveStatus, type GitHub } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { RunResult } from "#src/lib/run-result.js";
 
 const OFFLINE_GITHUB: GitHub = {
   prByRef: () => null,

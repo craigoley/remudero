@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import type { Clock } from "../src/lib/clock.js";
+import type { Clock } from "#src/lib/clock.js";
 import {
   READ_MODEL_IDLE_STRETCH_MAX,
   READ_MODEL_READ_HOT_MS,
@@ -23,9 +23,9 @@ import {
   type ReadModelInstanceState,
   type ReadModelViewFactory,
   type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import { stampReadWith } from "../src/lib/serve.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/read-model-worker.js";
+import { stampReadWith } from "#src/lib/serve.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-10-09T08:00:00.000Z");
 const LIVE = "ledger.ndjson";

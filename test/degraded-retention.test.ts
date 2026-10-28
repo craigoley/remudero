@@ -8,7 +8,7 @@ import {
   DECISION_RELEVANT_LEDGER_STEPS,
   RENDER_RELEVANT_LEDGER_STEPS,
   RENDER_STEP_RETENTION_WINDOW_MS,
-} from "../src/lib/ledger.js";
+} from "#src/lib/ledger.js";
 
 // ── `isRenderRelevantStep` is an exact `Set.has`, so a dotted CHILD does not inherit its parent's
 // protection. `daemon.headroom` was retained; `daemon.headroom.degraded`/`.unavailable` were not —

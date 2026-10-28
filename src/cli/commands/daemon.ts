@@ -170,6 +170,7 @@ export interface DaemonCommandHost {
   readonly dispatchValueContextForSelection: HostFn;
   readonly escalationSpoolDrainWiring: HostFn;
   readonly fixCommand: HostFn;
+  readonly fleetLaneSamenessJudge: HostFn;
   readonly fleetRatifyGateway: HostFn;
   readonly ghLiveStateByNumber: HostFn;
   readonly headroomPolicyFromCurve: HostFn;
@@ -404,6 +405,7 @@ export async function daemonCommand(
     dispatchValueContextForSelection,
     escalationSpoolDrainWiring,
     fixCommand,
+    fleetLaneSamenessJudge,
     fleetRatifyGateway,
     ghLiveStateByNumber,
     headroomPolicyFromCurve,
@@ -1741,6 +1743,7 @@ export async function daemonCommand(
           approve: (proposalId) => void fleetRatify.approve(proposalId),
           escalateReplayStranded: (stranded) => escalateReplayStranded(stranded, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
           handoffInFlight: (proposalId) => fleetRatify.inFlight(proposalId),
+          sameFinding: fleetLaneSamenessJudge(config, log),
           originMainSha: async () => (await hostWorktreeGitAsync(repoRoot, ["rev-parse", "origin/main"])).trim(),
         },
         inboxResponder: createDaemonInboxResponder({ root: config.root, ledgerPath, scope: { repository: `${target.owner}/${target.repo}` },

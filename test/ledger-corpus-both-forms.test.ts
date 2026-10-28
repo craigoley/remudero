@@ -20,8 +20,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ledgerRotationEntries, resolveLedgerUnion } from "../src/lib/ledger-grep.js";
-import { emissionsCommand, ledgerCorpusFiles } from "../src/run-task.js";
+import { ledgerRotationEntries, resolveLedgerUnion } from "#src/lib/ledger-grep.js";
+import { emissionsCommand, ledgerCorpusFiles } from "#src/run-task.js";
 
 const GZ_ONLY = '{"ts":"2026-07-01T00:00:00.000Z","step":"run.start","marker":"only-in-gzip"}';
 const PLAIN_ONLY = '{"ts":"2026-08-10T00:00:00.000Z","step":"run.start","marker":"only-in-plain"}';

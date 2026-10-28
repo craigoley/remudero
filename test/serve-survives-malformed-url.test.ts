@@ -27,8 +27,8 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 
-import { createService } from "../src/lib/service.js";
-import { CLI_EXIT_UNHANDLED_REJECTION, installUnhandledRejectionGuard } from "../src/run-task.js";
+import { createService } from "#src/lib/service.js";
+import { CLI_EXIT_UNHANDLED_REJECTION, installUnhandledRejectionGuard } from "#src/run-task.js";
 
 /** Speak raw bytes at the server and collect everything it says back, so a case can assert on the
  *  STATUS LINE a real client would parse rather than on a library's exception. Resolves on close

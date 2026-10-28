@@ -14,9 +14,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
-import { deriveStatus, ghGateway } from "../src/lib/status.js";
-import { pollToGate } from "../src/run-task.js";
+import type { Task } from "#src/lib/plan.js";
+import { deriveStatus, ghGateway } from "#src/lib/status.js";
+import { pollToGate } from "#src/run-task.js";
 
 function task(over: Partial<Task> = {}): Task {
   return {

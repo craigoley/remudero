@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { loadPlanFromYaml } from "../src/lib/plan.js";
-import { buildBatchedGithub, projectPlan, type BatchedPr } from "../src/lib/status.js";
+import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { buildBatchedGithub, projectPlan, type BatchedPr } from "#src/lib/status.js";
 // A NAMESPACE import: at the merge base `createDaemonGatewayFactory` does not exist, and a named import would fail
 // the whole file at load, which the reviewer reads as "never ran" rather than as a red.
-import * as runTask from "../src/run-task.js";
+import * as runTask from "#src/run-task.js";
 
 /**
  * W1-T6259 — A DISPATCHED RUN'S PROJECTION READS CHANGED FILES OFF THE LOOP. The daemon's lane gateways were built

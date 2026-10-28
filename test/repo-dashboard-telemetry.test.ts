@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createService } from "../src/lib/service.js";
+import { createService } from "#src/lib/service.js";
 import {
   buildRepoDashboardRoute,
   computeRepoTelemetryOffThread,
@@ -14,11 +14,11 @@ import {
   REPO_TELEMETRY_MIN_AGE_MS,
   type RepoDashboardEntry,
   type RepoTelemetryRequest,
-} from "../src/lib/repo-dashboard-route.js";
-import { boundConsoleReadRoute, type ServeDeps } from "../src/lib/serve.js";
-import type { Route } from "../src/lib/service.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
+} from "#src/lib/repo-dashboard-route.js";
+import { boundConsoleReadRoute, type ServeDeps } from "#src/lib/serve.js";
+import type { Route } from "#src/lib/service.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadPlanFromYaml, type Plan } from "#src/lib/plan.js";
 
 const READ_TOKEN = "repo-telemetry-read-token";
 const NOW = "2026-09-22T12:00:00.000Z";

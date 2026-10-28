@@ -3,18 +3,18 @@ import { appendFileSync, mkdirSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { BoardIssueRest, BoardPrRest } from "../src/lib/open-prs-rest.js";
-import { boardOpenSnapshotPath, createBoardSnapshotCache } from "../src/lib/board-snapshot-cache.js";
-import type { Clock } from "../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import type { BoardIssueRest, BoardPrRest } from "#src/lib/open-prs-rest.js";
+import { boardOpenSnapshotPath, createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
+import type { Clock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { acquireLease, type ReadModelDb } from "#src/lib/read-model-db.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 // NAMESPACE imports: at the merge base the W1-T6253 counting seams do not exist, and a named import would fail the
 // whole file at load, which the reviewer reads as "never ran" rather than as a red.
-import * as nowView from "../src/lib/now-view.js";
-import * as status from "../src/lib/status.js";
-import * as statusBoard from "../src/lib/status-board.js";
+import * as nowView from "#src/lib/now-view.js";
+import * as status from "#src/lib/status.js";
+import * as statusBoard from "#src/lib/status-board.js";
 
 /**
  * W1-T6253 — THE NOW VIEW'S SNAPSHOT INDEXES THE LEDGER ONCE PER GENERATION. Every now build's snapshot stage ran

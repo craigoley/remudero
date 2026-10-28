@@ -11,11 +11,11 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "../src/lib/sweep.js";
-import { hydrateMergeConflictEvidence, type GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/sweep.js";
+import { hydrateMergeConflictEvidence, type GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 /**
  * #11991 (W1-T9627), 2026-10-15. Head c94ea474f had one real content conflict with main in

@@ -4,11 +4,11 @@ import { mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { buildRepoDashboardRoutes, repoSummarySync, type RepoDashboardResult } from "../src/lib/repo-dashboard-route.js";
-import { installPolicyPath, loadDefaultPolicy } from "../src/lib/policy.js";
-import { loadAlertPolicy } from "../src/lib/alert-lane.js";
-import { createService } from "../src/lib/service.js";
-import { fixedClock } from "../src/lib/clock.js";
+import { buildRepoDashboardRoutes, repoSummarySync, type RepoDashboardResult } from "#src/lib/repo-dashboard-route.js";
+import { installPolicyPath, loadDefaultPolicy } from "#src/lib/policy.js";
+import { loadAlertPolicy } from "#src/lib/alert-lane.js";
+import { createService } from "#src/lib/service.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 const NOW = Date.parse("2026-10-08T12:00:00Z");
 const REPO = { owner: "acme", repo: "alpha" };

@@ -25,8 +25,8 @@ import {
   ghPrCreateFillCommand,
   lastCommitSubject,
   runGhPrCreate,
-} from "../src/run-task.js";
-import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+} from "#src/run-task.js";
+import { LiveWriteBlockedError, withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");

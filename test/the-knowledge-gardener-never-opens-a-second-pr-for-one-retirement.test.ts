@@ -8,9 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runGardenPass, type GardenWorkspace, type OpenGardenPr } from "../src/lib/knowledge-gardener.js";
-import { learningUsagePath } from "../src/lib/knowledge-value.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { runGardenPass, type GardenWorkspace, type OpenGardenPr } from "#src/lib/knowledge-gardener.js";
+import { learningUsagePath } from "#src/lib/knowledge-value.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const entry = (id: string, fact: string) => [`- id: ${id}`, "  subsystem: t", "  lifecycle: active", "  files: [src/x.ts]", "  fact: >-", `    ${fact}`, "  src: t", ""].join("\n");
 

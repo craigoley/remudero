@@ -5,16 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import type { GardenCheckout, GardenerDeps } from "../src/lib/gardener.js";
-import { loadPlanFromYaml, type Task } from "../src/lib/plan.js";
-import type { PlanInventory } from "../src/lib/plan-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { GardenCheckout, GardenerDeps } from "#src/lib/gardener.js";
+import { loadPlanFromYaml, type Task } from "#src/lib/plan.js";
+import type { PlanInventory } from "#src/lib/plan-gardener.js";
 import {
   SCOUT_SURVIVAL_WINDOW_MS, SCOUT_UNPRIORITIZED_SHARE_BOUND, SCOUT_WINDOW_MS, readMergedTasks, scoutGardenSpec, type ScoutSources,
-} from "../src/lib/scout-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+} from "#src/lib/scout-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const NOW = Date.UTC(2026, 9, 8, 12);
 const DAY = 24 * 3_600_000;

@@ -4,17 +4,17 @@ import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { defaultInstanceInboxSources, instanceStateRoot } from "../src/lib/instance-gateway.js";
-import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
-import { readPersistedInbox } from "../src/lib/fleet-lane.js";
-import { refreshInboxClassification } from "../src/lib/inbox-view.js";
-import { runReadModelWorker } from "../src/lib/read-model-worker.js";
-import { runSlowLaneWorker, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
-import { readModelInstances } from "../src/lib/serve.js";
-import { createService } from "../src/lib/service.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { defaultInstanceInboxSources, instanceStateRoot } from "#src/lib/instance-gateway.js";
+import { mountInstanceInboxRoutes } from "#src/lib/instance-inbox-contract.js";
+import { readPersistedInbox } from "#src/lib/fleet-lane.js";
+import { refreshInboxClassification } from "#src/lib/inbox-view.js";
+import { runReadModelWorker } from "#src/lib/read-model-worker.js";
+import { runSlowLaneWorker, type SlowLaneMessage } from "#src/lib/read-model-slow-lane.js";
+import { readModelInstances } from "#src/lib/serve.js";
+import { createService } from "#src/lib/service.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 type Context = { after(fn: () => void): void };
 function world(t: Context) {

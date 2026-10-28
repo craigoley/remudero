@@ -6,10 +6,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { appendTaskTrailerToCommit } from "../src/run-task.js";
-import { commitMessageContractLines } from "../src/lib/compaction.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitPushRunBranch } from "../src/lib/git-push.js";
+import { appendTaskTrailerToCommit } from "#src/run-task.js";
+import { commitMessageContractLines } from "#src/lib/compaction.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitPushRunBranch } from "#src/lib/git-push.js";
 
 // W1-T1012: THE MERGE-CREDIT TRAILER IS WRITTEN TO THE PR BODY AND NEVER TO THE COMMIT, SO THE
 // SQUASH DISCARDS IT. `gh pr merge --squash` runs with no `--subject`/`--body` at every call

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
+import type { Task } from "#src/lib/plan.js";
 import {
   deriveStatus,
   invalidateDurableCredit,
@@ -11,7 +11,7 @@ import {
   type DurableCreditInvalidation,
   type GitHub,
   type PrRef,
-} from "../src/lib/status.js";
+} from "#src/lib/status.js";
 
 const task = {
   id: "W9-T5656", title: "recover durable credit", repo: "remudero", depends_on: [],

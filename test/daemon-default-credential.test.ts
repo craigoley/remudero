@@ -23,7 +23,7 @@ import { dirname, join } from "node:path";
 import { mock, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { EXCHANGE_TIMEOUT_MS, INSTALLATION_TOKEN_LIFETIME_MS, REFRESH_MARGIN_MS, refreshInstallationToken } from "../src/lib/github-app.js";
+import { EXCHANGE_TIMEOUT_MS, INSTALLATION_TOKEN_LIFETIME_MS, REFRESH_MARGIN_MS, refreshInstallationToken } from "#src/lib/github-app.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RECYCLE_SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
