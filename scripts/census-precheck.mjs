@@ -30,6 +30,7 @@
  * Exit 0 clean, 1 a caused violation, 2 could not measure (the hook does not block on 2).
  */
 import { spawnSync } from "node:child_process";
+import { parse } from "acorn";
 import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
 import { isTrustRootPath, scanTrustRootText, trustRootFor } from "../src/lib/trust-root-text.ts";
 import { createHash } from "node:crypto";
@@ -1481,6 +1482,69 @@ export function precheckParityVerdict({ population, baseline, baseBaseline = nul
   };
 }
 
+/** Read the worker's literal parity keys and table-map spreads without running any worker code.
+ * Unsupported declarations are unmeasured, never replaced with the harness's registrations. */
+function workerParity(text) {
+  const tree = parse(text, { ecmaVersion: "latest", sourceType: "module" });
+  const declarations = new Map();
+  for (const statement of tree.body) {
+    const declaration = statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
+    if (declaration?.type !== "VariableDeclaration") continue;
+    for (const entry of declaration.declarations) {
+      if (entry.id.type === "Identifier") declarations.set(entry.id.name, entry.init);
+    }
+  }
+  const unsupported = () => { throw new Error("worker PRECHECK_PARITY declaration is not statically readable"); };
+  const member = (node, object, property) => node?.type === "MemberExpression" && !node.computed &&
+    node.object.type === "Identifier" && node.object.name === object && node.property.name === property;
+  const literal = (node) => node?.type === "Literal" && typeof node.value === "string" ? node.value : unsupported();
+  const rowsOf = (node) => {
+    if (node?.type !== "ArrayExpression") return unsupported();
+    return node.elements.flatMap((row) => {
+      if (row?.type === "ObjectExpression" && row.properties.every((p) => p.type === "Property" && !p.computed)) {
+        const key = row.properties.findLast((p) => (p.key.name ?? p.key.value) === "testFile");
+        return [literal(key?.value)];
+      }
+      const map = row?.argument;
+      const arrow = map?.arguments?.[0];
+      const pattern = arrow?.params?.[0];
+      const rest = pattern?.properties?.find((p) => p.type === "RestElement");
+      if (row?.type !== "SpreadElement" || map?.type !== "CallExpression" || map.arguments.length !== 1 ||
+          map.callee.type !== "MemberExpression" || map.callee.computed || map.callee.property.name !== "map" ||
+          arrow?.type !== "ArrowFunctionExpression" || arrow.params.length !== 1 || pattern.type !== "ObjectPattern" ||
+          !rest || rest.argument.type !== "Identifier" || pattern.properties.some((p) => p.type !== "RestElement" &&
+            (p.type !== "Property" || p.computed || (p.key.name ?? p.key.value) === "testFile")) ||
+          arrow.body.type !== "ObjectExpression" || arrow.body.properties.length === 0 ||
+          !arrow.body.properties.every((p, i) => i === 0
+            ? p.type === "SpreadElement" && p.argument.type === "Identifier" && p.argument.name === rest.argument.name
+            : p.type === "Property" && !p.computed && (p.key.name ?? p.key.value) !== "testFile")) return unsupported();
+      return rowsOf(map.callee.object);
+    });
+  };
+  const parity = Object.create(null);
+  const table = declarations.get("PRECHECK_PARITY");
+  if (table?.type !== "ObjectExpression") return unsupported();
+  for (const property of table.properties) {
+    if (property.type === "Property" && !property.computed && property.kind === "init") {
+      parity[literal(property.key)] = true;
+      continue;
+    }
+    const call = property.argument;
+    if (property.type !== "SpreadElement" || call?.type !== "CallExpression" ||
+        !member(call.callee, "Object", "fromEntries") || call.arguments.length !== 1) return unsupported();
+    const map = call.arguments[0];
+    const arrow = map?.arguments?.[0];
+    if (map?.type !== "CallExpression" || map.arguments.length !== 1 ||
+        map.callee.type !== "MemberExpression" || map.callee.computed || map.callee.property.name !== "map" ||
+        map.callee.object.type !== "Identifier" || arrow?.type !== "ArrowFunctionExpression" ||
+        arrow.params.length !== 1 || arrow.params[0].type !== "Identifier" ||
+        arrow.body.type !== "ArrayExpression" || arrow.body.elements.length !== 2 ||
+        !member(arrow.body.elements[0], arrow.params[0].name, "testFile")) return unsupported();
+    for (const path of rowsOf(declarations.get(map.callee.object.name))) parity[path] = true;
+  }
+  return parity;
+}
+
 /** W1-T10798: test/every-ci-census-is-asked-before-the-push.test.ts, asked before the push. A diff that moves a test,
  *  PRECHECK_PARITY or the shrink-only baseline must leave no CI census unasked and no stale baseline row. `population`
  *  is CI's census population on this tree; absent (snapshot mode) the check is not measured and returns []. */
@@ -1496,7 +1560,10 @@ export function censusParityViolations({ changed, readHead, population }) {
     return [];
   }
   if (!Array.isArray(baseline)) return [];
-  const verdict = precheckParityVerdict({ population: typeof population === "function" ? population() : population, baseline });
+  const worker = readHead("scripts/census-precheck.mjs");
+  if (worker === null) throw new Error("worker PRECHECK_PARITY source is unavailable");
+  const parity = workerParity(worker);
+  const verdict = precheckParityVerdict({ population: typeof population === "function" ? population() : population, baseline, parity });
   return [
     ...verdict.unasked.map((p) => `census-parity: ${p} is a CI census nothing asks before the push — model it in PRECHECK_PARITY (scripts/census-precheck.mjs); ${PRECHECK_PARITY_BASELINE} may only shrink`),
     ...verdict.stale.map((p) => `census-parity: ${p} is baselined but precheck now asks it or CI no longer runs it — delete the row from ${PRECHECK_PARITY_BASELINE}`),
