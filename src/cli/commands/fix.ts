@@ -3945,6 +3945,17 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     if (fixHarnessOwnsGit && fixCensusApplies && !deps.writeFixCensusSnapshot) {
       deps.log("fix.census_snapshot", { outcome: "unavailable", reason: "snapshot producer is not wired" });
     }
+    if (censusSnapshotPath && currentMergeConflict === undefined && prNumber !== undefined) {
+      const context = await host.readInheritedCensusContextAsync(opts.worktreePath, censusSnapshotPath);
+      if (context.state === "inherited") {
+        const checked = await host.checkFixCensusSnapshotAsync(opts.worktreePath, censusSnapshotPath, deps.log);
+        if (checked?.refusal?.inheritedMain?.state === "inherited") {
+          const refresh = await refreshInheritedCensusRefusal({ root: opts.config.root, worktreePath: opts.worktreePath,
+            branch: opts.branch, prUrl: opts.prUrl, prNumber, snapshotPath: censusSnapshotPath, context }, deps, host);
+          return { outcome: refresh.outcome === "requested" ? "base_refreshed" : "stood_down", review, strikes, retriggers, reason: refresh.reason };
+        }
+      }
+    }
     // W1-T5544: a proof-repair round stages EXACTLY the PR's own test files plus the task's declared test paths —
     // the census-baseline offers and every src/plan path are left out, so the harness commit refuses them by name.
     const proofRepairStageable = proofRepairRound
