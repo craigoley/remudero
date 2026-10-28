@@ -38,6 +38,8 @@ const pool = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "pure-test-p
 const tiers = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "test-tier-manifest.mjs")).href)) as {
   FAST_TIER_TEST_TIMEOUT_FACTOR?: number;
   fastTierHangBoundArgs?: (manifest: unknown) => string[];
+  SLOW_TIER_TEST_TIMEOUT_MS?: number;
+  slowTierHangBoundArgs?: () => string[];
   main: (argv: string[], opts: { spawn: (cmd: string, args: string[], o?: unknown) => { status: number | null }; env?: NodeJS.ProcessEnv }) => number;
 };
 const setup = noLiveRemote as unknown as {
@@ -188,10 +190,21 @@ test("unit test: a fast-tier run carries a per-test timeout scaled from the tier
     const slowCalls: string[][] = [];
     tiers.main(["--root", root, "--run", "slow"], { spawn: (_c, args) => (slowCalls.push(args), { status: 0 }), env: {} });
     assert.equal(slowCalls.length, 1);
-    assert.ok(!slowCalls[0]!.some((a) => a.startsWith("--test-timeout") || a === "--test-force-exit"), "the slow tier keeps its own pace");
+    assert.ok(slowCalls[0]!.includes(`--test-timeout=${tiers.SLOW_TIER_TEST_TIMEOUT_MS}`), slowCalls[0]!.join(" "));
+    assert.ok(slowCalls[0]!.includes("--test-force-exit"), "the slow tier exits once every test has finished");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("unit test: a slow-tier run carries a fixed per-test timeout well above its longest measured test", () => {
+  assert.equal(typeof tiers.slowTierHangBoundArgs, "function");
+  const limit = tiers.SLOW_TIER_TEST_TIMEOUT_MS!;
+  assert.deepEqual(tiers.slowTierHangBoundArgs!(), [`--test-timeout=${limit}`, "--test-force-exit"]);
+  // 71 s was the longest top-level slow-tier test measured on 2026-10-28; a bound under 2x that kills honest work.
+  assert.ok(limit >= 2 * 71_000, `slow-tier limit ${limit}ms leaves too little headroom`);
+  // The 35-minute shard ceiling must still leave room for a late hang to fail by name.
+  assert.ok(limit <= 5 * 60_000, `slow-tier limit ${limit}ms cannot fire before the shard is cancelled`);
 });
 
 test("a hung test under the fast-tier bound fails BY NAME and the run ends, in a pool and per file", () => {
