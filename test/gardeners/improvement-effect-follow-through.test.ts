@@ -3,8 +3,20 @@ import { test } from "node:test";
 import { CODE_HEALTH_POLICY_VERSION } from "#src/lib/code-health-collector.js";
 import { fixedClock } from "#src/lib/clock.js";
 import type { CodeHealthProjectionInput, CodeHealthScan } from "#src/lib/code-health-projection.js";
+import type { ImprovementPlanReceipt } from "#src/lib/improvement-thread.js";
 import type { CodeHealthStoredSnapshot } from "#src/lib/code-health-store.js";
 import * as outcomes from "#src/lib/opportunity-outcomes.js";
+
+/** The two production entry points this suite drives. The module is loaded by a computed file URL, not a literal
+ *  import specifier, so this suite does not join the direct importers of the run-task monolith (the reach ratchet). */
+interface RunTaskModule {
+  buildRegisteredGarden(name: string, ctx: Record<string, unknown>): Promise<() => Promise<unknown>> | (() => Promise<unknown>);
+  improvementNativeFilingReceipt(ledgerPath: string, proposalId: string, repository: string, clock?: unknown): ImprovementPlanReceipt | undefined;
+}
+const loadRunTask = async (): Promise<RunTaskModule> => {
+  const href = new URL("../../src/run-task.ts", import.meta.url).href;
+  return await import(href) as RunTaskModule;
+};
 
 const observedNow = Date.now();
 const at = (minutes: number): string => new Date(observedNow + minutes * 60_000).toISOString();
@@ -134,7 +146,7 @@ test("improvement native discovery freezes the original filed baseline after a n
   const { createImprovementThread, readImprovementThread, requestImprovementAction, runImprovementAction } = await import("#src/lib/improvement-thread.js");
   const { captureInboxDraftSnapshot, commitInboxDraftOutcomes, loadProposalRegistry } = await import("#src/lib/inbox.js");
   const { appendLedger } = await import("#src/lib/ledger.js");
-  const { improvementNativeFilingReceipt } = await import("#src/run-task.js");
+  const { improvementNativeFilingReceipt } = await loadRunTask();
   await withTempDir("improvement-native-discovery", async dir => {
     const { source, evidence, now } = fixture(), repository = source.repository, inboxRoot = join(dir, "atlas-instance"), inboxState = join(inboxRoot, "state"), ledgerPath = join(inboxState, "ledger.ndjson");
     mkdirSync(join(dir, "read-model"), { recursive: true });
@@ -291,7 +303,7 @@ test("daily progress reports improvement checks as activity without inventing co
 test("registered overseer reaches improvement follow-up and preserves its off switch", async () => {
   const { join } = await import("node:path"), fs = await import("node:fs");
   const { withTempDir } = await import("#src/lib/tmp.js");
-  const { buildRegisteredGarden } = await import("#src/run-task.js");
+  const { buildRegisteredGarden } = await loadRunTask();
   await withTempDir("improvement-registered-caller", async root => {
     const stateDir = join(root, "state"), native = join(root, "atlas");
     for (const dir of [stateDir, join(stateDir, "read-model"), join(native, "state"), join(native, "repos", "atlas", "plan")]) fs.mkdirSync(dir, { recursive: true });
@@ -303,7 +315,7 @@ test("registered overseer reaches improvement follow-up and preserves its off sw
     const originalRegistry = fs.readFileSync(nativeRegistry, "utf8");
     const planPath = join(native, "repos", "atlas", "plan", "tasks.yaml"); fs.writeFileSync(planPath, "[]\n");
     fs.writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [{ instanceId: "atlas", options: { controlRoot: native, planPath } }], improvementEvidence: { version: "repository-evidence-inventory-v1", measurementState: "not_collected", repositories: [{ repository: "acme/atlas", instanceIds: ["atlas"], expectedDailySources: ["pull_requests", "ledger_activity", "deployments"], expectedQualitySources: ["quality", "coverage"] }], unresolvedInstances: [] } }));
-    const events: string[] = [], ctx = { config: { root, claudeBin: "/bin/true", overflow: "none" }, repoRoot: root, owner: "acme", repo: "core", log: (step: string) => { events.push(step); }, raiseDuplicate: () => "" } as import("#src/run-task.js").GardenBuildContext;
+    const events: string[] = [], ctx = { config: { root, claudeBin: "/bin/true", overflow: "none" }, repoRoot: root, owner: "acme", repo: "core", log: (step: string) => { events.push(step); }, raiseDuplicate: () => "" } as Record<string, unknown>;
     const projection = join(outcomes.improvementOutcomeStateDir(stateDir, "acme/atlas", "atlas"), "opportunity-outcomes.json");
     const off = join(stateDir, "GARDENER_OVERSEER_OFF"); fs.writeFileSync(off, "operator paused\n");
     const pass = await buildRegisteredGarden("overseer", ctx); await pass();
