@@ -349,7 +349,7 @@ export function createNativeTargetRepository(root: string, owner: string, repo: 
   } satisfies Partial<DrainDeps>;
   return {
     persistCredit: (task: Plan["tasks"][number], pr: { number: number; url: string }, files: readonly string[] | undefined) => {
-      if (!files?.length) return "unreadable" as const;
+      if (files === undefined || files.length === 0) return "unreadable" as const;
       if (refusesAsPlanOnly(task, files)) return "plan-only" as const;
       const path = join(state, "credits.json");
       saveCreditStore(path, recordCredit(loadCreditStore(path), task.id, {
