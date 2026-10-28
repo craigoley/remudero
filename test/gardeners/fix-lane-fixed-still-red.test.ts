@@ -55,13 +55,25 @@ test("a new repair at the same head is evaluated after a previously cleared roun
 });
 
 test("W1-T10781: fix-lane-fixed-still-red clears without a person", () => {
-  const dispatch: LedgerRecord = {
+  const original: LedgerRecord = {
     step: "fix.dispatch", ts: at(-7), pr_number: 7, round_id: "repair-7", head_sha: "old-head",
     ci_failures: [{ check: "unit", signature: "a" }],
   };
-  const other = { ...sweep(-4, "own-red"), ci_failures: [{ check: "lint", signature: "b" }] };
-  const same = { ...sweep(-4, "own-red"), ci_failures: [{ check: "unit", signature: "a" }] };
+  const current: LedgerRecord = {
+    step: "fix.dispatch", ts: at(-3), pr_number: 7, round_id: "repair-8", head_sha: "fixed-head",
+    ci_failures: [{ check: "lint", signature: "b" }],
+  };
+  const redSweep = sweep(-4, "own-red");
   const all = (rows: LedgerRecord[]) => defectEventsOf(rows, NOW).filter(e => e.key.startsWith("fixed-"));
-  assert.deepEqual(all([dispatch, fixed, other]).map(e => e.key), ["fixed-new-red"]);
-  assert.deepEqual(all([dispatch, fixed, same]).map(e => e.key), ["fixed-still-red"]);
+  assert.equal(redSweep.ci_failures, undefined, "production sweep rows do not carry failing checks");
+  assert.deepEqual(all([original, fixed, redSweep, current]).map(e => e.key), ["fixed-new-red"]);
+  assert.deepEqual(all([original, fixed, redSweep, { ...current,
+    ci_failures: [{ check: "unit", signature: "a" }, { check: "lint", signature: "b" }],
+  }]).map(e => e.key), ["fixed-still-red"]);
+  assert.deepEqual(all([original, fixed, redSweep]).map(e => e.key), ["fixed-still-red"],
+    "an undispatched red remains visible without invented check evidence");
+  assert.deepEqual(all([original, fixed, redSweep, { ...current, pr_number: 8 }]).map(e => e.key),
+    ["fixed-still-red"], "another PR's dispatch cannot reclassify this one");
+  assert.deepEqual(all([original, fixed, redSweep, { ...current, head_sha: "another-head" }]).map(e => e.key),
+    ["fixed-still-red"], "another head's dispatch cannot reclassify this one");
 });

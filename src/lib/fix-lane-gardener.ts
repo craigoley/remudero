@@ -409,12 +409,17 @@ export function defectEventsOf(records: readonly LedgerRecord[], now: number, so
       // rerun going red must not resurrect the old FIXED round as a failed repair.
       if (r.blocker === "own-red") {
         pushed.delete(r.head_sha);
-        // A repair that cleared every red it was sent for, with only a DIFFERENT check red now, did its
-        // job: that is a new defect, not a repair that stayed red.
-        const nowReds = failuresOf(r);
+        // A sweep.disposed row has the blocker and head, but no ci_failures. The next fix.dispatch
+        // for this PR and head records the checks that made the sweep red. Its receipt is written
+        // when the round ends, so it can appear later in the ledger than this disposal.
+        const nextDispatch = rows.find(d => d.step === "fix.dispatch" && d.head_sha === r.head_sha &&
+          tsOf(d) >= tsOf(r) && prOfRow(d, byHead, byRound) === (pr || fixed.pr));
+        const nowReds = nextDispatch ? failuresOf(nextDispatch) : [];
+        // A repair that cleared every red it was sent for, with only a different check red now,
+        // did its job: that is a new defect, not a repair that stayed red.
         if (fixed.reds.length > 0 && nowReds.length > 0 &&
             !nowReds.some(b => fixed.reds.some(a => a.check === b.check))) {
-          add(r, "fixed-new-red", `a FIXED push ${r.head_sha.slice(0, 9)} cleared ${checkSet({ ci_failures: fixed.reds } as LedgerRecord)} but ${checkSet(r)} is red on the next sweep${quote(fixed.done.worker_tail)}`, pr || fixed.pr);
+          add(r, "fixed-new-red", `a FIXED push ${r.head_sha.slice(0, 9)} cleared ${checkSet({ ci_failures: fixed.reds } as LedgerRecord)} but ${checkSet(nextDispatch!)} is red on the next sweep${quote(fixed.done.worker_tail)}`, pr || fixed.pr);
           continue;
         }
         add(r, "fixed-still-red", `a FIXED push ${r.head_sha.slice(0, 9)} is still red on the next sweep${quote(fixed.done.worker_tail)}`, pr || fixed.pr);
