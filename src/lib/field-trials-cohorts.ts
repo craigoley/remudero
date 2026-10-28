@@ -1,3 +1,5 @@
+import { ATTEMPT_OUTCOMES, attributeAttemptOutcome, type AttemptOutcome } from "./attempt-outcome-attribution.js";
+
 const PIN_FIELDS = ["harness", "prompt", "tool", "scorer", "environment"] as const;
 export type TrialRevisionPins = Record<typeof PIN_FIELDS[number], string | null>;
 export const TRIAL_REVISION_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
@@ -6,6 +8,9 @@ type TrialCohortRow = {
   step: string; assignmentId: string | null; host: string | null; runId: string | null; taskId: string | null; ts: string | null;
   provider?: string | null; selectedModel: string | null; selectedEffort?: string | null; servedModel: string | null;
   taskClass: string | null; risk: string | null; workLane: string | null; success: boolean | null; stackRevisions?: TrialRevisionPins;
+  servedModelReason?: string | null; costUsd?: number | null;
+  /** Bounded worker.attempt ledger fields (worker_failure, error_class, tokens, ...) that attribution reads. */
+  outcomeSignals?: Readonly<Record<string, unknown>>;
 };
 
 /** Retain only immutable observed IDs, never a boolean claim or a guessed checkout revision. */
@@ -25,7 +30,19 @@ interface ServedTrialCohort {
   host: string; period: string; provider: string; selectedModel: string; servedModel: string; selectedEffort: string;
   taskClass: string; risk: string; workLane: string; revisions: TrialRevisionPins;
   assignments: number; workerSucceeded: number; workerFailed: number;
+  workerPreRequestRefused: number; workerInfrastructure: number; workerUnattributed: number;
 }
+
+/** W1-T10875: the attempt in the ledger's own field names; projected fields win only when present. */
+function attemptOutcomeOf(attempt: TrialCohortRow): AttemptOutcome {
+  return attributeAttemptOutcome({ ...attempt.outcomeSignals, success: attempt.success, served_model: attempt.servedModel,
+    ...(attempt.servedModelReason != null ? { served_model_reason: attempt.servedModelReason } : {}),
+    ...(attempt.costUsd != null ? { total_cost_usd: attempt.costUsd } : {}) }).outcome;
+}
+
+const COHORT_COUNTER: Record<AttemptOutcome, "workerSucceeded" | "workerFailed" | "workerPreRequestRefused"
+  | "workerInfrastructure" | "workerUnattributed"> = { success: "workerSucceeded", model: "workerFailed",
+  "pre-request-refusal": "workerPreRequestRefused", infrastructure: "workerInfrastructure", unknown: "workerUnattributed" };
 
 function assignmentIdentity(row: TrialCohortRow): string {
   return JSON.stringify([row.host, row.runId, row.taskId, row.ts, row.provider, row.selectedModel, row.selectedEffort,
@@ -62,6 +79,7 @@ export function servedTrialCohorts(rows: readonly TrialCohortRow[], asOf: string
   if (unkeyedAssignments > 0) excluded["assignment-id-unavailable"] = unkeyedAssignments;
   const cohorts = new Map<string, ServedTrialCohort>();
   let qualifiedAssignments = 0;
+  const outcomeAttribution = Object.fromEntries(ATTEMPT_OUTCOMES.map((outcome) => [outcome, 0])) as Record<AttemptOutcome, number>;
   for (const [id, assignment] of assignments) {
     const row = assignment.row;
     const terminal = terminals.get(id);
@@ -80,6 +98,9 @@ export function servedTrialCohorts(rows: readonly TrialCohortRow[], asOf: string
       || Date.parse(attempt.ts) < Date.parse(row.ts) || Date.parse(attempt.ts) > Date.parse(asOf)) {
       refuse("attempt-time-unavailable-or-outside-window"); continue;
     }
+    // Tallied before the served-model refusal: a ladder refusal names no served model, yet must stay visible.
+    const outcome = attemptOutcomeOf(attempt);
+    outcomeAttribution[outcome] += 1;
     if (attempt.servedModel === null) { refuse("served-model-unavailable"); continue; }
     if (attempt.success === null) { refuse("worker-outcome-unavailable"); continue; }
     if ([row.selectedModel, row.selectedEffort, row.taskClass, row.risk, row.workLane].some((value) => value == null)) {
@@ -96,16 +117,16 @@ export function servedTrialCohorts(rows: readonly TrialCohortRow[], asOf: string
     let cohort = cohorts.get(key);
     if (cohort === undefined) {
       if (cohorts.size >= TRIAL_COHORT_MAX) { refuse("cohort-output-bound"); continue; }
-      cohort = { ...dimensions, assignments: 0, workerSucceeded: 0, workerFailed: 0 };
+      cohort = { ...dimensions, assignments: 0, workerSucceeded: 0, workerFailed: 0,
+        workerPreRequestRefused: 0, workerInfrastructure: 0, workerUnattributed: 0 };
       cohorts.set(key, cohort);
     }
     cohort.assignments += 1;
-    cohort.workerSucceeded += Number(attempt.success);
-    cohort.workerFailed += Number(!attempt.success);
+    cohort[COHORT_COUNTER[outcome]] += 1;
     qualifiedAssignments += 1;
   }
-  return { version: "served-trial-cohorts-v1" as const, observational: true as const, causalClaims: "none" as const,
+  return { version: "served-trial-cohorts-v2" as const, observational: true as const, causalClaims: "none" as const,
     outcomeBasis: "terminal-worker-attempt" as const, denominator: assignments.size + unkeyedAssignments,
-    duplicateAssignments, qualifiedAssignments, excludedAssignments: Object.values(excluded).reduce((sum, n) => sum + n, 0),
+    outcomeAttribution, duplicateAssignments, qualifiedAssignments, excludedAssignments: Object.values(excluded).reduce((sum, n) => sum + n, 0),
     excluded, cohorts: [...cohorts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, value]) => value) };
 }
