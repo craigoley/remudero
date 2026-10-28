@@ -117,6 +117,8 @@ export function stringLiteralMask(text) {
   function code(untilBrace) {
     let depth = 0;
     let prev = "";
+    let beforePrev = "";
+    const parens = [];
     while (i < n) {
       const c = text[i];
       const d = text[i + 1];
@@ -130,12 +132,14 @@ export function stringLiteralMask(text) {
           i += point.length;
         }
         const word = text.slice(start, i);
+        beforePrev = prev;
         prev = prev === "." ? `.${word}` : word;
         continue;
       }
       if (c === '"' || c === "'") { quoted(c); prev = c; continue; }
       if (c === "`") {
-        const keyword = /^(return|throw|yield|await|case|typeof|void|delete|new|in|of)$/.test(prev);
+        const contextualOf = prev === "of" && parens.at(-1) === true && beforePrev !== "(";
+        const keyword = /^(return|throw|yield|await|case|typeof|void|delete|new|in)$/.test(prev) || contextualOf;
         const tail = Array.from(prev).at(-1) ?? "";
         const tagged = (IDENT_PART.test(tail) || tail === ")" || tail === "]" || tail === "`") && !keyword;
         i += 1;
@@ -152,6 +156,8 @@ export function stringLiteralMask(text) {
         if (c === "{") depth += 1;
         else if (c === "}") { if (depth === 0) return; depth -= 1; }
       }
+      if (c === "(") parens.push(prev === "for" || (prev === "await" && beforePrev === "for"));
+      else if (c === ")") parens.pop();
       if (!/\s/.test(c)) prev = c;
       i += 1;
     }

@@ -42,6 +42,23 @@ test("W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.t
   assert.deepEqual(rewriteSource(result.text, "test/ci/suites/fixture.test.ts"), {
     text: result.text, rewritten: 0, selfPathRemoved: false, unresolved: [],
   });
+
+  const tagged = "const of = String.raw; of`" + fixtureImport("./fixture.js") + "`;";
+  assert.equal(census(tagged).status, 0);
+  const taggedResult = rewriteSource(tagged, "test/ci/suites/fixture.test.ts");
+  assert.equal(taggedResult.text, tagged);
+  assert.equal(taggedResult.rewritten, 0);
+  assert.equal(taggedResult.unresolved.length, 1);
+  assert.match(taggedResult.unresolved[0], /raw spelling/);
+  assert.equal(runInNewContext(taggedResult.text), runInNewContext(tagged));
+
+  const forOf = "const values = []; for (const value of `" + fixtureImport("./fixture.js")
+    + "`) values.push(value); values.join('');";
+  const forOfResult = rewriteSource(forOf, "test/ci/suites/fixture.test.ts");
+  assert.equal(forOfResult.rewritten, 1);
+  assert.deepEqual(forOfResult.unresolved, []);
+  assert.equal(census(forOfResult.text).status, 1);
+  assert.equal(runInNewContext(forOfResult.text), runInNewContext(forOf));
 });
 
 test("fixture-only files are written by the codemod CLI", (t) => {
