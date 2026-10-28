@@ -454,10 +454,14 @@ export function classifyPreflightOutput(output: string): PreflightOutcomeClassif
   return { failingTests: [...failing], cancelledTests: [...cancelled], cancelledCount, hasSummary };
 }
 
+function processCleanupFailed(result: RetroPrepublishCommandResult): boolean {
+  return !!result.cleanupError || (result.error as NodeJS.ErrnoException | undefined)?.code === "EPROCESSGROUP";
+}
+
 function exitClass(result: RetroPrepublishCommandResult, ordinaryFailure: string): string {
   if (result.error && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") return "process_timeout";
   if (result.error && (result.error as NodeJS.ErrnoException).code === "ENOBUFS") return "output_limit_exceeded";
-  if (result.cleanupError) return "process_cleanup_failed";
+  if (processCleanupFailed(result)) return "process_cleanup_failed";
   if (result.error || result.cleanupError) return "process_spawn_failed";
   if (result.signal) return "process_signaled";
   return ordinaryFailure;
@@ -492,7 +496,7 @@ const listArg = ["--import", "tsx", "scripts/diff-class.mjs"];
 /** W1-T10144: the arguments that narrow the listing the way ci.yml narrows a plan-only PR; broad otherwise. */
 async function changedPathScope(worktreePath: string, run: RetroPrepublishRunner,
   changedFiles: (worktreePath: string) => Promise<RetroChangedFiles>, tmpRoot: string,
-): Promise<{ args: string[]; selection: SuiteSelection; cleanup: () => void }> {
+): Promise<{ args: string[]; selection: SuiteSelection; cleanup: () => void; failure?: RetroPrepublishCommandResult }> {
   const broad = (reason: string, changedPathCount: number | null = null) => ({
     args: [], selection: { mode: "broad" as const, reason, changedPathCount, broadSuiteCount: null }, cleanup: () => {} });
   const changed = await changedFiles(worktreePath);
@@ -510,9 +514,13 @@ async function changedPathScope(worktreePath: string, run: RetroPrepublishRunner
   const cleanup = () => rmSync(dir, { recursive: true, force: true });
   const verdict = await run(process.execPath, [...listArg, "--changed-files", list], commandOptions(worktreePath));
   const diffClass = normalizedOutput(verdict.stdout).trim();
-  if (verdict.status !== 0 || verdict.error || verdict.cleanupError || !CHANGED_PATH_CLASSES.has(diffClass)) {
+  if (processCleanupFailed(verdict)) {
     cleanup();
-    return broad(verdict.error || verdict.cleanupError ? "diff class unavailable (command error)"
+    return { ...broad("diff class cleanup unconfirmed", changed.files.length), failure: verdict };
+  }
+  if (verdict.status !== 0 || verdict.error || !CHANGED_PATH_CLASSES.has(diffClass)) {
+    cleanup();
+    return broad(verdict.error ? "diff class unavailable (command error)"
       : `diff class ${diffClass || `unreadable (exit ${verdict.status})`}`, changed.files.length);
   }
   return { args: ["--changed-files", list], cleanup,
@@ -527,6 +535,7 @@ async function enumerateSuites(worktreePath: string, run: RetroPrepublishRunner,
   selection: SuiteSelection;
 }> {
   const scope = await changedPathScope(worktreePath, run, changedFiles, tmpRoot);
+  if (scope.failure) return { suites: [], result: scope.failure, selection: scope.selection };
   let result: RetroPrepublishCommandResult;
   try {
     result = await run(process.execPath, [...listArg, "--list-plan-reading-suites", ...scope.args], commandOptions(worktreePath));
@@ -570,7 +579,7 @@ async function runAttempt(
         cancelledTests: [],
         cancelledCount: undefined,
         hasSummary: false,
-        cleanupFailed: !!enumeration.result.cleanupError,
+        cleanupFailed: processCleanupFailed(enumeration.result),
       },
     };
   }
@@ -629,7 +638,7 @@ async function runAttempt(
       cancelledTests: classified.cancelledTests,
       cancelledCount: classified.cancelledCount,
       hasSummary: classified.hasSummary,
-      cleanupFailed: !!result.cleanupError,
+      cleanupFailed: processCleanupFailed(result),
     },
   };
 }

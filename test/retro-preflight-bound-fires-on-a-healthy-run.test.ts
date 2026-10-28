@@ -17,6 +17,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { retainFixture } from "#test/setup/retained-fixtures.js";
 import {
@@ -383,6 +384,89 @@ test("W1-T10885: the retro watchdog stops its owned descendants without signalin
 });
 
 test("W1-T10885: retro process-group cleanup preserves ordinary results and spawn failures", async t => {
+  for (const evidence of ["both", "cleanupError", "EPROCESSGROUP", "timeout"] as const) {
+    await t.test(`diff classification stands down with ${evidence}`, async t => {
+      const dir = mkdtempSync(join(tmpdir(), "rmd-retro-diff-bound-")), nonce = randomUUID();
+      const ready = join(dir, "ready"), heart = join(dir, "heart"), stop = join(dir, "stop");
+      const wrapper = join(dir, "classifier.mjs");
+      const actor = `const fs=require('node:fs');
+fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.pid,nonce:${JSON.stringify(nonce)}}));
+const tick=setInterval(()=>{fs.appendFileSync(${JSON.stringify(heart)},'tick\\n');
+ if(fs.existsSync(${JSON.stringify(stop)})&&fs.readFileSync(${JSON.stringify(stop)},'utf8')===${JSON.stringify(nonce)})process.exit(0);},25);
+setTimeout(()=>process.exit(0),6000);`;
+      writeFileSync(wrapper, `import {spawn} from 'node:child_process';
+import {existsSync} from 'node:fs';
+import {main} from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "scripts/diff-class.mjs")).href)};
+const child=spawn(process.execPath,['-e',${JSON.stringify(actor)}],{stdio:'ignore',env:process.env});
+child.once('error',()=>process.exit(2));child.unref();
+const ready=setInterval(()=>{if(existsSync(${JSON.stringify(heart)})){clearInterval(ready);main(process.argv.slice(2));}},10);
+${evidence === "timeout" ? "setTimeout(()=>process.exit(0),3000);" : ""}`);
+      const kill = process.kill.bind(process);
+      const denied = Object.assign(new Error("fixture classifier group signal denied"), { code: "EPERM" });
+      const mocked = t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+        if (pid < 0) throw denied;
+        return kill(pid, signal);
+      });
+      const calls: string[][] = [], events: Array<{ step: string; fields: Record<string, unknown> }> = [];
+      let repairs = 0, regenerations = 0, admissions = 0, ownedPid: number | undefined;
+      try {
+        const outcome = await runRetroPrepublishPreflight({
+          worktreePath: dir, provenance: { model: "fixture", effort: "default", sessionId: "classifier-cleanup" },
+          remotePrExisted: false, repair: async () => { repairs++; },
+          regenerateHarnessArtifacts: () => { regenerations++; },
+          log: (step, fields) => { events.push({ step, fields }); },
+          deps: { tmpRoot: dir, changedFiles: async () => ({ files: ["plan/tasks.d/fixture.yaml", "docs/fixture.md"] }),
+            testSlot: { dir: join(dir, "slots"), slots: 1, memoryHeadroom: () => undefined,
+              load: () => { admissions++; return { cores: 8, load1: 0 }; }, log: () => {} },
+            run: async (_command, args) => {
+              calls.push(args);
+              if (calls.length > 1) return { status: 0, signal: null, stderr: "",
+                stdout: args.includes("--list-plan-reading-suites") ? "test/fixture.test.ts\n" : "# tests 1\n# fail 0\n" };
+              const result = await runRetroPrepublishCommand(process.execPath,
+                ["--import", import.meta.resolve("tsx"), wrapper, ...args.slice(3)],
+                { ...options(evidence === "timeout" ? 1_500 : 5_000), cwd: dir });
+              assert.equal(result.status, 0); assert.equal(result.signal, null);
+              assert.equal(result.stdout.trim(), "DOCS_ONLY", "the real classifier must read both affected paths");
+              assert.equal((result.error as NodeJS.ErrnoException).code, evidence === "timeout" ? "ETIMEDOUT" : "EPROCESSGROUP");
+              assert.equal(result.cleanupError, denied);
+              const identity = JSON.parse(readFileSync(ready, "utf8")) as { pid: number; nonce: string };
+              assert.equal(identity.nonce, nonce); assert.ok(Number.isSafeInteger(identity.pid) && identity.pid > 1);
+              ownedPid = identity.pid;
+              const bytes = readFileSync(heart).byteLength;
+              await new Promise(resolve => setTimeout(resolve, 150));
+              assert.ok(readFileSync(heart).byteLength > bytes, "denied cleanup leaves a real descendant writing after the result");
+              if (evidence === "cleanupError") delete result.error;
+              if (evidence === "EPROCESSGROUP") delete result.cleanupError;
+              return result;
+            } },
+        });
+        assert.deepEqual(outcome, { ok: false, attempts: 1, suiteCount: 0, repaired: false });
+        assert.deepEqual({ calls: calls.length, repairs, regenerations, admissions },
+          { calls: 1, repairs: 0, regenerations: 0, admissions: 0 });
+        const failed = events.find(x => x.step === "retro.preflight_failed")!.fields;
+        assert.equal(failed.exit_class, evidence === "timeout" ? "process_timeout" : "process_cleanup_failed");
+        assert.equal(failed.process_cleanup_failed, true);
+        assert.equal(failed.exit_code, 0); assert.equal(failed.signal, null);
+        assert.equal(failed.stdout_excerpt, "DOCS_ONLY\n"); assert.equal(failed.changed_path_count, 2);
+        assert.match(String(failed.stderr_excerpt), /every changed file is in plan scope or under docs/);
+        assert.equal(failed.test_slot_outcome, null); assert.equal(failed.has_summary, false);
+        assert.ok(events.some(x => x.step === "retro.preflight_repair_stood_down"));
+        assert.ok(events.every(x => x.step !== "retro.preflight_passed"));
+        assert.equal(readdirSync(dir).some(name => name.startsWith("rmd-retro-changed-")), false);
+      } finally {
+        mocked.mock.restore();
+        try {
+          writeFileSync(stop, nonce);
+          if (ownedPid === undefined && existsSync(ready)) ownedPid = JSON.parse(readFileSync(ready, "utf8")).pid;
+          if (ownedPid !== undefined) await untilFixture(() => fixturePidEnded(ownedPid!), "classifier descendant must retire before scratch");
+          rmSync(dir, { recursive: true, force: true });
+        } catch (error) {
+          retainFixture(dir, "classifier descendant cleanup is unknown");
+          throw error;
+        }
+      }
+    });
+  }
   const ordinary = await runRetroPrepublishCommand(process.execPath, ["-e", 'process.stdout.write("ordinary");process.stderr.write("warning")'], options(5_000));
   assert.equal(ordinary.status, 0); assert.equal(ordinary.signal, null); assert.equal(ordinary.error, undefined);
   assert.equal(ordinary.stdout, "ordinary"); assert.equal(ordinary.stderr, "warning");
