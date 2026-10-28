@@ -387,3 +387,34 @@ test("an older armed review orphan is not overtaken across refresh batches", asy
     f.cleanup();
   }
 });
+
+
+test("an older unarmed review still starts before a younger armed head's refresh barrier", async t => {
+  const old = { ...pr(991892), createdAt: "2026-10-27T00:00:00Z" };
+  const young = { ...pr(991893), autoMergeArmed: true, createdAt: "2026-10-27T01:00:00Z" };
+  const f = fixture([pr(991891, true), young, old]);
+  const gate = deferred<void>(), entered = deferred<void>();
+  f.effects.selectAdaptiveReviewWidth = () => 1;
+  f.io.readCompare = async () => {
+    entered.resolve();
+    await gate.promise;
+    return { ahead_by: 0, files: [] };
+  };
+  const running = f.hook()();
+  try {
+    await t.waitFor(() => assert.equal(entered.settled, true), { interval: 1, timeout: 2000 });
+    await t.waitFor(() => assert.equal(f.reviewed.length, 1), { interval: 1, timeout: 2000 });
+    assert.deepEqual(f.reviewed, [old.prNumber], "the earlier unarmed candidate keeps its early start");
+    assert.equal(gate.settled, false);
+    gate.resolve();
+    await running;
+    await t.waitFor(() => assert.equal(f.reviewed.length, 2), { interval: 1, timeout: 2000 });
+    assert.deepEqual(f.reviewed, [old.prNumber, young.prNumber]);
+    assert.deepEqual(f.updates, []);
+    assert.deepEqual(f.logs.filter(row => row.step === "sweep_light.error"), []);
+  } finally {
+    gate.resolve();
+    await running;
+    f.cleanup();
+  }
+});
