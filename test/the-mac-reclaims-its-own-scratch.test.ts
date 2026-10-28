@@ -101,6 +101,7 @@ function reclaim(fx: Fixture, freePct: number, apply = true, extra: Record<strin
       RMD_RECLAIM_FREE_PCT: String(freePct),
       RMD_RECLAIM_REPORT: report,
       RMD_RECLAIM_LSOF: fx.lsof,
+      RMD_RECLAIM_KEEP_FILE: join(fx.base, "keep.txt"), // never the operator's own keep list
       RMD_RECLAIM_TSX_FIND: join(fx.bin, "tsx-find-age"),
       TMPDIR: fx.base, // the tsx-cache pass reads TMPDIR; keep it off the real one
       PATH: fx.bin + ":" + process.env.PATH,
@@ -619,5 +620,84 @@ test("the installer schedules one hourly job per account, and re-running it repl
     assert.ok(existsSync(join(home, "Library", "Application Support", "remudero", "tmp-reclaim.sh")), "runs from a stable copy, not the checkout");
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+/** Wrap the fixture lsof so every call also prints the warning macOS lsof gives for a mount it cannot stat. */
+function warnAbout(fx: Fixture, mount: string): string {
+  const wrapper = join(fx.base, "lsof-warning");
+  writeFileSync(wrapper, [
+    "#!/bin/bash",
+    `printf '%s\\n' "lsof: WARNING: can't stat() devicefs file system ${mount}" "      Output information may be incomplete." '      assuming "dev=30000004" from mount table' >&2`,
+    `exec ${JSON.stringify(fx.lsof)} "$@"`,
+  ].join("\n") + "\n", { mode: 0o755 });
+  return wrapper;
+}
+
+test("a mount lsof cannot stat elsewhere does not keep every idle scratch path", () => {
+  // 2026-10-28: another account's CoreDevice DeviceFS made lsof warn on every call, and the
+  // warning was read as an open file, so /private/tmp kept 149 idle entries and deleted none.
+  const fx = fixture();
+  try {
+    mkdirSync(join(fx.root, "old-scratch"));
+    writeFileSync(join(fx.root, "old-scratch", "f"), "x");
+    writeFileSync(join(fx.root, "old-notes.txt"), "x");
+    age(fx.root, HOURS_AGO(8));
+    const { out } = reclaim(fx, 40, true, { RMD_RECLAIM_LSOF: warnAbout(fx, "/Users/other/Library/Developer/CoreDevice/DeviceFS") });
+    assert.ok(!existsSync(join(fx.root, "old-scratch")), out);
+    assert.ok(!existsSync(join(fx.root, "old-notes.txt")), out);
+  } finally {
+    rmSync(fx.base, { recursive: true, force: true });
+  }
+});
+
+test("a mount lsof cannot stat inside a scratch path still keeps that path", () => {
+  const fx = fixture();
+  try {
+    mkdirSync(join(fx.root, "image-session", "v"), { recursive: true });
+    writeFileSync(join(fx.root, "image-session", "scratch.dmg"), "x");
+    mkdirSync(join(fx.root, "old-scratch"));
+    age(fx.root, HOURS_AGO(8));
+    const mount = join(realpathSync(fx.root), "image-session", "v");
+    const { out } = reclaim(fx, 40, true, { RMD_RECLAIM_LSOF: warnAbout(fx, mount) });
+    assert.ok(existsSync(join(fx.root, "image-session", "scratch.dmg")), out);
+    assert.match(out, /KEEP RISKY \((cwd scan unavailable|open file or lsof scan uncertain)\): .*image-session/);
+    assert.ok(!existsSync(join(fx.root, "old-scratch")), out);
+  } finally {
+    rmSync(fx.base, { recursive: true, force: true });
+  }
+});
+
+test("an unexplained lsof warning keeps the path", () => {
+  const fx = fixture();
+  try {
+    mkdirSync(join(fx.root, "old-scratch"));
+    age(fx.root, HOURS_AGO(8));
+    const wrapper = join(fx.base, "lsof-odd");
+    writeFileSync(wrapper, `#!/bin/bash\necho 'lsof: WARNING: something else went wrong' >&2\nexec ${JSON.stringify(fx.lsof)} "$@"\n`, { mode: 0o755 });
+    const { out } = reclaim(fx, 40, true, { RMD_RECLAIM_LSOF: wrapper });
+    assert.ok(existsSync(join(fx.root, "old-scratch")), out);
+  } finally {
+    rmSync(fx.base, { recursive: true, force: true });
+  }
+});
+
+test("host-service names and the account keep list are never reclaimed", () => {
+  const fx = fixture();
+  try {
+    for (const name of ["openclaw", "ollama", "podcast-discovery-cache", "old-scratch"]) {
+      mkdirSync(join(fx.root, name));
+      writeFileSync(join(fx.root, name, "f"), "x");
+    }
+    writeFileSync(join(fx.base, "keep.txt"), "# extra names\n\npodcast-*\n");
+    age(fx.root, HOURS_AGO(8));
+    const { out } = reclaim(fx, 40);
+    for (const name of ["openclaw", "ollama", "podcast-discovery-cache"]) {
+      assert.ok(existsSync(join(fx.root, name, "f")), name + ": " + out);
+    }
+    assert.match(out, /kept host-service name \(podcast-\*\)/);
+    assert.ok(!existsSync(join(fx.root, "old-scratch")), out);
+  } finally {
+    rmSync(fx.base, { recursive: true, force: true });
   }
 });
