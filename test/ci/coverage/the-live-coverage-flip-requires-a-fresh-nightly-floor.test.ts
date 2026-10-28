@@ -306,13 +306,13 @@ const step = (doc: typeof CI, job: string, prefix: string) => {
 };
 
 /** A scratch checkout carrying the helper and the policy files it digests, so a real step runs off the tracked tree. */
-function checkout(): string {
+function checkout(paths = ["scripts/coverage-floor.mjs", "scripts/lib/argv.mjs", "scripts/lib/repo-root.mjs", "scripts/coverage-merge-ratchet.mjs",
+  ".nvmrc", "package-lock.json", "package.json", "test/setup/tmp-hygiene.ts",
+  "scripts/lib/lcov.mjs", "scripts/lib/coverage-chunk-codec.mjs"]): string {
   const dir = tmp("step");
-  for (const f of ["scripts/coverage-floor.mjs", "scripts/lib/argv.mjs", "scripts/lib/repo-root.mjs", "scripts/coverage-merge-ratchet.mjs",
-    ".nvmrc", "package-lock.json", "package.json", "test/setup/tmp-hygiene.ts",
-    "scripts/lib/lcov.mjs", "scripts/lib/coverage-chunk-codec.mjs"]) {
+  for (const f of paths) {
     mkdirSync(dirname(join(dir, f)), { recursive: true });
-    cpSync(join(REPO_ROOT, f), join(dir, f));
+    cpSync(join(REPO_ROOT, f), join(dir, f), { recursive: true });
   }
   return dir;
 }
@@ -348,9 +348,12 @@ esac
   return { status: r.status, out: r.stdout + r.stderr, calls: read("calls.log") + gh.calls().map((c) => `gh ${c}\n`).join(""), read, cwd };
 }
 
-test("W1-T5892: coverage-ledger stays the dependency-free choice it was, and pins no floor", () => {
-  assert.equal(CI.jobs["coverage-ledger"]!.outputs?.floor_decision, undefined);
-  assert.doesNotMatch(JSON.stringify(CI.jobs["coverage-ledger"]), /coverage-floor/);
+test("W1-T5892: the existing ledger prerequisite owns admission without adding a check name", () => {
+  const owner = CI.jobs["coverage-ledger"]!;
+  assert.equal(owner.outputs?.artifact_id, "${{ steps.finish.outputs.artifact_id }}");
+  assert.equal(owner.outputs?.digest, "${{ steps.resolve.outputs.digest }}");
+  assert.equal(owner.outputs?.floor_decision, "${{ steps.floor-finish.outputs.decision }}");
+  assert.equal(CI.jobs["coverage-floor-admission"], undefined);
 });
 
 const shardBody = step(CI, "coverage-ratchet", "Test with coverage").run!
@@ -362,14 +365,13 @@ const output = (text: string, key: string) => text.split("\n").filter((line) => 
 
 /** Execute admission and final publication. Only GitHub transport is synthetic. */
 function admit(n = nightly({ measuredAt: new Date(Date.now() - 3_600_000),
-  row: { updatedAt: new Date(Date.now() - 3_000_000).toISOString() } }), files = artifact(n.provenance), published = "success") {
-  const cwd = checkout();
-  const selected = runStep(step(CI, "coverage-floor-admission", "Select one coverage floor").run!, live,
+  row: { updatedAt: new Date(Date.now() - 3_000_000).toISOString() } }), files = artifact(n.provenance), published = "success", cwd = checkout()) {
+  const selected = runStep(step(CI, "coverage-ledger", "Select one coverage floor").run!, live,
     routes(join(cwd, "coverage-floor-pin"), n.row, files), cwd);
   assert.equal(selected.status, 0, selected.out);
   const selectedOutputs = selected.read("outputs.txt");
   const decision = output(selectedOutputs, "decision"), reason = output(selectedOutputs, "reason");
-  const finished = runStep(step(CI, "coverage-floor-admission", "Finalize the global floor decision").run!,
+  const finished = runStep(step(CI, "coverage-ledger", "Finalize the global floor decision").run!,
     { DECISION: decision, REASON: reason, PUBLISHED: published });
   assert.equal(finished.status, 0, finished.out);
   const env = { ...live, FLOOR_DECISION: output(finished.read("outputs.txt"), "decision"),
@@ -383,21 +385,34 @@ function admit(n = nightly({ measuredAt: new Date(Date.now() - 3_600_000),
   return { selected, env, pin, transport };
 }
 
+test("W1-T5892: sparse admission shares the producers' policy identity without dependencies", () => {
+  const owner = CI.jobs["coverage-ledger"]!;
+  const inputs = owner.steps.find((s) => s.uses?.startsWith("actions/checkout@"))!.with!["sparse-checkout"];
+  const cwd = checkout(String(inputs).split(/\s+/).filter(Boolean));
+  assert.equal(existsSync(join(cwd, "node_modules")), false);
+  assert.equal(policyDigest(cwd), CONSUMER.policyDigest, "sparse and complete checkouts hash the same policy bytes");
+  const a = admit(undefined, undefined, "success", cwd);
+  assert.equal(a.env.FLOOR_DECISION, "narrow", a.selected.out);
+  const shard = runStep(shardBody, a.env, a.transport);
+  assert.equal(shard.status, 0, shard.out);
+  assert.equal(shard.read("coverage-floor-pin.json"), a.pin);
+});
+
 const seedShards = (pin: string, split = 0) => Array.from({ length: 8 }, (_, i) => {
   const dir = `coverage-shards/coverage-shard-${i + 1}`;
   return `mkdir -p ${dir}\necho narrow > ${dir}/selection\ncat > ${dir}/floor-pin.json <<'PIN'\n${i + 1 === split ? pin.replace('"run_id": 111', '"run_id": 112') : pin}PIN\n`;
 }).join("\n");
 
 test("W1-T5892: one admission precedes all shards and every consumer uses its published pin", () => {
-  assert.equal(CI.jobs["coverage-floor-admission"]!.outputs?.decision, "${{ steps.finish.outputs.decision }}");
+  assert.equal(CI.jobs["coverage-ledger"]!.outputs?.floor_decision, "${{ steps.floor-finish.outputs.decision }}");
   for (const job of ["coverage-ratchet", "coverage-ratchet-required"]) {
-    assert.ok(CI.jobs[job]!.needs?.includes("coverage-floor-admission"), `${job} must wait for admission`);
+    assert.ok(CI.jobs[job]!.needs?.includes("coverage-ledger"), `${job} must wait for admission`);
     const consumer = step(CI, job, job === "coverage-ratchet" ? "Test with coverage" : "Coverage ratchet");
     for (const [key, field] of [["FLOOR_DECISION", "decision"], ["FLOOR_ARTIFACT", "artifact"], ["FLOOR_PIN_DIGEST", "pin_digest"]]) {
-      assert.equal(consumer.env?.[key!], `\${{ needs.coverage-floor-admission.outputs.${field} }}`);
+      assert.equal(consumer.env?.[key!], `\${{ needs.coverage-ledger.outputs.floor_${field} }}`);
     }
   }
-  const publish = step(CI, "coverage-floor-admission", "Publish the verified admission");
+  const publish = step(CI, "coverage-ledger", "Publish the verified admission");
   assert.equal(publish.with?.name, "coverage-floor-pin-${{ github.run_attempt }}");
   assert.equal(publish.with?.path, "coverage-floor-pin");
   const a = admit();
@@ -436,7 +451,7 @@ test("W1-T5892: refused admission and publication failure make every shard full 
     }
   }
   for (const env of [{ ...live, RMD_AFFECTED_SUITE_LIVE: "0" }, { ...live, GITHUB_EVENT_NAME: "merge_group" }]) {
-    const owner = runStep(step(CI, "coverage-floor-admission", "Select one coverage floor").run!, env);
+    const owner = runStep(step(CI, "coverage-ledger", "Select one coverage floor").run!, env);
     assert.equal(owner.status, 0, owner.out);
     assert.doesNotMatch(owner.calls, /coverage-floor|gh /);
     const shard = runStep(shardBody, env);

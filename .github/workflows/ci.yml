@@ -1513,11 +1513,16 @@ jobs:
   coverage-ledger:
     name: coverage-ledger
     runs-on: ubuntu-latest
+    # W1-T5892: this prerequisite publishes the shared floor pin before coverage shards start.
     # 75 - 49 - 20 - 5 = 1 minute, including setup: preserve WAIT_CAP_SECONDS and its margin.
     timeout-minutes: 1
     outputs:
       artifact_id: ${{ steps.finish.outputs.artifact_id }}
       digest: ${{ steps.resolve.outputs.digest }}
+      floor_decision: ${{ steps.floor-finish.outputs.decision }}
+      floor_reason: ${{ steps.floor-finish.outputs.reason }}
+      floor_pin_digest: ${{ steps.floor-select.outputs.pin_digest }}
+      floor_artifact: coverage-floor-pin-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1525,6 +1530,9 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             .nvmrc
+            package.json
+            package-lock.json
+            test/setup/tmp-hygiene.ts
             scripts/
             src/lib/plan-scope.ts
             src/lib/rule-suites.ts
@@ -1608,23 +1616,8 @@ jobs:
           [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] || { echo "::error::coverage-ledger: selected ledger was not published"; exit 1; }
           echo "artifact_id=${ARTIFACT_ID}" >> "$GITHUB_OUTPUT"
 
-  coverage-floor-admission:
-    name: coverage-floor-admission
-    runs-on: ubuntu-latest
-    # Parallel with coverage-ledger; retain the required gate's five-minute scheduling margin.
-    timeout-minutes: 1
-    outputs:
-      decision: ${{ steps.finish.outputs.decision }}
-      reason: ${{ steps.finish.outputs.reason }}
-      pin_digest: ${{ steps.select.outputs.pin_digest }}
-      artifact: coverage-floor-pin-${{ github.run_attempt }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
       - name: Select one coverage floor before any shard can narrow
-        id: select
+        id: floor-select
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -1638,8 +1631,8 @@ jobs:
             echo "reason=coverage floor admission failed or exceeded its 30s bound" >> "$GITHUB_OUTPUT"
           }
       - name: Publish the verified admission for every consumer
-        id: publish
-        if: steps.select.outputs.decision == 'narrow'
+        id: floor-publish
+        if: steps.floor-select.outputs.decision == 'narrow'
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -1648,11 +1641,11 @@ jobs:
           retention-days: 1
           if-no-files-found: error
       - name: Finalize the global floor decision
-        id: finish
+        id: floor-finish
         env:
-          DECISION: ${{ steps.select.outputs.decision }}
-          REASON: ${{ steps.select.outputs.reason }}
-          PUBLISHED: ${{ steps.publish.outcome }}
+          DECISION: ${{ steps.floor-select.outputs.decision }}
+          REASON: ${{ steps.floor-select.outputs.reason }}
+          PUBLISHED: ${{ steps.floor-publish.outcome }}
         run: |
           if [ "$DECISION" = "narrow" ] && [ "$PUBLISHED" != "success" ]; then
             DECISION=full
@@ -1675,7 +1668,7 @@ jobs:
     # fails when the diff adds a source line lcov marks instrumented but never hit.
     name: coverage-shard (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
-    needs: [coverage-ledger, coverage-floor-admission]
+    needs: [coverage-ledger]
     strategy:
       fail-fast: false
       matrix:
@@ -1747,7 +1740,7 @@ jobs:
           LEDGER_DIGEST: ${{ needs.coverage-ledger.outputs.digest }}
         run: |
           set -euo pipefail
-          { [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; } && [ "${{ steps.classify.outputs.class }}" = "SOURCE" ] || exit 0
+          { [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || { [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" = "1" ]; }; } && [ "${{ steps.classify.outputs.class }}" = "SOURCE" ] || exit 0
           die() { echo "::error::coverage-ledger: $*" >&2; exit 1; }
           [[ "$LEDGER_ARTIFACT_ID" =~ ^[0-9]+$ ]] || die "run supplied no resolved artifact id"
           [[ "$LEDGER_DIGEST" =~ ^[0-9a-f]{64}$ ]] || die "run supplied no resolved content digest"
@@ -1854,10 +1847,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          FLOOR_DECISION: ${{ needs.coverage-floor-admission.outputs.decision }}
-          FLOOR_REASON: ${{ needs.coverage-floor-admission.outputs.reason }}
-          FLOOR_ARTIFACT: ${{ needs.coverage-floor-admission.outputs.artifact }}
-          FLOOR_PIN_DIGEST: ${{ needs.coverage-floor-admission.outputs.pin_digest }}
+          FLOOR_DECISION: ${{ needs.coverage-ledger.outputs.floor_decision }}
+          FLOOR_REASON: ${{ needs.coverage-ledger.outputs.floor_reason }}
+          FLOOR_ARTIFACT: ${{ needs.coverage-ledger.outputs.floor_artifact }}
+          FLOOR_PIN_DIGEST: ${{ needs.coverage-ledger.outputs.floor_pin_digest }}
         run: |
           # W1-T4406: `merge_group` widens this guard alongside `pull_request` — never replaces it;
           # every pull_request behavior below is untouched. The merge queue's own commit is the
@@ -2058,7 +2051,7 @@ jobs:
   coverage-ratchet-required:
     name: coverage-ratchet
     runs-on: ubuntu-latest
-    needs: [coverage-ratchet, coverage-ledger, coverage-floor-admission]
+    needs: [coverage-ratchet, coverage-ledger]
     if: ${{ always() }}
     # PR #8080's eight shards passed, but merging their compact V8 reports ran past this job's
     # former 10m cap and GitHub cancelled the required check. A prior merge took 7m; 20m bounds
@@ -2294,9 +2287,9 @@ jobs:
           RMD_CI_REPORT: "1"
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          FLOOR_DECISION: ${{ needs.coverage-floor-admission.outputs.decision }}
-          FLOOR_ARTIFACT: ${{ needs.coverage-floor-admission.outputs.artifact }}
-          FLOOR_PIN_DIGEST: ${{ needs.coverage-floor-admission.outputs.pin_digest }}
+          FLOOR_DECISION: ${{ needs.coverage-ledger.outputs.floor_decision }}
+          FLOOR_ARTIFACT: ${{ needs.coverage-ledger.outputs.floor_artifact }}
+          FLOOR_PIN_DIGEST: ${{ needs.coverage-ledger.outputs.floor_pin_digest }}
         run: |
           # W1-T4406: merge_group widens this guard alongside pull_request (never replaces it).
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping on a ${GITHUB_EVENT_NAME} event (no coverage/lcov.info was collected above)."; exit 0; }
