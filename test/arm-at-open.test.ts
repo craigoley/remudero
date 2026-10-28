@@ -159,6 +159,11 @@ test(
     assert.equal(outcome, "armed");
     assert.equal(armedUrl, "url/open-1");
     assert.deepEqual(merged, [], "the happy arm path never touches the direct-merge fallback");
+    assert.deepEqual(
+      said.filter((m) => /refused|withheld|error_ignored|direct_merge|irreversib/i.test(m)),
+      [],
+      "the happy arm path says nothing about a refusal, an ignored error or a direct merge",
+    );
   },
 );
 
