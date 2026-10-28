@@ -779,7 +779,7 @@ export async function runRetroPrepublishPreflight(
       reason: named === 0
         ? `the ${first.failure!.exitClass} failure carries no failing test name in retained output — ` +
           `${interruption}; the suite verdict is incomplete, so standing down under the same conditions`
-        : `the ${first.failure!.exitClass} failure ended the attempt after it named ${named} failing test(s) — ` +
+        : `the ${first.failure!.exitClass} ${first.failure!.exitClass === "process_cleanup_failed" ? "failure ended the attempt" : "bound stopped the run"} after it named ${named} failing test(s) — ` +
           `${interruption}; retained output is not a complete plan verdict, so standing down under the same conditions`,
       ...provenanceFields(opts.provenance),
     });

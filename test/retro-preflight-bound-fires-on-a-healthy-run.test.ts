@@ -481,3 +481,33 @@ test("W1-T10885: interrupted diff classification cannot narrow the checked suite
     assert.deepEqual(readdirSync(dir), []);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("W1-T10885: a cleanup refusal keeps assertion evidence without claiming a timeout", async t => {
+  const kill = process.kill.bind(process);
+  const mocked = t.mock.method(process, "kill", (pid: number, signal?: string | number) => {
+    if (pid < 0) throw Object.assign(new Error("fixture group signal denied"), { code: "EPERM" });
+    return kill(pid, signal);
+  });
+  let calls = 0, repairs = 0;
+  const events: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  try {
+    const result = await runRetroPrepublishPreflight({
+      worktreePath: REPO_ROOT, provenance: { model: "fixture", effort: "default", sessionId: "cleanup-with-assertion" },
+      remotePrExisted: false, repair: async () => { repairs++; }, regenerateHarnessArtifacts: () => {},
+      log: (step, fields) => { events.push({ step, fields }); },
+      deps: { changedFiles: async () => ({ unreadable: "no PR diff" }), run: async () => {
+        if (++calls === 1) return { status: 0, signal: null, stdout: "test/fixture.test.ts\n", stderr: "" };
+        return runRetroPrepublishCommand(process.execPath, ["-e", 'process.stdout.write("not ok 1 - fixture assertion\\n# tests 1\\n# fail 1\\n");process.exitCode=1'], options(5_000));
+      } },
+    });
+    assert.equal(result.ok, false); assert.equal(repairs, 0); assert.equal(calls, 2);
+    const failed = events.find(x => x.step === "retro.preflight_failed")!.fields;
+    assert.equal(failed.exit_class, "process_cleanup_failed");
+    assert.equal(failed.process_cleanup_failed, true);
+    assert.deepEqual(failed.failing_tests, ["fixture assertion"]);
+    const reason = String(events.find(x => x.step === "retro.preflight_repair_stood_down")?.fields.reason);
+    assert.match(reason, /failure ended the attempt after it named 1 failing test/);
+    assert.match(reason, /could not confirm its owned process-group cleanup/);
+    assert.doesNotMatch(reason, /execution bound|bound stopped the run/);
+  } finally { mocked.mock.restore(); }
+});
