@@ -4160,6 +4160,11 @@ export async function runTask(
     config?: Config;
     /** Persist a caller's exact native run identity before any asynchronous work or spend. */
     onRunCreated?: (runId: string) => void;
+    /** A bounded target keeps its repository projection and verified credit in the same namespace. */
+    repositoryState?: {
+      project: (plan: Plan) => Map<string, StatusProjection>;
+      persistCredit: (task: Task, pr: { number: number; url: string }, files: readonly string[] | undefined) => ReturnType<typeof persistVerifiedCredit>;
+    };
     /** W1-T7096: the drain and the CLI ask the production LLM progress judge in the fix rung. */
     productionProgressJudge?: boolean;
     preopenGate?: RunTaskBodyOptions["preopenGate"];
@@ -4776,7 +4781,8 @@ export async function runTask(
   // owner/repo, so lanes 2..N hit a warm `knownBoardPrs` index (a `mode: "delta"` fetch)
   // instead of each paying `mode: "full"`. Absent it, this is byte-identical to before.
   const github = opts.github ?? opts.githubFor?.(owner, task.repo) ?? createDaemonGatewayFactory(config.root, log)(owner, task.repo);
-  const projection = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
+  const projection = opts.repositoryState?.project(plan) ?? projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
+  const persistRunCredit = opts.repositoryState?.persistCredit ?? persistVerifiedCredit.bind(null, ledgerPath);
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
   // W1-T322/W1-T367: computed once per run off the SAME plan+projection already built above —
   // the SHIPS-UNWIRED marker verification set both `runReviewFn` and `runFixRung` below consult.
@@ -7139,7 +7145,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       if (claim && resolved) {
         const v = alreadySatisfiedVerdict(impl, costUsd, "implement", resolved);
         // Make the credit the dispatcher's too, or its next projection re-dispatches the task.
-        const credit = persistVerifiedCredit(ledgerPath, task, resolved, github.changedFiles?.(resolved.url));
+        const credit = persistRunCredit(task, resolved, github.changedFiles?.(resolved.url));
         log("already_satisfied.credit_persisted", { pr_number: resolved.number, outcome: credit });
         try {
           worktreeRemove(repoDir, worktreePath);

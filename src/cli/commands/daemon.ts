@@ -78,7 +78,7 @@ import { loadPolicy, policyPath } from "../../lib/policy.js";
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
 import { dispatchClaimRef, findClaimMintRow, releaseReplacedContainerClaims, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
-import { buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
+import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
@@ -348,6 +348,15 @@ export function createNativeTargetRepository(root: string, owner: string, repo: 
     isLifetimeCapExceeded: (id: string) => hasRepeatedTaskAttributableLifetimeDispatches(current().lines, id),
   } satisfies Partial<DrainDeps>;
   return {
+    persistCredit: (task: Plan["tasks"][number], pr: { number: number; url: string }, files: readonly string[] | undefined) => {
+      if (!files?.length) return "unreadable" as const;
+      if (refusesAsPlanOnly(task, files)) return "plan-only" as const;
+      const path = join(state, "credits.json");
+      saveCreditStore(path, recordCredit(loadCreditStore(path), task.id, {
+        source: "trailer", prUrl: pr.url, prNumber: pr.number, prState: "MERGED",
+      }));
+      return "recorded" as const;
+    },
     project: (plan: Plan) => {
       governors.beginSelectionPass();
       github.resetFailureFlags?.();
@@ -1961,6 +1970,7 @@ export async function daemonCommand(
               planPath: job.planPath, config, allowStale: false, pairedTrialHost: "daemon", owner: job.owner, githubFor: laneGithubFor, handOffAtPrOpen: true,
               planSnapshot: async () => ({ plan: job.plan, staleDispatch: false }),
               onRunCreated: job.onRunCreated,
+              repositoryState: targetRepositoryFor(job.owner, job.repo),
               ...(gitCredentialSocket ? { gitCredentialSocketPath: gitCredentialSocket.socketPath } : {}),
             }),
             claimHeld: async (taskId, repo) => {
