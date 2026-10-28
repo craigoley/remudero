@@ -137,7 +137,9 @@ export function withoutBirthRounds(rounds: readonly CiFrictionRound[], search: P
 }
 
 /** The gardener's own source: a hand fix there is the gardener's development, not CI friction it should file a task against. */
-const CI_FRICTION_SELF_FILE_RE = /^src\/lib\/ci-friction-[\w-]+\.ts$/;
+function isCiFrictionSelfFile(file: string): boolean {
+  return file.startsWith("src/lib/ci-friction-") && file.endsWith(".ts") && !file.slice("src/lib/".length).includes("/");
+}
 
 /** A manual change records file overlap, not proof that a particular check failed or was repaired.
  * Preserve it as its own median-proxy observation under the existing repeated-file threshold.
@@ -162,7 +164,7 @@ export function ciFrictionHandFixRounds(
   const result: CiFrictionRound[] = [];
   for (const fix of unique) {
     if (pricedPrs.has(fix.pr)) continue;
-    for (const file of fix.files) if (!CI_FRICTION_SELF_FILE_RE.test(file)) unowned.set(file, [...(unowned.get(file) ?? []), fix]);
+    for (const file of fix.files) if (!isCiFrictionSelfFile(file)) unowned.set(file, [...(unowned.get(file) ?? []), fix]);
   }
   const emitted = new Set<number>();
   for (const [file, repairs] of [...unowned].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))) {
