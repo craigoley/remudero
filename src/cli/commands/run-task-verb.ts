@@ -32,7 +32,7 @@ import { billingMode, readBinaryPin, type BillingMode } from "../../lib/env.js";
 import { renderAnchorBlock } from "../../lib/compaction.js";
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "../../lib/unfinished-checkpoint.js";
 import { hashInstallInputs } from "../../lib/install-hash.js";
-import { PREOPEN_GATE_STEP, preopenGateLedgerFields, preopenGateStepDetail, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "../../lib/preopen-gate.js";
+import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "../../lib/preopen-gate.js";
 import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderReconPrompt, scopeGuardOutOfScopeFiles, type PriorPartialWork } from "../../lib/prompt-render.js";
 import type { RunResult } from "../../lib/run-result.js";
 import { dropTierRowsBeforePush, prePushGateRefusal } from "../../lib/pre-push-refusal.js";
@@ -131,12 +131,6 @@ import { buildIntoStore, childEntryStoreRoot } from "../../lib/child-entry-store
 import { buildEngineAfterStore } from "../../lib/engine-tree.js";
 import { chainAbortSignal } from "../../lib/run-child.js";
 import { type RollupCheck, fetchCiFailures, fetchCiFailuresAsync } from "../../lib/tick-read-worker.js";
-
-/** W1-T10920: why the gate's steps failed (`failed_detail`, a tail per step) and which ones its own sandbox broke. */
-function gateStepDetailFields(gate: PreopenGateResult): Record<string, unknown> {
-  const { failedDetail, environmentSteps } = preopenGateStepDetail(gate);
-  return { ...(failedDetail ? { failed_detail: failedDetail } : {}), ...(environmentSteps ? { environment_steps: environmentSteps } : {}) };
-}
 
 export type GitRunner = (args: string[], stdin?: string) => string;
 
@@ -6912,7 +6906,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       reprovisionInstallIfDrifted("preopen_gate");
       const gate = await preopenGate(worktreePath);
       log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
-        ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}), ...preopenGateLedgerFields(gate), ...gateStepDetailFields(gate) });
+        ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}), ...preopenGateLedgerFields(gate) });
       updatePreopenGateAlert({ stateDir: dirname(ledgerPath), readRows: () => readLedgerLines(ledgerPath), log });
       if (gate.kind === "fail") {
         const preopenYield = await yieldAtWorkerBoundary("preopen_gate", "implementing");
@@ -6944,7 +6938,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         const repairedGate = await preopenGate(worktreePath);
         log(PREOPEN_GATE_STEP, { after_repair: true, result: repairedGate.kind,
           failed: repairedGate.kind === "fail" ? repairedGate.failedSteps : [], duration_ms: repairedGate.durationMs,
-          ...(repairedGate.kind === "unmeasured" ? { reason: repairedGate.reason } : {}), ...preopenGateLedgerFields(repairedGate), ...gateStepDetailFields(repairedGate) });
+          ...(repairedGate.kind === "unmeasured" ? { reason: repairedGate.reason } : {}), ...preopenGateLedgerFields(repairedGate) });
         updatePreopenGateAlert({ stateDir: dirname(ledgerPath), readRows: () => readLedgerLines(ledgerPath), log });
         // W1-T10752: a run never opens a PR over an unresolved merge. The worktree stays as evidence and the restored head is kept.
         const stillConflicted = reconcilePaths.length === 0 ? [] : unresolvedMainConflicts(worktreePath, reconcilePaths);

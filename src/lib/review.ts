@@ -1981,8 +1981,8 @@ export function proofCheckoutGitDirs(cwd: string): { common?: string; worktree?:
   return existsSync(worktree) ? { common, worktree } : {};
 }
 
-/** Where a checkout's `node_modules` really lives when it is a link to a shared install, plus every top-level package
- *  link out of that install (npm workspaces link `node_modules/@scope/pkg` to the install's own `packages/`). */
+/** Where a checkout's `node_modules` really lives, plus package and .bin links out of that install.
+ *  The tsc adapter's single imported helper is code too; its owning checkout stays hidden. */
 export function proofLinkedModuleRoots(cwd: string): string[] {
   let target: string;
   try {
@@ -1997,7 +1997,7 @@ export function proofLinkedModuleRoots(cwd: string): string[] {
   const scan = (dir: string, depth: number): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name);
-      if (depth === 0 && entry.isDirectory() && entry.name.startsWith("@")) scan(path, 1);
+      if (depth === 0 && entry.isDirectory() && (entry.name.startsWith("@") || entry.name === ".bin")) scan(path, 1);
       if (!entry.isSymbolicLink()) continue;
       let real: string;
       try {
@@ -2006,10 +2006,16 @@ export function proofLinkedModuleRoots(cwd: string): string[] {
         continue; // a dangling package link resolves to nothing the sandbox could mount
       }
       if (!isWithin(real, target) && !isWithin(real, checkout)) roots.push(real);
+      // The installed tsc adapter links outside node_modules and imports this one source module.
+      // Bind its code only: exposing the owning checkout would expose its .git and credentials.
+      if (entry.name === "tsc" && real.endsWith("/scripts/tsc-entry.mjs")) {
+        const helper = join(dirname(dirname(real)), "src/lib/typecheck-buildinfo.ts");
+        if (existsSync(helper) && !isWithin(helper, checkout)) roots.push(helper);
+      }
     }
   };
   scan(target, 0);
-  return roots;
+  return [...new Set(roots)];
 }
 
 /** Each link BETWEEN a checkout's `node_modules` and the install it finally resolves to. A worker worktree links to an

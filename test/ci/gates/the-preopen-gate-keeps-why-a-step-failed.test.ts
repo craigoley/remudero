@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
+import { spawnFailureDetail } from "#src/lib/commit-message.js";
 import {
-  GATE_DETAIL_MAX_BYTES, defaultGateContainment, findOnPath, preopenGateEnv, readGateSummary, runPreopenGate,
+  GATE_DETAIL_MAX_BYTES, defaultGateContainment, findOnPath, preopenGateEnv, preopenGateLedgerFields, readGateSummary, renderPreopenGatePrompt, runPreopenGate,
   type GateRun,
 } from "#src/lib/preopen-gate.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -24,9 +26,11 @@ const noProcfs = () => [];
 
 test("W1-T10920: a failed gate step keeps a bounded tail of why it failed", async () => {
   const lines = Array.from({ length: 400 }, (_, i) => `src/lib/x.ts(${i + 1},1): error TS2322: Type 'string' is not assignable to type 'number'.`);
+  const token = `ghp_${"a".repeat(36)}`;
   const { home, run } = summaryRun((gateHome) => [
     { name: "commitlint", ok: true, detail: "commitlint: PASS" },
-    { name: "typecheck", ok: false, detail: `typecheck: FAIL — tsc -p tsconfig.json --noEmit\n${lines.join("\n")}\ntsbuildinfo kept at ${gateHome}/cache/x` },
+    { name: "typecheck", ok: false, detail: `typecheck: FAIL — tsc -p tsconfig.json --noEmit\n${lines.join("\n")}\n${token}\nhost cache: ${homedir()}/.cache/x\ntsbuildinfo kept at ${gateHome}/cache/x` },
+    { name: "secret-tail", ok: false, detail: `ghp_${"b".repeat(GATE_DETAIL_MAX_BYTES * 2)}` },
   ]);
   try {
     const gate = await runPreopenGate("/nowhere", { runGate: async () => run, runPushGate: noPush, scanProcfsWrites: noProcfs });
@@ -37,7 +41,12 @@ test("W1-T10920: a failed gate step keeps a bounded tail of why it failed", asyn
     assert.match(tail, /x\.ts\(400,1\): error TS2322/, "the TAIL is kept: the last diagnostic survives");
     assert.doesNotMatch(tail, /x\.ts\(1,1\)/, "the head is what gets cut");
     assert.match(tail, /tsbuildinfo kept at \$GATE_HOME\/cache\/x$/, "the throwaway HOME is named, not printed");
+    assert.ok(!tail.includes(token), "recognized tokens are scrubbed from retained detail");
+    assert.match(tail, /<redacted>/);
+    if (homedir() !== "/") assert.match(tail, /host cache: \$HOME\/\.cache\/x/);
+    assert.equal(gate.failedDetail["secret-tail"], "<redacted>", "redaction precedes truncation, so no token fragment survives");
     assert.equal(gate.failedDetail.commitlint, undefined, "a passing step contributes no detail");
+    assert.deepEqual(preopenGateLedgerFields(gate).failed_detail, gate.failedDetail, "both gate row writers retain the redacted detail map");
     const head = readGateSummary(join(home, "preflight-summary.json"), 0);
     assert.ok(!("unreadable" in head));
     assert.ok(!JSON.stringify(head).includes(home), "the throwaway HOME path is scrubbed from the detail");
@@ -51,7 +60,26 @@ test("W1-T10920: a step its sandbox broke is unmeasured, not the build", async (
     { name: "a NOT_RUN admission", env: ["typecheck"], handed: [],
       steps: [{ name: "typecheck", ok: false, detail: "typecheck: NOT_RUN (static admission refused: headroom 1200 MiB under a 3072 MiB peak)" }] },
     { name: "a spawn that never ran", env: ["typecheck"], handed: [],
-      steps: [{ name: "typecheck", ok: false, detail: "typecheck: SPAWN FAILURE — spawnSync tsc EACCES; the check did NOT run, so this is not a result about the code" }] },
+      steps: [{ name: "typecheck", ok: false, detail: spawnFailureDetail("typecheck", { status: null, error: "spawnSync tsc EACCES" }) }] },
+    ...[
+      ["missing dependency", "ENOENT: no such file or directory, open '/opt/harness/node_modules/typescript/lib.d.ts'"],
+      ["relative dependency", "ENOENT: no such file or directory, open 'node_modules/typescript/lib.d.ts'"],
+      ["read-only cache", "EROFS: read-only file system, mkdir '/home/runner/.cache/swc'"],
+      ["sandbox temporary file", "EACCES: permission denied, open '/tmp/tsx-1000/x'"],
+      ["bwrap mount", "bwrap: Can't bind mount /opt/harness: No such file or directory"],
+      ["swc cache failure", "failed to create swc cache directory: /home/runner/.swc/cache"],
+      ["swc cache path failure", "failed to create cache directory: /home/runner/.swc/cache"],
+      ["tsx IPC failure", "Error: listen /tmp/tsx-1000/12345.pipe"],
+      ["harness path", `EPERM: operation not permitted, open '${REPO_ROOT}/bin/rmd'`],
+    ].map(([name, detail]) => ({ name, env: ["typecheck"], handed: [], steps: [{ name: "typecheck", ok: false, detail }] })),
+    ...[
+      ["source permission", "EACCES: permission denied, open 'src/generated.ts'"],
+      ["missing source", "ENOENT: no such file or directory, open '/project/src/generated.ts'"],
+      ["unrelated errno", "EPERM: operation not permitted"],
+      ["source mentions cache", "EACCES: permission denied, open 'src/cache.ts'"],
+      ["errno and unrelated cache line", "EACCES: permission denied, open 'src/generated.ts'\ncache is at /tmp/cache"],
+      ["diagnostic overrules environment", "typecheck: NOT_RUN\nsrc/generated.ts(1,2): error TS2322: ENOENT /tmp/cache"],
+    ].map(([name, detail]) => ({ name, env: [], handed: ["typecheck"], steps: [{ name: "typecheck", ok: false, detail }] })),
     { name: "a sandbox errno beside a real failure", env: ["rule-checks"], handed: ["claims"],
       steps: [
         { name: "rule-checks", ok: false, detail: "rule-checks: FAIL\nError: listen EPERM: operation not permitted /tmp/tsx-1000/12345.pipe" },
@@ -68,8 +96,11 @@ test("W1-T10920: a step its sandbox broke is unmeasured, not the build", async (
       } else {
         assert.equal(gate.kind, "fail", c.name);
         assert.deepEqual(gate.kind === "fail" ? gate.failedSteps : [], c.handed, `${c.name}: only the build's own failure is handed to the worker`);
+        const prompt = renderPreopenGatePrompt(gate.kind === "fail" ? gate.failedSteps : [], true);
+        for (const step of c.env) assert.ok(!prompt.includes(`  - ${step}`), `${c.name}: environment steps never enter the repair prompt`);
       }
-      assert.deepEqual("environmentSteps" in gate ? gate.environmentSteps : undefined, c.env, `${c.name}: the environment steps are recorded`);
+      assert.deepEqual("environmentSteps" in gate ? gate.environmentSteps : undefined, c.env.length ? c.env : undefined, `${c.name}: the environment steps are recorded`);
+      assert.deepEqual(preopenGateLedgerFields(gate).environment_steps, c.env.length ? c.env : undefined);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -104,9 +135,16 @@ test("W1-T10920: a clean tree passes typecheck inside the real gate sandbox", as
     const sandbox = await defaultGateContainment({ cwd: tree, home, harnessRoot: REPO_ROOT, env });
     assert.equal(sandbox.mode, "sandboxed", `the gate sandbox must start where bwrap exists: ${sandbox.mode === "unavailable" ? sandbox.reason : ""}`);
     if (sandbox.mode !== "sandboxed") return;
-    const tsc = join(tree, "node_modules", "typescript", "bin", "tsc");
-    const r = spawnSync(sandbox.file, [...sandbox.argv, process.execPath, tsc, "-p", "tsconfig.json"], { cwd: tree, env, encoding: "utf8", timeout: 120_000 });
+    const entry = pathToFileURL(join(REPO_ROOT, "src/lib/commit-message.ts")).href;
+    const loader = pathToFileURL(join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs")).href;
+    const script = `import { typecheckStep } from ${JSON.stringify(entry)};
+      const step = typecheckStep(process.cwd());
+      console.log(JSON.stringify(step));
+      process.exitCode = step.ok ? 0 : 1;`;
+    const r = spawnSync(sandbox.file, [...sandbox.argv, process.execPath, "--import", loader, "--input-type=module", "-e", script], { cwd: tree, env, encoding: "utf8", timeout: 120_000 });
     assert.equal(r.status, 0, `a clean tree's typecheck fails inside the gate sandbox:\n${(r.stdout ?? "") + (r.stderr ?? "")}`);
+    assert.deepEqual(JSON.parse(r.stdout.trim()), { name: "typecheck", ok: true, detail: "typecheck: PASS — tsc -p tsconfig.json --noEmit" });
+    assert.ok(existsSync(join(tree, ".rmd-typecheck.tsbuildinfo")), "production cache preparation wrote the fixture's buildinfo");
   } finally {
     rmSync(tree, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });

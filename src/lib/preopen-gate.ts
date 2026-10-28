@@ -21,7 +21,7 @@
  */
 import { hostWorktreeGit } from "./worktree-git.js";
 import { accessSync, constants as fsConstants, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,6 +33,7 @@ import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { PROOF_ENV_ALLOWLIST, PROOF_SANDBOX_BINARY, proofChildEnv, proofLinkedModuleRoots, proofSandboxArgv } from "./review.js";
+import { redactProofOutput } from "./proofExecutor.js";
 import { TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { parseGateSandboxMeasurement, type GateSandboxMeasurement } from "./gate-sandbox-metrics.js";
@@ -173,18 +174,25 @@ export function gateDetailTail(detail: string): string {
 /** A tsc diagnostic: a compile error is always the build's, whatever words its message carries. */
 const TS_DIAGNOSTIC = /\berror TS\d+:/;
 /** The step producers' own did-not-run markers (commit-message.ts typecheckStep / spawnFailureDetail, ci-parity's NOT_RUN). */
-const DID_NOT_RUN = /^[^\n:]+: (?:NOT_RUN\b|SPAWN FAILURE —)/;
+const DID_NOT_RUN = /^[^\n:]+: (?:NOT_RUN\b|SPAWN FAILURE — [^\n]+; the check did NOT run, so this is not a result about the code(?:\n|$))/;
 const SANDBOX_START = /^bwrap: /m;
-const SANDBOX_ERRNO = /\b(?:EPERM|EACCES|EROFS)\b/;
+const SANDBOX_ERRNO = /\b(?:EPERM|EACCES|EROFS|ENOENT)\b/;
+const SANDBOX_PATH = /(?:^|\/)(?:node_modules|\.cache|cache|\.swc|\.npm)(?:\/|$)/;
 
 /**
  * W1-T10920 — a failed step its sandbox broke, not the build: a did-not-run marker on its first line, a bwrap error, or a
- * permission errno with no compiler diagnostic. The worker is never handed such a step to fix: it cannot, and since
+ * path-qualified sandbox errno with no compiler diagnostic. The worker is never handed such a step to fix: it cannot, and since
  * 2026-10-19 every gate's typecheck failed this way while the worker's own `tsc` and CI's passed.
  */
 export function gateStepIsEnvironment(detail: string): boolean {
   if (TS_DIAGNOSTIC.test(detail)) return false;
-  return DID_NOT_RUN.test(detail) || SANDBOX_START.test(detail) || SANDBOX_ERRNO.test(detail);
+  if (DID_NOT_RUN.test(detail) || SANDBOX_START.test(detail)) return true;
+  return detail.split("\n").some((line) => {
+    const paths = line.match(/(?:\/|(?:\.\/)?node_modules\/)[^\s'"`,;:)\]}]+/g) ?? [];
+    const sandboxPath = paths.some((path) => within(path, HARNESS_ROOT.replace(/\/$/, "")) || within(path, "/tmp") || SANDBOX_PATH.test(path));
+    const runtimeFailure = /(?:failed|failure|error|cannot|unable)/i.test(line) && /\b(?:swc|tsx)\b/i.test(line) && /\b(?:cache|ipc|listen|pipe)\b/i.test(line);
+    return sandboxPath && (SANDBOX_ERRNO.test(line) || runtimeFailure);
+  });
 }
 
 export interface PreopenGateOptions {
@@ -545,13 +553,15 @@ export function readGateSummary(
   const failed = steps.filter((s) => s && s.ok === false);
   // W1-T10920: the summary sits in the gate's throwaway HOME; its path names nothing the row should keep.
   const home = dirname(summaryFile);
+  const hostHome = homedir();
   const failedDetail: Record<string, string> = {};
   const environmentSteps: string[] = [];
   const failedSteps = failed.map((s) => {
     const name = typeof s.name === "string" && s.name ? s.name : "(unnamed step)";
     if (typeof s.detail === "string" && s.detail.trim() !== "") {
-      const detail = s.detail.split(home).join("$GATE_HOME");
-      if (gateStepIsEnvironment(detail)) environmentSteps.push(name);
+      if (gateStepIsEnvironment(s.detail)) environmentSteps.push(name);
+      let detail = redactProofOutput(s.detail).split(home).join("$GATE_HOME");
+      if (hostHome !== "/") detail = detail.split(hostHome).join("$HOME");
       failedDetail[name] = gateDetailTail(detail);
     }
     return name;
@@ -637,9 +647,12 @@ function classifyGateRun(run: GateRun, durationMs: number): PreopenGateResult {
  * the reuse rate is read from the ledger.
  */
 export function preopenGateLedgerFields(result: PreopenGateResult): Record<string, unknown> {
+  const { failedDetail, environmentSteps } = preopenGateStepDetail(result);
   const containment = result.containment === undefined ? {} : { launcher: "harness", containment: result.containment, env_allowlist: PREOPEN_GATE_ENV_ALLOWLIST_NAME };
   const push = "pushGate" in result && result.pushGate ? result.pushGate : undefined;
   return {
+    ...(failedDetail ? { failed_detail: failedDetail } : {}),
+    ...(environmentSteps ? { environment_steps: environmentSteps } : {}),
     ...containment,
     ...(result.sandboxMetrics ?? (result.containment === "sandboxed" ? { sandbox_unmeasured: "the child wrote no sandbox measurement" } : {})),
     ...(push ? {
