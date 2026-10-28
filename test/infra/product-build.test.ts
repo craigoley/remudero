@@ -302,8 +302,13 @@ test("W1-T10615: a product build kick reaches only the target daemon's own admis
 
 test("W1-T10615: a product build refuses a target no live daemon instance drives", async (t) => {
   const f = fixture(t);
-  writeFileSync(f.registryPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n  old:\n    github_repo: craigoley/wreckterra\n    retired: true\n");
-  assert.equal(await refused(f.service.execute(actor, f.command())), "target_daemon_missing", "a retired instance drives nothing");
+  // W1-T10799: a retired instance drives nothing, so the marker goes to the CORE daemon's root, which owns one bounded job.
+  const native = fixture(t);
+  writeFileSync(native.registryPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n  old:\n    github_repo: craigoley/wreckterra\n    retired: true\n");
+  const roots: string[] = [];
+  const routed = await new ProductBuildService({ ...native.options, kick: (kickRoot) => { roots.push(kickRoot); } }).execute(actor, native.command());
+  assert.ok(routed.ok);
+  assert.deepEqual(roots, [native.root], "a retired instance drives nothing: the core root is the marker's home");
   writeFileSync(f.registryPath, "instances:\n  core:\n  wreckterra:\n");
   assert.equal(await refused(f.service.execute(actor, f.command())), "target_unreadable", "a malformed registry is unknown, never no daemon");
   assert.equal(await refused(new ProductBuildService({ ...f.options, instances: undefined }).execute(actor, f.command())), "target_unreadable",
