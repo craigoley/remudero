@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { stringify } from "yaml";
-import { fixedClock } from "#src/lib/clock.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
+import { DEFAULT_LIVENESS_BOUND_MS } from "#src/lib/non-worker-verdict.js";
 import { ProductBuildService, productBuildKickOrigin, readTargetExecution, type BuildTask, type ProductBuildTarget, type TargetInspection, type TaskRead } from "#src/lib/product-build.js";
 import { ProductCaseService } from "#src/lib/product-case.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
@@ -231,6 +232,10 @@ test("W1-T10823: a product build refuses more active builds than its envelope al
   for (const [allowed, nativeState, second] of [
     [1, "unknown", "concurrency_exceeded"], [2, "unknown", undefined],
     [1, "dispatched", "concurrency_exceeded"], [2, "dispatched", undefined],
+    [1, "running", "concurrency_exceeded"], [2, "running", undefined],
+    [1, "silent", "concurrency_exceeded"], [2, "silent", undefined],
+    [1, "ended", undefined], [2, "ended", undefined],
+    [1, "refused", undefined], [2, "refused", undefined],
   ] as const) {
     const root = ownedFixtureDir(t, "product-plan-envelope").dir;
     const store = new ProductIntentStore({ root });
@@ -250,21 +255,31 @@ test("W1-T10823: a product build refuses more active builds than its envelope al
     const provider: Pick<ProductRepositoryProvider, "read"> = { async read() {
       return { state: "found", repository: { id: REPO_ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" } };
     } };
-    const service = new ProductBuildService({ root, store, target, provider, clock: fixedClock(Date.parse("2026-10-26T01:00:00.000Z")),
+    const requestedAt = "2026-10-26T01:00:00.000Z";
+    let nowMs = Date.parse(requestedAt);
+    const service = new ProductBuildService({ root, store, target, provider, clock: clockFromMillisFn(() => nowMs),
       instances: { registryPath, stateBase }, kick: () => {} });
     const start = (taskId: string, requestId: string, expectedRevision: number) => service.execute(actor, { version: "product-build-v1", requestId, productId,
       planEvidenceId: plan.id, taskId, expectedRevision, expectedObjectiveRevision: 1 });
     const first = await start("W9-T1", "build-request-0001", 2);
     assert.ok(first.ok, JSON.stringify(first));
-    if (nativeState === "dispatched") {
-      const state = join(stateBase, "wreckterra", "state");
-      const origin = productBuildKickOrigin(productId, first.value.receipt.operationId);
-      const requestedAt = "2026-10-26T01:00:00.000Z";
-      writeLedger([{ ts: requestedAt, run_id: "DAEMON-1", task_id: "DAEMON", step: "console.kick_dispatched",
-        lane: "daemon", task: "W9-T1", origin, repo: "wreckterra" }], { dir: state });
-      assert.deepEqual(readTargetExecution(state, { taskId: "W9-T1", origin, repo: "wreckterra", requestedAt,
-        nowMs: Date.parse(requestedAt) }), { state: "dispatched" }, "the real ledger reader sees this request before run.start");
+    const state = join(stateBase, "wreckterra", "state");
+    const origin = productBuildKickOrigin(productId, first.value.receipt.operationId);
+    const runId = "W9-T1-12345";
+    if (nativeState !== "unknown") {
+      const rows: Record<string, unknown>[] = [{ ts: requestedAt, run_id: "DAEMON-1", task_id: "DAEMON",
+        step: nativeState === "refused" ? "console.kick_refused" : "console.kick_dispatched",
+        lane: "daemon", task: "W9-T1", origin, repo: "wreckterra" }];
+      if (["running", "silent", "ended"].includes(nativeState)) rows.push({ ts: requestedAt, run_id: runId,
+        task_id: "W9-T1", step: "run.start", lane: "run-task" });
+      if (nativeState === "ended") rows.push({ ts: requestedAt, run_id: runId, task_id: "W9-T1", step: "verdict",
+        lane: "run-task", verdict: "pass" });
+      writeLedger(rows, { dir: state });
+      if (nativeState === "silent") nowMs += DEFAULT_LIVENESS_BOUND_MS + 1;
     }
+    assert.deepEqual(readTargetExecution(state, { taskId: "W9-T1", origin, repo: "wreckterra", requestedAt, nowMs }),
+      ["running", "silent", "ended"].includes(nativeState) ? { state: nativeState, runId } : { state: nativeState },
+      "the real ledger reader distinguishes a terminal receipt from elapsed silence");
     const next = await start("W9-T2", "build-request-0002", 3);
     assert.equal(next.ok ? undefined : next.code, second, `maxConcurrentBuilds ${allowed}, native state ${nativeState}`);
   }

@@ -252,7 +252,7 @@ test("W1-T10615: a product build kick reaches only the target daemon's own admis
     const lines: { step: string; extra: Record<string, unknown> }[] = [];
     await runDaemon(plan, {
       refreshMerged: () => () => false,
-      runOne: async (id) => { spawned.push(id); return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }; },
+      runOne: async (id) => { spawned.push(id); return { taskId: id, runId: `${id}-1`, merged: true, costUsd: 0, verdict: "merged" }; },
       ...port, sleep: async () => {}, log: (step, extra = {}) => { lines.push({ step, extra }); },
     }, { headroomEnabled: false, max: 1 });
     return { spawned, kicks: lines.filter((line) => line.step.startsWith("console.kick_")) };
@@ -280,6 +280,11 @@ test("W1-T10615: a product build kick reaches only the target daemon's own admis
   for (const line of dispatched.kicks) ledger.daemon(REQUESTED_MS, line.step, line.extra);
   const query = { taskId: "W9-T1", origin, repo: "wreckterra", requestedAt: started.value.receipt.queuedAt, nowMs: REQUESTED_MS };
   assert.deepEqual(readTargetExecution(state, query), { state: "dispatched" });
+  // The injected runOne completed above. Write its canonical native lifetime before the
+  // separate refusal case starts another build; a dispatch row alone still holds capacity.
+  ledger.run(REQUESTED_MS, "W9-T1-1", "run.start");
+  ledger.run(REQUESTED_MS, "W9-T1-1", "verdict", { verdict: "merged" });
+  assert.deepEqual(readTargetExecution(state, query), { state: "ended", runId: "W9-T1-1" });
   // A refused kick clears exactly its own marker; the unscoped and another repository's marker for the same id remain.
   const second = await service.execute(actor, f.command({ requestId: "build-request-0002", taskId: "W9-T2", expectedRevision: 3 }));
   assert.ok(second.ok);
