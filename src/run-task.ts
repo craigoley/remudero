@@ -42663,6 +42663,8 @@ export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, re
  * failed status through the closed failure union; an unknown kind is never read as success.
  */
 type DetachedFixRuntimePorts = Partial<Pick<FixDispatchChildPorts, "hold" | "log" | "dispatcher">> & {
+  self?: ReturnType<typeof resolveOwnerRepo>;
+  effectsDeps?: Partial<BuildSweepEffectsDeps>;
   planPath?: string;
   planSnapshot?: (options: { allowStale?: boolean }) => SyncedPlan;
   config?: Config;
@@ -42696,7 +42698,7 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
   let configMemo: ReturnType<typeof loadConfig> | undefined;
   const cfg = () => (configMemo ??= ports.config ?? loadConfig());
   let selfMemo: ReturnType<typeof resolveOwnerRepo> | undefined;
-  const self = () => (selfMemo ??= resolveOwnerRepo());
+  const self = () => (selfMemo ??= ports.self ?? resolveOwnerRepo());
   const repoName = (): string => (typeof inputs.repo === "string" ? inputs.repo : self().repo);
   const ledgerPath = (): string => ledgerPathFor(cfg());
   const log = (step: string, extra: Record<string, unknown> = {}): void => {
@@ -42734,11 +42736,19 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
       projection ??= projectPlan(plan, { ledgerPath: ledgerPath(), github: ports.github ?? buildBatchedGithub(self().owner, repoName()) });
       const status = projection.get(taskId);
       if (!status || status.indeterminate) throw new Error(`task ${taskId}'s merge projection is unreadable`);
+      const retired = task.status === "blocked" && task.retirement !== undefined;
+      if (!status.merged && !retired) {
+        assertRunnable(plan, task, (dependency) => {
+          const credit = projection!.get(dependency.id);
+          if (!credit || credit.indeterminate) throw new Error(`task ${dependency.id}'s merge projection is unreadable`);
+          return credit.merged;
+        }, resolveReleasedIds(releaseReadersFor(ledgerPath()), plan));
+      }
       const digest = riskJudgePlanContextDigestFor(plan)({ taskId });
       return { found: true, merged: status.merged,
-        retired: task.status === "blocked" && task.retirement !== undefined, ...(digest === undefined ? {} : { contextDigest: digest }) };
+        retired, ...(digest === undefined ? {} : { contextDigest: digest }) };
     },
-    dispatcher: ports.dispatcher ?? (() => buildSweepEffects({ productionProgressJudge: true, owner: self().owner, repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
+    dispatcher: ports.dispatcher ?? (() => buildSweepEffects({ ...ports.effectsDeps, productionProgressJudge: true, owner: self().owner, repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
       plan: planNow(), log, policy: DEFAULT_SWEEP_POLICY })),
   });
   return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };

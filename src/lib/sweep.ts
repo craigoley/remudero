@@ -3857,6 +3857,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // AFTER `fix.dispatch` is unchanged: the strike is real, `runSweep` must keep recording
       // `acted:true` exactly as it always has, so it is still swallowed below.
       let dispatchStarted = false;
+      let dispatchFailed = false;
+      let refusalReason = "the governed dispatcher ended before a fix round started";
       // W1-T5919: a registered-owner decline names its head and reports itself, never a dispatch.
       const declineClaim = (fields: Record<string, unknown> & { owner_recovery_reason: string }): FixClaimDeclined => {
         log("sweep.fix.checkout_claim_declined", { ...fields, head_sha: pr.headSha });
@@ -4673,8 +4675,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             branchClaim,
           },
         });
+        if (rung?.standDownReason) refusalReason = rung.standDownReason;
         keepWorktree = rung?.superseded !== undefined;
       } catch (e) {
+        dispatchFailed = true;
         // W1-T2402: a signal-terminated spawn (this fleet's own `killProcessGroup`/forced-deploy/
         // wall-clock-reclaim paths, or a genuine host OOM — indistinguishable by signal alone, see
         // `fixDispatchSignalDeath`'s own doc) used to be recoverable only by string-matching the
@@ -4709,6 +4713,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           });
         } finally {
           branchClaim?.release();
+        }
+        if (control?.requireStarted && !dispatchStarted && !dispatchFailed) {
+          throw new Error(`fix dispatch refused: ${refusalReason}`);
         }
       }
     },
@@ -16286,7 +16293,7 @@ export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-
   | "light-pass-action";
 export type DetachedFixPhase = "admission" | "worker" | "ci-wait";
 export type DetachedFixPhaseObserver = (phase: DetachedFixPhase, wait?: { sinceMs: number; attempts: number }) => void;
-export interface DetachedFixControl { signal: AbortSignal; admissionSinceMs?: number }
+export interface DetachedFixControl { signal: AbortSignal; admissionSinceMs?: number; requireStarted?: boolean }
 interface DetachedFixClaim {
   fixKey: string; release: () => void; abandon: AbortController; control: DetachedFixControl;
   run: <T>(fn: () => T | Promise<T>) => Promise<T>;
@@ -16694,6 +16701,7 @@ export async function recheckFixDispatch(
     const taskId = envelope.pr.taskId;
     if (taskId !== undefined) {
       const task = ports.readTask(taskId);
+      if (!task.found) return refuse(`task ${taskId}'s canonical context changed: the task is missing`);
       if (task.found && task.merged) return refuse(`task ${taskId} is already merged`);
       if (task.found && task.retired) return refuse(`task ${taskId} is retired`);
       if (envelope.planContextDigest !== undefined && (!task.found || task.contextDigest !== envelope.planContextDigest)) {
@@ -16737,7 +16745,9 @@ export async function runFixDispatchChild(inputs: Record<string, unknown>, deps:
       deps.onPhase?.(phase);
       deps.log("sweep.fix.child_phase", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, phase });
     },
+    { signal: new AbortController().signal, requireStarted: true },
   );
+  if (outcome === false) throw new Error("fix dispatch refused: no fix round was admitted");
   const declined = fixClaimDeclinedReason(outcome);
   if (declined !== undefined) throw new Error(`fix dispatch refused: ${declined}`);
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
@@ -13,6 +13,8 @@ import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { riskJudgePlanContextDigestFor } from "#src/lib/risk-judge.js";
 import { runDaemon, type DaemonFreshness } from "#src/lib/daemon.js";
 import { defaultInstance } from "#src/lib/host-memory-ledger.js";
+import { acquireInflightLock, inflightLockPath, readInflightLock } from "#src/lib/inflight-lock.js";
+import { loadMounts, resolveMount } from "#src/lib/mounts.js";
 import { loadPlan, type Plan } from "#src/lib/plan.js";
 import {
   adoptRunChildren, createDetachedWorkHost, DETACHED_WORK_INVENTORY, DETACHED_WORK_KINDS, detachedWorkModeNow, detachedWorkPlacement,
@@ -23,7 +25,7 @@ import { childIdentity, readStatus, RUN_CHILD_SCHEMA, writeSpec, writeStatus, ty
 import { runChildMain } from "#src/run-child-main.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import {
-  adoptChildWork, buildFixDispatchEnvelope, childWorkCount, childWorkHoldsReviewKey, childWorkLeftRunning, detachedSweepActionCount,
+  adoptChildWork, buildFixDispatchEnvelope, buildSweepEffects as buildGovernedEffects, childWorkCount, childWorkHoldsReviewKey, childWorkLeftRunning, detachedSweepActionCount, fixBranchClaimKey,
   detachSweepAction, drainDetachedSweepActions, installDetachedWorkHost, readFixDispatchEnvelope, resetChildWork, reviewAdmissionBound, runFixDispatchChild, runSweep,
   type BuildSweepEffectsDeps, type DetachedActionKind, type FixDispatchChildPorts, type FixDispatchEnvelope, type OpenPrView, type SweepDeps,
 } from "#src/lib/sweep.js";
@@ -258,6 +260,7 @@ test("W1-T9114: a terminal review child settles once", async () => {
 // are adopted, and the restart returns while both still run. The title is the proof's verbatim grep target. The fix child is the one
 // the sweep's governed producer spawns (see the producer test below); here it is the adopted half of the same contract.
 test("W1-T9114: a restart does not drain child reviews or fix dispatches", async () => {
+  await freshChildRestart();
   const f = fixture();
   try {
     const reviewDir = f.add("work-review-A-3", review);
