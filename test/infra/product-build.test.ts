@@ -1325,7 +1325,7 @@ test("W1-T10799: repository decisions join only the target's native run and keep
   await f.drive();
   assert.deepEqual(f.calls.runTask, ["W9-T1"], "the maintained target drain uses its own repository predicates");
   assert.equal(coreQueries, 0);
-  const nativeRun = JSON.parse(readFileSync(join(f.core, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+  const nativeRun = JSON.parse(readFileSync(f.ledgerPath, "utf8").trim().split("\n")
     .find((line) => JSON.parse(line).step === "run.start")!);
   const repositoryFor = nativeTargetRepositoryResolver(f.core, (owner, repo) => buildBatchedGithub(owner, repo, { fetchAll: () => [], commitTrailerIndex: () => new Map() }));
   const own = repositoryFor("craigoley", "wreckterra");
