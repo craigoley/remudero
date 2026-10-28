@@ -550,3 +550,21 @@ test("a pre-open census repair stops on newly witnessed inherited drift before i
   assert.equal(result.refusal.inheritedMain?.state, "inherited");
   assert.match(result.reason, /no PR exists yet/);
 });
+
+
+test("the real census refusal keeps the hardened worktree Git boundary", async t => {
+  const { harness, repo, log } = await inheritedContractFixture(t);
+  const snapshot = await harness.writeFixCensusSnapshotAsync(repo.dir, log); assert.ok(snapshot);
+  const normal = await harness.checkFixCensusSnapshotAsync(repo.dir, snapshot, log);
+  assert.equal(normal?.refusal?.inheritedMain?.state, "inherited", "positive control: ordinary real Git evidence is readable");
+  // No command needs to run: the pinned host leaf refuses this code-executing config key.
+  // A bare git -C accepts the key when an unchanged baseline produces no external diff.
+  repo.git("config", "diff.external", "fixture-must-never-execute");
+  try {
+    const refused = await harness.checkFixCensusSnapshotAsync(repo.dir, snapshot, log);
+    assert.ok(refused?.refusal, "the trusted reach check is still red");
+    assert.equal(refused.refusal.inheritedMain?.state, "unavailable", "unsafe worktree Git config cannot supply refresh evidence");
+    const sync = harness.checkFixCensusSnapshot(repo.dir, snapshot, log);
+    assert.equal(sync?.refusal?.inheritedMain?.state, "unavailable", "the synchronous CLI check has the same pinned Git boundary");
+  } finally { repo.git("config", "--unset", "diff.external"); }
+});
