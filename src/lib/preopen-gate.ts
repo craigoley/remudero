@@ -174,7 +174,8 @@ export function gateDetailTail(detail: string): string {
 /** A tsc diagnostic: a compile error is always the build's, whatever words its message carries. */
 const TS_DIAGNOSTIC = /\berror TS\d+:/;
 /** The step producers' own did-not-run markers (commit-message.ts typecheckStep / spawnFailureDetail, ci-parity's NOT_RUN). */
-const DID_NOT_RUN = /^[^\n:]+: (?:NOT_RUN\b|SPAWN FAILURE — [^\n]+; the check did NOT run, so this is not a result about the code(?:\n|$))/;
+// runPreflightFast prefixes spawnFailureDetail with the step and command; script names can contain colons too.
+const DID_NOT_RUN = /^[^\n]+: (?:NOT_RUN\b|SPAWN FAILURE — [^\n]+; the check did NOT run, so this is not a result about the code(?:\n|$))/;
 const SANDBOX_START = /^bwrap: /m;
 const SANDBOX_ERRNO = /\b(?:EPERM|EACCES|EROFS|ENOENT)\b/;
 const SANDBOX_PATH = /(?:^|\/)(?:node_modules|\.cache|cache|\.swc|\.npm)(?:\/|$)/;

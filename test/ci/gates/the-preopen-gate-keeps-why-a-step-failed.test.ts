@@ -5,6 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
+import { FAST_GATE_STEPS, runPreflightFast } from "#src/lib/ci-parity.js";
 import { spawnFailureDetail } from "#src/lib/commit-message.js";
 import {
   GATE_DETAIL_MAX_BYTES, defaultGateContainment, findOnPath, preopenGateEnv, preopenGateLedgerFields, readGateSummary, renderPreopenGatePrompt, runPreopenGate,
@@ -56,7 +57,21 @@ test("W1-T10920: a failed gate step keeps a bounded tail of why it failed", asyn
 });
 
 test("W1-T10920: a step its sandbox broke is unmeasured, not the build", async () => {
+  const produced = runPreflightFast(REPO_ROOT, {
+    steps: FAST_GATE_STEPS.filter(({ job }) => ["rule-checks", "census-precheck", "cli-reference"].includes(job)),
+    spawn: () => ({ status: null, stdout: "", stderr: "", error: "spawn EACCES" }),
+  });
+  assert.equal(produced.ok, false, "the production fast gate observes the refused spawns");
+  assert.deepEqual(produced.steps.map(({ name }) => name).sort(), ["census-precheck", "cli-reference", "rule-checks"]);
+  const diagnostic = "src/generated.ts(1,2): error TS2322: ENOENT /tmp/cache";
   const cases: { name: string; steps: { name: string; ok: boolean; detail?: string }[]; env: string[]; handed: string[] }[] = [
+    ...produced.steps.flatMap((step) => [
+      { name: `${step.name}: production-wrapped spawn failure`, env: [step.name], handed: [], steps: [step] },
+      { name: `${step.name}: compiler diagnostic overrules the wrapped marker`, env: [], handed: [step.name],
+        steps: [{ ...step, detail: `${step.detail}\n${diagnostic}` }] },
+      { name: `${step.name}: wrapped spawn failure beside a compiler failure`, env: [step.name], handed: ["typecheck"],
+        steps: [step, { name: "typecheck", ok: false, detail: diagnostic }] },
+    ]),
     { name: "a NOT_RUN admission", env: ["typecheck"], handed: [],
       steps: [{ name: "typecheck", ok: false, detail: "typecheck: NOT_RUN (static admission refused: headroom 1200 MiB under a 3072 MiB peak)" }] },
     { name: "a spawn that never ran", env: ["typecheck"], handed: [],
@@ -78,6 +93,7 @@ test("W1-T10920: a step its sandbox broke is unmeasured, not the build", async (
       ["unrelated errno", "EPERM: operation not permitted"],
       ["source mentions cache", "EACCES: permission denied, open 'src/cache.ts'"],
       ["errno and unrelated cache line", "EACCES: permission denied, open 'src/generated.ts'\ncache is at /tmp/cache"],
+      ["marker only in later output", "rule-checks: FAIL\ntypecheck: NOT_RUN"],
       ["diagnostic overrules environment", "typecheck: NOT_RUN\nsrc/generated.ts(1,2): error TS2322: ENOENT /tmp/cache"],
     ].map(([name, detail]) => ({ name, env: [], handed: ["typecheck"], steps: [{ name: "typecheck", ok: false, detail }] })),
     { name: "a sandbox errno beside a real failure", env: ["rule-checks"], handed: ["claims"],
