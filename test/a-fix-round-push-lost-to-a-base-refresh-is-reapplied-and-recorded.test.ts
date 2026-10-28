@@ -13,7 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildSweepEffects, FixRoundPushError, harnessCommitForShellLessWorker, runFixRung } from "./helpers/run-task-test.js";
+import {
+  buildSweepEffects, FixRoundPushError, ghUpdateBranch, harnessCommitForShellLessWorker,
+  preserveInheritedCensusWork, readInheritedCensusContextAsync, runFixRung, writeFixCensusSnapshotAsync,
+} from "#test/helpers/run-task-test.js";
 import { buildFixProgressInput } from "../src/lib/fix-progress-judge.js";
 import { ghJsonAsync } from "../src/lib/github-transport.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -249,7 +252,6 @@ test("W1-T8833: the progress judge reads a push_failed round as not landed", asy
 
 
 async function censusRefreshOwner(t: import("node:test").TestContext) {
-  const { writeFixCensusSnapshotAsync, readInheritedCensusContextAsync, preserveInheritedCensusWork } = await import("#src/run-task.js");
   const { refreshInheritedCensusRefusal } = await import("#src/cli/commands/fix.js");
   const { fixRoundBranchClaim } = await import("#src/lib/sweep.js");
   const { acquireInflightLock } = await import("#src/lib/inflight-lock.js");
@@ -382,7 +384,6 @@ test("census refresh retains failed merged checks overlaps unavailable reads and
 
 
 test("the native census refresh sends its expected head to the actual REST adapter", async () => {
-  const { ghUpdateBranch } = await import("#src/run-task.js");
   const { withLiveWritesAllowed } = await import("#src/lib/live-write-guard.js");
   let argv: string[] = [];
   const result = withLiveWritesAllowed(() => ghUpdateBranch("fixture", "repo", 1,

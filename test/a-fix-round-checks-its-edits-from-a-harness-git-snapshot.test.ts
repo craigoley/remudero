@@ -356,8 +356,8 @@ async function inheritedContractFixture(t: TestContext) {
   // Only parent changed-source coverage is needed; prevent each unchanged census child from
   // duplicating its raw V8 dump into the same bounded scratch volume.
   const coverage = process.env.NODE_V8_COVERAGE;
-  delete process.env.NODE_V8_COVERAGE;
-  t.after(() => { if (coverage === undefined) delete process.env.NODE_V8_COVERAGE; else process.env.NODE_V8_COVERAGE = coverage; });
+  process.env.NODE_V8_COVERAGE = "";
+  t.after(() => { process.env.NODE_V8_COVERAGE = coverage ?? ""; });
   const harness = await import("#src/run-task.js");
   const repo = gitRepo({ scope: t, kind: "inherited-census-contract" });
   const f = fixture(repo.dir, true);
@@ -402,7 +402,8 @@ test("the real snapshot checker identifies the inherited reach contract after it
   const merged = await harness.checkFixCensusSnapshotAsync(repo.dir, mergedSnapshot, log);
   assert.equal(merged?.refusal, undefined, "merging main clears the real trusted reach refusal without changing the gate");
   assert.equal(readFileSync(join(repo.dir, baselinePath), "utf8"), current);
-  assert.match(readFileSync(join(repo.dir, "src/lib/unreached.ts"), "utf8"), /saved fix belongs/);
+  assert.equal(repo.git("hash-object", "src/lib/unreached.ts"), repo.git("rev-parse", `${head}:src/lib/unreached.ts`),
+    "the independent saved fix stays byte-identical through the refresh");
 
   const context = (refused.refusal as unknown as { inheritedMain?: Record<string, unknown> }).inheritedMain;
   assert.deepEqual(context, { state: "inherited", headSha: head, mainSha: main, mergeBase: base, baselinePath },
