@@ -3335,7 +3335,7 @@ async function repairCensusRefusedPush(helperHost: Pick<RunTaskHelperHost, "CENS
   for (let strike = 1; strike <= strikeCap; strike++) {
     if (refusal.inheritedMain?.state === "inherited") {
       const reason = "inherited census contract needs native base refresh before another worker; no PR exists yet";
-      log("census_push.refresh_held", { strike, ...refusal.inheritedMain, reason });
+      log("census_push.refresh_held", { strike, ...refusal.inheritedMain, refusal: refusal.text, reason });
       return { outcome: "refused", strikes: strike - 1, refusal, reason };
     }
     const catalogFiles = input.catalogFiles?.(refusal) ?? [];
@@ -3400,7 +3400,7 @@ async function repairCensusRefusedPush(helperHost: Pick<RunTaskHelperHost, "CENS
       refusal = censusCheck.refusal;
       if (refusal.inheritedMain?.state === "inherited") {
         const reason = "inherited census contract needs native base refresh before another worker; no PR exists yet";
-        log("census_push.refresh_held", { strike, ...refusal.inheritedMain, reason });
+        log("census_push.refresh_held", { strike, ...refusal.inheritedMain, refusal: refusal.text, reason });
         return { outcome: "refused", strikes: strike, refusal, reason };
       }
       log("census_push.strike", { strike, ...receipt.ledgerFields(result), cost_usd: result.costUsd,
