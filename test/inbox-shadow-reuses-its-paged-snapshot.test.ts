@@ -158,6 +158,10 @@ test("W1-T10917: readiness preserves exact cursors scope and producer generation
   const next = entries(), nextGeneration = next[0]!.qualificationGeneration;
   assert.notEqual(nextGeneration, generation, "retiring pages changes the required population incarnation");
   assert.deepEqual(next.map(entry => entry.key).sort(), replacement.bodies.map(body => body.key).sort());
+  assert.ok(restored.reload() > 0, "the existing warm consumer reloads the replacement committed snapshot");
+  assert.equal(restored.qualificationGeneration?.(INBOX_VIEW_NAME), nextGeneration);
+  assert.equal(restored.body(INBOX_VIEW_NAME, continuation.key), undefined, "reload retires the old exact continuation instead of retaining a stale body");
+  assert.equal(restored.shadowIdentity?.(INBOX_VIEW_NAME, "section=needsYou")?.key, firstPageIdentity);
   const obsolete = f.view.compute(new URLSearchParams(continuation.key)); assert.ok("error" in obsolete);
   assert.equal(obsolete.error, "inbox_snapshot_changed", "normal routing still rejects the old exact cursor");
   const publication = messages.slice(mark) as Array<{ type: string; view?: string; generation?: string; entry?: { view: string } }>;
@@ -172,6 +176,9 @@ test("W1-T10917: readiness preserves exact cursors scope and producer generation
   ticker.accept({ view: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, bodies: bad });
   assert.deepEqual(entries().map(entry => [entry.key, entry.etag, entry.qualificationGeneration]), beforePartial, "an incomplete producer cannot partially replace a committed population");
   assert.equal(viewMode(warm(), INBOX_VIEW_NAME), "shadow", "restart retains the incomplete-source refusal");
+  restored.reload();
+  assert.equal(restored.qualificationGeneration?.(INBOX_VIEW_NAME), "inbox-current-pages-v1:pending", "reload independently retains the failed producer's qualification refusal");
+  assert.equal(restored.shadowIdentity?.(INBOX_VIEW_NAME, "section=needsYou")?.key, undefined);
   ticker.accept({ view: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, bodies: replacement.bodies });
   const controls = openProjectorReadModel(f.state, "core", f.clock);
   f.closesFirst(() => controls.close());
