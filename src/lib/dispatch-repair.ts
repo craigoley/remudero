@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 import type { Task } from "./plan.js";
 
 /**
@@ -69,23 +70,17 @@ export const RUNNER_CONFIG_PATHS: readonly string[] = [
   ...["config", "workspace"].flatMap((kind) => ["ts", "mts", "cts", "js", "mjs", "cjs"].map((ext) => `vitest.${kind}.${ext}`)),
 ];
 
-/** W1-T10919: sha256 over each present {@link RUNNER_CONFIG_PATHS} file's path and content in the checkout `dir` — the
- *  inputs that decide which tests its runner loads. Read from the files, never a git spawn, because the daemon reads it
- *  on its selection loop; the refused run's worktree and the target's checkout are measured by this one function, so
- *  the two sides always count the same units. `undefined` when `dir` itself cannot be read. */
-export function runnerConfigDigest(dir: string): string | undefined {
-  if (!existsSync(dir)) return undefined;
-  const hash = createHash("sha256");
-  for (const path of [...RUNNER_CONFIG_PATHS].sort()) {
-    let content: Buffer;
-    try {
-      content = readFileSync(join(dir, path));
-    } catch {
-      continue; // an absent spelling is the common case: that file simply plays no part in the runner's scope
-    }
-    hash.update(`${path}\0${content.length}\0`).update(content);
+/** W1-T10919: sha256 of the runner-config Git tree listing, including its trailing newline.
+ *  Refusals read HEAD; selection reads origin/main even when the consumer checkout is stale.
+ *  A failed tree read is no evidence for holding a task. */
+export function runnerConfigDigest(dir: string, ref: "HEAD" | "origin/main" = "HEAD"): string | undefined {
+  try {
+    const listing = hostWorktreeGit(dir, ["ls-tree", ref, "--", ...RUNNER_CONFIG_PATHS]);
+    return createHash("sha256").update(listing).digest("hex");
+  } catch (error) {
+    console.error(`runner config tree unreadable (${ref} in ${dir}): ${String(error)}`);
+    return undefined;
   }
-  return hash.digest("hex");
 }
 
 /** BACKSTOP: bounds one selection pass's state materialization, never normal admission. Entries

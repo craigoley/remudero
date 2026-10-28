@@ -497,7 +497,7 @@ export function openPullRequestChecked(
           "proof-collected-nothing",
           undefined,
           undefined,
-          runnerConfigDigest(repoRoot),
+          runnerConfigDigest(repoRoot, "HEAD"),
         );
       }
       return reject(

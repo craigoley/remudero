@@ -341,7 +341,8 @@ export function runnerLoadedNoTestFile(stdout: string, stderr = ""): boolean {
  *  the collected-nothing cause line — `undefined` when no config holds a literal `include: [...]`. Diagnostic only:
  *  the classification never depends on it. */
 export function vitestIncludeOf(cwd: string): string | undefined {
-  for (const name of ["vitest.config.ts", "vitest.config.mts", "vitest.config.js", "vitest.config.mjs", "vitest.config.cjs"]) {
+  for (const name of ["config", "workspace"].flatMap((kind) =>
+    ["ts", "mts", "cts", "js", "mjs", "cjs"].map((ext) => `vitest.${kind}.${ext}`))) {
     let text: string;
     try {
       text = readFileSync(join(cwd, name), "utf8");
