@@ -2,7 +2,7 @@
   title: Preserve original CodeQL tool identity and inspect missing source evidence
   repo: remudero
   type: implement
-  verify: human
+  verify: auto
   priority: 1
   risk: high
   band_meaning: span
@@ -76,3 +76,14 @@
     suite. The exporter and existing contract suite count as two concerns under Rule19; declare
     risk high honestly and keep budget15 unchanged. Do not reuse the prior narrower ruling. This is a
     bounded first repair, not a claim that the entire Code health source problem is solved.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files are two existing ones (an exporter script and its existing contract test suite). Both exist at base, so there is no new path, and the plan states that no workflow, scanner settings, validator, artifact schema or threshold changes."
+      - "The description says the work is a bounded identity-parsing fix, with a fixed-schema diagnostic that is allowlisted to counts and booleans. It also says the exporter must not leak sentinel text or paths, and that partial scope must stay partial. All of this is verifiable through the named unit tests and the existing CLI."
+      - "It touches no secrets, auth, permissions, merge/deploy/infrastructure or review policy, and it deletes nothing. It asks for no operator-only decision. The filed \"risk high\" declaration reflects the Rule19 two-concern count rather than danger, and the description says CI and review still apply."
+      - "The family has no track record (0 merged, Beta mean 0.50), which adds some caution. No actual-change view was supplied, so my judgment rests only on the description and the files list. That is why confidence is moderate."
+    judged_at: "2026-10-28T00:35:26.225Z"
+    pin: "f0f9c2e7463fdfa25fd0b35df15d6aaa6d62fd7c7296ae637f04dae1df15209c"
