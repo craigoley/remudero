@@ -454,6 +454,7 @@ test("W1-T10885: errored zero-exit enumeration cannot start a suite or repair", 
     assert.equal(calls, 1); assert.equal(repairs, 0);
     assert.equal(events.find(x => x.step === "retro.preflight_failed")?.fields.process_cleanup_failed, true);
     assert.equal(events.find(x => x.step === "retro.preflight_failed")?.fields.exit_class, timedOut ? "process_timeout" : "process_cleanup_failed");
+    if (!timedOut) assert.match(String(events.find(x => x.step === "retro.preflight_repair_stood_down")?.fields.reason), /could not confirm its owned process-group cleanup/);
   }
 });
 

@@ -764,6 +764,8 @@ export async function runRetroPrepublishPreflight(
     const named = first.failure!.failingTests.length;
     const interruption = first.failure!.exitClass === "process_spawn_failed"
       ? "preflight could not start"
+      : first.failure!.exitClass === "process_cleanup_failed"
+      ? "preflight could not confirm its owned process-group cleanup"
       : "preflight hit an execution bound";
     opts.log("retro.preflight_repair_stood_down", {
       attempt: 1,
@@ -777,7 +779,7 @@ export async function runRetroPrepublishPreflight(
       reason: named === 0
         ? `the ${first.failure!.exitClass} failure carries no failing test name in retained output — ` +
           `${interruption}; the suite verdict is incomplete, so standing down under the same conditions`
-        : `the ${first.failure!.exitClass} bound stopped the run after it named ${named} failing test(s) — ` +
+        : `the ${first.failure!.exitClass} failure ended the attempt after it named ${named} failing test(s) — ` +
           `${interruption}; retained output is not a complete plan verdict, so standing down under the same conditions`,
       ...provenanceFields(opts.provenance),
     });
