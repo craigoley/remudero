@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import type { Config } from "#src/lib/config.js";
+import { riskJudgePlanContextDigestFor } from "#src/lib/risk-judge.js";
 import { runDaemon, type DaemonFreshness } from "#src/lib/daemon.js";
 import { defaultInstance } from "#src/lib/host-memory-ledger.js";
 import { loadPlan, type Plan } from "#src/lib/plan.js";
@@ -623,5 +624,82 @@ test("W1-T9114: the fix child rechecks, dispatches through the sweep's own dispa
     if (inputs === undefined && name !== "a declined claim") {
       assert.equal(h.rows.some((r) => r.step === "sweep.fix.child_refused"), true, `${name}: the refusal is ledgered`);
     }
+  }
+});
+
+test("W1-T9114: the run path maps live PR evidence and reads the canonical task before fix dispatch", async () => {
+  const f = fixture();
+  const argv = [...process.argv];
+  process.argv.push("--repo-root", REPO_ROOT);
+  try {
+    const { runDetachedWork } = await import("#src/run-task.js");
+    const planPath = join(f.root, "tasks.yaml");
+    const task = { id: FIX_TASK, title: "fix child fixture", repo: "remudero", type: "implement", verify: "auto",
+      depends_on: [], status: "queued", files: ["src/lib/sweep.ts"], design: "the original canonical design" };
+    const writePlan = (over: Record<string, unknown> = {}) => writeFileSync(planPath, JSON.stringify([{ ...task, ...over }]));
+    writePlan();
+    const envelope = buildFixDispatchEnvelope(fixPr(), { unmetCriteria: UNMET }, {
+      fixKey: `${FIX_TASK}@${FIX_HEAD}`, decidedAtMs: 1,
+      planContextDigest: riskJudgePlanContextDigestFor(loadPlan(planPath))({ taskId: FIX_TASK }),
+    });
+    const work: DetachedWorkSpec = { ...fix, inputs: { envelope } };
+    const ctx = { taskId: FIX_TASK, runId: "work-fix-runtime-1" };
+    const reads: string[][] = [];
+    const dispatched: OpenPrView[] = [];
+    let built = 0;
+    let live: unknown = { state: "OPEN", mergedAt: null, headRefOid: FIX_HEAD };
+    const ports = {
+      planPath, hold: () => undefined, log: f.log,
+      readPr: async (args: string[]) => { reads.push(args); return live; },
+      dispatcher: () => {
+        built += 1;
+        return { dispatchFix: async (pr: OpenPrView) => { dispatched.push(pr); } };
+      },
+    };
+
+    assert.deepEqual(await runDetachedWork(work, ctx, ports), { ...ctx, merged: false, verdict: "no_pr", costUsd: 0 });
+    assert.deepEqual(reads, [["pr", "view", envelope.pr.prUrl, "--json", "state,mergedAt,headRefOid"]]);
+    assert.equal(built, 1);
+    assert.deepEqual(dispatched, [envelope.pr]);
+
+    const refused = async (reason: RegExp) => {
+      await assert.rejects(runDetachedWork(work, ctx, ports), reason);
+      assert.equal(built, 1, "a refused recheck never reconstructs the dispatcher");
+      assert.equal(dispatched.length, 1, "a refused recheck never dispatches a fix");
+      assert.match(String(f.rows.at(-1)?.reason), reason);
+      assert.equal(f.rows.at(-1)?.step, "sweep.fix.child_refused");
+    };
+    live = { state: "OPEN", mergedAt: "2026-10-01T00:00:00Z", headRefOid: FIX_HEAD };
+    await refused(/no longer open \(merged\)/);
+    live = { state: "CLOSED", mergedAt: "", headRefOid: FIX_HEAD };
+    await refused(/no longer open \(CLOSED\)/);
+    live = { state: "OPEN", headRefOid: "new-head" };
+    await refused(/head moved from .* to new-head/);
+    live = { state: "OPEN", headRefOid: null };
+    await refused(/head moved from .* to an unreadable head/);
+    live = {};
+    await refused(/live state could not be read/);
+    live = { state: "OPEN", mergedAt: "", headRefOid: FIX_HEAD };
+
+    writeFileSync(planPath, "[]");
+    await refused(/canonical context changed/);
+    for (const status of ["merged", "done"]) {
+      writePlan({ status });
+      await refused(/already merged/);
+    }
+    writePlan({ status: "blocked", retirement: "retired" });
+    await refused(/is retired/);
+    writePlan({ design: "the canonical design changed after the producer decided" });
+    await refused(/canonical context changed/);
+    writeFileSync(planPath, "not: [valid yaml");
+    await refused(/could not read its evidence/);
+    writePlan();
+    await assert.rejects(runDetachedWork(work, ctx, { ...ports, readPr: async () => { throw new Error("fixture PR read failed"); } }),
+      /could not read its evidence \(fixture PR read failed\)/);
+    assert.equal(built, 1);
+    assert.equal(dispatched.length, 1);
+  } finally {
+    process.argv.splice(0, process.argv.length, ...argv);
+    f.cleanup();
   }
 });

@@ -41643,7 +41643,7 @@ import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js"
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
 import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, runChildModeIsOn, spawnRunChild, type DetachedWorkSpec, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
-import { installDetachedWorkHost, runFixDispatchChild } from "./lib/sweep.js";
+import { installDetachedWorkHost, runFixDispatchChild, type FixDispatchChildPorts } from "./lib/sweep.js";
 import { type RunChildMode } from "./lib/policy.js";
 import {
   escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
@@ -42662,8 +42662,12 @@ export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, re
  * repository, the plan-filing flag and the review attempt id. A kind this entry does not host throws, which the child writes as a
  * failed status through the closed failure union; an unknown kind is never read as success.
  */
-export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void }): Promise<RunResult> {
-  if (work.kind === "fix-dispatch") return runFixDispatchWork(work, ctx);
+type DetachedFixRuntimePorts = Partial<Pick<FixDispatchChildPorts, "hold" | "log" | "dispatcher">> & {
+  planPath?: string;
+  readPr?: (args: string[]) => Promise<unknown>;
+};
+export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void }, ports: DetachedFixRuntimePorts = {}): Promise<RunResult> {
+  if (work.kind === "fix-dispatch") return runFixDispatchWork(work, ctx, ports);
   if (work.kind !== "review" || work.prNumber === undefined) {
     throw new Error(`the run child hosts no detached work of kind ${work.kind}${work.kind === "review" ? " without a PR number" : ""}`);
   }
@@ -42683,7 +42687,7 @@ export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: stri
  * whose branch claim is taken through the native helper in this process. Nothing here routes through `rmd fix` or `--requested`.
  * A plan, a config or a PR read that fails throws: an unread reconstruction refuses and the child ends as a failed status.
  */
-async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void }): Promise<RunResult> {
+async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void }, ports: DetachedFixRuntimePorts): Promise<RunResult> {
   const inputs = work.inputs ?? {};
   // Every read is lazy: the child reads its envelope first, and an unreadable one refuses before any config, plan or PR is read.
   let configMemo: ReturnType<typeof loadConfig> | undefined;
@@ -42696,18 +42700,18 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     appendLedger(ledgerPath(), { run_id: ctx.runId, task_id: ctx.taskId, step, lane: "sweep-fix", ...extra });
   };
   let planMemo: ReturnType<typeof loadPlan> | undefined;
-  const planNow = () => (planMemo ??= loadPlan(repoName() === self().repo ? join(repoRoot, "plan", "tasks.yaml") : join(cfg().root, "repos", repoName(), "plan", "tasks.yaml")));
+  const planNow = () => (planMemo ??= loadPlan(ports.planPath ?? (repoName() === self().repo ? join(repoRoot, "plan", "tasks.yaml") : join(cfg().root, "repos", repoName(), "plan", "tasks.yaml"))));
   await runFixDispatchChild(inputs, {
-    log,
+    log: ports.log ?? log,
     ...(ctx.onPhase === undefined ? {} : { onPhase: ctx.onPhase }),
-    hold: () => {
+    hold: ports.hold ?? (() => {
       const stopped = stopDetail(cfg().root);
       if (stopped !== undefined) return `STOP: ${stopped}`;
       const paused = checkSharedPause(cfg().root, realDeps().sharedPauseGit);
       return paused === undefined ? undefined : `PAUSE: ${paused}`;
-    },
+    }),
     readLivePr: async (prUrl) => {
-      const live = await ghJsonAsync(["pr", "view", prUrl, "--json", "state,mergedAt,headRefOid"]) as
+      const live = await (ports.readPr ?? ghJsonAsync)(["pr", "view", prUrl, "--json", "state,mergedAt,headRefOid"]) as
         { state?: unknown; mergedAt?: unknown; headRefOid?: unknown } | undefined;
       if (typeof live?.state !== "string") return undefined;
       return { state: live.state, merged: typeof live.mergedAt === "string" && live.mergedAt !== "",
@@ -42721,8 +42725,8 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
       return { found: true, merged: task.status === "merged" || task.status === "done",
         retired: task.status === "blocked" && task.retirement !== undefined, ...(digest === undefined ? {} : { contextDigest: digest }) };
     },
-    dispatcher: () => buildSweepEffects({ productionProgressJudge: true, owner: self().owner, repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
-      plan: planNow(), log, policy: DEFAULT_SWEEP_POLICY }),
+    dispatcher: ports.dispatcher ?? (() => buildSweepEffects({ productionProgressJudge: true, owner: self().owner, repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
+      plan: planNow(), log, policy: DEFAULT_SWEEP_POLICY })),
   });
   return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
 }
