@@ -11,7 +11,6 @@ import {
   type DaemonTargetRecord,
 } from "#src/cli/commands/daemon.js";
 import { LIVE_WRITE_OVERRIDE_ENV } from "#src/lib/live-write-guard.js";
-import { loadPlan } from "#src/lib/plan.js";
 import { SELF_SYNC_GUARD_ENV } from "#src/lib/self-sync.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
@@ -30,8 +29,6 @@ const ENGINE_TASK = "ENGINE-T1";
 const planYaml = (id: string, repo: string): string =>
   `- id: ${id}\n  title: "a task"\n  repo: ${repo}\n  depends_on: []\n  type: implement\n  verify: auto\n` +
   `  risk: low\n  status: queued\n  files: [src/x.ts]\n  acceptance:\n    - claim: "it holds"\n      proof: "unit test: it holds"\n`;
-
-const planHolds = (root: string, id: string): boolean => loadPlan(join(root, "plan", "tasks.yaml")).byId.has(id);
 
 /** A git checkout whose committed plan holds `id`. */
 function checkout(kind: string, id: string, repo: string): GitRepo {
@@ -98,6 +95,25 @@ function rmd(f: Instance, argv: string[]): Run {
     .filter((row) => row.step === "dispatch.breaker_released");
   return { code: r.status, out: r.stdout, err: r.stderr, released };
 }
+
+test("W1-T10925: the default plan reader resolves cwd, target and explicit checkout plans", (t) => {
+  const f = instance(t);
+  const target = consumerRecord(f);
+  assert.deepEqual(writeDaemonTargetRecord(f.stateDir, target), { written: true });
+  const input = { argv: [], cwdRoot: f.engine.dir, stateDir: () => f.stateDir };
+
+  assert.deepEqual(resolveVerbPlanRoot(ENGINE_TASK, input), { ok: true, root: f.engine.dir, via: "cwd" });
+  assert.deepEqual(resolveVerbPlanRoot(TARGET_TASK, input), { ok: true, root: f.target, via: "target", target });
+  assert.deepEqual(resolveVerbPlanRoot(TARGET_TASK, { ...input, argv: ["--repo-root", f.target] }),
+    { ok: true, root: f.target, via: "repo-root" });
+
+  const searched = [join(f.engine.dir, "plan", "tasks.yaml"), join(f.target, "plan", "tasks.yaml")];
+  assert.deepEqual(resolveVerbPlanRoot("PORTAL-T000", input), {
+    ok: false,
+    searched,
+    error: `not found in ${searched.join(", ")}; this instance targets craigoley/remudero-site — read its plan with --repo-root ${f.target}`,
+  });
+});
 
 test("W1-T10925: a release in a consumer instance resolves the target plan", (t) => {
   const f = instance(t);
@@ -173,8 +189,7 @@ test("W1-T10925: a miss names every plan searched and the repo-root to use", (t)
   assert.equal(guess.released.length, 0);
 
   // A malformed record is "no target" with its reason; a record naming a missing checkout names it unreadable.
-  const onlyTarget = (id: string) => resolveVerbPlanRoot(id, { argv: [], cwdRoot: f.engine.dir, stateDir: () => f.stateDir,
-    holds: planHolds });
+  const onlyTarget = (id: string) => resolveVerbPlanRoot(id, { argv: [], cwdRoot: f.engine.dir, stateDir: () => f.stateDir });
   writeFileSync(join(f.stateDir, "daemon-target.json"), "{not json");
   const bad = onlyTarget(TARGET_TASK);
   assert.match(bad.ok ? "" : bad.error, /; no instance target \(record unreadable: \S*daemon-target\.json: /);
