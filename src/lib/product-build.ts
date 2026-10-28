@@ -369,6 +369,7 @@ export class ProductBuildService {
       accessSync(join(core, "state"), constants.R_OK | constants.X_OK);
       readdirSync(join(core, "state"));
     } catch (error) {
+      // Failed Core access or listing is an unreadable route, never permission to create a kick marker.
       void error; return { state: "unreadable" };
     }
     return { state: "found", root: core, instance: this.options.instances?.coreInstance ?? CORE_INSTANCE, native: true };
