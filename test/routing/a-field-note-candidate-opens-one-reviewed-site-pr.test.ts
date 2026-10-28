@@ -20,8 +20,8 @@ import { taskIdFromHeadRef } from "#src/lib/body-repair.js";
 import { taskIdFromRunBranch, taskIdFromSlugBranch } from "#src/lib/status.js";
 import { isDispatchedRunBranch } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { recordingGitHubApi } from "#test/helpers/fake-github.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const DAY = (day: number, hour = 0) => new Date(Date.UTC(2026, 8, day, hour)).toISOString();
@@ -87,7 +87,9 @@ function siteRest(opts: { failWrites?: boolean } = {}) {
     commits: [] as { parents: string[]; tree: string }[],
     prs: [] as { number: number; html_url: string; title: string; body: string; head: string; base: string; open: boolean; draft: boolean }[] };
   const field = (args: string[], name: string) => args.find((arg) => arg.startsWith(`${name}=`))?.slice(name.length + 1);
-  const api = recordingGitHubApi((args) => {
+  const calls: string[][] = [];
+  const fetch: GhApiFetcher = (args) => {
+    calls.push([...args]);
     const method = args[1] === "--method" ? args[2]! : "GET";
     const path = method === "GET" ? args[1]! : args[3]!;
     const input = args.includes("--input") ? JSON.parse(readFileSync(args[args.indexOf("--input") + 1]!, "utf8")) : undefined;
@@ -114,8 +116,8 @@ function siteRest(opts: { failWrites?: boolean } = {}) {
       pr.title = field(args, "title")!; pr.body = field(args, "body")!; return pr;
     }
     throw new Error(`unexpected GitHub call: ${args.join(" ")}`);
-  });
-  return { ...api, state };
+  };
+  return { fetch, calls, state };
 }
 
 /** The ledger rows of one day: 20 served assignments of one model on each given day. */

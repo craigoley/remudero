@@ -20,7 +20,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import { fixedClock } from "./clock.js";
 import type { PreflightFastDeps } from "./ci-parity.js";
-import { hostWorktreeGit, hostWorktreeGitEnv } from "./worktree-git.js";
+import { hostGitClone, hostWorktreeGit } from "./worktree-git.js";
 import { ghJson } from "./github-transport.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
 import { createPlanPrRest, probeExistingPlanPr } from "./plan-pr-emitter.js";
@@ -149,11 +149,7 @@ export function syncFieldNoteSiteImport(input: SiteImportInput,
   try {
     const siteDir = join(workDir, "site");
     const url = deps.siteUrl ?? `https://github.com/${SITE_IMPORT_OWNER}/${SITE_IMPORT_REPO}.git`;
-    // No repository exists to pin before clone. Keep the leaf's config hardening, without its pin.
-    const { GIT_DIR: _gitDir, GIT_WORK_TREE: _workTree, ...cloneEnv } = hostWorktreeGitEnv({
-      worktree: workDir, gitDir: join(workDir, ".git"), source: "git-directory" });
-    const clone = spawn("git", ["clone", "--quiet", "--single-branch", "--branch", SITE_IMPORT_BASE, url, siteDir],
-      { cwd: workDir, env: cloneEnv });
+    const clone = hostGitClone(workDir, url, siteDir, SITE_IMPORT_BASE, spawn);
     if (clone.status !== 0) return { state: "site-checkout-failed", reason: `git-clone-exit-${clone.status}: ${clone.stderr.trim()}` };
     const released = readReleases(siteDir);
     if (typeof released === "string") return { state: "site-checkout-failed", reason: released };

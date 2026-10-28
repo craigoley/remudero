@@ -263,6 +263,14 @@ function configReadEnv(pin: PinnedWorktreeGit): NodeJS.ProcessEnv {
   return env;
 }
 
+/** Clone into fresh scratch: no repository exists to pin yet; retain the leaf's config hardening. */
+export function hostGitClone<T>(cwd: string, url: string, target: string, branch: string,
+  spawn: (file: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv }) => T): T {
+  const { GIT_DIR: _gitDir, GIT_WORK_TREE: _workTree, ...env } = hostWorktreeGitEnv({
+    worktree: cwd, gitDir: join(cwd, ".git"), source: "git-directory" });
+  return spawn("git", ["clone", "--quiet", "--single-branch", "--branch", branch, url, target], { cwd, env });
+}
+
 /** A pinned config file holds a key the harness never writes. Nothing ran. */
 export class WorktreeConfigRefusedError extends RmdError {
   constructor(readonly worktree: string, readonly keys: readonly string[]) {
