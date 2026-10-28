@@ -21,7 +21,6 @@ import { streakRefusal } from "#src/lib/non-worker-verdict.js";
 import { nonWorkerVerdictClass } from "#src/lib/stranded-task-detector.js";
 import type { Task } from "#src/lib/plan.js";
 import * as prOpen from "#src/lib/pr-open.js";
-import * as runTask from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const BRANCH = "run-W1-T9-1";
@@ -48,8 +47,9 @@ function filedRunBranch(t: TestContext): string {
 const answering = (status: number, stdout: string): prOpen.AsyncOpenPullRequestProofRunner =>
   async () => ({ status, signal: null, stdout, stderr: "" });
 
+/** The daemon's opener entry: the proofs pre-run off the loop, then the same synchronous checks. */
 const openAsDaemon = (dir: string, runner: prOpen.AsyncOpenPullRequestProofRunner) =>
-  withLiveWritesAllowed(() => runTask.ghPrCreateFillCommandAsync(dir, "o", "r", BRANCH, "feat(x): a subject", runner, true));
+  withLiveWritesAllowed(() => prOpen.openPullRequestCheckedAsync("", BRANCH, dir, "origin/main", runner));
 
 /** A Vitest-shaped checkout whose include reaches only `.test.ts`, its one test a `.test.tsx` file, and a pinned
  *  runner that, like the real one, loads no file its include does not reach. */
@@ -93,7 +93,7 @@ test("W1-T10919: a proof whose title is in a head test file but collects zero te
       assert.ok(err.message.includes("tests/unit/timeline.test.tsx"), err.message);
       assert.ok(err.message.includes("tests/**/*.test.ts"), err.message);
       assert.match(err.runnerConfigDigest ?? "", /^[0-9a-f]{64}$/, "the refusal records what the runner read");
-      assert.equal(err.runnerConfigDigest, runnerConfigDigest(dir, "HEAD"));
+      assert.equal(err.runnerConfigDigest, runnerConfigDigest(dir));
       return true;
     },
   );
@@ -162,22 +162,18 @@ const TASK: Task = {
 } as Task;
 
 test("W1-T10919: a collected-nothing task waits for a runner-config or shard change, then dispatches", (t) => {
-  // The REAL digest: two commits on a real checkout, so the default `git ls-tree` seam is exercised, not faked.
+  // The REAL digest, read off a checkout's files: the reader the daemon calls on its loop, with no seam to fake.
   const site = gitRepo({ kind: "collected-nothing-digest", scope: t });
   writeFileSync(join(site.dir, "vitest.config.mjs"), 'export default { test: { include: ["tests/**/*.test.ts"] } };\n');
   writeFileSync(join(site.dir, "README.md"), "a\n");
-  site.git("add", "-A");
-  site.git("commit", "-q", "-m", "seed");
-  const before = runnerConfigDigest(site.dir, "HEAD");
+  const before = runnerConfigDigest(site.dir);
   assert.match(before ?? "", /^[0-9a-f]{64}$/);
   writeFileSync(join(site.dir, "README.md"), "b\n");
-  site.git("commit", "-qam", "an unrelated merge");
-  assert.equal(runnerConfigDigest(site.dir, "HEAD"), before, "an unrelated merge leaves the runner's scope unchanged");
+  assert.equal(runnerConfigDigest(site.dir), before, "an unrelated change leaves the runner's scope unchanged");
   writeFileSync(join(site.dir, "vitest.config.mjs"), 'export default { test: { include: ["tests/**/*.test.{ts,tsx}"] } };\n');
-  site.git("commit", "-qam", "widen the include, as PORTAL-T44 did");
-  const after = runnerConfigDigest(site.dir, "HEAD");
-  assert.notEqual(after, before, "a runner-config change moves the digest");
-  assert.equal(runnerConfigDigest(site.dir, "no-such-rev"), undefined, "an unreadable tree is no reading");
+  const after = runnerConfigDigest(site.dir);
+  assert.notEqual(after, before, "a runner-config change moves the digest, as PORTAL-T44's widened include did");
+  assert.equal(runnerConfigDigest(join(site.dir, "no-such-dir")), undefined, "an unreadable checkout is no reading");
 
   const state = gitRepo({ kind: "collected-nothing-state", scope: t, seedCommit: false }).dir;
   writePriorRefusal(state, TASK.id, {

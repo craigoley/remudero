@@ -1,6 +1,5 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
 import type { Task } from "./plan.js";
@@ -70,12 +69,23 @@ export const RUNNER_CONFIG_PATHS: readonly string[] = [
   ...["config", "workspace"].flatMap((kind) => ["ts", "mts", "cts", "js", "mjs", "cjs"].map((ext) => `vitest.${kind}.${ext}`)),
 ];
 
-/** W1-T10919: sha256 of `git ls-tree <rev> -- <RUNNER_CONFIG_PATHS>` in `dir` — the runner-scope inputs as git blob
- *  ids, so the refused tree and origin/main are measured in the same units. `undefined` when git cannot read `rev`. */
-export function runnerConfigDigest(dir: string, rev: string): string | undefined {
-  const listed = spawnSync("git", ["-C", dir, "ls-tree", rev, "--", ...RUNNER_CONFIG_PATHS], { encoding: "utf8", timeout: 15_000 });
-  if (listed.status !== 0 || typeof listed.stdout !== "string") return undefined;
-  return createHash("sha256").update(listed.stdout).digest("hex");
+/** W1-T10919: sha256 over each present {@link RUNNER_CONFIG_PATHS} file's path and content in the checkout `dir` — the
+ *  inputs that decide which tests its runner loads. Read from the files, never a git spawn, because the daemon reads it
+ *  on its selection loop; the refused run's worktree and the target's checkout are measured by this one function, so
+ *  the two sides always count the same units. `undefined` when `dir` itself cannot be read. */
+export function runnerConfigDigest(dir: string): string | undefined {
+  if (!existsSync(dir)) return undefined;
+  const hash = createHash("sha256");
+  for (const path of [...RUNNER_CONFIG_PATHS].sort()) {
+    let content: Buffer;
+    try {
+      content = readFileSync(join(dir, path));
+    } catch {
+      continue; // an absent spelling is the common case: that file simply plays no part in the runner's scope
+    }
+    hash.update(`${path}\0${content.length}\0`).update(content);
+  }
+  return hash.digest("hex");
 }
 
 /** BACKSTOP: bounds one selection pass's state materialization, never normal admission. Entries

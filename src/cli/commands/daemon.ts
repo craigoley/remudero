@@ -1625,8 +1625,8 @@ export async function daemonCommand(
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
           ? daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness
           : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
-        // W1-T10919: a hold earned by the runner's scope lifts when main's runner config moves, read off the target's checkout.
-        readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state"), () => runnerConfigDigest(targetCheckoutRoot, "origin/main")),
+        // W1-T10919: a hold earned by the runner's scope lifts when the target checkout's runner config moves (fs reads only).
+        readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state"), () => runnerConfigDigest(targetCheckoutRoot)),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
         // paths, so the reload always reads the SAME source the boot did (origin/main, never the

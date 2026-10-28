@@ -343,7 +343,11 @@ export function runnerLoadedNoTestFile(stdout: string, stderr = ""): boolean {
 export function vitestIncludeOf(cwd: string): string | undefined {
   for (const name of ["vitest.config.ts", "vitest.config.mts", "vitest.config.js", "vitest.config.mjs", "vitest.config.cjs"]) {
     let text: string;
-    try { text = readFileSync(join(cwd, name), "utf8"); } catch { continue; }
+    try {
+      text = readFileSync(join(cwd, name), "utf8");
+    } catch {
+      continue; // that config spelling is absent: try the next; no config at all just omits the include from the line
+    }
     const include = /\binclude\s*:\s*\[([^\]]*)\]/.exec(text)?.[1];
     if (include !== undefined) return `[${include.trim().replace(/\s+/g, " ")}]`;
   }
