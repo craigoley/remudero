@@ -19,10 +19,26 @@ raw: >-
     (none found)
 attachments: []
 origin: incident#96a35e0d5e5e75cbeff8050aa8311d53cae887feb9bdd87f9e023f130cbb7a20
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/14985
+summary:
+  headline: CodeQL CI check still missing on main after failed automatic repair
+  what_happened: The codeql.yml workflow on main still has a required-check gap
+    even after an automatic repair attempt. It was seen once, and no deploy or
+    suspect commit was identified.
+  decision: Choose how to handle the unresolved CodeQL workflow gap on main.
+  options:
+    - label: Fix codeql.yml manually
+      consequence: Restores CodeQL coverage on main, but needs an engineer's time.
+      intent: approve
+    - label: Keep the gap for now
+      consequence: CodeQL coverage stays missing on main until someone addresses it.
+      intent: keep
+    - label: Close the incident without fixing
+      consequence: The incident closes, and the gap may recur unnoticed.
+      intent: decline
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

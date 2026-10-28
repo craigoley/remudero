@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.15
+  # refusal-amendment (W1-T10598, run W1-T10598-1793137272051, 2026-10-27T22:35:19.768Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The refusal is raised in `src/cli/commands/fix.ts`, outside the declared files, and the record names no specific refusal reason or failing path to repair. The `.tail` logs aren't available here to settle it.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

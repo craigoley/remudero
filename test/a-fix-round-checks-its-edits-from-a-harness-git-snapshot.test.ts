@@ -15,16 +15,22 @@ const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const REACH = "test/the-affected-suite-reach-ratchet.test.ts";
 const SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";
 const IMPORT_CLI = `import ${JSON.stringify("../src/run-task.js")};\n`;
+// W1-T10820: a real snapshot carries package.json, and an importer in a nested test folder reaches
+// src/run-task.ts through the alias, which resolves from any depth where a "../" specifier does not.
+const IMPORT_ALIAS = `import { run } from ${JSON.stringify("#src/run-task.js")};\n`;
 
 function fixture(root = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-"))) {
   const baseline = JSON.parse(readFileSync(join(ROOT, "scripts/affected-reach-baseline.json"), "utf8"));
   const texts: Record<string, string> = {
     "src/run-task.ts": "export {};\n",
     "src/lib/affected-suites.ts": "export {};\n",
+    // A module no suite reaches keeps the fixture's median reach under the real tree's recorded one.
+    "src/lib/unreached.ts": "export {};\n",
     [REACH]: "export {};\n",
     "scripts/affected-reach-baseline.json": JSON.stringify(baseline),
+    "package.json": JSON.stringify({ imports: JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).imports }),
   };
-  for (const path of baseline.importers) texts[path] = IMPORT_CLI;
+  for (const path of baseline.importers) texts[path] = IMPORT_ALIAS;
   for (const [path, text] of Object.entries(texts)) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), text);
@@ -100,11 +106,12 @@ test("test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts: no 
   const reachArgs = ["--test", "--test-reporter=tap", "--import", "tsx"];
   const clean = run(REACH, reachArgs, f.env);
   assert.equal(clean.status, 0, clean.text);
-  assert.match(clean.text, /^# tests 4$/m);
+  assert.match(clean.text, /^# tests 6$/m);
   writeFileSync(join(f.root, "test/new.test.ts"), IMPORT_CLI);
   const refused = run(REACH, reachArgs, f.env);
   assert.equal(refused.status, 1, refused.text);
-  assert.match(refused.text, /importerCount: 934 > 933; new importers: test\/new.test.ts/);
+  const recorded = JSON.parse(readFileSync(join(ROOT, "scripts/affected-reach-baseline.json"), "utf8")).importerCount;
+  assert.ok(refused.text.includes(`importerCount: ${recorded + 1} > ${recorded}; new importers: test/new.test.ts`), refused.text);
   assert.doesNotMatch(refused.text, /ENOENT|git /);
   const precheck = spawnSync(process.execPath, [join(ROOT, "scripts/census-precheck.mjs"), "--root", f.root],
     { cwd: ROOT, env: f.env, encoding: "utf8", timeout: 60_000 });
