@@ -253,3 +253,40 @@ test("skill conformance is executed before push on every nonempty diff", () => {
   assert.equal(red.violations.length, 1);
   assert.ok(red.violations[0].startsWith("census-suite: " + SKILL_CONFORMANCE_CENSUS + " fails"));
 });
+
+test("W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.ts is prevented, not retried", () => {
+  const { baseline, population } = live();
+  assert.ok(population.length > 50, "positive control: the population saw the tree");
+  assert.deepEqual(precheck.listCiRuleSuites(ROOT), listRuleSuites(ROOT),
+    "the plain-Node precheck must select exactly the suites CI runs");
+  const readHead = (rows: string[]) => (path: string) =>
+    path === PRECHECK_PARITY_BASELINE ? JSON.stringify({ ciOnly: rows }) : null;
+  const unasked = precheck.censusParityViolations({
+    changed: ["test/x.test.ts"], readHead: readHead(baseline),
+    population: [...population, "test/brand-new-census.test.ts"],
+  });
+  assert.equal(unasked.length, 1);
+  assert.match(unasked[0], /test\/brand-new-census\.test\.ts.*PRECHECK_PARITY/);
+  const stale = precheck.censusParityViolations({
+    changed: [PRECHECK_PARITY_BASELINE], readHead: readHead([...baseline, "test/gone.test.ts"]), population,
+  });
+  assert.equal(stale.length, 1);
+  assert.match(stale[0], /test\/gone\.test\.ts.*delete the row/);
+  assert.deepEqual(precheck.censusParityViolations({
+    changed: ["src/a.ts"], readHead: readHead(baseline),
+    population: [...population, "test/z.test.ts"],
+  }), []);
+  let populationCalls = 0;
+  const lazyPopulation = () => { populationCalls++; return population; };
+  assert.deepEqual(precheck.censusParityViolations({
+    changed: [PRECHECK_PARITY_BASELINE], readHead: () => null, population: lazyPopulation,
+  }), []);
+  assert.deepEqual(precheck.censusParityViolations({
+    changed: [PRECHECK_PARITY_BASELINE], readHead: () => "{bad", population: lazyPopulation,
+  }), []);
+  assert.equal(populationCalls, 0, "an unreadable baseline must not enumerate fixture repositories");
+  assert.deepEqual(precheck.censusParityViolations({
+    changed: [PRECHECK_PARITY_BASELINE], readHead: readHead(baseline), population: lazyPopulation,
+  }), []);
+  assert.equal(populationCalls, 1);
+});

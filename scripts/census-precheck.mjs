@@ -31,7 +31,6 @@
  */
 import { spawnSync } from "node:child_process";
 import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
-import { listRuleSuites } from "../src/lib/ci-parity.ts";
 import { isTrustRootPath, scanTrustRootText, trustRootFor } from "../src/lib/trust-root-text.ts";
 import { createHash } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -1457,6 +1456,15 @@ export function ciCensusPopulation(ruleSuites, extras = PRECHECK_EXTRA_CI_CENSUS
   return [...new Set([...ruleSuites, ...Object.keys(extras)])].sort();
 }
 
+/** Mirror ci-parity's rule-suite selection without loading its TypeScript dependency graph under plain Node. */
+export function listCiRuleSuites(root) {
+  const tracked = gitOut(root, ["ls-files", "--", "test"]).split(/\r?\n/).filter(Boolean);
+  const suites = tracked.filter((path) => isRuleSuitePath(path) &&
+    isRuleSuitePath(path, readFileSync(join(root, path), "utf8"))).sort();
+  if (suites.length < 20) throw new Error(`rule-check population too small: found ${suites.length}, expected at least 20`);
+  return suites;
+}
+
 /**
  * The parity verdict. `unasked`: a population member neither on `parity` nor baselined. `stale`: a
  * baseline row `parity` now asks or the population no longer holds, which must leave the baseline.
@@ -1488,7 +1496,7 @@ export function censusParityViolations({ changed, readHead, population }) {
     return [];
   }
   if (!Array.isArray(baseline)) return [];
-  const verdict = precheckParityVerdict({ population, baseline });
+  const verdict = precheckParityVerdict({ population: typeof population === "function" ? population() : population, baseline });
   return [
     ...verdict.unasked.map((p) => `census-parity: ${p} is a CI census nothing asks before the push — model it in PRECHECK_PARITY (scripts/census-precheck.mjs); ${PRECHECK_PARITY_BASELINE} may only shrink`),
     ...verdict.stale.map((p) => `census-parity: ${p} is baselined but precheck now asks it or CI no longer runs it — delete the row from ${PRECHECK_PARITY_BASELINE}`),
@@ -1756,7 +1764,8 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       srcFiles: listHouseLayoutSrcFiles(root),
     });
     if (!snapshot) {
-      violations = [...violations, ...censusParityViolations({ changed, readHead: readers.readHead, population: ciCensusPopulation(listRuleSuites(root)) })];
+      violations = [...violations, ...censusParityViolations({ changed, readHead: readers.readHead,
+        population: () => ciCensusPopulation(listCiRuleSuites(root)) })];
     }
     const instrument = evaluateInstrumentSurface({
       changed,
