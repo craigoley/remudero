@@ -1,0 +1,84 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { runInNewContext } from "node:vm";
+// @ts-ignore the executable .mjs module has no declaration file.
+import { LOCATION_RELATIVE_ERE, hasLocationRelativeSpecifier, rewriteSource } from "#scripts/test-location-codemod.mjs";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+const fixtureImport = (spec: string) => `import value from '${spec}';`;
+const fixtures = () => {
+  const data = fixtureImport("./fixture.js");
+  const dynamicPath = "../outside.js";
+  const setupPath = "./setup.js";
+  return [
+    `const double = ${JSON.stringify(data)};`,
+    `const single = '${data.replaceAll("'", '"')}';`,
+    "const template = `" + data + "\n" + data + "`;",
+    `const dynamic = ${JSON.stringify(`import('${dynamicPath}')`)};`,
+    `const sideEffect = ${JSON.stringify(`import '${setupPath}';`)};`,
+    "[double, single, template, dynamic, sideEffect];",
+  ].join("\n");
+};
+
+const census = (source: string) => spawnSync("grep", ["-E", LOCATION_RELATIVE_ERE], {
+  input: source, encoding: "utf8",
+});
+
+test("W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.ts is prevented, not retried", () => {
+  const source = fixtures();
+  assert.equal(census(source).status, 0, "control: the census sees the original fixture imports");
+  const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
+  assert.equal(result.rewritten, 6);
+  assert.deepEqual(result.unresolved, []);
+  assert.equal(hasLocationRelativeSpecifier(result.text), false);
+  const checked = census(result.text);
+  assert.equal(checked.status, 1, checked.stderr);
+  assert.deepEqual(Array.from(runInNewContext(result.text)), Array.from(runInNewContext(source)));
+  assert.deepEqual(rewriteSource(result.text, "test/ci/suites/fixture.test.ts"), {
+    text: result.text, rewritten: 0, selfPathRemoved: false, unresolved: [],
+  });
+});
+
+test("fixture-only files are written by the codemod CLI", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-fixture-escape-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, "fixture.test.ts");
+  const source = fixtures();
+  writeFileSync(file, source);
+  const run = (...args: string[]) => spawnSync(process.execPath, [
+    join(REPO_ROOT, "scripts/test-location-codemod.mjs"), ...args, file,
+  ], { encoding: "utf8" });
+  const dry = run();
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, /1 of 1 file\(s\) would change/);
+  assert.equal(readFileSync(file, "utf8"), source);
+  const written = run("--write");
+  assert.equal(written.status, 0, written.stderr);
+  assert.match(written.stdout, /1 of 1 file\(s\) rewritten/);
+  const actual = readFileSync(file, "utf8");
+  assert.equal(census(actual).status, 1);
+  assert.deepEqual(Array.from(runInNewContext(actual)), Array.from(runInNewContext(source)));
+});
+
+test("tagged templates retain observable raw spelling and report unresolved imports", () => {
+  const source = "String.raw`" + fixtureImport("./fixture.js") + "`;";
+  const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
+  assert.equal(result.text, source);
+  assert.equal(result.rewritten, 0);
+  assert.equal(result.unresolved.length, 1);
+  assert.match(result.unresolved[0], /raw spelling/);
+  assert.equal(runInNewContext(result.text), runInNewContext(source));
+});
+
+
+test("returned templates keep their values while becoming location-free", () => {
+  const source = "(() => { return `" + fixtureImport("../fixture.js") + "`; })();";
+  const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
+  assert.equal(result.rewritten, 1);
+  assert.equal(census(result.text).status, 1);
+  assert.equal(runInNewContext(result.text), runInNewContext(source));
+});
