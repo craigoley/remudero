@@ -16594,6 +16594,9 @@ export interface ReviewChildLaunch {
   acknowledge?: (outcome: PromiseSettledResult<never>) => void;
 }
 
+/** Abandoned admission refuses the dispatch; only ordinary unavailability permits an in-process fallback. */
+export type FixChildLaunch = ReviewChildLaunch | { abandoned: true; reason: "admission-abandoned"; runId: string; waitedMs: number };
+
 /**
  * W1-T9114: what starts detached work as a run child in this process, installed by the daemon's composition root. Unset, every kind
  * runs in process. `hosts` is what is wired (never what the design intends), and the drain reads it as the evidence that an entry
@@ -16608,12 +16611,12 @@ export interface DetachedWorkHost {
     reviewKey: string;
     reviewAttemptId: string | undefined;
   }) => Promise<ReviewChildLaunch | undefined>;
-  /** Starts one fix dispatch as a child from its decision envelope, or `undefined` when it stays in process. Absent: it stays in process. */
+  /** Starts a fix child, refuses abandoned admission, or returns `undefined` to stay in process. Absent: stay in process. */
   spawnFix?: (input: {
     pr: { prNumber: number; headSha: string; taskId?: string };
     fixKey: string;
     envelope: FixDispatchEnvelope;
-  }) => Promise<ReviewChildLaunch | undefined>;
+  }) => Promise<FixChildLaunch | undefined>;
 }
 let installedWorkHost: DetachedWorkHost | undefined;
 
@@ -19049,7 +19052,7 @@ export async function runSweep(
       log("sweep.fix.child_envelope_refused", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
       return false;
     }
-    let hosted: ReviewChildLaunch | undefined;
+    let hosted: FixChildLaunch | undefined;
     try {
       hosted = await host.spawnFix({ pr: { prNumber: pr.prNumber, headSha: pr.headSha, taskId: escalationTaskIdFor(pr) }, fixKey: claim.fixKey, envelope });
     } catch (error) {
@@ -19057,6 +19060,16 @@ export async function runSweep(
       return false;
     }
     if (hosted === undefined) return false;
+    if ("abandoned" in hosted) {
+      claim.release();
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: "sweep.fix.dispatch_failed",
+        pr_number: pr.prNumber, head_sha: pr.headSha, dedupe_key: dedupeKey,
+        reason: hosted.reason, admission_run_id: hosted.runId, admission_waited_ms: hosted.waitedMs,
+        error: "fix child admission abandoned; no worker spawned",
+      });
+      return true;
+    }
     // Release this pass's claim (its capacity too), then let the registry hold the same key at once: no await between the two.
     claim.release();
     void adoptChildWork({

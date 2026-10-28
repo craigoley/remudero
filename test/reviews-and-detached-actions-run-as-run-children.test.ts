@@ -687,6 +687,73 @@ test("W1-T9114: a fix dispatch the sweep decides is spawned as a child before an
   } finally { installDetachedWorkHost(undefined); resetChildWork(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("W1-T9114: abandoned child fix admission never falls back in process and releases the producer claim", async () => {
+  const f = fixture();
+  let finish!: (value: RunResult) => void;
+  const settled = new Promise<RunResult>((resolve) => { finish = resolve; });
+  try {
+    const clock = fixedClock(Date.parse("2026-10-05T23:00:00Z"));
+    const appended: Array<Record<string, unknown>> = [];
+    const seed = [{ step: "fix.dispatch", task_id: FIX_TASK, head_sha: "81c30d80bb" }];
+    let inProcess = 0;
+    let heldCapacity = 0;
+    let releasedCapacity = 0;
+    let attempts = 0;
+    let hold: "STOP" | "PAUSE" | undefined;
+    const spawn = (async () => {
+      attempts += 1;
+      return hold === undefined
+        ? { started: true, runId: "work-fix-admitted", dir: f.root, pid: 1, settled, abort: async () => ({}) }
+        : { started: false, abandoned: true, reason: "admission-abandoned", runId: `work-fix-withheld-${hold}`, waitedMs: 23 };
+    }) as unknown as typeof spawnRunChild;
+    installDetachedWorkHost(createDetachedWorkHost({
+      stateRoot: f.stateRoot, repoDir: f.root, root: f.root, repo: "fixture", log: f.log, readMode: () => "on", spawn,
+      readLedger: () => [{ step: "daemon.freshness_drain.completed", duration_ms: 1_000,
+        waited_on: [{ what: "detached", kind: "fix-dispatch", settled_after_ms: 1_000 }] }],
+    }));
+    const deps: SweepDeps = {
+      arm: () => {}, close: () => {}, escalate: () => {}, runId: "SWEEP-W1-T9114", now: () => clock.now(),
+      ledgerPath: join(f.stateRoot, "ledger.ndjson"), readLedger: () => [...seed, ...appended],
+      appendLine: (_path, row) => { appended.push(row); }, log: f.log, detachFixWait: true,
+      dispatchFix: () => { inProcess += 1; },
+      claimFixAdmission: () => {
+        assert.equal(heldCapacity, 0, "the previous attempt released its host slot");
+        heldCapacity += 1;
+        return { admitted: true, release: () => { heldCapacity -= 1; releasedCapacity += 1; } };
+      },
+    };
+    for (const control of ["STOP", "PAUSE"] as const) {
+      hold = control;
+      await runSweep([fixPr()], deps);
+      await drainDetachedSweepActions();
+      assert.equal(inProcess, 0, `${control}: withheld child admission cannot authorize an in-process worker`);
+      assert.equal(heldCapacity, 0, `${control}: the producer releases its capacity`);
+      assert.equal(detachedSweepActionCount(), 0, `${control}: nothing is left for a restart to drain`);
+      assert.equal(childWorkCount(), 0, `${control}: no child was registered as successful`);
+      const refusal = appended.findLast(row => row.step === "sweep.fix.dispatch_failed");
+      assert.equal(refusal?.reason, "admission-abandoned");
+      assert.equal(refusal?.head_sha, FIX_HEAD);
+      assert.equal(refusal?.admission_waited_ms, 23);
+    }
+    assert.equal(attempts, 2, "the same head is re-admitted after abandonment, without resetting retry state");
+    hold = undefined;
+    await runSweep([fixPr()], deps);
+    await drainDetachedSweepActions();
+    assert.equal(attempts, 3, "lifting the hold re-admits the unchanged head through the production host");
+    assert.equal(inProcess, 0);
+    assert.equal(releasedCapacity, 3, "both abandoned attempts and the successful handoff release the producer slot");
+    assert.equal(childWorkCount("fix-dispatch"), 1);
+    assert.equal(detachedSweepActionCount(), 0, "the admitted fix remains a child across a restart");
+    assert.equal(appended.some(row => row.step === "fix.dispatch" || row.step === "fix.done"), false,
+      "the producer spends no fix round on an abandoned launch");
+  } finally {
+    finish(result(FIX_TASK));
+    await flush();
+    installDetachedWorkHost(undefined);
+    f.cleanup();
+  }
+});
+
 test("W1-T9114: the fix child rechecks, dispatches through the sweep's own dispatchFix and refuses what it cannot read", async () => {
   const envelope = buildFixDispatchEnvelope(fixPr(), { unmetCriteria: UNMET, progressJudge: (() => { throw new Error("never serialized"); }) as never },
     { fixKey: `${FIX_TASK}@${FIX_HEAD}`, decidedAtMs: 1, planContextDigest: "digest-1" });

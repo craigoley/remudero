@@ -1003,13 +1003,13 @@ export interface DetachedWorkChildHost {
     reviewKey: string;
     reviewAttemptId: string | undefined;
   }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | undefined>;
-  /** Starts one fix dispatch as a child from its serializable decision envelope, or `undefined` when it stays in process. */
+  /** Starts a fix child, refuses abandoned admission, or returns `undefined` when it stays in process. */
   spawnFix: (input: {
     pr: { prNumber: number; headSha: string; taskId?: string };
     fixKey: string;
     /** The typed decision envelope (sweep.ts `FixDispatchEnvelope`); this module only carries it into `spec.json`, plain JSON. */
     envelope: object;
-  }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | undefined>;
+  }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
 }
 
 /** `off`: everything in process. `shadow`: a probe round-trips the contract, the work stays in process. `on`: moved kinds are children. */
@@ -1277,7 +1277,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "sweep-fix", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
         plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
       });
-      if (!launch.started) return undefined;
+      if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
     },
   };
