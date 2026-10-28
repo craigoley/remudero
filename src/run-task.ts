@@ -42367,8 +42367,11 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["knowledge", (rest) => knowledgeCommand(rest)],
   [
     "trace",
-    async (rest) =>
-      await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot: verbPlanRootOrCwd(rest[0]), resolveOwnerRepo }),
+    async (rest) => {
+      // W1-T10925: shadows the module `repoRoot` with the plan root the id resolves in (cwd's when it misses).
+      const repoRoot = verbPlanRootOrCwd(rest[0]);
+      return await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot, resolveOwnerRepo });
+    },
   ],
   ["peek", async (rest) => await peekCommand(rest)],
   ["pr-owner", (rest) => prOwnerCommand(rest)],

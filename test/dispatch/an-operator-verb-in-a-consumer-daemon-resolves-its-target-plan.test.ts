@@ -63,16 +63,17 @@ class ProcessExitCalled extends Error {
   }
 }
 
-interface Run { code: number | undefined; err: string; released: Array<Record<string, unknown>> }
+interface Run { code: number | undefined; out: string; err: string; released: Array<Record<string, unknown>> }
 
 /** `rmd <argv>` through the real `main()`, cwd = this (engine) checkout, HOME = the fixture's. */
 async function rmd(t: TestContext, f: Instance, argv: string[]): Promise<Run> {
   const shim = ghShim([{ when: "", stderr: "t10925 test: unexpected gh call", exit: 1 }], { kind: "t10925-gh" });
+  const out: string[] = [];
   const err: string[] = [];
   t.mock.method(process, "exit", ((code?: number): never => {
     throw new ProcessExitCalled(code);
   }) as typeof process.exit);
-  t.mock.method(console, "log", () => {});
+  t.mock.method(console, "log", (...a: unknown[]) => out.push(a.join(" ")));
   t.mock.method(console, "error", (...a: unknown[]) => err.push(a.join(" ")));
   t.mock.method(console, "warn", () => {});
   const saved = { argv: process.argv, home: process.env.HOME, path: process.env.PATH, guard: process.env[SELF_SYNC_GUARD_ENV] };
@@ -86,7 +87,7 @@ async function rmd(t: TestContext, f: Instance, argv: string[]): Promise<Run> {
     assert.ok(caught instanceof ProcessExitCalled, `main() must reach process.exit: ${String(caught)}`);
     const released = (readLedgerLines(f.ledgerPath) as Array<Record<string, unknown>>)
       .filter((r) => r.step === "dispatch.breaker_released");
-    return { code: (caught as ProcessExitCalled).code, err: err.join("\n"), released };
+    return { code: (caught as ProcessExitCalled).code, out: out.join("\n"), err: err.join("\n"), released };
   } finally {
     process.argv = saved.argv;
     process.env.HOME = saved.home;
@@ -106,6 +107,15 @@ test("W1-T10925: a release in a consumer instance resolves the target plan", asy
   assert.equal(r.released.length, 1, "exactly one dispatch.breaker_released row");
   assert.equal(r.released[0]!.task_id, TARGET_TASK);
   assert.equal(r.released[0]!.repo, "remudero-site", "the row carries the TARGET plan's repo");
+
+  // `correct` and `trace` share the resolver: the target task is found, and correct asks the TARGET repo.
+  const corrected = await rmd(t, f, ["correct", TARGET_TASK, "--pr", "7"]);
+  assert.equal(corrected.code, 1);
+  assert.match(corrected.err, /could not resolve PR '7' in craigoley\/remudero-site/);
+  const traced = await rmd(t, f, ["trace", TARGET_TASK]);
+  assert.equal(traced.code, 0, traced.err);
+  assert.match(traced.out, new RegExp(`### rmd trace ${TARGET_TASK} \\(reverse`));
+  assert.equal((await rmd(t, f, ["trace"])).code, 2, "no id still reaches trace's own usage error");
 });
 
 test("W1-T10925: a self-targeting instance and --repo-root are unchanged", async (t) => {
