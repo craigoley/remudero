@@ -316,7 +316,7 @@ test("a keep-alive client sees zero ECONNRESET across a drain to a second server
 test("an exit blocked by a worker thread in a native call is killed at the deadline", { timeout: 60_000 }, async () => {
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
     import { Worker } from "node:worker_threads";
-    import { exitWithin } from "#src/lib/serve-drain.ts";
+    import { exitWithin } from "./src/lib/serve-drain.ts";
     const worker = new Worker(\`const { DatabaseSync } = process.getBuiltinModule("node:sqlite"); const db = new DatabaseSync(":memory:");
       process.getBuiltinModule("node:worker_threads").parentPort.postMessage("busy");
       db.prepare("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000000000) SELECT count(*) FROM c").get();\`, { eval: true });

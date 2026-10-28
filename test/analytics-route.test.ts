@@ -538,8 +538,8 @@ test("deriveAnalyticsSnapshotFromLedger streams a replaying rotation union to th
 
 test("deriveAnalyticsSnapshotFromStream does not retain a response-irrelevant corpus", () => {
   const script = `
-    import { deriveAnalyticsSnapshotFromStream } from "#src/lib/analytics-route.js";
-    import { fixedClock } from "#src/lib/clock.js";
+    import { deriveAnalyticsSnapshotFromStream } from "./src/lib/analytics-route.js";
+    import { fixedClock } from "./src/lib/clock.js";
     async function* rows() {
       for (let i = 0; i < 20000; i += 1) {
         yield { step: "irrelevant", payload: Buffer.alloc(8192, i % 251).toString("hex") + i };

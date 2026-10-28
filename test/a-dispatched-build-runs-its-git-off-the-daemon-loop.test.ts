@@ -89,9 +89,7 @@ function lane(): { wt: string; remote: string; branch: string } {
   seed.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
   seed.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
   writeFileSync(join(seed.dir, "README.md"), "seed\n");
-  // The suite imports through #src/*, and the selector reads that alias from the tree's own package.json.
-  writeFileSync(join(seed.dir, "package.json"), `${JSON.stringify({ imports: { "#src/*": "./src/*" } })}\n`);
-  seed.git("add", "README.md", "package.json");
+  seed.git("add", "README.md");
   seed.git("commit", "-q", "-m", "chore: seed");
   seed.addRemote("origin", remote);
   seed.git("push", "-q", "origin", "main");
@@ -101,7 +99,7 @@ function lane(): { wt: string; remote: string; branch: string } {
   mkdirSync(join(wt, "src"));
   mkdirSync(join(wt, "test"));
   writeFileSync(join(wt, "src", "feature.ts"), "export const feature = 1;\n");
-  writeFileSync(join(wt, "test", "feature.test.ts"), 'import { feature } from "#src/feature.js";\nvoid feature;\n');
+  writeFileSync(join(wt, "test", "feature.test.ts"), 'import { feature } from "../src/feature.js";\nvoid feature;\n');
   spawnSync("git", ["-C", wt, "add", "src", "test"]);
   spawnSync("git", ["-C", wt, "-c", "core.hooksPath=/dev/null", "-c", `user.email=${GIT_REPO_FIXTURE_IDENTITY.email}`, "-c",
     `user.name=${GIT_REPO_FIXTURE_IDENTITY.name}`, "commit", "-q", "-m", "feat: a feature"]);

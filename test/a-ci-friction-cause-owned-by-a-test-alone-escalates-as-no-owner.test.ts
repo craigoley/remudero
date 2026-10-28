@@ -41,7 +41,7 @@ test("W1-T9503: a cause owned by a test alone escalates as no-owner", t => {
 });
 
 test("W1-T9503: a source-owned cause still drafts a record lint-plan admits", t => {
-  const f = fixture(t, 'import { govern } from "#src/lib/dispatch-governor.js";\nexport const ok = govern();\n');
+  const f = fixture(t, 'import { govern } from "../src/lib/dispatch-governor.js";\nexport const ok = govern();\n');
   const { next } = f.ladder();
   assert.equal(next?.decision.kind, "draft");
   const owner = next?.decision.kind === "draft" ? next.decision.owner : undefined;

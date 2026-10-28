@@ -25,7 +25,7 @@ function fixture(t: TestContext) {
     writeFileSync(join(repo.dir, file), text);
   };
   put(".github/workflows/ci.yml", "jobs:\n  tests:\n    name: ci-shard\n");
-  put(TEST, `import { run } from "#scripts/merge-producer.mjs";\nconst cli = new URL("../scripts/merge-producer.mjs", import.meta.url);\n`);
+  put(TEST, `import { run } from "../scripts/merge-producer.mjs";\nconst cli = new URL("../scripts/merge-producer.mjs", import.meta.url);\n`);
   put(SCRIPT, "export const run = () => true;\n");
   repo.git("add", ".");
   repo.git("commit", "-qm", "fixture");
@@ -35,7 +35,7 @@ function fixture(t: TestContext) {
 
 test("#11716: a test importing an .mjs script names that .mjs file as its source", () => {
   assert.deepEqual(
-    testSourcePaths("test/a.test.ts", `import x from "#scripts/x.mjs";\nimport y from "#src/lib/y.js";\n`),
+    testSourcePaths("test/a.test.ts", `import x from "../scripts/x.mjs";\nimport y from "../src/lib/y.js";\n`),
     ["scripts/x.mjs", "scripts/x.mts", "src/lib/y.ts"],
   );
 });

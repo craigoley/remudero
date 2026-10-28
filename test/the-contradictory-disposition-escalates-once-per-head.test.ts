@@ -124,8 +124,8 @@ test("the contradictory escalation backoff survives a restart", async (t) => {
     }
     const before = dispositions(f.ledgerPath).length;
     const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
-    import { runSweep, DEFAULT_SWEEP_POLICY } from '#src/lib/sweep.ts';
-    import { readLedgerLines } from '#src/lib/status.ts';
+    import { runSweep, DEFAULT_SWEEP_POLICY } from './src/lib/sweep.ts';
+    import { readLedgerLines } from './src/lib/status.ts';
     let escalations = 0;
     const pr = ${JSON.stringify(f.pr)};
     await runSweep([pr], {

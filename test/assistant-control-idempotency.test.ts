@@ -58,8 +58,8 @@ function controlRoutes(deps: Parameters<typeof buildAssistantControlRoute>[0]): 
 }
 
 const childServer = `
-import { createService } from "#src/lib/service.ts";
-import { buildAssistantControlRoute, buildAssistantActionDiscoveryRoute } from "#src/lib/panel-actions.ts";
+import { createService } from "./src/lib/service.ts";
+import { buildAssistantControlRoute, buildAssistantActionDiscoveryRoute } from "./src/lib/panel-actions.ts";
 import { join } from "node:path";
 const root = process.env.RMD_TEST_CONTROL_ROOT;
 const deps = { root, ledgerPath: join(root, "state", "ledger.ndjson"), claimRoot: root, instance: "core",

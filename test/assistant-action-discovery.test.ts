@@ -85,8 +85,8 @@ function routes(deps: AssistantControlOptions): Route[] {
 }
 
 const childServer = `
-import { createService } from "#src/lib/service.ts";
-import { buildAssistantControlRoute, buildAssistantControlReceiptRoute, buildAssistantActionDiscoveryRoute } from "#src/lib/panel-actions.ts";
+import { createService } from "./src/lib/service.ts";
+import { buildAssistantControlRoute, buildAssistantControlReceiptRoute, buildAssistantActionDiscoveryRoute } from "./src/lib/panel-actions.ts";
 import { join } from "node:path";
 const root = process.env.RMD_TEST_CONTROL_ROOT;
 const interrupt = process.env.RMD_TEST_INTERRUPT;
@@ -513,7 +513,7 @@ test("assistant discovery refuses a real claim named pipe without waiting for a 
   assert.deepEqual((await readAssistantActionDiscovery(request)).pending.map(row => row.actionId), [actionId], "regular claim is the positive control");
   rmSync(path); execFileSync("mkfifo", [path]);
   const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval",
-    `import { readAssistantActionDiscovery } from "#src/lib/assistant-action-discovery.ts";
+    `import { readAssistantActionDiscovery } from "./src/lib/assistant-action-discovery.ts";
      console.log(JSON.stringify(await readAssistantActionDiscovery(${JSON.stringify(request)})));`],
     { cwd: process.cwd(), encoding: "utf8", timeout: 5000 });
   assert.equal(child.error, undefined, "nonregular claim must not block in open before stat can reject it");

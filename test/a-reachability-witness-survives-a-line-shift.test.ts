@@ -16,7 +16,7 @@ import { callSiteKey, enclosingTestTitle, numberCallSites } from "#test/helpers/
 // change under the shift below.
 
 const FIXTURE = [
-  'import { armIfVerdictPermits } from "#src/lib/arm-auto-merge.ts";',
+  'import { armIfVerdictPermits } from "../src/lib/arm-auto-merge.ts";',
   "",
   'test("a passing verdict arms the PR", () => {',
   "  const outcome = armIfVerdictPermits(verdict, ctx, { arm });",

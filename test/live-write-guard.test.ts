@@ -567,7 +567,7 @@ test("a claim-ref push is never guarded outside the test runner", () => {
   withLiveWritesAllowed(() => assert.doesNotThrow(() => assertClaimRefPushAllowed(fake.run, "refs/rmd-id/W1-T9000", TEST_RUN)));
   // and a reserver in a REAL process (no runner variable) reaches its push without any origin lookup
   const child = spawnSync(process.execPath, ["--import", "tsx", "-e",
-    `import("#src/lib/dispatch-claim.ts").then(({ gitDispatchClaimReserver }) => {
+    `import("./src/lib/dispatch-claim.ts").then(({ gitDispatchClaimReserver }) => {
        const calls = [];
        const run = (a) => { calls.push(a[0]); return { status: 0, stdout: "x", stderr: "" }; };
        gitDispatchClaimReserver({ run }).attempt("W1-T9000", "anchor");

@@ -185,7 +185,7 @@ test("W1-T6406: the policy is tiered — one PR is noise, two watch, three file"
 
 test("W1-T6406: the modules a test imports are the source its failure could come from", () => {
   assert.deepEqual(
-    testSourcePaths("test/a.test.ts", `import x from "#src/lib/x.js";\nconst y = await import("#test/helpers/y.ts");\nimport z from "zod";`),
+    testSourcePaths("test/a.test.ts", `import x from "../src/lib/x.js";\nconst y = await import("./helpers/y.ts");\nimport z from "zod";`),
     ["src/lib/x.ts", "test/helpers/y.ts"],
   );
   assert.deepEqual(testSourcePaths("test/a.test.ts", undefined), []);
