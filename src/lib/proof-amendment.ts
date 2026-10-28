@@ -1155,7 +1155,7 @@ export async function saveScopeAmendmentWork(input: ScopeAmendmentWork, io: Scop
   return file;
 }
 
-/** W1-T10387: replays the asking round's edit onto the merged file (ours = HEAD, base = the saved base, theirs = the
+/** W1-T10387: replays the asking round's edit onto the merged file (ours = worktree, base = the saved base, theirs = the
  *  saved edit), never a whole-file snapshot: #13324's recovery wrote a pre-#13318 copy of sweep.ts over the merge and
  *  reverted #13318. A conflicting path, or every path of a record with no base, is left as the merge produced it. */
 export async function restoreScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): Promise<string[]> {
@@ -1165,7 +1165,8 @@ export async function restoreScopeAmendmentWork(input: ScopeAmendmentWork, io: S
     throw new ScopeRecoveryError(`saved scope work has no base, so it cannot be replayed; ${legacy.join(", ")} left as the merge ` +
       "produced them — re-apply the round's change to them");
   }
-  const merged = scopeWorkTree(input.worktreePath, "HEAD", entries.map((entry) => entry.path), io);
+  const merged = new Map((await scopeWorkFiles(input.worktreePath, entries, false, io))
+    .map((entry) => [entry.path, entry.data === null ? null : { data: entry.data, mode: entry.mode }]));
   const writes: ScopeWorkEntry[] = [];
   const replayed: string[] = [];
   const conflicted: string[] = [];

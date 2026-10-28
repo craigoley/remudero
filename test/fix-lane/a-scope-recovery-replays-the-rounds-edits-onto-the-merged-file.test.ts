@@ -25,7 +25,7 @@ function scopeFixture(t: TestContext, extra: Record<string, string> = {}) {
   const input = { root, worktreePath: repo.dir, taskId: "W1-T10387", prNumber: 13324, amendmentNumber: 13330,
     paths: [path, ...Object.keys(extra)] };
   /** Main's commit lands, the round's dirty edit is gone, and the branch merges main as the amendment resume does. */
-  const mergeMain = (files: Record<string, string | null>) => {
+  const mergeMain = (files: Record<string, string | null>, commit = true) => {
     repo.git("checkout", "-q", "--", ".");
     repo.git("clean", "-qfd");
     repo.git("checkout", "-q", "main");
@@ -34,36 +34,45 @@ function scopeFixture(t: TestContext, extra: Record<string, string> = {}) {
     }
     repo.git("add", "-A"); repo.git("commit", "-qm", "main moves on");
     repo.git("checkout", "-q", "run-W1-T10387-1");
-    repo.git("merge", "-q", "--no-edit", "--no-ff", "main");
+    repo.git("merge", "-q", "--no-edit", "--no-ff", commit ? "--commit" : "--no-commit", "main");
     return readFileSync(join(repo.dir, path));
   };
   return { repo, input, mergeMain };
 }
 
 test("W1-T10387: a scope recovery keeps main's hunks and replays the round's edit", async (t) => {
-  const f = scopeFixture(t);
-  writeFileSync(join(f.repo.dir, path), original.replace("export const b = 1;", "export const b = 2; // the round's edit"));
-  await saveScopeAmendmentWork(f.input);
-  f.mergeMain({ [path]: original.replace("export const a = 1;", "export const a = 1; // PR-13039: main's hold") });
-  assert.deepEqual(await restoreScopeAmendmentWork(f.input), [path]);
-  assert.equal(readFileSync(join(f.repo.dir, path), "utf8"), lines("// header", "export const a = 1; // PR-13039: main's hold",
-    "", "", "", "export const b = 2; // the round's edit", "// footer"));
+  for (const commit of [true, false]) await t.test(commit ? "committed merge" : "uncommitted merge", async (t) => {
+    const f = scopeFixture(t);
+    const head = f.repo.git("rev-parse", "HEAD");
+    writeFileSync(join(f.repo.dir, path), original.replace("export const b = 1;", "export const b = 2; // the round's edit"));
+    await saveScopeAmendmentWork(f.input);
+    f.mergeMain({ [path]: original.replace("export const a = 1;", "export const a = 1; // PR-13039: main's hold") }, commit);
+    if (!commit) assert.equal(f.repo.git("rev-parse", "HEAD"), head, "the merge has not advanced HEAD");
+    assert.deepEqual(await restoreScopeAmendmentWork(f.input), [path]);
+    assert.equal(readFileSync(join(f.repo.dir, path), "utf8"), lines("// header", "export const a = 1; // PR-13039: main's hold",
+      "", "", "", "export const b = 2; // the round's edit", "// footer"));
+  });
 });
 
 test("W1-T10387: a conflicting scope recovery leaves the merged file untouched", async (t) => {
-  const f = scopeFixture(t);
-  writeFileSync(join(f.repo.dir, path), original.replace("export const a = 1;", "export const a = 2; // the round's edit"));
-  await saveScopeAmendmentWork(f.input);
-  const merged = f.mergeMain({ [path]: original.replace("export const a = 1;", "export const a = 3; // main's edit") });
-  await assert.rejects(restoreScopeAmendmentWork(f.input), (error) => {
-    assert.ok(error instanceof ScopeRecoveryConflictError);
-    assert.equal(error.recoveryStatus, "conflicted");
-    assert.deepEqual(error.conflictedPaths, [path]);
-    assert.match(error.message, /conflicted on app\/lib\/sweep\.ts.*re-apply the round's change/);
-    return true;
+  for (const commit of [true, false]) await t.test(commit ? "committed merge" : "uncommitted merge", async (t) => {
+    const f = scopeFixture(t);
+    const head = f.repo.git("rev-parse", "HEAD");
+    writeFileSync(join(f.repo.dir, path), original.replace("export const a = 1;", "export const a = 2; // the round's edit"));
+    await saveScopeAmendmentWork(f.input);
+    const merged = f.mergeMain({ [path]: original.replace("export const a = 1;", "export const a = 3; // main's edit") }, commit);
+    if (!commit) assert.equal(f.repo.git("rev-parse", "HEAD"), head, "the merge has not advanced HEAD");
+    const status = f.repo.git("status", "--porcelain");
+    await assert.rejects(restoreScopeAmendmentWork(f.input), (error) => {
+      assert.ok(error instanceof ScopeRecoveryConflictError);
+      assert.equal(error.recoveryStatus, "conflicted");
+      assert.deepEqual(error.conflictedPaths, [path]);
+      assert.match(error.message, /conflicted on app\/lib\/sweep\.ts.*re-apply the round's change/);
+      return true;
+    });
+    assert.deepEqual(readFileSync(join(f.repo.dir, path)), merged);
+    assert.equal(f.repo.git("status", "--porcelain"), status);
   });
-  assert.deepEqual(readFileSync(join(f.repo.dir, path)), merged);
-  assert.equal(f.repo.git("status", "--porcelain"), "");
 });
 
 test("W1-T10387: a legacy scope record never overwrites the merged file", async (t) => {
