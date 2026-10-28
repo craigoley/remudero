@@ -2117,8 +2117,10 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
     deps.log("fix.census_refresh", { pr_number: input.prNumber, head_sha: context.headSha, main_sha: context.mainSha,
       merge_base: context.mergeBase, baseline_path: context.baselinePath, outcome, reason, ...extra });
   const held = (reason: string) => { log("held", reason); return { outcome: "held" as const, reason }; };
-  if (!deps.branchClaim?.verify || !deps.readLiveState || !deps.readLiveHead || !deps.readCiRollup ||
-      !deps.readMergeFacts || !deps.reproduceFailingTestsOnMerge || !deps.updateBranchAtHead) return held("native refresh ownership or evidence is not wired");
+  if (deps.branchClaim === undefined) return held("native refresh branch claim is not wired");
+  if (deps.branchClaim.verify === undefined) return held("native refresh ownership verification is not wired");
+  if (!deps.readLiveState || !deps.readLiveHead || !deps.readCiRollup ||
+      !deps.readMergeFacts || !deps.reproduceFailingTestsOnMerge || !deps.updateBranchAtHead) return held("native refresh evidence is not wired");
   try {
     const check = async (): Promise<string | undefined> => {
       const claim = deps.branchClaim!.reacquire() ?? deps.branchClaim!.verify!();
@@ -2160,7 +2162,10 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
     deps.log("fix.base_refreshed", { pr_number: input.prNumber, head_sha: context.headSha, main_sha: context.mainSha,
       red_checks: ["pre-push census-precheck"], test_files: [reach], matching_base_files: [context.baselinePath], method: "merge", reason });
     return { outcome: "requested", reason };
-  } catch (error) { return held(`native refresh evidence unavailable: ${String(error).slice(0, 512)}`); }
+  } catch (error) {
+    const reason = `native refresh evidence unavailable: ${String(error).slice(0, 512)}`;
+    return held(reason);
+  }
 }
 
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {

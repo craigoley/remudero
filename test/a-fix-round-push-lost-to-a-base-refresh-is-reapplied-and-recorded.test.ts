@@ -345,13 +345,14 @@ test("census refresh durably preserves staged unstaged and untracked work withou
 });
 
 test("census refresh retains failed merged checks overlaps unavailable reads and preservation errors", async t => {
-  for (const mode of ["growth", "unrunnable", "missing-probe", "unwired-owner", "unleased-updater", "overlap", "reader-error", "save-error", "tracked-only"] as const) {
+  for (const mode of ["growth", "unrunnable", "missing-probe", "unwired-owner", "unverified-owner", "unleased-updater", "overlap", "reader-error", "save-error", "tracked-only"] as const) {
     await t.test(mode, async t => {
       const fx = await censusRefreshOwner(t);
       if (mode === "growth" || mode === "unrunnable") fx.deps.reproduceFailingTestsOnMerge = async (_pr, files) =>
         files.map(file => ({ file, outcome: mode === "growth" ? "fails" : "unrunnable", duration_ms: 1, cached: false }));
       if (mode === "missing-probe") fx.deps.reproduceFailingTestsOnMerge = undefined;
       if (mode === "unwired-owner") fx.deps.branchClaim = undefined;
+      if (mode === "unverified-owner") fx.deps.branchClaim = { ...fx.claim, verify: undefined };
       let legacyUpdates = 0;
       if (mode === "unleased-updater") {
         fx.deps.updateBranchAtHead = undefined;

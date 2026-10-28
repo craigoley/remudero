@@ -12996,7 +12996,10 @@ export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => Inf
       if (!info || !info.host || !info.startedAt || info.run_id !== held.info.run_id || info.pid !== held.info.pid ||
           info.host !== held.info.host || info.startedAt !== held.info.startedAt) return "branch claim belongs to another owner";
       return undefined;
-    } catch { return "branch claim identity is unavailable"; }
+    } catch {
+      const reason = "branch claim identity is unavailable";
+      return reason;
+    }
   };
   return {
     id: () => held?.info.run_id,
