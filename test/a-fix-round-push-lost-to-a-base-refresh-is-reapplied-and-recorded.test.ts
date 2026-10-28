@@ -336,13 +336,18 @@ test("census refresh durably preserves staged unstaged and untracked work withou
 });
 
 test("census refresh retains failed merged checks overlaps unavailable reads and preservation errors", async t => {
-  for (const mode of ["growth", "unrunnable", "missing-probe", "unwired-owner", "overlap", "reader-error", "save-error", "tracked-only"] as const) {
+  for (const mode of ["growth", "unrunnable", "missing-probe", "unwired-owner", "unleased-updater", "overlap", "reader-error", "save-error", "tracked-only"] as const) {
     await t.test(mode, async t => {
       const fx = await censusRefreshOwner(t);
       if (mode === "growth" || mode === "unrunnable") fx.deps.reproduceFailingTestsOnMerge = async (_pr, files) =>
         files.map(file => ({ file, outcome: mode === "growth" ? "fails" : "unrunnable", duration_ms: 1, cached: false }));
       if (mode === "missing-probe") fx.deps.reproduceFailingTestsOnMerge = undefined;
       if (mode === "unwired-owner") fx.deps.branchClaim = undefined;
+      let legacyUpdates = 0;
+      if (mode === "unleased-updater") {
+        fx.deps.updateBranchAtHead = undefined;
+        Object.assign(fx.deps, { updateBranch: () => { legacyUpdates++; return { ok: true }; } });
+      }
       if (mode === "overlap") {
         writeFileSync(join(fx.repo.dir, "scripts/affected-reach-baseline.json"), "changed saved baseline\n");
       }
@@ -358,6 +363,7 @@ test("census refresh retains failed merged checks overlaps unavailable reads and
       assert.equal(result.outcome, mode === "tracked-only" ? "requested" : "held", JSON.stringify(fx.rows));
       assert.equal(fx.repo.git("status", "--porcelain=v1"), before);
       assert.equal(fx.updates(), mode === "tracked-only" ? 1 : 0);
+      assert.equal(legacyUpdates, 0, "a historical updater without CAS is never a refresh capability");
       if (mode === "overlap") await assert.rejects(fx.evidence.preserveInheritedCensusWork(fx.root, fx.repo.dir, "refresh", fx.context), /overlaps main/);
       if (mode === "tracked-only") assert.match(String(fx.rows.find(row => row.outcome === "work-preserved")!.recovery_ref), /^refs\/rmd-recovery\//);
     });
