@@ -296,9 +296,11 @@ function* mergeFactsSteps(owner: string, repo: string, prNumber: number, fetch: 
  *  "untouched": {@link directMergePreflight} sends it down the same update path as "touched". */
 export type PlanTouch = "touched" | "untouched" | "unreadable";
 
-/** W1-T5472 — classify one PR's changed files from the REST files page. A failed read, a
- *  non-array payload, an empty list, or a full page (the list may be truncated past it) cannot
- *  prove the plan is untouched, so each answers "unreadable". A rename counts its old path too. */
+/** W1-T5472 — classify one PR's changed files from the REST files pages. A failed read, a
+ *  non-array payload, an empty list, or a full last page (the list may be truncated past it) cannot
+ *  prove the plan is untouched, so each answers "unreadable". A rename counts its old path too.
+ *  A full page reads the next one, up to GitHub's 3,000-file listing: #14817 (843 files, none under
+ *  plan/) read one page, answered "unreadable" and took the plan-PR path. */
 export function planTouchFromRest(
   owner: string,
   repo: string,
@@ -308,21 +310,29 @@ export function planTouchFromRest(
   return runStepsSync(planTouchSteps(owner, repo, prNumber, fetch));
 }
 
+/** BACKSTOP: GitHub lists at most 3,000 files of a pull request, 100 per page. */
+const PLAN_TOUCH_MAX_PAGES = 30;
+
 function* planTouchSteps(owner: string, repo: string, prNumber: number, fetch: RestReader): Steps<PlanTouch> {
-  let rows: unknown;
-  try {
-    rows = yield* step(() => fetch(prFilesRestArgs(owner, repo, prNumber)));
-  } catch {
-    // the failure keeps its own value: "unreadable" is updated like a plan PR, never merged as-is.
-    return "unreadable";
+  for (let page = 1; page <= PLAN_TOUCH_MAX_PAGES; page++) {
+    const args = prFilesRestArgs(owner, repo, prNumber);
+    if (page > 1) args[args.length - 1] += `&page=${page}`;
+    let rows: unknown;
+    try {
+      rows = yield* step(() => fetch(args));
+    } catch {
+      // the failure keeps its own value: "unreadable" is updated like a plan PR, never merged as-is.
+      return "unreadable";
+    }
+    if (!Array.isArray(rows) || (page === 1 && rows.length === 0)) return "unreadable";
+    const paths = rows.flatMap((row) => {
+      const r = (row ?? {}) as { filename?: unknown; previous_filename?: unknown };
+      return [r.filename, r.previous_filename].filter((p): p is string => typeof p === "string");
+    });
+    if (paths.some((p) => p.startsWith("plan/"))) return "touched";
+    if (rows.length < PLAN_FILING_FILE_RESPONSE_CAP) return "untouched";
   }
-  if (!Array.isArray(rows) || rows.length === 0) return "unreadable";
-  const paths = rows.flatMap((row) => {
-    const r = (row ?? {}) as { filename?: unknown; previous_filename?: unknown };
-    return [r.filename, r.previous_filename].filter((p): p is string => typeof p === "string");
-  });
-  if (paths.some((p) => p.startsWith("plan/"))) return "touched";
-  return rows.length >= PLAN_FILING_FILE_RESPONSE_CAP ? "unreadable" : "untouched";
+  return "unreadable";
 }
 
 /** W1-T5472 — every plan file under `planDir` (`tasks.yaml` and each `tasks.d/*.yaml`) that a
