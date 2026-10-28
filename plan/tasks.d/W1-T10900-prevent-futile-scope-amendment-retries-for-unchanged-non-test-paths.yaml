@@ -6,7 +6,10 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=f054cfb49e68e18a
+  # backlog gardener: placed=2026-10-28T08:30:08.075Z
   attempts: 0
   files:
     - src/cli/commands/fix.ts
