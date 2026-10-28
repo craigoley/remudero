@@ -20,7 +20,6 @@
  */
 import { createHash } from "node:crypto";
 import { fixedClock } from "./clock.js";
-import type { FieldTrialsConsent } from "./field-trials-flow.js";
 import { TRIAL_REVISION_RE, type TrialRevisionPins } from "./field-trials-cohorts.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { ROUTING_DRAW_METHOD } from "./worker-provider.js";
@@ -31,10 +30,15 @@ export const CENSORING_MARGIN_MS = 72 * 3_600_000;
 export const BOOTSTRAP_RESAMPLES = 2000;
 /** The site's id grammar (model ids, release ids, revisions). */
 export const SITE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
-/** An assignment count whose arm split strays this many standard errors from the draw is a broken allocation. */
+/** PRIMARY CONTROL: the audit's balance check. An arm split straying this many standard errors from the draw is a broken allocation. */
 export const BALANCE_MAX_Z = 4;
-/** Share of assignments whose served model is unknown above which the audit does not pass. */
+/** PRIMARY CONTROL: the audit's missingness check. Above this share of assignments with an unknown served model, the audit does not pass. */
 export const MISSINGNESS_MAX = 0.05;
+
+/** The consent registry's shape this builder reads; the flow's FieldTrialsConsent satisfies it (no import, so no cycle). */
+export interface ControlledConsent {
+  repos: { repo: string; rights: string; receipt: string; revoked?: boolean }[];
+}
 
 /** A registered randomized epoch: fixed before any outcome is read. */
 export interface ControlledEpoch {
@@ -78,7 +82,7 @@ export interface ControlledReleaseInput {
   assignments: readonly EpochAssignment[];
   outcomes: readonly EpochTaskOutcome[];
   pins: TrialRevisionPins;
-  consent: FieldTrialsConsent | string | null;
+  consent: ControlledConsent | string | null;
   asOf: string;
   /** Whether the vendored site parser accepts `adherence` and `secondary` (PORTAL-T43). Unproven: false. */
   siteAcceptsSecondary?: boolean;
