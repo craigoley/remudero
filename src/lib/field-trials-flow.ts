@@ -20,6 +20,8 @@
 import { ciRemedyExecutionOf, ciRemedyExecutionReport, type CiRemedyExecution } from "./ci-remedy-execution.js";
 import { importedModuleOf, preventionRegistrationsOf, preventionAdoption, type ImportedModuleEvidence, type PreventionSourceRegistration } from "./prevention-source-evidence.js";
 import { servedTrialCohorts, trialRevisionPins, type TrialRevisionPins } from "./field-trials-cohorts.js";
+import { buildControlledFieldTrialsRelease, deriveRegisteredEpoch, SITE_SECONDARY_COMMIT, type ControlledReleaseInput,
+  type ControlledReleaseResult, type LedgerEpochFacts } from "./field-trials-controlled-release.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { projectRepairCostContext, repairCostCells, repairCostsByPull, type RepairCostContext, type RepairCostReport } from "./repair-cost-evidence.js";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -28,10 +30,12 @@ import { parseArgs } from "node:util";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
+import { ghInteractiveRead } from "./github-transport.js";
+import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol } from "./benchmark-paid-pilot.js";
 import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, observedCurrentHeadGreen, parseGithubStore, RUN_BRANCH_RE,
   type FieldTrialsGithubPass, type FieldTrialsGithubStore, type GithubCursor, type GithubPageFetch,
   type GithubPull, type GithubRepoStore } from "./field-trials-github.js";
-import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
+import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion, readLedgerUnionRecords } from "./ledger-union.js";
 import { deriveReviewFindingOutcomes, type FindingOutcomeReport, type VerifiedFindingEvidence } from "./review-finding-outcomes.js";
 import { deriveVerifiedReviewFindingEvidence, readReviewFindingEvidence, type FindingEvidenceInput, type FindingEvidenceReport } from "./review-finding-evidence.js";
 import type { TaskCaseFile } from "./task-case-file.js";
@@ -893,8 +897,9 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
 
 export interface FieldTrialsConsent {
   version: typeof FIELD_TRIALS_CONSENT_VERSION;
+  consentRegistryRevision?: string;
   repos: { repo: string; rights: "private" | "aggregate-opt-in" | "public-benchmark"; receipt: string; revoked?: boolean;
-    publicSourceUrl?: string }[];
+    publicSourceUrl?: string; sourceId?: string }[];
 }
 
 export function parseFieldTrialsConsent(value: unknown): FieldTrialsConsent | string {
@@ -1210,6 +1215,94 @@ function pseudonymSalt(outDir: string): string {
   }
 }
 
+/**
+ * W1-T10843: build the CONTROLLED release for one registered epoch beside the observational one. The epoch
+ * file carries `{ epoch, assignments, outcomes, stack }`. A candidate and its private sidecar land under
+ * `<outDir>/controlled/` for the reviewed import flow; nothing is published, no manifest entry is made.
+ */
+export function writeControlledCandidate(outDir: string, epochFile: unknown, consent: FieldTrialsConsent | string | null, nowIso: string,
+  siteAcceptsSecondary?: boolean, siteParserCommit?: string): { state: "candidate"; file: string } | { state: "refused"; reason: string } {
+  const body = record(epochFile);
+  if (body === undefined || record(body.epoch) === undefined || !Array.isArray(body.assignments) || !Array.isArray(body.outcomes)) {
+    return { state: "refused", reason: "controlled-epoch-invalid" };
+  }
+  return persistControlled(outDir, buildControlledFieldTrialsRelease({ epoch: body.epoch, assignments: body.assignments, outcomes: body.outcomes,
+    pins: trialRevisionPins(record(body.stack)), consent, asOf: nowIso,
+    ...(siteAcceptsSecondary === undefined ? {} : { siteAcceptsSecondary }),
+    ...(siteParserCommit === undefined ? {} : { siteParserCommit }) } as ControlledReleaseInput));
+}
+
+function persistControlled(outDir: string, result: ControlledReleaseResult): { state: "candidate"; file: string } | { state: "refused"; reason: string } {
+  if (result.state === "refused") return { state: "refused", reason: `${result.reason}: ${result.detail}` };
+  const file = join("controlled", `${result.release.releaseId}.candidate.json`);
+  writeJsonAtomically(join(outDir, file), result.release);
+  writeJsonAtomically(join(outDir, "controlled", `${result.release.releaseId}.sidecar.private.json`), result.sidecar);
+  return { state: "candidate", file };
+}
+
+/**
+ * PRODUCTION SOURCE of a registered epoch (W1-T10843): derive assignments and outcomes from the ledger,
+ * merged `Remudero-Task` pulls and fix rows; take revisions from the registered protocol, then build.
+ * The command reads the existing paid-pilot protocol (or --controlled-protocol envelope), never receipt pins.
+ */
+export function writeRegisteredControlledCandidate(outDir: string, epochId: string, facts: LedgerEpochFacts,
+  consent: FieldTrialsConsent | string | null, nowIso: string, siteAcceptsSecondary: boolean,
+  siteParserCommit?: string): { state: "candidate"; file: string } | { state: "refused"; reason: string } {
+  const derived = deriveRegisteredEpoch(epochId, facts);
+  if (derived === null) return { state: "refused", reason: `controlled-epoch-unregistered: ${epochId}` };
+  return persistControlled(outDir, buildControlledFieldTrialsRelease({ ...derived, consent, asOf: nowIso, siteAcceptsSecondary,
+    ...(siteParserCommit === undefined ? {} : { siteParserCommit }) }));
+}
+
+async function readControlledLedgerRows(stateDir: string): Promise<Record<string, unknown>[]> {
+  const problems: string[] = [];
+  const rows = await readLedgerUnionRecords(stateDir, {
+    onUnreadDirectory: (path) => { problems.push(`unread-directory: ${path}`); },
+    onUnreadArchive: (path) => { problems.push(`unread-archive: ${path}`); },
+    onUnreadLive: (path) => { problems.push(`unread-live: ${path}`); },
+    onMalformedRow: (finding) => { problems.push(`malformed-${finding.kind}: ${finding.path}:${finding.rowOrdinal}`); },
+  });
+  if (problems.length > 0) throw new Error(problems.join("; "));
+  return rows;
+}
+
+/** The ledger rows and merged pulls of every source that has a ledger, or a named source refusal. */
+async function controlledEpochFacts(repos: readonly (readonly [string, string])[], ledgers: ReadonlyMap<string, string>, github: FieldTrialsGithubStore,
+  readRows: (stateDir: string) => Promise<Record<string, unknown>[]>): Promise<LedgerEpochFacts | string> {
+  const rows: Record<string, unknown>[] = [];
+  const merged: LedgerEpochFacts["merged"][number][] = [];
+  const sourceRepos: string[] = [];
+  let observedThrough: string | null = null;
+  let complete = true;
+  for (const [label, repo] of repos) {
+    const dir = ledgers.get(label);
+    if (dir === undefined) continue;
+    try { for (const row of await readRows(dir)) rows.push(row); }
+    catch (error) {
+      return `controlled-ledger-read-failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    sourceRepos.push(repo);
+    const store = github.repos[repo];
+    const cursor = store?.cursors.pulls;
+    const commits = store?.cursors.commits;
+    if (store === undefined || cursor?.state !== "complete" || cursor.asOf === null
+      || commits?.state !== "complete" || commits.asOf === null) complete = false;
+    else {
+      const through = cursor.asOf < commits.asOf ? cursor.asOf : commits.asOf;
+      if (observedThrough === null || through < observedThrough) observedThrough = through;
+    }
+    for (const pull of Object.values(store?.pulls ?? {})) merged.push({ trailerTaskIds: pull.trailerTaskIds, mergedAt: pull.mergedAt,
+      mergedOnMain: pull.mergeCommitSha !== null && typeof store?.commits[pull.mergeCommitSha] === "string" });
+  }
+  if (sourceRepos.length === 0) return "controlled-ledger-unavailable";
+  return { rows, merged, mergesObservedThrough: complete ? observedThrough : null, sourceRepos };
+}
+
+/** A full 40-hex git commit id (case-insensitive); a function, not a module-scope regex constant. */
+function isFullCommitSha(value: string): boolean {
+  return value.length === 40 && /^[0-9a-f]+$/i.test(value);
+}
+
 export interface FieldTrialsCommandInput {
   nowIso?: string;
   print?: (line: string) => void;
@@ -1217,10 +1310,15 @@ export interface FieldTrialsCommandInput {
   fetch?: GithubPageFetch;
   readLedger?: (stateDir: string) => Promise<FieldTrialsLedgerRead>;
   resolveConfig?: () => { root: string; fleetRepos?: string[] };
+  /** Read the GitHub comparison proving that the vendored accepting parser commit is on site main. */
+  readSiteEvidence?: (path: string) => Promise<unknown>;
+  /** W1-T10843: the raw ledger-union rows of one state dir, read for a registered controlled epoch. */
+  readRows?: (stateDir: string) => Promise<Record<string, unknown>[]>;
 }
 
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
   + "[--consent <file>] [--case-files <file>] [--finding-evidence <file>] [--finding-evidence-keys <file>] "
+  + "[--controlled-registered <epoch-id> | --controlled-epoch <file>] [--controlled-protocol <file>] [--site-parser-commit <sha>] "
   + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--json]";
 
 function labelOf(repo: string): string {
@@ -1238,6 +1336,20 @@ function pairs(values: string[] | undefined): Map<string, string> | string {
   return out;
 }
 
+/** Only the vendored parser revision is supported; its presence on site main is verified at release time. */
+export async function verifySiteSecondarySupport(commit: string | undefined, read: (path: string) => Promise<unknown>):
+  Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (commit !== SITE_SECONDARY_COMMIT) return { ok: false, reason: "parser-commit-not-vendored" };
+  try {
+    const comparison = record(await read(`repos/craigoley/remudero-site/compare/${commit}...main?per_page=1`));
+    const onMain = (comparison?.status === "ahead" || comparison?.status === "identical")
+      && record(comparison.base_commit)?.sha === commit && record(comparison.merge_base_commit)?.sha === commit;
+    return onMain ? { ok: true } : { ok: false, reason: "parser-commit-not-on-main" };
+  } catch (err) {
+    return { ok: false, reason: `site-evidence-read-failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
 /**
  * `rmd field-trials`: one resumable snapshot pass. Reads each source's ledger union and a bounded
  * number of GitHub pages, writes the private snapshot, and — only with a consent file — a dated,
@@ -1253,7 +1365,8 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     values = parseArgs({ args: rest, strict: true, allowPositionals: false, options: {
       source: { type: "string", multiple: true }, ledger: { type: "string", multiple: true }, "out-dir": { type: "string" },
       consent: { type: "string" }, "case-files": { type: "string" }, "max-pages": { type: "string" },
-      "finding-evidence": { type: "string" }, "finding-evidence-keys": { type: "string" },
+      "finding-evidence": { type: "string" }, "finding-evidence-keys": { type: "string" }, "controlled-epoch": { type: "string" },
+      "controlled-registered": { type: "string" }, "controlled-protocol": { type: "string" }, "site-parser-commit": { type: "string" },
       offline: { type: "boolean" }, revoke: { type: "string" }, json: { type: "boolean" } } }).values;
   } catch {
     const reason = "arguments-invalid";
@@ -1265,6 +1378,13 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
   const maxPages = values["max-pages"] === undefined ? DEFAULT_MAX_PAGES : Number(values["max-pages"]);
   if (typeof sourcePairs === "string" || typeof ledgerPairs === "string" || !Number.isSafeInteger(maxPages) || maxPages < 1) {
     print(`${USAGE} (invalid: ${typeof sourcePairs === "string" ? sourcePairs : typeof ledgerPairs === "string" ? ledgerPairs : "--max-pages"})`);
+    return 2;
+  }
+  const siteCommit = typeof values["site-parser-commit"] === "string" ? values["site-parser-commit"] : undefined;
+  const registeredEpoch = typeof values["controlled-registered"] === "string" ? values["controlled-registered"] : undefined;
+  const siteCommitInvalid = siteCommit !== undefined && !isFullCommitSha(siteCommit);
+  if (siteCommitInvalid || (registeredEpoch !== undefined && values["controlled-epoch"] !== undefined)) {
+    print(`${USAGE} (invalid: ${siteCommitInvalid ? "--site-parser-commit" : "--controlled-registered with --controlled-epoch"})`);
     return 2;
   }
   const config = (input.resolveConfig ?? loadConfig)();
@@ -1340,9 +1460,39 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     printError(JSON.stringify({ event: "field_trials.refresh_failed", reason: failure, last_known_good: manifest.lastKnownGood }));
   }
   writeJsonAtomically(manifestPath, manifest);
+  let controlled: ReturnType<typeof writeControlledCandidate> | null = null;
+  if (typeof values["controlled-epoch"] === "string" || registeredEpoch !== undefined) {
+    const siteEvidence = values.offline === true && input.readSiteEvidence === undefined ? { ok: false as const, reason: "site-evidence-unavailable-offline" }
+      : await verifySiteSecondarySupport(siteCommit, input.readSiteEvidence ?? (async (path) =>
+        JSON.parse(String(await ghInteractiveRead(["api", path], { encoding: "utf8" })))));
+    const siteAccepts = siteEvidence.ok;
+    if (registeredEpoch === undefined) {
+      controlled = writeControlledCandidate(outDir, readJson(values["controlled-epoch"] as string), consent, nowIso, siteAccepts, siteCommit);
+    } else {
+      const facts = await controlledEpochFacts(repos, defaultLedgers, github, input.readRows ?? readControlledLedgerRows);
+      if (typeof facts !== "string") {
+        const stateDir = defaultLedgers.values().next().value ?? join(config.root, "state");
+        const loaded = typeof values["controlled-protocol"] === "string" ? record(readJson(values["controlled-protocol"]))
+          : record(loadPaidPilotProtocol(stateDir, registeredEpoch));
+        const protocol = record(loaded?.protocol);
+        const revisions = record(protocol?.revisions);
+        if (protocol?.version === BENCHMARK_PAID_PILOT_VERSION && protocol.pilotId === registeredEpoch && revisions !== undefined) {
+          const stack = Object.fromEntries(Object.entries(revisions).map(([key, value]) => [key, { state: "observed", value }]));
+          facts.protocol = { epochId: registeredEpoch, stack };
+        }
+      }
+      controlled = typeof facts === "string" ? { state: "refused", reason: facts }
+        : writeRegisteredControlledCandidate(outDir, registeredEpoch, facts, consent, nowIso, siteAccepts, siteCommit);
+    }
+    if (controlled.state === "refused" && controlled.reason.startsWith("site-secondary-unavailable") && !siteEvidence.ok) {
+      controlled.reason += `; ${siteEvidence.reason}`;
+    }
+    if (values.json !== true) print(controlled.state === "candidate" ? `  controlled candidate: ${controlled.file} (never published; reviewed import only)`
+      : `  controlled release refused (${controlled.reason})`);
+  }
   if (values.json === true) print(JSON.stringify({ snapshot: { state: snapshot.state, reasons: snapshot.reasons, links: {
     prs: snapshot.links.prs, matched: snapshot.links.matched, ambiguous: snapshot.links.ambiguous, unmatched: snapshot.links.unmatched },
-  rebuild: snapshot.rebuild }, github: { state: githubPass.state, pagesRead: githubPass.pagesRead }, manifest }));
+  rebuild: snapshot.rebuild }, github: { state: githubPass.state, pagesRead: githubPass.pagesRead }, manifest, controlled }));
   else {
     print(`field-trials ${snapshot.asOf}: snapshot ${snapshot.state}; github ${githubPass.state} (${githubPass.pagesRead} pages); `
       + `${snapshot.links.matched}/${snapshot.links.prs} PRs linked, ${snapshot.links.ambiguous} ambiguous, ${snapshot.links.unmatched} unmatched`);
@@ -1351,5 +1501,5 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
       + `last known good ${manifest.lastKnownGood ? `${manifest.lastKnownGood.releaseId} as of ${manifest.lastKnownGood.asOf}` : "none"}`);
     print("  observational only: no causal claim, no routing change, nothing published");
   }
-  return failure === null ? 0 : 1;
+  return failure === null && controlled?.state !== "refused" ? 0 : 1;
 }
