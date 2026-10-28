@@ -3,6 +3,7 @@
 // replay and reports missingness instead of zeros. Every case runs in rmd- temp state roots with a fake attempt
 // dispatcher, a fake grader, injected runtime pins and a fixed clock: nothing spawns a worker, reads a real ledger or spends.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -362,6 +363,86 @@ test("calibration refuses unreadable plans and frozen populations before dispatc
   assert.match(population.refusals[0] ?? "", /^population-unreadable:/);
   assert.equal(population.receipt.state, "withheld");
   assert.equal(calls.length, 0);
+});
+
+/** A plan whose first task, when the driver grades its eligibility, installs a competing population: the read/create gap. */
+function racingPlan(path: string, winner: string, installed: { count: number }): () => ReadinessTask[] {
+  return () => planTasks().map((task, index) => index > 0 ? task : { id: task.id, get acceptance() {
+    if (installed.count++ === 0) writeFileSync(path, winner);
+    return CRITERIA;
+  } });
+}
+
+async function winnerText(): Promise<string> {
+  const donor = root();
+  await register(donor);
+  await runBenchmarkAaReadiness(input(donor, [], { maxPairs: 1 }));
+  return readFileSync(join(prospectiveAaDir(donor, TRIAL), "population.json"), "utf8");
+}
+
+test("calibration reuses a valid concurrent population winner", async () => {
+  const winner = await winnerText();
+  const stateDir = root();
+  await register(stateDir);
+  const path = join(prospectiveAaDir(stateDir, TRIAL), "population.json");
+  const installed = { count: 0 };
+  const calls: PairedAttemptRequest<string>[] = [];
+  const result = await runBenchmarkAaReadiness(input(stateDir, calls, { loadPlanTasks: racingPlan(path, winner, installed) }));
+  assert.ok(installed.count > 0, "the competing winner was installed between the read and the create");
+  assert.equal(readFileSync(path, "utf8"), winner, "the winner is preserved byte for byte");
+  assert.equal(result.population?.frozenAt, (JSON.parse(winner) as { frozenAt: string }).frozenAt, "the winner's own freeze is reported");
+  assert.equal(result.run.dispatchedPairs, TASKS.length);
+  assert.equal(calls.length, TASKS.length * 2);
+});
+
+test("calibration refuses conflicting and partial population winners", async () => {
+  const winner = await winnerText();
+  const parsed = JSON.parse(winner) as Record<string, unknown>;
+  const { digest: _digest, ...body } = parsed;
+  const redigest = (changes: Record<string, unknown>) => {
+    const changed = { ...body, ...changes };
+    return JSON.stringify({ ...changed, digest: createHash("sha256").update(JSON.stringify(changed)).digest("hex") });
+  };
+  const cases: [string, string, RegExp][] = [
+    ["partial", winner.slice(0, winner.length / 2), /^population-unreadable:/],
+    ["tampered", JSON.stringify({ ...parsed, denominator: 1 }), /^population-changed-since-freeze$/],
+    ["other allocation", redigest({ allocationReceiptHash: "f".repeat(64) }), /^population-changed-since-freeze$/],
+    ["other denominator", redigest({ denominator: TASKS.length + 1 }), /^population-changed-since-freeze$/],
+    ["other trial", redigest({ trialId: "aa-other" }), /^population-changed-since-freeze$/],
+    ["other task set", redigest({ eligible: [], refused: [] }), /^population-changed-since-freeze$/],
+    ["not an object", "null", /^population-changed-since-freeze$/],
+  ];
+  for (const [label, text, reason] of cases) {
+    const stateDir = root();
+    await register(stateDir);
+    const path = join(prospectiveAaDir(stateDir, TRIAL), "population.json");
+    const calls: PairedAttemptRequest<string>[] = [];
+    const result = await runBenchmarkAaReadiness(input(stateDir, calls, { loadPlanTasks: racingPlan(path, text, { count: 0 }) }));
+    assert.equal(result.state, "refused", label);
+    assert.match(result.refusals[0] ?? "", reason, label);
+    assert.equal(result.receipt.state, "withheld", label);
+    assert.equal(calls.length, 0, `${label}: nothing was dispatched before validation`);
+    assert.equal(readFileSync(path, "utf8"), text, `${label}: the winner is never replaced`);
+    assert.deepEqual(prospectiveAaLedgerRows(stateDir, TRIAL), [], `${label}: no trial row was written`);
+  }
+});
+
+test("concurrent calibration drivers resume without pair replay", async () => {
+  const winner = await winnerText();
+  const stateDir = root();
+  await register(stateDir);
+  const path = join(prospectiveAaDir(stateDir, TRIAL), "population.json");
+  const calls: PairedAttemptRequest<string>[] = [];
+  const [first, second] = await Promise.all([
+    runBenchmarkAaReadiness(input(stateDir, calls, { loadPlanTasks: racingPlan(path, winner, { count: 0 }) })),
+    runBenchmarkAaReadiness(input(stateDir, calls)),
+  ]);
+  assert.notEqual(first.state, "refused", first.refusals.join(","));
+  assert.notEqual(second.state, "refused", second.refusals.join(","));
+  const restarted = await runBenchmarkAaReadiness(input(stateDir, calls));
+  assert.equal(restarted.run.dispatchedPairs, 0, "a restart replays nothing");
+  for (const taskId of TASKS) assert.equal(calls.filter((call) => call.taskId === taskId).length, 2, `${taskId} ran exactly one pair`);
+  assert.equal(readFileSync(path, "utf8"), winner);
 });
 
 test("calibration preserves the opened follow-up file when its path is replaced", async (t) => {
