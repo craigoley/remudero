@@ -16699,7 +16699,8 @@ export async function recheckFixDispatch(
     }
     return { ok: true };
   } catch (error) {
-    return refuse(`the recheck could not read its evidence (${String((error as Error)?.message ?? error)})`);
+    const reason = `the recheck could not read its evidence (${String((error as Error)?.message ?? error)})`;
+    return refuse(reason);
   }
 }
 
