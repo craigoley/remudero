@@ -29,7 +29,8 @@ import {
   startDaemonGitCredentialSocket,
   type ScopedTokenMint,
 } from "../src/lib/secret-boundary.js";
-import type { GitHub, PrRef } from "#src/lib/status.js";
+import { buildBatchedGithub, defaultCreditStorePath, saveCreditStore, type GitHub, type PrRef } from "#src/lib/status.js";
+import { createNativeTargetRepository } from "#src/cli/commands/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   CLAUDE_BIN_ENV_OVERRIDE,
@@ -1026,4 +1027,28 @@ test("W1-T10799: the native runner persists identity before plan reads and abort
   assert.equal(writes.length, 1);
   assert.match(writes[0]!, /^W9-T1-\d+$/);
   assert.equal(existsSync(join(root, "state", "ledger.ndjson")), false, "the refused write starts no native run");
+});
+
+// Keep the worker entry-point check beside its existing native integration coverage.
+test("W1-T10799: the native worker rechecks target credit before dependency admission", async (t) => {
+  const root = ownedFixtureDir(t, "bounded-target-worker-credit").dir;
+  mkdirSync(join(root, "state"), { recursive: true });
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const planPath = join(root, "target-plan.yaml");
+  writeFileSync(planPath, TARGET_PLAN.replace("depends_on: []", "depends_on: [W9-T3]"));
+  const target = buildBatchedGithub("craigoley", "wreckterra", { fetchAll: () => [], commitTrailerIndex: () => new Map() });
+  saveCreditStore(defaultCreditStorePath(ledgerPath), { "W9-T1": { trailer: {
+    source: "trailer", prNumber: 77, prUrl: "https://github.com/craigoley/remudero/pull/77", prState: "MERGED",
+  } } });
+  const coreStore = readFileSync(defaultCreditStorePath(ledgerPath), "utf8");
+  const scope = createNativeTargetRepository(root, "craigoley", "wreckterra", target);
+  const options = { skipGitSync: true, planPath, config: { root, claudeBin: "/bin/true" },
+    owner: "craigoley", github: target, spawn: async () => { throw new Error("no worker may spawn"); } };
+  const legacy = await runTask("W9-T1", options);
+  assert.equal(legacy.verdict, "task_already_merged", "positive control: the default Core reader sees the colliding credit");
+  const beforeWorkerCache = readFileSync(join(root, "state", "status.json"), "utf8");
+  await assert.rejects(runTask("W9-T1", { ...options, repositoryState: scope }), /unmerged dependenc/i,
+    "the bounded worker uses target credit and reaches the real unmet dependency guard");
+  assert.equal(readFileSync(defaultCreditStorePath(ledgerPath), "utf8"), coreStore);
+  assert.equal(readFileSync(join(root, "state", "status.json"), "utf8"), beforeWorkerCache, "the worker preserves Core's cache");
 });

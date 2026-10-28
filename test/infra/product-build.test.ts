@@ -10,7 +10,6 @@ import {
 } from "#src/lib/product-build.js";
 import { nativeTargetRepositoryResolver, createNativeTargetRepository, createNativeTargetJobRunner, daemonKickPort, daemonTargetJobPort } from "#src/cli/commands/daemon.js";
 import { runDrain, type DrainOpts, type TargetJobRecord } from "#src/lib/drain.js";
-import { runTask } from "#src/run-task.js";
 import { persistRunTaskCredit } from "#src/cli/commands/run-task-verb.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import { runDaemon, type DaemonDeps, type DaemonOpts } from "#src/lib/daemon.js";
@@ -1271,17 +1270,6 @@ test("W1-T10799: target admission never inherits Core credit or status for the s
   assert.equal(projected.get("W9-T1")?.merged, false, "an unmerged target does not inherit Core's durable credit");
   assert.equal(readFileSync(defaultCreditStorePath(f.ledgerPath), "utf8"), coreStore, "target projection preserves Core's credit store");
   assert.equal(readFileSync(join(f.core, "state", "status.json"), "utf8"), coreCache, "target projection preserves Core's status cache");
-  // The worker repeats projection after the target drain. An unmet dependency stops it before any worker or claim.
-  writeFileSync(f.targetPlanFile, readFileSync(f.targetPlanFile, "utf8").replace("depends_on: []", "depends_on: [W9-T3]"));
-  const options = { skipGitSync: true, planPath: f.targetPlanFile, config: { root: f.core, claudeBin: "/bin/true" },
-    owner: "craigoley", github: target, spawn: async () => { throw new Error("no worker may spawn"); } };
-  const legacy = await runTask("W9-T1", options);
-  assert.equal(legacy.verdict, "task_already_merged", "positive control: the default Core reader really sees the colliding credit");
-  const beforeWorkerCache = readFileSync(join(f.core, "state", "status.json"), "utf8");
-  await assert.rejects(runTask("W9-T1", { ...options, repositoryState: scope }), /unmerged dependenc/i,
-    "the bounded worker uses target credit and reaches the real unmet dependency guard");
-  assert.equal(readFileSync(defaultCreditStorePath(f.ledgerPath), "utf8"), coreStore);
-  assert.equal(readFileSync(join(f.core, "state", "status.json"), "utf8"), beforeWorkerCache, "the worker preserves Core's cache");
   const task = { ...loadPlan(f.targetPlanFile).tasks[0], files: ["src/game.ts"] };
   const pr = { number: 9, url: "https://github.com/craigoley/wreckterra/pull/9" };
   assert.equal(persistRunTaskCredit({ ledgerPath: f.ledgerPath, persistCredit: scope.persistCredit }, task, pr, undefined), "unreadable", "unreadable files grant no credit");
