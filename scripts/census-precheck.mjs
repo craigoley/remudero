@@ -47,6 +47,7 @@ import { git } from "./lib/git.mjs";
 import { analyzeSource } from "./test-repo-root-codemod.mjs";
 import { scanSource as scanChildCoverage } from "./coverage-session-blanking-check.mjs";
 import { captureStepSync } from "./lib/author-step-capture.mjs";
+import { describeJudgedRun, judgedNodeTestArgs, judgeRun, prepareJudgedRun } from "./pure-test-pool.mjs";
 import { retainFixture } from "./lib/retained-fixtures.mjs";
 import { measureTree } from "./lib/instrument-surface-census.mjs";
 import {
@@ -752,9 +753,20 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   };
   try {
     const once = () => {
+      // W1-T8379: every run is JUDGED (scripts/pure-test-pool.mjs): a suite that exits 0 before its own summary is
+      // failing, never clean. Per run, so `child` and `options` (the reader context hashes both) stay unjudged.
+      const judged = prepareJudgedRun();
+      try {
+        return judgedOnce(judged);
+      } finally {
+        judged.cleanup();
+      }
+    };
+    const judgedOnce = (judged) => {
+      const judgedChild = priority.wrap(process.execPath, judgedNodeTestArgs(args, judged.args));
       const startLoad = load1();
       const startedMs = now();
-      const res = run(child.file, child.args, options);
+      const res = run(judgedChild.file, judgedChild.args, { ...options, env: { ...options.env, ...judged.env } });
       pending.add(res);
       const finishedMs = now();
       if (TIME_BOUND_CODES.has(res.error?.code) && options.timeout === CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
@@ -782,11 +794,20 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
       if (res.status !== 0 && failing.length === 0) {
         throw new Error(`the census suite child exited ${res.status} but its TAP names no failing suite`);
       }
+      // A nonzero exit keeps the TAP's own reading; only an exit 0 gains the judgment.
+      const verdict = res.status === 0 ? judgeRun(files, { status: 0, pool: false, root, ...judged.read() }) : null;
+      if (verdict && !verdict.complete) {
+        const line = describeJudgedRun("census suite", verdict, { prefix: "census-precheck" });
+        // Incomplete with every file reported (a cancelled test): no suite to name, so not a measurement at all.
+        if (verdict.missing.length === 0) throw new Error(`the census suite child exited 0 but did not finish: ${line}`);
+        console.error(line);
+        for (const file of verdict.missing) if (!failing.includes(file)) failing.push(file);
+      }
       const summary = Object.fromEntries(["pass", "fail", "cancelled", "skipped", "todo"].map((key) => {
         const matches = [...stdout.matchAll(new RegExp(`^# ${key} (\\d+)$`, "gm"))];
         return [key, matches.length === 1 ? Number(matches[0][1]) : null];
       }));
-      const passed = summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
+      const passed = verdict?.complete !== false && summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
       const identities = [...stdout.matchAll(/^( *)(?:not )?ok [0-9]+ - (.+)$/gm)]
         .map((match) => `${match[1].length}:${match[2]}`);
       return { failing, tests: Number(total[1]), identities, passed, elapsedMs: finishedMs - startedMs, finishedMs,

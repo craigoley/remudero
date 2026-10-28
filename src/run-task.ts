@@ -825,6 +825,8 @@ import {
   runPreflightCoverage,
   runPreflightFast,
   runTreeAdvisoryLine,
+  judgedTestShellOut,
+  prepareJudgedTestRun,
   shellOut,
   type CiParityStepResult,
   type PreflightFastDeps,
@@ -10755,16 +10757,25 @@ function* fixCensusSnapshotSteps(
   }
   if (!refusal) {
     const reach = "test/the-affected-suite-reach-ratchet.test.ts";
-    const result = yield* step(() => run(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import",
-      "./test/setup/tmp-hygiene.ts", reach],
-      { cwd: scriptsRoot, env, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
-    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-    if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
-      refusal = unavailable(`census suite ${reach}`, result, output);
-    } else if (result.status !== 0) {
-      const reason = String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000);
-      refusal = { text: `census-precheck: this branch grows 1 census count(s) CI will refuse:\n  census-suite: ${reach} fails — ${reason}`,
-        censuses: ["census-suite"], offeredBaselines: [] };
+    // W1-T8379: judged — an exit 0 passes only when the suite reached its own summary (scripts/pure-test-pool.mjs).
+    const judged = prepareJudgedTestRun(["--test", "--test-reporter=tap", "--import", "tsx", "--import",
+      "./test/setup/tmp-hygiene.ts", reach], scriptsRoot, `census suite ${reach}`);
+    try {
+      const result = yield* step(() => run(process.execPath, judged.args,
+        { cwd: scriptsRoot, env: { ...env, ...judged.env }, encoding: "utf8", timeout: childTimeBoundMs, maxBuffer: 64 * 1024 * 1024 }));
+      const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+      const stopped = (reason: string) => ({ text: `census-precheck: this branch grows 1 census count(s) CI will refuse:\n  census-suite: ${reach} fails — ${reason}`,
+        censuses: ["census-suite"], offeredBaselines: [] });
+      if (result.error || result.signal || result.status === null || !/^# tests [1-9]\d*$/m.test(output)) {
+        refusal = unavailable(`census suite ${reach}`, result, output);
+      } else if (result.status !== 0) {
+        refusal = stopped(String(precheck.error ?? precheck.signal ?? result.error ?? result.signal ?? output).slice(-4000));
+      } else {
+        const verdict = judged.judge(0);
+        if (!verdict.complete) refusal = stopped(verdict.line);
+      }
+    } finally {
+      judged.cleanup();
     }
   }
   log("fix.census_check", { outcome: refusal ? "refused" : unmeasured ? "partially-measured" : "passed",
@@ -19281,7 +19292,11 @@ export function runPreflightCiChecks(repoRoot: string, deps: Pick<PreflightFastD
   const steps: CiParityStepResult[] = PREFLIGHT_CI_CHECKS.map((entry) => {
     const name = `ci-checks:${entry.name}`;
     const { file, args } = entry.argv(repoRoot);
-    const r = withoutNodeTestContextEnv(() => shellOut(spawn, `${name} (predicts CI: ${entry.predictsCiJob})`, file, args, { cwd: repoRoot }));
+    const label = `${name} (predicts CI: ${entry.predictsCiJob})`;
+    // W1-T8379: a census suite's `node --test` child is JUDGED — exit 0 passes only when its file reached its summary.
+    const r = withoutNodeTestContextEnv(() => args[0] === "--test"
+      ? judgedTestShellOut(spawn, label, args, { cwd: repoRoot })
+      : shellOut(spawn, label, file, args, { cwd: repoRoot }));
     return {
       name,
       ok: r.ok,
