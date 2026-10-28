@@ -665,6 +665,29 @@ def source_seal(workspace, target, budget, stage=None):
     return result
 
 
+LSOF_CANT_STAT = re.compile(r"^lsof: WARNING: can't stat\(\) \S+ file system (/.*)$")
+LSOF_CANT_STAT_DETAIL = re.compile(r'^\s+(Output information may be incomplete\.|assuming "dev=[0-9A-Fa-fx]+" from mount table)$')
+
+
+def lsof_stderr_unexplained(stderr, path):
+    """True unless every stderr line is a can't-stat warning for a mount clear of `path`.
+
+    lsof warns on every call about a mount it cannot stat (another account's CoreDevice
+    DeviceFS, a session's private disk image); that says nothing about `path` unless the
+    mount lies inside or above it.
+    """
+    for line in stderr.splitlines():
+        if not line.strip() or LSOF_CANT_STAT_DETAIL.match(line):
+            continue
+        mount = LSOF_CANT_STAT.match(line)
+        if not mount:
+            return True
+        mounted = Path(mount.group(1))
+        if mounted.is_relative_to(path) or Path(path).is_relative_to(mounted):
+            return True
+    return False
+
+
 def inactive(workspace, known_file=None):
     processes = command(["ps", "-axww", "-o", "pid=,command="])
     if processes.returncode:
@@ -679,7 +702,7 @@ def inactive(workspace, known_file=None):
     if any(str(workspace) in row for pid, row in commands.items() if pid != os.getpid()):
         raise Hold("active-command")
     cwds = command(["lsof", "-nP", "-a", "-d", "cwd", "-Fn"])
-    if cwds.returncode or cwds.stderr.strip():
+    if cwds.returncode or lsof_stderr_unexplained(cwds.stderr, workspace):
         raise Hold("cwd-query-unavailable")
     pid, positive = None, False
     for line in cwds.stdout.splitlines():
@@ -708,7 +731,7 @@ def inactive(workspace, known_file=None):
         if known.returncode or "n" + str(known_file) not in known.stdout.splitlines():
             raise Hold("open-positive-control-missing")
     opened = command(["lsof", "-nP", "+D", str(workspace)])
-    if opened.returncode != 1 or opened.stdout.strip() or opened.stderr.strip():
+    if opened.returncode != 1 or opened.stdout.strip() or lsof_stderr_unexplained(opened.stderr, workspace):
         raise Hold("active-or-unknown-open-file")
 
 
