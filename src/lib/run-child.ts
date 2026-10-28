@@ -32,7 +32,6 @@ import {
 import { waitingStarts } from "./host-memory-admission.js";
 import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservation.js";
 import type { RunResult } from "./run-result.js";
-import type { DetachedActionKind, DetachedWorkHost } from "./sweep.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { killProcessGroup } from "./worker-containment.js";
 
@@ -985,6 +984,12 @@ export function adoptRunChildren(input: {
 // run child under the same contract is drained by nothing: a booting daemon adopts it. WHERE a kind runs is read from the table
 // below through `detachedWorkPlacement`, never from a list kept at the drain site.
 
+/** src/lib/sweep.ts's `DetachedActionKind`, restated: this module imports nothing from sweep.ts, as sweep.ts imports nothing from it.
+ *  A type import is still an edge of the affected-suite graph, and it put sweep's closure under every suite that reaches this module
+ *  (the reach ratchet refused it). The inventory test types its kind list with sweep's union, so the two cannot drift apart. */
+type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort"
+  | "light-pass-action";
+
 /** Every in-process unit a restart drains today: the detached-action kinds, and the review registry. */
 export type DetachedWorkKind = DetachedActionKind | "review";
 
@@ -1171,6 +1176,17 @@ export function detachedWorkModeNow(
   }
 }
 
+/** The host src/lib/sweep.ts's `installDetachedWorkHost` takes, restated structurally (the composition root type-checks the match). */
+export interface DetachedWorkChildHost {
+  hosts: ReadonlySet<string>;
+  mode: () => DetachedWorkMode;
+  spawnReview: (input: {
+    pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean };
+    reviewKey: string;
+    reviewAttemptId: string | undefined;
+  }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | undefined>;
+}
+
 export interface DetachedWorkHostInput {
   stateRoot: string;
   /** The managed checkout the engine trees are cut from. */
@@ -1192,7 +1208,7 @@ export interface DetachedWorkHostInput {
  * review stays in process. Under `on` it starts the review as a run child on its own reservation, only where the inventory and the
  * measured drain cost say so; a child that cannot start is `undefined`, and the review runs in process as before.
  */
-export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWorkHost {
+export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWorkChildHost {
   const mode = (): DetachedWorkMode => detachedWorkModeNow(input.stateRoot, input.readMode);
   let probing = false;
   return {

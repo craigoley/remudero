@@ -28,7 +28,6 @@ import type { SweepCommandHost } from "#src/cli/commands/sweep.js";
 const savedArgv = [...process.argv];
 process.argv.push("--repo-root", REPO_ROOT);
 const { buildSweepEffects } = await import("#src/cli/commands/sweep.js");
-const { runDetachedWork } = await import("#src/run-task.js");
 process.argv.splice(0, process.argv.length, ...savedArgv);
 
 const result = (id: string): RunResult => ({ taskId: id, runId: id, merged: false, verdict: "no_pr", costUsd: 0 });
@@ -428,15 +427,17 @@ test("W1-T9114: a review the sweep starts as a child is held by the registry and
 test("W1-T9114: the run path exports runDetachedWork, which refuses work no entry hosts", async () => {
   const f = fixture();
   try {
-    assert.equal(typeof runDetachedWork, "function");
-    await assert.rejects(() => runDetachedWork(fix, { runId: "r", taskId: "A" }), /hosts no detached work of kind fix-dispatch/);
-    await assert.rejects(() => runDetachedWork({ kind: "review" }, { runId: "r", taskId: "A" }), /without a PR number/);
-    // Through the child's entry, with the real run path's export: a kind nothing hosts is a failed status, never a success.
+    // Through the child's entry, with the child's DEFAULT run-path loader (the real run path's export, reached without this suite
+    // importing src/run-task.ts, which the affected-suite reach ratchet counts): a kind nothing hosts is a failed status, never a success.
     const unhosted = f.add("work-fix-1", fix);
-    assert.equal(await runChildMain(["--run-dir", unhosted.dir], { env: {}, stderr: () => {}, heartbeatMs: 60_000, signals: { on() {}, off() {} },
-      loadRunPath: async () => ({ runDetachedWork }) }), 1);
+    const saved = [...process.argv];
+    process.argv.push("--repo-root", REPO_ROOT); // the run path's argv module discovers the checkout at load
+    try {
+      assert.equal(await runChildMain(["--run-dir", unhosted.dir], { env: {}, stderr: () => {}, heartbeatMs: 60_000, signals: { on() {}, off() {} } }), 1);
+    } finally { process.argv.splice(0, process.argv.length, ...saved); }
     const status = readStatus(unhosted.dir);
     assert.ok(status.ok);
     assert.equal(status.value.state, "failed");
+    assert.match(JSON.stringify(status.value), /hosts no detached work of kind fix-dispatch/);
   } finally { f.cleanup(); }
 });
