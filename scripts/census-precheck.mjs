@@ -1546,9 +1546,9 @@ function workerParity(text) {
 }
 
 /** W1-T10798: test/every-ci-census-is-asked-before-the-push.test.ts, asked before the push. A diff that moves a test,
- *  PRECHECK_PARITY or the shrink-only baseline must leave no CI census unasked and no stale baseline row. `population`
+ *  PRECHECK_PARITY or the shrink-only baseline must leave no CI census unasked and no stale or grown baseline row. `population`
  *  is CI's census population on this tree; absent (snapshot mode) the check is not measured and returns []. */
-export function censusParityViolations({ changed, readHead, population }) {
+export function censusParityViolations({ changed, readHead, readBase = () => null, population }) {
   if (!population) return [];
   if (!changed.some((p) => p === PRECHECK_PARITY_BASELINE || p === "scripts/census-precheck.mjs" || p.startsWith("test/"))) return [];
   const text = readHead(PRECHECK_PARITY_BASELINE);
@@ -1560,13 +1560,17 @@ export function censusParityViolations({ changed, readHead, population }) {
     return [];
   }
   if (!Array.isArray(baseline)) return [];
+  const baseText = readBase(PRECHECK_PARITY_BASELINE);
+  const baseBaseline = baseText === null ? null : JSON.parse(baseText).ciOnly;
+  if (baseBaseline !== null && !Array.isArray(baseBaseline)) throw new Error("base CI census baseline is not an array");
   const worker = readHead("scripts/census-precheck.mjs");
   if (worker === null) throw new Error("worker PRECHECK_PARITY source is unavailable");
   const parity = workerParity(worker);
-  const verdict = precheckParityVerdict({ population: typeof population === "function" ? population() : population, baseline, parity });
+  const verdict = precheckParityVerdict({ population: typeof population === "function" ? population() : population, baseline, baseBaseline, parity });
   return [
     ...verdict.unasked.map((p) => `census-parity: ${p} is a CI census nothing asks before the push — model it in PRECHECK_PARITY (scripts/census-precheck.mjs); ${PRECHECK_PARITY_BASELINE} may only shrink`),
     ...verdict.stale.map((p) => `census-parity: ${p} is baselined but precheck now asks it or CI no longer runs it — delete the row from ${PRECHECK_PARITY_BASELINE}`),
+    ...verdict.grown.map((p) => `census-parity: ${p} is new in ${PRECHECK_PARITY_BASELINE} — model it in PRECHECK_PARITY; the baseline may only shrink`),
   ];
 }
 
@@ -1831,7 +1835,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       srcFiles: listHouseLayoutSrcFiles(root),
     });
     if (!snapshot) {
-      violations = [...violations, ...censusParityViolations({ changed, readHead: readers.readHead,
+      violations = [...violations, ...censusParityViolations({ changed, ...readers,
         population: () => ciCensusPopulation(listCiRuleSuites(root)) })];
     }
     const instrument = evaluateInstrumentSurface({
