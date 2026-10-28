@@ -117,6 +117,7 @@ usage:
   rmd trace <id>   # Render the provenance chain: feedback -> proposal -> task -> run -> PR -> merge.
   rmd peek <runId> [--lines <n>] [--follow]   # Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
   rmd pr-owner <pr-number>   # Report whether the local ledger shows a fix lane owning one PR.
+  rmd pr-state <n...> [--max-age <dur>]   # Read PR state from the ledger, revalidating stale or missing fields in one broker query.
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
   rmd improvement-action <operation-id> --state-dir <path>   # Resume one saved planning action through the daemon's admitted workflow.
   rmd inbox [--dry-run]   # The ratification inbox's deterministic core: tier proposals READY/not-ready.
@@ -1166,6 +1167,16 @@ rmd pr-owner <pr-number>
 ```
 
 W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. Makes no ledger, claim or service changes; owned temporary disk scratch is removed after the read.
+
+### `rmd pr-state`
+
+Read PR state from the ledger, revalidating stale or missing fields in one broker query.
+
+```
+rmd pr-state <n...> [--max-age <dur>]
+```
+
+W1-T10370: reports head sha, check rollup and failing names, mergeability, review state, auto-merge and terminal state with each field's as-of timestamp and source. Reads the shared ledger union once. Only stale or incomplete PRs enter one batched GraphQL read through rmd gh --class agent --fresh. Defaults to two recent full sweep periods, falling back to twice the policy poll interval. --max-age accepts <n>s|m|h|d. Failed revalidation retains the ledger answer marked STALE with its error and exits 1; bad arguments exit 2. Writes no ledger or GitHub state.
 
 ### `rmd plan`
 

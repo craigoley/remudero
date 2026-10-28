@@ -1309,6 +1309,7 @@ import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, with
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
+import { prStateCommand } from "./lib/pr-state.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -41459,6 +41460,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. Makes no ledger, claim or service changes; owned temporary disk scratch is removed after the read.",
   },
   {
+    name: "pr-state",
+    syntax: "rmd pr-state <n...> [--max-age <dur>]",
+    summary: "Read PR state from the ledger, revalidating stale or missing fields in one broker query.",
+    detail: "W1-T10370: reports head sha, check rollup and failing names, mergeability, review state, auto-merge and terminal state with each field's as-of timestamp and source. Reads the shared ledger union once. Only stale or incomplete PRs enter one batched GraphQL read through rmd gh --class agent --fresh. Defaults to two recent full sweep periods, falling back to twice the policy poll interval. --max-age accepts <n>s|m|h|d. Failed revalidation retains the ledger answer marked STALE with its error and exits 1; bad arguments exit 2. Writes no ledger or GitHub state.",
+  },
+  {
     name: "plan",
     syntax: "rmd plan --mode=create|clarify|expand [<brief>...]",
     summary: "The unified Architect PLAN skill: create, clarify or expand plan tasks.",
@@ -42362,6 +42369,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ],
   ["peek", async (rest) => await peekCommand(rest)],
   ["pr-owner", (rest) => prOwnerCommand(rest)],
+  ["pr-state", (rest) => prStateCommand(rest, { repository: resolveOwnerRepo })],
   ["plan", async (rest) => await planCommand(rest)],
   ["improvement-action", async (rest) => await improvementActionCommand(rest)],
   ["inbox", async (rest) => await inboxCommand(rest)],
@@ -42422,6 +42430,13 @@ export async function main(
   } = {},
 ): Promise<void> {
   const inspectionArgv = stripRepoRootFlag(process.argv.slice(2));
+  if (inspectionArgv[0] === "pr-state") {
+    if (inspectionArgv.includes("--help") || inspectionArgv.includes("-h")) {
+      console.log(commandHelp(commandSpec("pr-state")));
+      return await flushThenExit(0);
+    }
+    return await flushThenExit(await prStateCommand(inspectionArgv.slice(1), { repository: resolveOwnerRepo }));
+  }
   if (inspectionArgv[0] === "inspect") {
     if (inspectionArgv.includes("--help") || inspectionArgv.includes("-h")) {
       console.log(commandHelp(commandSpec("inspect")));
