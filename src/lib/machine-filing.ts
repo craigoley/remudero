@@ -132,6 +132,8 @@ export interface MachineShardSpec {
  */
 export function renderMachineShard(spec: MachineShardSpec): { text: string; refused?: string } {
   const q = (v: string): string => JSON.stringify(v);
+  const rationale = spec.rationale?.flatMap((entry) => entry.split(/\r\n|\r|\n/));
+  const rationaleStyle = /^[ \t]/.test(rationale?.find((line) => line !== "") ?? "") ? "|2" : "|";
   const text = [
     `- id: ${spec.taskId}`,
     `  title: ${q(spec.title)}`,
@@ -145,7 +147,7 @@ export function renderMachineShard(spec: MachineShardSpec): { text: string; refu
     "  acceptance:",
     ...spec.acceptance.flatMap((c) => [`    - claim: ${q(c.claim)}`, `      proof: ${q(c.proof)}`]),
     ...(spec.note === undefined ? [] : [`  note: ${q(spec.note)}`]),
-    ...(spec.rationale === undefined ? [] : ["  rationale: |2", ...spec.rationale.flatMap((entry) => entry.split(/\r\n|\r|\n/).map((line) => (line === "" ? "" : `    ${line}`)))]),
+    ...(rationale === undefined ? [] : [`  rationale: ${rationaleStyle}`, ...rationale.map((line) => (line === "" ? "" : `    ${line}`))]),
     "",
   ].join("\n");
   try {
