@@ -364,6 +364,7 @@ import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueReva
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
 import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
+import { reconcileManagedImprovementEffects } from "./lib/opportunity-outcomes.js";
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
@@ -27500,9 +27501,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // W1-T4802: the overseer watches every gardener -- liveness, the effect of merged changes and
     // churn -- and folds effect back into each class's Beta record. Off: state/GARDENER_OVERSEER_OFF.
     case "overseer":
-      return () => {
+      return async () => {
         try {
-          runGardenerOverseer(productionGardenerOverseerPorts({ stateDir, repoRoot, owner, repo, fetch: ghJson, log, escalate: raiseDuplicate }));
+          const pass = runGardenerOverseer(productionGardenerOverseerPorts({ stateDir, repoRoot, owner, repo, fetch: ghJson, log, escalate: raiseDuplicate }));
+          if (pass.ran) {
+            try { log("improvement_effects.pass", await reconcileManagedImprovementEffects({ stateDir, repoRoot, repository: `${owner}/${repo}`, log })); }
+            catch (error) {
+              log("improvement_effects.pass_failed", { reason: "Independent improvement follow-up could not be completed.", error: String(error) });
+            }
+          }
         } catch (e) {
           log("gardener_overseer.overseer_failed", { error: String((e as Error)?.message ?? e) });
         }
