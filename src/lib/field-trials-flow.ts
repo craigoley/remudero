@@ -1459,7 +1459,8 @@ export async function verifySiteSecondarySupport(commit: string | undefined, rea
  * `rmd field-trials`: one resumable snapshot pass. Reads each source's ledger union and a bounded
  * number of GitHub pages, writes the private snapshot, and — only with a consent file — a dated,
  * revocable candidate release. A refresh failure keeps the last known good release and says so.
- * With refresh metadata it records the collector outcome; it changes no routing or publication.
+ * With refresh metadata it records the collector outcome and, W1-T10832, keeps the one owner-reviewed
+ * site import PR current; it changes no routing and merges nothing.
  */
 export async function fieldTrialsCommand(rest: string[], build: (input: FieldTrialsFlowInput) => FieldTrialsFlowSnapshot,
   input: FieldTrialsCommandInput = {}): Promise<number> {
