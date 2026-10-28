@@ -2981,7 +2981,9 @@ function assembleServeRoutes(
     ...buildProductBuildRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root, instances: {
       registryPath: deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
       stateBase: deps.instances?.stateBase, coreInstance: deps.instances?.coreInstance, readText: deps.instances?.readText } }),
-    ...buildProductCaseRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root, instances: {
+    // W1-T10823: the plan proposal hands off through the SAME maintained gateway this serve's inbox actions use, and reads
+    // the SAME core ledger that gateway's `ratify.cli_*` rows land in.
+    ...buildProductCaseRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root, planGateway: panelGraphDeps.ratify, planLedgerPath: deps.ledgerPath, instances: {
       registryPath: deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
       stateBase: deps.instances?.stateBase, coreInstance: deps.instances?.coreInstance, readText: deps.instances?.readText } }),
     withStatusNeedsYou(withFleetRuntimeHealth(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), readRuntimeHealth), needsYouGates),

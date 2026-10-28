@@ -8,6 +8,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { openPrsRestArgs, prFilesRestArgs, type RestPullRow } from "./open-prs-rest.js";
+import { runnerConfigDigest } from "./dispatch-repair.js";
 import { loadPlan, type AcceptanceCriterion } from "./plan.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
@@ -174,8 +175,10 @@ export function defaultProofRunnerAsync(
 }
 
 /** `stale-proof` needs a plan amendment; `branch-gap` can be repaired by a build.
- *  `all-credited` has no remaining proof to execute and grants no new credit. */
-export type PrOpenRefusalClass = "stale-proof" | "branch-gap" | "all-credited";
+ *  `all-credited` has no remaining proof to execute and grants no new credit.
+ *  `proof-collected-nothing` (W1-T10919): the runner loaded no test file although head files hold the proof's title,
+ *  so only a change to the runner's scope on main, or to the task, can let a rebuild pass. */
+export type PrOpenRefusalClass = "stale-proof" | "branch-gap" | "all-credited" | "proof-collected-nothing";
 
 /** A `branch-gap` refusal whose only defect is a filed proof that ran and failed: the body is otherwise
  *  fully checked, so the opener can still open the finished work with that proof named as its fix target. */
@@ -202,6 +205,8 @@ export class PrOpenRefusedError extends RmdError {
     reason: string,
     readonly failingProof?: FailingProofAtOpen,
     readonly inconclusiveProof?: InconclusiveProofAtOpen,
+    /** W1-T10919: for `proof-collected-nothing`, the {@link runnerConfigDigest} of the tree whose runner loaded nothing. */
+    readonly runnerConfigDigest?: string,
   ) {
     super("plan", GENERIC_EXIT_CODE, `openPullRequestChecked: ${reason}`, { refusalClass });
     this.name = "PrOpenRefusedError";
@@ -213,8 +218,9 @@ function reject(
   refusalClass: PrOpenRefusalClass = "branch-gap",
   failingProof?: FailingProofAtOpen,
   inconclusiveProof?: InconclusiveProofAtOpen,
+  runnerDigest?: string,
 ): never {
-  throw new PrOpenRefusedError(refusalClass, reason, failingProof, inconclusiveProof);
+  throw new PrOpenRefusedError(refusalClass, reason, failingProof, inconclusiveProof, runnerDigest);
 }
 
 /** `note` placed before the task trailer so the trailer stays the body's last paragraph. */
@@ -291,6 +297,7 @@ export function recordRefusedPrOpen(
     head_sha: at.headSha,
     refusal_class: err.refusalClass,
     reason: err.message,
+    ...(err.runnerConfigDigest !== undefined ? { runner_config_digest: err.runnerConfigDigest } : {}),
   });
   if (err.refusalClass !== "stale-proof") return null;
   // A test-only build whose proof already passes at the merge base found nothing to change: main
@@ -415,6 +422,10 @@ const proofInconclusive = (result: OpenPullRequestProofResult): boolean =>
 // refusal, missing test, or execution error; exit 5 means the proof is stale at base.
 const EXECUTED_PROOF_FAILURE = 1;
 const STALE_PROOF = 5;
+/** `rmd check-proof` exit 3 is a no-match; W1-T10919's `cause: collected-nothing` line marks the no-match the runner's
+ *  scope produced (it loaded no file while head files hold the title), as opposed to a test nobody wrote. */
+const NO_MATCH_PROOF = 3;
+const COLLECTED_NOTHING_CAUSE = /(?:^|\n)cause:\s+collected-nothing\b/;
 
 /**
  * Prepare the exact body an existing PR opener will send. Filed task branches resolve their
@@ -479,6 +490,16 @@ export function openPullRequestChecked(
       const inconclusive: InconclusiveProofAtOpen | undefined = !stale && proofInconclusive(result)
         ? { proof, detail: detail.length > 3000 ? detail.slice(-3000) : detail, checkedBody, attempts: result.attempts ?? 1 }
         : undefined;
+      if (!stale && result.status === NO_MATCH_PROOF && COLLECTED_NOTHING_CAUSE.test(detail)) {
+        return reject(
+          `${taskId} proof collected no tests (${proof}): the runner's scope does not reach the files holding its title, ` +
+            `so a rebuild on this tree is refused the same way: ${detail}`,
+          "proof-collected-nothing",
+          undefined,
+          undefined,
+          runnerConfigDigest(repoRoot, "HEAD"),
+        );
+      }
       return reject(
         `${taskId} proof did not pass ${proofBase === undefined ? "at head" : "against merge base"} (${proof})${detail ? `: ${detail}` : `: exit ${result.status ?? result.signal ?? "unknown"}`}`,
         stale ? "stale-proof" : "branch-gap",

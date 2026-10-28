@@ -228,6 +228,19 @@ test("W1-T9918: an unchanged head and main reuse their compare off the loop", as
   } finally { gate.resolve(); await first; f.cleanup(); }
 });
 
+test("the light pass probes every stable ready head across bounded passes", async () => {
+  const f = fixture(Array.from({ length: 9 }, (_, i) => pr(992000 + i, true)));
+  f.effects.updateBranch = undefined;
+  f.io.readCompare = async (args) => { f.compares.push(args); return { ahead_by: 0, files: [] }; };
+  const hook = f.hook();
+  try {
+    for (let pass = 0; pass < 3; pass++) await hook();
+    const heads = new Set(f.compares.map((args) => args[1]));
+    assert.equal(f.compares.length, 9, "each pass issues at most three compares");
+    assert.equal(heads.size, 9, "all stable ready heads are probed");
+  } finally { f.cleanup(); }
+});
+
 test("W1-T9918: the default compare transport leaves the loop available while its child is running", async (t) => {
   const f = fixture([pr(991831, true)]);
   delete f.io.readCompare;
