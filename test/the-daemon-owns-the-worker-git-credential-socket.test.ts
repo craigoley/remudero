@@ -951,6 +951,11 @@ test("W1-T10799: one managed target without a daemon reaches one bounded native 
       gitCredentialMint: async (repo: string) => ({ ok: true, token: `scoped-for-${repo}` }),
       runTask: (async (taskId: string, opts: Record<string, unknown>) => {
         taskCalls.push({ taskId, opts });
+        assert.equal(typeof opts.onRunCreated, "function", "the core composition supplies the durable native identity hook");
+        (opts.onRunCreated as (runId: string) => void)(`${taskId}-1234`);
+        const runningJob = store.read("product:fresh/one");
+        assert.ok(runningJob.state === "found" && runningJob.record.runId === `${taskId}-1234`,
+          "the native identity is durable before the worker's first asynchronous read");
         const snapshot = await (opts.planSnapshot as () => Promise<{ plan: { tasks: Array<{ id: string; repo: string }> } }>)();
         assert.equal(snapshot.plan.tasks.find((task) => task.id === taskId)?.repo, "wreckterra", "runTask reads the exact selected target plan snapshot");
         targetPrs.push({ number: 1, url: "https://github.com/craigoley/wreckterra/pull/1", state: "OPEN", headRefName: `run-${taskId}-1` });
@@ -1004,4 +1009,21 @@ test("W1-T10799: one managed target without a daemon reaches one bounded native 
   const ledger = readFileSync(join(coreRoot, "state", "ledger.ndjson"), "utf8").split("\n").filter((line) => line.includes("target_job.resumed"));
   assert.equal(ledger.length, 1, "the resumption is ledgered once");
   assert.ok(ledger[0]!.includes('"claim":"unknown"'), "and it records that the claim could not be read");
+});
+
+test("W1-T10799: the native runner persists identity before plan reads and aborts on a failed durable write", async (t) => {
+  const root = ownedFixtureDir(t, "bounded-native-identity").dir;
+  const config: Config = { root, claudeBin: "/bin/true" };
+  const writes: string[] = [];
+  let reads = 0;
+  const refusedWrite = new Error("durable identity write failed");
+  await assert.rejects(runTask("W9-T1", {
+    config, owner: "craigoley",
+    onRunCreated: (runId) => { writes.push(runId); throw refusedWrite; },
+    planSnapshot: async () => { reads++; throw new Error("fixture plan unavailable"); },
+  }), (error) => error === refusedWrite);
+  assert.equal(reads, 0, "a failed durable write prevents all asynchronous plan work");
+  assert.equal(writes.length, 1);
+  assert.match(writes[0]!, /^W9-T1-\d+$/);
+  assert.equal(existsSync(join(root, "state", "ledger.ndjson")), false, "the refused write starts no native run");
 });

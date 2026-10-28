@@ -1466,6 +1466,7 @@ export interface DaemonDeps {
   /** Run ONE task through the existing run-task path (default = runTask). W1-T9089: a restart never reaches into a
    *  run; a child run is left running for the next boot to adopt and an in-process lane is awaited. */
   runOne: (taskId: string, options?: {
+    onRunCreated?: (runId: string) => void;
     onChild?: (child: RunChildHandle) => void;
     /** W1-T10000: the run waits for its child's memory admission; no child exists yet. */
     onChildPending?: (pending: RunChildPending) => void;
@@ -1611,7 +1612,7 @@ export interface DaemonDeps {
   /** W1-T10799: runs ONE such job to its terminal verdict, through the maintained drain. The daemon passes its own deps so
    *  the job meets every governor this daemon applies, and awaits it: one job occupies the one reserved lane. A `held` or
    *  `resumed` outcome keeps the marker for a later tick; `ended` and `refused` closed it. */
-  runTargetJob?: (kick: DaemonKick & { repo: string }, daemonDeps: DaemonDeps) => Promise<{ state: "ended" | "refused" | "held" | "resumed" }>;
+  runTargetJob?: (kick: DaemonKick & { repo: string }, daemonDeps: DaemonDeps, onDispatch?: () => void) => Promise<{ state: "ended" | "refused" | "held" | "resumed" }>;
   /** Read and delete the "drain now" marker, consumed once; a defined return means the operator
    *  asked for one immediate dispatch cycle. */
   consumeDrainNow?: () => { origin: string } | null;
@@ -6668,7 +6669,12 @@ export async function runDaemon(
         } else {
           for (const other of waiting) log("target_job.capacity_deferred", { task: other.taskId, origin: other.origin, repo: other.repo, reason: "lane reserved by another job" });
           let closed = false;
-          try { closed = ["ended", "refused"].includes((await deps.runTargetJob(job, deps)).state); }
+          let charged = false;
+          try { closed = ["ended", "refused"].includes((await deps.runTargetJob(job, deps, () => {
+            if (charged) throw new Error("target job already charged");
+            charged = true;
+            attempted.push(job.taskId);
+          })).state); }
           catch (e) { log("target_job.error", { task: job.taskId, origin: job.origin, repo: job.repo, error: String((e as Error)?.message ?? e) }); }
           if (closed) continue;
         }
@@ -7592,8 +7598,13 @@ export async function runDaemon(
     const phaseFaults: Array<{ phase: string; reason: unknown }> = [];
     const admittedWork = runLanePool(admitted, (id, task) => {
       const startedAtMs = preparedStartTimes.get(id)!;
+      const kick = forcedKick?.taskId === id ? forcedKick : undefined;
+      const bindRun = (runId: string) => {
+        if (kick) log("console.kick_dispatched", { task: id, origin: kick.origin, ...kickRepoField(kick), native_run_id: runId });
+      };
       // Preserve the current worker-boundary handoff; a reservation never preempts it.
-      return deps.runOne(id, { onChild: (child) => {
+      return deps.runOne(id, { onRunCreated: bindRun, onChild: (child) => {
+        bindRun(child.runId);
         childMode = true;
         children.set(child.runId, { ...child, taskId: id });
         batchChildren.set(task, child);
@@ -8114,8 +8125,10 @@ export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: Boun
   }
   if (dispatched) {
     if (summary.stopReason === "error") return held("dispatch outcome unresolved", "target_job.unknown");
+    const dispatchedJob = deps.readJob(origin);
+    if (dispatchedJob.state !== "found") return held("dispatched job record unreadable", "target_job.unknown");
     deps.log("target_job.ended", { ...fields, stop_reason: summary.stopReason });
-    return close(base("ended", { ...(prior ?? base("queued")), attempts: (prior?.attempts ?? 0) + 1 }, { ...identity, stopReason: summary.stopReason }), summary.stopReason, false);
+    return close({ ...dispatchedJob.record, status: "ended", updatedAt: deps.nowIso(), stopReason: summary.stopReason }, summary.stopReason, false);
   }
   if (CAPACITY_STOPS.has(summary.stopReason) || summary.stopReason === "error") {
     return held(`${summary.stopReason}${summary.stopDetail ? `: ${summary.stopDetail}` : ""}`, "target_job.capacity_deferred");

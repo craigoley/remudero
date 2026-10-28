@@ -1324,6 +1324,10 @@ function nextCurated(
     if (isMerged(id)) continue;
     const t = plan.byId.get(id);
     if (!t) continue;
+    if (opts.isIndependentFailureBlocked?.(id)) {
+      opts.onFiltered?.(t, "blocked");
+      continue;
+    }
     if (!taskPreconditionHolds(t, opts)) continue;
     // Same indeterminate-read semantics as the natural path (W1-T119): a curation-panel selection
     // is still dispatch, and must not re-run work whose own GitHub read failed.
@@ -2767,7 +2771,7 @@ export interface TargetJobRecord {
   origin: string; taskId: string; repo: string; status: TargetJobStatus;
   /** How many times the drain was entered for this job; a replay never raises it past a dispatch that happened. */
   attempts: number; updatedAt: string; reason?: string; stopReason?: string;
-  owner?: string; planRevision?: string;
+  owner?: string; planRevision?: string; runId?: string;
 }
 /** `unreadable` is its own state: a record this process cannot read is never "no job", so it can never respend. */
 export type TargetJobRead = { state: "found"; record: TargetJobRecord } | { state: "absent" } | { state: "unreadable" };

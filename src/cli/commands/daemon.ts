@@ -312,7 +312,7 @@ export interface NativeTargetJobContext {
   syncPlan: (planPath: string, owner: string, repo: string) => Promise<{ plan: Plan } | { error: string }>;
   /** The merged/open-PR projection bound to the TARGET owner and repository, never the core repository's closures. */
   project: (plan: Plan, owner: string, repo: string) => Map<string, StatusProjection>;
-  runTask: (taskId: string, target: { planPath: string; owner: string; repo: string; plan: Plan }) => Promise<RunResult>;
+  runTask: (taskId: string, target: { planPath: string; owner: string; repo: string; plan: Plan; onRunCreated: (runId: string) => void }) => Promise<RunResult>;
   claimHeld: BoundedTargetJobPorts["claimHeld"];
   runDrain?: typeof runDrain;
 }
@@ -323,11 +323,11 @@ export interface NativeTargetJobContext {
  * maintained drain with the core daemon's own governors, and takes no capacity of its own: the daemon runs it inline in
  * the lane it reserves.
  */
-export function createNativeTargetJobRunner(ctx: NativeTargetJobContext): (kick: DaemonKick & { repo: string }, daemonDeps: DaemonDeps) => Promise<BoundedTargetJobOutcome> {
+export function createNativeTargetJobRunner(ctx: NativeTargetJobContext): (kick: DaemonKick & { repo: string }, daemonDeps: DaemonDeps, onDispatch?: () => void) => Promise<BoundedTargetJobOutcome> {
   const store = fileTargetJobStore(ctx.root);
   const stateDir = join(ctx.root, "state");
   let reserved = false;
-  return async (kick, daemonDeps) => {
+  return async (kick, daemonDeps, chargeDispatch) => {
     if (reserved) {
       ctx.log("target_job.capacity_deferred", { task: kick.taskId, origin: kick.origin, repo: kick.repo, reason: "core lane reserved by another job" });
       return { state: "held", reason: "core lane reserved by another job" };
@@ -352,7 +352,7 @@ export function createNativeTargetJobRunner(ctx: NativeTargetJobContext): (kick:
         claimHeld: ctx.claimHeld,
         // The core ledger's own receipts for THIS origin, read from the dispatch time the durable record kept.
         execution: (record) => readTargetExecution(stateDir, { taskId: record.taskId, origin: record.origin, repo: record.repo,
-          requestedAt: fixedClock(Date.parse(record.updatedAt) - 60_000).iso(), nowMs: ctx.nowMs() }),
+          requestedAt: fixedClock(Date.parse(record.updatedAt) - 60_000).iso(), nowMs: ctx.nowMs(), runId: record.runId }),
         drain: (plan, opts, onDispatch) => (ctx.runDrain ?? runDrain)(plan, {
           ...governors,
           refreshMerged: () => {
@@ -362,7 +362,17 @@ export function createNativeTargetJobRunner(ctx: NativeTargetJobContext): (kick:
           isOpenPr: (id) => { const row = projection.get(id); return row?.prState === "OPEN" ? row.prNumber : undefined; },
           isCreditIndeterminate: (id) => projection.get(id)?.indeterminate === true,
           isIndeterminate: (id) => projection.get(id)?.indeterminate === true,
-          runOne: async (id) => { onDispatch(); return ctx.runTask(id, { planPath, owner, repo: kick.repo, plan }); },
+          isIndependentFailureBlocked: (id) => projection.get(id)?.independentFailureBlocked === true,
+          runOne: async (id) => {
+            onDispatch();
+            chargeDispatch?.();
+            return ctx.runTask(id, { planPath, owner, repo: kick.repo, plan, onRunCreated: (runId) => {
+              const read = store.read(kick.origin);
+              if (read.state !== "found" || read.record.status !== "admitted" || read.record.runId !== undefined) throw new Error("native job identity unavailable");
+              store.write({ ...read.record, runId });
+              ctx.log("console.kick_dispatched", { task: id, origin: kick.origin, repo: kick.repo, native_run_id: runId });
+            } });
+          },
           log: ctx.log,
         }, opts),
         clearKick: (taskId, repo) => { clearKick(ctx.root, taskId, repo); },
@@ -914,7 +924,7 @@ export async function daemonCommand(
         if (job.status !== "admitted" || job.repo.toLowerCase() !== managed.repo.toLowerCase()) continue;
         if (rows.some((pr: PrRef) => taskIdFromRunBranch(pr.headRefName ?? "") === job.taskId)) continue;
         const execution = readTargetExecution(join(config.root, "state"), { taskId: job.taskId, origin: job.origin, repo: job.repo,
-          requestedAt: fixedClock(Date.parse(job.updatedAt) - 60_000).iso(), nowMs: (deps.now ?? Date.now)() });
+          requestedAt: fixedClock(Date.parse(job.updatedAt) - 60_000).iso(), nowMs: (deps.now ?? Date.now)(), runId: job.runId });
         if (execution.state !== "ended") owned++;
       }
     }
@@ -1652,6 +1662,7 @@ export async function daemonCommand(
             pairedTrialHost: "daemon",
             skipGitSync: !!flagValue(rest, "--plan"),
             owner: target.owner,
+            onRunCreated: runOptions?.onRunCreated,
             // W1-T2509: EVERY LANE SHARES ONE GATEWAY PER owner/repo — a per-lane COLD gateway paid a
             // synchronous full-repo walk before its first yield, serialising lane starts (78 s apart).
             // See `laneGithubFor` for why it memoises per owner/repo rather than per drain target.
@@ -1810,6 +1821,7 @@ export async function daemonCommand(
             runTask: (taskId, job) => runTaskFn(taskId, {
               planPath: job.planPath, config, allowStale: false, pairedTrialHost: "daemon", owner: job.owner, githubFor: laneGithubFor, handOffAtPrOpen: true,
               planSnapshot: async () => ({ plan: job.plan, staleDispatch: false }),
+              onRunCreated: job.onRunCreated,
               ...(gitCredentialSocket ? { gitCredentialSocketPath: gitCredentialSocket.socketPath } : {}),
             }),
             claimHeld: async (taskId, repo) => {

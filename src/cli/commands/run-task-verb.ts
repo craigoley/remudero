@@ -4158,6 +4158,8 @@ export async function runTask(
   opts: ProbeAdmissionOptions & {
     planPath?: string;
     config?: Config;
+    /** Persist a caller's exact native run identity before any asynchronous work or spend. */
+    onRunCreated?: (runId: string) => void;
     /** W1-T7096: the drain and the CLI ask the production LLM progress judge in the fix rung. */
     productionProgressJudge?: boolean;
     preopenGate?: RunTaskBodyOptions["preopenGate"];
@@ -4618,6 +4620,7 @@ export async function runTask(
   // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
   // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
   const runId = `${taskId}-${Date.now()}`;
+  opts.onRunCreated?.(runId);
   const log = benchmarkRunLedgerLogger((step, fields) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...fields }),
     opts.benchmarkStackEvidence ?? workerBoundaryStack);

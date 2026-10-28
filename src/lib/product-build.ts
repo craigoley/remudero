@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -93,7 +93,7 @@ export interface ProductBuildTarget {
 }
 
 /** One build request, as the target daemon's ledger must name it before its run can read as this build's. */
-export interface ExecutionQuery { taskId: string; origin: string; repo: string; requestedAt: string; nowMs: number }
+export interface ExecutionQuery { taskId: string; origin: string; repo: string; requestedAt: string; nowMs: number; runId?: string }
 /**
  * Native execution evidence for ONE build request. `dispatched`: the daemon's admission consumed this request's kick;
  * `running`: the run that dispatch started has no terminal row and wrote inside the liveness bound; `ended`: it wrote a
@@ -111,7 +111,7 @@ const RUN_TERMINAL_STEPS: ReadonlySet<string> = new Set(["verdict", "run.error"]
 /**
  * Reads the TARGET daemon's own ledger (`stateDir`, every rotation) for this request's execution. Correlation, never
  * freshness: the kick row must name this request's origin, task and repository at or after its recorded time; the
- * run is the first `run.start` of this task at or after that dispatch; it is live only with no terminal row and an
+ * run is bound by a native receipt to this exact origin; it is live only with no terminal row and an
  * own row inside the board's liveness bound (W1-T179), which only bounds a run that died without a verdict.
  */
 export function readTargetExecution(stateDir: string, query: ExecutionQuery, fsDeps: LedgerGrepFsDeps = realLedgerFs): ExecutionRead {
@@ -124,9 +124,18 @@ export function readTargetExecution(stateDir: string, query: ExecutionQuery, fsD
     row.origin === query.origin && typeof row.repo === "string" && row.repo.toLowerCase() === query.repo.toLowerCase());
   if (!kick) return { state: "none" };
   if (kick.step === KICK_REFUSED_STEP) return { state: "refused" };
+  const bindings = rows.filter((row) => row.step === KICK_DISPATCHED_STEP &&
+    row.task === query.taskId && row.origin === query.origin && typeof row.repo === "string" &&
+    row.repo.toLowerCase() === query.repo.toLowerCase() && typeof row.native_run_id === "string");
+  const ids = new Set(bindings.map((row) => row.native_run_id as string));
+  if (ids.size > 1 || (query.runId !== undefined && ids.size === 1 && !ids.has(query.runId))) return { state: "unknown" };
+  const boundRun = [...ids][0];
+  if (boundRun === undefined) return { state: "dispatched" };
+  if (rows.some((row) => row.native_run_id === boundRun && typeof row.origin === "string" && row.origin !== query.origin &&
+    typeof row.repo === "string" && row.repo.toLowerCase() === query.repo.toLowerCase())) return { state: "unknown" };
   const start = rows.find((row) => row.step === RUN_START_STEP && row.task_id === query.taskId &&
     typeof row.repo === "string" && row.repo.toLowerCase() === query.repo.toLowerCase() &&
-    ledgerRunBelongsToTask(query.taskId, row.run_id) && at(row) >= at(kick));
+    ledgerRunBelongsToTask(query.taskId, row.run_id) && row.run_id === boundRun);
   if (!start) return { state: "dispatched" };
   const runId = start.run_id as string;
   const own = rows.filter((row) => row.run_id === runId);
@@ -356,6 +365,12 @@ export class ProductBuildService {
     if (read.state !== "absent") return read;
     const core = this.options.root;
     if (core === undefined || !isAbsolute(core) || !existsSync(join(core, "state"))) return { state: "unreadable" };
+    try {
+      accessSync(join(core, "state"), constants.R_OK | constants.X_OK);
+      readdirSync(join(core, "state"));
+    } catch (error) {
+      void error; return { state: "unreadable" };
+    }
     return { state: "found", root: core, instance: this.options.instances?.coreInstance ?? CORE_INSTANCE, native: true };
   }
 
@@ -533,7 +548,7 @@ export function nativeTargetAdmission(repoName: string, options: ProductBuildIns
 const targetJobRecordSchema = z.object({
   origin: z.string().min(1), taskId: z.string().min(1), repo: z.string().min(1), status: z.enum(["queued", "admitted", "ended", "refused"]),
   attempts: z.number().int().min(0), updatedAt: z.string(), reason: z.string().optional(), stopReason: z.string().optional(),
-  owner: z.string().optional(), planRevision: z.string().optional(),
+  owner: z.string().optional(), planRevision: z.string().optional(), runId: z.string().optional(),
 }).strict();
 
 /** The durable job record: one file per kick origin under `<root>/state/target-jobs`, replaced atomically. */
