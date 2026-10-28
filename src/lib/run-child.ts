@@ -1003,6 +1003,13 @@ export interface DetachedWorkChildHost {
     reviewKey: string;
     reviewAttemptId: string | undefined;
   }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | undefined>;
+  /** Starts one fix dispatch as a child from its serializable decision envelope, or `undefined` when it stays in process. */
+  spawnFix: (input: {
+    pr: { prNumber: number; headSha: string; taskId?: string };
+    fixKey: string;
+    /** The typed decision envelope (sweep.ts `FixDispatchEnvelope`); this module only carries it into `spec.json`, plain JSON. */
+    envelope: object;
+  }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | undefined>;
 }
 
 /** `off`: everything in process. `shadow`: a probe round-trips the contract, the work stays in process. `on`: moved kinds are children. */
@@ -1025,8 +1032,10 @@ const REDONE_AFTER_RESTART = "a best-effort rung the restart releases and the ne
 /** The inventory, as data. The drain cost of a kind is NOT stored here: it is measured from the ledger ({@link measureDrainCosts}). */
 export const DETACHED_WORK_INVENTORY: Readonly<Record<DetachedWorkKind, DetachedWorkRow>> = {
   review: { kind: "review", holds: "the judgement's model call and the PR's diff, in the daemon heap", resumableFromFiles: true, eligible: true },
-  "fix-dispatch": { kind: "fix-dispatch", holds: "the fix worker's handle and its admission or CI wait", resumableFromFiles: true, eligible: false,
-    stays: "deferred out of W1-T9114: a fix dispatch's inputs are the sweep's in-process claim, judged evidence and phase observer, which a spec cannot carry yet (follow-up: a serializable fix-evidence contract)" },
+  // A fix dispatch moves through the governed producer: the sweep spawns it BEFORE taking the fix-branch claim and carries a typed,
+  // serializable decision envelope (sweep.ts `FixDispatchEnvelope`: the PR view and the judged evidence, never the claim keeper, a
+  // dependency function or the phase callback). The child rebuilds live dependencies, rechecks, and takes its own claim.
+  "fix-dispatch": { kind: "fix-dispatch", holds: "the fix worker's handle and its admission or CI wait", resumableFromFiles: true, eligible: true },
   retro: { kind: "retro", holds: "a settle await on the retro subprocess", resumableFromFiles: false, eligible: false,
     stays: "the retro already runs in its own subprocess (runAutomatedRetroSubprocess, W1-T2870); only its settle is in process" },
   "auto-triage": { kind: "auto-triage", holds: "one triage run's await", resumableFromFiles: false, eligible: false, stays: REDONE_AFTER_RESTART },
@@ -1167,10 +1176,10 @@ export function detachedWorkPlacement(
 
 /**
  * The kinds this process has a run-child entry for. A review is hosted: `runDetachedWork` (src/run-task.ts) takes the PR number and
- * the review's flags from the spec. A fix dispatch is NOT, and is out of this task's scope: its inputs are the sweep's in-process
- * claim, its judged evidence and its phase observer, which a spec cannot carry, so the inventory keeps it in process and says why.
+ * the review's flags from the spec. A fix dispatch is hosted too: `runDetachedWork` takes the typed decision envelope from the spec,
+ * rebuilds the sweep's live dependencies, rechecks the PR and the task, and calls the same `dispatchFix` the sweep calls in process.
  */
-export const HOSTED_DETACHED_WORK_KINDS: ReadonlySet<DetachedWorkKind> = new Set<DetachedWorkKind>(["review"]);
+export const HOSTED_DETACHED_WORK_KINDS: ReadonlySet<DetachedWorkKind> = new Set<DetachedWorkKind>(["review", "fix-dispatch"]);
 
 /** `sweep.runChild.mode` as detached work reads it: `auto` is decided from the ledger evidence the build runs use (W1-T9087). */
 export function detachedWorkModeNow(
@@ -1238,6 +1247,21 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "review", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
+        plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+      });
+      if (!launch.started) return undefined;
+      return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
+    },
+    async spawnFix({ pr, fixKey, envelope }) {
+      // A fix has no shadow probe of its own: the review's probe already round-trips the contract. Only `on` moves it.
+      if (mode() !== "on") return undefined;
+      const placement = detachedWorkPlacement("fix-dispatch", {
+        mode: "on", hosted: HOSTED_DETACHED_WORK_KINDS, measured: measureDrainCosts(input.readLedger()),
+      });
+      if (placement.placement !== "child") return undefined;
+      const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey, inputs: { repo: input.repo, envelope } };
+      const launch = await (input.spawn ?? spawnRunChild)({
+        taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "sweep-fix", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
         plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
       });
       if (!launch.started) return undefined;

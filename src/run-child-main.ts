@@ -40,7 +40,11 @@ export interface ProbeStatusExtras {
 export type RunChildRunTask = (taskId: string, options: Record<string, unknown>) => Promise<RunResult>;
 
 /** W1-T9114: the slice of `runDetachedWork` this entry drives for a spec that carries `work` (the run path exports the real one). */
-export type RunChildDetachedWork = (work: DetachedWorkSpec, ctx: { runId: string; taskId: string }) => Promise<RunResult>;
+export type RunChildDetachedWork = (
+  work: DetachedWorkSpec,
+  /** `onPhase` writes the work's own phase (a fix's admission, worker or CI wait) to the owned `status.json`, the adoption identity's file. */
+  ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void },
+) => Promise<RunResult>;
 
 /** The signals this entry listens on; the default is the process itself. */
 export interface RunChildSignalSource {
@@ -195,17 +199,21 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
     }
     restoreActor = markRunChildProcessActor();
     const background: Promise<unknown>[] = [];
-    const beat = setInterval(() => status("running", "run", {}), deps.heartbeatMs ?? RUN_CHILD_HEARTBEAT_MS);
+    let phase = work !== undefined ? work.kind : "run";
+    const beat = setInterval(() => status("running", phase, {}), deps.heartbeatMs ?? RUN_CHILD_HEARTBEAT_MS);
     beat.unref();
     let outcome: { result: RunResult } | { error: unknown };
     try {
-      status("running", work !== undefined ? work.kind : "run", {});
+      status("running", phase, {});
       const aborted = (): { error: unknown } => ({ error: Object.assign(new Error("aborted before the run finished"), { name: "AbortError" }) });
       if (work !== undefined && detachedWork !== undefined && !abort.signal.aborted) {
         // Detached work has no safe point to stop at: a SIGTERM ends it as `aborted` at once, and the process exit takes the work with it.
         const stopped = new Promise<{ error: unknown }>((resolve) => { abort.signal.addEventListener("abort", () => resolve(aborted()), { once: true }); });
         outcome = await Promise.race([
-          withRunChildReservation(spec.value, () => detachedWork(work, { runId, taskId: spec.value.taskId })).then(
+          withRunChildReservation(spec.value, () => detachedWork(work, { runId, taskId: spec.value.taskId, onPhase: (next) => {
+            phase = `${work.kind}:${next}`;
+            status("running", phase, {});
+          } })).then(
             (result): { result: RunResult } => ({ result }), (error: unknown): { error: unknown } => ({ error })),
           stopped,
         ]);

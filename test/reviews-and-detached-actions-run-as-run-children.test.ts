@@ -19,8 +19,9 @@ import { childIdentity, readStatus, RUN_CHILD_SCHEMA, writeSpec, writeStatus, ty
 import { runChildMain } from "#src/run-child-main.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import {
-  adoptChildWork, childWorkCount, childWorkHoldsReviewKey, childWorkLeftRunning, installDetachedWorkHost, resetChildWork, reviewAdmissionBound,
-  type BuildSweepEffectsDeps, type DetachedActionKind, type OpenPrView,
+  adoptChildWork, buildFixDispatchEnvelope, childWorkCount, childWorkHoldsReviewKey, childWorkLeftRunning, detachedSweepActionCount,
+  drainDetachedSweepActions, installDetachedWorkHost, readFixDispatchEnvelope, resetChildWork, reviewAdmissionBound, runFixDispatchChild, runSweep,
+  type BuildSweepEffectsDeps, type DetachedActionKind, type FixDispatchChildPorts, type FixDispatchEnvelope, type OpenPrView, type SweepDeps,
 } from "#src/lib/sweep.js";
 import type { SweepCommandHost } from "#src/cli/commands/sweep.js";
 
@@ -84,10 +85,10 @@ test("W1-T9114: the inventory moves a kind only on a measured drain cost", () =>
   const hosted = new Set<DetachedWorkKind>(DETACHED_WORK_KINDS);
   const on = (over: Partial<DetachedWorkEvidence> = {}): DetachedWorkEvidence => ({ mode: "on", hosted, measured, ...over });
   const moved = (evidence: DetachedWorkEvidence) => DETACHED_WORK_KINDS.filter((k) => detachedWorkPlacement(k, evidence).placement === "child");
-  assert.deepEqual(moved(on()), ["review"], "only the review moves: a fix dispatch is deferred out of this task");
-  const fixPlacement = detachedWorkPlacement("fix-dispatch", on());
-  assert.equal(fixPlacement.placement, "process");
-  assert.match(fixPlacement.reason, /deferred out of W1-T9114/, "the table says why the fix dispatch stays in process");
+  assert.deepEqual(moved(on()), ["review", "fix-dispatch"], "the review and the fix dispatch moved: both held a drain over the window");
+  assert.equal(detachedWorkPlacement("fix-dispatch", on()).placement, "child");
+  assert.deepEqual(moved(on({ measured: { review: measured.review! } })), ["review"], "a fix dispatch that never held a drain stays in process");
+  assert.match(detachedWorkPlacement("fix-dispatch", on({ measured: {} })).reason, /never held a drain/, "and the placement says why");
   assert.deepEqual(moved(on({ measured: {} })), [], "no measured drain cost, nothing moves");
   assert.deepEqual(moved(on({ measured: { review: { drains: 3, waitedMs: 0, abandoned: 0 } } })), [], "a zero wait is no cost");
   assert.deepEqual(moved(on({ mode: "off" })), []);
@@ -135,10 +136,22 @@ test("W1-T9114: the run child hosts detached work and maps every ending to a sta
     const ok = f.add("work-ok-1", review);
     const seen: unknown[] = [];
     assert.equal(await runChildMain(["--run-dir", ok.dir], { ...base, signals: noSignals,
-      runDetachedWork: async (work, ctx) => { seen.push(work, ctx); return result("A"); } }), 0);
+      runDetachedWork: async (work, ctx) => { seen.push(work, { runId: ctx.runId, taskId: ctx.taskId }); return result("A"); } }), 0);
     assert.deepEqual(seen, [review, { runId: "work-ok-1", taskId: "A" }]);
     assert.equal(read(ok.dir).state, "done");
     assert.equal(read(ok.dir).phase, "done");
+
+    // The work's own phase (a fix's admission, worker, CI wait) lands in the owned status.json while it runs: the adopting daemon reads it.
+    const phased = f.add("work-phase-1", fix);
+    const phases: string[] = [];
+    assert.equal(await runChildMain(["--run-dir", phased.dir], { ...base, signals: noSignals,
+      runDetachedWork: async (_work, ctx) => {
+        for (const phase of ["admission", "worker", "ci-wait"]) { ctx.onPhase!(phase); phases.push(read(phased.dir).phase); }
+        assert.equal(read(phased.dir).state, "running");
+        return result("A");
+      } }), 0);
+    assert.deepEqual(phases, ["fix-dispatch:admission", "fix-dispatch:worker", "fix-dispatch:ci-wait"]);
+    assert.equal(read(phased.dir).state, "done");
 
     // Work that throws is a failed status through the closed failure union.
     const boom = f.add("work-boom-1", review);
@@ -220,13 +233,14 @@ test("W1-T9114: a terminal review child settles once", async () => {
   } finally { f.cleanup(); }
 });
 
-// Narrowed per the operator (W1-T78): the drain half is proved for REVIEW children only, through the production host factory.
-// The title is the proof's verbatim grep target. Fix-dispatch drain is out of scope for this PR (no production producer spawns a
-// fix child); the test asserts it stays in process, so only the review child is left running by the restart.
+// The drain half is proved for BOTH moved kinds through the production host factory: a live review child and a live fix-dispatch child
+// are adopted, and the restart returns while both still run. The title is the proof's verbatim grep target. The fix child is the one
+// the sweep's governed producer spawns (see the producer test below); here it is the adopted half of the same contract.
 test("W1-T9114: a restart does not drain child reviews or fix dispatches", async () => {
   const f = fixture();
   try {
     const reviewDir = f.add("work-review-A-3", review);
+    const fixDir = f.add("work-fix-A-3", fix, { phase: "fix-dispatch:worker" });
     const planPath = join(f.root, "tasks.yaml");
     writeFileSync(planPath, `- id: A\n  title: A\n  repo: remudero\n  type: implement\n  verify: auto\n  depends_on: []\n  status: queued\n  files: [src/A.ts]\n`);
     // The ledger the placement reads: a review drain that waited, and a fix dispatch the drain had to abandon (which still does not move).
@@ -252,27 +266,29 @@ test("W1-T9114: a restart does not drain child reviews or fix dispatches", async
     };
     const moved = drive("on");
     const summary = await moved.daemon;
-    assert.equal(summary.stopReason, "stale", "the restart returned while the review child still ran");
+    assert.equal(summary.stopReason, "stale", "the restart returned while the review and fix children still ran");
     const completed = moved.rows.find((r) => r.step === "daemon.freshness_drain.completed");
     assert.ok(completed, "the drain row is written for children alone");
-    assert.deepEqual(completed.detached_children_left_running, { review: 1 });
+    assert.deepEqual(completed.detached_children_left_running, { review: 1, "fix-dispatch": 1 });
     assert.equal(completed.in_flight_reviews, 0);
     assert.equal(completed.abandoned_in_flight_reviews, 0);
     assert.equal(completed.abandoned_detached_sweep_actions, 0);
     assert.equal((completed.detached_work_placement as Record<string, string>).review, "child");
-    // A fix dispatch's inputs are in-process claims no spec can carry, so nothing spawns one as a child: it stays in process
-    // (and the drain waits for it) under the moved mode. That drain is out of this task's scope; a follow-up moves it.
-    assert.equal((completed.detached_work_placement as Record<string, string>)["fix-dispatch"], "process");
+    assert.equal((completed.detached_work_placement as Record<string, string>)["fix-dispatch"], "child", "the fix dispatch moved: the ledger measured its drain wait");
     assert.equal((completed.detached_work_placement as Record<string, string>).retro, "process");
-    assert.equal(childWorkCount(), 1, "the review child was not settled, aborted or waited for by the exit");
+    assert.equal(childWorkCount(), 2, "neither child was settled, aborted or waited for by the exit");
+    assert.equal(childWorkCount("fix-dispatch"), 1);
     assert.equal(JSON.parse(readFileSync(join(reviewDir.dir, "status.json"), "utf8")).state, "running");
+    assert.equal(JSON.parse(readFileSync(join(fixDir.dir, "status.json"), "utf8")).state, "running");
+    assert.equal(reviewAdmissionBound(3).inFlight, 1, "a fix child holds a fix slot, never a review slot");
 
-    // Control: the same boot with the mode off reads every kind as in process, and a child adopted earlier is still left running and named.
+    // Control: the same boot with the mode off reads every kind as in process, and children adopted earlier are still left running and named.
     const off = drive("off");
     assert.equal((await off.daemon).stopReason, "stale");
     const offRow = off.rows.find((r) => r.step === "daemon.freshness_drain.completed");
     assert.equal((offRow?.detached_work_placement as Record<string, string>).review, "process");
-    assert.deepEqual(offRow?.detached_children_left_running, { review: 1 });
+    assert.equal((offRow?.detached_work_placement as Record<string, string>)["fix-dispatch"], "process");
+    assert.deepEqual(offRow?.detached_children_left_running, { review: 1, "fix-dispatch": 1 });
 
     // Control: with no host installed at all (a daemon whose sweep builder was injected) every kind reads as in process.
     installDetachedWorkHost(undefined);
@@ -313,8 +329,8 @@ test("W1-T9114: the production host starts a review as a child only where the le
     const ask = (h: ReturnType<typeof host>) => h.spawnReview({ pr: { prNumber: 7, headSha: "h".repeat(40), taskId: "A", isPlanFiling: true },
       reviewKey: "review-key-7", reviewAttemptId: "review-PR7-attempt" });
 
-    assert.deepEqual([...HOSTED_DETACHED_WORK_KINDS], ["review"], "only the review has an entry: a fix dispatch's inputs are in-process claims");
-    assert.deepEqual([...host("on").hosts], ["review"]);
+    assert.deepEqual([...HOSTED_DETACHED_WORK_KINDS], ["review", "fix-dispatch"], "a review and a fix dispatch have an entry");
+    assert.deepEqual([...host("on").hosts], ["review", "fix-dispatch"]);
 
     const launched = await ask(host("on"));
     assert.equal(launched?.runId, "work-review-A-9");
@@ -352,6 +368,25 @@ test("W1-T9114: the production host starts a review as a child only where the le
     let readAttempts = 0;
     assert.equal(detachedWorkModeNow(f.stateRoot, () => "auto", () => { readAttempts += 1; throw new Error("ledger union unreadable"); }), "off");
     assert.equal(readAttempts, 1, "the evidence read was attempted and its failure settled as off");
+
+    // A fix dispatch starts as a child on the fix class's reservation, from the envelope alone, only where the ledger measured its wait.
+    spawnOutcome = "started";
+    const spawnedBefore = spawned.length;
+    const fixWaited = [{ step: "daemon.freshness_drain.completed", duration_ms: 9_000, waited_on: [{ what: "detached", kind: "fix-dispatch", settled_after_ms: 6_000 }] }];
+    const envelope = { schema: 1, fixKey: "A@" + "g".repeat(40) };
+    const askFix = (h: ReturnType<typeof host>) => h.spawnFix({ pr: { prNumber: 8, headSha: "g".repeat(40), taskId: "A" }, fixKey: "A@" + "g".repeat(40), envelope });
+    const fixLaunch = await askFix(host("on", fixWaited));
+    assert.equal(fixLaunch?.runId, "work-review-A-9");
+    assert.equal(spawned.length, spawnedBefore + 1);
+    assert.equal(spawned.at(-1)!.lane, "sweep-fix", "the fix child reserves on the fix class");
+    assert.deepEqual(spawned.at(-1)!.work, { kind: "fix-dispatch", prNumber: 8, headSha: "g".repeat(40), fixKey: "A@" + "g".repeat(40),
+      inputs: { repo: "fixture", envelope } }, "the spec carries the typed envelope, never a claim, a function or a callback");
+    assert.equal(await askFix(host("on", waited)), undefined, "a fix that never held a drain stays in process");
+    assert.equal(await askFix(host("shadow", fixWaited)), undefined);
+    assert.equal(await askFix(host("off", fixWaited)), undefined);
+    assert.equal(spawned.length, spawnedBefore + 1, "none of those started a child");
+    spawnOutcome = "unavailable";
+    assert.equal(await askFix(host("on", fixWaited)), undefined, "a child that cannot start leaves the fix in process");
   } finally { f.cleanup(); }
 });
 
@@ -428,20 +463,165 @@ test("W1-T9114: the run path exports runDetachedWork, which refuses work no entr
   const f = fixture();
   try {
     // Through the child's entry, with the child's own default loader of the real run path (this suite does not import it): a kind
-    // nothing hosts is a failed status, never a success.
-    const unhosted = f.add("work-fix-1", fix);
+    // nothing hosts, and a fix whose spec carries no readable envelope, are each a failed status, never a success.
     const argv = [...process.argv];
     process.argv.push("--repo-root", REPO_ROOT);
-    let code: number;
-    const lines: string[] = [];
+    const drive = async (id: string, work: DetachedWorkSpec): Promise<{ code: number; status: RunChildStatus }> => {
+      const child = f.add(id, work);
+      const code = await runChildMain(["--run-dir", child.dir], { env: {}, stderr: () => {}, heartbeatMs: 60_000, signals: { on() {}, off() {} } });
+      const status = readStatus(child.dir);
+      assert.ok(status.ok);
+      return { code, status: status.value };
+    };
     try {
-      code = await runChildMain(["--run-dir", unhosted.dir], { env: {}, stderr: (line: string) => { lines.push(line); }, heartbeatMs: 60_000,
-        signals: { on() {}, off() {} } });
+      const unhosted = await drive("work-retro-1", { kind: "retro" });
+      assert.equal(unhosted.code, 1);
+      assert.equal(unhosted.status.state, "failed");
+      assert.match(JSON.stringify(unhosted.status), /hosts no detached work of kind retro/);
+
+      const unread = await drive("work-fix-1", fix);
+      assert.equal(unread.code, 1, "an unread envelope is a refusal, not a dispatch");
+      assert.equal(unread.status.state, "failed");
+      assert.match(JSON.stringify(unread.status), /no readable decision envelope/);
     } finally { process.argv.splice(0, process.argv.length, ...argv); }
-    assert.equal(code, 1);
-    const status = readStatus(unhosted.dir);
-    assert.ok(status.ok);
-    assert.equal(status.value.state, "failed");
-    assert.match(JSON.stringify(status.value), /hosts no detached work of kind fix-dispatch/);
   } finally { f.cleanup(); }
+});
+
+const FIX_TASK = "W1-T5882";
+const FIX_HEAD = "9c0fa1b0aa";
+const FIX_BRANCH = "run-W1-T5882-1791200000000";
+const UNMET = [{ claim: "a criterion", proof: "unit test: x", met: false, reason: "not done", proof_exec: "not_executable" as const }];
+const fixPr = (over: Partial<OpenPrView> = {}): OpenPrView => ({
+  prNumber: 9379, prUrl: "https://github.com/craigoley/remudero/pull/9379", taskId: FIX_TASK, reviewState: "failure", checksState: "green",
+  unmetCriteria: UNMET, priorStrikes: 0, lastActivityAt: "2026-10-05T22:00:00Z", headSha: FIX_HEAD, headRefName: FIX_BRANCH, autoMergeArmed: false, ...over,
+});
+
+test("W1-T9114: a fix dispatch the sweep decides is spawned as a child before any claim and held by the registry", async () => {
+  resetChildWork();
+  const dir = mkdtempSync(join(tmpdir(), "rmd-fix-producer-"));
+  try {
+    const appended: Array<Record<string, unknown>> = [];
+    const logged: Array<Record<string, unknown>> = [];
+    // The task's earlier head's dispatch keeps the no-dispatch re-arm from firing, as in the sweep's own detached-dispatch fixtures.
+    const seed = [{ step: "fix.dispatch", task_id: FIX_TASK, head_sha: "81c30d80bb" }];
+    let inProcess = 0;
+    const deps = (over: Partial<SweepDeps> = {}): SweepDeps => ({
+      arm: () => {}, close: () => {}, escalate: () => {}, runId: "SWEEP-W1-T9114", now: () => Date.parse("2026-10-05T23:00:00Z"),
+      ledgerPath: join(dir, "ledger.ndjson"), readLedger: () => [...seed, ...appended], appendLine: (_path, row) => { appended.push(row); },
+      log: (step, extra) => { logged.push({ step, ...extra }); }, detachFixWait: true,
+      dispatchFix: () => { inProcess += 1; }, ...over,
+    });
+    const asked: Array<{ pr: { prNumber: number; headSha: string; taskId?: string }; fixKey: string; envelope: FixDispatchEnvelope }> = [];
+    let refuse!: (error: Error) => void;
+    const settled = new Promise<RunResult>((_resolve, reject) => { refuse = reject; });
+    const spawnFix = async (input: (typeof asked)[number]) => {
+      asked.push(input);
+      return { runId: "work-fix-W1-T5882-1", settled };
+    };
+    installDetachedWorkHost({ hosts: new Set(["review", "fix-dispatch"]), mode: () => "on", spawnReview: async () => undefined, spawnFix });
+
+    await runSweep([fixPr()], deps());
+    await drainDetachedSweepActions();
+    assert.equal(inProcess, 0, "the dispatch did not run in this process, so no fix-branch claim was taken here");
+    assert.equal(asked.length, 1);
+    assert.deepEqual(asked[0]!.pr, { prNumber: 9379, headSha: FIX_HEAD, taskId: FIX_TASK });
+    const envelope = asked[0]!.envelope;
+    assert.equal(asked[0]!.fixKey, `${FIX_TASK}@${FIX_HEAD}`);
+    assert.equal(envelope.fixKey, asked[0]!.fixKey);
+    assert.deepEqual(envelope.evidence.unmetCriteria, UNMET, "the judged evidence rides the envelope");
+    assert.equal(envelope.pr.headSha, FIX_HEAD);
+    assert.equal("progressJudge" in envelope.evidence, false, "no function crosses the boundary");
+    assert.deepEqual(JSON.parse(JSON.stringify(envelope)), envelope, "the envelope is plain JSON");
+    assert.deepEqual(readFixDispatchEnvelope(JSON.parse(JSON.stringify(envelope))), envelope, "the child's reader takes what the producer built");
+    assert.equal(detachedSweepActionCount(), 0, "a restart's drain has nothing in process to wait for");
+    assert.deepEqual(childWorkLeftRunning(), { "fix-dispatch": 1 });
+    assert.equal(logged.some((r) => r.step === "sweep.fix.child" && r.child_run_id === "work-fix-W1-T5882-1"), true);
+
+    // The registry holds the mutex key: another pass under a fresh ledger is refused the PR while the child runs.
+    const other: Array<Record<string, unknown>> = [];
+    await runSweep([fixPr()], deps({ readLedger: () => seed, appendLine: (_path, row) => { other.push(row); } }));
+    const reason = String(other.filter((r) => r.step === "sweep.disposed").at(-1)?.stand_down_reason);
+    assert.match(reason, /duplicate fix-dispatch key/);
+    assert.equal(asked.length, 1);
+    assert.equal(inProcess, 0);
+
+    // A child that refuses ends as lost: its key is released once, and the dedup is voided exactly as a detached rejection voids it.
+    refuse(new Error("fix dispatch refused: the PR head moved"));
+    for (let i = 0; i < 400 && childWorkCount("fix-dispatch") > 0; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(childWorkCount(), 0);
+    const failed = logged.filter((r) => r.step === "sweep.fix.dispatch_failed");
+    assert.equal(failed.length, 1);
+    assert.deepEqual({ pr: failed[0]!.pr_number, head: failed[0]!.head_sha, run: failed[0]!.child_run_id }, { pr: 9379, head: FIX_HEAD, run: "work-fix-W1-T5882-1" });
+    assert.match(String(failed[0]!.error), /head moved/);
+
+    // Control: a mode that is not on, or a host that declines, leaves the dispatch in process and in the registry a restart drains.
+    installDetachedWorkHost({ hosts: new Set(["review", "fix-dispatch"]), mode: () => "off", spawnReview: async () => undefined, spawnFix });
+    await runSweep([fixPr({ headSha: "f00dfacecc" })], deps());
+    await drainDetachedSweepActions();
+    assert.equal(inProcess, 1);
+    installDetachedWorkHost({ hosts: new Set(["review", "fix-dispatch"]), mode: () => "on", spawnReview: async () => undefined, spawnFix: async () => undefined });
+    await runSweep([fixPr({ headSha: "0ddba11000" })], deps());
+    await drainDetachedSweepActions();
+    assert.equal(inProcess, 2, "a child that cannot start leaves the dispatch in process");
+  } finally { installDetachedWorkHost(undefined); resetChildWork(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("W1-T9114: the fix child rechecks, dispatches through the sweep's own dispatchFix and refuses what it cannot read", async () => {
+  const envelope = buildFixDispatchEnvelope(fixPr(), { unmetCriteria: UNMET, progressJudge: (() => { throw new Error("never serialized"); }) as never },
+    { fixKey: `${FIX_TASK}@${FIX_HEAD}`, decidedAtMs: 1, planContextDigest: "digest-1" });
+  const live = { state: "OPEN", merged: false, headSha: FIX_HEAD };
+  const task = { found: true as const, merged: false, retired: false, contextDigest: "digest-1" };
+  const judge = (() => {}) as never;
+  const harness = (over: Partial<FixDispatchChildPorts> & { dispatch?: SweepDeps["dispatchFix"] } = {}) => {
+    const calls: Array<{ pr: OpenPrView; evidence: Parameters<SweepDeps["dispatchFix"]>[1] }> = [];
+    const rows: Array<Record<string, unknown>> = [];
+    const phases: string[] = [];
+    let built = 0;
+    const deps: FixDispatchChildPorts = {
+      hold: () => undefined, readLivePr: async () => live, readTask: () => task, log: (step, extra) => { rows.push({ step, ...extra }); },
+      onPhase: (phase) => { phases.push(phase); },
+      dispatcher: () => { built += 1; return { dispatchFix: over.dispatch ?? (async (pr, evidence, onPhase) => { onPhase?.("admission"); onPhase?.("worker"); calls.push({ pr, evidence }); }), fixProgressJudge: judge }; },
+      ...over,
+    };
+    return { deps, calls, rows, phases, built: () => built };
+  };
+  const wire = (): Record<string, unknown> => ({ envelope: JSON.parse(JSON.stringify(envelope)) });
+
+  const ok = harness();
+  await runFixDispatchChild(wire(), ok.deps);
+  assert.equal(ok.calls.length, 1, "the child called the sweep's own dispatchFix once");
+  assert.equal(ok.calls[0]!.pr.headSha, FIX_HEAD);
+  assert.deepEqual(ok.calls[0]!.evidence.unmetCriteria, UNMET);
+  assert.equal(ok.calls[0]!.evidence.progressJudge, judge, "the judge is the child's own, rebuilt there");
+  assert.deepEqual(ok.phases, ["admission", "worker"], "the phases reach the owned status sink");
+  assert.deepEqual(ok.rows.filter((r) => r.step === "sweep.fix.child_phase").map((r) => r.phase), ["admission", "worker"]);
+
+  const refusals: Array<[string, Partial<FixDispatchChildPorts> & { dispatch?: SweepDeps["dispatchFix"] }, RegExp, Record<string, unknown>?]> = [
+    ["a fleet hold", { hold: () => "STOP: operator" }, /admission is held: STOP/],
+    ["an unreadable PR", { readLivePr: async () => undefined }, /live state could not be read/],
+    ["a merged PR", { readLivePr: async () => ({ ...live, merged: true }) }, /no longer open \(merged\)/],
+    ["a closed PR", { readLivePr: async () => ({ ...live, state: "CLOSED" }) }, /no longer open \(CLOSED\)/],
+    ["a moved head", { readLivePr: async () => ({ ...live, headSha: "f00dfacecc" }) }, /head moved/],
+    ["a merged task", { readTask: () => ({ ...task, merged: true }) }, /already merged/],
+    ["a retired task", { readTask: () => ({ ...task, retired: true }) }, /is retired/],
+    ["a changed canonical context", { readTask: () => ({ ...task, contextDigest: "digest-2" }) }, /canonical context changed/],
+    ["a vanished task", { readTask: () => ({ found: false as const }) }, /canonical context changed/],
+    ["an unreadable plan", { readTask: () => { throw new Error("plan unreadable"); } }, /could not read its evidence \(plan unreadable\)/],
+    ["a throwing live read", { readLivePr: async () => { throw new Error("gh down"); } }, /could not read its evidence \(gh down\)/],
+    ["a reconstruction that throws", { dispatcher: () => { throw new Error("no credentials"); } }, /could not be reconstructed \(no credentials\)/],
+    ["a declined claim", { dispatch: () => ({ claimDeclined: true, ownerRecoveryReason: "owner_remove_failed" }) }, /declined at the checkout claim/],
+    ["an unread envelope", {}, /no readable decision envelope/, { envelope: { schema: 2 } }],
+    ["no envelope", {}, /no readable decision envelope/, {}],
+  ];
+  for (const [name, over, pattern, inputs] of refusals) {
+    const h = harness(over);
+    await assert.rejects(runFixDispatchChild(inputs ?? wire(), h.deps), pattern, name);
+    assert.equal(h.calls.length, 0, `${name}: nothing was dispatched`);
+    if (inputs === undefined && name !== "a reconstruction that throws" && name !== "a declined claim") {
+      assert.equal(h.built(), 0, `${name}: the live dependencies were not even rebuilt`);
+    }
+    if (inputs === undefined && name !== "a declined claim") {
+      assert.equal(h.rows.some((r) => r.step === "sweep.fix.child_refused"), true, `${name}: the refusal is ledgered`);
+    }
+  }
 });
