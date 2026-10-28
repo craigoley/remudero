@@ -5671,6 +5671,17 @@ export async function runDaemon(
             days_since_marker: Number.isFinite(decision.daysSinceMarker) ? decision.daysSinceMarker : "unbounded",
           });
           if (deps.runRetroTrigger) {
+            const decisionInput = { ...decision, daysSinceMarker: Number.isFinite(decision.daysSinceMarker) ? decision.daysSinceMarker : "Infinity" };
+            const child = await installedDetachedWorkHost()?.spawnRetro?.({ decision: decisionInput });
+            if (child) {
+              if ("abandoned" in child) {
+                log("daemon.retro_trigger.child_refused", { child_run_id: child.runId, reason: child.reason });
+              } else {
+                void adoptChildWork({ ...child, taskId: "DAEMON", work: { kind: "retro" } }, log);
+                log("daemon.retro_trigger.detached", { reason: decision.reason, child_run_id: child.runId });
+              }
+              return false;
+            }
             // DETACHED, NOT AWAITED (W1-T2981). This await was unbounded and sits ABOVE the dispatch
             // pick, so a fired retro held the whole tick: MEASURED 2026-09-06, the daemon logged
             // `retro_triggered` and then never wrote `daemon.idle` or any dispatch row again, while the

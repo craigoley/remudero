@@ -16617,6 +16617,8 @@ export interface DetachedWorkHost {
     fixKey: string;
     envelope: FixDispatchEnvelope;
   }) => Promise<FixChildLaunch | undefined>;
+  /** Hosts the existing retro subprocess's settle when its measured drain cost moves it. */
+  spawnRetro?: (input: { decision: Record<string, unknown> }) => Promise<FixChildLaunch | undefined>;
 }
 let installedWorkHost: DetachedWorkHost | undefined;
 
@@ -16812,6 +16814,7 @@ export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extr
  *  same marker file, so the rung refuses rather than stacking. A KIND query, not a separate boolean,
  *  so the registry stays the one source of truth about what is in flight. */
 export function detachedActionInFlight(kind: DetachedActionKind): boolean {
+  if (childWorkCount(kind) > 0) return true;
   for (const action of detachedSweepActions.values()) if (action.actionKind === kind) return true;
   return false;
 }

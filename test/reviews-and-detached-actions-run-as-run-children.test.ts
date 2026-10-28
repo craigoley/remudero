@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,10 +22,11 @@ import {
 } from "#src/lib/run-child.js";
 import { childIdentity, readStatus, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
 import { runChildMain } from "#src/run-child-main.js";
+import { runAutomatedRetroSubprocess } from "#src/lib/retro-subprocess.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import {
   adoptChildWork, buildFixDispatchEnvelope, childWorkCount, childWorkHoldsReviewKey, childWorkLeftRunning, detachedSweepActionCount,
-  detachSweepAction, drainDetachedSweepActions, installDetachedWorkHost, readFixDispatchEnvelope, resetChildWork, reviewAdmissionBound, runFixDispatchChild, runSweep,
+  detachSweepAction, detachedActionInFlight, drainDetachedSweepActions, installDetachedWorkHost, readFixDispatchEnvelope, resetChildWork, reviewAdmissionBound, runFixDispatchChild, runSweep,
   type BuildSweepEffectsDeps, type DetachedActionKind, type FixDispatchChildPorts, type FixDispatchEnvelope, type OpenPrView, type SweepDeps,
 } from "#src/lib/sweep.js";
 import type { SweepCommandHost } from "#src/cli/commands/sweep.js";
@@ -98,10 +100,18 @@ test("W1-T9114: the inventory moves a kind only on a measured drain cost", () =>
   assert.deepEqual(moved(on({ mode: "off" })), []);
   assert.deepEqual(moved(on({ mode: "shadow" })), []);
   assert.deepEqual(moved(on({ hosted: new Set() })), [], "a kind no entry hosts stays in process");
-  // A kind the design keeps in process says why, even when the ledger measured a wait for it.
-  const retro = detachedWorkPlacement("retro", on({ measured: { retro: { drains: 1, waitedMs: 5_000, abandoned: 0 } } }));
-  assert.equal(retro.placement, "process");
-  assert.match(retro.reason, /runAutomatedRetroSubprocess/);
+  const retroCost = measureDrainCosts([{ step: "daemon.memory_drain.completed", duration_ms: 5_000,
+    waited_on: [{ what: "detached", kind: "retro", settled_after_ms: 5_000 }] }]);
+  const retro = detachedWorkPlacement("retro", on({ measured: retroCost }));
+  assert.equal(retro.placement, "child", "the retro subprocess's settle moves when it held a drain");
+  assert.match(retro.reason, /5000 ms/);
+  assert.equal(DETACHED_WORK_INVENTORY.retro.resumableFromFiles, true);
+  for (const kind of DETACHED_WORK_KINDS) {
+    const costs = { [kind]: { drains: 1, waitedMs: 5_000, abandoned: 0 } };
+    assert.equal(detachedWorkPlacement(kind, on({ measured: costs })).placement, "child", `${kind}: measured cost decides eligibility`);
+    assert.match(detachedWorkPlacement(kind, on({ measured: {} })).reason, /never held a drain/, `${kind}: no drain cost stays in process`);
+    assert.equal(detachedWorkPlacement(kind, on({ measured: costs, hosted: new Set() })).placement, "process", `${kind}: an entry must host it`);
+  }
   assert.equal(detachedWorkPlacement("not-a-kind", on()).placement, "process");
 
   const legacy = (duration: number, age: number) => measureDrainCosts([
@@ -405,6 +415,7 @@ test("W1-T9114: detached auto mode demotes on lost and misidentified children", 
     const host = createDetachedWorkHost({ stateRoot: f.stateRoot, repoDir: f.root, root: f.root, repo: "fixture", log: f.log,
       readMode: () => "auto", readLedger: () => [{ step: "daemon.freshness_drain.completed", duration_ms: 1_000, waited_on: [
         { what: "review", kind: "review", settled_after_ms: 1_000 }, { what: "detached", kind: "fix-dispatch", settled_after_ms: 1_000 },
+        { what: "detached", kind: "retro", settled_after_ms: 1_000 },
       ] }],
       spawn: (async (input: { work?: DetachedWorkSpec }) => {
         spawned.push(input.work!.kind);
@@ -416,15 +427,16 @@ test("W1-T9114: detached auto mode demotes on lost and misidentified children", 
     const askBoth = async () => [
       await host.spawnReview({ pr: { prNumber: 7, headSha: review.headSha! }, reviewKey: "review-key", reviewAttemptId: undefined }),
       await host.spawnFix({ pr: { prNumber: 8, headSha: fix.headSha! }, fixKey: "fix-key", envelope: {} }),
+      await host.spawnRetro({ decision: { fire: true, reason: "days", mergesSinceMarker: 0, daysSinceMarker: "Infinity" } }),
     ];
     writeRows(promoted);
-    assert.equal((await askBoth()).every(child => child !== undefined), true, "the production union admits both child kinds before loss");
-    assert.deepEqual(spawned, ["review", "fix-dispatch"]);
+    assert.equal((await askBoth()).every(child => child !== undefined), true, "the production union admits all hosted child kinds before loss");
+    assert.deepEqual(spawned, ["review", "fix-dispatch", "retro"]);
     for (const detail of ["process exited without a terminal status", "pid was reused by another process"]) {
       writeRows([...promoted, { step: "run_child.lost", ts: "2026-10-12T12:02:03Z", detail }]);
       assert.equal(host.mode(), "shadow");
-      assert.deepEqual(await askBoth(), [undefined, undefined], "neither review nor fix work moves after demotion");
-      assert.deepEqual(spawned, ["review", "fix-dispatch"]);
+      assert.deepEqual(await askBoth(), [undefined, undefined, undefined], "no hosted work moves after demotion");
+      assert.deepEqual(spawned, ["review", "fix-dispatch", "retro"]);
     }
   } finally { f.cleanup(); }
 });
@@ -451,8 +463,8 @@ test("W1-T9114: the production host starts a review as a child only where the le
     const ask = (h: ReturnType<typeof host>) => h.spawnReview({ pr: { prNumber: 7, headSha: "h".repeat(40), taskId: "A", isPlanFiling: true },
       reviewKey: "review-key-7", reviewAttemptId: "review-PR7-attempt" });
 
-    assert.deepEqual([...HOSTED_DETACHED_WORK_KINDS], ["review", "fix-dispatch"], "a review and a fix dispatch have an entry");
-    assert.deepEqual([...host("on").hosts], ["review", "fix-dispatch"]);
+    assert.deepEqual([...HOSTED_DETACHED_WORK_KINDS], ["review", "fix-dispatch", "retro"], "reviews, fix dispatches and retro settles have an entry");
+    assert.deepEqual([...host("on").hosts], ["review", "fix-dispatch", "retro"]);
 
     const launched = await ask(host("on"));
     assert.equal(launched?.runId, "work-review-A-9");
@@ -509,7 +521,161 @@ test("W1-T9114: the production host starts a review as a child only where the le
     assert.equal(spawned.length, spawnedBefore + 1, "none of those started a child");
     spawnOutcome = "unavailable";
     assert.equal(await askFix(host("on", fixWaited)), undefined, "a child that cannot start leaves the fix in process");
+
+    spawnOutcome = "started";
+    const retroWaited = [{ step: "daemon.memory_drain.completed", duration_ms: 5_000,
+      waited_on: [{ what: "detached", kind: "retro", settled_after_ms: 5_000 }] }];
+    const decision = { fire: true, reason: "days", mergesSinceMarker: 4, daysSinceMarker: "Infinity" };
+    const askRetro = (h: ReturnType<typeof host>) => h.spawnRetro({ decision });
+    const beforeRetro = spawned.length;
+    assert.ok(await askRetro(host("on", retroWaited)));
+    assert.equal(spawned.at(-1)!.lane, "retro");
+    assert.equal(spawned.at(-1)!.taskId, "DAEMON");
+    assert.deepEqual(spawned.at(-1)!.work, { kind: "retro", inputs: { decision } });
+    assert.equal(await askRetro(host("on", waited)), undefined, "no retro drain cost keeps its settle in process");
+    assert.equal(await askRetro(host("off", retroWaited)), undefined);
+    assert.equal(await askRetro(host("shadow", retroWaited)), undefined);
+    assert.equal(spawned.length, beforeRetro + 1);
+    spawnOutcome = "unavailable";
+    assert.equal(await askRetro(host("on", retroWaited)), undefined);
+    const abandoned = { started: false as const, abandoned: true as const, reason: "admission-abandoned" as const, runId: "retro-refused", waitedMs: 10 };
+    const refusing = createDetachedWorkHost({ stateRoot: f.stateRoot, repoDir: f.root, root: f.root, repo: "fixture", log: f.log,
+      readLedger: () => retroWaited, readMode: () => "on", spawn: (async () => abandoned) as typeof spawnRunChild });
+    assert.deepEqual(await askRetro(refusing), abandoned, "abandoned admission refuses rather than spending in process");
   } finally { f.cleanup(); }
+});
+
+test("W1-T9114: refused retro child admission never falls back in process", async () => {
+  const f = fixture();
+  try {
+    const planPath = join(f.root, "tasks.yaml");
+    writeFileSync(planPath, "[]");
+    let refused = false;
+    installDetachedWorkHost(createDetachedWorkHost({ stateRoot: f.stateRoot, repoDir: f.root, root: f.root, repo: "fixture", log: f.log,
+      readLedger: () => [{ step: "daemon.memory_drain.completed", duration_ms: 5_000,
+        waited_on: [{ what: "detached", kind: "retro", settled_after_ms: 5_000 }] }], readMode: () => "on",
+      spawn: (async () => ({ started: false, abandoned: true, reason: "admission-abandoned", runId: "retro-refused", waitedMs: 10 })) as typeof spawnRunChild,
+    }));
+    await runDaemon(loadPlan(planPath), {
+      refreshMerged: () => () => true, openPrCount: () => 0, runOne: async (id) => result(id),
+      checkRetroTrigger: () => ({ fire: true, reason: "days", mergesSinceMarker: 0, daysSinceMarker: Infinity }),
+      runRetroTrigger: async () => assert.fail("refused child admission must not spend in process"),
+      checkStop: () => refused ? "done" : undefined, sleep: async () => { await flush(); },
+      log: (step, fields) => { f.log(step, fields); if (step === "daemon.retro_trigger.child_refused") refused = true; },
+    });
+    assert.equal(refused, true);
+    assert.equal(f.rows.find((r) => r.step === "daemon.retro_trigger.child_refused")?.reason, "admission-abandoned");
+    assert.equal(childWorkCount("retro"), 0);
+    assert.equal(detachedSweepActionCount(), 0);
+  } finally { installDetachedWorkHost(undefined); f.cleanup(); }
+});
+
+test("W1-T9114: a measured retro settle survives restart and keeps its existing subprocess", async () => {
+  const f = fixture();
+  const argv = [...process.argv];
+  process.argv.push("--repo-root", REPO_ROOT);
+  try {
+    const { runDetachedWork } = await import("#src/run-task.js");
+    const planPath = join(f.root, "tasks.yaml");
+    writeFileSync(planPath, `- id: A\n  title: A\n  repo: remudero\n  type: implement\n  verify: auto\n  depends_on: []\n  status: queued\n  files: [src/A.ts]\n`);
+    const ledger = [{ step: "daemon.memory_drain.completed", duration_ms: 5_000,
+      waited_on: [{ what: "detached", kind: "retro", settled_after_ms: 5_000 }] }];
+    const subprocess = Object.assign(new EventEmitter(), { stdout: new EventEmitter() });
+    let now = Date.parse("2026-10-12T12:00:00Z");
+    let subprocessSpawns = 0;
+    const tornDown: number[] = [];
+    const completions: Promise<number>[] = [];
+    let dir = "";
+    const runtime = { config: { root: f.root } as Config, log: f.log,
+      runRetroSubprocess: ((decision, deps) => runAutomatedRetroSubprocess(decision, { ...deps, env: {}, now: () => now,
+        spawn: (options) => {
+          subprocessSpawns++;
+          assert.equal(options.args.at(-1), "retro", "the run child still uses the existing retro subprocess");
+          assert.deepEqual(JSON.parse(options.env!.RMD_AUTOMATED_RETRO_DECISION!), {
+            fire: true, reason: "days", mergesSinceMarker: 4, daysSinceMarker: "Infinity",
+          });
+          return { pid: 8114, process: subprocess } as never;
+        }, teardown: (pid) => { tornDown.push(pid); },
+      })) as typeof runAutomatedRetroSubprocess,
+    };
+    let launches = 0;
+    installDetachedWorkHost(createDetachedWorkHost({ stateRoot: f.stateRoot, repoDir: f.root, root: f.root, repo: "fixture", log: f.log,
+      readLedger: () => ledger, readMode: () => "on", spawn: (async (input) => {
+        launches++;
+        const child = f.add(`work-retro-${launches}`, input.work!, {}, "DAEMON");
+        dir = child.dir;
+        const completion = runChildMain(["--run-dir", dir], { env: {}, stderr: () => {}, clock: () => now, heartbeatMs: 60_000,
+          signals: { on() {}, off() {} }, loadRunPath: async () => ({ runDetachedWork: (work: DetachedWorkSpec, ctx: Parameters<typeof runDetachedWork>[1]) => runDetachedWork(work, ctx, runtime) }) });
+        completions.push(completion);
+        const settled = completion.then((code) => { assert.equal(code, 0); return result("DAEMON"); });
+        return { started: true, runId: `work-retro-${launches}`, dir, pid: process.pid, settled, abort: async () => ({}) };
+      }) as typeof spawnRunChild,
+    }));
+    const decision = { fire: true as const, reason: "days" as const, mergesSinceMarker: 4, daysSinceMarker: Infinity };
+    let checkStop = false;
+    const drive = (boot: boolean) => runDaemon(loadPlan(planPath), {
+      ...(boot ? { adoptRunChildren: f.adopt } : {}),
+      refreshMerged: () => () => true, openPrCount: () => 0, runOne: async (id) => result(id),
+      checkRetroTrigger: () => decision, runRetroTrigger: async () => assert.fail("a measured retro must settle in its child"),
+      checkFreshness: () => launches > 0 && subprocessSpawns > 0 ? { stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40) } : { stale: false },
+      checkStop: () => checkStop ? "done" : undefined,
+      sweep: async () => {}, sweepLight: async () => {}, readLedgerLines: () => ledger.map((row) => JSON.stringify(row)), log: f.log, now: () => fixedClock(now).date(),
+      sleep: async () => { await flush(); }, sleepUntilSweepWake: async () => { await flush(); return "timeout"; },
+    }, { laneCount: 1, wipLimit: 1, pollIntervalMs: 5 });
+    assert.equal((await drive(false)).stopReason, "stale");
+    assert.equal(launches, 1);
+    assert.equal(subprocessSpawns, 1);
+    assert.equal(detachedSweepActionCount(), 0, "the daemon owns no retro await to drain");
+    assert.equal(childWorkCount("retro"), 1);
+    assert.equal(detachedActionInFlight("retro"), true);
+    let status = readStatus(dir);
+    assert.ok(status.ok);
+    assert.equal(status.value.state, "running");
+    assert.equal(status.value.phase, "retro:subprocess");
+    const drain = f.rows.find((r) => r.step === "daemon.freshness_drain.completed");
+    assert.deepEqual(drain?.detached_children_left_running, { retro: 1 });
+    assert.equal((drain?.detached_work_placement as Record<string, string>).retro, "child");
+
+    resetChildWork();
+    checkStop = true;
+    await drive(true);
+    assert.equal(childWorkCount("retro"), 1, "the new boot adopts the running settle");
+    assert.equal(detachedActionInFlight("retro"), true, "the adopted child prevents a duplicate marker writer");
+    assert.equal(launches, 1);
+    now += 700;
+    subprocess.emit("exit", 0, null);
+    assert.deepEqual(await Promise.all(completions), [0]);
+    for (let i = 0; i < 400 && childWorkCount("retro") > 0; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(childWorkCount("retro"), 0);
+    assert.equal(detachedActionInFlight("retro"), false);
+    assert.deepEqual(tornDown, [8114]);
+    status = readStatus(dir);
+    assert.ok(status.ok);
+    assert.equal(status.value.state, "done");
+    assert.equal(f.rows.find((r) => r.step === "daemon.retro_subprocess.terminal")?.duration_ms, 700);
+    const settled = f.rows.filter((r) => r.step === "run_child.settled" && r.run_id === "work-retro-1").length;
+    assert.equal(settled, 1);
+    await Promise.all(f.adopt().map((child) => child.work ? adoptChildWork({ ...child, work: child.work }, f.log) : Promise.resolve()));
+    assert.equal(f.rows.filter((r) => r.step === "run_child.settled" && r.run_id === "work-retro-1").length, settled);
+
+    const failed = f.add("work-retro-failed", { kind: "retro", inputs: { decision: { ...decision, daysSinceMarker: "Infinity" } } }, {}, "DAEMON");
+    const failure = runChildMain(["--run-dir", failed.dir], { env: {}, stderr: () => {}, clock: () => now, heartbeatMs: 60_000,
+      signals: { on() {}, off() {} }, loadRunPath: async () => ({ runDetachedWork: (work: DetachedWorkSpec, ctx: Parameters<typeof runDetachedWork>[1]) => runDetachedWork(work, ctx, { ...runtime, log: undefined }) }) });
+    await flush();
+    now += 50;
+    subprocess.emit("exit", 1, null);
+    assert.equal(await failure, 1, "a failed retro subprocess must fail its host child");
+    status = readStatus(failed.dir);
+    assert.ok(status.ok);
+    assert.equal(status.value.state, "failed");
+    assert.match(status.value.failure!.message, /automated retro subprocess failed/);
+    const childLedger = readFileSync(ledgerPathFor(runtime.config), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(childLedger.some((row) => row.step === "daemon.retro_subprocess.terminal" && row.run_id === "work-retro-failed" && row.outcome === "failure"),
+      "the production logger carries subprocess failure under the child's owned run id");
+    await Promise.all(f.adopt().map((child) => child.work ? adoptChildWork({ ...child, work: child.work }, f.log) : Promise.resolve()));
+    assert.equal(childWorkCount("retro"), 0);
+    assert.equal(f.rows.find((r) => r.step === "daemon.child_work_settled" && r.run_id === "work-retro-failed")?.outcome, "lost");
+  } finally { installDetachedWorkHost(undefined); process.argv.splice(0, process.argv.length, ...argv); f.cleanup(); }
 });
 
 test("W1-T9114: a review the sweep starts as a child is held by the registry and never run in process", async () => {
@@ -596,10 +762,15 @@ test("W1-T9114: the run path exports runDetachedWork, which refuses work no entr
       return { code, status: status.value };
     };
     try {
-      const unhosted = await drive("work-retro-1", { kind: "retro" });
+      const unhosted = await drive("work-triage-1", { kind: "auto-triage" });
       assert.equal(unhosted.code, 1);
       assert.equal(unhosted.status.state, "failed");
-      assert.match(JSON.stringify(unhosted.status), /hosts no detached work of kind retro/);
+      assert.match(JSON.stringify(unhosted.status), /hosts no detached work of kind auto-triage/);
+
+      const unreadRetro = await drive("work-retro-unread", { kind: "retro" });
+      assert.equal(unreadRetro.code, 1);
+      assert.equal(unreadRetro.status.state, "failed");
+      assert.match(JSON.stringify(unreadRetro.status), /RMD_AUTOMATED_RETRO_DECISION is absent/);
 
       const unread = await drive("work-fix-1", fix);
       assert.equal(unread.code, 1, "an unread envelope is a refusal, not a dispatch");

@@ -42637,9 +42637,19 @@ type DetachedFixRuntimePorts = Partial<Pick<FixDispatchChildPorts, "hold" | "log
   config?: Config;
   github?: GitHub;
   readPr?: (args: string[]) => Promise<unknown>;
+  runRetroSubprocess?: typeof runAutomatedRetroSubprocess;
 };
 export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void }, ports: DetachedFixRuntimePorts = {}): Promise<RunResult> {
   if (work.kind === "fix-dispatch") return runFixDispatchWork(work, ctx, ports);
+  if (work.kind === "retro") {
+    const decision = decodeAutomatedRetroDecision(JSON.stringify(work.inputs?.decision));
+    const log = ports.log ?? ((step: string, extra?: Record<string, unknown>) => {
+      appendLedger(ledgerPathFor(ports.config ?? loadConfig()), { run_id: ctx.runId, task_id: ctx.taskId, step, lane: "retro", ...extra });
+    });
+    ctx.onPhase?.("subprocess");
+    await buildRetroDaemonHooks({ config: ports.config, runSubprocess: ports.runRetroSubprocess }).runRetroTrigger(decision, log);
+    return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
+  }
   if (work.kind !== "review" || work.prNumber === undefined) {
     throw new Error(`the run child hosts no detached work of kind ${work.kind}${work.kind === "review" ? " without a PR number" : ""}`);
   }

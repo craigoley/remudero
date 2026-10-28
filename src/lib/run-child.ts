@@ -1010,6 +1010,7 @@ export interface DetachedWorkChildHost {
     /** The typed decision envelope (sweep.ts `FixDispatchEnvelope`); this module only carries it into `spec.json`, plain JSON. */
     envelope: object;
   }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
+  spawnRetro: (input: { decision: Record<string, unknown> }) => ReturnType<DetachedWorkChildHost["spawnFix"]>;
 }
 
 /** `off`: everything in process. `shadow`: a probe round-trips the contract, the work stays in process. `on`: moved kinds are children. */
@@ -1021,30 +1022,21 @@ export interface DetachedWorkRow {
   holds: string;
   /** Can the unit resume from files alone, so a booting daemon can adopt it without redoing it? */
   resumableFromFiles: boolean;
-  /** The design moves this kind to a child when its measured drain cost is non-zero. */
-  eligible: boolean;
-  /** Why the kind stays in process, for every kind that is not eligible. */
-  stays?: string;
 }
-
-const REDONE_AFTER_RESTART = "a best-effort rung the restart releases and the next pass re-derives (daemon.detached_action_released)";
 
 /** The inventory, as data. The drain cost of a kind is NOT stored here: it is measured from the ledger ({@link measureDrainCosts}). */
 export const DETACHED_WORK_INVENTORY: Readonly<Record<DetachedWorkKind, DetachedWorkRow>> = {
-  review: { kind: "review", holds: "the judgement's model call and the PR's diff, in the daemon heap", resumableFromFiles: true, eligible: true },
+  review: { kind: "review", holds: "the judgement's model call and the PR's diff, in the daemon heap", resumableFromFiles: true },
   // A fix dispatch moves through the governed producer: the sweep spawns it BEFORE taking the fix-branch claim and carries a typed,
   // serializable decision envelope (sweep.ts `FixDispatchEnvelope`: the PR view and the judged evidence, never the claim keeper, a
   // dependency function or the phase callback). The child rebuilds live dependencies, rechecks, and takes its own claim.
-  "fix-dispatch": { kind: "fix-dispatch", holds: "the fix worker's handle and its admission or CI wait", resumableFromFiles: true, eligible: true },
-  retro: { kind: "retro", holds: "a settle await on the retro subprocess", resumableFromFiles: false, eligible: false,
-    stays: "the retro already runs in its own subprocess (runAutomatedRetroSubprocess, W1-T2870); only its settle is in process" },
-  "auto-triage": { kind: "auto-triage", holds: "one triage run's await", resumableFromFiles: false, eligible: false, stays: REDONE_AFTER_RESTART },
-  "ci-learning": { kind: "ci-learning", holds: "one learning pass's await", resumableFromFiles: false, eligible: false, stays: REDONE_AFTER_RESTART },
-  "benchmark-cohort": { kind: "benchmark-cohort", holds: "one cohort's await", resumableFromFiles: false, eligible: false, stays: REDONE_AFTER_RESTART },
-  "measurement-cadence": { kind: "measurement-cadence", holds: "the settle poll of a cadence that already runs out of process", resumableFromFiles: false,
-    eligible: false, stays: "the cadence already runs out of process (W1-T5723); only its settle poll is in process" },
-  "light-pass-action": { kind: "light-pass-action", holds: "an action bound to the pass that started it", resumableFromFiles: false, eligible: false,
-    stays: "bound to the light pass that started it; the next light pass re-derives it" },
+  "fix-dispatch": { kind: "fix-dispatch", holds: "the fix worker's handle and its admission or CI wait", resumableFromFiles: true },
+  retro: { kind: "retro", holds: "a settle await on runAutomatedRetroSubprocess (W1-T2870)", resumableFromFiles: true },
+  "auto-triage": { kind: "auto-triage", holds: "one triage run's await", resumableFromFiles: false },
+  "ci-learning": { kind: "ci-learning", holds: "one learning pass's await", resumableFromFiles: false },
+  "benchmark-cohort": { kind: "benchmark-cohort", holds: "one cohort's await", resumableFromFiles: false },
+  "measurement-cadence": { kind: "measurement-cadence", holds: "the settle poll of a cadence that already runs out of process", resumableFromFiles: false },
+  "light-pass-action": { kind: "light-pass-action", holds: "an action bound to the pass that started it", resumableFromFiles: false },
 };
 
 export const DETACHED_WORK_KINDS = Object.keys(DETACHED_WORK_INVENTORY) as DetachedWorkKind[];
@@ -1165,7 +1157,7 @@ export interface DetachedWorkPlacement {
   reason: string;
 }
 
-/** Where a kind runs: a child only when the design moves it, the mode is on, an entry hosts it, AND the ledger measured a non-zero drain wait for it. */
+/** A kind moves when the ledger measures a non-zero drain wait, the mode is on and an entry hosts it. */
 export function detachedWorkPlacement(
   kind: DetachedWorkKind | string, evidence: DetachedWorkEvidence, inventory: Readonly<Record<string, DetachedWorkRow>> = DETACHED_WORK_INVENTORY,
 ): DetachedWorkPlacement {
@@ -1173,13 +1165,12 @@ export function detachedWorkPlacement(
   const row = inventory[kind];
   // An unknown kind is work this process owns: the restart waits for it.
   if (row === undefined) return stay("not in the inventory");
-  if (!row.eligible) return stay(row.stays ?? "the inventory does not move it");
   if (evidence.mode === "off") return stay("run-child mode is off");
   if (evidence.mode === "shadow") return stay("run-child mode is shadow: a probe round-trips the contract and the work stays in process");
   const known = DETACHED_WORK_KINDS.find((k) => k === kind);
-  if (known === undefined || !evidence.hosted.has(known)) return stay("no run-child entry hosts it yet");
-  const waitedMs = evidence.measured[known]?.waitedMs ?? 0;
+  const waitedMs = known === undefined ? 0 : evidence.measured[known]?.waitedMs ?? 0;
   if (waitedMs <= 0) return stay("it never held a drain over the measured window");
+  if (known === undefined || !evidence.hosted.has(known)) return stay("no run-child entry hosts it yet");
   return { kind, placement: "child", reason: `it held drains for ${waitedMs} ms over the measured window` };
 }
 
@@ -1188,7 +1179,7 @@ export function detachedWorkPlacement(
  * the review's flags from the spec. A fix dispatch is hosted too: `runDetachedWork` takes the typed decision envelope from the spec,
  * rebuilds the sweep's live dependencies, rechecks the PR and the task, and calls the same `dispatchFix` the sweep calls in process.
  */
-export const HOSTED_DETACHED_WORK_KINDS: ReadonlySet<DetachedWorkKind> = new Set<DetachedWorkKind>(["review", "fix-dispatch"]);
+export const HOSTED_DETACHED_WORK_KINDS: ReadonlySet<DetachedWorkKind> = new Set<DetachedWorkKind>(["review", "fix-dispatch", "retro"]);
 
 /** `sweep.runChild.mode` as detached work reads it: `auto` is decided from the ledger evidence the build runs use (W1-T9087). */
 export function detachedWorkModeNow(
@@ -1275,6 +1266,20 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey, inputs: { repo: input.repo, envelope } };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "sweep-fix", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
+        plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+      });
+      if (!launch.started) return launch.abandoned ? launch : undefined;
+      return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
+    },
+    async spawnRetro({ decision }) {
+      if (mode() !== "on") return undefined;
+      const placement = detachedWorkPlacement("retro", {
+        mode: "on", hosted: HOSTED_DETACHED_WORK_KINDS, measured: measureDrainCosts(input.readLedger()),
+      });
+      if (placement.placement !== "child") return undefined;
+      const work: DetachedWorkSpec = { kind: "retro", inputs: { decision } };
+      const launch = await (input.spawn ?? spawnRunChild)({
+        taskId: "DAEMON", lane: "retro", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
         plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
