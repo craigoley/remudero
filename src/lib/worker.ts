@@ -167,6 +167,10 @@ import {
   type RoutingDrawSeed,
   type RoutingPropensity,
   selectOpenWeightModel,
+  type CapacityShortfall,
+  hydrateCashCapacity,
+  learnedCashLimit,
+  recordCashCapacityShortfall,
   openWeightUsageUsd,
   OPENWEIGHT_MAX_COMPLETION_TOKENS,
   openWeightDeploymentReady,
@@ -203,6 +207,7 @@ import {
   selectWorkerProviderForPolicy,
   type ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
+import { cashDeploymentEndpoint } from "./config-schema.js";
 import { FIX_ROUTING_LEARNER, fixRoutingDecisionFields, mountedFixArms, type FixLearnedArms, type FixRoutingWeights } from "./fix-routing-learner.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 import { FIX_WORKER_TOOLS } from "./fix-fence.js";
@@ -353,6 +358,7 @@ export interface WorkerResult {
   cashAllowanceLimit?: "fleet" | "foundry-claude";
   /** W1-T4079: set when a cash attempt found its deployment absent (HTTP 404), so the ladder walks. */
   openWeightDeploymentAbsent?: string;
+  openWeightCapacityShortfall?: CapacityShortfall;
   /** Opaque join key for the immutable, pre-execution routing assignment. A terminal worker row
    * carries this only after its assignment event was emitted; the ID does NOT imply that a provider
    * reported serving the selected model. */
@@ -1274,7 +1280,7 @@ export interface SpawnWorkerArgs {
   onModelFallbackAttempt?: (attempt: {
     selectionAssignmentId?: string;
     model: string;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused";
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused" | "capacity_shortfall";
     result?: WorkerResult;
   }) => void;
   /** Injectable seam: override the process-group spawn and teardown. Omitted means the real
@@ -1663,10 +1669,17 @@ export function cashAllowanceFallbackRefusal(config: Config, prompt: string, dep
   }
 }
 
-function cashSonnetAlternatives(prompt: string): string[] {
-  return openWeightDeploymentReady("gpt-6.1-sol") &&
-    openWeightDeploymentHolds("gpt-6.1-sol", openWeightEstimatedTokens(Buffer.byteLength(prompt, "utf8")))
-    ? ["gpt-6.1-sol"] : [];
+function cashSonnetAlternatives(prompt: string, config: Config, ctx: { runId?: string; taskId?: string }): string[] {
+  hydrateCashCapacity(config);
+  const deployment = "gpt-6.1-sol";
+  if (!openWeightDeploymentReady(deployment)) return [];
+  const estimatedTokens = openWeightEstimatedTokens(Buffer.byteLength(prompt, "utf8"));
+  const limitTokens = learnedCashLimit(deployment, cashDeploymentEndpoint(config, deployment));
+  if (openWeightDeploymentHolds(deployment, estimatedTokens, limitTokens)) return [deployment];
+  if (limitTokens !== undefined && openWeightDeploymentHolds(deployment, estimatedTokens, Number.POSITIVE_INFINITY)) {
+    recordCashCapacityShortfall(config, { reason: "capacity_shortfall", deployment, estimatedTokens, limitTokens }, ctx);
+  }
+  return [];
 }
 
 /** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
@@ -2350,7 +2363,7 @@ export async function runOpenWeightWalkingLadder(
   run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
   selection: OpenWeightModelSelection,
   onFallbackAttempt?: (attempt: { selection: OpenWeightModelSelection;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract"; result?: WorkerResult }) => void,
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "capacity_shortfall"; result?: WorkerResult }) => void,
   contractFailed?: (result: WorkerResult) => boolean,
 ): Promise<WorkerResult> {
   const rungs = [...new Set([selection.model, ...selection.alternatives])];
@@ -2362,6 +2375,11 @@ export async function runOpenWeightWalkingLadder(
       // W1-T4079: an absent deployment (404) cannot succeed on retry but the next rung can. Remember
       // it so selection passes over it, and walk; with no rung left, return the result as before.
       const next = rungs[index + 1];
+      if (result.openWeightCapacityShortfall && next) {
+        try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: "capacity_shortfall", result }); }
+        catch (error) { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: String(error) })); }
+        continue;
+      }
       if (result.openWeightDeploymentAbsent && next) {
         markOpenWeightDeploymentAbsent(result.openWeightDeploymentAbsent);
         console.error(JSON.stringify({ event: "worker.openweight.rung_absent", deployment: model, next, rung: index + 1, of: rungs.length }));
@@ -2718,7 +2736,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         fixedClock((args.providerRouting?.now ?? Date.now)()).iso());
       const plainCashModels = () => {
         const choice = selectOpenWeightModel(capabilities, args.model, args.effort, Buffer.byteLength(executionFor("cash").prompt, "utf8"),
-          { cashSqueezed: true, modelApprovals: config.modelApprovals,
+          { config, runId: args.runId, taskId: args.taskId, cashSqueezed: true, modelApprovals: config.modelApprovals,
             ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}) });
         return [choice.model, ...choice.alternatives];
       };
@@ -2763,7 +2781,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // A refused plain ladder does not remove the independently eligible Sonnet arm.
             models = [];
           }
-          if (canTrySonnet) models.push("claude-sonnet-5-5", ...cashSonnetAlternatives(executionFor("cash").prompt));
+          if (canTrySonnet) models.push("claude-sonnet-5-5", ...cashSonnetAlternatives(executionFor("cash").prompt, config, args));
           const held = allowanceRefusal([...new Set(models)].filter(model => !(args.avoidModels ?? []).includes(model)));
           if (held !== undefined) {
             console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
@@ -3025,13 +3043,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       ? { model: "claude-opus-5-5", effort: args.effort ?? "medium", capability: "frontier", alternatives: [] }
       : args.cashSonnetEmergency === true
       ? { model: "claude-sonnet-5-5", effort: args.effort ?? "medium", capability: "balanced",
-        alternatives: cashSonnetAlternatives(executionPrompt) }
+        alternatives: cashSonnetAlternatives(executionPrompt, config, args) }
       : selectOpenWeightModel(
       capabilities,
       args.model,
       args.effort,
       Buffer.byteLength(executionPrompt, "utf8"),
       {
+        config, runId: args.runId, taskId: args.taskId,
         cashSqueezed: args.cashSqueezed === true,
         modelApprovals: config.modelApprovals,
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
