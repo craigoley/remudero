@@ -17374,6 +17374,10 @@ export async function runSweep(
   sweepDeps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary> {
+  const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
+  const memoryHeldSummaries = memoryHeld.map((pr) =>
+    lightPassMemoryWaitSummary(pr, sweepDeps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
+  openPrs = openPrs.filter((pr) => !memoryHeld.includes(pr));
   // W1-T7096: every round this pass dispatches is judged by the judge this pass was given.
   const deps: SweepDeps = {
     ...sweepDeps,
@@ -17825,13 +17829,37 @@ export async function runSweep(
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
         formerCeiling: pr.repeatedFixRefusal !== undefined ? 2 : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason });
-      const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
-        { ...progressWitness(pr), judge: progressJudge, firstRound: true });
-      appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
-        pr_number: pr.prNumber, head_sha: pr.headSha,
-        site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
-        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
-        round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
+      const judgeAndRecord = async () => {
+        const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
+          { ...progressWitness(pr), judge: progressJudge, firstRound: true });
+        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
+          pr_number: pr.prNumber, head_sha: pr.headSha,
+          site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
+          parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
+          round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
+        return result;
+      };
+      let result: FixProgressResult;
+      if (lightPassActionScope.getStore() !== undefined) result = await judgeAndRecord();
+      else {
+        let onMemoryWait!: () => void;
+        const memoryWait = new Promise<"memory-wait">((resolve) => { onMemoryWait = () => resolve("memory-wait"); });
+        const settled = lightPassActionScope.run({ onMemoryWait }, judgeAndRecord);
+        const first = await Promise.race([settled, memoryWait]);
+        if (first === "memory-wait") {
+          const key = lightPassHeadKey(pr);
+          const hold = { sinceMs: deps.now ? deps.now() : systemClock.now() };
+          lightPassMemoryWaits.set(key, hold);
+          detachSweepAction(settled.finally(() => {
+            if (lightPassMemoryWaits.get(key) === hold) lightPassMemoryWaits.delete(key);
+          }), { actionKind: "light-pass-action", taskId: escalationTaskIdFor(pr) });
+          const reason = "progress judgment waiting for memory admission";
+          judgedUnavailable.set(pr.prNumber, reason);
+          next.push({ ...pr, progressContinue: { reason, unavailable: true } });
+          continue;
+        }
+        result = first;
+      }
       if (result.verdict === "escalate") {
         next.push({ ...pr, progressEscalation: { loop: result.loop, reason: result.reason, judged } });
         continue;
@@ -22568,13 +22596,17 @@ export async function runSweep(
   }
 
   const summary: SweepSummary = {
-    total: openPrs.length,
+    total: openPrs.length + memoryHeld.length,
     byDisposition,
     actionsTaken,
     actionsFailed,
     actions,
     noneCount,
   };
+  for (const held of memoryHeldSummaries) {
+    summary.byDisposition.wait += held.byDisposition.wait;
+    summary.actions.push(...held.actions);
+  }
   log("sweep.summary", {
     ...summary.byDisposition,
     total: summary.total,
