@@ -15,6 +15,7 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { gzipSync } from "node:zlib";
 import {
   bootSweepDispatchClaims,
   dispatchClaimRef,
@@ -90,6 +91,7 @@ function fakeReserver(
 }
 
 interface Instance {
+  stateDir: string;
   boot: (reserver: DispatchClaimReserver) => void;
   rawLines: () => string[];
   rows: () => Array<Record<string, unknown>>;
@@ -105,6 +107,7 @@ function instance(t: TestContext, seed: Array<Record<string, unknown>>): Instanc
   const rawLines = () => readFileSync(ledger, "utf8").split("\n").filter(Boolean);
   let boots = 0;
   return {
+    stateDir,
     rawLines,
     rows: () => rawLines().map((line) => JSON.parse(line) as Record<string, unknown>),
     boot: (reserver) => {
@@ -215,6 +218,25 @@ test("W1-T10896: a run orphaned by the restart gets one orphaned-by-restart verd
   node.boot(fakeReserver(claims, { keepOnDrop: true }));
   assert.equal(sweepRows(node.rows()).filter((r) => r.arm === "dead-claimant").length, 2, "the second boot judged it again");
   assert.equal(orphanVerdicts(node.rows()).length, 1, "a second boot writes no second verdict");
+
+  // Rotate the sole verdict beyond the mint lookup's first three archives, then boot again.
+  const rows = node.rows();
+  writeFileSync(join(node.stateDir, "ledger.2000-01-01T00-01-00-000Z.ndjson"),
+    orphanRunRows().map((row) => `${JSON.stringify(row)}\n`).join(""));
+  for (const minute of [2, 3]) {
+    writeFileSync(join(node.stateDir, `ledger.2000-01-01T00-0${minute}-00-000Z.ndjson`), "");
+  }
+  for (const compressed of [false, true]) {
+    const archive = join(node.stateDir, `ledger.2000-01-02T00-00-00-000Z.ndjson${compressed ? ".gz" : ""}`);
+    const history = rows.map((row) => `${JSON.stringify(row)}\n`).join("");
+    writeFileSync(archive, compressed ? gzipSync(history) : history);
+    writeFileSync(join(node.stateDir, "ledger.ndjson"), "");
+    node.boot(fakeReserver(claims, { keepOnDrop: true }));
+    assert.equal(sweepRows(node.rows())[0]?.dropped, true, "the archived verdict does not prevent claim release");
+    assert.equal(orphanVerdicts(rows).length + orphanVerdicts(node.rows()).length, 1,
+      `a boot with the verdict in the fourth ${compressed ? "gzip" : "plain"} archive writes no duplicate`);
+    rmSync(archive);
+  }
 });
 
 test("W1-T10896: the orphaned run pushed head resumes instead of blocking dispatch", (t) => {
@@ -284,6 +306,12 @@ test("W1-T10896: the run ledger reader and the branch head parser fail closed", 
   writeFileSync(join(dir, "ledger.ndjson"), `{torn ${RUN_ID}\n${orphanRunRows().map((r) => JSON.stringify(r)).join("\n")}\n`);
   assert.deepEqual(readRunLedgerState(dir, RUN_ID, anchor), { started: true, verdict: false });
   assert.deepEqual(readRunLedgerState(join(dir, "absent"), RUN_ID, anchor), { started: false, verdict: false });
+
+  const [start, ...afterStart] = orphanRunRows();
+  writeFileSync(join(dir, "ledger.1999-12-31T23-59-59-500Z.ndjson.gz"), gzipSync(`${JSON.stringify(start)}\n`));
+  writeFileSync(join(dir, "ledger.ndjson"), afterStart.map((row) => `${JSON.stringify(row)}\n`).join(""));
+  assert.deepEqual(readRunLedgerState(dir, RUN_ID, anchor), { started: true, verdict: false },
+    "a run.start rotated before the claim mint still identifies the orphaned run");
 
   assert.equal(runBranchHeadFromLsRemote({ status: 0, stdout: `${HEAD}\trefs/heads/${BRANCH}\n` }, BRANCH), HEAD);
   assert.equal(runBranchHeadFromLsRemote({ status: 0, stdout: `${HEAD}\trefs/heads/${BRANCH}-x\n` }, BRANCH), undefined);

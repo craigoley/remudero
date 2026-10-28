@@ -807,17 +807,21 @@ export interface RunLedgerState {
   readonly prUrl?: string;
 }
 
-/** W1-T10896: reads the archives the claim's mint row is looked for in, plus the live file. */
+/** W1-T10896: reads the full run history, including starts before mint and verdicts in later rotations. */
 export function readRunLedgerState(
   stateDir: string,
   runId: string,
-  anchor: ClaimAnchorIdentity,
+  _anchor: ClaimAnchorIdentity,
   fs: LedgerGrepFsDeps = realLedgerFs,
 ): RunLedgerState {
   let started = false;
   let verdict = false;
   let prUrl: string | undefined;
-  for (const file of claimLedgerFiles(stateDir, anchor, fs)) {
+  const names = fs.existsSync(stateDir) ? fs.readdirSync(stateDir) : [];
+  const files = ledgerRotationEntries(names, stateDir)
+    .map((entry) => ({ path: entry.path, gzip: entry.form === "gzip" }));
+  if (fs.existsSync(ledgerLivePath(stateDir))) files.push({ path: ledgerLivePath(stateDir), gzip: false });
+  for (const file of files) {
     for (const line of claimLedgerText(file, fs).split("\n")) {
       if (!line.includes(runId)) continue;
       const parsed = parseLedgerRow(line);
