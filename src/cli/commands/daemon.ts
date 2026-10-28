@@ -40,8 +40,10 @@ import { createThreadEventSync, registryThreadItems, type InboxResponderDeps } f
 import type { InboxCausalScope } from "../../lib/inbox-thread.js";
 import { gitRecommendationEvidence, RECOMMENDATION_SEED_PATH } from "../../lib/inbox-recommendation.js";
 import { censusRunDirs } from "../../lib/run-child-contract.js";
-import { plannedSequence, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
-import { daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
+import { plannedSequence, runBoundedTargetJob, runDrain, type BoundedTargetJobDeps, type BoundedTargetJobOutcome, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
+import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
+import type { RunResult } from "../../lib/run-result.js";
+import { daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktrees } from "../../lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
@@ -267,6 +269,97 @@ export function daemonKickPort(root: string, target: { repo: string; isSelf: boo
   return {
     pendingKicks: () => pendingKicks(root).filter((kick) => addressed(kick) && existsSync(kickFilePath(root, kick.taskId, kick.repo))),
     clearKick: (taskId, repo) => { clearKick(root, taskId, repo); },
+  };
+}
+
+/**
+ * W1-T10799: the repo-scoped kick markers under the CORE root that no other daemon addresses: those naming a repository
+ * other than this daemon's own. They are offered ONLY to {@link createNativeTargetJobRunner}, never to `pendingKicks`
+ * ({@link daemonKickPort} still hands the self daemon nothing for a foreign repository), and only while the exact file
+ * its clear would delete exists.
+ */
+export function daemonTargetJobPort(root: string, self: { repo: string }): {
+  pendingTargetJobs: () => Array<DaemonKick & { repo: string }>;
+} {
+  return {
+    pendingTargetJobs: () => pendingKicks(root).flatMap((kick) =>
+      kick.repo !== undefined && kick.repo.toLowerCase() !== self.repo.toLowerCase() && existsSync(kickFilePath(root, kick.taskId, kick.repo))
+        ? [{ taskId: kick.taskId, origin: kick.origin, repo: kick.repo }] : []),
+  };
+}
+
+/** The governors and ledger readers a bounded target job takes from the CORE daemon's own deps, never a second wiring. */
+const TARGET_JOB_DAEMON_DEPS = [
+  "checkStop", "checkPause", "checkCostGovernor", "checkQueueGovernor", "checkMemoryGovernor", "memoryReadTracker", "readMemoryStoreFailure",
+  "checkQuietHours", "checkHeavyNewBuild", "readUsage", "beginSelectionPass", "isCircuitTripped", "breakerDetail", "isLifetimeCapExceeded",
+  "readLedgerLines", "readDurableReleases",
+] as const satisfies readonly (keyof DrainDeps & keyof DaemonDeps)[];
+
+export interface NativeTargetJobContext {
+  /** The core daemon's config root: its ledger, its kick markers and the job records live under it. */
+  root: string;
+  /** The checkout whose reviewed managed set enrolls targets and whose registry names their live daemons. */
+  repoRoot: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  nowMs: () => number;
+  instances?: ProductBuildInstances;
+  /** The target clone's plan path, derived exactly as `resolveDaemonTarget` derives it; undefined refuses to start. */
+  planPathFor: (owner: string, repo: string) => string | undefined;
+  /** Clone-if-absent, then sync that plan from origin/main through the existing plan-sync refusal. */
+  syncPlan: (planPath: string, owner: string, repo: string) => Promise<{ plan: Plan } | { error: string }>;
+  /** The merged/open-PR projection bound to the TARGET owner and repository, never the core repository's closures. */
+  project: (plan: Plan, owner: string, repo: string) => Map<string, StatusProjection>;
+  runTask: (taskId: string, target: { planPath: string; owner: string }) => Promise<RunResult>;
+  claimHeld: BoundedTargetJobDeps["claimHeld"];
+  runDrain?: typeof runDrain;
+}
+
+/**
+ * W1-T10799: the core daemon's owner of ONE bounded native job for a managed target with no daemon of its own. It
+ * composes {@link runBoundedTargetJob} over the real durable record, the real registry and managed set, and the
+ * maintained drain with the core daemon's own governors, and takes no capacity of its own: the daemon runs it inline in
+ * the lane it reserves.
+ */
+export function createNativeTargetJobRunner(ctx: NativeTargetJobContext): (kick: DaemonKick & { repo: string }, daemonDeps: DaemonDeps) => Promise<BoundedTargetJobOutcome> {
+  const store = fileTargetJobStore(ctx.root);
+  const stateDir = join(ctx.root, "state");
+  return (kick, daemonDeps) => {
+    let owner = "";
+    let planPath = "";
+    let projection = new Map<string, StatusProjection>();
+    const governors = Object.fromEntries(TARGET_JOB_DAEMON_DEPS.flatMap((key) => (daemonDeps[key] === undefined ? [] : [[key, daemonDeps[key]]]))) as Partial<DrainDeps>;
+    const jobDeps: BoundedTargetJobDeps = {
+      readJob: store.read,
+      writeJob: store.write,
+      admit: (repo) => nativeTargetAdmission(repo, { ...ctx.instances, repoRoot: ctx.repoRoot }),
+      syncPlan: async (targetOwner, repo) => {
+        const path = ctx.planPathFor(targetOwner, repo);
+        if (path === undefined) return { error: "no target clone path" };
+        owner = targetOwner;
+        planPath = path;
+        return ctx.syncPlan(path, targetOwner, repo);
+      },
+      claimHeld: ctx.claimHeld,
+      // The core ledger's own receipts for THIS origin, read from the dispatch time the durable record kept.
+      execution: (record) => readTargetExecution(stateDir, { taskId: record.taskId, origin: record.origin, repo: record.repo,
+        requestedAt: new Date(Date.parse(record.updatedAt) - 60_000).toISOString(), nowMs: ctx.nowMs() }),
+      runDrain: (plan, opts, onDispatch) => (ctx.runDrain ?? runDrain)(plan, {
+        ...governors,
+        refreshMerged: () => {
+          projection = ctx.project(plan, owner, kick.repo);
+          return (id) => projection.get(id)?.merged ?? false;
+        },
+        isOpenPr: (id) => { const row = projection.get(id); return row?.prState === "OPEN" ? row.prNumber : undefined; },
+        isCreditIndeterminate: (id) => projection.get(id)?.indeterminate === true,
+        isIndeterminate: (id) => projection.get(id)?.indeterminate === true,
+        runOne: async (id) => { onDispatch(); return ctx.runTask(id, { planPath, owner }); },
+        log: ctx.log,
+      }, opts),
+      clearKick: (taskId, repo) => { clearKick(ctx.root, taskId, repo); },
+      log: ctx.log,
+      now: () => new Date(ctx.nowMs()).toISOString(),
+    };
+    return runBoundedTargetJob(kick, jobDeps);
   };
 }
 
@@ -1650,6 +1743,43 @@ export async function daemonCommand(
         // through its normal assertRunnable-gated path and honouring "drain now".
         // W1-T10615: only the kicks addressed to THIS daemon's target, each cleared by its exact marker.
         ...daemonKickPort(config.root, target),
+        // W1-T10799: only the CORE daemon owns a bounded native job for a managed target with no daemon of its own.
+        ...(target.isSelf ? {
+          ...daemonTargetJobPort(config.root, target),
+          runTargetJob: createNativeTargetJobRunner({
+            root: config.root, repoRoot, log, nowMs: deps.now ?? Date.now,
+            planPathFor: (owner, repo) => {
+              const resolvedJob = resolveDaemonTarget({ selfOwner: self.owner, selfRepo: self.repo, repoRoot: effectiveRepoRoot, reposDir }, ["--repo", `${owner}/${repo}`]);
+              return "error" in resolvedJob ? undefined : resolvedJob.target.planPath;
+            },
+            syncPlan: async (planPath, owner, repo) => {
+              const repoDir = join(reposDir, repo);
+              if (!existsSync(repoDir)) {
+                mkdirSync(dirname(repoDir), { recursive: true });
+                ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+              }
+              const synced = await syncPlanOrRefuseAsync(planPath, { allowStale: false, log, say: (msg: string) => writeSyncLine(2, `### rmd daemon — ${msg}`), quarantine: reportPlanQuarantine });
+              return "error" in synced ? { error: String(synced.error) } : { plan: synced.plan };
+            },
+            project: (jobPlan, owner, repo) => {
+              const github = laneGithubFor(owner, repo);
+              github.resetFailureFlags?.();
+              return projectPlan(jobPlan, { ledgerPath, github, skipUncreditedBuildWarning: true }, statusPath);
+            },
+            runTask: (taskId, job) => runTaskFn(taskId, {
+              planPath: job.planPath, config, allowStale: false, pairedTrialHost: "daemon", owner: job.owner, githubFor: laneGithubFor, handOffAtPrOpen: true,
+              ...(gitCredentialSocket ? { gitCredentialSocketPath: gitCredentialSocket.socketPath } : {}),
+            }),
+            claimHeld: (taskId, repo) => {
+              try {
+                return execFileSync("git", ["-C", join(reposDir, repo), "ls-remote", "origin", dispatchClaimRef(taskId)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 30_000 }).trim() !== "";
+              } catch (error) {
+                // An unreachable remote is an unknown claim, which a job treats as held; it is never "free".
+                void error; return undefined;
+              }
+            },
+          }),
+        } : {}),
         consumeDrainNow: () => consumeDrainNow(config.root),
         // Selected-repository PR controls (W1-T3989). The HTTP surface only writes a bounded
         // marker; this is the sole point that reaches the established selected-repository CLI

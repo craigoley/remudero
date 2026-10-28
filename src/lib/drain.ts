@@ -2759,3 +2759,126 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   }
   return summary("max_reached", `${max} task(s)`);
 }
+
+/**
+ * W1-T10799 — A MANAGED TARGET WITH NO DAEMON OF ITS OWN runs its one reviewed frontier task as ONE bounded
+ * job the CORE daemon owns. The narrow exception to {@link taskTargetsRepo}'s single-target guard: one job, one
+ * task, one lane, ended at that one dispatch's terminal verdict. It never makes the daemon a multi-repo
+ * scheduler, and it reuses the maintained drain, so every admission gate the drain applies still decides.
+ *
+ * PURE: every read and write is a seam the caller wires (the durable record, the registry, the plan sync, the
+ * dispatch claim, the drain's own deps), so this module keeps its no-filesystem contract.
+ */
+export type TargetJobStatus = "queued" | "admitted" | "ended" | "refused";
+/** The durable record of ONE job, keyed by the kick origin `ProductBuildService` mints for the request. */
+export interface TargetJobRecord {
+  origin: string; taskId: string; repo: string; status: TargetJobStatus;
+  /** How many times the drain was entered for this job; a replay never raises it past a dispatch that happened. */
+  attempts: number; updatedAt: string; reason?: string; stopReason?: string;
+}
+/** `unreadable` is its own state: a record this process cannot read is never "no job", so it can never respend. */
+export type TargetJobRead = { state: "found"; record: TargetJobRecord } | { state: "absent" } | { state: "unreadable" };
+/** Who may run a target repository's task: this daemon natively, its own live instance, or nobody. */
+export type TargetJobAdmission =
+  | { state: "native"; owner: string } | { state: "own_instance"; instance: string } | { state: "not_enrolled" } | { state: "unreadable" };
+
+export interface BoundedTargetJobKick { taskId: string; origin: string; repo: string }
+export interface BoundedTargetJobDeps {
+  readJob: (origin: string) => TargetJobRead;
+  writeJob: (record: TargetJobRecord) => void;
+  admit: (repo: string) => TargetJobAdmission;
+  /** The target clone's plan, synced from origin/main through the existing plan-sync refusal. */
+  syncPlan: (owner: string, repo: string) => Promise<{ plan: Plan } | { error: string }>;
+  /** Whether the target's dispatch claim for the task is held; `undefined` is an unreadable remote, never "free". */
+  claimHeld: (taskId: string, repo: string) => boolean | undefined;
+  /** The native receipts the CORE ledger holds for this job's origin (`readTargetExecution`). */
+  execution: (record: TargetJobRecord) => { state: string };
+  /** The maintained drain. `onDispatch` runs immediately before the drain's one `runOne` and may throw to refuse it. */
+  runDrain: (plan: Plan, opts: DrainOpts, onDispatch: () => void) => Promise<DrainSummary>;
+  clearKick: (taskId: string, repo: string) => void;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  now: () => string;
+}
+/** `ended`/`refused` close the job and its marker; `held` and `resumed` keep both for a later tick. */
+export type BoundedTargetJobOutcome =
+  | { state: "ended" | "refused"; reason: string; replayed: boolean }
+  | { state: "held" | "resumed"; reason: string };
+
+/** The drain stop reasons that mean the core daemon's own governors declined, not that the task is unrunnable. */
+const CAPACITY_STOPS: ReadonlySet<StopReason> = new Set<StopReason>([
+  "headroom_exhausted", "headroom_degraded", "cost_governor_deferred", "queue_governor_deferred", "memory_governor_deferred",
+  "quiet_hours_deferred", "new_build_deferred", "wip_deferred", "stopped", "paused",
+]);
+
+export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: BoundedTargetJobDeps, baseOpts: DrainOpts = {}): Promise<BoundedTargetJobOutcome> {
+  const { taskId, origin, repo } = kick;
+  const fields = { task: taskId, origin, repo };
+  const base = (status: TargetJobStatus, prior?: TargetJobRecord, extra: Partial<TargetJobRecord> = {}): TargetJobRecord =>
+    ({ origin, taskId, repo, attempts: prior?.attempts ?? 0, ...extra, status, updatedAt: deps.now() });
+  const held = (reason: string, step = "target_job.held"): BoundedTargetJobOutcome => { deps.log(step, { ...fields, reason }); return { state: "held", reason }; };
+  const close = (record: TargetJobRecord, reason: string, replayed: boolean): BoundedTargetJobOutcome => {
+    if (!replayed) deps.writeJob({ ...record, reason });
+    deps.clearKick(taskId, repo);
+    return { state: record.status as "ended" | "refused", reason, replayed };
+  };
+  const refuse = (prior: TargetJobRecord | undefined, reason: string): BoundedTargetJobOutcome => {
+    deps.log("console.kick_refused", { ...fields, reason });
+    return close(base("refused", prior), reason, false);
+  };
+
+  const read = deps.readJob(origin);
+  if (read.state === "unreadable") return held("job record unreadable", "target_job.unknown");
+  const prior = read.state === "found" ? read.record : undefined;
+  // A closed job is reported, never re-run: the same origin never spends twice.
+  if (prior && (prior.status === "ended" || prior.status === "refused")) {
+    deps.log("target_job.replayed", { ...fields, status: prior.status });
+    return close(prior, prior.reason ?? prior.status, true);
+  }
+
+  const admission = deps.admit(repo);
+  if (admission.state === "unreadable") return held("registry or managed set unreadable", "target_job.unknown");
+  if (admission.state === "not_enrolled") return refuse(prior, "target is not an enrolled managed repository");
+  if (admission.state === "own_instance") return refuse(prior, `${admission.instance} drives this repository; its own kick path owns the task`);
+
+  const synced = await deps.syncPlan(admission.owner, repo);
+  if ("error" in synced) return held(`target plan not synced: ${synced.error}`, "target_job.plan_unreadable");
+  if (!synced.plan.tasks.some((t) => t.id === taskId)) return refuse(prior, "unknown task id");
+
+  if (prior?.status === "admitted") {
+    // A restart or a lost response: recover from the durable record, the native receipts and the dispatch claim.
+    const seen = deps.execution(prior);
+    if (seen.state === "ended") return close({ ...prior, status: "ended", updatedAt: deps.now() }, "terminal verdict recorded", false);
+    const claim = deps.claimHeld(taskId, repo);
+    if (claim !== false || seen.state === "running") {
+      if (prior.reason !== "resumed") {
+        // `updatedAt` stays the dispatch time: the native receipts are correlated from it.
+        deps.writeJob({ ...prior, reason: "resumed" });
+        deps.log("target_job.resumed", { ...fields, claim: claim === undefined ? "unknown" : "held", execution: seen.state });
+      }
+      return { state: "resumed", reason: `dispatch already landed (${seen.state})` };
+    }
+  }
+
+  // One task, depth 1, max 1, one lane: the job can never re-enter the target plan's other tasks.
+  const opts = applyCuratedSelection({ ...baseOpts, laneCount: 1, wipLimit: 1 }, { taskIds: [taskId], depth: 1 });
+  let dispatched = false;
+  let summary: DrainSummary;
+  try {
+    summary = await deps.runDrain(synced.plan, opts, () => {
+      // Durable BEFORE the spend, and the receipt only when the drain really starts the run.
+      deps.writeJob(base("admitted", prior, { attempts: (prior?.attempts ?? 0) + 1 }));
+      dispatched = true;
+      deps.log("console.kick_dispatched", fields);
+    });
+  } catch (error) {
+    return held(`drain failed${dispatched ? " after dispatch" : ""}: ${String((error as Error)?.message ?? error)}`, "target_job.error");
+  }
+  if (dispatched) {
+    deps.log("target_job.ended", { ...fields, stop_reason: summary.stopReason });
+    return close(base("ended", { ...(prior ?? base("queued")), attempts: (prior?.attempts ?? 0) + 1 }, { stopReason: summary.stopReason }), summary.stopReason, false);
+  }
+  if (CAPACITY_STOPS.has(summary.stopReason) || summary.stopReason === "error") {
+    return held(`${summary.stopReason}${summary.stopDetail ? `: ${summary.stopDetail}` : ""}`, "target_job.capacity_deferred");
+  }
+  return refuse(prior, `drain found the task not runnable (${summary.stopReason})`);
+}

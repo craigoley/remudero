@@ -1597,6 +1597,13 @@ export interface DaemonDeps {
   /** Delete one kick marker (consumed-once) after the daemon dispatches or refuses it. W1-T10615: `repo` is the
    *  SAME repo the pending kick carried, so the clear names that exact marker, never a sibling repo's. */
   clearKick?: (taskId: string, repo?: string) => void;
+  /** W1-T10799: the repo-scoped kick markers for a MANAGED TARGET with no daemon of its own, which only the core daemon
+   *  may service. Never offered to {@link pendingKicks}' consumer, so a foreign marker cannot dispatch a core task. */
+  pendingTargetJobs?: () => Array<DaemonKick & { repo: string }>;
+  /** W1-T10799: runs ONE such job to its terminal verdict, through the maintained drain. The daemon passes its own deps so
+   *  the job meets every governor this daemon applies, and awaits it: one job occupies the one reserved lane. A `held` or
+   *  `resumed` outcome keeps the marker for a later tick; `ended` and `refused` closed it. */
+  runTargetJob?: (kick: DaemonKick & { repo: string }, daemonDeps: DaemonDeps) => Promise<{ state: "ended" | "refused" | "held" | "resumed" }>;
   /** Read and delete the "drain now" marker, consumed once; a defined return means the operator
    *  asked for one immediate dispatch cycle. */
   consumeDrainNow?: () => { origin: string } | null;
@@ -6629,6 +6636,29 @@ export async function runDaemon(
         forcedKick = kick;
         forcedNext = task;
         break;
+      }
+    }
+
+    // W1-T10799: a managed target with no daemon of its own runs ONE bounded job here, in the lane this daemon
+    // reserves for it. Core's own kick has priority, a busy lane or a zero enforced lane target defers the job
+    // explicitly, and a second request in the same tick defers behind the first: this adds no capacity.
+    if (!forcedNext && deps.pendingTargetJobs && deps.runTargetJob) {
+      const [job, ...waiting] = deps.pendingTargetJobs();
+      if (job) {
+        const laneTarget = enforcedLaneTarget(children.size, tickQueueAdmission?.wipLimit);
+        if (children.size > 0 || laneTarget < 1) {
+          log("target_job.capacity_deferred", { task: job.taskId, origin: job.origin, repo: job.repo, in_flight: children.size });
+        } else {
+          for (const other of waiting) log("target_job.capacity_deferred", { task: other.taskId, origin: other.origin, repo: other.repo, reason: "lane reserved by another job" });
+          let closed = false;
+          try { closed = ["ended", "refused"].includes((await deps.runTargetJob(job, deps)).state); }
+          catch (e) { log("target_job.error", { task: job.taskId, origin: job.origin, repo: job.repo, error: String((e as Error)?.message ?? e) }); }
+          if (closed) continue;
+        }
+        // Held, resumed or deferred: the marker stays, and the loop paces itself rather than re-reading it at once.
+        ticks++;
+        await sleepUntilSweepWake(pollIntervalMs);
+        continue;
       }
     }
 

@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import type { TargetJobAdmission, TargetJobRead, TargetJobRecord } from "./drain.js";
 import { systemClock, type Clock } from "./clock.js";
 import { daemonInstanceRegistryPath } from "./deployer.js";
 import { dispatchClaimRef } from "./dispatch-claim.js";
@@ -134,7 +135,7 @@ export function readTargetExecution(stateDir: string, query: ExecutionQuery, fsD
 }
 
 /** Which daemon drives the target: its config root, the root that daemon's own kick port reads. */
-export type DaemonRootRead = { state: "found"; root: string; instance: string } | { state: "absent" } | { state: "unreadable" };
+export type DaemonRootRead = { state: "found"; root: string; instance: string; native?: true } | { state: "absent" } | { state: "unreadable" };
 
 /** Where the daemon instances live, as serve's own instance gateway names them. */
 export interface ProductBuildInstances {
@@ -343,6 +344,20 @@ export class ProductBuildService {
     }
   }
 
+  /**
+   * W1-T10799: where the request's marker goes. A live instance of the target keeps its own root unchanged. Only a
+   * READABLE registry that names no live instance (`absent`) routes to the CORE daemon's root, which owns one bounded
+   * native job; an unreadable registry stays unreadable, and a core root without a `state/` directory is unreadable
+   * too, because a marker written there would mint a directory no daemon reads.
+   */
+  private routeDaemon(subject: BuildRepository): Exclude<DaemonRootRead, { state: "absent" }> {
+    const read = this.daemonRoot(subject);
+    if (read.state !== "absent") return read;
+    const core = this.options.root;
+    if (core === undefined || !isAbsolute(core) || !existsSync(join(core, "state"))) return { state: "unreadable" };
+    return { state: "found", root: core, instance: this.options.instances?.coreInstance ?? CORE_INSTANCE, native: true };
+  }
+
   private readProduct(actor: string, id: string): StoredProduct {
     const read = this.store.read(actor, id);
     if (!read.ok) throw new Fault(read.code);
@@ -386,9 +401,8 @@ export class ProductBuildService {
       if (!inspected.enrolled) throw new Fault("target_not_enrolled");
       if (!this.target.runnerRegistered(subject)) throw new Fault("runner_missing");
       // The marker goes where the target's OWN daemon reads it, and that daemon must not be halted either.
-      daemon = this.daemonRoot(subject);
+      daemon = this.routeDaemon(subject);
       if (daemon.state === "unreadable") throw new Fault("target_unreadable");
-      if (daemon.state === "absent") throw new Fault("target_daemon_missing");
       if (!isAbsolute(daemon.root)) throw new Fault("unavailable");
       if (isStopped(daemon.root) || isPaused(daemon.root)) throw new Fault("fleet_halted");
       if (inspected.head === undefined || inspected.readmeOnly === undefined) throw new Fault("target_unreadable");
@@ -419,7 +433,7 @@ export class ProductBuildService {
     // Observation may add admitted/running evidence, each with its own record; absence adds nothing. Admission is a
     // held claim or the daemon's dispatch of this request; running is ONLY the target daemon's native evidence.
     const seen = await this.target.observe(subject, input.taskId);
-    daemon ??= this.daemonRoot(subject);
+    daemon ??= this.routeDaemon(subject);
     // A daemon whose state this process cannot reach (a remote or unmounted instance) has no readable evidence.
     const execution: ExecutionRead = daemon.state !== "found" || !isAbsolute(daemon.root) ? { state: "unknown" }
       : readTargetExecution(join(daemon.root, "state"), { taskId: input.taskId, origin, repo: subject.name, requestedAt: queuedEvidence.observedAt, nowMs: this.clock.now() });
@@ -487,4 +501,61 @@ export function bootstrapConfirmed(product: Pick<StoredProduct, "stageEvidence">
   if (inspected.head === undefined || inspected.readmeOnly === undefined) return false;
   return !inspected.readmeOnly || BOOTSTRAP_CHECKS.every((check) => product.stageEvidence.some((item) =>
     item.id === bootstrapEvidenceId(inspected.head!, check) && item.outcome === "succeeded"));
+}
+
+/**
+ * W1-T10799: who may run an enrolled target's task when its kick marker sits under the CORE root. The same two
+ * reviewed sources the build request read: the managed set enrolls the repository, and the live instance registry
+ * says whether it has a daemon of its own. Either source unreadable is `unreadable`, never "no daemon" and never
+ * "not enrolled", so neither a malformed file nor an ambiguous owner can start a job.
+ */
+export function nativeTargetAdmission(repoName: string, options: ProductBuildInstances & { repoRoot: string }): TargetJobAdmission {
+  let registry: RegistryInstance[];
+  let managed: { owner: string; repo: string }[];
+  try {
+    const path = options.registryPath ?? daemonInstanceRegistryPath(options.repoRoot);
+    registry = parseInstanceRegistry((options.readText ?? ((file: string) => readFileSync(file, "utf8")))(path)).instances;
+    managed = loadManagedRepos(options.repoRoot);
+  } catch (error) {
+    void error; return { state: "unreadable" };
+  }
+  const wanted = repoName.toLowerCase();
+  const enrolled = managed.filter((entry) => entry.repo.toLowerCase() === wanted);
+  if (enrolled.length === 0) return { state: "not_enrolled" };
+  if (enrolled.length > 1) return { state: "unreadable" };
+  const { owner, repo } = enrolled[0]!;
+  const live = registry.find((entry) => entry.live && entry.repo.toLowerCase() === `${owner}/${repo}`.toLowerCase());
+  return live ? { state: "own_instance", instance: live.name } : { state: "native", owner };
+}
+
+const targetJobRecordSchema = z.object({
+  origin: z.string().min(1), taskId: z.string().min(1), repo: z.string().min(1), status: z.enum(["queued", "admitted", "ended", "refused"]),
+  attempts: z.number().int().min(0), updatedAt: z.string(), reason: z.string().optional(), stopReason: z.string().optional(),
+}).strict();
+
+/** The durable job record: one file per kick origin under `<root>/state/target-jobs`, replaced atomically. */
+export function fileTargetJobStore(root: string): { read: (origin: string) => TargetJobRead; write: (record: TargetJobRecord) => void } {
+  const dir = join(root, "state", "target-jobs");
+  const pathFor = (origin: string) => join(dir, `${digest(origin).slice(0, 48)}.json`);
+  return {
+    read(origin) {
+      const path = pathFor(origin);
+      if (!existsSync(path)) return { state: "absent" };
+      try {
+        const record = targetJobRecordSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+        // A record filed under this name for another origin is a corrupt store, never this job.
+        return record.origin === origin ? { state: "found", record } : { state: "unreadable" };
+      } catch (error) {
+        // A torn or foreign record is unknown, which the caller holds; it is never "no job", which would respend.
+        void error; return { state: "unreadable" };
+      }
+    },
+    write(record) {
+      mkdirSync(dir, { recursive: true });
+      const path = pathFor(record.origin);
+      const temp = `${path}.${process.pid}.tmp`;
+      writeFileSync(temp, JSON.stringify(targetJobRecordSchema.parse(record)), { mode: 0o600 });
+      renameSync(temp, path);
+    },
+  };
 }
