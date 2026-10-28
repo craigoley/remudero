@@ -1517,9 +1517,60 @@ components:
           minLength: 1
           maxLength: 64
         pullRequest: *a1
+    ProductCasePropose:
+      type: object
+      additionalProperties: false
+      description: A saved product by identity and revision only. A pull request, brief text or budget is never accepted.
+      required:
+        - requestId
+        - productId
+        - expectedRevision
+        - expectedObjectiveRevision
+      properties:
+        requestId:
+          $ref: "#/components/schemas/ProductRequestId"
+        productId:
+          $ref: "#/components/schemas/ProductId"
+        expectedRevision: *a1
+        expectedObjectiveRevision: *a1
+    ProductPlanOperation:
+      type: object
+      additionalProperties: false
+      description: The durable plan-operation observation. pending, proposed, refused, unknown, changed-brief and stale-target
+        stay distinct; a pending or proposed operation is never an approved or merged plan.
+      required:
+        - operationId
+        - state
+        - mode
+        - planEvidenceId
+        - repository
+        - targetHead
+        - revision
+        - objectiveRevision
+        - briefDigest
+        - requestedAt
+      properties:
+        operationId: { type: string, pattern: "^[a-f0-9]{64}$" }
+        state: { type: string, enum: [pending, proposed, refused, unknown, changed-brief, stale-target] }
+        mode: { type: string, enum: [create, clarify] }
+        planEvidenceId: { type: string, minLength: 1, maxLength: 80, pattern: "^[A-Za-z0-9_-]+$" }
+        repository:
+          type: object
+          additionalProperties: false
+          required: [id, owner, name]
+          properties:
+            id: { type: integer, minimum: 1 }
+            owner: { type: string, minLength: 1, maxLength: 64 }
+            name: { type: string, minLength: 1, maxLength: 128 }
+        targetHead: { type: string, pattern: "^[a-f0-9]{40}$" }
+        revision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        briefDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+        requestedAt: { type: string, format: date-time }
+        proposal: { type: string, maxLength: 2048, description: The correlated plan pull request, only once the native run opened it. }
     ProductCaseCommand:
       description: At most 65536 raw bytes. Import an approved brief, adopt its existing repository,
-        verify a merged reviewed plan, or request one guarded build. Client evidence and verification
+        verify a merged reviewed plan, propose one native plan for the saved brief, or request one guarded build. Client evidence and verification
         fields are rejected.
       oneOf:
         - type: object
@@ -1590,6 +1641,23 @@ components:
                 - build
             command:
               $ref: "#/components/schemas/ProductBuildCommand"
+        - type: object
+          additionalProperties: false
+          required:
+            - version
+            - action
+            - command
+          properties:
+            version:
+              type: string
+              enum:
+                - product-case-v1
+            action:
+              type: string
+              enum:
+                - propose
+            command:
+              $ref: "#/components/schemas/ProductCasePropose"
     ProductCaseResponse:
       type: object
       additionalProperties: false
@@ -1649,6 +1717,8 @@ components:
             mobile: *a2
         build:
           $ref: "#/components/schemas/ProductBuildReceipt"
+        planOperation:
+          $ref: "#/components/schemas/ProductPlanOperation"
     ProductCaseError:
       type: object
       additionalProperties: false
@@ -1691,9 +1761,12 @@ components:
             - task_claimed
             - task_merged
             - budget_exceeded
+            - concurrency_exceeded
             - fleet_halted
             - kick_failed
             - creation_denied
+            - envelope_missing
+            - handoff_unavailable
     ProductBuildCommand:
       type: object
       additionalProperties: false
@@ -1759,7 +1832,7 @@ components:
         version: { type: string, enum: [product-build-v1] }
         error:
           type: string
-          enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, request_too_large, repository_missing, repository_not_found, repository_conflict, provider_unreadable, plan_not_approved, target_not_enrolled, target_unreadable, target_daemon_missing, runner_missing, bootstrap_unverified, task_not_found, task_unreadable, task_stale, task_claimed, task_merged, budget_exceeded, fleet_halted, kick_failed]
+          enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, request_too_large, repository_missing, repository_not_found, repository_conflict, provider_unreadable, plan_not_approved, target_not_enrolled, target_unreadable, target_daemon_missing, runner_missing, bootstrap_unverified, task_not_found, task_unreadable, task_stale, task_claimed, task_merged, budget_exceeded, concurrency_exceeded, fleet_halted, kick_failed]
     ProductBuildAccessError:
       type: object
       additionalProperties: false
@@ -16849,8 +16922,9 @@ paths:
       description: The verified operator, write scope, high tier and exact confirmation are required.
         Import saves the approved brief with provenance. Adoption never creates a repository. Planning
         verifies enrollment, runner and bootstrap, then reads the complete approved brief in a
-        reviewed merged target task at both its merge and current head. Build rechecks that plan and
-        delegates to the existing guarded builder. Evidence channels stay separate; empty channels
+        reviewed merged target task at both its merge and current head. Propose hands the saved,
+        verified brief to ONE native plan run in the managed target checkout and answers at once with
+        a durable observation. Build rechecks that plan and delegates to the existing guarded builder. Evidence channels stay separate; empty channels
         mean not observed. A queued receipt never proves execution, deployment or mobile playability.
         Responses use private, no-store.
       requestBody:
