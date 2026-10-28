@@ -145,7 +145,7 @@ export function renderMachineShard(spec: MachineShardSpec): { text: string; refu
     "  acceptance:",
     ...spec.acceptance.flatMap((c) => [`    - claim: ${q(c.claim)}`, `      proof: ${q(c.proof)}`]),
     ...(spec.note === undefined ? [] : [`  note: ${q(spec.note)}`]),
-    ...(spec.rationale === undefined ? [] : ["  rationale: |2", ...spec.rationale.map((line) => (line === "" ? "" : `    ${line}`))]),
+    ...(spec.rationale === undefined ? [] : ["  rationale: |", ...spec.rationale.flatMap((entry) => entry.split(/\r\n|\r|\n/).map((line) => (line === "" ? "" : `    ${line}`)))]),
     "",
   ].join("\n");
   try {
