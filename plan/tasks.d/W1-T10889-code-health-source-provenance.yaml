@@ -4,7 +4,7 @@
   type: implement
   verify: human
   priority: 1
-  risk: medium
+  risk: high
   band_meaning: span
   budget_usd: 15
   author_class: machine
@@ -15,7 +15,7 @@
   plan_refs: [W1-T10560, W1-T10561]
   files:
     - scripts/code-health-provenance.mjs
-    - test/infra/code-health-source-provenance.test.ts
+    - test/infra/code-health-contract.test.ts
   rationale: >-
     Native bounded readCodeHealthQualityEvidence independently read completed main CodeQL run40604345009,
     SHA26f9ed4d7116f63a8a81ddd49c50154e61515554, for the configured actions, JavaScript-TypeScript and
@@ -49,7 +49,7 @@
     partial; representative complete old input retains required source facts. Inject sentinel
     security text and paths into result/arbitrary structures and parser errors and prove no leak
     through the diagnostic or public error. Import via repository aliases, compute any repository
-    root through the maintained helper, and verify the actual new physical test with rmd test-place.
+    root through the maintained helper, and verify the full existing physical suite and retained test placement.
     Keep all existing jobs, collector24h clock, ownership, memory/admission/spending, source and
     review guards. This task does not activate a view, create a source opportunity, release either
     cockpit consumer hold, restart/deploy a service or certify Code health complete. Trace the actual
@@ -70,6 +70,9 @@
   note: >-
     Unfiled machine proposal pending a genuine native allocation and configured filing judgment.
     No old approval, previous risk ruling, merged source credit or product readiness is borrowed.
-    Native deterministic placement from the two proposed imports computes infra with no competing
-    subsystem signal; verify actual source placement again before first publication. This is a
+    Extend the existing physical Code health contract suite without removing or moving any old
+    assertions. The native full filing admission correctly refused the previously proposed new
+    generic test path. This exact replacement keeps that guard intact and uses an existing relevant
+    suite. The exporter and existing contract suite count as two concerns under Rule19; declare
+    risk high honestly and keep budget15 unchanged. Do not reuse the prior narrower ruling. This is a
     bounded first repair, not a claim that the entire Code health source problem is solved.
