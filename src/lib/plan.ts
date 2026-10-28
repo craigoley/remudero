@@ -1287,24 +1287,53 @@ export type GitBlobRunner = (args: string[], stdin?: string) => string;
  */
 export function readBlobsAtRef(runGit: GitBlobRunner, ref: string, relPaths: string[]): string[] {
   if (relPaths.length === 0) return [];
-  return parseBlobBatch(runGit(["cat-file", "--batch"], blobBatchRequest(ref, relPaths)), ref, relPaths);
+  const request = blobBatchRequest(ref, relPaths, runGit(blobIdListingArgs(ref, relPaths)));
+  return parseBlobBatch(runGit(["cat-file", "--batch"], request), ref, relPaths);
 }
 
-/** {@link readBlobsAtRef} through an AWAITED runner: the same one `cat-file --batch`, request and framing. */
+/** {@link readBlobsAtRef} through an AWAITED runner: the same listing, one `cat-file --batch`, request and framing. */
 export async function readBlobsAtRefAsync(
   runGit: (args: string[], stdin?: string) => Promise<string>,
   ref: string,
   relPaths: string[],
 ): Promise<string[]> {
   if (relPaths.length === 0) return [];
-  return parseBlobBatch(await runGit(["cat-file", "--batch"], blobBatchRequest(ref, relPaths)), ref, relPaths);
+  const request = await blobBatchRequestAsync(runGit, ref, relPaths);
+  return parseBlobBatch(await runGit(["cat-file", "--batch"], request), ref, relPaths);
 }
 
-function blobBatchRequest(ref: string, relPaths: string[]): string {
-  return relPaths.map((p) => `${ref}:${p}`).join("\n") + "\n";
+/**
+ * The `cat-file --batch` request for `relPaths` at `ref`, each path asked by its blob id. A `<ref>:<path>` line makes
+ * git resolve the path through its directory's tree once per line: over plan/tasks.d's 4,577 entries that cost about
+ * 2 ms a shard, 9.86 s for the plan against 0.36 s by id (measured 2026-10-28; #15230). One `git ls-tree` over the
+ * paths' directories names every id; a path it does not list as a blob is still asked by path, so git itself
+ * answers `missing` for it.
+ */
+export async function blobBatchRequestAsync(
+  runGit: (args: string[], stdin?: string) => Promise<string>,
+  ref: string,
+  relPaths: string[],
+): Promise<string> {
+  return blobBatchRequest(ref, relPaths, await runGit(blobIdListingArgs(ref, relPaths)));
 }
 
-function parseBlobBatch(raw: string, ref: string, relPaths: string[]): string[] {
+/** `git ls-tree <ref> -- <dir>/...`: every entry in each directory that holds one of `relPaths`. */
+function blobIdListingArgs(ref: string, relPaths: string[]): string[] {
+  const dirs = new Set(relPaths.map((p) => (dirname(p) === "." ? p : `${dirname(p)}/`)));
+  return ["ls-tree", ref, "--", ...[...dirs].sort()];
+}
+
+function blobBatchRequest(ref: string, relPaths: string[], listing: string): string {
+  const ids = new Map<string, string>();
+  for (const line of listing.split("\n")) {
+    const entry = /^\d{6} blob ([0-9a-f]{40,64})\t(.+)$/.exec(line);
+    if (entry) ids.set(entry[2]!, entry[1]!);
+  }
+  return relPaths.map((p) => ids.get(p) ?? `${ref}:${p}`).join("\n") + "\n";
+}
+
+/** Frame the bytes one `cat-file --batch` printed for `relPaths`, in order; the contract {@link readBlobsAtRef} states. */
+export function parseBlobBatch(raw: string, ref: string, relPaths: string[]): string[] {
   const buf = Buffer.from(raw, "utf8");
   const texts: string[] = [];
   let off = 0;

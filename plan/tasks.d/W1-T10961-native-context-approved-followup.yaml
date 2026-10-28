@@ -1,0 +1,70 @@
+- id: W1-T10961
+  title: Native author context binding and cancellation preserve exact ownership and closed child groups
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12
+  risk: high
+  band_meaning: blast-radius
+  origin: operator-approved-followups:2026-10-28
+  plan_refs:
+    - W1-T5882
+    - W1-T9928
+  files:
+    - scripts/lib/author-context-compatibility.mjs
+    - scripts/lib/author-step-capture.mjs
+    - scripts/lib/author-step-resources.mjs
+    - scripts/lib/author-low-footprint.mjs
+    - scripts/lib/native-author-runtime.mjs
+    - test/ci/author-context-compatibility.test.ts
+    - test/infra/author-step-resources.test.ts
+    - test/author-step-capture.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: Integrate the foundation f6e362e5 source/dependency/allocation/context owner and capture
+    controls as one native execution boundary. Bind head/tree and immutable dependencies, actual
+    slot/owner nonce and every allocation filesystem before starting or reusing work. Native readers
+    retain their own 120s limit and scratch/output caps; cancellation and ordinary completion must
+    close the recorded groups before the native owner releases the slot. Distinguish parent already
+    exited, absent progress timestamp, terminal child failure and actual timeout; record an
+    intervention before signaling only owned work. A failed closure is not PASS or a free slot.
+    Preserve old failures and no-summary/ghost-file refusals, TAP on Node22/24, synthetic
+    HOME/TMP/auth and no fleet-state/real credential mounts. No arbitrary ended-reservation
+    recovery, signal to another owner, time grant, private lower-floor adoption or test-gate change
+    is part of this task.
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
+  acceptance:
+    - claim: only matching exact source dependency allocation and owner context can start or reuse a
+        native phase
+      proof: 'grep: test("W1-T10961: only matching exact source dependency allocation and owner context
+        can start or reuse a native phase" in test/ci/author-context-compatibility.test.ts'
+    - claim: normal exit cancellation and pressure refusal preserve terminal failure evidence and prove
+        owned child closure before release
+      proof: 'grep: test("W1-T10961: normal exit cancellation and pressure refusal preserve terminal
+        failure evidence and prove owned child closure before release" in
+        test/infra/author-step-resources.test.ts'
+  falsifier: "Add the exact named real-path controls in the computed test folders using package
+    aliases and the shared root helper. Establish the failing current-main behavior, restore the
+    smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
+    the named assertion to fail, then restore it. Preserve baseline failures, partial runs and
+    old-head evidence; never make unchanged failures green through repetition. "

@@ -1,0 +1,71 @@
+- id: W1-T10950
+  title: Incremental compiler processes leave a priced resource budget for their parents
+  repo: remudero
+  depends_on:
+    - W1-T10949
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10
+  risk: high
+  band_meaning: span
+  origin: operator-approved-followups:2026-10-28
+  plan_refs:
+    - W1-T7392
+    - W1-T9405
+    - W1-T5882
+  files:
+    - src/lib/typecheck-run.ts
+    - src/lib/typecheck-buildinfo.ts
+    - src/lib/compiler-budget.ts
+    - scripts/compile-project.mjs
+    - test/npm-run-typecheck-is-incremental-and-slotted.test.ts
+    - test/a-tight-typecheck-runs-fewer-checkers-with-the-same-diagnostics.test.ts
+    - package.json
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: Integrate only the unshipped compiler/parent-headroom portion of foundation f6e362e5 on
+    current main. Reuse existing slotted incremental tsc and worker protocols (W1-T7392/W1-T9405),
+    keep build-info private to its worktree and bound checker fanout, native parent-plus-child
+    memory and scratch. Prove unchanged diagnostics on real success/error inputs and
+    cold/warm/cache-invalid cases. Do not confuse process heap with a complete joint reservation,
+    fake away the default compiler, increase global heap/slots, or move runtime/image pins.
+    Node22/24 verification remains separate from cutover permission.
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
+  acceptance:
+    - claim: cold and warm compiler runs preserve diagnostics and maintain correctly scoped incremental
+        state
+      proof: 'grep: test("W1-T10950: cold and warm compiler runs preserve diagnostics and maintain
+        correctly scoped incremental state" in
+        test/npm-run-typecheck-is-incremental-and-slotted.test.ts'
+    - claim: native parent and checker child fit the recorded joint memory reservation without increased
+        fanout
+      proof: 'grep: test("W1-T10950: native parent and checker child fit the recorded joint memory
+        reservation without increased fanout" in
+        test/a-tight-typecheck-runs-fewer-checkers-with-the-same-diagnostics.test.ts'
+    - claim: The real default production path invokes compilerEnvironment; an unused export, declaration
+        or re-export is insufficient.
+      proof: "grep: compilerEnvironment( in src/lib/typecheck-run.ts"
+  falsifier: "Add the exact named real-path controls in the computed test folders using package
+    aliases and the shared root helper. Establish the failing current-main behavior, restore the
+    smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
+    the named assertion to fail, then restore it. Preserve baseline failures, partial runs and
+    old-head evidence; never make unchanged failures green through repetition. "

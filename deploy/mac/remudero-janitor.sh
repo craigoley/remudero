@@ -1291,6 +1291,28 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
     done
 done
 
+# Codex runs copy regenerable downloads into long-lived evidence folders:
+# Playwright browser installs (stamped INSTALLATION_COMPLETE) and private npm
+# caches (`_cacache`). The folder around them stays active for weeks, so judge
+# each copy on its own idle time and keep the evidence beside it.
+nested_root="${REMUDERO_JANITOR_NESTED_ROOT:-$USER_HOME/.codex/work-artifacts}"
+if [ -d "$nested_root" ] && [ ! -L "$nested_root" ]; then
+  if nested=$(find -P "$nested_root" -xdev \( -name .git -o -name node_modules \) -prune -o -type d \
+      \( -name 'chromium-[0-9]*' -o -name 'chromium_headless_shell-[0-9]*' -o -name 'chromium_tip_of_tree-[0-9]*' \
+         -o -name 'firefox-[0-9]*' -o -name 'webkit-[0-9]*' -o -name 'ffmpeg-[0-9]*' -o -name _cacache \) -print -prune 2>/dev/null); then
+    while IFS= read -r artifact; do
+      [ -n "$artifact" ] && [ -d "$artifact" ] && [ ! -L "$artifact" ] || continue
+      case "${artifact##*/}" in
+        _cacache) [ -d "$artifact/index-v5" ] || [ -d "$artifact/content-v2" ] || { log "SKIP unrecognised-npm-cache $artifact"; continue; } ;;
+        *) [ -f "$artifact/INSTALLATION_COMPLETE" ] && [ ! -L "$artifact/INSTALLATION_COMPLETE" ] || { log "SKIP unrecognised-browser-install $artifact"; continue; } ;;
+      esac
+      clean_artifact "$artifact" "$AGE_HOURS"
+    done <<< "$nested"
+  else
+    log "SKIP nested-download scan failed (unknown) $nested_root"
+  fi
+fi
+
 for root in "${SCAN_ROOTS[@]}"; do
   [ -d "$root" ] || continue
   for pref in "${PREFIXES[@]}"; do

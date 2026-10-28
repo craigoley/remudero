@@ -13,6 +13,7 @@
     - src/lib/worker-provider.ts
     - src/lib/worker.ts
     - test/worker/spawn/codex-credits-keep-codex-eligible-past-its-reserve.test.ts
+    - "src/lib/provider-routing-policy.ts"
   status: queued
   priority: 1  # operator ruling 2026-10-22: P0
   attempts: 0
