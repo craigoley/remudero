@@ -1482,9 +1482,9 @@ export function precheckParityVerdict({ population, baseline, baseBaseline = nul
   };
 }
 
-/** Read the worker's literal parity keys and table-map spreads without running any worker code.
+/** Read the worker's literal parity keys, table-map spreads and extra census keys without running worker code.
  * Unsupported declarations are unmeasured, never replaced with the harness's registrations. */
-function workerParity(text) {
+function workerCensusDeclarations(text) {
   const tree = parse(text, { ecmaVersion: "latest", sourceType: "module" });
   const declarations = new Map();
   for (const statement of tree.body) {
@@ -1542,7 +1542,20 @@ function workerParity(text) {
         !member(arrow.body.elements[0], arrow.params[0].name, "testFile")) return unsupported();
     for (const path of rowsOf(declarations.get(map.callee.object.name))) parity[path] = true;
   }
-  return parity;
+  const extras = Object.create(null);
+  const extraTable = declarations.get("PRECHECK_EXTRA_CI_CENSUSES");
+  if (extraTable?.type !== "ObjectExpression") {
+    throw new Error("worker PRECHECK_EXTRA_CI_CENSUSES declaration is not statically readable");
+  }
+  for (const property of extraTable.properties) {
+    if (property.type !== "Property" || property.computed || property.kind !== "init" || property.method ||
+        property.key.type !== "Literal" || typeof property.key.value !== "string" ||
+        property.value.type !== "Literal" || typeof property.value.value !== "string") {
+      throw new Error("worker PRECHECK_EXTRA_CI_CENSUSES declaration is not statically readable");
+    }
+    extras[property.key.value] = property.value.value;
+  }
+  return { parity, extras };
 }
 
 /** W1-T10798: test/every-ci-census-is-asked-before-the-push.test.ts, asked before the push. A diff that moves a test,
@@ -1565,8 +1578,8 @@ export function censusParityViolations({ changed, readHead, readBase = () => nul
   if (baseBaseline !== null && !Array.isArray(baseBaseline)) throw new Error("base CI census baseline is not an array");
   const worker = readHead("scripts/census-precheck.mjs");
   if (worker === null) throw new Error("worker PRECHECK_PARITY source is unavailable");
-  const parity = workerParity(worker);
-  const verdict = precheckParityVerdict({ population: typeof population === "function" ? population() : population, baseline, baseBaseline, parity });
+  const { parity, extras } = workerCensusDeclarations(worker);
+  const verdict = precheckParityVerdict({ population: typeof population === "function" ? population(extras) : population, baseline, baseBaseline, parity });
   return [
     ...verdict.unasked.map((p) => `census-parity: ${p} is a CI census nothing asks before the push — model it in PRECHECK_PARITY (scripts/census-precheck.mjs); ${PRECHECK_PARITY_BASELINE} may only shrink`),
     ...verdict.stale.map((p) => `census-parity: ${p} is baselined but precheck now asks it or CI no longer runs it — delete the row from ${PRECHECK_PARITY_BASELINE}`),
@@ -1836,7 +1849,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     });
     if (!snapshot) {
       violations = [...violations, ...censusParityViolations({ changed, ...readers,
-        population: () => ciCensusPopulation(listCiRuleSuites(root)) })];
+        population: (extras) => ciCensusPopulation(listCiRuleSuites(root), extras) })];
     }
     const instrument = evaluateInstrumentSurface({
       changed,
