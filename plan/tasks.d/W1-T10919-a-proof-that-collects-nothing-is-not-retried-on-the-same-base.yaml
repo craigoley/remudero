@@ -17,6 +17,7 @@
     - src/lib/pr-open.ts
     - src/lib/check-proof.ts
     - src/lib/non-worker-verdict.ts
+    - src/lib/stranded-task-detector.ts
     - src/lib/dispatch-repair.ts
     - src/cli/commands/run-task-verb.ts
     - src/cli/commands/daemon.ts
@@ -78,6 +79,9 @@
        `pr_open.refused` verdict with `refusal_class: "proof-collected-nothing"` is the non-worker
        class `proof_collected_nothing`: excluded from the breaker, never resetting a streak. Keep
        the W1-T7742 contract: rows from before this task carry no class and are left as they were.
+       `nonWorkerVerdictClass` (stranded-task-detector.ts) names it as itself, as it does
+       `proof_inconclusive`, never as a `toolchain` fault, so the breaker-release runbook reads it
+       as the runner's scope.
     4. HOLD through the EXISTING W1-T3959 mechanism, never a second one. At that refusal,
        run-task-verb.ts writes the task's prior-refusal record (dispatch-repair.ts
        `writePriorRefusal`): escalated, `preDispatchContractRevision` = the task's current
