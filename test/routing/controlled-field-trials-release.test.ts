@@ -413,6 +413,28 @@ test("W1-T10843: the registered sol61-vs-sonnet55 epoch is read from the ledger,
   }
 });
 
+test("W1-T10843: an unreadable ledger refuses the registered epoch by name and emits nothing", async () => {
+  const fx = productionFixture();
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}controlled-ledger-unreadable-`));
+  try {
+    const consentPath = join(root, "consent.json");
+    writeFileSync(consentPath, JSON.stringify(CONSENT));
+    const dir = join(root, "out");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "field-trials-github-v1.json"), JSON.stringify(fx.store("complete")));
+    const printed: string[] = [];
+    const code = await fieldTrialsCommand(["--source", "core=craigoley/remudero", "--ledger", `core=${root}`, "--out-dir", dir, "--consent", consentPath,
+      "--offline", "--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", "b".repeat(40)], buildFieldTrialsFlowSnapshot,
+    { nowIso: AS_OF, print: (l) => printed.push(l), printError: () => undefined, readLedger: async () => unavailableLedger("fixture"),
+      resolveConfig: () => ({ root }), readRows: async () => { throw new Error("ledger union unreadable"); } });
+    assert.equal(code, 1, "a refused controlled release fails the command");
+    assert.match(printed.join("\n"), /controlled release refused \(controlled-ledger-read-failed\)/);
+    assert.equal(existsSync(join(dir, "controlled")), false, "no candidate and no sidecar are written");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T10843: no merge-only release before the site accepts secondaries", () => {
   for (const siteAcceptsSecondary of [undefined, false]) {
     const result = buildControlledFieldTrialsRelease({ ...input(), ...(siteAcceptsSecondary === undefined ? { siteAcceptsSecondary: undefined } : { siteAcceptsSecondary }) });
