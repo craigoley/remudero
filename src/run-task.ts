@@ -136,7 +136,7 @@ import {
 } from "./cli/commands/run-task-verb.js";
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
-import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
+import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, resolveVerbPlanRoot, type VerbPlanRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
 export { readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync };
 import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
@@ -13262,8 +13262,10 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
 
   // design (i): trailer → that task's shard, exactly as `reviewCommand` resolves it — falling
   // through to the body block only when the trailer is absent or resolves zero criteria.
-  const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const taskId = reviewTaskIdFromBody(body);
+  // W1-T10925: the trailer's task resolves in the instance's target plan when cwd's lacks it.
+  const located = deps.planPath === undefined && taskId ? verbTaskPlan(taskId) : undefined;
+  const planPath = deps.planPath ?? (located?.ok ? located.planPath : join(repoRoot, "plan", "tasks.yaml"));
   let criteria: AcceptanceCriterion[] = [];
   let declaredFilesForTrailer: string[] = [];
   if (taskId) {
@@ -37089,8 +37091,10 @@ export async function approveCommand(
   const bareTokens = rest.filter((t, i) => !t.startsWith("--") && !(i > 0 && rest[i - 1] === "--note"));
   if (proposalId && bareTokens.length === 1 && namesATask(proposalId)) {
     const config = deps.config ?? loadConfig();
+    // W1-T10925: a consumer task's id is found in the instance's target plan, not the engine's.
+    const located = deps.planPath === undefined ? verbTaskPlan(proposalId, () => join(config.root, "state")) : undefined;
     const outcome = approveParkedTask(proposalId, {
-      plan: loadPlan(planPath),
+      plan: located?.ok ? located.plan : loadPlan(planPath),
       ledgerPath: ledgerPathFor(config),
       // Clock-free BY CONSTRUCTION — and the comment may not NAME the shape it avoids, because
       // clock-signature-census.test.ts counts by SOURCE TEXT, comments included. The row is already
@@ -40403,6 +40407,33 @@ export function bundleExportCommand(
   return 0;
 }
 
+/** W1-T10925: `<config.root>/state` for the target-record lookup — `undefined` when this host has no
+ *  instance config at all, so a read-only verb never creates one just to find a target. */
+function instanceStateDirIfConfigured(): string | undefined {
+  return existsSync(instanceConfigPath()) ? join(loadConfig().root, "state") : undefined;
+}
+
+/** W1-T10925: the plan root (and its loaded plan) a per-task verb acts on — cwd's, or the instance's
+ *  target checkout's when cwd's plan lacks the id. A miss names every plan searched. */
+function verbTaskPlan(taskId: string, stateDir: () => string | undefined = instanceStateDirIfConfigured):
+  (Extract<VerbPlanRoot, { ok: true }> & { plan: Plan; planPath: string }) | Extract<VerbPlanRoot, { ok: false }> {
+  let loaded: Plan | undefined;
+  const located = resolveVerbPlanRoot(taskId, {
+    cwdRoot: repoRoot,
+    stateDir,
+    holds: (root, id) => (loaded = loadPlan(join(root, "plan", "tasks.yaml"))).byId.has(id),
+  });
+  return located.ok ? { ...located, plan: loaded!, planPath: join(located.root, "plan", "tasks.yaml") } : located;
+}
+
+/** W1-T10925: case-file/trace take a root, not a plan — the resolved one for a task id, else cwd's, so a
+ *  feedback id or a batch flag still reaches the verb's own handling. */
+function verbPlanRootOrCwd(id: string | undefined): string {
+  if (id === undefined || id.startsWith("-")) return repoRoot;
+  const located = verbTaskPlan(id);
+  return located.ok ? located.root : repoRoot;
+}
+
 /** `before`/`after` line for `rmd correct` — the operator-facing flip. */
 function describeProjection(label: string, proj: StatusProjection): string {
   const pr = proj.prUrl ? `${proj.prUrl}${proj.prState ? ` (${proj.prState})` : ""}` : "none";
@@ -40429,16 +40460,15 @@ async function correctCommand(rest: string[]): Promise<number> {
     return 2;
   }
 
-  const planPath = join(repoRoot, "plan", "tasks.yaml");
-  const plan = loadPlan(planPath);
-  const task = plan.byId.get(taskId);
-  if (!task) {
-    console.error(`rmd correct: unknown task '${taskId}' (not found in ${planPath})`);
+  const located = verbTaskPlan(taskId);
+  if (!located.ok) {
+    console.error(`rmd correct: unknown task '${taskId}' (${located.error})`);
     return 2;
   }
+  const task = located.plan.byId.get(taskId)!;
 
   const config = loadConfig();
-  const { owner } = resolveOwnerRepo();
+  const owner = located.target?.owner ?? resolveOwnerRepo().owner;
   const github = ghGateway(owner, task.repo);
   const ledgerPath = ledgerPathFor(config);
   const result = applyCorrection(task, prFlag, { ledgerPath, github }, { reason: flagValue(rest, "--reason") });
@@ -40484,13 +40514,13 @@ async function releaseCommand(rest: string[]): Promise<number> {
     return 2;
   }
 
-  const planPath = join(repoRoot, "plan", "tasks.yaml");
-  const plan = loadPlan(planPath);
-  const task = plan.byId.get(taskId);
-  if (!task) {
-    console.error(`rmd release: unknown task '${taskId}' (not found in ${planPath})`);
+  // W1-T10925: in a consumer instance cwd is the ENGINE checkout, whose plan never holds the target's ids.
+  const located = verbTaskPlan(taskId);
+  if (!located.ok) {
+    console.error(`rmd release: unknown task '${taskId}' (${located.error})`);
     return 2;
   }
+  const task = located.plan.byId.get(taskId)!;
 
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
@@ -40503,7 +40533,7 @@ async function releaseCommand(rest: string[]): Promise<number> {
     actor: process.env.USER ?? "operator",
     releasedBy: `operator (\`rmd release ${taskId}\`)`,
     closeIssue: (url, comment) => {
-      const { owner } = resolveOwnerRepo();
+      const owner = located.target?.owner ?? resolveOwnerRepo().owner;
       ghIssueGateway(owner, task.repo).closeWithComment?.(url, comment);
     },
   });
@@ -40610,8 +40640,26 @@ export function progressWatchdogCommand(
 
 export interface ClaimVerbOpts {
   reserver?: DispatchClaimReserver;
-  isPlanned?: (taskId: string) => boolean;
+  /** W1-T10925: builds the reserver for the resolved plan root (default {@link dispatchClaimReserverFor}). */
+  reserverFor?: (repoDir: string) => DispatchClaimReserver;
+  isPlanned?: (taskId: string, repoDir?: string) => boolean;
   localHost?: string;
+  /** W1-T10925: `<config.root>/state` holding the daemon's target record. */
+  stateDir?: string;
+}
+
+/** W1-T10925: the checkout whose origin/main plans the id — cwd's, else the instance's target — so the
+ *  claim ref is reserved on the repository whose daemon reads it. */
+function claimPlanRoot(taskId: string, opts: ClaimVerbOpts): string | undefined {
+  const isPlanned = opts.isPlanned ?? plannedOnOriginMain;
+  const located = resolveVerbPlanRoot(taskId, {
+    cwdRoot: repoRoot,
+    stateDir: opts.stateDir === undefined ? instanceStateDirIfConfigured : () => opts.stateDir,
+    holds: (root, id) => isPlanned(id, root),
+  });
+  if (located.ok) return located.root;
+  console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id (${located.error})`);
+  return undefined;
 }
 
 export function plannedOnOriginMain(taskId: string, dir: string = repoRoot): boolean {
@@ -40637,11 +40685,9 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
     console.error(`rmd claim: '${taskId}' is not a task id`);
     return 2;
   }
-  if (!(opts.isPlanned ?? plannedOnOriginMain)(taskId)) {
-    console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id`);
-    return 1;
-  }
-  const reserver = opts.reserver ?? dispatchClaimReserverFor(repoRoot);
+  const planRoot = claimPlanRoot(taskId, opts);
+  if (planRoot === undefined) return 1;
+  const reserver = opts.reserver ?? (opts.reserverFor ?? dispatchClaimReserverFor)(planRoot);
   const ref = dispatchClaimRef(taskId);
   if (rest.includes("--drop")) {
     const sha = reserver.holder(taskId);
@@ -40722,11 +40768,9 @@ export async function claimHoldCommand(rest: string[], opts: ClaimHoldOpts = {})
     console.error(`rmd claim: '${taskId}' is not a task id, or --interval-ms is not a positive integer`);
     return 2;
   }
-  if (!(opts.isPlanned ?? plannedOnOriginMain)(taskId)) {
-    console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id`);
-    return 1;
-  }
-  const reserver = opts.reserver ?? dispatchClaimReserverFor(repoRoot);
+  const planRoot = claimPlanRoot(taskId, opts);
+  if (planRoot === undefined) return 1;
+  const reserver = opts.reserver ?? (opts.reserverFor ?? dispatchClaimReserverFor)(planRoot);
   const held = takeOrAdoptClaim(taskId, reserver, opts.localHost ?? hostname());
   if (held === undefined) return 1;
   console.log(`holding ${dispatchClaimRef(taskId)} ${held}`);
@@ -42264,7 +42308,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["doctor", async (rest) => await doctorCommand(rest, { repoRoot })],
   ["status", async (rest) => await statusCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
   ["mcp", async (rest) => await operatorMcpCommand(rest, loadConfig(), repoRoot, (deps) => createOperatorMcpServer(deps))],
-  ["case-file", async (rest) => await caseFileCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
+  ["case-file", async (rest) => await caseFileCommand(rest, { usage: USAGE, repoRoot: verbPlanRootOrCwd(rest[0]), resolveOwnerRepo })],
   ["sweep", async (rest) => await sweepCommand(rest)],
   [
     "fix",
@@ -42324,7 +42368,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   [
     "trace",
     async (rest) =>
-      await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot, resolveOwnerRepo }),
+      await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot: verbPlanRootOrCwd(rest[0]), resolveOwnerRepo }),
   ],
   ["peek", async (rest) => await peekCommand(rest)],
   ["pr-owner", (rest) => prOwnerCommand(rest)],

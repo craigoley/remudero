@@ -19,9 +19,9 @@ import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
@@ -66,7 +66,7 @@ import { getHeapStatistics } from "node:v8";
 import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
 import { ledgerMemoHolders } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
-import { type Plan } from "../../lib/plan.js";
+import { loadPlan, type Plan } from "../../lib/plan.js";
 import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
 import { runnerConfigDigest, terminalPreDispatchRefusalRevisions } from "../../lib/dispatch-repair.js";
@@ -276,6 +276,126 @@ export function daemonKickPort(root: string, target: { repo: string; isSelf: boo
  *  daemon, else the target's clone under the config root's `repos/`. */
 export function daemonTargetCheckoutRoot(target: { repo: string; isSelf: boolean }, configRoot: string, selfRoot: string = repoRoot): string {
   return target.isSelf ? selfRoot : join(configRoot, "repos", target.repo);
+}
+
+/** W1-T10925: what the daemon wrote at boot about the repository it drains. */
+export interface DaemonTargetRecord { owner: string; repo: string; isSelf: boolean; checkoutRoot: string }
+
+export function daemonTargetRecordPath(stateDir: string): string {
+  return join(stateDir, "daemon-target.json");
+}
+
+/** W1-T10925: written at boot under `<config.root>/state`, so a verb run with `docker exec` in this
+ *  instance can find the target's checkout. The daemon's launch argv is not visible to that verb. */
+export function writeDaemonTargetRecord(stateDir: string, record: DaemonTargetRecord): void {
+  const path = daemonTargetRecordPath(stateDir);
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(`${path}.${process.pid}.tmp`, JSON.stringify(record, null, 2) + "\n");
+  renameSync(`${path}.${process.pid}.tmp`, path);
+}
+
+export type DaemonTargetRecordRead =
+  | { kind: "absent" }
+  | { kind: "unreadable"; reason: string }
+  | { kind: "record"; record: DaemonTargetRecord };
+
+/** An absent or malformed record means "no target", never a guess from the `repos/` listing. */
+export function readDaemonTargetRecord(stateDir: string): DaemonTargetRecordRead {
+  const path = daemonTargetRecordPath(stateDir);
+  let raw: string | undefined;
+  try {
+    raw = readFileIfExists(path);
+  } catch (e) {
+    return { kind: "unreadable", reason: `${path}: ${(e as Error).message}` };
+  }
+  if (raw === undefined) return { kind: "absent" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { kind: "unreadable", reason: `${path}: ${(e as Error).message}` };
+  }
+  const r = parsed as Partial<DaemonTargetRecord> | null;
+  if (r === null || typeof r !== "object" || typeof r.owner !== "string" || typeof r.repo !== "string" ||
+    typeof r.isSelf !== "boolean" || typeof r.checkoutRoot !== "string" || r.checkoutRoot === "") {
+    return { kind: "unreadable", reason: `${path}: not an {owner, repo, isSelf, checkoutRoot} record` };
+  }
+  return { kind: "record", record: { owner: r.owner, repo: r.repo, isSelf: r.isSelf, checkoutRoot: r.checkoutRoot } };
+}
+
+export interface VerbPlanRootInput {
+  /** The verb's argv; an explicit `--repo-root <path>` in it wins outright. */
+  argv?: string[];
+  /** The cwd toplevel (`repoRoot`). */
+  cwdRoot?: string;
+  /** `<config.root>/state`, where the daemon's target record lives; read only once (b) misses.
+   *  `undefined` means this host has no instance config, so no target. */
+  stateDir: () => string | undefined;
+  /** Does the plan at this checkout root hold the id? Defaults to the checkout's `plan/tasks.yaml` + shards. */
+  holds?: (root: string, taskId: string) => boolean;
+}
+
+export type VerbPlanRoot =
+  | { ok: true; root: string; via: "repo-root" | "cwd" | "target"; target?: DaemonTargetRecord }
+  | { ok: false; searched: string[]; error: string };
+
+function planHoldsTask(root: string, taskId: string): boolean {
+  return loadPlan(join(root, "plan", "tasks.yaml")).byId.has(taskId);
+}
+
+/**
+ * W1-T10925 — THE PLAN ROOT A PER-TASK OPERATOR VERB ACTS ON. Precedence:
+ *   (a) an explicit `--repo-root` wins, as before (the only plan searched);
+ *   (b) the cwd toplevel, when its plan holds the id;
+ *   (c) the instance's TARGET checkout from the daemon's boot record, when (b) misses and the record
+ *       names a non-self target.
+ * A self-targeting record, or none at all, resolves exactly as before. A miss names every plan
+ * searched, plus the `--repo-root` the target record names.
+ */
+export function resolveVerbPlanRoot(taskId: string, input: VerbPlanRootInput): VerbPlanRoot {
+  const argv = input.argv ?? process.argv.slice(2);
+  const holds = input.holds ?? planHoldsTask;
+  const searched: string[] = [];
+  const tryRoot = (root: string): boolean => {
+    const label = join(root, "plan", "tasks.yaml");
+    try {
+      if (holds(root, taskId)) return true;
+      searched.push(label);
+    } catch (e) {
+      searched.push(`${label} (unreadable: ${(e as Error).message})`);
+    }
+    return false;
+  };
+  let read: DaemonTargetRecordRead | undefined;
+  const targetRecord = (): DaemonTargetRecordRead => {
+    if (read !== undefined) return read;
+    let stateDir: string | undefined;
+    try {
+      stateDir = input.stateDir();
+    } catch (e) {
+      return (read = { kind: "unreadable", reason: `instance config: ${(e as Error).message}` });
+    }
+    return (read = stateDir === undefined ? { kind: "absent" } : readDaemonTargetRecord(stateDir));
+  };
+  const nonSelf = (r: DaemonTargetRecordRead) => r.kind === "record" && !r.record.isSelf ? r.record : undefined;
+  const flagIdx = argv.indexOf("--repo-root");
+  const explicit = flagIdx >= 0 && argv[flagIdx + 1] !== undefined ? resolve(argv[flagIdx + 1]!) : undefined;
+  if (explicit !== undefined) {
+    if (tryRoot(explicit)) return { ok: true, root: explicit, via: "repo-root" };
+  } else {
+    const cwdRoot = input.cwdRoot ?? repoRoot;
+    if (tryRoot(cwdRoot)) return { ok: true, root: cwdRoot, via: "cwd" };
+    const target = nonSelf(targetRecord());
+    if (target !== undefined && resolve(target.checkoutRoot) !== resolve(cwdRoot) && tryRoot(target.checkoutRoot)) {
+      return { ok: true, root: target.checkoutRoot, via: "target", target };
+    }
+  }
+  const record = targetRecord();
+  const target = nonSelf(record);
+  const hint = target !== undefined
+    ? `; this instance targets ${target.owner}/${target.repo} — read its plan with --repo-root ${target.checkoutRoot}`
+    : record.kind === "unreadable" ? `; no instance target (record unreadable: ${record.reason})` : "";
+  return { ok: false, searched, error: `not found in ${searched.join(", ")}${hint}` };
 }
 
 /**
@@ -757,6 +877,11 @@ export async function daemonCommand(
   let tickReadGeneration: ReadGeneration<TickReadFacts> | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
   const targetCheckoutRoot = daemonTargetCheckoutRoot(target, config.root);
+  try {
+    writeDaemonTargetRecord(join(config.root, "state"), { owner: target.owner, repo: target.repo, isSelf: target.isSelf, checkoutRoot: targetCheckoutRoot });
+  } catch (e) {
+    log("daemon.target_record_failed", { reason: (e as Error).message });
+  }
   const targetCommitTrailerIndex = () =>
     buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot })();
   const gatewayFor = createDaemonGatewayFactory(config.root, log, {
