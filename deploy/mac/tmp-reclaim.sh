@@ -257,6 +257,28 @@ symlink_risk() {
   return 1
 }
 
+# Keep rules protect a matching entry, its contents, and any tree removed with it.
+kept_name_risk() {
+  local path="$1" parent keep_name found status names=()
+  case "$path" in /*) ;; *) path="$ROOT_REAL/${path#./}" ;; esac
+  parent="$path"
+  while [ "$parent" != / ]; do
+    for keep_name in "${KEEP_NAMES[@]}"; do
+      # shellcheck disable=SC2254 # keep names are globs by design
+      case "${parent##*/}" in $keep_name) echo "kept host-service name ($keep_name)"; return 0 ;; esac
+    done
+    parent=${parent%/*}; [ -n "$parent" ] || parent=/
+  done
+  for keep_name in "${KEEP_NAMES[@]}"; do
+    [ "${#names[@]}" -eq 0 ] || names+=(-o)
+    names+=(-name "$keep_name")
+  done
+  found=$(find "$path" -xdev \( "${names[@]}" \) -print -quit 2>/dev/null); status=$?
+  [ "$status" -eq 0 ] || { echo 'keep-name scan unavailable'; return 0; }
+  [ -z "$found" ] || { echo "contains kept host-service name: $found"; return 0; }
+  return 1
+}
+
 # Print a reason and return success if a path must be retained.
 artifact_risk() {
   local path="$1" found status owner_name structure_only="${2:-0}"
@@ -264,6 +286,7 @@ artifact_risk() {
   [ ! -L "$path" ] || { echo 'symbolic link'; return 0; }
   owner_name=$(owner "$path" 2>/dev/null)
   [ "$owner_name" = "$ME" ] || { echo "owned by ${owner_name:-unknown}"; return 0; }
+  if found=$(kept_name_risk "$path"); then echo "$found"; return 0; fi
   found=$(find "$path" -xdev ! -user "$ME" -print -quit 2>/dev/null); status=$?
   [ "$status" -eq 0 ] || { echo 'ownership scan unavailable'; return 0; }
   [ -z "$found" ] || { echo "contains foreign-owned content: $found"; return 0; }
@@ -276,10 +299,6 @@ artifact_risk() {
   case "${path##*/}" in
     claude-*|com.apple.*|launchd*|powerlog|.X*|.font-unix|.ICE-unix) echo 'protected Claude/macOS temp name'; return 0 ;;
   esac
-  for keep_name in "${KEEP_NAMES[@]}"; do
-    # shellcheck disable=SC2254 # keep names are globs by design
-    case "${path##*/}" in $keep_name) echo "kept host-service name ($keep_name)"; return 0 ;; esac
-  done
   case "${path##*/}" in
     .env|.env.*|*password*|*secret*|*token*|*credential*|*keychain*|*.pem|*.p12|*.pfx|*.keytab|id_rsa*|id_ed25519*) echo 'credential-like filename'; return 0 ;;
     *.log)
@@ -351,6 +370,7 @@ prune_tsx_cache() {
   if [ "$owner_name" != "$ME" ]; then
     TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk "TSX cache owned by ${owner_name:-unknown}" "$dir"; return 0
   fi
+  if active=$(kept_name_risk "$dir"); then report_risk "$active" "$dir"; return 0; fi
   if [ "$strict" = 1 ]; then
     parent="$dir"
     while [ "$parent" != / ]; do
@@ -399,8 +419,9 @@ prune_tsx_cache() {
 }
 
 prune_node_compile_cache() {
-  local dir="$1" resolved mode
+  local dir="$1" resolved mode why
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  if why=$(kept_name_risk "$dir"); then report_risk "$why" "$dir"; return 0; fi
   if [ ! -f "$SEED_GUARD_DIR/cache-reclaim.py" ] || ! command -v python3 >/dev/null 2>&1; then
     report_risk 'Node compile-cache helper unavailable; no generic fallback' "$dir"; return 0
   fi

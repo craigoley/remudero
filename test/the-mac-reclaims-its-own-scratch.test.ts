@@ -90,9 +90,9 @@ function fixture(): Fixture {
   return { base, root, sessions, cwds, open, lsof, bin, cron };
 }
 
-function reclaim(fx: Fixture, freePct: number, apply = true, extra: Record<string, string> = {}): { out: string; report: string } {
+function reclaim(fx: Fixture, freePct: number, apply = true, extra: Record<string, string> = {}, options: string[] = []): { out: string; report: string } {
   const report = join(fx.base, "kept.txt");
-  const r = spawnSync("bash", [SCRIPT, ...(apply ? ["--apply"] : [])], {
+  const r = spawnSync("bash", [SCRIPT, ...(apply ? ["--apply"] : []), ...options], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -685,20 +685,85 @@ test("an unexplained lsof warning keeps the path", () => {
 test("host-service names and the account keep list are never reclaimed", () => {
   const fx = fixture();
   try {
-    for (const name of ["openclaw", "ollama", "podcast-discovery-cache", "old-scratch"]) {
-      mkdirSync(join(fx.root, name));
+    const kept = ["openclaw", "ollama", "podcast-discovery-cache", "outer/openclaw-worker",
+      "mixed/ollama-models", "mixed/podcast-cache"];
+    for (const name of [...kept, "old-scratch"]) {
+      mkdirSync(join(fx.root, name), { recursive: true });
       writeFileSync(join(fx.root, name, "f"), "x");
     }
     writeFileSync(join(fx.base, "keep.txt"), "# extra names\n\npodcast-*\n");
     age(fx.root, HOURS_AGO(8));
+    writeFileSync(join(fx.root, "mixed", "fresh.txt"), "recent sibling\n");
     const { out } = reclaim(fx, 40);
-    for (const name of ["openclaw", "ollama", "podcast-discovery-cache"]) {
+    for (const name of kept) {
       assert.ok(existsSync(join(fx.root, name, "f")), name + ": " + out);
     }
     assert.match(out, /kept host-service name \(podcast-\*\)/);
     assert.ok(!existsSync(join(fx.root, "old-scratch")), out);
   } finally {
     rmSync(fx.base, { recursive: true, force: true });
+  }
+});
+
+test("host-service names and the account keep list are never reclaimed during cache cleanup", () => {
+  for (const options of [[], ["--tsx-only"]]) {
+    const fx = fixture();
+    try {
+      const hash = `17920-${"a".repeat(40)}`;
+      const keptCaches = [
+        join(fx.root, "tsx-701"), join(fx.root, "rt", "tsx-702"),
+        join(fx.root, "job", "tsx-703"), join(fx.base, "tsx-704"),
+        ...["openclaw-worker", "ollama-runtime", "podcast-cache"].map(name =>
+          join(fx.root, name, "deep", "tsx-801")),
+      ];
+      const control = join(fx.root, "tsx-999");
+      for (const cache of [...keptCaches, control]) {
+        mkdirSync(cache, { recursive: true });
+        writeFileSync(join(cache, hash), "compiled cache\n");
+      }
+      const nodeCaches = [join(fx.root, "node-compile-cache"),
+        join(fx.root, "rt", "node-compile-cache"), join(fx.base, "node-compile-cache")];
+      for (const cache of nodeCaches) {
+        mkdirSync(cache, { recursive: true });
+        writeFileSync(join(cache, "old-cache"), "node compiled cache\n");
+      }
+      const calls = join(fx.base, "python-calls.txt");
+      const python = sh(fx.base, "sh", "-c", "command -v python3").trim();
+      // Observe delegation too: real kernel ctime could otherwise hide a bypass.
+      writeFileSync(join(fx.bin, "python3"), [
+        `#!${process.execPath}`,
+        `require("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)));`,
+        `const r = require("node:child_process").spawnSync(${JSON.stringify(python)}, process.argv.slice(2), { stdio: "inherit" });`,
+        "process.exit(r.status ?? 1);",
+      ].join("\n") + "\n", { mode: 0o755 });
+      writeFileSync(join(fx.base, "keep.txt"), "# extra names\n\npodcast-*\ntsx-70?\nnode-compile-cache\n");
+      age(fx.root, HOURS_AGO(8));
+      for (const cache of [keptCaches[3]!, nodeCaches[2]!]) age(cache, HOURS_AGO(8));
+
+      const { out, report } = reclaim(fx, 40, true, {}, options);
+      for (const cache of keptCaches) {
+        assert.equal(readFileSync(join(cache, hash), "utf8"), "compiled cache\n", cache + out);
+      }
+      for (const cache of nodeCaches) {
+        assert.equal(readFileSync(join(cache, "old-cache"), "utf8"), "node compiled cache\n");
+      }
+      assert.equal(existsSync(calls), false, "kept Node caches never reach the removal helper: " + out);
+      if (options.length === 0) {
+        assert.equal(existsSync(join(control, hash)), false, "unkept TSX content is reclaimed: " + out);
+      }
+      // Require the keep decision for each discovered path so another safety
+      // gate cannot silently mask a missing keep check during discovery.
+      for (const cache of keptCaches.filter(cache => cache.startsWith(fx.root + "/"))) {
+        assert.ok(report.split("\n").some(line => line.startsWith("kept host-service name (") &&
+          line.endsWith(" | " + realpathSync(cache))), "discovery applies the keep rule to " + cache + ": " + report);
+      }
+      assert.match(report, /kept host-service name \(tsx-70\?\)/);
+      assert.match(report, /kept host-service name \(openclaw\*\)/);
+      assert.match(report, /kept host-service name \(ollama\*\)/);
+      assert.match(report, /kept host-service name \(podcast-\*\)/);
+    } finally {
+      rmSync(fx.base, { recursive: true, force: true });
+    }
   }
 });
 
