@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
   BOOTSTRAP_CHECKS, bootstrapConfirmed, bootstrapEvidenceId, ghProductBuildTarget, productBuildKickOrigin, productPlanOrigin, ProductBuildService,
   fileTargetJobStore, readTargetExecution, registryDaemonRoot, starterEvidenceId,
   type BootstrapRead, type BuildObservation, type BuildTask, type ExecutionQuery, type ProductBuildOptions, type ProductBuildTarget, type TargetInspection, type TaskRead,
 } from "#src/lib/product-build.js";
-import { createNativeTargetJobRunner, daemonKickPort, daemonTargetJobPort } from "#src/cli/commands/daemon.js";
+import { createNativeTargetJobRunner, daemonCommand, daemonKickPort, daemonTargetJobPort } from "#src/cli/commands/daemon.js";
 import { runDrain, type DrainOpts, type TargetJobRecord } from "#src/lib/drain.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
-import { runDaemon } from "#src/lib/daemon.js";
+import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { daemonGitCredentialSocketPath } from "#src/lib/secret-boundary.js";
+import type { GitHub } from "#src/lib/status.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { requestKick } from "#src/lib/fleet-control.js";
 import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
 import { DEFAULT_LIVENESS_BOUND_MS } from "#src/lib/non-worker-verdict.js";
@@ -726,7 +730,8 @@ function nativeFixture(t: TestContext, registry = CORE_ONLY) {
     appendLedger(ledgerPath, { run_id: "DAEMON-1", task_id: "DAEMON", step, lane: "daemon", ...extra });
   };
   const calls = { runTask: [] as string[], drains: [] as DrainOpts[], claims: [] as string[], durable: [] as string[][] };
-  const state = { claimHeld: false as boolean | undefined, syncError: undefined as string | undefined, daemonDeps: {} as Record<string, unknown> };
+  const state = { claimHeld: false as boolean | undefined, syncError: undefined as string | undefined, daemonDeps: {} as Record<string, unknown>,
+    drainThrows: undefined as "before" | "after" | undefined };
   const runner = createNativeTargetJobRunner({
     root: core, repoRoot: checkout, log, nowMs: () => Date.now(), instances: { registryPath },
     planPathFor: (_owner, repo) => (repo === "wreckterra" ? planFile : undefined),
@@ -742,7 +747,12 @@ function nativeFixture(t: TestContext, registry = CORE_ONLY) {
       return { taskId, runId, merged: true, costUsd: 0, verdict: "merged" };
     },
     claimHeld: async (taskId) => { calls.claims.push(taskId); return state.claimHeld; },
-    runDrain: (plan, deps, opts) => { calls.drains.push(opts ?? {}); return runDrain(plan, deps, opts); },
+    runDrain: async (plan, deps, opts) => {
+      calls.drains.push(opts ?? {});
+      if (state.drainThrows === "before") throw new Error("drain unavailable");
+      if (state.drainThrows === "after") { await deps.runOne("W9-T1"); throw new Error("drain crashed"); }
+      return runDrain(plan, deps, opts);
+    },
   });
   const service = new ProductBuildService(options);
   /** One real daemon pass over the CORE daemon's own bindings: its kick port, the target-job port and the runner. */
@@ -902,6 +912,122 @@ test("W1-T10799: native receipts distinguish queued admitted running and refused
   const refusedJob = unknown.record(third.origin);
   assert.ok(refusedJob.state === "found" && refusedJob.record.status === "refused");
   assert.ok(!existsSync(nativeMarker(unknown.core, "wreckterra", "W9-T1")));
+});
+
+test("W1-T10799: a drain that throws holds the job open and keeps its marker", async (t) => {
+  const before = nativeFixture(t);
+  const request = await nativeStarted(before);
+  before.state.drainThrows = "before";
+  const failed = await before.drive();
+  const errored = failed.lines.find((line) => line.step === "target_job.error");
+  assert.equal(errored?.extra.reason, "drain failed: drain unavailable", "a drain that never started names its own failure");
+  assert.deepEqual(before.calls.runTask, [], "nothing was dispatched");
+  assert.equal(before.record(request.origin).state, "absent", "no dispatch, so no durable job record: the job is still only queued");
+  assert.ok(existsSync(nativeMarker(before.core, "wreckterra", "W9-T1")), "a failed read of the world is never a terminal verdict");
+  assert.equal(await nativeOutcome(before), "queued");
+
+  const after = nativeFixture(t);
+  const started = await nativeStarted(after);
+  after.state.drainThrows = "after";
+  const crashed = await after.drive();
+  assert.equal(crashed.lines.find((line) => line.step === "target_job.error")?.extra.reason, "drain failed after dispatch: drain crashed",
+    "a drain that threw after the dispatch landed says so");
+  const landed = after.record(started.origin);
+  assert.ok(landed.state === "found" && landed.record.status !== "refused" && landed.record.attempts >= 1, "the dispatch that did land is on the durable record");
+  assert.ok(after.calls.runTask.length >= 1, "the one kicked task did dispatch before the drain threw");
+});
+
+const OFFLINE_GITHUB: GitHub = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
+
+// The core daemon's OWN composition root, not a hand-wired runner: it binds the job to the target clone, reads the
+// target's dispatch claim from that clone's origin, and hands the job's worker the daemon's one credential socket.
+test("W1-T10799: the core daemon's own wiring runs the job over the target clone, its claim and its credential socket", async (t) => {
+  const root = ownedFixtureDir(t, "bounded-target-daemon").dir;
+  const home = join(root, "home");
+  const coreRoot = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root: coreRoot }));
+  mkdirSync(join(coreRoot, "state"), { recursive: true });
+  const selfPlan = join(root, "self-plan.yaml");
+  writeFileSync(selfPlan, "[]\n");
+
+  // The target's origin carries its own plan; its clone sits where the core daemon keeps managed clones.
+  const origin = gitRepo({ bare: true, scope: t, kind: "bounded-job-origin" });
+  const seed = gitRepo({ seedCommit: false, scope: t, kind: "bounded-job-seed" });
+  seed.addRemote("origin", origin.dir);
+  mkdirSync(join(seed.dir, "plan"));
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), nativeTargetPlan("prd_x"));
+  seed.git("add", "-A");
+  seed.git("commit", "-q", "-m", "seed");
+  seed.git("push", "-q", "-u", "origin", "main");
+  const checkout = join(root, "checkout");
+  execFileSync("git", ["clone", "-q", origin.dir, checkout], { stdio: "pipe" });
+  mkdirSync(join(checkout, ".remudero"));
+  writeFileSync(join(checkout, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra", "craigoley/gammaterra"] }));
+  writeFileSync(join(checkout, ".remudero", "daemon-instances.yaml"), CORE_ONLY);
+  const reposDir = join(coreRoot, "repos");
+  mkdirSync(reposDir);
+  execFileSync("git", ["clone", "-q", origin.dir, join(reposDir, "wreckterra")], { stdio: "pipe" });
+  // A clone whose `.git` is a symlink is one the pinned host git refuses to read: its claim is unknown, never free.
+  mkdirSync(join(reposDir, "gammaterra"));
+  symlinkSync(join(reposDir, "wreckterra", ".git"), join(reposDir, "gammaterra", ".git"));
+
+  // Both jobs already dispatched once, so each must recover from its durable record and its claim, never respend blindly.
+  const origins: Record<string, string> = { wreckterra: "product:prd_x/op_1", gammaterra: "product:prd_x/op_2" };
+  const store = fileTargetJobStore(coreRoot);
+  for (const repo of Object.keys(origins)) {
+    store.write({ origin: origins[repo]!, taskId: "W9-T1", repo, status: "admitted", attempts: 1, updatedAt: new Date().toISOString() });
+  }
+
+  const socketPath = daemonGitCredentialSocketPath(join(coreRoot, "state"));
+  const previous = { HOME: process.env.HOME, CI: process.env.CI, GITHUB_ACTIONS: process.env.GITHUB_ACTIONS };
+  process.env.HOME = home;
+  delete process.env.CI;
+  delete process.env.GITHUB_ACTIONS;
+  const outcomes: Record<string, unknown> = {};
+  const taskCalls: Array<{ taskId: string; opts: Record<string, unknown> }> = [];
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", selfPlan, "--max", "0"], {
+      repoRoot: checkout,
+      githubFactory: () => OFFLINE_GITHUB,
+      startGithubAppRefresh: () => ({ armed: true, ready: Promise.resolve() }),
+      gitCredentialMint: async (repo: string) => ({ ok: true, token: `scoped-for-${repo}` }),
+      runTask: (async (taskId: string, opts: Record<string, unknown>) => {
+        taskCalls.push({ taskId, opts });
+        return { taskId, runId: `${taskId}-wired`, merged: true, costUsd: 0, verdict: "merged" };
+      }) as never,
+      runDaemon: (async (_plan: unknown, daemonDeps: DaemonDeps) => {
+        for (const repo of ["wreckterra", "gammaterra"]) {
+          outcomes[repo] = await daemonDeps.runTargetJob!({ taskId: "W9-T1", origin: origins[repo]!, repo }, {} as DaemonDeps);
+        }
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      }) as never,
+    });
+    assert.equal(code, 0);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dirname(socketPath), { recursive: true, force: true });
+  }
+
+  // A claim the target's origin does not hold is free: the one job entered the maintained drain and ended.
+  assert.equal((outcomes.wreckterra as { state: string }).state, "ended", "a readable, absent claim lets the recovered job dispatch once");
+  assert.deepEqual(taskCalls.map((call) => call.taskId), ["W9-T1"], "exactly one dispatch across both recovered jobs");
+  assert.equal(taskCalls[0]!.opts.planPath, join(reposDir, "wreckterra", "plan", "tasks.yaml"), "the target clone's own plan, derived as resolveDaemonTarget derives it");
+  assert.equal(taskCalls[0]!.opts.owner, "craigoley", "bound to the verified target owner");
+  assert.equal(taskCalls[0]!.opts.gitCredentialSocketPath, socketPath, "the job's worker gets the daemon's one credential socket");
+  const ended = store.read(origins.wreckterra!);
+  assert.ok(ended.state === "found" && ended.record.status === "ended");
+
+  // A claim that cannot be read is unknown: the job resumes from its record and is never dispatched a second time.
+  assert.equal((outcomes.gammaterra as { state: string }).state, "resumed", "an unreadable claim is held, never read as free");
+  const resumed = store.read(origins.gammaterra!);
+  assert.ok(resumed.state === "found" && resumed.record.status === "admitted" && resumed.record.reason === "resumed");
+  const ledger = readFileSync(join(coreRoot, "state", "ledger.ndjson"), "utf8").split("\n").filter((line) => line.includes("target_job.resumed"));
+  assert.equal(ledger.length, 1, "the resumption is ledgered once");
+  assert.ok(ledger[0]!.includes('"claim":"unknown"'), "and it records that the claim could not be read");
 });
 const nativeOutcome = async (f: ReturnType<typeof nativeFixture>) => { const result = await f.service.execute(actor, f.command()); assert.ok(result.ok); return result.value.receipt.outcome; };
 const nativeKickMarkers = (core: string) => readdirSync(join(core, "state")).filter((name) => name.startsWith("KICK_REQUESTED-"));

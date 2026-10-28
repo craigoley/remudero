@@ -1747,7 +1747,7 @@ export async function daemonCommand(
         ...(target.isSelf ? {
           ...daemonTargetJobPort(config.root, target),
           runTargetJob: createNativeTargetJobRunner({
-            root: config.root, repoRoot, log, nowMs: deps.now ?? Date.now,
+            root: config.root, repoRoot: effectiveRepoRoot, log, nowMs: deps.now ?? Date.now,
             planPathFor: (owner, repo) => {
               const resolvedJob = resolveDaemonTarget({ selfOwner: self.owner, selfRepo: self.repo, repoRoot: effectiveRepoRoot, reposDir }, ["--repo", `${owner}/${repo}`]);
               return "error" in resolvedJob ? undefined : resolvedJob.target.planPath;
