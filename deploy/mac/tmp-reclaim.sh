@@ -232,6 +232,8 @@ symlink_risk() {
       if [ "$cleanup_root" = /private/tmp ]; then
         case "$target_path" in /tmp/*) target_path="/private/tmp/${target_path#/tmp/}" ;; esac
       fi
+      # A dangling link into a part of this same tree that is already gone is removed with it.
+      case "$target_path" in "$candidate"/*) [ -e "$target_path" ] || [ -L "$target_path" ] || continue ;; esac
       target_parent=$(cd "$(dirname "$target_path")" 2>/dev/null && pwd -P) || { echo "symlink target parent unavailable: $link -> $target"; exit 1; }
       target_real="$target_parent/${target_path##*/}"
       [ ! -L "$target_path" ] || { echo "symlink chain is unverified: $link -> $target"; exit 1; }

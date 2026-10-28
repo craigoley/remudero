@@ -701,3 +701,22 @@ test("host-service names and the account keep list are never reclaimed", () => {
     rmSync(fx.base, { recursive: true, force: true });
   }
 });
+
+test("a dangling link into a removed part of the same scratch tree does not keep it", () => {
+  // rmd copy-on-write fixtures leave `<wt>-linked/node_modules -> <tree>/<wt>/node_modules` after <wt> is gone.
+  const fx = fixture();
+  try {
+    const tree = join(fx.root, "w1-fixture");
+    mkdirSync(join(tree, "wt-linked"), { recursive: true });
+    symlinkSync(join(realpathSync(fx.root), "w1-fixture", "wt", "node_modules"), join(tree, "wt-linked", "node_modules"));
+    const outside = join(fx.root, "w2-fixture");
+    mkdirSync(join(outside, "wt-linked"), { recursive: true });
+    symlinkSync(join(fx.base, "gone", "node_modules"), join(outside, "wt-linked", "node_modules"));
+    age(fx.root, HOURS_AGO(8));
+    const { out } = reclaim(fx, 40);
+    assert.ok(!existsSync(tree), out);
+    assert.ok(existsSync(outside), "a dangling link out of the tree still keeps it: " + out);
+  } finally {
+    rmSync(fx.base, { recursive: true, force: true });
+  }
+});
