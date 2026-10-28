@@ -28,7 +28,7 @@ import type { OpenPrView } from "../src/lib/sweep.js";
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import type { WorkerResult } from "../src/lib/worker.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { withGhShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import {
   buildSweepEffects,
@@ -260,17 +260,19 @@ test("selected recycler default child checks the original parent digest and phys
 
 test("selected supervisor hands immutable private identity only to its trusted recycler and redacts failures", async () => {
   const fixture = runtimeRegistryFixture(), calls: string[][] = [];
+  const callerKinds: Array<string | undefined> = [];
   const stateRoot = join(fixture.root, "selected-state");
   writeFileSync(fixture.selected, registry("shadow") + `    state_dir: ${stateRoot}\n    container_name: selected-container\n`);
   try {
     await runtimeRegistryRunner()(() => {
       const options: Parameters<typeof realDeployDeps>[0] = { installPath: fixture.root, stateRoot, daemonLabel: "fixture", serveLabel: "fixture-serve",
         servePort: 1, uid: 1, ledgerPath: join(stateRoot, "unused"), log: () => {},
-        execFile: (cmd: string, args: string[]) => { calls.push([cmd, ...args]); return ""; } };
+        execFile: (cmd, args, execOptions) => { calls.push([cmd, ...args]); callerKinds.push(execOptions?.env.RMD_RECYCLE_CALLER); return ""; } };
       const deps = realDeployDeps(options), recycler = deps.restartBackends!().find(b => b.name === "recycle-container")!;
       options.instance = "retargeted";
       recycler.restart();
       const command = calls.at(-1)!;
+      assert.equal(callerKinds.at(-1), "deploy-tick", "selected binding preserves the real recycler caller attribution");
       assert.ok(command.includes("worker"), "selected bytes, not the healthy public row, name the target");
       assert.ok(command.includes(fixture.selected), "only this trusted host launcher receives the private selection");
       assert.ok(command.some(arg => /^[a-f0-9]{64}$/.test(arg)), "the original digest/physical binding survives the handoff");
@@ -1211,7 +1213,7 @@ test("private registry selection preserves owner holds and private-safe boundari
   seed.git("commit", "-qm", "test: seed"); seed.git("push", "-q", "origin", "main");
   mkdirSync(join(root, "repos")); git(["clone", "-q", origin.dir, repoDir]);
   for (const args of [["user.name", "selected-mode-fixture"], ["user.email", "selected@example.invalid"]]) git(["-C", repoDir, "config", ...args]);
-  const shim = ghShim([
+  return withGhShim([
     { when: "--json headRefName", stdout: JSON.stringify({ headRefName: branch }) },
     { when: "--json body", stdout: JSON.stringify({ body: "Remudero-Task: T-SELECTED" }) },
     { when: "--json files", stdout: JSON.stringify({ files: [{ path: "src/lib/daemon.ts" }] }) },
@@ -1219,55 +1221,56 @@ test("private registry selection preserves owner holds and private-safe boundari
     { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
     { when: "api repos/owner/remudero/pulls/1/files", stdout: "[]" },
     { when: "api repos/owner/remudero/pulls/1", stdout: JSON.stringify({ number: 1, state: "closed", merged: true, merged_at: new Date(now).toISOString(), head: { sha: head } }) },
-  ]);
-  const previous = { path: process.env.PATH, registry: process.env.RMD_INSTANCE_REGISTRY, name: process.env.RMD_INSTANCE_NAME };
-  process.env.PATH = `${shim.dir}:${previous.path}`; delete process.env.RMD_INSTANCE_REGISTRY; delete process.env.RMD_INSTANCE_NAME;
-  const clock = t.mock.method(Date, "now", () => now);
-  let spawned = 0;
-  try {
-    const selectedConfig: Config = { root, claudeBin: "/bin/true", installRoot: SELECTED_INSTALL_ROOT,
-      selectedRegistryMode: { mode: "shadow", instanceName: "fixture", registryPath: selected } };
-    const sweepRows: Array<Record<string, unknown>> = [];
-    const effects = buildSweepEffects({ owner: "owner", repo: "remudero", config: selectedConfig,
-      ledgerPath: join(root, "state", "ledger.ndjson"), runId: "selected-sweep", plan: { tasks: [], byId: new Map() } as Plan,
-      instanceRegistryTextImpl: () => undefined, armImpl: async () => "armed" as const,
-      log: (step, fields = {}) => { if (step === "instance_mode.shadow_observed") sweepRows.push(fields); } });
-    assert.equal(await effects.arm({ prUrl: "https://github.com/owner/remudero/pull/1", prNumber: 1,
-      taskId: "T-SELECTED", headSha: head } as OpenPrView), "armed");
-    assert.equal(sweepRows.at(-1)?.selected_outcome, "would-shadow", "real sweep construction and selected filesystem control");
-    const res = await withLiveWritesAllowed(() => runTask("T-SELECTED", {
-      owner: "owner", skipGitSync: true, planPath,
-      config: selectedConfig,
-      github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
-      spawn: async () => {
-        spawned++;
-        return { sessionId: `selected-${spawned}`, costUsd: 0, numTurns: 0,
-          text: spawned === 1 ? "RECON REPORT\nOBSERVED: fixture\nINFERRED: none\nCOULDN'T-VERIFY: none\n"
-            : spawned === 2 ? "REPORT\nPR_URL: https://github.com/owner/remudero/pull/1\n"
-            : "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95\nRISK_REASON: fixture\n",
-          blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
-          model: "default", effort: "default", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
-          modelUsage: {}, compactionEvents: [], qualitySuspect: false } satisfies WorkerResult;
-      },
-      containmentExec: async token => ({ transcript: `touch ../${token}.txt: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
-      isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
-      runReview: async () => {
-        writeFileSync(selected, selectedText("live"));
-        return { state: "success", criteria: [], testTheater: false, summary: "fixture pass", floorDegraded: false,
-          capped: false, keywordOnly: false, planOnly: false, headSha: head, reviewerOutcome: "success" };
-      },
-    }));
-    assert.equal(res.verdict, "merged", "the contained independent legacy run still finishes normally");
-    const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
-    const observed = rows.filter(row => row.step === "instance_mode.shadow_observed");
-    assert.ok(observed.length > 0, "the REAL runTaskBody deferred arm must carry the original selected binding");
-    assert.ok(observed.some(row => row.reason === "revision_changed" && row.selected_outcome === "would-refuse"));
-    assert.ok(observed.every(row => row.publication_permission === "not-granted"));
-  } finally {
-    clock.mock.restore(); process.env.PATH = previous.path;
-    if (previous.registry === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = previous.registry;
-    if (previous.name === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = previous.name;
-    rmSync(shim.dir, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
-    seed.cleanup(); origin.cleanup();
-  }
+  ], async () => {
+    const previous = { registry: process.env.RMD_INSTANCE_REGISTRY, name: process.env.RMD_INSTANCE_NAME };
+    delete process.env.RMD_INSTANCE_REGISTRY; delete process.env.RMD_INSTANCE_NAME;
+    const clock = t.mock.method(Date, "now", () => now);
+    let spawned = 0;
+    try {
+      const selectedConfig: Config = { root, claudeBin: "/bin/true", installRoot: SELECTED_INSTALL_ROOT,
+        selectedRegistryMode: { mode: "shadow", instanceName: "fixture", registryPath: selected } };
+      const sweepRows: Array<Record<string, unknown>> = [];
+      const effects = buildSweepEffects({ owner: "owner", repo: "remudero", config: selectedConfig,
+        ledgerPath: join(root, "state", "ledger.ndjson"), runId: "selected-sweep", plan: { tasks: [], byId: new Map() } as Plan,
+        instanceRegistryTextImpl: () => undefined, armImpl: async () => "armed" as const,
+        log: (step, fields = {}) => { if (step === "instance_mode.shadow_observed") sweepRows.push(fields); } });
+      assert.equal(await effects.arm({ prUrl: "https://github.com/owner/remudero/pull/1", prNumber: 1,
+        taskId: "T-SELECTED", headSha: head } as OpenPrView), "armed");
+      assert.equal(sweepRows.at(-1)?.selected_outcome, "would-shadow", "real sweep construction and selected filesystem control");
+      const res = await withLiveWritesAllowed(() => runTask("T-SELECTED", {
+        owner: "owner", skipGitSync: true, planPath,
+        config: selectedConfig,
+        github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+        spawn: async () => {
+          spawned++;
+          return { sessionId: `selected-${spawned}`, costUsd: 0, numTurns: 0,
+            text: spawned === 1 ? "RECON REPORT\nOBSERVED: fixture\nINFERRED: none\nCOULDN'T-VERIFY: none\n"
+              : spawned === 2 ? "REPORT\nPR_URL: https://github.com/owner/remudero/pull/1\n"
+              : "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95\nRISK_REASON: fixture\n",
+            blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
+            model: "default", effort: "default", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+            modelUsage: {}, compactionEvents: [], qualitySuspect: false } satisfies WorkerResult;
+        },
+        containmentExec: async token => ({ transcript: `touch ../${token}.txt: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
+        isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
+        runReview: async () => {
+          writeFileSync(selected, selectedText("live"));
+          return { state: "success", criteria: [], testTheater: false, summary: "fixture pass", floorDegraded: false,
+            capped: false, keywordOnly: false, planOnly: false, headSha: head, reviewerOutcome: "success" };
+        },
+      }));
+      assert.equal(res.verdict, "merged", "the contained independent legacy run still finishes normally");
+      const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+      const observed = rows.filter(row => row.step === "instance_mode.shadow_observed");
+      assert.ok(observed.length > 0, "the REAL runTaskBody deferred arm must carry the original selected binding");
+      assert.ok(observed.some(row => row.reason === "revision_changed" && row.selected_outcome === "would-refuse"));
+      assert.ok(observed.every(row => row.publication_permission === "not-granted"));
+    } finally {
+      clock.mock.restore();
+      if (previous.registry === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = previous.registry;
+      if (previous.name === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = previous.name;
+      rmSync(root, { recursive: true, force: true });
+      seed.cleanup(); origin.cleanup();
+    }
+  });
 });

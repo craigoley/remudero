@@ -15,7 +15,7 @@
  * itself parses `gh`'s own quoting rules, which is why this returns the raw joined string rather
  * than pretending to reconstruct argv precisely.
  */
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { RMD_TMP_PREFIX } from "../../src/lib/tmp.js";
@@ -158,4 +158,22 @@ export function ghShim(routes: GhShimRoute[] = [], opts: { kind?: string; comman
       });
     },
   };
+}
+
+/** Run a caller with the shared executable fixture, restoring its environment and retiring the fixture on every exit. */
+export async function withGhShim<T>(
+  routes: GhShimRoute[],
+  body: (shim: GhShim) => T | Promise<T>,
+  options: Parameters<typeof ghShim>[1] = {},
+): Promise<T> {
+  const shim = ghShim(routes, options);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
+  try {
+    return await body(shim);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    rmSync(shim.dir, { recursive: true, force: true });
+  }
 }
