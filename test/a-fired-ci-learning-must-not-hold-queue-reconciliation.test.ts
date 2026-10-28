@@ -12,19 +12,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runDaemon } from "../src/lib/daemon.js";
-import { collectCiFailureCorpus } from "../src/lib/ci-failure-corpus.js";
-import { measureGateFireRates } from "../src/lib/gate-fire-rate.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { drainDetachedSweepActions, detachedActionInFlight } from "../src/lib/sweep.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { collectCiFailureCorpus } from "#src/lib/ci-failure-corpus.js";
+import { measureGateFireRates } from "#src/lib/gate-fire-rate.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { drainDetachedSweepActions, detachedActionInFlight } from "#src/lib/sweep.js";
 import {
   loadCiFailureWindowAsync,
   buildCiLearningCadenceRunner,
   buildCiLearningDaemonHooks,
   type RunResult,
-} from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
 
 const YAML = `
 - id: A

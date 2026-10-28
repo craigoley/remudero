@@ -4,9 +4,9 @@ import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync } from "nod
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
-import { doctorCommand, type DoctorDeps } from "../src/lib/report-commands.js";
-import { selectOpenWeightUnitTestSuites, spawnCodexWorker } from "../src/lib/worker-provider.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { doctorCommand, type DoctorDeps } from "#src/lib/report-commands.js";
+import { selectOpenWeightUnitTestSuites, spawnCodexWorker } from "#src/lib/worker-provider.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const RUN = "W1-T6134-1";
 

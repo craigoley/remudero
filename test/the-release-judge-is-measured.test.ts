@@ -3,14 +3,14 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { stageInboxProposalOnce } from "../src/run-task.js";
+import { stageInboxProposalOnce } from "#src/run-task.js";
 import {
   auditMachineReleases,
   RELEASE_AUDIT_MIN_DECIDED,
   RELEASE_AUDIT_MIN_RELEASES,
   runReleaseAudit,
   type ReleaseAuditState,
-} from "../src/lib/verify-human-release.js";
+} from "#src/lib/verify-human-release.js";
 
 // W1-T4083 — the first live verify-human sweep (2026-09-22) released 38 of 38 automate verdicts
 // with zero escalations. The audit joins each machine release to what the task became.
@@ -93,7 +93,7 @@ test("a release that has rotated out of the ledger is still counted from the rem
 
 test("the production verify-human cadence runs the audit and remembers it", async () => {
   const { copyFileSync, mkdirSync, writeFileSync, existsSync } = await import("node:fs");
-  const { defaultVerifyHumanCadenceResult } = await import("../src/run-task.js");
+  const { defaultVerifyHumanCadenceResult } = await import("#src/run-task.js");
   const stateRoot = mkdtempSync(join(tmpdir(), "rmd-release-audit-prod-"));
   try {
     const checkout = join(stateRoot, "remudero");
@@ -119,7 +119,7 @@ test("the production verify-human cadence runs the audit and remembers it", asyn
 
 test("the audit state reader starts empty on a missing or corrupt file", async () => {
   const { writeFileSync } = await import("node:fs");
-  const { readReleaseAuditState } = await import("../src/run-task.js");
+  const { readReleaseAuditState } = await import("#src/run-task.js");
   const dir = mkdtempSync(join(tmpdir(), "rmd-release-audit-state-"));
   try {
     const path = join(dir, "state.json");

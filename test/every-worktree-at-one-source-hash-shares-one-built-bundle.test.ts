@@ -17,11 +17,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { childEntryArgv } from "../src/lib/child-entry-argv.js";
+import { childEntryArgv } from "#src/lib/child-entry-argv.js";
 import {
   buildIntoStore, defaultChildEntryStoreRoot, materializeFromStore, pruneChildEntryStore, runBuildScriptInChild,
   type RunBuildScript,
-} from "../src/lib/child-entry-store.js";
+} from "#src/lib/child-entry-store.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const NAME = "check-proof-main";

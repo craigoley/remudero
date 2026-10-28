@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { commitWorkerEdits } from "../src/run-task.js";
+import { commitWorkerEdits } from "#src/run-task.js";
 
 // W1-T3849. `git status --porcelain -z` with git's DEFAULT untracked mode collapses a
 // wholly-new directory into ONE entry -- the directory path itself, never the files inside it.

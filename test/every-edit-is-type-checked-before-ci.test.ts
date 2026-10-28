@@ -10,7 +10,7 @@ import {
   parseTscDiagnostics,
   postToolUseHookOutput,
   type TypeCheckRunner,
-} from "../src/lib/containment.js";
+} from "#src/lib/containment.js";
 
 const fake =
   (output: string, timedOut = false): TypeCheckRunner =>

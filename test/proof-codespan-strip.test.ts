@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cappedReason, judgeReview, parseWhitelistedProof } from "../src/lib/review.js";
-import { reviewPostedDescription } from "../src/run-task.js";
+import { cappedReason, judgeReview, parseWhitelistedProof } from "#src/lib/review.js";
+import { reviewPostedDescription } from "#src/run-task.js";
 
 // A dialect proof wrapped in a markdown CODE SPAN is the same proof, and used not to be.
 // `parseAcceptanceBlock` extracts bullet text verbatim, so `` `grep: x in y` `` reached the dialect

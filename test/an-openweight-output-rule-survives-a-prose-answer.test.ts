@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { OPENWEIGHT_OUTPUT_CONTRACT } from "../src/lib/worker-provider.js";
+import { OPENWEIGHT_OUTPUT_CONTRACT } from "#src/lib/worker-provider.js";
 
 // W1-T3664. MEASURED over the deduped ledger union: 200 draft attempts, 100 errors, all 100
 // carrying the SAME reason -- "the worker produced output carrying NEITHER marker — it answered

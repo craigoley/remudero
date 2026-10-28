@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { join } from "node:path";
-import { explainUnitTestProofRefusal, parseWhitelistedProof, pinnedVitestCli } from "../src/lib/review.js";
+import { explainUnitTestProofRefusal, parseWhitelistedProof, pinnedVitestCli } from "#src/lib/review.js";
 
 // W1-T3178 — THE PROOF DIALECT COULD NOT NAME A DASHBOARD TEST.
 //

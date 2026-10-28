@@ -8,7 +8,7 @@ import {
   type IssueCloser,
   type PanelActionDeps,
   type RiskOverrideRecordInput,
-} from "../src/lib/panel-actions.js";
+} from "#src/lib/panel-actions.js";
 import {
   DECISION_RELEVANT_LEDGER_STEPS,
   RISK_OVERRIDE_DISPOSITIONS,
@@ -16,9 +16,9 @@ import {
   RISK_OVERRIDE_REASON_CLASSES,
   appendLedger,
   riskOverrideFromLedger,
-} from "../src/lib/ledger.js";
-import { cappedOverrideFromLedger } from "../src/lib/review.js";
-import { planRiskJudgeAction, type RiskJudgeVerdict } from "../src/lib/risk-judge.js";
+} from "#src/lib/ledger.js";
+import { cappedOverrideFromLedger } from "#src/lib/review.js";
+import { planRiskJudgeAction, type RiskJudgeVerdict } from "#src/lib/risk-judge.js";
 
 // ── W1-T2244 — AN OPERATOR OVERRIDE OF A RISK ESCALATION LEAVES NO RECORD ───────────────────
 //

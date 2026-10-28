@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { reviewDecisionDigest, reviewerOutcome } from "../src/lib/review.js";
-import { shadowJudgeSampled } from "../src/lib/shadow-judge.js";
-import { workerLedgerFields, type WorkerExit, type WorkerResult } from "../src/lib/worker.js";
-import { runReview, workerErrorVerdict } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { reviewDecisionDigest, reviewerOutcome } from "#src/lib/review.js";
+import { shadowJudgeSampled } from "#src/lib/shadow-judge.js";
+import { workerLedgerFields, type WorkerExit, type WorkerResult } from "#src/lib/worker.js";
+import { runReview, workerErrorVerdict } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 function result(overrides: Partial<WorkerResult> = {}): WorkerResult {
   return {

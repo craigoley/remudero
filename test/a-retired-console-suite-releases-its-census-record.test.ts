@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 // @ts-ignore the executable .mjs module has no declaration file.
-import { RECORDED_POPULATION_BY_FILE, refusePopulationDrop } from "../scripts/expiring-fixture-census.mjs";
+import { RECORDED_POPULATION_BY_FILE, refusePopulationDrop } from "#scripts/expiring-fixture-census.mjs";
 
 const RETIRING_SUITE = "test/console-shell-coverage-is-vacuous.test.ts";
 

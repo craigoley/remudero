@@ -3,9 +3,9 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 
-import * as provider from "../src/lib/worker-provider.js";
-import type { Config } from "../src/lib/config.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import * as provider from "#src/lib/worker-provider.js";
+import type { Config } from "#src/lib/config.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const config = { claudeBin: "/unused", root: "/tmp", workerProviders: { codexHome: "/tmp/unused-codex-home" } } as unknown as Config;
 

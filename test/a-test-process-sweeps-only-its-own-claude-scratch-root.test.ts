@@ -10,8 +10,8 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, utimesSync, w
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { test } from "node:test";
-import { worktreeAdd, worktreeRemove } from "../src/lib/worker.js";
-import { claudeScratchRoot } from "../src/lib/worker-scratch.js";
+import { worktreeAdd, worktreeRemove } from "#src/lib/worker.js";
+import { claudeScratchRoot } from "#src/lib/worker-scratch.js";
 
 /** The scratch root this process sweeps, refused BEFORE anything touches it unless it sits inside the test HOME. */
 function pinnedScratchRoot(): string {

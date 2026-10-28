@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { effectiveCashCapUsd } from "../src/lib/worker-provider.js";
-import { spawnWorker } from "../src/lib/worker.js";
+import { effectiveCashCapUsd } from "#src/lib/worker-provider.js";
+import { spawnWorker } from "#src/lib/worker.js";
 
 // this change. Operator intent, 2026-09-16: "$10 on a normal day and $25 on a day when the
 // subscriptions are tapped out." The higher figure is a CEILING that stops the cap refusing work

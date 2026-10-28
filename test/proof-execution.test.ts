@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { loadPlan, type AcceptanceCriterion } from "../src/lib/plan.js";
+import { loadPlan, type AcceptanceCriterion } from "#src/lib/plan.js";
 import {
   execWhitelistedProof,
   isDialectPrefixed,
   judgeReview,
   parseWhitelistedProof,
   type ProofExecutor,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 // ── W1-T128: THE DEAD PROOF FLOOR ────────────────────────────────────────────
 //

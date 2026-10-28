@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const SCRIPT = fileURLToPath(new URL("../scripts/comment-load-ratchet.mjs", import.meta.url));
 const WORKFLOW = fileURLToPath(new URL("../.github/workflows/ci.yml", import.meta.url));

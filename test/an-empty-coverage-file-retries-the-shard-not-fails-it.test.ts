@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const wrapper = fileURLToPath(new URL("../scripts/test-with-retry.mjs", import.meta.url));
 const emptyName = "coverage-999999-1791500613083-0.json";

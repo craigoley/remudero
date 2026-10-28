@@ -4,7 +4,7 @@ import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const workerScript = join(root, "scripts", "worker-branch-shape.mjs");

@@ -23,7 +23,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { dispatchFixCatchOutcome, fixDispatchErrorClass } from "../src/run-task.js";
+import { dispatchFixCatchOutcome, fixDispatchErrorClass } from "#src/run-task.js";
 
 // ── acceptance 1: the class is recorded structurally, not only in the free-text `error` prose ───
 

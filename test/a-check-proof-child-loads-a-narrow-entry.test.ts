@@ -5,9 +5,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { stripComments } from "../src/lib/test-impact-map.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { makeRuntimeFixture } from "./helpers/native-runtime-fixture.js";
+import { stripComments } from "#src/lib/test-impact-map.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { makeRuntimeFixture } from "#test/helpers/native-runtime-fixture.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const entry = resolve(root, "src/check-proof-main.ts");
@@ -39,7 +39,7 @@ test("W1-T7728: the narrow check-proof entry never imports the run-task module",
 });
 
 test("W1-T7728: the narrow entry and rmd check-proof agree on verdict and exit code", async () => {
-  const { checkProofChildArgv } = await import("../src/lib/check-proof.js");
+  const { checkProofChildArgv } = await import("#src/lib/check-proof.js");
   const fixture = gitRepo({ kind: "narrow-proof" });
   try {
     writeFileSync(resolve(fixture.dir, "marker.txt"), "shared\n");
@@ -94,7 +94,7 @@ function childEnv(): NodeJS.ProcessEnv {
 
 test("the narrow CLI awaits a real missing-export observation before claiming discrimination", async t => {
   const fixture = exportFixture(t, "export const kept = 1;\n");
-  const { checkProofChildArgv } = await import("../src/lib/check-proof.js");
+  const { checkProofChildArgv } = await import("#src/lib/check-proof.js");
   const out = runNarrow(checkProofChildArgv("unit test: test/probe.test.ts", "HEAD~1"), fixture.dir, childEnv());
   assert.equal(out.status, 0, out.stdout + out.stderr);
   assert.match(out.stdout, /COULD NOT LINK — base lacks export\(s\) added/);
@@ -104,7 +104,7 @@ test("the narrow CLI awaits a real missing-export observation before claiming di
 
 test("the narrow CLI retains unknown for an unrelated base load failure", async t => {
   const fixture = exportFixture(t, "export const malformed = ;\n");
-  const { checkProofChildArgv } = await import("../src/lib/check-proof.js");
+  const { checkProofChildArgv } = await import("#src/lib/check-proof.js");
   const out = runNarrow(checkProofChildArgv("unit test: test/probe.test.ts", "HEAD~1"), fixture.dir, childEnv());
   assert.equal(out.status, 0, out.stdout + out.stderr);
   assert.match(out.stdout, /discrimination: unknown/);
@@ -116,7 +116,7 @@ test("the narrow observation protocol reads real fixtures and refuses invalid re
   const base = gitRepo({ scope: t, kind: "narrow-observation-base" });
   mkdirSync(resolve(base.dir, "src"));
   writeFileSync(resolve(base.dir, "src/a.ts"), "export const kept = 1;\n");
-  const { checkProofObservationChildArgv } = await import("../src/lib/check-proof.js");
+  const { checkProofObservationChildArgv } = await import("#src/lib/check-proof.js");
   const output = `# ${resolve(base.dir, "test/probe.test.ts")}:1\n# SyntaxError: The requested module '../src/a.js' does not provide an export named 'added'\n`;
   const request = { output, base: base.dir, head: fixture.dir };
   const valid = runNarrow(checkProofObservationChildArgv(), fixture.dir, childEnv(), JSON.stringify(request));
@@ -139,7 +139,7 @@ test("the narrow observation protocol reads real fixtures and refuses invalid re
 });
 
 test("an unavailable CLI export observation never produces an attribution", async () => {
-  const { observeCliMissingExports } = await import("../src/lib/check-proof.js");
+  const { observeCliMissingExports } = await import("#src/lib/check-proof.js");
   const unavailable = (() => { throw new Error("controlled observer unavailable"); }) as typeof spawnSync;
   assert.deepEqual(observeCliMissingExports("controlled load error", root, root, unavailable),
     { state: "unavailable", reason: "observer-error" });
@@ -168,7 +168,7 @@ test("an unavailable CLI export observation never produces an attribution", asyn
 
 test("the CLI reports an unavailable export observer while retaining unknown", async t => {
   const fixture = exportFixture(t, "export const kept = 1;\n");
-  const { checkProofCommand } = await import("../src/lib/check-proof.js");
+  const { checkProofCommand } = await import("#src/lib/check-proof.js");
   const lines: string[] = [], previous = process.cwd();
   t.mock.method(console, "log", (...args: unknown[]) => { lines.push(args.join(" ")); });
   process.chdir(fixture.dir);

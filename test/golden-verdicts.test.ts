@@ -28,8 +28,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { loadLearningsForTaskFiles, selectLearnings } from "../src/lib/learnings.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { loadLearningsForTaskFiles, selectLearnings } from "#src/lib/learnings.js";
 import {
   checkDrillCoverage,
   checkTroubleshootingCoverage,
@@ -37,7 +37,7 @@ import {
   judgeReview,
   type ReviewEvidence,
   type ReviewVerdict,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_ROOT = join(HERE, "fixtures", "golden-verdicts");

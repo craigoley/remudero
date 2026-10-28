@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { coverageScratchDir } from "../src/lib/ci-parity.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { coverageScratchDir } from "#src/lib/ci-parity.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /** A TMPDIR as long as macOS's per-user /private/var/folders/<..>/T, built under /tmp so the
  *  fixture is identical on Linux CI and on a Mac. */

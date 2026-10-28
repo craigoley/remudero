@@ -9,8 +9,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { Clock } from "../src/lib/clock.js";
-import { createGateObservationState, observeGate, snapshotGateObservations } from "../src/lib/gate-observations.js";
+import type { Clock } from "#src/lib/clock.js";
+import { createGateObservationState, observeGate, snapshotGateObservations } from "#src/lib/gate-observations.js";
 
 type LoggedLine = { step: string; extra?: Record<string, unknown> };
 

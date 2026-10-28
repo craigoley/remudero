@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { gitCiFrictionOwnerSearch } from "../src/lib/ci-friction-gardener.js";
-import { locateCiFrictionOwner } from "../src/lib/ci-friction-remedy.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitCiFrictionOwnerSearch } from "#src/lib/ci-friction-gardener.js";
+import { locateCiFrictionOwner } from "#src/lib/ci-friction-remedy.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const WORKFLOW = ".github/workflows/ci.yml";
 const SIBLING = "test/source-text-census.test.ts";

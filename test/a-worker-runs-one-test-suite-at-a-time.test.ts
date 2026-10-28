@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { Task } from "../src/lib/plan.js";
-import { ONE_TEST_SUITE_AT_A_TIME_LINE, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts } from "../src/lib/prompt-render.js";
+import type { Task } from "#src/lib/plan.js";
+import { ONE_TEST_SUITE_AT_A_TIME_LINE, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts } from "#src/lib/prompt-render.js";
 
 // W1-T4106 — MEASURED 2026-09-23: a fix-rung worker backgrounded four coverage suites at once from its
 // Bash tool (~28 test processes on a 15.6 GiB host) and the swap storm took the console down. The deny

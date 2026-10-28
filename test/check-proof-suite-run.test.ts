@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { checkProofCommand, checkProofTimeoutMs, CHECK_PROOF_FULL_SUITE_FLAG } from "../src/run-task.js";
+import { checkProofCommand, checkProofTimeoutMs, CHECK_PROOF_FULL_SUITE_FLAG } from "#src/run-task.js";
 
 // ── `rmd check-proof` must never be the thing that runs the whole test suite.
 //

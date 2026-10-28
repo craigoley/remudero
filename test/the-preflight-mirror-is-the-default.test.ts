@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { preflightCommand, preflightSummarySentence, type PreflightTier } from "../src/run-task.js";
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import { preflightCommand, preflightSummarySentence, type PreflightTier } from "#src/run-task.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
 
 // ── W1-T3737 — THE LOCAL CI MIRROR IS BUILT, AND THE DEFAULT RAN THREE OF ITS TWENTY CHECKS ───
 //

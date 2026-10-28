@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 // @ts-expect-error The production coverage merger is an executable .mjs module outside tsconfig.
-import { mergeShardLineHits, scriptsTheSourceMapDescribes } from "../scripts/coverage-merge-ratchet.mjs";
+import { mergeShardLineHits, scriptsTheSourceMapDescribes } from "#scripts/coverage-merge-ratchet.mjs";
 
 /**
  * A FILE LOADED BY BOTH tsx LOADERS IN ONE PROCESS KEEPS EVERY OTHER PROCESS'S COVERAGE OF IT.

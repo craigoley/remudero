@@ -3,12 +3,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { depReviewCommand, type DepReviewDeps } from "../src/run-task.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import { decideDepReview, reconcileDepReviewHold } from "../src/lib/dep-review.js";
-import { escalationClasses, escalationDecisions } from "../src/lib/now-decisions.js";
-import type { BoardRow } from "../src/lib/board.js";
+import { depReviewCommand, type DepReviewDeps } from "#src/run-task.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import { decideDepReview, reconcileDepReviewHold } from "#src/lib/dep-review.js";
+import { escalationClasses, escalationDecisions } from "#src/lib/now-decisions.js";
+import type { BoardRow } from "#src/lib/board.js";
 
 const ageMs = 24 * 60 * 60 * 1000;
 

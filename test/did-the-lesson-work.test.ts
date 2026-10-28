@@ -15,17 +15,17 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { collectCiFailureCorpus, type CorpusPr } from "../src/lib/ci-failure-corpus.js";
+import { collectCiFailureCorpus, type CorpusPr } from "#src/lib/ci-failure-corpus.js";
 import {
   CI_LEARNING_MINT_CEILING,
   judgeCiLessonEfficacy,
   parseFiledCiLesson,
-} from "../src/lib/measurement-cadence.js";
+} from "#src/lib/measurement-cadence.js";
 import {
   readFiledCiLessons,
   summarizeCiLessonRecurrences,
   readCiLessonExposure,
-} from "../src/lib/ci-lesson-recurrence.js";
+} from "#src/lib/ci-lesson-recurrence.js";
 
 const pair = (pr: number, gate: string) => ({ pr, gate, state: "repaired" as const, redSha: "a", repairFiles: [] });
 const lesson = (gate: string, watermarkPr: number) => ({ findingId: `ci-learning:1:${gate}`, gate, watermarkPr });

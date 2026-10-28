@@ -3,12 +3,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { LearningEntry } from "../src/lib/learnings.js";
-import type { Config } from "../src/lib/config.js";
-import type { RunResult } from "../src/lib/run-result.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
-import { main, wipeTestCommand } from "../src/run-task.js";
+import type { LearningEntry } from "#src/lib/learnings.js";
+import type { Config } from "#src/lib/config.js";
+import type { RunResult } from "#src/lib/run-result.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { SELF_SYNC_GUARD_ENV } from "#src/lib/self-sync.js";
+import { main, wipeTestCommand } from "#src/run-task.js";
 import {
   aggregateWipeTestPairs,
   computeMatchedLearningsForArm,
@@ -23,7 +23,7 @@ import {
   type LearningsInjectionDeps,
   type WipeTestPair,
   type WipeTestRunResult,
-} from "../src/lib/wipe-test.js";
+} from "#src/lib/wipe-test.js";
 
 // W1-T86 — ratifies P12: injected learnings must be shown to help, or pruned. These
 // tests are the harness's own acceptance proofs (plan/tasks.yaml's design).
@@ -379,12 +379,12 @@ function wipeTestFixtureConfig(): Config {
   return { claudeBin: "/bin/true", root: mkdtempSync(join(tmpdir(), "rmd-wipe-test-cmd-root-")) };
 }
 
-function fakeRunTaskFn(byArm: { A: RunResult; B: RunResult }): typeof import("../src/run-task.js").runTask {
+function fakeRunTaskFn(byArm: { A: RunResult; B: RunResult }): typeof import("#src/run-task.js").runTask {
   let calls = 0;
   return (async (_taskId: string, opts: { maskLearnings?: boolean } = {}) => {
     calls++;
     return opts.maskLearnings ? byArm.B : byArm.A;
-  }) as unknown as typeof import("../src/run-task.js").runTask;
+  }) as unknown as typeof import("#src/run-task.js").runTask;
 }
 
 test("wipeTestCommand: no task-id argument fails loud (exit 2), no config/dispatch touched", async () => {
@@ -404,7 +404,7 @@ test("wipeTestCommand: a non-sandbox --repo without --allow-non-sandbox is refus
     runTaskFn: (async () => {
       dispatched++;
       return realRunResult({});
-    }) as unknown as typeof import("../src/run-task.js").runTask,
+    }) as unknown as typeof import("#src/run-task.js").runTask,
   });
   assert.equal(code, 2);
   assert.equal(dispatched, 0, "a refused target must never reach either arm's dispatch");
@@ -420,7 +420,7 @@ test("wipeTestCommand: a task the projection reports MERGED is refused up front 
   const runTaskFn = (async () => {
     dispatched++;
     return realRunResult({});
-  }) as unknown as typeof import("../src/run-task.js").runTask;
+  }) as unknown as typeof import("#src/run-task.js").runTask;
   // Default (sandbox) target is a non-self repo, so the clone/fetch step runs first --
   // fake it out the SAME way every other non-self test does, so this test never shells
   // out to a real `gh`/`git`.
@@ -472,7 +472,7 @@ test("wipeTestCommand: self-target (--repo remudero) runs BOTH arms via runTaskF
   const runTaskFn = (async (_taskId: string, opts: { maskLearnings?: boolean } = {}) => {
     seenMask.push(opts.maskLearnings);
     return opts.maskLearnings ? armB : armA;
-  }) as unknown as typeof import("../src/run-task.js").runTask;
+  }) as unknown as typeof import("#src/run-task.js").runTask;
 
   const code = await wipeTestCommand(["W1-T86", "--repo", "remudero", "--allow-non-sandbox"], {
     config,

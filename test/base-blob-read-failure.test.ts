@@ -33,16 +33,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { materializeReviewWorktree, reviewCommand, runReview } from "../src/run-task.js";
-import { buildBaseProofDir } from "../src/lib/check-proof.js";
+import type { Config } from "#src/lib/config.js";
+import { materializeReviewWorktree, reviewCommand, runReview } from "#src/run-task.js";
+import { buildBaseProofDir } from "#src/lib/check-proof.js";
 import {
   baseBlobErrorIsAbsence,
   judgeCriterion,
   materialiseBaseProofBlobs,
   parseWhitelistedProof,
   preexistingProofHits,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

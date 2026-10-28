@@ -18,16 +18,16 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import * as gitPush from "../src/lib/git-push.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { recordWorktreeBase, stampRunWorktreeAssignment, worktreeAdd } from "../src/lib/worker.js";
-import * as provider from "../src/lib/worker-provider.js";
-import { appendTaskTrailerToCommit, commitWorkerEdits } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import * as gitPush from "#src/lib/git-push.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { recordWorktreeBase, stampRunWorktreeAssignment, worktreeAdd } from "#src/lib/worker.js";
+import * as provider from "#src/lib/worker-provider.js";
+import { appendTaskTrailerToCommit, commitWorkerEdits } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 // The leaf is loaded in `before`, so at a base without it every subtest fails rather than the file.
-type Leaf = typeof import("../src/lib/worktree-git.js");
+type Leaf = typeof import("#src/lib/worktree-git.js");
 let leaf: Leaf;
 const { gitPushRunBranch, gitPushRunBranchAsync, PushFailedError, worktreeGitCapture, worktreePushExec } = gitPush as typeof gitPush;
 const openWeightWritablePath: typeof provider.openWeightWritablePath = (...a) => provider.openWeightWritablePath(...a);
@@ -92,7 +92,7 @@ function plantGitDir(name: string): string {
 }
 
 before(async () => {
-  leaf = await import("../src/lib/worktree-git.js");
+  leaf = await import("#src/lib/worktree-git.js");
   root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t6106-`));
   markers = join(root, "markers");
   harnessHooks = join(root, "harness-hooks");

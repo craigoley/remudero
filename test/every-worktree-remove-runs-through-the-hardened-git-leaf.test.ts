@@ -21,12 +21,12 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { pruneStaleRuns, reapStaleWorktrees, worktreeRemove, worktreeRemoveAsync } from "../src/lib/worker.js";
-import { buildBaseReproductionProbe, removeAbandonedFixWorktreeOwner } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { OpenPrView } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { pruneStaleRuns, reapStaleWorktrees, worktreeRemove, worktreeRemoveAsync } from "#src/lib/worker.js";
+import { buildBaseReproductionProbe, removeAbandonedFixWorktreeOwner } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { OpenPrView } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 let root: string;
 let decoy: GitRepo;

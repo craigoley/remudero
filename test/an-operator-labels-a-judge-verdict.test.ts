@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   buildRecordJudgeLabelRoute,
   deriveJudgeCalibration,
@@ -21,13 +21,13 @@ import {
   loadJudgeLabels,
   type JudgeLabel,
   type JudgeLabelStore,
-} from "../src/lib/judge-calibration.js";
-import { hashToken } from "../src/lib/last-seen.js";
-import type { Plan } from "../src/lib/plan.js";
-import { buildServeRoutes, buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { createService, type Route } from "../src/lib/service.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+} from "#src/lib/judge-calibration.js";
+import { hashToken } from "#src/lib/last-seen.js";
+import type { Plan } from "#src/lib/plan.js";
+import { buildServeRoutes, buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { createService, type Route } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const READ_TOKEN = "judge-label-read-token";
 const WRITE_TOKEN = "judge-label-write-token";

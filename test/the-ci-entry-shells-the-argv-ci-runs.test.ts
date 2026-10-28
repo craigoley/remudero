@@ -3,8 +3,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { CI_PARITY_TABLE } from "../src/lib/ci-parity.js";
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import { CI_PARITY_TABLE } from "#src/lib/ci-parity.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");

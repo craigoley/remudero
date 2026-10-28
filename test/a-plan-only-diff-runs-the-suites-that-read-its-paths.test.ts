@@ -4,7 +4,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { withTempDir } from "../src/lib/tmp.js";
+import { withTempDir } from "#src/lib/tmp.js";
 
 const SCRIPT = new URL("../scripts/diff-class.mjs", import.meta.url);
 const { planReadingSuiteFiles, censusSuiteFiles, enumeratesPopulation, withoutRelativePathLiterals, REPO_ROOT } = await import(SCRIPT.href) as {

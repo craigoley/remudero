@@ -110,7 +110,7 @@ test('native timing profiles refuse changed memory settings and unmodelled NODE_
 });
 
 test('native runtime profile rereads real closed evidence and rejects stale, corrupt and foreign bindings', async (t) => {
-  const { makeRuntimeFixture } = await import('./helpers/native-runtime-fixture.js');
+  const { makeRuntimeFixture } = await import('#test/helpers/native-runtime-fixture.js');
   const f = makeRuntimeFixture(); t.after(() => f.cleanup());
   const { calibrateAuthorRuntime } = await import(pathToFileURL(join(process.cwd(), 'scripts/calibrate-author-runtime.mjs')).href);
   const observed = calibrateAuthorRuntime({ root: f.dir });

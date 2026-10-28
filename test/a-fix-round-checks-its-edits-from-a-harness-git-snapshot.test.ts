@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { gitRepo } from "./helpers/git-repo.js";
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
-import type { WorkerResult, SpawnWorkerArgs } from "../src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
+import type { WorkerResult, SpawnWorkerArgs } from "#src/lib/worker.js";
 // @ts-ignore executable census module has no declaration file.
-import { CENSUS_SNAPSHOT_ROOTS, main, readCensusSnapshot } from "../scripts/census-precheck.mjs";
+import { CENSUS_SNAPSHOT_ROOTS, main, readCensusSnapshot } from "#scripts/census-precheck.mjs";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const REACH = "test/the-affected-suite-reach-ratchet.test.ts";

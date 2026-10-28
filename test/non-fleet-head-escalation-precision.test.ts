@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { foreignHeadIsStuck } from "../src/run-task.js";
+import { foreignHeadIsStuck } from "#src/run-task.js";
 
 /**
  * W1-T3168 — THE NON-FLEET-HEAD ESCALATION FIRED ON A HEALTHY PR.

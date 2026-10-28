@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { defaultHandWorktreeParent } from "../src/lib/hand-worktree.js";
-import { handWorktreeCommand } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { defaultHandWorktreeParent } from "#src/lib/hand-worktree.js";
+import { handWorktreeCommand } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const PROOF = "test/a-hand-worktree-defaults-to-the-scratch-disk.test.ts";
 const NOW = 1_791_000_000_000;

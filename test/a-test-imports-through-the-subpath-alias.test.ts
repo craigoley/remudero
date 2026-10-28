@@ -123,6 +123,10 @@ test("W1-T9864: location-relative test files never rise above the merge base", (
     "a-capped-pr-with-repairable-proofs-is-repaired-not-escalated",
     "a-board-projection-shares-equal-string-values-within-its-rows",
     "a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks",
+    // W1-T9867: batch 3 — one representative each from worker, ci and review.
+    "a-balanced-squeeze-diverts-to-foundry-sonnet",
+    "a-clock-sweep-runs-as-shards-and-merges-one-report",
+    "a-dead-containers-claim-does-not-outlive-it",
   ].map((name) => `test/${name}.test.ts`);
   // The representative files live in this file's checkout; the screen's scratch repository holds only its plants.
   const stillRelative = rewrittenAtBatch1.filter((f) => hasLocationRelativeSpecifier(readFileSync(join(repoRoot(), f), "utf8")));

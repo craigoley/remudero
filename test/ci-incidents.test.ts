@@ -14,15 +14,15 @@ import {
   recordCheckRunOutcome,
   TAP_LOCATION_RE,
   TAP_NOT_OK_RE,
-} from "../src/lib/ci-incidents.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import type { IssueCloser } from "../src/lib/panel-actions.js";
-import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
-import type { Plan } from "../src/lib/plan.js";
-import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { TraceGithub } from "../src/lib/trace.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/ci-incidents.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
+import type { Plan } from "#src/lib/plan.js";
+import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { TraceGithub } from "#src/lib/trace.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 

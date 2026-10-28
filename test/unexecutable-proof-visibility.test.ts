@@ -6,7 +6,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import {
   applyVerdictStability,
   auditMergedTaskClaims,
@@ -21,7 +21,7 @@ import {
   type PriorReviewVerdict,
   type ProofExecutor,
   type ReviewVerdict,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 // ── W1-T305 ──────────────────────────────────────────────────────────────────
 //

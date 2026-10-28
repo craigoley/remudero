@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildFixRungDispatchArgs } from "../src/run-task.js";
-import { deriveFixMode } from "../src/lib/prompt-render.js";
+import { buildFixRungDispatchArgs } from "#src/run-task.js";
+import { deriveFixMode } from "#src/lib/prompt-render.js";
 import {
   proofDiscriminationEvidenceFromCheckLog,
   runSweep,
@@ -13,9 +13,9 @@ import {
   type FixDispatchEvidence,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
+} from "#test/helpers/sweep-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
 
 const TASK = "W1-T4957-FIXTURE";
 const PR_URL = "https://github.com/acme/remudero/pull/8088";

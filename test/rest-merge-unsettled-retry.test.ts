@@ -17,7 +17,7 @@ import {
   REST_MERGE_UNSETTLED_MAX_READS,
   REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS,
   type FixRebaseMergeFacts,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/2605";
 const RATE_LIMIT = "GraphQL: API rate limit already exceeded for user ID 4397075.";

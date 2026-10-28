@@ -4,14 +4,14 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { fallbackPushCause, runTask, type FallbackPushCause } from "../src/run-task.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import type { spawnWorker } from "../src/lib/worker.js";
-import type { Config } from "../src/lib/config.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { fallbackPushCause, runTask, type FallbackPushCause } from "#src/run-task.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import type { spawnWorker } from "#src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
 
 /**
  * W1-T2267 — THE ORCHESTRATOR'S FALLBACK PUSH RECORDS WHY IT FIRED.

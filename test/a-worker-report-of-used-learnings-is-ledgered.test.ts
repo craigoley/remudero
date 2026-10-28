@@ -11,15 +11,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { Config } from "../src/lib/config.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import type { GitHub } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
-import { logLearningsUsed, runTask } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { Config } from "#src/lib/config.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import type { GitHub } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import { logLearningsUsed, runTask } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const workerResult = (over: Partial<WorkerResult> = {}): WorkerResult => ({
   sessionId: "skill-observation",
@@ -109,7 +109,7 @@ async function runWithReport(t: { mock: { method: (o: object, m: string, f: () =
       ? workerResult({ text: "RECON REPORT\nOBSERVED: -\nINFERRED: -\nCOULDN'T-VERIFY: -\n" })
       : workerResult({ text: finalText });
   };
-  const { withLiveWritesAllowed } = await import("../src/lib/live-write-guard.js");
+  const { withLiveWritesAllowed } = await import("#src/lib/live-write-guard.js");
   try {
     await withLiveWritesAllowed(() =>
       runTask("T-USED", {

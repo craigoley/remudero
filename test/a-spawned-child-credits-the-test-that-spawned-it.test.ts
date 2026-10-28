@@ -21,11 +21,11 @@ import { fileURLToPath } from "node:url";
 
 // Namespace imports, so the file LOADS where these exports do not exist yet and each test fails on
 // its own assertion there, rather than the whole file failing to link.
-import * as impactMap from "../src/lib/test-impact-map.js";
-import type { ImpactArmContext, ImpactMap } from "../src/lib/test-impact-map.js";
-import * as hygiene from "./setup/tmp-hygiene.js";
+import * as impactMap from "#src/lib/test-impact-map.js";
+import type { ImpactArmContext, ImpactMap } from "#src/lib/test-impact-map.js";
+import * as hygiene from "#test/setup/tmp-hygiene.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
-import * as ratchet from "../scripts/coverage-merge-ratchet.mjs";
+import * as ratchet from "#scripts/coverage-merge-ratchet.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TSX = import.meta.resolve("tsx");

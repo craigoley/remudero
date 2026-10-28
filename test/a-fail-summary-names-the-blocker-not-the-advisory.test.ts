@@ -3,8 +3,8 @@
 // summary said "entangled: … split it" — which sweep.ts reads as an unsatisfiable gate needing a split worker.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { failSummary, judgeReview } from "../src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { failSummary, judgeReview } from "#src/lib/review.js";
 
 const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
 const CRITERIA: AcceptanceCriterion[] = [{ claim: "the change is safe", proof: "widget frobnicate implemented" }];

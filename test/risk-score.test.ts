@@ -13,8 +13,8 @@ import {
   shouldRecordDecision,
   type DiffSummary,
   type RiskTaskMetadata,
-} from "../src/lib/risk-score.js";
-import { parseDecisionRequest } from "../src/lib/worker.js";
+} from "#src/lib/risk-score.js";
+import { parseDecisionRequest } from "#src/lib/worker.js";
 
 function diffOf(...paths: string[]): DiffSummary {
   return { files: paths.map((path) => ({ path, additions: 1, deletions: 0 })) };

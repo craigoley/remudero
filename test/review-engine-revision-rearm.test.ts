@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import {
   REVIEW_ENGINE_REVISION,
   claimReviewDecision,
@@ -13,10 +13,10 @@ import {
   reviewDecisionDigest,
   reviewInputDigest,
   type ReviewVerdict,
-} from "../src/lib/review.js";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
-import { reviewAttemptsForInput } from "../src/run-task.js";
-import { writeMutantModule } from "./helpers/mutant-module.js";
+} from "#src/lib/review.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "#src/lib/sweep.js";
+import { reviewAttemptsForInput } from "#src/run-task.js";
+import { writeMutantModule } from "#test/helpers/mutant-module.js";
 
 const PR_4042 = "https://github.com/craigoley/remudero/pull/4042";
 const TASK_4042 = "W1-T2857";
@@ -226,7 +226,7 @@ test("W1-T2872 mutation: deleting the engine revision independently restores adm
   const inputMutant = (await import(writeMutantModule(
     "review-input-revision-mutant.ts",
     source.replace(inputNeedle, "const encoded = JSON.stringify({ version: 2, headSha, body });"),
-  ))) as typeof import("../src/lib/review.js");
+  ))) as typeof import("#src/lib/review.js");
   assert.equal(
     inputMutant.reviewInputDigest(HEAD_4042, PR_BODY_4042, REVIEW_ENGINE_REVISION),
     inputMutant.reviewInputDigest(HEAD_4042, PR_BODY_4042, "review-engine-pre-exact-head-v1"),
@@ -236,7 +236,7 @@ test("W1-T2872 mutation: deleting the engine revision independently restores adm
   const decisionMutant = (await import(writeMutantModule(
     "review-decision-revision-mutant.ts",
     source.replace(decisionNeedle, ""),
-  ))) as typeof import("../src/lib/review.js");
+  ))) as typeof import("#src/lib/review.js");
   const material = {
     headSha: HEAD_4042,
     diff: "diff",

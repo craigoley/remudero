@@ -9,7 +9,7 @@ import {
   parseIsolationReport,
   probeIsolation,
   type ProbeExecResult,
-} from "../src/lib/isolation.js";
+} from "#src/lib/isolation.js";
 
 // ── The PURE verdict (the falsifier lives here, LLM-free) ───────────────────
 

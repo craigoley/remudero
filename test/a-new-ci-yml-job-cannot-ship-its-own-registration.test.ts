@@ -31,7 +31,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { detectInstrumentEntanglement } from "../src/lib/review.js";
+import { detectInstrumentEntanglement } from "#src/lib/review.js";
 
 /** A real `git diff` block for a brand-new file — carries the `new file mode` and `/dev/null` markers
  *  `fileIsNewInDiff` actually reads, never a hand-waved approximation of them. */

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { RULE_SUITE_NAME_RE } from "../src/lib/ci-parity.js";
-import { lintTask, newShardRuleSuiteViolations, type LintOpts } from "../src/lib/task-linter.js";
-import type { Task } from "../src/lib/plan.js";
+import { RULE_SUITE_NAME_RE } from "#src/lib/ci-parity.js";
+import { lintTask, newShardRuleSuiteViolations, type LintOpts } from "#src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
 
 const PATH = "test/x-census.test.ts";
 const NEW_SHARD: LintOpts = { riskTransition: { baseTask: undefined } };

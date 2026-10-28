@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { declaredWorkspaceGlobs, isManifestPath } from "../src/lib/dep-review.js";
+import { declaredWorkspaceGlobs, isManifestPath } from "#src/lib/dep-review.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const GATE = pathToFileURL(join(__dirname, "..", "scripts", "head-identity-gate.mjs")).href;

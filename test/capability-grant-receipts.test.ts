@@ -9,7 +9,7 @@ import {
   createCapabilityGrant,
   InMemoryCapabilityGrantStore,
   useCapabilityGrant,
-} from "../src/lib/capability-grant.js";
+} from "#src/lib/capability-grant.js";
 
 const APPROVAL = { approvedBy: "operator:alice", approvedAt: new Date(Date.now() - 1_000).toISOString() };
 

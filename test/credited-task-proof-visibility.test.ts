@@ -35,14 +35,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import type { Task, Plan } from "../src/lib/plan.js";
+import type { Task, Plan } from "#src/lib/plan.js";
 import {
   proofQueueAudit,
   creditedAmendmentVisibility,
   CREDITED_PROOF_QUEUE_AUDIT_CAUSES,
   type CreditedAmendmentFact,
-} from "../src/lib/proof-queue-audit.js";
-import { proofQueueAuditCommand, creditedProofVisibility, type CreditedProofVisibilityResult } from "../src/run-task.js";
+} from "#src/lib/proof-queue-audit.js";
+import { proofQueueAuditCommand, creditedProofVisibility, type CreditedProofVisibilityResult } from "#src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

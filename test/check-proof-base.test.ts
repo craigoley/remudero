@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { checkProofCommand, CHECK_PROOF_EXIT, verifyBaseGrepAbsence } from "../src/lib/check-proof.js";
+import { checkProofCommand, CHECK_PROOF_EXIT, verifyBaseGrepAbsence } from "#src/lib/check-proof.js";
 
 /** This repo's own root — used by the base_unknown test below, which needs a real `unit test:`
  *  proof (a `grep:`-only fixture dir cannot resolve one) rather than the throwaway single-file

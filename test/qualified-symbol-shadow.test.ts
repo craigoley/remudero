@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { qualifiedSymbolShadow, qualifiedShadowFailures } from "../src/lib/qualified-symbol-shadow.js";
-import type { AffectedSuitesInput } from "../src/lib/affected-suites.js";
+import { qualifiedSymbolShadow, qualifiedShadowFailures } from "#src/lib/qualified-symbol-shadow.js";
+import type { AffectedSuitesInput } from "#src/lib/affected-suites.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 // @ts-expect-error — the CLI is JavaScript and ships no declaration file.
-import { main } from "../scripts/select-affected-suites.mjs";
+import { main } from "#scripts/select-affected-suites.mjs";
 
 const files = new Map([
   ["scripts/target.mjs", "export function main() {}"],

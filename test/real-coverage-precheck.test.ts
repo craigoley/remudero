@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { chmodSync, copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { coveragePrecheck, FixRoundPushError, pushFixRoundPrechecked, type CoveragePrecheckPorts } from "../src/run-task.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { usePassThroughProofSandbox } from "./helpers/pass-through-proof-sandbox.js";
+import { coveragePrecheck, FixRoundPushError, pushFixRoundPrechecked, type CoveragePrecheckPorts } from "#src/run-task.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { usePassThroughProofSandbox } from "#test/helpers/pass-through-proof-sandbox.js";
 
 usePassThroughProofSandbox();
 

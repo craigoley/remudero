@@ -25,10 +25,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { Task } from "../src/lib/plan.js";
-import type { NameFilterResolution } from "../src/lib/review.js";
-import { proofQueueAudit, type ProofQueueAuditOpts } from "../src/lib/proof-queue-audit.js";
-import { proofNameResolutionViolations, zeroMatchTitleIsReportable } from "../src/lib/task-linter.js";
+import type { Task } from "#src/lib/plan.js";
+import type { NameFilterResolution } from "#src/lib/review.js";
+import { proofQueueAudit, type ProofQueueAuditOpts } from "#src/lib/proof-queue-audit.js";
+import { proofNameResolutionViolations, zeroMatchTitleIsReportable } from "#src/lib/task-linter.js";
 
 function fixtureTask(id: string, proof: string): Task {
   return {

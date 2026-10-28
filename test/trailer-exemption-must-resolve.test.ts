@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { acceptanceAuthorTimeCheck } from "../src/lib/review.js";
+import { acceptanceAuthorTimeCheck } from "#src/lib/review.js";
 
 
 // ── A GATE PASSED A BODY WHOSE CRITERIA IT COULD NOT READ ───────────────────────────────────────

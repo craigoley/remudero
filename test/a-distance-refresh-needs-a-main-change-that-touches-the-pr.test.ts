@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildBehindMainByPr } from "../src/run-task.js";
+import { buildBehindMainByPr } from "#src/run-task.js";
 import {
   DEFAULT_SWEEP_POLICY,
   openPrsBehindMain,
@@ -11,7 +11,7 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const NOW = 1_800_000_000_000;
 const POLICY: SweepPolicy = {

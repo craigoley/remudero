@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { fixedClock } from "../src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   OPENWEIGHT_ALLOWANCE_FILENAME,
   OPENWEIGHT_MAX_COMPLETION_TOKENS,
@@ -14,7 +14,7 @@ import {
   openWeightEstimatedTokens,
   spawnOpenWeightWorker,
   type OpenWeightAllowanceState,
-} from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
 
 // W1-T3666. MEASURED from state/openweight-allowance.json on 2026-09-15: 104 requests against the
 // $10 cap, $5.2696 reserved but only $0.9270 settled -- 32 of 104 never settled, so the day was

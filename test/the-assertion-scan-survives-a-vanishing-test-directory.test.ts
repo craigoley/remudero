@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // @ts-expect-error -- plain .mjs script, no type declarations
-import { listTestFiles } from "../scripts/assertion-discrimination-check.mjs";
+import { listTestFiles } from "#scripts/assertion-discrimination-check.mjs";
 
 function makeTree(): string {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}scan-vanish-`));

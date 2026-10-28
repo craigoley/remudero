@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { parse } from "yaml";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // 2026-10-10: three main reds, each from a test a PR ADDED that passed the one time its PR ran it.
 // scripts/flake-screen.mjs reruns every added test file before merge; these pin what it screens,

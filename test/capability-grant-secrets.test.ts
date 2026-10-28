@@ -9,8 +9,8 @@ import {
   InMemoryCapabilityGrantStore,
   REDACTED_PLACEHOLDER,
   useCapabilityGrant,
-} from "../src/lib/capability-grant.js";
-import { renderCapabilityGrantContext } from "../src/lib/prompt-render.js";
+} from "#src/lib/capability-grant.js";
+import { renderCapabilityGrantContext } from "#src/lib/prompt-render.js";
 
 const REAL_SECRET = "REAL-SECRET-do-not-leak-9f8a7c";
 const FUTURE = new Date(Date.now() + 60_000).toISOString();

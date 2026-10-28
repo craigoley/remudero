@@ -8,7 +8,7 @@ import {
   declaredViewFields,
   producerAssignedKeys,
   KNOWN_UNWIRED,
-} from "../src/lib/producer-completeness.js";
+} from "#src/lib/producer-completeness.js";
 
 /**
  * recon-DW found NINE optional `OpenPrView` fields that no producer assigns, each with live

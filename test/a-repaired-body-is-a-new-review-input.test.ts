@@ -25,7 +25,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { reviewInputDigest } from "../src/lib/review.js";
+import { reviewInputDigest } from "#src/lib/review.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
@@ -33,8 +33,8 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { appendLedger } from "../src/lib/ledger.js";
+} from "#test/helpers/sweep-test.js";
+import { appendLedger } from "#src/lib/ledger.js";
 
 // ── the incident's own shape, reused across all four tests ──────────────────────────────────────
 

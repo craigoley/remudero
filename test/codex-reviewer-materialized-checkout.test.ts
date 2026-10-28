@@ -4,11 +4,11 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { runReview } from "../src/run-task.js";
-import { shadowJudgeSampled } from "../src/lib/shadow-judge.js";
-import { reviewDecisionDigest } from "../src/lib/review.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { runReview } from "#src/run-task.js";
+import { shadowJudgeSampled } from "#src/lib/shadow-judge.js";
+import { reviewDecisionDigest } from "#src/lib/review.js";
 
 type LogRow = { step: string; extra: Record<string, unknown> };
 
@@ -131,7 +131,7 @@ async function review(
     account: (worker: WorkerResult) => worker,
     spawnReviewer: true,
     requireSemanticReview: options.requireSemanticReview,
-    reviewerSpawnWorker: options.spawn as typeof import("../src/lib/worker.js").spawnWorker,
+    reviewerSpawnWorker: options.spawn as typeof import("#src/lib/worker.js").spawnWorker,
     reviewerMount: { model: "sonnet", effort: "high", maxTurns: 10, contextBudget: 120_000 },
     headCheckoutDir: options.headCheckoutDir,
     baseCheckoutDir: options.baseCheckoutDir,

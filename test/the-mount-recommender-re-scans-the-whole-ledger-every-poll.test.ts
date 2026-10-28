@@ -7,11 +7,11 @@ import { test } from "node:test";
 import {
   MOUNT_RECOMMENDER_CADENCE_POLICY,
   runMountRecommenderRung,
-} from "../src/run-task.js";
-import { fixedClock } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
-import type { MountHeadroomCell } from "../src/lib/mount-recommender.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/run-task.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import type { MountHeadroomCell } from "#src/lib/mount-recommender.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

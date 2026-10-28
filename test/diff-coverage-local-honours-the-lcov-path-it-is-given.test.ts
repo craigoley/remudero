@@ -21,8 +21,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 // @ts-expect-error The exercised script is a plain .mjs without a declaration file.
-import * as local from "../scripts/diff-coverage-local.mjs";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as local from "#scripts/diff-coverage-local.mjs";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const FIXTURES = join(REPO_ROOT, "test", "fixtures", "diff-coverage");

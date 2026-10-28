@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { overflowFallbackRefusal, cashFallbackRefusal, spawnWorker } from "../src/lib/worker.js";
+import { overflowFallbackRefusal, cashFallbackRefusal, spawnWorker } from "#src/lib/worker.js";
 
 // NOT key-shaped on purpose: a realistic prefix here trips the reachable-secret census (W1-T2698),
 // and the value is never sent anywhere — only its PRESENCE is read by the two-factor check.

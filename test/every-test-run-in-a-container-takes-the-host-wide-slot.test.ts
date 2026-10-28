@@ -19,13 +19,13 @@ import { getPriority, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runSuiteShifted } from "../src/lib/gate-gardener.js";
+import { runSuiteShifted } from "#src/lib/gate-gardener.js";
 // A NAMESPACE import, so a tree without proofChildCommand fails the tests below rather than the load.
-import * as review from "../src/lib/review.js";
-import { resolveTestSlotDir, TEST_RUN_NICENESS } from "../src/lib/test-slot.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as review from "#src/lib/review.js";
+import { resolveTestSlotDir, TEST_RUN_NICENESS } from "#src/lib/test-slot.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 // @ts-ignore the executable .mjs module has no declaration file.
-import * as precheck from "../scripts/census-precheck.mjs";
+import * as precheck from "#scripts/census-precheck.mjs";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const LIB = join(REPO_ROOT, "deploy", "scratch-mounts.sh");

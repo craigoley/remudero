@@ -3,10 +3,10 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { evaluateFlightSignals, extractTurnSnapshots, type FlightSignalConfig } from "../src/lib/flight-signals.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { evaluateFlightSignals, extractTurnSnapshots, type FlightSignalConfig } from "#src/lib/flight-signals.js";
 import {
   extractJudgeTurnEvidence,
   runFlightJudge,
@@ -15,7 +15,7 @@ import {
   type FlightJudgeDeps,
   type JudgeInput,
   type JudgeVerdict,
-} from "../src/lib/flight-judge.js";
+} from "#src/lib/flight-judge.js";
 
 /**
  * P1 spiral golden (W1-T59, MASTER-PLAN §4B) — an engineered-to-spiral run

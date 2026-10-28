@@ -6,12 +6,12 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
-import { CI_PARITY_TABLE, parseCiJobNames, runCiParityAdmitted, runCiParity as runCiParityEngine, type CiParityDeps } from "../src/lib/ci-parity.js";
-import { preflightCommand } from "../src/run-task.js";
-import { skipInMutationSandbox } from "./helpers/mutation-sandbox.js";
-import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { defaultPreflightSpawn, type PreflightSpawn } from "#src/lib/commit-message.js";
+import { CI_PARITY_TABLE, parseCiJobNames, runCiParityAdmitted, runCiParity as runCiParityEngine, type CiParityDeps } from "#src/lib/ci-parity.js";
+import { preflightCommand } from "#src/run-task.js";
+import { skipInMutationSandbox } from "#test/helpers/mutation-sandbox.js";
+import { coverageParitySpawnResult } from "#test/helpers/coverage-parity-spawn.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");

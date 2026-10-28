@@ -35,8 +35,8 @@ import {
   outOfDeclaredScopeFiles,
   renderFixPrompt,
   scopeGuardOutOfScopeFiles,
-} from "../src/run-task.js";
-import { REGENERABLE_ARTIFACT_GENERATORS } from "../src/lib/sweep.js";
+} from "#src/run-task.js";
+import { REGENERABLE_ARTIFACT_GENERATORS } from "#src/lib/sweep.js";
 
 const REGISTRY_PATH = "scripts/source-size-baseline.json";
 const OTHER_REGISTRY_PATH = "docs/docs-index.json";

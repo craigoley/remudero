@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { DENIED_ATTRIBUTIVE_RE, DENIED_LABEL_ANSWER_RE, bodyContradictsDiff } from "../src/lib/review.js";
+import { DENIED_ATTRIBUTIVE_RE, DENIED_LABEL_ANSWER_RE, bodyContradictsDiff } from "#src/lib/review.js";
 
 /**
  * W1-T2533 — the label arm of `shorthandIsAboutChangeset` decides on the COLON alone and never

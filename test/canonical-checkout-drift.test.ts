@@ -8,7 +8,7 @@ import {
   measureCanonicalCheckoutDrift,
   recordCanonicalCheckoutDrift,
   worktreeAdd,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 // W1-T2618: `linkWorktreeNodeModules` (src/lib/worker.ts) symlinks EVERY worker worktree's
 // `node_modules` onto the CANONICAL CHECKOUT's real tree — but a worktree's CODE is cut

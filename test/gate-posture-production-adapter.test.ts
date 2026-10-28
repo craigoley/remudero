@@ -5,16 +5,16 @@ import {
   decideGatePosture,
   type GatePostureFinding,
   type GatePostureOutcome,
-} from "../src/lib/gate-posture.js";
+} from "#src/lib/gate-posture.js";
 import {
   buildSourceSizeGatePostureRuntime,
   reportWorkerSourceSizeFollowupWithGatePosture,
   sourceSizeGateFollowupConsumer,
   type SourceSizeGatePostureResult,
-} from "../src/run-task.js";
-import { spawnWorker } from "../src/lib/worker.js";
-import type { ConsumeSourceSizeFollowupArgs, ConsumeSourceSizeFollowupResult } from "../src/lib/source-size-followup.js";
-import type { RiskJudgeResult, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
+} from "#src/run-task.js";
+import { spawnWorker } from "#src/lib/worker.js";
+import type { ConsumeSourceSizeFollowupArgs, ConsumeSourceSizeFollowupResult } from "#src/lib/source-size-followup.js";
+import type { RiskJudgeResult, RiskJudgeVerdict } from "#src/lib/risk-judge.js";
 
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);

@@ -32,8 +32,8 @@ import {
   LiveSpawnBlockedError,
   offendingTestFrame,
   withLiveSpawnAllowed,
-} from "../src/lib/spawn-guard.js";
-import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker } from "../src/lib/worker.js";
+} from "#src/lib/spawn-guard.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker } from "#src/lib/worker.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = join(REPO_ROOT, "src");

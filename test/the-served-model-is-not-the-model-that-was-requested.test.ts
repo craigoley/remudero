@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { collectWorkerResult, workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
+import { collectWorkerResult, workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 
 // ── W1-T2572: THE LEDGER RECORDS THE MOUNT THAT WAS ASKED FOR, NEVER THE MODEL THAT
 // ACTUALLY SERVED ───────────────────────────────────────────────────────────────────────

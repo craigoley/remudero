@@ -14,7 +14,7 @@ import {
   refreshProofToolchain,
   registerReviewerCheckout,
   vitestNameFilteredOutcome,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 const loadError = "Error: Cannot find package '@vercel/functions' imported from tests/unit/example.test.ts";
 const vitestLoadFailure = `TAP version 13\n1..1\nnot ok 1 - tests/unit/example.test.ts # time=1ms {\n` +

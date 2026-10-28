@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { collectWorkerResult, workerLedgerFields } from "../src/lib/worker.js";
+import { collectWorkerResult, workerLedgerFields } from "#src/lib/worker.js";
 
 // ── W1-T303 — DIAGNOSIS, not a fix ──────────────────────────────────────────
 //

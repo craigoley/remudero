@@ -11,7 +11,7 @@ import {
   stallTimeoutPredicate,
   type FlightSignalConfig,
   type TurnSnapshot,
-} from "../src/lib/flight-signals.js";
+} from "#src/lib/flight-signals.js";
 
 const BASE_CONFIG: FlightSignalConfig = { burnRateBaselineUsdPerTurn: 1.0 };
 

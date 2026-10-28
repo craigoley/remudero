@@ -7,7 +7,7 @@ import {
   type RiskJudgeInput,
   type RiskJudgeOrchestratorDeps,
   type RiskJudgeVerdict,
-} from "../src/lib/risk-judge.js";
+} from "#src/lib/risk-judge.js";
 
 /**
  * W1-T454: the risk judge is NEVER shown a diff — {@link RiskJudgeChange} (see

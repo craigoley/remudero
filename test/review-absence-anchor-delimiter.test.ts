@@ -30,7 +30,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { bodyContradictsDiff, changesetClaimsDisagreeing, noClaimIsAboutChangeset } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing, noClaimIsAboutChangeset } from "#src/lib/review.js";
 
 /** A diff that touches src/, so any "no code"/"no src/…" claim over it is a real contradiction. */
 const DIFF = ["src/lib/review.ts", "test/review-absence-anchor-delimiter.test.ts"];

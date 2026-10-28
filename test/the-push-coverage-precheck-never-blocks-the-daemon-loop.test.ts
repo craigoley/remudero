@@ -8,10 +8,10 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { AffectedSelection } from "../src/lib/affected-suites.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { coveragePrecheck, type CoveragePrecheck, type CoveragePrecheckPorts } from "../src/run-task.js";
-import { usePassThroughProofSandbox } from "./helpers/pass-through-proof-sandbox.js";
+import type { AffectedSelection } from "#src/lib/affected-suites.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { coveragePrecheck, type CoveragePrecheck, type CoveragePrecheckPorts } from "#src/run-task.js";
+import { usePassThroughProofSandbox } from "#test/helpers/pass-through-proof-sandbox.js";
 
 usePassThroughProofSandbox();
 

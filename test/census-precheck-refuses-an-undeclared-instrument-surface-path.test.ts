@@ -16,14 +16,14 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { gitRepo } from "./helpers/git-repo.js";
-import { INSTRUMENT_SURFACE } from "../src/lib/review.js";
-import { censusPushRefusal } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { INSTRUMENT_SURFACE } from "#src/lib/review.js";
+import { censusPushRefusal } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 // @ts-ignore the executable .mjs module has no declaration file.
-import { evaluateInstrumentSurface, main, measureViaChild } from "../scripts/census-precheck.mjs";
+import { evaluateInstrumentSurface, main, measureViaChild } from "#scripts/census-precheck.mjs";
 // @ts-ignore the executable .mjs module has no declaration file.
-import { declaredInstrumentRe, deriveInstrumentCandidates, findUnexplainedGaps } from "../scripts/lib/instrument-surface-census.mjs";
+import { declaredInstrumentRe, deriveInstrumentCandidates, findUnexplainedGaps } from "#scripts/lib/instrument-surface-census.mjs";
 
 type Tree = Record<string, string>;
 type Side = { candidates: string[]; gaps: string[] };

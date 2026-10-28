@@ -10,7 +10,7 @@ import {
   sweepOrphanWorkers,
   workerInstallationScope,
   workerMarkerEnv,
-} from "../src/lib/worker-containment.js";
+} from "#src/lib/worker-containment.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { INSTRUMENT_SURFACE, INSTRUMENT_SURFACE_EXCLUSIONS, detectInstrumentEntanglement, judgeReview } from "../src/lib/review.js";
+import { INSTRUMENT_SURFACE, INSTRUMENT_SURFACE_EXCLUSIONS, detectInstrumentEntanglement, judgeReview } from "#src/lib/review.js";
 // @ts-ignore the executable .mjs module has no declaration file.
-import { deriveInstrumentCandidates, findUnexplainedGaps, harvestTokens, liveTree } from "../scripts/lib/instrument-surface-census.mjs";
+import { deriveInstrumentCandidates, findUnexplainedGaps, harvestTokens, liveTree } from "#scripts/lib/instrument-surface-census.mjs";
 
 // ── W1-T402: "INSTRUMENT_SURFACE was hand-enumerated against one day's tree and missed the rule
 // files of five REQUIRED jobs ... and the only thing asking anyone to re-check membership is a

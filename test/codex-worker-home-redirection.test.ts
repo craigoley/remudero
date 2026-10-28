@@ -31,10 +31,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { codexSpawnEnvForTest } from "../src/lib/worker-provider.js";
-import { WORKER_HOME_RC_FILES, materializeWorkerHome, perRunWorkerHomeDir } from "../src/lib/worker-home.js";
-import { billingMode } from "../src/lib/env.js";
-import type { Config } from "../src/lib/config.js";
+import { codexSpawnEnvForTest } from "#src/lib/worker-provider.js";
+import { WORKER_HOME_RC_FILES, materializeWorkerHome, perRunWorkerHomeDir } from "#src/lib/worker-home.js";
+import { billingMode } from "#src/lib/env.js";
+import type { Config } from "#src/lib/config.js";
 
 const SENTINEL = "sk-ant-LEAKCANARY-W1T2800-deadbeef";
 

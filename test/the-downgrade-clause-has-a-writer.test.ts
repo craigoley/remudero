@@ -14,8 +14,8 @@
 // test/downgrade-names-the-remedy.test.ts and is deliberately not re-asserted here.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { judgeCriterion, parseReviewerVerdictClauses, reviewerVerdictContract } from "../src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { judgeCriterion, parseReviewerVerdictClauses, reviewerVerdictContract } from "#src/lib/review.js";
 
 const CRITERION: AcceptanceCriterion = { claim: "the widget renders", proof: "widget renders densely above the fold" };
 const TOKENS = new Set(["widget", "renders", "densely", "above", "fold"]); // full coverage ⇒ floor MET

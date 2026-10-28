@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // @ts-expect-error — the executable script has no declaration output.
-import * as workflowGuard from "../scripts/workflow-guard-mutation-ratchet.mjs";
+import * as workflowGuard from "#scripts/workflow-guard-mutation-ratchet.mjs";
 
 interface Guard { line: number; text: string }
 interface Scratch { root: string; cleanup(): void }

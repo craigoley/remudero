@@ -3,18 +3,18 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { fixedClock } from "../src/lib/clock.js";
-import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
-import { withTempDir } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
+import { withTempDir } from "#src/lib/tmp.js";
 import {
   decideMeasurementCadence, readMeasurementCadenceMarker, recordMeasurementCadenceFire,
-} from "../src/lib/measurement-cadence.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/measurement-cadence.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import {
   readCoverageNightlySummary,
   coverageNightlyGithubReader,
   type CoverageNightlyReader,
-} from "../src/lib/coverage-nightly-intake.js";
+} from "#src/lib/coverage-nightly-intake.js";
 
 const day = 24 * 60 * 60 * 1000;
 const at = Date.now() - 7 * day;

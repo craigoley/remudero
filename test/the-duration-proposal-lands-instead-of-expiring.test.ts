@@ -7,7 +7,7 @@ import { test } from "node:test";
 // @ts-expect-error — this executable .mjs intentionally has no declaration output; the seam this
 // suite consumes is declared immediately below rather than left as `any`, the same shape
 // test/a-ci-skip-guard-can-fire-unconditionally.test.ts already uses for a sibling script.
-import * as manifestScript from "../scripts/test-tier-manifest.mjs";
+import * as manifestScript from "#scripts/test-tier-manifest.mjs";
 
 type Manifest = { thresholdMs?: number; files?: Record<string, number> };
 const mergeDurations = manifestScript.mergeDurations as (m: Manifest, measured: Record<string, number>) => Required<Manifest>;

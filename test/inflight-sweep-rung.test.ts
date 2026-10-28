@@ -15,8 +15,8 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readd
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildSweepHook, runInflightLockSweepRung } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+import { buildSweepHook, runInflightLockSweepRung } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 
 // Keep synthetic dead holders outside the OS PID range. A recycled small PID can belong to an
 // unrelated runner process, making the stale-lock fixture intermittently look live.

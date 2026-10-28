@@ -27,14 +27,14 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { runFixRung, acceptanceGateBodyRepair } from "./helpers/run-task-test.js";
-import { acceptanceAuthorTimeCheck } from "../src/lib/review.js";
-import type { CiFailure } from "../src/lib/sweep.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { runFixRung, acceptanceGateBodyRepair } from "#test/helpers/run-task-test.js";
+import { acceptanceAuthorTimeCheck } from "#src/lib/review.js";
+import type { CiFailure } from "#src/lib/sweep.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const GATE_URL = pathToFileURL(join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs")).href;
@@ -581,8 +581,8 @@ test("runFixRung (acceptance 8, fail-open): a body write that throws mid-repair 
  * nothing else, so the REPAIR could not use what the report had worked out. That is the gap here.
  */
 
-import { recoverableCriteria } from "../src/lib/plan-pr-emitter.js";
-import { parseAcceptanceBlock } from "../src/lib/review.js";
+import { recoverableCriteria } from "#src/lib/plan-pr-emitter.js";
+import { parseAcceptanceBlock } from "#src/lib/review.js";
 
 const emDashBody = (n: number) =>
   ["## Acceptance", ""]

@@ -3,9 +3,9 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { workerKeychainPaths } from "../src/lib/worker-home.js";
-import { readUsageSnapshot, type UsageProbeRunner } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import { workerKeychainPaths } from "#src/lib/worker-home.js";
+import { readUsageSnapshot, type UsageProbeRunner } from "#src/run-task.js";
 
 // A minimal, well-formed `/usage` capture parseUsage accepts — content is
 // irrelevant to every test here; only the ENV/argv the probe builds is under

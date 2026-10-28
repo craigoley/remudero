@@ -3,16 +3,16 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSweep, type HandedOffHeadJudgment, type OpenPrView, type SweepDeps, type SweepSummary } from "./helpers/sweep-test.js";
+import { runSweep, type HandedOffHeadJudgment, type OpenPrView, type SweepDeps, type SweepSummary } from "#test/helpers/sweep-test.js";
 // Read off the module namespaces, never named imports: at a base without this task the suite must
 // still LOAD and fail subtest by subtest, which is what makes the proof discriminate.
-import * as sweepModule from "./helpers/sweep-test.js";
-import * as runTaskModule from "../src/run-task.js";
-import type { RiskJudgeChangeView, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as sweepModule from "#test/helpers/sweep-test.js";
+import * as runTaskModule from "#src/run-task.js";
+import type { RiskJudgeChangeView, RiskJudgeVerdict } from "#src/lib/risk-judge.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // W1-T5523 — W1-T5403's sweep judged a handed-off head by AWAITING a model call inside the
 // `mergeable` arm, once per head, serially, with no wall-clock bound, after a synchronous change-view

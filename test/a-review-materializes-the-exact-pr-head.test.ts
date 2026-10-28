@@ -7,8 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { materializeReviewWorktree, type ReviewWorktreeDeps } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import { materializeReviewWorktree, type ReviewWorktreeDeps } from "#src/run-task.js";
 
 const MADE: string[] = [];
 after(() => {

@@ -26,7 +26,7 @@ import {
   type CiFrictionRemedyTask,
   type OwnerSearch,
   type RemedyRound,
-} from "../src/lib/ci-friction-remedy.js";
+} from "#src/lib/ci-friction-remedy.js";
 
 const DAY = 86_400_000;
 const MERGE = Date.parse("2026-09-20T00:00:00.000Z");

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
-import { implementPromptParts, renderImplementPromptWithParts } from "../src/lib/prompt-render.js";
-import { assertProvenance } from "../src/lib/provenance.js";
-import { judgeReview, reviewScopeContext, SCOPE_EXEMPT_GENERATED_ARTIFACTS } from "../src/lib/review.js";
-import { REGENERABLE_ARTIFACT_GENERATORS } from "../src/lib/sweep.js";
-import { declaresProofTitle } from "../src/run-task.js";
+import type { Task } from "#src/lib/plan.js";
+import { implementPromptParts, renderImplementPromptWithParts } from "#src/lib/prompt-render.js";
+import { assertProvenance } from "#src/lib/provenance.js";
+import { judgeReview, reviewScopeContext, SCOPE_EXEMPT_GENERATED_ARTIFACTS } from "#src/lib/review.js";
+import { REGENERABLE_ARTIFACT_GENERATORS } from "#src/lib/sweep.js";
+import { declaresProofTitle } from "#src/run-task.js";
 
 const titles = ["first proof [literal]", "second proof (literal)", "third proof in words"];
 const task: Task = {

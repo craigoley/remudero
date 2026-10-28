@@ -9,11 +9,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 // @ts-expect-error — this executable .mjs intentionally has no declaration output; the seam this suite
 // consumes is declared immediately below rather than left as any.
-import * as remeasureModule from "../scripts/arch-remeasure.mjs";
+import * as remeasureModule from "#scripts/arch-remeasure.mjs";
 
 type Form = "gz" | "plain" | "live";
 interface FormCount { present: number; read: number; state?: string }

@@ -3,8 +3,8 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildStaleGateWorkflowsByPr, updatedForWorkflowFromLedger } from "../src/run-task.js";
-import type { OpenPrView } from "./helpers/sweep-test.js";
+import { buildStaleGateWorkflowsByPr, updatedForWorkflowFromLedger } from "#src/run-task.js";
+import type { OpenPrView } from "#test/helpers/sweep-test.js";
 
 // ── W1-T1212: the READ HALF's real wiring ───────────────────────────────────────────────────
 //

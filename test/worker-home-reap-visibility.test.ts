@@ -14,13 +14,13 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { perRunWorkerHomeDir, reapWorkerHome, type WorkerHomeReapResult } from "../src/lib/worker-home.js";
+import { perRunWorkerHomeDir, reapWorkerHome, type WorkerHomeReapResult } from "#src/lib/worker-home.js";
 import {
   CLAUDE_BIN_ENV_OVERRIDE,
   createClaudeExecutableCache,
   spawnWorker,
   workerHomeReapLogFields,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "rmd-workerhome-reap-visibility-"));

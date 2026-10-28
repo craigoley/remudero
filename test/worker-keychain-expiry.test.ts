@@ -10,7 +10,7 @@ import {
   ensureWorkerKeychain,
   extractCredentialExpiryMs,
   workerKeychainPaths,
-} from "../src/lib/worker-home.js";
+} from "#src/lib/worker-home.js";
 
 /**
  * W1-T293 — the worker credential store becomes EXPIRY-AWARE.

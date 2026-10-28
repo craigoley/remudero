@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { checkCallersAudited, judgeRubric, rubricAdvisorySection } from "../src/lib/review.js";
+import { checkCallersAudited, judgeRubric, rubricAdvisorySection } from "#src/lib/review.js";
 
 const REPORT = "Adjusted scratch handling. No docs update because this is reviewer-internal behavior.";
 

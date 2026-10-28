@@ -16,14 +16,14 @@ import {
   countGateRemedyScopeDeadlockLedgerMembers,
   fixRungScopeStandDownReason,
   runFixRung,
-} from "./helpers/run-task-test.js";
-import { remedyFilesForFailingChecks } from "../src/lib/ci-parity.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { CiFailure } from "../src/lib/sweep.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+} from "#test/helpers/run-task-test.js";
+import { remedyFilesForFailingChecks } from "#src/lib/ci-parity.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { CiFailure } from "#src/lib/sweep.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 const COMMENT_LOAD_REMEDY = "scripts/comment-load-baseline.json";
 const UNDECLARED_REMEDY = "scripts/unregistered-ratchet-baseline.json";

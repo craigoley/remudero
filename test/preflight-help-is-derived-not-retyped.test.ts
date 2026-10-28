@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { FAST_GATE_STEPS } from "../src/lib/ci-parity.js";
-import { COMMANDS, PREFLIGHT_BOOL_FLAGS, PREFLIGHT_VALUE_FLAGS, renderFastGateScriptList } from "../src/run-task.js";
+import { FAST_GATE_STEPS } from "#src/lib/ci-parity.js";
+import { COMMANDS, PREFLIGHT_BOOL_FLAGS, PREFLIGHT_VALUE_FLAGS, renderFastGateScriptList } from "#src/run-task.js";
 
 // ── W1-T2646: the preflight help text stops RE-TYPING a table the code owns ────────────────────
 //

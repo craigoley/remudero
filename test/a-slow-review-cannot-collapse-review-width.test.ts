@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import * as capacity from "../src/lib/review-capacity.js";
+import * as capacity from "#src/lib/review-capacity.js";
 import type {
   ReviewCapacityObservation,
   ReviewCapacityPolicy,
   ReviewCapacityState,
   ReviewSettlementObservation,
-} from "../src/lib/review-capacity.js";
+} from "#src/lib/review-capacity.js";
 
 // 2026-10-06 — ONE SLOW REVIEW, OR A NOISY NEIGHBOUR, COLLAPSED REVIEW WIDTH.
 //

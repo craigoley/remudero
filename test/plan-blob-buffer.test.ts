@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { GitFetchError, syncPlanFromOrigin } from "../src/run-task.js";
+import { GitFetchError, syncPlanFromOrigin } from "#src/run-task.js";
 
 // THE DISPATCH PATH READS plan/tasks.yaml AS A GIT BLOB, UNBUFFERED.
 //

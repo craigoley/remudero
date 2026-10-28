@@ -3,15 +3,15 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import {
   LOCAL_MERGE_CHECK_ROUTES,
   localMergeRouteContractErrors,
   runIsolatedLocalMergeRoute,
-} from "../src/lib/ci-parity.js";
-import { rollupFromRest } from "../src/lib/open-prs-rest.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+} from "#src/lib/ci-parity.js";
+import { rollupFromRest } from "#src/lib/open-prs-rest.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 
 const NOW = Date.parse("2026-09-12T12:00:00Z");
 const HEAD = "a".repeat(40);

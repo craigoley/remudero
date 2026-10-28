@@ -9,8 +9,8 @@ import {
   runSweep,
   type CiFailure,
   type OpenPrView,
-} from "./helpers/sweep-test.js";
-import { buildSweepEffects } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { buildSweepEffects } from "#src/run-task.js";
 
 /**
  * W1-T2620 — THE BASE-CAUSED STAND-DOWN'S EXIT CONDITION.

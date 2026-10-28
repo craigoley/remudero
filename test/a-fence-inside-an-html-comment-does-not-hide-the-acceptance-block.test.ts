@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import * as review from "../src/lib/review.js";
+import * as review from "#src/lib/review.js";
 
 const REAL = "- the real claim | unit test: the real test title";
 const CLAIM = "This PR is plan-only.";

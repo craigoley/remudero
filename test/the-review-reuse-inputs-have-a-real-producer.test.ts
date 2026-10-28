@@ -28,9 +28,9 @@ import {
   fetchReviewReuseFacts,
   tryFetchReviewReuseFacts,
   hydrateReviewReuseFacts,
-} from "../src/lib/open-prs-rest.js";
-import { reviewReuseVerdict } from "../src/lib/sweep.js";
-import { priorReviewVerdictFromLedger, reviewLedgerLegibilityFields } from "../src/lib/review.js";
+} from "#src/lib/open-prs-rest.js";
+import { reviewReuseVerdict } from "#src/lib/sweep.js";
+import { priorReviewVerdictFromLedger, reviewLedgerLegibilityFields } from "#src/lib/review.js";
 
 const FILES_A = [
   { filename: "src/lib/a.ts", status: "modified", sha: "blob1111" },

@@ -9,16 +9,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { loadMounts, mountsPath, resolveClaudeModelAlias } from "../src/lib/mounts.js";
-import type { ProviderCapacity } from "../src/lib/worker-provider.js";
+import { loadMounts, mountsPath, resolveClaudeModelAlias } from "#src/lib/mounts.js";
+import type { ProviderCapacity } from "#src/lib/worker-provider.js";
 import {
   createClaudeExecutableCache,
   spawnWorker,
   workerSelectionAssignment,
   type SpawnWorkerArgs,
   type WorkerSelectionAssignment,
-} from "../src/lib/worker.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+} from "#src/lib/worker.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const NOW = Date.parse("2026-09-25T12:00:00.000Z");

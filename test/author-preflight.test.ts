@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { getPriority } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
-import { gitRepo } from './helpers/git-repo.js';
+import { gitRepo } from '#test/helpers/git-repo.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(ROOT, 'scripts/preflight-author.mjs');
@@ -18,7 +18,7 @@ const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {})
 };
 
 test('author deadline admission refuses a too-small real slot budget before starting static work', async (t) => {
-  const { makeRuntimeFixture } = await import('./helpers/native-runtime-fixture.js');
+  const { makeRuntimeFixture } = await import('#test/helpers/native-runtime-fixture.js');
   const { calibrateAuthorRuntime } = await import(pathToFileURL(join(ROOT, 'scripts/calibrate-author-runtime.mjs')).href);
   const f = makeRuntimeFixture(); t.after(() => f.cleanup());
   const observed = calibrateAuthorRuntime({ root: f.dir });

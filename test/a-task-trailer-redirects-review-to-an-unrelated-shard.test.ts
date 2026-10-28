@@ -31,7 +31,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { checkAcceptanceCommand } from "../src/run-task.js";
+import { checkAcceptanceCommand } from "#src/run-task.js";
 
 const PLAN = `- id: W1-T-DEPLOY
   title: a deploy-shaped task

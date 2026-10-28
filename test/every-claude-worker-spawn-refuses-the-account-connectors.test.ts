@@ -9,10 +9,10 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { query, type Options, type SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 // @ts-expect-error -- plain .mjs script, no type declarations
-import { censusWorkerMcpExposure } from "../scripts/worker-mcp-exposure-census.mjs";
-import { ACCOUNT_CONNECTOR_DENY } from "../src/lib/worker-mcp-isolation.js";
+import { censusWorkerMcpExposure } from "#scripts/worker-mcp-exposure-census.mjs";
+import { ACCOUNT_CONNECTOR_DENY } from "#src/lib/worker-mcp-isolation.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, openUsageProbeSession, spawnWorker, workerLedgerFields,
-  type UsageProbeQueryFn } from "../src/lib/worker.js";
+  type UsageProbeQueryFn } from "#src/lib/worker.js";
 
 /**
  * W1-T9489. Every Claude worker spawn (fix, implement, review, recon) ran under bypassPermissions with the fleet account's

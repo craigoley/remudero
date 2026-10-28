@@ -3,9 +3,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { readCiGateRequiredChecks } from "../src/lib/ci-gate-required.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type SweepDeps } from "./helpers/sweep-test.js";
-import { buildOpenPrViews } from "../src/run-task.js";
+import { readCiGateRequiredChecks } from "#src/lib/ci-gate-required.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { buildOpenPrViews } from "#src/run-task.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";

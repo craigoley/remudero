@@ -28,9 +28,9 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 // @ts-expect-error -- plain .mjs script, no type declarations
-import { planNightlyRun, readsMutatedModuleSource } from "../scripts/mutation-ratchet.mjs";
+import { planNightlyRun, readsMutatedModuleSource } from "#scripts/mutation-ratchet.mjs";
 // @ts-expect-error -- plain .mjs script, no type declarations
-import { buildBody, MAX_BODY } from "../scripts/needs-human-issue.mjs";
+import { buildBody, MAX_BODY } from "#scripts/needs-human-issue.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const alwaysFast = () => ({ ms: 1, ok: true, timedOut: false });

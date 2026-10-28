@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { judgeReview, resolvePlanCriteriaAtHeadAsync, resolvePlanCriteriaAtHead } from "../src/lib/review.js";
+import { judgeReview, resolvePlanCriteriaAtHeadAsync, resolvePlanCriteriaAtHead } from "#src/lib/review.js";
 
 // ── W1-T2432: "A BUILD IS UNJUDGEABLE UNTIL THE REVIEWER's OWN CONTAINER RESTARTS PAST ITS
 // SHARD" ──────────────────────────────────────────────────────────────────────────────────────

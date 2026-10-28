@@ -26,13 +26,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { LiveSpawnBlockedError } from "../src/lib/spawn-guard.js";
+import { LiveSpawnBlockedError } from "#src/lib/spawn-guard.js";
 import {
   assertWorkerCredentialFile,
   classifyWorkerCredentialFile,
   workerCredentialFilePath,
   WorkerKeychainError,
-} from "../src/lib/worker-home.js";
+} from "#src/lib/worker-home.js";
 
 const HEALTHY = JSON.stringify({
   claudeAiOauth: { accessToken: "not-a-real-token", expiresAt: Date.now() + 86_400_000 },
@@ -200,7 +200,7 @@ test("the two new classes are distinct from every macOS class, so a Linux failur
  *  an injected recorder, which would only prove the seam was reachable. It also sidesteps the
  *  reaper trap entirely: the verdict is the error TYPE, never a directory read after teardown. */
 async function spawnAgainst(realHome: string, platform?: NodeJS.Platform): Promise<{ reachedSpawn: boolean; err?: unknown }> {
-  const { spawnWorker, renderWorkerSettings } = await import("../src/lib/worker.js");
+  const { spawnWorker, renderWorkerSettings } = await import("#src/lib/worker.js");
   const root = mkdtempSync(join(tmpdir(), "rmd-cred-root-"));
   const settingsFile = renderWorkerSettings({
     templatePath: new URL("../settings/worker.json", import.meta.url).pathname,

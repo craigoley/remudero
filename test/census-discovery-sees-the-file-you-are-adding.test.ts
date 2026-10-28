@@ -20,9 +20,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { CENSUS_DISCOVERY_PROBE_ARGV, discoverCensusCandidates } from "../src/lib/ci-parity.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import { CENSUS_DISCOVERY_PROBE_ARGV, discoverCensusCandidates } from "#src/lib/ci-parity.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
 
 const realSpawn: PreflightSpawn = (file, args, opts) => {
   try {

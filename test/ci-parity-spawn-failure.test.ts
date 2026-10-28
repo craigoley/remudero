@@ -4,8 +4,8 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultPreflightSpawn } from "../src/lib/commit-message.js";
-import { shellOut } from "../src/lib/ci-parity.js";
+import { defaultPreflightSpawn } from "#src/lib/commit-message.js";
+import { shellOut } from "#src/lib/ci-parity.js";
 
 /**
  * `shellOut` CLAIMED TO REPORT A SIGNAL KILL AND NEVER DID — and the false comment was the sharper

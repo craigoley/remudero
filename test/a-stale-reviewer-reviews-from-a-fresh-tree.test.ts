@@ -8,9 +8,9 @@ import {
   buildFreshTreeReviewRunner,
   buildReviewerCodeFreshnessGate,
   spawnRmdReviewForFreshTree,
-} from "../src/run-task.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/run-task.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // ── W1-T3723 — A STALE REVIEWER REVIEWS FROM A FRESH TREE INSTEAD OF WAITING FOR A RESTART ────
 //

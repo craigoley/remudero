@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { bodyContradictsDiff, judgeCriterion, judgeReview } from "../src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { bodyContradictsDiff, judgeCriterion, judgeReview } from "#src/lib/review.js";
 
 // ── W1-T1100: a body detector judges the substitute it was handed ──────────────────────────────
 //

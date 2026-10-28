@@ -22,9 +22,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { killProcessGroup } from "../src/lib/worker-containment.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { waitForServeBanner } from "./helpers/serve-boot-banner.js";
+import { killProcessGroup } from "#src/lib/worker-containment.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { waitForServeBanner } from "#test/helpers/serve-boot-banner.js";
 
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 

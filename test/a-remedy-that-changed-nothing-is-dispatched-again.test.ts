@@ -12,17 +12,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildOpenPrViews, deriveStrikeHistory, runFixRung } from "./helpers/run-task-test.js";
+import { buildOpenPrViews, deriveStrikeHistory, runFixRung } from "#test/helpers/run-task-test.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { reviewInputDigest, type CriterionVerdict, type ReviewVerdict } from "../src/lib/review.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+} from "#test/helpers/sweep-test.js";
+import { reviewInputDigest, type CriterionVerdict, type ReviewVerdict } from "#src/lib/review.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 // W1-T4226: the fix rung reads the live PR body after CI goes green; every runFixRung below
 // injects it through `deps.fetchPrBody` so the rung judges a real body, not the substitute.

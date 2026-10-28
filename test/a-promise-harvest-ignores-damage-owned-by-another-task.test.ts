@@ -3,8 +3,8 @@ import { createReadStream, existsSync, readdirSync, rmSync, writeFileSync } from
 import { basename, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { test, type TestContext } from "node:test";
-import { recoverPromisedFollowUpReports, type PromisedFollowUpObservation } from "../src/lib/review.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { recoverPromisedFollowUpReports, type PromisedFollowUpObservation } from "#src/lib/review.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const taskId = "W1-T8775", prUrl = "https://github.com/o/r/pull/11255";
 const firstRun = "2026-10-12T10:00:00.000Z";

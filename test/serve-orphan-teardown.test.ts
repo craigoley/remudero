@@ -45,8 +45,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { killProcessGroup } from "../src/lib/worker-containment.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { killProcessGroup } from "#src/lib/worker-containment.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 

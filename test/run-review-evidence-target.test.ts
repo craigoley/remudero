@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { runReview } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { runReview } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const REVIEWER_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
 const SOURCE_TEXT_SUBJECT_MARKER = "@source-text-subject";

@@ -25,14 +25,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import type { Task } from "../src/lib/plan.js";
-import type { NameFilterResolution } from "../src/lib/review.js";
+import type { Task } from "#src/lib/plan.js";
+import type { NameFilterResolution } from "#src/lib/review.js";
 import {
   proofQueueAudit,
   PROOF_QUEUE_AUDIT_CAUSES,
   type ProofQueueAuditOpts,
-} from "../src/lib/proof-queue-audit.js";
-import { creditedProofVisibility, grepPatternMatches, proofQueueAuditCommand } from "../src/run-task.js";
+} from "#src/lib/proof-queue-audit.js";
+import { creditedProofVisibility, grepPatternMatches, proofQueueAuditCommand } from "#src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

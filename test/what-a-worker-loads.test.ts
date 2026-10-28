@@ -4,8 +4,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { implementPromptParts } from "../src/run-task.js";
-import type { Task } from "../src/lib/plan.js";
+import { implementPromptParts } from "#src/run-task.js";
+import type { Task } from "#src/lib/plan.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WORKER_TS = join(REPO_ROOT, "src", "lib", "worker.ts");

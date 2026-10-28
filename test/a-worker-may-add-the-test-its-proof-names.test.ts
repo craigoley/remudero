@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { commitWorkerEdits, harnessCommitForShellLessWorker } from "../src/run-task.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { commitWorkerEdits, harnessCommitForShellLessWorker } from "#src/run-task.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const title = "the worker's [proof] (lands)";
 const acceptance = [{ claim: "lands", proof: `unit test: ${title}` }];

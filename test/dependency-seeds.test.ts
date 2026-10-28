@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, dependencySeedIdentity, DEPENDENCY_SEED_MIN_IDLE_MS, legacyHostNamespace, materializeDependencySeed, sweepDependencySeeds } from "../src/lib/dependency-seeds.js";
+import { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, dependencySeedIdentity, DEPENDENCY_SEED_MIN_IDLE_MS, legacyHostNamespace, materializeDependencySeed, sweepDependencySeeds } from "#src/lib/dependency-seeds.js";
 
 function writable(path: string): void {
   const s = lstatSync(path);

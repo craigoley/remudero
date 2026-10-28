@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { declaredFilesForFiledIds, printLaneOverlapAdvisory } from "../src/run-task.js";
-import type { Plan } from "../src/lib/plan.js";
+import { declaredFilesForFiledIds, printLaneOverlapAdvisory } from "#src/run-task.js";
+import type { Plan } from "#src/lib/plan.js";
 
 // ── W1-T985: THREE MINTING LANES NEVER TYPE THE ADVISORY ────────────────────────────────────
 //

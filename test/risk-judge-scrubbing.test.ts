@@ -8,7 +8,7 @@ import {
   type RiskJudgeInput,
   type RiskJudgeOrchestratorDeps,
   type RiskJudgeVerdict,
-} from "../src/lib/risk-judge.js";
+} from "#src/lib/risk-judge.js";
 
 function input(overrides: Partial<RiskJudgeInput> = {}): RiskJudgeInput {
   return {

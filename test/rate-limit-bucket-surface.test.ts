@@ -5,7 +5,7 @@ import {
   ghRateLimitRefusalFromReading,
   ghRateLimitRefusalUnknown,
   type GhRateLimitReading,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 import {
   armAndLogOutcome,
   armAutoMergeDetailed,
@@ -15,9 +15,9 @@ import {
   renderGhBucketsSection,
   statusCommand,
   type ArmDeps,
-} from "../src/run-task.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/run-task.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import type { Config } from "#src/lib/config.js";
 
 // ── W1-T1235: an exhausted GitHub quota bucket is never named. The auto-merge arm is
 // GraphQL-ONLY (no REST form to trade to, unlike `update-branch`), its refusals discarded the

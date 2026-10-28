@@ -9,8 +9,8 @@ import {
   type FlightJudgeConfig,
   type JudgeParseOutcome,
   type JudgeState,
-} from "../src/lib/flight-judge.js";
-import type { RiskTaskMetadata } from "../src/lib/risk-score.js";
+} from "#src/lib/flight-judge.js";
+import type { RiskTaskMetadata } from "#src/lib/risk-score.js";
 
 // W1-T2225 — flight-judge.ts carries W1-T2212's collapse: an unreadable judge
 // output must not be storable as a classification. See design (i)-(iii) in

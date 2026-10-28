@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { shadowJudgeSampled } from "../src/lib/shadow-judge.js";
-import type { Config } from "../src/lib/config.js";
-import type { Mount, Mounts } from "../src/lib/mounts.js";
-import type { ShardUnderJudgement } from "../src/lib/verify-human-judge.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
-import { shadowedVerifyHumanJudge } from "../src/run-task.js";
+import { shadowJudgeSampled } from "#src/lib/shadow-judge.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount, Mounts } from "#src/lib/mounts.js";
+import type { ShardUnderJudgement } from "#src/lib/verify-human-judge.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import { shadowedVerifyHumanJudge } from "#src/run-task.js";
 
 function workerResult(text: string, model: string, servedModel: string): WorkerResult {
   return {

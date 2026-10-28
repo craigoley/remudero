@@ -3,12 +3,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { loadMounts, mountsPath } from "../src/lib/mounts.js";
-import { ROUTING_EXPERIMENTS, routingExperimentFor } from "../src/lib/routing-experiments.js";
+import type { Config } from "#src/lib/config.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
+import { ROUTING_EXPERIMENTS, routingExperimentFor } from "#src/lib/routing-experiments.js";
 import { openWeightAllowancePath, openWeightCommittedUsd, openWeightReservationUsd, openWeightUsageUsd,
-  selectOpenWeightModel, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
-import { workerSelectionAssignment } from "../src/lib/worker.js";
+  selectOpenWeightModel, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import { workerSelectionAssignment } from "#src/lib/worker.js";
 
 const MODEL = "gpt-6.1-sol";
 const root = join(import.meta.dirname, "..");

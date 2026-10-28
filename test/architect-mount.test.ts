@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { draftProposalBatch } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { draftProposalBatch } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // fb-1784921980488-44b355 §4 (MPG first-instance ruling: opus -> Opus 5): the Architect-tier
 // roles (retro, triage, the inbox-draft rung) resolve their spawn model through

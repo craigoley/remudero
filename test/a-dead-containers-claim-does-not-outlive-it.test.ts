@@ -3,8 +3,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { ReviewStatusLockTimeoutError, acquireReviewStatusLock } from "../src/lib/review.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { ReviewStatusLockTimeoutError, acquireReviewStatusLock } from "#src/lib/review.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 // ── W1-T3335 — A DEAD CONTAINER'S CLAIM MUST NOT OUTLIVE IT ───────────────────────────────────
 //

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { measureShadowJudgeAgreement, runShadowJudge, shadowJudgeSampled, shadowJudgeMount } from "../src/lib/shadow-judge.js";
-import type { Mount } from "../src/lib/mounts.js";
+import { measureShadowJudgeAgreement, runShadowJudge, shadowJudgeSampled, shadowJudgeMount } from "#src/lib/shadow-judge.js";
+import type { Mount } from "#src/lib/mounts.js";
 
 const primary: Mount = { model: "sonnet", effort: "high", maxTurns: 400, contextBudget: 120000 };
 const other: Mount = { model: "haiku", effort: "low", maxTurns: 400, contextBudget: 60000 };

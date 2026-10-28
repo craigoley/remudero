@@ -27,8 +27,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
-import { ghShim } from "./helpers/gh-shim.js";
-import { allowGhRefusals } from "./setup/tmp-hygiene.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { allowGhRefusals } from "#test/setup/tmp-hygiene.js";
 
 allowGhRefusals("W1-T4119's own proof: every test below deliberately triggers the shared refusal");
 

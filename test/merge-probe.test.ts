@@ -13,10 +13,10 @@ import {
   stackedOnNumbers,
   type MergeProbeGit,
   type MergeProbeGitResult,
-} from "../src/lib/merge-probe.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import type { OpenPrView } from "../src/lib/sweep.js";
+} from "#src/lib/merge-probe.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import type { OpenPrView } from "#src/lib/sweep.js";
 
 const MAIN_A = "a".repeat(40);
 const MAIN_B = "b".repeat(40);

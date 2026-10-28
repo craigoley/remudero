@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 // @ts-ignore the executable .mjs module has no declaration file.
-import { evaluateInstrumentSurface, main } from "../scripts/census-precheck.mjs";
+import { evaluateInstrumentSurface, main } from "#scripts/census-precheck.mjs";
 
 const SCRIPT = "scripts/branch-helper.mjs";
 const OTHER = "scripts/another-helper.mjs";

@@ -9,9 +9,9 @@ import {
   runRiskJudge,
   type RiskJudgeInput,
   type RiskJudgeOrchestratorDeps,
-} from "../src/lib/risk-judge.js";
-import { changeView } from "../src/run-task.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
+} from "#src/lib/risk-judge.js";
+import { changeView } from "#src/run-task.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
 
 /**
  * W1-T1031 — "round 2" of W1-T454's Option A (Option B, the honesty prefix, shipped as

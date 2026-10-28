@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import type { AffectedSuitesInput } from "../src/lib/affected-suites.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
+import type { AffectedSuitesInput } from "#src/lib/affected-suites.js";
 import {
   preflightCommand,
   runPreflightCiChecks,
   runPreflightScopedDiffCoverage,
   PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING,
   PREFLIGHT_SCOPED_COVERAGE_PER_SUITE_ESTIMATE_MS,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 // @ts-expect-error scripts/diff-coverage-local.mjs is a plain .mjs script with no declaration file.
-import { extractCoverageFlags, readCiYaml } from "../scripts/diff-coverage-local.mjs";
+import { extractCoverageFlags, readCiYaml } from "#scripts/diff-coverage-local.mjs";
 
 // ── W1-T4108: PREFLIGHT RUNS WHAT CI RUNS ────────────────────────────────────────────────────
 //

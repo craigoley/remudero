@@ -34,8 +34,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { runBeat, REAL_SCRIPT, REPO_ROOT, type Beat, type Call } from "./helpers/fleet-heartbeat-harness.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { runBeat, REAL_SCRIPT, REPO_ROOT, type Beat, type Call } from "#test/helpers/fleet-heartbeat-harness.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 
 /** `key=value` lookup over a published payload. */

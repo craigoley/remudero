@@ -3,9 +3,9 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { judgeReview, matchedLinesAreAllComments } from "../src/lib/review.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import { judgeReview, matchedLinesAreAllComments } from "#src/lib/review.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 
 function withFixtureCheckout(files: Record<string, string>, run: (cwd: string) => void): void {
   const cwd = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}remudero-comment-grep-`));

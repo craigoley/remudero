@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createWorkerToolLineage, observeWorkerToolLineage, type WorkerToolReceipt } from "../src/lib/worker-tool-lineage.js";
+import { createWorkerToolLineage, observeWorkerToolLineage, type WorkerToolReceipt } from "#src/lib/worker-tool-lineage.js";
 
 test("test/worker-tool-lineage-unknown.test.ts missing IDs, malformed evidence and unsupported adapters are named", () => {
   const rows: WorkerToolReceipt[] = [];

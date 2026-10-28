@@ -20,7 +20,7 @@ import {
   pruneStaleRuns,
   reclaimStaleConfigLock,
   worktreeAdd,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 // W1-T1036: a zero-byte `.git/config.lock` left by a killed process fails every
 // subsequent `git worktree add` outright (`worktreeAdd` writes `branch.<name>.remote`/

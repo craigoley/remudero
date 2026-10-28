@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T3085: the comment-load ratchet measures the COMMITTED diff (`<base>...HEAD`), so an edit still
 // in the working tree is not what it judged. The refusal must say so for a refused path that is dirty,

@@ -25,14 +25,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { CHANGESET_CLAIM_FALSIFIER_NOTE, bodyContradictsDiff, changesetClaimsDisagreeing, judgeReview, recognizeChangesetClaims } from "../src/lib/review.js";
-import { runFixRung } from "./helpers/run-task-test.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { CHANGESET_CLAIM_FALSIFIER_NOTE, bodyContradictsDiff, changesetClaimsDisagreeing, judgeReview, recognizeChangesetClaims } from "#src/lib/review.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 // ── fixtures shared across this file ────────────────────────────────────────
 

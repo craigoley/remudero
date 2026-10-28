@@ -10,14 +10,14 @@ import {
   WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
   WorktreeBaseStaleError,
   worktreeAdd,
-} from "../src/lib/worker.js";
-import { runTask } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
+import { runTask } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { GitHub, PrRef } from "#src/lib/status.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
 
 // W1-T2621: a worktree creation's ledger line used to name neither the base it cut from nor
 // any remote reading -- `log("worktree.add", { branch, worktreePath })` (run-task.ts:11575,

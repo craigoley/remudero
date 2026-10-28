@@ -6,8 +6,8 @@ import {
   inverseScopeAdvisorySection,
   scopeAdvisorySection,
   unwiredExportAdvisorySection,
-} from "../src/lib/review.js";
-import type { UnwiredAdvisory } from "../src/lib/review.js";
+} from "#src/lib/review.js";
+import type { UnwiredAdvisory } from "#src/lib/review.js";
 
 const inverse = (symbols: string[]): UnwiredAdvisory => ({
   reasonCode: "inverse_scope",

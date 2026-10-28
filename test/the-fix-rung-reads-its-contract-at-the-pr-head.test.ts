@@ -15,11 +15,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { ghJsonAsync } from "../src/lib/github-transport.js";
-import type { Plan } from "../src/lib/plan.js";
-import { renderFixPrompt } from "../src/lib/prompt-render.js";
-import type { PlanCriteriaAtHeadResult } from "../src/lib/review.js";
+import type { Config } from "#src/lib/config.js";
+import { ghJsonAsync } from "#src/lib/github-transport.js";
+import type { Plan } from "#src/lib/plan.js";
+import { renderFixPrompt } from "#src/lib/prompt-render.js";
+import type { PlanCriteriaAtHeadResult } from "#src/lib/review.js";
 import {
   buildSweepEffects,
   DEFAULT_SWEEP_POLICY,
@@ -27,9 +27,9 @@ import {
   fixRungTaskFor,
   fixRungWantsHeadContract,
   type BuildSweepEffectsDeps,
-} from "../src/lib/sweep.js";
-import { commitWorkerEdits, fixRungScopeStandDownReason } from "./helpers/run-task-test.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/sweep.js";
+import { commitWorkerEdits, fixRungScopeStandDownReason } from "#test/helpers/run-task-test.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const ID = "W1-T4051";
 const SUPERSEDED = "test/the-board-review-check-does-not-freeze-the-loop.test.ts";

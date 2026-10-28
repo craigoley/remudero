@@ -17,8 +17,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
-import { gitRepo } from "./helpers/git-repo.js";
-import { imageDependenciesCommitsBehind, imageDependencyInputFingerprint, newestImageDependencyInputSha, realDeployDeps } from "../src/lib/deployer.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { imageDependenciesCommitsBehind, imageDependencyInputFingerprint, newestImageDependencyInputSha, realDeployDeps } from "#src/lib/deployer.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const SDK_KEY = "node_modules/@anthropic-ai/claude-agent-sdk";

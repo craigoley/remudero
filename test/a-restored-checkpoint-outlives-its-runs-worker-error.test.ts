@@ -10,18 +10,18 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setImmediate as drainMicrotasks } from "node:timers/promises";
 import { test } from "node:test";
-import { pendingWorkerBoundaryHandoffs, runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
-import { DECISION_RELEVANT_LEDGER_STEPS, rotateLedger } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { loadPlan } from "../src/lib/plan.js";
+import { pendingWorkerBoundaryHandoffs, runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { DECISION_RELEVANT_LEDGER_STEPS, rotateLedger } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { loadPlan } from "#src/lib/plan.js";
 import {
   INDEPENDENT_BLOCK_BASE_BACKOFF_MS, INDEPENDENT_BLOCK_RELEASED_STEP, buildLedgerIndex,
   independentFailureLatch, type IndependentBlockRelease, type StatusProjection,
-} from "../src/lib/status.js";
-import * as status from "../src/lib/status.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { restoreBoundaryCheckpoint, runTask, type RunResult } from "./helpers/run-task-test.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/status.js";
+import * as status from "#src/lib/status.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { restoreBoundaryCheckpoint, runTask, type RunResult } from "#test/helpers/run-task-test.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const TASK = "W1-T9676";
 const SOURCE = `run-${TASK}-1791807256528`;

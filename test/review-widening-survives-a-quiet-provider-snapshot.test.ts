@@ -5,7 +5,7 @@ import {
   type ReviewCapacityObservation,
   type ReviewCapacityPolicy,
   type ReviewCapacityState,
-} from "../src/lib/review-capacity.js";
+} from "#src/lib/review-capacity.js";
 
 // W1-T2987 — REVIEW WIDENING MUST SURVIVE A QUIET PROVIDER SNAPSHOT.
 //

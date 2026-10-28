@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
-import { ledgeredNonDispatchSpawn, reviewCommand, runReview } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
+import { ledgeredNonDispatchSpawn, reviewCommand, runReview } from "#src/run-task.js";
 
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();

@@ -1,4 +1,3 @@
-// test/a-body-proof-that-names-a-missing-path-is-refused.test.ts
 //
 // W1-T3675 — A PULL REQUEST BODY'S `grep:` PROOF NAMES A FILE BY PATH AND IS SILENTLY INVALIDATED
 // BY A RENAME. MEASURED THREE TIMES in one evening on #5742/#5718 (the task's rationale): a shard

@@ -9,8 +9,8 @@ import {
   FAST_GATE_STEPS,
   KNOWN_CENSUS_SUITES,
   censusSuiteMembership,
-} from "../src/lib/ci-parity.js";
-import { censusMembershipCommand } from "../src/run-task.js";
+} from "#src/lib/ci-parity.js";
+import { censusMembershipCommand } from "#src/run-task.js";
 
 const COST_REFUSED_TEST_FILE = "test/enforcement-data-carveout.test.ts";
 const COST_REFUSED_JOB = "enforcement-data-carveout-census";

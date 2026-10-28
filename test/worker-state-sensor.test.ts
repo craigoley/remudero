@@ -19,13 +19,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { readLedgerLines } from "../src/lib/status.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   collectWorkerResult,
   DEFAULT_WORKER_QUIET_FLOOR_MS,
   WorkerStateTracker,
   type WorkerStreamEvent,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 import {
   buildWorkerStateSensor,
   capWorkerTailLines,
@@ -38,8 +38,8 @@ import {
   WORKER_TAIL_MAX_BYTES,
   WORKER_TAIL_MAX_LINES,
   writeWorkerTailBestEffort,
-} from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 
 function tmpRoot(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `rmd-${prefix}-`));

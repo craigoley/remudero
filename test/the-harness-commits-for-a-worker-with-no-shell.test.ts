@@ -36,32 +36,32 @@ import {
   parseReport,
   spawnWorker,
   type SpawnWorkerArgs,
-} from "../src/lib/worker.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
 import {
   assertOpenWeightToolBoundary,
   OPENWEIGHT_CHECKS,
   OPENWEIGHT_FUNCTIONS,
   runOpenWeightCheck,
   spawnOpenWeightWorker,
-} from "../src/lib/worker-provider.js";
-import { outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
-import { FIX_WORKER_TOOLS } from "../src/lib/fix-fence.js";
+} from "#src/lib/worker-provider.js";
+import { outputContractLines, renderAnchorBlock } from "#src/lib/compaction.js";
+import { FIX_WORKER_TOOLS } from "#src/lib/fix-fence.js";
 import {
   implementPromptParts,
   renderImplementPrompt,
   renderImplementPromptWithParts,
-} from "../src/lib/prompt-render.js";
+} from "#src/lib/prompt-render.js";
 import {
   cashContainedRunRefusal,
   commitWorkerEdits,
   forceCashContainedRunSpawn,
   harnessCommitForShellLessWorker,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 // The SHARED builder, not a hand-rolled `git init`: test/fixture-copy-census.test.ts holds the
 // population of files that shell git themselves at a baseline, and one more copy of this fixture
 // is exactly what it exists to refuse.
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 test("only a spawn bounded without a shell is harness-committed", () => {
   // THE WHOLE POINT OF THE PREDICATE. An unbounded spawn inherits Bash, so it is NOT harness

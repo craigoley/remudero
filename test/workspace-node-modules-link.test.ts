@@ -9,7 +9,7 @@ import {
   linkWorkspaceNodeModules,
   workspaceNodeModulesIncomplete,
   worktreeAdd,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 // W1-T4003: `linkWorktreeNodeModules` (src/lib/worker.ts) links ONLY the root `node_modules`.
 // This fleet's real npm layout can leave a workspace's own dependency nested under ITS OWN

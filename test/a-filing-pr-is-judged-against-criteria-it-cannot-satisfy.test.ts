@@ -20,12 +20,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { filingSelfCreditCheck } from "../src/lib/review.js";
+import { filingSelfCreditCheck } from "#src/lib/review.js";
 // @ts-expect-error — `scripts/**` sits outside tsconfig's `include`, so this executable .mjs has
 // no declaration output (TS7016). The seam this suite consumes is declared immediately below
 // rather than left as `any`, the same idiom test/a-ci-skip-guard-can-fire-unconditionally.test.ts
 // uses for its own script.
-import * as authorGate from "../scripts/acceptance-author-gate.mjs";
+import * as authorGate from "#scripts/acceptance-author-gate.mjs";
 
 const evaluateGate = authorGate.evaluateGate as (input: {
   body: string;

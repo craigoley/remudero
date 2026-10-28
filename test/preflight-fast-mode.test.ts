@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
-import { preflightCommand } from "../src/run-task.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
+import { FAST_GATE_STEPS, runPreflightFast } from "#src/lib/ci-parity.js";
+import { preflightCommand } from "#src/run-task.js";
 
 // ── W1-T373: `rmd preflight --fast` — the deterministic npm-script gates, nothing else ──────
 //

@@ -18,8 +18,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cashCanServeToolSurface, cashFallbackRefusal, harnessOwnsGitFor } from "../src/lib/worker.js";
-import { RISK_JUDGE_TOOLS } from "../src/lib/risk-judge.js";
+import { cashCanServeToolSurface, cashFallbackRefusal, harnessOwnsGitFor } from "#src/lib/worker.js";
+import { RISK_JUDGE_TOOLS } from "#src/lib/risk-judge.js";
 
 const CASH_ENABLED = {
   workerProviders: { enabled: ["claude", "openweight"], cashFallbackWhenBlocked: true },

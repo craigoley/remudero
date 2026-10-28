@@ -27,8 +27,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cashCanServeToolSurface } from "../src/lib/worker.js";
-import { TRIAGE_CASH_TOOLS, TRIAGE_WORKER_TOOLS } from "../src/run-task.js";
+import { cashCanServeToolSurface } from "#src/lib/worker.js";
+import { TRIAGE_CASH_TOOLS, TRIAGE_WORKER_TOOLS } from "#src/run-task.js";
 
 test("W1-T3749: triage-cash-divert: the Claude surface keeps WebSearch — the Architect-tier research grant", () => {
   assert.ok(TRIAGE_WORKER_TOOLS.includes("WebSearch"), "triage's own STEP 2 (lib/triage.ts) instructs it to research");

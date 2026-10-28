@@ -31,7 +31,7 @@ import {
   VITEST_TAP_SKIP_RE,
   type ProofSpawner,
   type SuiteRegistryTarget,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TMP_HYGIENE_IMPORT = "./test/setup/tmp-hygiene.ts";

@@ -11,8 +11,8 @@ import {
   loadCiGateLists as loadSharedCiGateLists,
   loadWorkflowDocuments,
   type WorkflowDoc,
-} from "../src/lib/ci-control-plane.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/ci-control-plane.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // ── R-51 (docs/audits/recon-2026-09-05.md): "every deterministic PR check can block a merge" ──
 //

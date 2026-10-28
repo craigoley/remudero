@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { classifyHeadShaAvailability, parseAcceptanceBlock, resolvePlanCriteriaAtHead } from "../src/lib/review.js";
+import { classifyHeadShaAvailability, parseAcceptanceBlock, resolvePlanCriteriaAtHead } from "#src/lib/review.js";
 
 const MADE: string[] = [];
 after(() => {

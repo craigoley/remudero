@@ -5,16 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
 import {
   computeRunContext,
   mergeBaseRelativeStepNames,
   runTreeAdvisoryLine,
   type CiParityStepResult,
   type PreflightSummary,
-} from "../src/lib/ci-parity.js";
-import { preflightCommand } from "../src/run-task.js";
-import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
+} from "#src/lib/ci-parity.js";
+import { preflightCommand } from "#src/run-task.js";
+import { coverageParitySpawnResult } from "#test/helpers/coverage-parity-spawn.js";
 
 const BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
 

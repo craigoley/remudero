@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // @census-reads: none — only child JSON and raw V8 reports from the private fixture are read.
 const wrapper = fileURLToPath(new URL("../scripts/test-with-retry.mjs", import.meta.url));

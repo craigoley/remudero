@@ -5,7 +5,7 @@ import {
   isTestOnlyCompletionOfExistingBehaviour,
   type DeclaredFileBaseFact,
   type RiskJudgeChangeView,
-} from "../src/lib/risk-judge.js";
+} from "#src/lib/risk-judge.js";
 
 // W1-T2991 — A DECLARED FILE ABSENT FROM A DIFF IS NOT PROOF OF DRIFT.
 //

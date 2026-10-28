@@ -7,8 +7,8 @@
 // nothing worth carrying, so a quiet worker's ledger row never grows a blank field.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { noPrVerdict } from "../src/run-task.js";
-import { noPrReportExcerpt, REPORT_EXCERPT_CAP, type WorkerResult } from "../src/lib/worker.js";
+import { noPrVerdict } from "#src/run-task.js";
+import { noPrReportExcerpt, REPORT_EXCERPT_CAP, type WorkerResult } from "#src/lib/worker.js";
 
 function result(over: Partial<WorkerResult>): WorkerResult {
   return {

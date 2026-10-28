@@ -16,9 +16,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Config } from "../src/lib/config.js";
-import type { AffectedSelection } from "../src/lib/affected-suites.js";
-import { defaultPreflightSpawn as defaultSpawn } from "../src/lib/commit-message.js";
+import type { Config } from "#src/lib/config.js";
+import type { AffectedSelection } from "#src/lib/affected-suites.js";
+import { defaultPreflightSpawn as defaultSpawn } from "#src/lib/commit-message.js";
 import {
   OPENWEIGHT_CHECKS,
   OPENWEIGHT_RUN_CHECK_LEDGER_STEP,
@@ -29,8 +29,8 @@ import {
   selectOpenWeightUnitTestSuites,
   selectOpenWeightUnitTestSuitesOffLoop,
   spawnOpenWeightWorker,
-} from "../src/lib/worker-provider.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/worker-provider.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 /** A git tree shaped like remudero's: the selector marker, a source module, the suite that
  *  names it, an unrelated suite, and the setup file — committed, with origin/main at that commit. */

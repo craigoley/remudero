@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "../src/run-task.js";
+import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "#src/run-task.js";
 
 const branchNames = ["main", "needs-review", "closed-unmerged"];
 

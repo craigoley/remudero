@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { bodyContradictsDiff, changesetClaimsDisagreeing, claimsChangesetContext } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing, claimsChangesetContext } from "#src/lib/review.js";
 
 /**
  * W1-T2534 — a quotation is not an assertion, and W1-T308 already established that for BLOCK-level

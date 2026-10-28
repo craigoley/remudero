@@ -9,7 +9,7 @@ import {
   useCapabilityGrant,
   verifyCapabilityGrant,
   type CapabilityUseRequest,
-} from "../src/lib/capability-grant.js";
+} from "#src/lib/capability-grant.js";
 
 const APPROVAL = { approvedBy: "operator:alice", approvedAt: new Date(Date.now() - 1_000).toISOString() };
 

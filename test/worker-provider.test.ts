@@ -28,24 +28,24 @@ import {
   spawnCodexWorker,
   type ProviderCapacity,
   type RoutingDrawSeed,
-} from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
 import {
   selectWorkerProviderForPolicy,
   type EffectiveProviderRoutingPolicy,
-} from "../src/lib/provider-routing-policy.js";
+} from "#src/lib/provider-routing-policy.js";
 import {
   readProviderRoutingStatus,
   writeProviderRoutingStatus,
-} from "../src/lib/provider-routing-status.js";
+} from "#src/lib/provider-routing-status.js";
 import {
   clearClaudeCapacityCache,
   createClaudeExecutableCache,
   readClaudeProviderCapacity,
   spawnWorker,
   workerLedgerFields,
-} from "../src/lib/worker.js";
-import { withLiveSpawnAllowed } from "../src/lib/spawn-guard.js";
-import type { CapabilityLadder } from "../src/lib/mounts.js";
+} from "#src/lib/worker.js";
+import { withLiveSpawnAllowed } from "#src/lib/spawn-guard.js";
+import type { CapabilityLadder } from "#src/lib/mounts.js";
 
 function capacity(provider: "claude" | "codex", ...usedPercent: number[]): ProviderCapacity {
   return {

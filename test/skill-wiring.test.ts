@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { HANDLERS } from "../src/run-task.js";
+import { HANDLERS } from "#src/run-task.js";
 
 // Same convention as test/mounts-wiring.test.ts: assert the CLI entrypoint
 // actually calls into the lib (loadSkillRegistry/renderSkillList) rather than

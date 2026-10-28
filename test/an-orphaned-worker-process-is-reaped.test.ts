@@ -6,7 +6,7 @@ import {
   type RunLockRead,
   type WorkerProcess,
   type WorkerReapOpts,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 // ── W1-T3629: NOTHING REAPS AN ORPHANED WORKER PROCESS ──────────────────────────────
 //

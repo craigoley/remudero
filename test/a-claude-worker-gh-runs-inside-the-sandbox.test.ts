@@ -5,8 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import * as settings from "../src/lib/settings.js";
-import * as workerHome from "../src/lib/worker-home.js";
+import * as settings from "#src/lib/settings.js";
+import * as workerHome from "#src/lib/worker-home.js";
 
 /**
  * A CLAUDE WORKER'S `gh` RUNS INSIDE THE SANDBOX, AND ITS HOME NEVER REACHES THE OPERATOR'S gh CONFIG.

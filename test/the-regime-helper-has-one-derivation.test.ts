@@ -21,8 +21,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import * as runTask from "../src/run-task.js";
-import { strikeRegimeForDispatch } from "../src/run-task.js";
+import * as runTask from "#src/run-task.js";
+import { strikeRegimeForDispatch } from "#src/run-task.js";
 
 test("W1-T4042: the proof-only constant is no longer exported", () => {
   assert.equal(

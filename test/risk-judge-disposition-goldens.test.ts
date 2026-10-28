@@ -4,8 +4,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { decideGatePosture, type GatePostureFinding, type GatePostureInput } from "../src/lib/gate-posture.js";
-import { planRiskJudgeAction, type RiskJudgeVerdict } from "../src/lib/risk-judge.js";
+import { decideGatePosture, type GatePostureFinding, type GatePostureInput } from "#src/lib/gate-posture.js";
+import { planRiskJudgeAction, type RiskJudgeVerdict } from "#src/lib/risk-judge.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CORPUS_ROOT = join(HERE, "fixtures", "risk-judge-dispositions");

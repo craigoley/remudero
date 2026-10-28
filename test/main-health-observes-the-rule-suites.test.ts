@@ -2,16 +2,16 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-import * as reproduction from "../src/lib/base-reproduction.js";
-import type { BaseProbeFile, BaseProbeResult } from "../src/lib/base-reproduction.js";
-import { listRuleSuites } from "../src/lib/ci-parity.js";
-import { ciFailureRegionReducer, extractCiFailureRegion } from "../src/run-task.js";
+import * as reproduction from "#src/lib/base-reproduction.js";
+import type { BaseProbeFile, BaseProbeResult } from "#src/lib/base-reproduction.js";
+import { listRuleSuites } from "#src/lib/ci-parity.js";
+import { ciFailureRegionReducer, extractCiFailureRegion } from "#src/run-task.js";
 import {
   BASE_RED_REFRESH_STEP, DEFAULT_SWEEP_POLICY, baseRedHistoryFromLedger, decideBaseRed, mainLatestRunFromLedger, runSweep,
   type OpenPrView, type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 // @ts-ignore the executable .mjs module is exercised directly and has no declaration file.
-import { runRuleSuites } from "../scripts/list-rule-suites.mjs";
+import { runRuleSuites } from "#scripts/list-rule-suites.mjs";
 
 // W1-T7848: `rule-checks` runs only on pull_request and merge_group, so main's CI census never names it
 // and a green main reads as green for every rule red. The W1-T6024 probe is the only observer, and it

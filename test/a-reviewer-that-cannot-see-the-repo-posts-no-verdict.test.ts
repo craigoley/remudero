@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { postReviewStatusGuarded } from "../src/lib/review.js";
-import { reviewCommand } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import { postReviewStatusGuarded } from "#src/lib/review.js";
+import { reviewCommand } from "#src/run-task.js";
 
 // W1-T4410 — on 2026-09-23 an operator session ran `rmd review 1706 --repo remudero-console` on a Mac with no
 // managed console checkout, and the refusal posted `remudero-review: FAIL — review-subject-missing` on the PR

@@ -47,10 +47,10 @@ import {
   installHashMarkerPath,
   serviceFreshnessGate,
   SymlinkInstallRefusal,
-} from "../src/run-task.js";
-import { killProcessGroup } from "../src/lib/worker-containment.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { waitForServeBanner } from "./helpers/serve-boot-banner.js";
+} from "#src/run-task.js";
+import { killProcessGroup } from "#src/lib/worker-containment.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { waitForServeBanner } from "#test/helpers/serve-boot-banner.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const SERVE_BOOT_BOUND_MS = 120_000;

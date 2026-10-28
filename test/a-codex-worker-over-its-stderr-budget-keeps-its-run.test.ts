@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { CODEX_WORKER_STDERR_MAX_BYTES, spawnCodexWorker } from "../src/lib/worker-provider.js";
+import { CODEX_WORKER_STDERR_MAX_BYTES, spawnCodexWorker } from "#src/lib/worker-provider.js";
 
 function worker() {
   const home = mkdtempSync(join(tmpdir(), "rmd-w1t8203-"));

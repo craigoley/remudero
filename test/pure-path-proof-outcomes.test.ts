@@ -10,7 +10,7 @@ import {
   type ProofExecContext,
   type ProofSpawner,
   type WhitelistedProof,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 // ── W1-T1077 ─────────────────────────────────────────────────────────────────
 //

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AffectedSelection } from "../src/lib/affected-suites.js";
-import { coveragePrecheck, PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING, type CoveragePrecheckPorts } from "../src/run-task.js";
+import type { AffectedSelection } from "#src/lib/affected-suites.js";
+import { coveragePrecheck, PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING, type CoveragePrecheckPorts } from "#src/run-task.js";
 
 // MEASURED 2026-10-01: W1-T4772's push precheck ran CI's instrumented suite over 1839 files for 42 minutes inside
 // the daemon process (a synchronous spawn), freezing every sweep, tick and ledger write, and the run's push then

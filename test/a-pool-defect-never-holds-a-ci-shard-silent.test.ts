@@ -19,10 +19,10 @@ import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import * as noLiveRemote from "./setup/no-live-remote.js";
-import { LIVE_WRITE_SENTINEL_TOKEN } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { finishJudgedRun } from "./helpers/judged-pool-run.js";
+import * as noLiveRemote from "#test/setup/no-live-remote.js";
+import { LIVE_WRITE_SENTINEL_TOKEN } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

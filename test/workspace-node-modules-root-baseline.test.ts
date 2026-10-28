@@ -10,7 +10,7 @@ import {
   linkWorktreeNodeModules,
   workspaceNodeModulesIncomplete,
   worktreeAdd,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 // W1-T4003: the design's own words: "Retain the root node_modules link and its
 // lockfile-mismatch observation unchanged." This file pins that baseline STILL holds with

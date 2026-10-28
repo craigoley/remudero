@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildReviewPrompt } from "../src/lib/review.js";
+import { buildReviewPrompt } from "#src/lib/review.js";
 
 test("semantic review traces new inputs to a production producer instead of accepting fixture-only wiring", () => {
   const prompt = buildReviewPrompt({
