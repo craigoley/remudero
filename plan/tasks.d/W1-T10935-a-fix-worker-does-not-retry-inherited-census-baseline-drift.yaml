@@ -1,0 +1,66 @@
+- id: W1-T10935
+  title: "A fix worker does not retry inherited census baseline drift"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  dispatch_hold: true
+  principles: { tdd: strict }
+  risk: high
+  band_meaning: span
+  budget_usd: 8.00
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "source-census-main-drift:PR15183; operator-authorized cash/retro publication follow-through"
+  plan_refs: [W1-T7182, W1-T9484, W1-T10820, W1-T10885]
+  files:
+    - src/run-task.ts
+    - src/cli/commands/fix.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/lib/sweep.ts
+    - test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts
+    - test/a-fix-round-push-lost-to-a-base-refresh-is-reapplied-and-recorded.test.ts
+  acceptance:
+    - claim: "An inherited main-owned census migration is routed to a native exact-head refresh before another model retry"
+      proof: "unit test: inherited census baseline drift refreshes before another fix worker"
+    - claim: "The drift remedy preserves genuine head-only census growth and changed-baseline refusals"
+      proof: "unit test: census baseline refresh never excuses new growth or an edited baseline"
+    - claim: "An active competing owner or concurrent head prevents refresh and preserves unpublished work"
+      proof: "unit test: census baseline refresh respects live owners and the exact head"
+  rationale: |
+    Observed on PR #15183 at head 4564285c44f055600fea0d8d6dfa86c5376f7aea: a native repair returned edits, but its harness refused the commit because the trusted reach suite expected the alias-aware baseline while this branch retained its pre-migration record. The recorded precheck executed six tests with three assertion failures; it was not a memory or disk admission refusal. A second repair reported the same inherited mismatch. The original semantic cleanup finding remained unmet and no repaired head landed.
+    The PR merge base bd6563d83c6f6e9f544f7bc6379cbe1286aec6ae and its head have byte-identical scripts/affected-reach-baseline.json (no resolution field; importerCount 933, largestScc 250). The native snapshot main 25339074163fdf244be798d48c8b0699510f294b carries the approved W1-T10820/PR #14861 migration (resolution package-imports; importerCount 1010, largestScc 85). The migration merged after this branch was cut. This is an inherited contract difference, not evidence this PR raised a census ceiling.
+    A private Git-object merge against captured main b8a0e61d959eba999636e35d23dc6bc9439385c9 was conflict-free, adopted main’s exact baseline, and preserved both retro product/test blobs. This proves merge compatibility only: the merged tree has not been tested, published or adopted. A new alias importer can still create genuine growth and must be checked after refresh.
+    This is one measured incident, not a claim that every old branch is broken. The implementation must distinguish actual inherited main-owned census drift from PR-edited baselines, new growth and unknown evidence before any automated action.
+  note: |
+    incident: PR15183-inherited-census-drift
+    The ID was atomically reserved by the maintained next-task-id command from the operator-owned checkout.
+    Reservation holder: codex/file-inherited-census-refresh-1793202909079
+    MACHINE-AUTHORED AND PARKED: verify: human and dispatch_hold remain until the normal native filing-risk judge releases or escalates this exact record. No hand-authored ruling or operator-release pin is implied.
+    The current advertised open Git head trees were counted against main for the subject before reservation. Two old source versions were reconciled by exact head/base blob equality; neither was a new implementation.
+    Existing W1-T10793/PR #15156 and W1-T10798/PR #15022 own related precheck-registration work. PR #14957 already fixed the primary paired snapshot selector path. This task preserves those checks and addresses the native inherited-context retry/refresh seam; it must reconcile any newer owner before building.
+    The two native report.followups proposals already request investigation and an update of this branch’s inherited baseline. This filing reconciles that evidence; it does not mutate their acknowledgment marks.
+    No manual production refresh, restart, retro, deployment, worker signal, claim/lease/breaker/marker clearing, status/merge/arm, paid probe, live configuration, model routing, spend ceiling or reservation change is authorized. Protected normal source delivery and all gates remain required.
+    Keep private paths, topology, live process identities and raw output out of public artifacts. Build criteria stay pinned; amendments need a separate plan-only PR.
+  design: |
+    Detect only a witnessed census-context incompatibility proven by exact head/base/main identities: the PR left the relevant census-owned baseline unchanged from its merge base, while authoritative main carries the approved newer contract. Use structured snapshot/Git facts; never parse an LLM claim or generic behind count into permission.
+    Represent inherited main drift separately from in-diff census growth and NOT_MEASURED. Preserve the refusing census result; never call an unmeasured or red gate green.
+    Before another model retry, route this exact head through the existing native branch-refresh path once it has no live competing fix/worker/CI owner. Keep expected-head CAS, bounded waits, proper claim release, unknown/foreign refusals and preserved unpublished work. Refresh only this witnessed PR; no fan-out.
+    The refreshed head must run the same unchanged censuses and full hosted/native/protected merge gates. If it still has new growth, changed baselines, unreadable evidence or a concurrent head, retain the real refusal and existing remedies. No baseline edits, exemptions, threshold changes, forced pushes, manual statuses/merges, production restart, caps or reservation changes.
+    Ledger the decision-producing exact refs/path and native refresh/refusal outcome using existing records, so inherited drift cannot silently spend repeated subscription/cash model rounds. No new supervisor/projection.
+    Preserve the final trusted reach check and PR14957’s paired snapshot behavior. Do not remove a required check or run a weaker legacy selector to manufacture green. A new alias importer that would exceed the approved merged-tree reach bound must still be caught after native refresh.
+    Reuse existing native branch refresh and work-preservation mechanisms. An existing active/foreign owner blocks refresh. Preserve saved tracked and untracked edits; an overlapping or unprovable recovery remains held with an explicit reason. Never discard a partial fix, force-reset a ref, invent owner death or relax the census to get a commit.
+    Before building, replay the witnessed old-head/old-base/new-main case through the real snapshot/check path. Then qualify the native path with real Git fixtures, default failure arms, literal fixed/deleted/restored controls, caller/census membership and mapped changed-source coverage. Full current-head hosted/native/protected automatic merge, natural source adoption and actual prevented model retry/native recovery are separate completion receipts.
+  falsifier: |
+    Real-Git fixture with base/PR identical legacy baseline and approved newer main. The actual harness snapshot/check records inherited drift, the native route makes no model call, and normal merge adopts exactly main baseline before unchanged checks rerun. Delete only the new dispatch/refresh handling: the fixture must call a model or return the original repeated refusal and fail. Restore and pass. Matched controls must retain real new growth, PR-edited baseline, unreadable main, live owner, in-flight CI, changed head and failed update refusals. No manual production run or guard bypass.
+    The real-Git controls include a saved unpublished fix and an unrelated sibling branch. The first stays preserved across a safe native refresh, the sibling is never updated, and overlap/unknown owner/concurrent-head cases retain a refusal. A newly added alias importer that violates the approved post-refresh reach bound must remain red. Refused admission, an empty file list, a setup error or a fixture passing with and without the fix is not a qualifying result.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.7
+    reasons:
+      - "high-risk verdict at confidence 0.70 — on the change's description/files alone, no diff was read — The description states the change alters native repair workflow branch-update decisions (automated exact-head branch refresh before retry). That touches merge/branch-update policy and must protect active owners, unpublished tracked/untracked work, concurrent heads and in-flight CI, so a mistake could lose unpublished work or push over a concurrent head.; on the change's description/files alone, no diff was read — The record spans four source modules (run-task, fix, run-task-verb, sweep) plus two real-Git test suites, which is a broad surface for an automated-action change.; on the change's description/files alone, no diff was read — The gates state shows a machine-authored filing that is parked and dispatch-held at verify:human, with a declared risk:high. The family track record is 0 merged and 0 approved, so there is no history of this kind of change succeeding.; on the change's description/files alone, no diff was read — The record itself says the merge-compatibility proof was private and that the merged tree has not been tested, published or adopted. Its evidence rests on a single incident (PR #15183), and it acknowledges overlapping owners (W1-T10793/PR #15156, W1-T10798/PR #15022) that must be reconciled before building."
+    judged_at: "2026-10-28T16:05:40.905Z"
+    pin: "4c7e8fe1c26f14322b3581f4bf4d137fc5933ffb0d16d028afb28294075c741e"
