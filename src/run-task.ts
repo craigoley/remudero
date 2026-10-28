@@ -10707,9 +10707,6 @@ function* inheritedCensusContextSteps(
       throw new Error("census snapshot refs changed");
     }
     const branchEdits = yield* read(["diff", "--name-only", identity.mergeBase, identity.headSha, "--", baselinePath]);
-    if (branchEdits !== "" || (yield* read(["diff", "HEAD", "--", baselinePath])) !== "") {
-      return { state: "not-inherited", reason: "branch or saved work edits the reach baseline" };
-    }
     const base = yield* read(["show", `${identity.mergeBase}:${baselinePath}`]);
     const main = yield* read(["show", `${identity.mainSha}:${baselinePath}`]);
     if (JSON.parse(base).resolution !== undefined || JSON.parse(main).resolution !== "package-imports") {
