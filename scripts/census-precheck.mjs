@@ -30,9 +30,9 @@
  * Exit 0 clean, 1 a caused violation, 2 could not measure (the hook does not block on 2).
  */
 import { spawnSync } from "node:child_process";
-import { parse } from "acorn";
-import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
+import { parse, parseExpressionAt } from "acorn";
 import { isTrustRootPath, scanTrustRootText, trustRootFor } from "../src/lib/trust-root-text.ts";
+import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
 import { createHash } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
@@ -1457,11 +1457,55 @@ export function ciCensusPopulation(ruleSuites, extras = PRECHECK_EXTRA_CI_CENSUS
   return [...new Set([...ruleSuites, ...Object.keys(extras)])].sort();
 }
 
-/** Mirror ci-parity's rule-suite selection without loading its TypeScript dependency graph under plain Node. */
+/** Read the worker's selector data as syntax, without executing worktree TypeScript in the managed hook. */
+function workerRuleSuiteSelector(text) {
+  const unreadable = () => { throw new Error("worker rule-suite selector is not statically readable"); };
+  const declaration = (name) => {
+    const match = new RegExp(`^\\s*(?:export\\s+)?const ${name}(?:\\s*:[^=]+)?\\s*=\\s*`, "m").exec(text);
+    if (!match) return unreadable();
+    try { return parseExpressionAt(text, match.index + match[0].length, { ecmaVersion: "latest" }); }
+    catch { return unreadable(); }
+  };
+  const string = (node) => node?.type === "Literal" && typeof node.value === "string" ? node.value : unreadable();
+  const array = (name) => {
+    const node = declaration(name);
+    return node.type === "ArrayExpression" ? node.elements : unreadable();
+  };
+  const roster = new Set();
+  for (const row of array("CENSUS_POPULATION")) {
+    if (row?.type === "ObjectExpression") {
+      const field = row.properties.find((p) => p.type === "Property" && (p.key.name ?? p.key.value) === "testFile");
+      roster.add(string(field?.value).split("/").at(-1));
+    } else if (row?.type === "CallExpression" && row.callee.name === "refusedForPredicate") {
+      roster.add(string(row.arguments[0]).split("/").at(-1));
+    } else unreadable();
+  }
+  for (const row of array("RETAINED_RULE_SUITES")) roster.add(string(row).split("/").at(-1));
+  const namePattern = declaration("RULE_SUITE_NAME_RE");
+  const ruleDir = string(declaration("RULE_SUITE_DIR"));
+  if (namePattern.type !== "Literal" || !(namePattern.value instanceof RegExp)) unreadable();
+  return { roster, ruleDir, namePattern: namePattern.value };
+}
+
+/** Mirror ci-parity's rule-suite selection using the worker tree's selector data. */
 export function listCiRuleSuites(root) {
+  const selector = workerRuleSuiteSelector(readFileSync(join(root, "src/lib/rule-suites.ts"), "utf8"));
   const tracked = gitOut(root, ["ls-files", "--", "test"]).split(/\r?\n/).filter(Boolean);
-  const suites = tracked.filter((path) => isRuleSuitePath(path) &&
-    isRuleSuitePath(path, readFileSync(join(root, path), "utf8"))).sort();
+  const suites = tracked.filter((path) => {
+    if (!path.startsWith("test/") || !path.endsWith(".test.ts")) return false;
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    if (path.startsWith(selector.ruleDir) || selector.roster.has(name)) return true;
+    if (!selector.namePattern.test(name)) return false;
+    const source = readFileSync(join(root, path), "utf8");
+    const header = source.match(/^\s*(?:(?:\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/)\s*)*/)[0];
+    const markers = [...header.matchAll(/@not-a-rule-suite\b([^\r\n]*)/g)];
+    for (const marker of markers) {
+      if (!/^[ \t]*:[ \t]*\S/.test(marker[1].replace(/\*\/.*$/, "").trimEnd())) {
+        throw new Error(`${path}: @not-a-rule-suite requires a reason`);
+      }
+    }
+    return markers.length === 0;
+  }).sort();
   if (suites.length < 20) throw new Error(`rule-check population too small: found ${suites.length}, expected at least 20`);
   return suites;
 }
@@ -1563,7 +1607,7 @@ function workerCensusDeclarations(text) {
  *  is CI's census population on this tree; absent (snapshot mode) the check is not measured and returns []. */
 export function censusParityViolations({ changed, readHead, readBase = () => null, population }) {
   if (!population) return [];
-  if (!changed.some((p) => p === PRECHECK_PARITY_BASELINE || p === "scripts/census-precheck.mjs" || p.startsWith("test/"))) return [];
+  if (!changed.some((p) => p === PRECHECK_PARITY_BASELINE || p === "scripts/census-precheck.mjs" || p === "src/lib/rule-suites.ts" || p.startsWith("test/"))) return [];
   const text = readHead(PRECHECK_PARITY_BASELINE);
   if (text === null) return [];
   let baseline;

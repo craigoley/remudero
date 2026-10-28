@@ -40,6 +40,7 @@ test("W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.t
   const workerPath = join(REPO_ROOT, "scripts/census-precheck.mjs");
   const worker = await import(pathToFileURL(workerPath).href);
   const source = readFileSync(workerPath, "utf8");
+  const selectorSource = readFileSync(join(REPO_ROOT, "src/lib/rule-suites.ts"), "utf8");
   const write = (path: string, text: string) => {
     mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
     writeFileSync(join(repo.dir, path), text);
@@ -53,8 +54,11 @@ test("W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.t
   symlinkSync(join(REPO_ROOT, "node_modules"), join(harness, "node_modules"));
   const fillers = Array.from({ length: 20 }, (_, i) => `test/filler-${i}-census.test.ts`);
   for (const path of fillers) write(path, "");
+  const retained = "test/checkout-writers.test.ts";
+  write(retained, "");
+  write("src/lib/rule-suites.ts", selectorSource);
   const baselinePath = "scripts/census-precheck-parity-baseline.json";
-  write(baselinePath, JSON.stringify({ ciOnly: [...fillers,
+  write(baselinePath, JSON.stringify({ ciOnly: [...fillers, retained,
     ...Object.keys(worker.PRECHECK_EXTRA_CI_CENSUSES).filter((path) => !Object.hasOwn(worker.PRECHECK_PARITY, path))] }));
   write("scripts/census-precheck.mjs", source);
   repo.git("add", "--all");
@@ -63,8 +67,8 @@ test("W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.t
   const added = "test/worker-hidden.test.ts";
   write(added, "");
   repo.git("add", "--", added);
-  assert.deepEqual(worker.listCiRuleSuites(repo.dir), fillers.sort(),
-    "the real rule-suite selector must see its tracked corpus and exclude the extra");
+  assert.deepEqual(worker.listCiRuleSuites(repo.dir), [...fillers, retained].sort(),
+    "the worker rule-suite selector must see its tracked corpus and exclude the extra");
   const extraSource = source.replace("export const PRECHECK_EXTRA_CI_CENSUSES = {",
     `export const PRECHECK_EXTRA_CI_CENSUSES = {\n  "${added}": "worker addition #10798",`);
   assert.notEqual(extraSource, source);
@@ -96,6 +100,45 @@ test("W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.t
   saveWorker(extraSource.replace(`"${added}": "worker addition #10798"`,
     `["${added}"]: "worker addition #10798"`));
   assert.match(hook().output, /worker PRECHECK_EXTRA_CI_CENSUSES declaration is not statically readable/);
+
+  saveWorker(source);
+  const removedSelector = selectorSource.replace(`  "${retained}",`, "");
+  assert.notEqual(removedSelector, selectorSource, "the fixture must remove a worker roster entry");
+  write("src/lib/rule-suites.ts", removedSelector);
+  assert.ok(!worker.listCiRuleSuites(repo.dir).includes(retained),
+    "the worker selector must drop the retained suite after its in-memory removal");
+  const stale = hook();
+  assert.equal(stale.status, 1, stale.output);
+  assert.ok(stale.output.includes(`census-parity: ${retained} is baselined but precheck now asks it or CI no longer runs it`), stale.output);
+  write("src/lib/rule-suites.ts", selectorSource);
+  const restored = hook();
+  assert.equal(restored.status, 0, restored.output);
+});
+
+test("W1-T10798: the census-parity trigger measures a diff outside its own path list", async () => {
+  const worker = await import(pathToFileURL(join(REPO_ROOT, "scripts/census-precheck.mjs")).href);
+  const gate = "test/every-ci-census-is-asked-before-the-push.test.ts";
+  const nearCrossing = "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts";
+  const evaluate = (changed: string, readers: object = {}) => {
+    const ran: string[] = [];
+    const result = worker.evaluateAdmittedCensusSuites({
+      changed: [changed], loadMembers: () => [], ...readers,
+      runSuites: (files: string[]) => { ran.push(...files); return []; },
+    }) as { violations: string[]; unmeasured: string | null };
+    return { ran, result };
+  };
+  for (const path of ["src/lib/gate-gardener.ts", "scripts/expiring-fixture-census.mjs"]) {
+    const { ran, result } = evaluate(path);
+    assert.deepEqual(result, { violations: [], unmeasured: null }, path);
+    assert.ok(ran.includes(nearCrossing), path);
+    assert.ok(!ran.includes(gate), `${path} is not a rule suite`);
+  }
+  const rule = evaluate("test/rules/a-new-rule.test.ts", { readHead: () => "", readBase: () => null });
+  assert.equal(rule.result.unmeasured, null);
+  assert.ok(rule.ran.includes(gate), "a new rule suite asks the census-parity gate");
+  const opted = evaluate("test/a-new-census.test.ts", { readHead: () => "// @not-a-rule-suite: fixture only\n" });
+  assert.equal(opted.result.unmeasured, null);
+  assert.ok(!opted.ran.includes(gate), "an opted-out census-named test is not a rule suite");
 });
 
 // @source-text-subject: the worker registration source is the input to the parity parser.
