@@ -34,6 +34,6 @@ export function buildGardenersRoute(input: {
     }
     const opportunityEvidence = await readGardenerOpportunityEvidence(input.stateDir, input.repository, clock);
     sendJson(res, 200, { ...snapshot, generatedAt: clock.iso(), opportunityEvidence,
-      coverage: "registered-off-loop", counterWindow: "daemon-run", outcomeAssessment: "not_collected", spend: null });
+      coverage: "registered-off-loop", counterWindow: "daemon-run", outcomeAssessment: opportunityEvidence.state === "reported" && opportunityEvidence.improvementEffects.length > 0 ? "reported" : "not_collected", spend: null });
   } };
 }

@@ -183,6 +183,7 @@ test("cash429 cannot exceed existing turns or infer a cooldown from missing inva
     for (const headers of ([{}, { "retry-after-ms": "0" }, { "retry-after-ms": "-1" },
       { "retry-after-ms": "9999999999999999" }, { "retry-after-ms": "bad", "retry-after": "1" }, { "retry-after-ms": "1000" }] as Array<Record<string, string>>)) {
       const f = cashFixture(child); let calls = 0;
+      // Freeze the request clock so reservation I/O cannot consume the 100 ms header window.
       const result = await spawnOpenWeightWorker({ ...f.args, clock: fixedClock(0), requestTimeoutMs: 100,
         fetchImpl: async () => { calls++; return new Response(null, { status: 429, headers }); } }, f.config, { model, effort: "low" });
       assert.equal(calls, 1); assert.equal(result.isError, true);

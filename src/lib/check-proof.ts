@@ -797,6 +797,15 @@ export function checkProofCommand(
       return headExit;
     }
 
+    if (baseW.kind === "test" && baseW.nameFiltered && baseW.runner !== "vitest" && !allowFullSuite) {
+      const resolution = resolveNameFilteredCandidates(baseCheckoutDir, baseW.label);
+      if (resolution.status === "unresolvable") {
+        console.log(`base:       UNKNOWN — unresolvable title; a whole-suite fallback requires ${CHECK_PROOF_FULL_SUITE_FLAG}.`);
+        console.log("discrimination: unknown — no unrequested base suite was executed; head verdict stands unchanged.");
+        return headExit;
+      }
+    }
+
     let baseDiag: SpawnDiagnostics | undefined;
     const baseCapturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
       try {
