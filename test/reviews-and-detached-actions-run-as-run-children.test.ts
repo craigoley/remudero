@@ -6,7 +6,8 @@ import { setImmediate as flush } from "node:timers/promises";
 import { test } from "node:test";
 
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import type { Config } from "#src/lib/config.js";
+import { configPath, type Config } from "#src/lib/config.js";
+import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { riskJudgePlanContextDigestFor } from "#src/lib/risk-judge.js";
 import { runDaemon, type DaemonFreshness } from "#src/lib/daemon.js";
 import { defaultInstance } from "#src/lib/host-memory-ledger.js";
@@ -699,6 +700,56 @@ test("W1-T9114: the run path maps live PR evidence and reads the canonical task 
     assert.equal(built, 1);
     assert.equal(dispatched.length, 1);
   } finally {
+    process.argv.splice(0, process.argv.length, ...argv);
+    f.cleanup();
+  }
+});
+
+test("W1-T9114: the fix run path reads real fleet holds and ledgers each refusal", async () => {
+  const f = fixture();
+  const savedHome = process.env.HOME;
+  const argv = [...process.argv];
+  process.argv.push("--repo-root", REPO_ROOT);
+  process.env.HOME = f.root;
+  try {
+    const { runDetachedWork } = await import("#src/run-task.js");
+    mkdirSync(join(f.root, ".config", "remudero"), { recursive: true });
+    writeFileSync(configPath(), JSON.stringify({ root: f.root, claudeBin: "/bin/true" }));
+    mkdirSync(f.stateRoot, { recursive: true });
+    const requestedAt = "2026-10-12T00:00:00Z";
+    writeFileSync(join(f.stateRoot, "STOP"), JSON.stringify({ requestedAt, reason: "stop fixture" }));
+    writeFileSync(join(f.stateRoot, "PAUSE"), JSON.stringify({ requestedAt, reason: "pause fixture" }));
+    const envelope = buildFixDispatchEnvelope(fixPr(), { unmetCriteria: UNMET }, {
+      fixKey: `${FIX_TASK}@${FIX_HEAD}`, decidedAtMs: 1,
+    });
+    const work: DetachedWorkSpec = { ...fix, inputs: { envelope } };
+    let liveReads = 0;
+    let dispatchers = 0;
+    const ports = {
+      readPr: async () => { liveReads += 1; throw new Error("held work must not read the PR"); },
+      dispatcher: () => { dispatchers += 1; throw new Error("held work must not reconstruct a dispatcher"); },
+    };
+    for (const [runId, reason] of [
+      ["work-fix-stop", "STOP: STOP requested: stop fixture"],
+      ["work-fix-pause", "PAUSE: PAUSE requested: pause fixture; actor: actor unrecorded"],
+    ] as const) {
+      const ctx = { taskId: FIX_TASK, runId };
+      await assert.rejects(runDetachedWork(work, ctx, ports), { message: `fix dispatch refused: worker admission is held: ${reason}` });
+      const rows = readFileSync(ledgerPathFor({ root: f.root }), "utf8").trim().split("\n").map(line => JSON.parse(line));
+      const row = rows.at(-1);
+      assert.equal(rows.length, runId === "work-fix-stop" ? 1 : 2);
+      assert.deepEqual({ run_id: row.run_id, task_id: row.task_id, lane: row.lane, step: row.step,
+        pr_number: row.pr_number, head_sha: row.head_sha, reason: row.reason }, {
+        run_id: runId, task_id: FIX_TASK, lane: "sweep-fix", step: "sweep.fix.child_refused",
+        pr_number: envelope.pr.prNumber, head_sha: FIX_HEAD, reason: `worker admission is held: ${reason}`,
+      });
+      rmSync(join(f.stateRoot, "STOP"), { force: true });
+    }
+    assert.equal(liveReads, 0, "both real holds refuse before reading live PR evidence");
+    assert.equal(dispatchers, 0, "both real holds refuse before reconstructing the claim-taking dispatcher");
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
     process.argv.splice(0, process.argv.length, ...argv);
     f.cleanup();
   }
