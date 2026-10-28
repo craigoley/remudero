@@ -302,7 +302,7 @@ const TARGET_JOB_DAEMON_DEPS = [
 
 /** Repository reads for one bounded target; host capacity still belongs to the Core daemon. */
 export function createNativeTargetRepository(root: string, owner: string, repo: string, github: GitHub, core: Partial<DaemonDeps> = {}) {
-  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor({ root });
   const governors = Object.fromEntries(TARGET_JOB_DAEMON_DEPS.flatMap((key) => core[key] === undefined ? [] : [[key, core[key]]])) as Partial<DrainDeps>;
   return {
     project: (plan: Plan) => {
