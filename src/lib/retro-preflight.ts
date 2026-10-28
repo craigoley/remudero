@@ -203,8 +203,10 @@ export function runRetroPrepublishCommand(
     const signalOwnedGroup = (signal: NodeJS.Signals): void => {
       if (child.pid === undefined) return; // A spawn failure never established a group.
       try { killProcessGroup(child.pid, signal); }
-      catch (error) {
-        cleanupError ??= error as Error;
+      catch (cause) {
+        const error = cause instanceof Error
+          ? cause : new Error("retro preflight owned-group signal failed", { cause });
+        cleanupError ??= error;
         processError ??= Object.assign(new Error("retro preflight owned-group cleanup failed", { cause: error }), { code: "EPROCESSGROUP" });
       }
     };
