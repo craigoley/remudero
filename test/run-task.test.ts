@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { emptyHoldLedger } from "./helpers/empty-hold-ledger.js";
 import { execFileSync } from "node:child_process";
 import { chmodSync, cpSync, readdirSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6173,8 +6174,10 @@ test("realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh 
   );
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}:${oldPath}`;
+  // the merge write fences on present, untorn hold evidence: give it an empty (no hold) ledger.
+  const holdLedger = emptyHoldLedger();
   try {
-    const d = realArmDeps();
+    const d = realArmDeps(holdLedger.config);
     // A REAL PR URL: the REST path resolves owner/repo/number from it, and refuses anything it
     // cannot address rather than falling back to a gh --json read.
     assert.equal(
@@ -6208,6 +6211,7 @@ test("realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh 
   } finally {
     process.env.PATH = oldPath;
     rmSync(bin, { recursive: true, force: true });
+    holdLedger.dispose();
   }
 });
 

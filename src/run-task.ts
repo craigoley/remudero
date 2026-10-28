@@ -686,6 +686,7 @@ import {
   taskSemanticRevision,
   ghIssueGateway,
   ghIssueGatewayAsync,
+  maintenanceOperatorChannel,
   presenceMode,
   setPresenceMode,
   tryEscalate,
@@ -1474,7 +1475,7 @@ import {
   tallyDispositions,
   type CloneReapSummary,
 } from "./lib/clone-reaper.js";
-import { runRepositoryMaintenance, activeWorkerProbes, defaultListInflightLocks, type MaintenanceContext, type ObjectReapDeps, type ObjectReapResult } from "./lib/object-reaper.js";
+import { runRepositoryMaintenance, activeWorkerProbes, defaultListInflightLocks, fleetPruneInputs, type MaintenanceContext, type ObjectReapDeps, type ObjectReapResult } from "./lib/object-reaper.js";
 
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
  *  rather than authorising something the operator never read. "2" (operator ruling 2026-10-06):
@@ -7266,8 +7267,8 @@ async function runReview(args: {
   /** Head ref of the PR under review — used ONLY to exclude `dependabot/` heads from the
    *  post-verdict arm, which the dep-review lane owns. Absent ⇒ not a dependabot PR. */
   headRefName?: string;
-  /** Injectable arm (impl-BG). Default: the real {@link armAutoMerge}. */
-  arm?: (prUrl: string, taskId: string) => ArmOutcome;
+  /** Injectable arm (impl-BG), awaited (W1-T9549). Default: the awaited {@link armAutoMergeDetailedAsync}. */
+  arm?: (prUrl: string, taskId: string) => ArmOutcome | Promise<ArmOutcome>;
   /**
    * W1-T178 (verdict stability): the run's ledger path, so a semantic-lane
    * downgrade on an UNCHANGED head sha whose deterministic floor still passes
@@ -25872,8 +25873,14 @@ export async function runRepositoryMaintenanceRung(
   log: (step: string, fields: Record<string, unknown>) => void,
   context: MaintenanceContext,
   policy?: ReturnType<typeof loadDefaultPolicy>["values"]["objectReap"],
+  issues?: AsyncIssueGateway,
 ): Promise<void> {
   const limits = policy ?? loadDefaultPolicy().values.objectReap;
+  // W1-T10750: the gateway is resolved at first use, so a store that never escalates never reads the repo identity.
+  const operator = {
+    open: (note: Parameters<ReturnType<typeof maintenanceOperatorChannel>["open"]>[0]) => maintenanceOperatorChannel(issues ?? fleetIssueGatewayAsync()).open(note),
+    close: (repo: string, url: string | undefined, comment: string) => maintenanceOperatorChannel(issues ?? fleetIssueGatewayAsync()).close(repo, url, comment),
+  };
   const roots = new Set<string>();
   const reposRoot = join(config.root, "repos");
   if (existsSync(reposRoot)) {
@@ -25887,6 +25894,8 @@ export async function runRepositoryMaintenanceRung(
   for (const repo of roots) {
     const state = join(config.root, "state", `repository-maintenance-${createHash("sha256").update(repo).digest("hex").slice(0, 16)}.json`);
     await runRepositoryMaintenance(repo, state, limits, log, {
+      operator,
+      pruneInputs: fleetPruneInputs(join(config.root, "state", "inflight")),
       context: () => {
         const freeBytes = readDiskFreeBytes(config.root);
         const inflight = join(config.root, "state", "inflight");
@@ -26661,6 +26670,46 @@ export function plainInboxWriter(
     });
   } catch (e) {
     log("inbox.plain_writer_unavailable", { error: String((e as Error)?.message ?? e) });
+    return undefined;
+  }
+}
+
+/** W1-T9103: the fleet lane's production `sameFinding` port — one question to the `inbox-draft` lane's mount, whose
+ *  answer is "same", "distinct" or, when no answer can be read, "unavailable" (the failure is logged, never read as "distinct"). */
+export function fleetLaneSamenessJudge(
+  config: Config,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  rawSpawn: typeof spawnWorker = spawnWorker,
+): ((earlier: string, later: string) => Promise<"same" | "distinct" | "unavailable">) | undefined {
+  try {
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", "fleet-lane-sameness-settings.json"),
+    });
+    const mount = loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
+    return async (earlier, later) => {
+      const prompt = [
+        "Two follow-up findings were written by different rounds of one run. Say whether the LATER one restates the EARLIER one",
+        "(the same request, possibly in other words, possibly with more detail) or asks something distinct.",
+        'Answer with one JSON object only: {"answer": "same"} or {"answer": "distinct"}.',
+        "", `EARLIER: ${earlier}`, "", `LATER: ${later}`,
+      ].join("\n");
+      try {
+        const result = await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({
+          ...buildInboxDraftSpawnArgs({ cwd: config.root, settingsFile, mount, config, prompt, disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS }),
+          onSelectionAssignment: undefined,
+        });
+        const answer = /\{[^{}]*\}/.exec(result.text)?.[0];
+        const parsed = answer === undefined ? undefined : (JSON.parse(answer) as { answer?: unknown }).answer;
+        return parsed === "same" || parsed === "distinct" ? parsed : "unavailable";
+      } catch (e) {
+        log("fleet_lane.sameness_judge_failed", { error: String((e as Error)?.message ?? e) });
+        return "unavailable";
+      }
+    };
+  } catch (e) {
+    log("fleet_lane.sameness_judge_unavailable", { error: String((e as Error)?.message ?? e) });
     return undefined;
   }
 }
@@ -27869,6 +27918,7 @@ function daemonCommandHost(): DaemonCommandHost {
     orphanSweepRunActive,
     orphanWorkerKillLedger,
     plainInboxWriter,
+    fleetLaneSamenessJudge,
     productionLifetimePressureHook,
     quarantineReporter,
     queueGovernorGateFor,

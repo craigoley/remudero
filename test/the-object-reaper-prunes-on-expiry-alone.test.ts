@@ -48,6 +48,7 @@ test("live workers defer full maintenance and preserve the marker and due episod
   const fixture = gitRepo({ kind: "maintenance-busy-store" });
   const wt = join(scratch("maintenance-busy-wt"), "lane");
   fixture.addWorktree(wt, "lane");
+  fixture.git("repack", "-d"); // incremental-repack needs a pack to index, as any real store has
   writeFileSync(runLockPath(wt), JSON.stringify({ pid: process.pid, run_id: "W1-TX-1", startedAt: new Date().toISOString() }));
   mkdirSync(join(root, "repos"));
   symlinkSync(fixture.dir, join(root, "repos", "remudero"), "dir");
@@ -59,16 +60,18 @@ test("live workers defer full maintenance and preserve the marker and due episod
   const rows: Array<[string, Record<string, unknown>]> = [];
   await runRepositoryMaintenanceRung({ root } as never, (s, f) => rows.push([s, f]),
     { activeLanes: 0, disk: "unknown", queueBusy: false });
-  const deferred = rows.find(([s]) => s === "repository_maintenance.defer")?.[1];
-  assert.ok(deferred, JSON.stringify(rows));
-  assert.equal(deferred.active_lanes, 1, "the default probe sees the live inflight holder");
-  assert.match(String(deferred.reason), /full GC requires quiet admission/);
-  assert.equal(rows.some(([s]) => s === "repository_maintenance.start"), false);
+  // W1-T10750: live workers no longer defer everything — the incremental pass runs, the full gc stays owed.
+  const started = rows.filter(([s]) => s === "repository_maintenance.start").map(([, f]) => f.kind);
+  assert.deepEqual(started, ["incremental"], JSON.stringify(rows));
+  const complete = rows.find(([s]) => s === "repository_maintenance.complete")?.[1];
+  assert.ok(complete, JSON.stringify(rows));
+  assert.equal(complete.active_lanes, 1, "the default probe sees the live inflight holder");
+  assert.match(String(complete.reason), /full gc still pending/);
   assert.equal(readFileSync(marker, "utf8"), "failure evidence\n");
   const stateName = readdirSync(join(root, "state")).find((name) => name.startsWith("repository-maintenance-"))!;
   const state = readMaintenanceState(join(root, "state", stateName));
-  assert.equal(state.nextEligibleAt, 0, "a busy deferral does not lose the due GC episode");
   assert.equal(state.failures, 0);
+  assert.ok(state.gcLogSince !== undefined, "the starvation bound starts when the marker is first seen");
 
   // Retained raw-prune exports still report the historical expiry barrier; production never calls them.
   assert.deepEqual(objectReapDecision("/r", "/i", { ...busy, listWorktrees: () => [], listInflightLocks: () => [] }), { carriedBy: "quiet" });

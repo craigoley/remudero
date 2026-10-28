@@ -154,7 +154,8 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   // A decline outlives the live ledger's per-step carry cap: the receipts of every proposal still registered are kept.
   if (classified.verdictReceipts && proposals.length > 0) writeVerdictReceipts(stateDir, classified.verdictReceipts, proposals.map((p) => p.id));
   // The pass's own instant judges every snooze, so the persisted stores say which are still ahead and the view reads no clock.
-  const stores = readInboxStores(deps.inboxRoot, proposals, { plan: classified.plan, ledgerLines: classified.ledgerLines, nowMs: now });
+  const stores = readInboxStores(deps.inboxRoot, proposals, { plan: classified.plan, ledgerLines: classified.ledgerLines, nowMs: now,
+    ...((deps.inboxSourceIdentity ?? deps.inboxAuditScope) ? { recommendationRepository: (deps.inboxSourceIdentity ?? deps.inboxAuditScope)!.repository } : {}) });
   const sourceThreads = readAllThreads({ threadStorePath: join(stateDir, "inbox-threads.jsonl") });
   if (sourceThreads.status !== "ok") throw new Error("Inbox gardener operator intent source unavailable");
   const byId = new Map(proposals.map(proposal => [proposal.id, proposal]));
