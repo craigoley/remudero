@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { test } from "node:test";
+import { runInNewContext } from "node:vm";
 // @ts-ignore the executable .mjs module has no declaration file.
 import { LOCATION_RELATIVE_ERE, aliasFor, hasLocationRelativeSpecifier, isTransientTestPath, main as codemodMain, rewriteSource } from "#scripts/test-location-codemod.mjs";
 import { repoRoot } from "#test/helpers/repo-root.js";
@@ -194,24 +195,27 @@ test("W1-T9864: the codemod rewrites relative specifiers to the aliases", () => 
   assert.equal(aliasFor("package.json"), null);
 });
 
-test("W1-T9866: the codemod rewrites code but leaves import-like text inside a string or template literal as written", () => {
+test("W1-T9866: the codemod rewrites code and preserves string and template fixture values", () => {
   // Source a test writes to a scratch dir, hands to --eval or feeds a recognizer resolves from where THAT code
   // runs; rewriting it to `#test/...` broke the harness pre-push fixture and the --eval children.
   const file = "test/nested/deep/thing.test.ts";
   const data = imp("./lib/record.mjs", "record");
-  const lines = (spec: string, helper: string): string[] => [
-    `const single = '${data}';`,
-    "const tpl = `" + data + "\n" + data + "`;",
+  const lines = (spec: string, helper: string, fixture = data): string[] => [
+    `const single = '${fixture}';`,
+    "const tpl = `" + fixture + "\n" + fixture + "`;",
     "const sub = `${" + dyn(spec) + "}`;",
     "const re = /[\"']/;",
     imp(helper),
     "",
   ];
   const out = rewriteSource(lines("../../../src/lib/config.js", "../../helpers/git-repo.js").join("\n"), file);
-  assert.equal(out.text, lines("#src/lib/config.js", "#test/helpers/git-repo.js").join("\n"));
-  assert.equal(out.rewritten, 2, "the substitution's import and the real import are code");
-  assert.equal(out.unresolved.length, 3, "each string-embedded specifier is listed, never guessed");
-  assert.ok(out.unresolved.every((item: string) => /inside a string or template literal/.test(item)));
+  assert.equal(out.text, lines("#src/lib/config.js", "#test/helpers/git-repo.js",
+    data.replace("./", "\\x2e/")).join("\n"));
+  assert.equal(out.rewritten, 5, "two code imports and three fixture imports are rewritten");
+  assert.deepEqual(out.unresolved, []);
+  assert.equal(hasLocationRelativeSpecifier(out.text), false);
+  const fixtureSource = out.text.slice(0, out.text.indexOf("const sub"));
+  assert.deepEqual(Array.from(runInNewContext(`${fixtureSource}[single, tpl];`)), [data, `${data}\n${data}`]);
 });
 
 test("W1-T9864: the codemod writes a file in place, and --folder degrades when the placement table is absent", () => {
