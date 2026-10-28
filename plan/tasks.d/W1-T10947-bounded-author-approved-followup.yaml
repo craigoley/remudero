@@ -1,0 +1,64 @@
+- id: W1-T10947
+  title: An explicitly bounded author profile uses the approved fully costed 10 GiB minimum
+  repo: remudero
+  depends_on:
+    - W1-T10961
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12
+  risk: high
+  band_meaning: blast-radius
+  origin: operator-approved-followups:2026-10-28
+  plan_refs:
+    - W1-T10765
+    - W1-T10926
+  files:
+    - scripts/lib/mac-author-admission.mjs
+    - scripts/lib/coverage-disk-profile.mjs
+    - scripts/lib/native-author-runtime.mjs
+    - scripts/preflight-author.mjs
+    - test/mac-author-admission.test.ts
+    - test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: Reconcile the retained foundation proposal f6e362e531b441743b64f05facc5bc157109904d with
+    current main and the separately owned author-admission repair before editing their shared files.
+    Reuse existing measured admission W1-T10765; this is only the previously approved explicit
+    bounded-profile route. Its effective minimum is max(10737418240 bytes, the fully costed
+    allocation requirement), independently evidenced on every allocation filesystem. Bind actual
+    head/tree, immutable dependencies, owner/slot and
+    allocation/scratch/output/native/runtime/child-closure budgets. Omitted, unknown or unbounded
+    author profiles and independent full coverage retain their 20 GiB reserve. Preserve maintained
+    memory-pressure/UNKNOWN refusals and all independent checks. No automatic adoption of this chat
+    private adapters, extra allowance, source-image cutover or guard waiver. Deliver a complete
+    ordinary source-author route, not a four-line threshold extraction.
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+  acceptance:
+    - claim: a genuine bounded profile requires the larger of 10 GiB and all declared allocations on each
+        actual filesystem
+      proof: "unit test: W1-T10947: a genuine bounded profile requires the larger of 10 GiB and all
+        declared allocations on each actual filesystem"
+    - claim: unbounded profiles, full coverage, missing allocation evidence and stale identity retain
+        their existing refusals
+      proof: "unit test: W1-T10947: unbounded profiles, full coverage, missing allocation evidence and
+        stale identity retain their existing refusals"
+  falsifier: "Add the exact named real-path controls in the computed test folders using package
+    aliases and the shared root helper. Establish the failing current-main behavior, restore the
+    smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
+    the named assertion to fail, then restore it. Preserve baseline failures, partial runs and
+    old-head evidence; never make unchanged failures green through repetition. "

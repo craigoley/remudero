@@ -1,0 +1,63 @@
+- id: W1-T10953
+  title: The sole routing collector retains exact bounded evidence and truthful fresh scorecards
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12
+  risk: medium
+  band_meaning: span
+  origin: operator-approved-followups:2026-10-28
+  plan_refs:
+    - W1-T10830
+    - W1-T10756
+  files:
+    - scripts/private-routing-daily-review.mjs
+    - src/lib/ledger-exact-dedupe.ts
+    - src/lib/ledger-union.ts
+    - test/ledger/ledger-exact-dedupe.test.ts
+    - test/daily-routing-review.test.ts
+    - test/deploy/a-field-trials-refresh-step-failure-keeps-the-other-steps.test.ts
+    - src/lib/producer-identity.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: Current main already includes W1-T10830 bounded reader and per-stage refresh outcomes.
+    Reconcile only the stronger exact-dedupe, byte/disk-bound, retained-counter/completeness and
+    freshness requirements from collector proposal ded7d76a05c6ddb16d299962024290f51ac3bd87; do not
+    replace or duplicate that shipped reader/cron/wrapper. Preserve complete rotated-plus-live
+    union, exact row identity (including UTF16 edge cases), positive corpus controls, bounded
+    SQLite/cache/scratch and named partial reasons on unreadable/mutated/over-budget input. Separate
+    source merge, installed/mounted source, actual runtime identity, latest output age and measured
+    outcome counts. Preserve stage failure independence. One collector, no second schedule/provider,
+    no historical failure converted into efficacy. Reconcile current source before selecting minimal
+    source dependencies.
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+  acceptance:
+    - claim: exact dedupe preserves distinct ledger rows and complete corpus controls within byte and disk
+        bounds
+      proof: "unit test: W1-T10953: exact dedupe preserves distinct ledger rows and complete corpus
+        controls within byte and disk bounds"
+    - claim: a stale or partial adopted collector reports its actual source revision, stage state and
+        missing evidence
+      proof: "unit test: W1-T10953: a stale or partial adopted collector reports its actual source
+        revision, stage state and missing evidence"
+  falsifier: "Add the exact named real-path controls in the computed test folders using package
+    aliases and the shared root helper. Establish the failing current-main behavior, restore the
+    smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
+    the named assertion to fail, then restore it. Preserve baseline failures, partial runs and
+    old-head evidence; never make unchanged failures green through repetition. "

@@ -1,0 +1,67 @@
+- id: W1-T10951
+  title: One coverage admission preserves complete provenance and excludes narrowed executions from
+    efficacy evidence
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12
+  risk: high
+  band_meaning: blast-radius
+  origin: operator-approved-followups:2026-10-28
+  plan_refs:
+    - W1-T5891
+    - W1-T5892
+  files:
+    - .github/workflows/ci.yml
+    - .github/workflows/coverage-nightly.yml
+    - scripts/coverage-floor.mjs
+    - src/lib/selector-shadow-gardener.ts
+    - test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts
+    - test/gardeners/a-narrowed-coverage-run-is-not-shadow-evidence.test.ts
+    - test/the-live-selection-narrows-the-coverage-lane.test.ts
+    - scripts/ci-shard-admission.mjs
+    - test/infra/workflow-playwright-runtime.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: Reconcile only the extra foundation f6e362e5 safeguards onto the mechanisms already shipped
+    for W1-T5891/W1-T5892; no second producer, selector or artifact lookup. Keep current upstream
+    immutable attempt-pin/consumer agreement and durable narrowed-run visibility. Preserve stronger
+    exact runtime/lock/policy/source-tree identity, protected-main ancestry, successful complete
+    eight-shard suite union, verified positive LCOV and globally finalized selection;
+    empty/unreadable/duplicate/foreign evidence goes full or refuses as appropriate. Narrowed
+    observations remain visible but never enter miss/saving/efficacy denominators, including
+    retained/replayed records. Duplicate, malformed and partial execution markers cannot qualify a
+    run. Flag-off/push/final merge-group behavior and current critical-path/job budgets remain
+    intact. Reconcile actual workflow bodies and both branches controls rather than blindly choosing
+    one conflict side.
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+  acceptance:
+    - claim: one immutable admission requires complete compatible producer and shard-union evidence before
+        narrowing
+      proof: "unit test: W1-T10951: one immutable admission requires complete compatible producer and
+        shard-union evidence before narrowing"
+    - claim: narrowed or malformed executions stay visible without diluting current or retained
+        full-execution evidence
+      proof: "unit test: W1-T10951: narrowed or malformed executions stay visible without diluting current
+        or retained full-execution evidence"
+  falsifier: "Add the exact named real-path controls in the computed test folders using package
+    aliases and the shared root helper. Establish the failing current-main behavior, restore the
+    smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
+    the named assertion to fail, then restore it. Preserve baseline failures, partial runs and
+    old-head evidence; never make unchanged failures green through repetition. "

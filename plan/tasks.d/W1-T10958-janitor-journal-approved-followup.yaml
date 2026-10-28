@@ -1,0 +1,63 @@
+- id: W1-T10958
+  title: Janitor destructive phases refuse without a durable matching decision journal
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10
+  risk: high
+  band_meaning: blast-radius
+  origin: operator-approved-followups:2026-10-28
+  plan_refs:
+    - W1-T10256
+    - W1-T8861
+    - W1-T8863
+  files:
+    - deploy/mac/preserve-retire.py
+    - deploy/mac/remudero-janitor.sh
+    - deploy/mac/JANITOR.md
+    - test/mac-janitor-dependency-health.test.ts
+    - test/deploy/the-janitor-preserves-idle-work-before-it-retires-a-checkout.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: "Reconcile the retained journal proposal ad4784515e7e388b9c6845779a8014eb4bfedf77 against
+    current main, installed-owner repairs and all already-shipped journal defenses before writing.
+    The candidate includes historical merges; never cherry-pick its whole tree. Verify the actual
+    shared decision-journal boundary for destructive discovery/retire/housekeeping phases:
+    append/flush/identity failure must prevent deletion and surface a terminal reason, not
+    success-shaped cleanup counts. Test real inaccessible/broken/partial journal paths, parent
+    guards and synthetic worktree-prune/reference protection, with removal/restoration controls and
+    existing owner integration. Preserve six-hour descendant mtime/ctime, active/open/lent work, all
+    Git refs/unpublished changes, cash reserves and durable recovery evidence. No broad
+    cleanup/apply, config toggle, installation, hold release or schedule change belongs to this
+    source task."
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+  acceptance:
+    - claim: a real journal write or flush failure prevents the matching destructive phase and remains
+        visible as failure
+      proof: "unit test: W1-T10958: a real journal write or flush failure prevents the matching
+        destructive phase and remains visible as failure"
+    - claim: successful journaling does not bypass six-hour active-work reference and parent-folder
+        protections
+      proof: "unit test: W1-T10958: successful journaling does not bypass six-hour active-work reference
+        and parent-folder protections"
+  falsifier: "Add the exact named real-path controls in the computed test folders using package
+    aliases and the shared root helper. Establish the failing current-main behavior, restore the
+    smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
+    the named assertion to fail, then restore it. Preserve baseline failures, partial runs and
+    old-head evidence; never make unchanged failures green through repetition. "

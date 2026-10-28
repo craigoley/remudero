@@ -1,0 +1,52 @@
+- id: W1-T10782
+  title: "Serve names native CPU time for its sampled worker threads without turning unreadable counters into zero"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium
+  band_meaning: span
+  origin: "operator-approved bounded Core/serve resource attribution follow-through, 2026-10-26"
+  plan_refs: [W1-T6266, W1-T9403]
+  files:
+    - src/lib/worker-heaps.ts
+    - test/memory/serve-worker-cpu-counters.test.ts
+    - test/serve-memory-names-where-rss-lives.test.ts
+    - test/serve-memory-names-what-the-heavy-view-lane-holds.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Serve already samples each named Worker's heap and transports nested worker readings. Those
+    samples contain no CPU counters. A heap size or main-thread stall profile does not establish
+    which worker consumed CPU. Node 22.22.3 and 24.21.0 expose Worker.cpuUsage(), which returns
+    cumulative user/system microseconds for that Worker thread. Read those counters through the
+    existing sampler rather than adding another profiler, timer cadence or fleet control.
+  design: |
+    Add cpu_user_us and cpu_system_us to each sampled worker part. These are cumulative native
+    counters for that thread, not elapsed build duration, process CPU, CPU percentage or a census
+    of V8 helper threads. Preserve the same fields through the existing nested-worker protocol.
+    Missing APIs, failed/invalid reads, deadlines and exited workers carry cpu_unmeasured_reason
+    with no numeric CPU fields. A heap failure and a CPU failure remain independent observations.
+    Bound CPU reads by the existing sample deadline and allow only one outstanding native request
+    per Worker until it settles; repeated samples must not accumulate native requests or waiters.
+    Keep every runtime limit, sampling cadence, relief decision, owner override and activation
+    boundary unchanged. This task does not recover or duplicate the retained W1-T6266 report.
+  acceptance:
+    - claim: "a real Worker's CPU counters increase after native work, and exit leaves them unmeasured"
+      proof: "unit test: serve worker CPU: native work increases only the live worker's cumulative counters"
+    - claim: "unreadable counters stay unknown independently of heap availability"
+      proof: "unit test: serve worker CPU: unreadable counters remain unknown and do not suppress heap samples"
+    - claim: "a timed-out native read stays single-flight until it settles"
+      proof: "unit test: serve worker CPU: a timed-out native read is single-flight until it settles"
+    - claim: "the existing nested-worker transport preserves the counters"
+      proof: "unit test: serve worker CPU: nested worker transport preserves CPU counters"
+    - claim: "exit during a pending native read discards its counters"
+      proof: "unit test: serve worker CPU: exit during a native read discards counters"
+  falsifier: |
+    Run the new physical suite against the unmodified worker-heaps source: each named control
+    must fail for missing CPU evidence. Restore the fix and require a complete passing TAP
+    summary on Node 22 and 24. Remove the pending-request guard and the native-call-count
+    assertion must fail. Remove nested CPU propagation and the nested-worker assertion must fail.

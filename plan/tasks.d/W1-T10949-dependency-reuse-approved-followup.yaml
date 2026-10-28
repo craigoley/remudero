@@ -1,0 +1,65 @@
+- id: W1-T10949
+  title: Workspace dependency reuse remains immutable and disposable outputs are reclaimed by their owner
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10
+  risk: medium
+  band_meaning: span
+  origin: operator-approved-followups:2026-10-28
+  plan_refs:
+    - W1-T10507
+    - W1-T10508
+    - W1-T10739
+  files:
+    - src/lib/dependency-seeds.ts
+    - scripts/dependency-seeds.mjs
+    - src/lib/workspace-usage.ts
+    - test/dependency-seeds.test.ts
+    - test/dependency-seeds-cli.test.ts
+    - test/workspace-usage.test.ts
+    - src/lib/config-schema.ts
+    - docs/dependency-seed-command-reuse.md
+    - docs/docs-index.json
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: Reconcile foundation f6e362e5 command reuse and immutable-generation controls with
+    W1-T10507/W1-T10508/W1-T10739 instead of duplicating their installers or seed locks. Retain
+    exact-lock/runtime bindings and copy-on-write/private writable proof generations. A command that
+    needs no private install should not expand a fresh dependency tree. Never npm install/ci into
+    each Mac checkout, create per-run npm/browser caches or modify a shared generation through a
+    worktree. Track workspace-owned growth and clean completed disposable
+    coverage/V8/dependency/browser material after durable receipts; preserve active/lent/shared
+    generations, unpublished work, cash reservations and evidence. Builder cleanup does not become a
+    broad janitor, worktree-retirement loop or six-hour-rule exception for unrelated paths.
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+  acceptance:
+    - claim: repeated commands reuse the correct immutable dependency generation without an independent
+        install
+      proof: "unit test: W1-T10949: repeated commands reuse the correct immutable dependency generation
+        without an independent install"
+    - claim: cleanup drops only completed owner-disposable payload while active shared and unpublished
+        inputs remain protected
+      proof: "unit test: W1-T10949: cleanup drops only completed owner-disposable payload while active
+        shared and unpublished inputs remain protected"
+  falsifier: "Add the exact named real-path controls in the computed test folders using package
+    aliases and the shared root helper. Establish the failing current-main behavior, restore the
+    smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
+    the named assertion to fail, then restore it. Preserve baseline failures, partial runs and
+    old-head evidence; never make unchanged failures green through repetition. "

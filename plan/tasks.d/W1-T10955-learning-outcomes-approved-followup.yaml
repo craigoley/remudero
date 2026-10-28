@@ -1,0 +1,64 @@
+- id: W1-T10955
+  title: Lifecycle learning reports measure observed outcomes without inventing preventive efficacy
+  repo: remudero
+  depends_on:
+    - W1-T10953
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10
+  risk: medium
+  band_meaning: span
+  origin: operator-approved-followups:2026-10-28
+  plan_refs:
+    - W1-T4802
+    - W1-T10728
+  files:
+    - src/lib/ci-remedy-execution-observer.ts
+    - src/lib/review-flow-observation.ts
+    - src/lib/goal-observation.ts
+    - scripts/private-routing-daily-review.mjs
+    - test/review-flow-observation.test.ts
+    - test/fix-lane/daily-component-execution.test.ts
+    - src/lib/goals.ts
+    - src/lib/ledger-steps.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: Continue the approved outcome-producer gaps from ded7d76a after reusing the native
+    collectors. Add real first-observed-green, rework-cost joins, later lesson exposure and
+    preventive-fix runtime/work evidence where the source producer can prove them. First-observed
+    success is not first-ever success; unavailable historical timestamps stay unavailable. Maintain
+    task-start and merge-week cohorts and denominators separately, dedupe review/attempt outcomes by
+    real IDs, and retain source-completeness/freshness reasons. A proposal merge, running container,
+    learning count or a repeated failure class cannot establish learning efficacy. PR15262 supplies
+    one real successful review with one assignment despite two posting lines; use this as a counter
+    control without launching a new review. Leave PR-repair ownership with its current lane.
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+  acceptance:
+    - claim: duplicate review notifications count as one delivered exact review and cohort denominators
+        remain separate
+      proof: "unit test: W1-T10955: duplicate review notifications count as one delivered exact review and
+        cohort denominators remain separate"
+    - claim: missing exposure, cost or preventive-work evidence remains unavailable rather than a
+        successful learning claim
+      proof: "unit test: W1-T10955: missing exposure, cost or preventive-work evidence remains unavailable
+        rather than a successful learning claim"
+  falsifier: "Add the exact named real-path controls in the computed test folders using package
+    aliases and the shared root helper. Establish the failing current-main behavior, restore the
+    smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
+    the named assertion to fail, then restore it. Preserve baseline failures, partial runs and
+    old-head evidence; never make unchanged failures green through repetition. "

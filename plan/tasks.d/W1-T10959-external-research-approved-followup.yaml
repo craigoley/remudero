@@ -1,0 +1,49 @@
+- id: W1-T10959
+  title: Compare the four retained automation inspirations against current shipped mechanisms before
+    proposing more work
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  budget_usd: 6
+  risk: low
+  band_meaning: span
+  origin: operator-approved-followups:2026-10-28
+  plan_refs: []
+  files:
+    - docs/research/agent-automation-inspirations.md
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: "Review primary source code/docs for paperclipai/paperclip, vectorize-io/hindsight,
+    NVIDIA/Model-Optimizer and block/buzz. Produce one bounded public-source comparison: exact
+    source/version/date, relevant mechanism, current Remudero overlap, and either an explicit
+    no-change/deferred disposition or one small falsifiable proposal with expected
+    CPU/disk/cost/flow benefit and an experiment. Use the existing plan and open-head subject census
+    before proposing anything; do not create competing orchestrators, memory databases, model
+    optimization deployments or background jobs. No private topology/account/credential/evidence
+    disclosure or public field-trial release. Research is not implementation or efficacy credit."
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+  acceptance:
+    - claim: a primary-source comparison explicitly covers all four requested repositories and current
+        overlap
+      proof: "grep: https://github.com/paperclipai/paperclip in
+        docs/research/agent-automation-inspirations.md"
+    - claim: each proposed improvement includes a falsifiable bounded experiment or an explicit no-change
+        disposition
+      proof: "grep: https://github.com/block/buzz in docs/research/agent-automation-inspirations.md"
+  falsifier: "Remove one requested repository, its primary-source citation or its overlap/no-change
+    disposition: the report is incomplete. A source comparison or proposed experiment is never
+    claimed as a shipped improvement."
