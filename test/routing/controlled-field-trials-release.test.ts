@@ -9,11 +9,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  buildControlledFieldTrialsRelease, crossoverBucket, type ControlledEpoch, type ControlledReleaseInput, type EpochAssignment,
+  buildControlledFieldTrialsRelease, crossoverBucket, deriveRegisteredEpoch, type ControlledEpoch, type ControlledReleaseInput, type EpochAssignment,
   type EpochTaskOutcome,
 } from "#src/lib/field-trials-controlled-release.js";
 import { fieldTrialsCommand, unavailableLedger, writeControlledCandidate, buildFieldTrialsFlowSnapshot, type FieldTrialsConsent }
   from "#src/lib/field-trials-flow.js";
+import { FIELD_TRIALS_GITHUB_VERSION } from "#src/lib/field-trials-github.js";
 import { ROUTING_DRAW_METHOD } from "#src/lib/worker-provider.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
@@ -287,6 +288,129 @@ test("W1-T10843: the Sol x Sonnet release carries pre-registered secondaries and
     .concat({ taskId: "t0", at: "2026-09-27T00:30:00.000Z", assignedArm: SON, servedArm: SON, propensity: 0.5 });
   const flipped = built({}, { ...data, assignments: reassigned }).release;
   assert.equal(flipped.arms[0].assigned, release.arms[0].assigned - 1, "t0's earliest assignment was the other arm");
+});
+
+/** Raw ledger rows and a GitHub store shaped like production's, for the registered sol61-vs-sonnet55 epoch. */
+function productionFixture() {
+  const PROD_SOL = "gpt-6.1-sol";
+  const PROD_SON = "claude-sonnet-5-5";
+  const labelOf = (i: number) => (i % 2 === 0 ? "sol61" : "sonnet");
+  const modelOf = (label: string) => (label === "sol61" ? PROD_SOL : PROD_SON);
+  const crossed = (i: number) => (i % 2 === 0 ? i % 4 === 0 : i % 10 === 1);
+  const merged = (i: number) => i % 5 !== 0 && !(i % 2 === 1 && i % 7 === 1) && i !== 13;
+  const rounds = (i: number) => (i % 9 === 0 ? 2 : i % 3 === 0 ? 1 : 0);
+  const task = (i: number) => `W1-T${1000 + i}`;
+  const at = (i: number) => Date.UTC(2026, 8, 28) + i * 3_600_000;
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const stack = Object.fromEntries(["harness", "prompt", "tool", "scorer", "environment"].map((f, k) =>
+    [`${f}Revision`, { state: "observed", value: "abcde".charAt(k).repeat(40) }]));
+  const rows: Record<string, unknown>[] = [];
+  const pulls: Record<string, unknown> = {};
+  const pull = (n: number, ids: string[], mergedAt: number) => {
+    pulls[String(n)] = { nodeId: `n${n}`, number: n, state: "closed", createdAt: iso(mergedAt - 1000), updatedAt: iso(mergedAt), mergedAt: iso(mergedAt),
+      closedAt: iso(mergedAt), headRef: null, headSha: null, mergeCommitSha: null, trailerTaskIds: ids, revertsPr: null, authorClass: "bot",
+      detail: { state: "pending" } };
+  };
+  for (let i = 0; i < 80; i += 1) {
+    const label = labelOf(i);
+    const servedLabel = crossed(i) ? (label === "sol61" ? "sonnet" : "sol61") : label;
+    const claude = { provider: "claude", model: PROD_SON, eligible: true, selected: servedLabel === "sonnet" };
+    rows.push({ step: "worker.assignment", task_id: task(i), ts: iso(at(i)), benchmark_run: { stack }, worker_assignment: {
+      id: `a${i}`, selected: { provider: servedLabel === "sonnet" ? "claude" : "codex", model: modelOf(servedLabel) },
+      routing: { decision: { ab: "sol61-vs-sonnet55", considered: [claude, { provider: "codex", model: PROD_SOL, eligible: true, selected: servedLabel === "sol61" }] },
+        propensity: { method: ROUTING_DRAW_METHOD, selectedProbability: 0.5 },
+        experiment: { id: "sol61-vs-sonnet55", unit: "task", assignedArm: label, assignedProbability: 0.5, servedArm: servedLabel, crossover: crossed(i) } } } });
+    if (i % 7 !== 0) rows.push({ step: "worker.attempt", task_id: task(i), ts: iso(at(i) + 60_000), selection_assignment_id: `a${i}`, served_model: modelOf(servedLabel) });
+    for (let r = 1; r <= rounds(i); r += 1) {
+      rows.push({ step: "fix.dispatch", task_id: task(i), ts: iso(at(i) + r * 600_000), round_id: `r${i}-${r}` });
+      rows.push({ step: "fix.done", task_id: task(i), ts: iso(at(i) + r * 600_000 + 1), round_id: `r${i}-${r}`, served_model: PROD_SON });
+    }
+    if (merged(i)) pull(i + 1, [task(i)], at(i) + 2 * 86_400_000);
+  }
+  rows.push({ step: "fix.dispatch", task_id: task(0), ts: iso(at(0) + 600_000), round_id: "r0-1" }); // a replayed row is one round
+  rows.push({ step: "fix.dispatch", task_id: task(3), ts: iso(at(3) + 900_000), kind: "proof_amendment", round_id: "amend-3" }); // not a worker round
+  rows.push({ step: "fix.dispatch", task_id: task(6), ts: iso(at(6) - 3_600_000), round_id: "before-6" }); // before the first assignment
+  pull(500, [task(10)], at(10) - 86_400_000); // merged BEFORE its first assignment: not this assignment's outcome
+  pull(501, [task(13), task(14)], at(13) + 86_400_000); // two trailers: ambiguous, never an exact trailer match
+  const cursor = (state: string) => ({ state, reason: null, watermark: null, sweepHigh: null, resumePage: null, pagesRead: 1, asOf: AS_OF });
+  const store = (state: string) => ({ version: FIELD_TRIALS_GITHUB_VERSION, repos: { [REPO]: { pulls, commits: {}, deployments: {},
+    cursors: { pulls: cursor(state), commits: cursor("complete"), deployments: cursor("complete") } } } });
+  return { rows, store, PROD_SOL, PROD_SON, labelOf, crossed, merged, rounds, task };
+}
+
+test("W1-T10843: the registered sol61-vs-sonnet55 epoch is read from the ledger, with no operator epoch file", async () => {
+  const fx = productionFixture();
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}controlled-registered-`));
+  try {
+    const consentPath = join(root, "consent.json");
+    writeFileSync(consentPath, JSON.stringify(CONSENT));
+    const SITE_COMMIT = "b".repeat(40);
+    const printed: string[] = [];
+    const run = async (name: string, extra: string[], opts: { store?: string; rows?: Record<string, unknown>[] } = {}) => {
+      const dir = join(root, name);
+      mkdirSync(dir);
+      writeFileSync(join(dir, "field-trials-github-v1.json"), JSON.stringify(fx.store(opts.store ?? "complete")));
+      printed.length = 0;
+      const code = await fieldTrialsCommand(["--source", "core=craigoley/remudero", "--ledger", `core=${root}`, "--out-dir", dir, "--consent", consentPath,
+        "--offline", ...extra], buildFieldTrialsFlowSnapshot, { nowIso: AS_OF, print: (l) => printed.push(l), printError: () => undefined,
+        readLedger: async () => unavailableLedger("fixture"), resolveConfig: () => ({ root }), readRows: async () => opts.rows ?? fx.rows });
+      return { dir, code, out: printed.join("\n") };
+    };
+    // the production path: no site commit named -> withheld, nothing emitted, never a merge-only release
+    const withheld = await run("withheld", ["--controlled-registered", "sol61-vs-sonnet55"]);
+    assert.match(withheld.out, /controlled release refused \(site-secondary-unavailable/);
+    assert.equal(existsSync(join(withheld.dir, "controlled")), false);
+    // the site commit that accepts the keys is named: the epoch is derived from the ledger and built
+    const ok = await run("ok", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT]);
+    assert.match(ok.out, /controlled candidate: controlled\/controlled-[0-9a-f]{16}\.candidate\.json \(never published/);
+    const files = readdirSync(join(ok.dir, "controlled"));
+    const candidate = JSON.parse(readFileSync(join(ok.dir, "controlled", files.find((f) => f.endsWith(".candidate.json"))!), "utf8"));
+    const sidecar = JSON.parse(readFileSync(join(ok.dir, "controlled", files.find((f) => f.endsWith(".sidecar.private.json"))!), "utf8"));
+    assert.deepEqual(siteParse(candidate, [REPO]), { ok: true });
+    assert.equal(sidecar.siteParserCommit, SITE_COMMIT);
+    assert.equal(existsSync(join(ok.dir, "releases")), false, "nothing is published or manifested");
+    // exact per-arm counts by FIRST assignment, from the ledger and the merged pulls
+    const expect = (label: string) => {
+      const ids = [...Array(80).keys()].filter((i) => fx.labelOf(i) === label);
+      return { assigned: ids.length, observed: ids.length, successes: ids.filter(fx.merged).length,
+        clean: ids.filter((i) => fx.merged(i) && fx.rounds(i) === 0).length, rounds: ids.reduce((s, i) => s + fx.rounds(i), 0) };
+    };
+    assert.deepEqual(candidate.arms.map((a: { modelId: string }) => a.modelId), [fx.PROD_SOL, fx.PROD_SON]);
+    for (const [index, label] of ["sol61", "sonnet"].entries()) {
+      const want = expect(label);
+      const arm = candidate.arms[index];
+      assert.deepEqual([arm.assigned, arm.observed, arm.successes], [want.assigned, want.observed, want.successes], label);
+      assert.ok(Math.abs(candidate.secondary[0].arms[index].value - want.clean / want.observed) < 1e-9, `${label}: first-pass success`);
+      assert.equal(candidate.secondary[1].arms[index].value, Math.round((want.rounds / want.assigned) * 10) / 10, `${label}: repair rounds per assigned task`);
+    }
+    assert.deepEqual(candidate.secondary.map((s: { metric: string }) => s.metric), ["first_pass_success", "repair_rounds_mean"]);
+    assert.deepEqual(sidecar.crossover, { crossed: 28, assignments: 80 });
+    assert.equal([...Array(80).keys()].filter(fx.crossed).length, 28);
+    assert.equal(candidate.adherence.crossoverPctBucket, ">30%", "28 of 80 assignments crossed over: 35%");
+    assert.equal(sidecar.repairedBy[fx.task(3)], fx.PROD_SON, "the repairing model is private sidecar data");
+    assert.equal(sidecar.seed, "W1-T10843:sol61-vs-sonnet55:2026-10-27");
+    assert.equal(JSON.stringify(candidate).includes(sidecar.seed), false);
+    assert.deepEqual(candidate.sourceRepos, [REPO]);
+    assert.equal(candidate.harnessRevision, "a".repeat(40));
+    assert.equal(candidate.scorerRevision, "d".repeat(40));
+    // an incomplete pull history observed no outcomes: the epoch refuses rather than count unread merges as failures
+    const partial = await run("partial", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { store: "partial" });
+    assert.match(partial.out, /controlled release refused \(horizon-not-reached/);
+    assert.equal(existsSync(join(partial.dir, "controlled")), false);
+    // a draw not recorded through selectionPropensity is a missing propensity: the audit refuses
+    const unrecorded = fx.rows.map((row) => row.step === "worker.assignment"
+      ? { ...row, worker_assignment: { ...(row.worker_assignment as object), routing: { ...(row.worker_assignment as { routing: object }).routing, propensity: { method: "unavailable" } } } } : row);
+    const audit = await run("audit", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { rows: unrecorded });
+    assert.match(audit.out, /controlled release refused \(assignment-audit-failed: propensity-missing/);
+    // an empty ledger has no assignments; an unregistered epoch and a malformed site commit are refused
+    assert.match((await run("empty", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", SITE_COMMIT], { rows: [] })).out,
+      /assignment-audit-failed: no-assignments-in-window/);
+    assert.match((await run("unregistered", ["--controlled-registered", "terra-vs-sol", "--site-parser-commit", SITE_COMMIT])).out, /controlled-epoch-unregistered/);
+    assert.equal(deriveRegisteredEpoch("terra-vs-sol", { rows: [], merged: [], mergesObservedThrough: null, sourceRepos: [REPO] }), null);
+    assert.equal((await run("badsha", ["--controlled-registered", "sol61-vs-sonnet55", "--site-parser-commit", "main"])).code, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("W1-T10843: no merge-only release before the site accepts secondaries", () => {

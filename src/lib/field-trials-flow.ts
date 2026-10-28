@@ -20,7 +20,8 @@
 import { ciRemedyExecutionOf, ciRemedyExecutionReport, type CiRemedyExecution } from "./ci-remedy-execution.js";
 import { importedModuleOf, preventionRegistrationsOf, preventionAdoption, type ImportedModuleEvidence, type PreventionSourceRegistration } from "./prevention-source-evidence.js";
 import { servedTrialCohorts, trialRevisionPins, type TrialRevisionPins } from "./field-trials-cohorts.js";
-import { buildControlledFieldTrialsRelease, type ControlledReleaseInput } from "./field-trials-controlled-release.js";
+import { buildControlledFieldTrialsRelease, deriveRegisteredEpoch, type ControlledReleaseInput,
+  type ControlledReleaseResult, type LedgerEpochFacts } from "./field-trials-controlled-release.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { projectRepairCostContext, repairCostCells, repairCostsByPull, type RepairCostContext, type RepairCostReport } from "./repair-cost-evidence.js";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -32,7 +33,7 @@ import { loadConfig } from "./config.js";
 import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, observedCurrentHeadGreen, parseGithubStore, RUN_BRANCH_RE,
   type FieldTrialsGithubPass, type FieldTrialsGithubStore, type GithubCursor, type GithubPageFetch,
   type GithubPull, type GithubRepoStore } from "./field-trials-github.js";
-import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
+import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion, readLedgerUnionRecords } from "./ledger-union.js";
 import { deriveReviewFindingOutcomes, type FindingOutcomeReport, type VerifiedFindingEvidence } from "./review-finding-outcomes.js";
 import { deriveVerifiedReviewFindingEvidence, readReviewFindingEvidence, type FindingEvidenceInput, type FindingEvidenceReport } from "./review-finding-evidence.js";
 import type { TaskCaseFile } from "./task-case-file.js";
@@ -1184,20 +1185,67 @@ function pseudonymSalt(outDir: string): string {
  * `<outDir>/controlled/` for the reviewed import flow; nothing is published, no manifest entry is made.
  */
 export function writeControlledCandidate(outDir: string, epochFile: unknown, consent: FieldTrialsConsent | string | null, nowIso: string,
-  siteAcceptsSecondary?: boolean): { state: "candidate"; file: string } | { state: "refused"; reason: string } {
+  siteAcceptsSecondary?: boolean, siteParserCommit?: string): { state: "candidate"; file: string } | { state: "refused"; reason: string } {
   const body = record(epochFile);
   if (body === undefined || record(body.epoch) === undefined || !Array.isArray(body.assignments) || !Array.isArray(body.outcomes)) {
     return { state: "refused", reason: "controlled-epoch-invalid" };
   }
-  const result = buildControlledFieldTrialsRelease({ epoch: body.epoch, assignments: body.assignments, outcomes: body.outcomes,
+  return persistControlled(outDir, buildControlledFieldTrialsRelease({ epoch: body.epoch, assignments: body.assignments, outcomes: body.outcomes,
     pins: trialRevisionPins(record(body.stack)), consent, asOf: nowIso,
-    ...(siteAcceptsSecondary === undefined ? {} : { siteAcceptsSecondary }) } as ControlledReleaseInput);
+    ...(siteAcceptsSecondary === undefined ? {} : { siteAcceptsSecondary }),
+    ...(siteParserCommit === undefined ? {} : { siteParserCommit }) } as ControlledReleaseInput));
+}
+
+function persistControlled(outDir: string, result: ControlledReleaseResult): { state: "candidate"; file: string } | { state: "refused"; reason: string } {
   if (result.state === "refused") return { state: "refused", reason: `${result.reason}: ${result.detail}` };
   const file = join("controlled", `${result.release.releaseId}.candidate.json`);
   writeJsonAtomically(join(outDir, file), result.release);
   writeJsonAtomically(join(outDir, "controlled", `${result.release.releaseId}.sidecar.private.json`), result.sidecar);
   return { state: "candidate", file };
 }
+
+/**
+ * PRODUCTION SOURCE of a registered epoch (W1-T10843): derive the epoch's assignments, outcomes and pinned
+ * revisions from the ledger's routing assignments, the merged `Remudero-Task` pulls and the fix lane's rows,
+ * then build. A registered epoch needs no operator-supplied epoch file.
+ */
+export function writeRegisteredControlledCandidate(outDir: string, epochId: string, facts: LedgerEpochFacts,
+  consent: FieldTrialsConsent | string | null, nowIso: string, siteAcceptsSecondary: boolean,
+  siteParserCommit?: string): { state: "candidate"; file: string } | { state: "refused"; reason: string } {
+  const derived = deriveRegisteredEpoch(epochId, facts);
+  if (derived === null) return { state: "refused", reason: `controlled-epoch-unregistered: ${epochId}` };
+  return persistControlled(outDir, buildControlledFieldTrialsRelease({ ...derived, consent, asOf: nowIso, siteAcceptsSecondary,
+    ...(siteParserCommit === undefined ? {} : { siteParserCommit }) }));
+}
+
+/** The ledger rows and merged pulls of every source that has a ledger; null when none does or a ledger is unreadable. */
+async function controlledEpochFacts(repos: readonly (readonly [string, string])[], ledgers: ReadonlyMap<string, string>, github: FieldTrialsGithubStore,
+  readRows: (stateDir: string) => Promise<Record<string, unknown>[]>): Promise<LedgerEpochFacts | string> {
+  const rows: Record<string, unknown>[] = [];
+  const merged: LedgerEpochFacts["merged"][number][] = [];
+  const sourceRepos: string[] = [];
+  let observedThrough: string | null = null;
+  let complete = true;
+  for (const [label, repo] of repos) {
+    const dir = ledgers.get(label);
+    if (dir === undefined) continue;
+    try { for (const row of await readRows(dir)) rows.push(row); }
+    catch {
+      const reason = "controlled-ledger-read-failed";
+      return reason;
+    }
+    sourceRepos.push(repo);
+    const store = github.repos[repo];
+    const cursor = store?.cursors.pulls;
+    if (store === undefined || cursor?.state !== "complete" || cursor.asOf === null) complete = false;
+    else if (observedThrough === null || cursor.asOf < observedThrough) observedThrough = cursor.asOf;
+    for (const pull of Object.values(store?.pulls ?? {})) merged.push({ trailerTaskIds: pull.trailerTaskIds, mergedAt: pull.mergedAt });
+  }
+  if (sourceRepos.length === 0) return "controlled-ledger-unavailable";
+  return { rows, merged, mergesObservedThrough: complete ? observedThrough : null, sourceRepos };
+}
+
+const SITE_COMMIT_RE = /^[0-9a-f]{40}$/i;
 
 export interface FieldTrialsCommandInput {
   nowIso?: string;
@@ -1208,11 +1256,14 @@ export interface FieldTrialsCommandInput {
   resolveConfig?: () => { root: string; fleetRepos?: string[] };
   /** W1-T10843: overrides whether the site parser is known to accept `adherence` and `secondary`. */
   siteAcceptsSecondary?: boolean;
+  /** W1-T10843: the raw ledger-union rows of one state dir, read for a registered controlled epoch. */
+  readRows?: (stateDir: string) => Promise<Record<string, unknown>[]>;
 }
 
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
   + "[--consent <file>] [--case-files <file>] [--finding-evidence <file>] [--finding-evidence-keys <file>] "
-  + "[--controlled-epoch <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--json]";
+  + "[--controlled-registered <epoch-id> | --controlled-epoch <file>] [--site-parser-commit <sha>] "
+  + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--json]";
 
 function labelOf(repo: string): string {
   const name = repo.split("/").at(-1)!.toLowerCase();
@@ -1245,6 +1296,7 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
       source: { type: "string", multiple: true }, ledger: { type: "string", multiple: true }, "out-dir": { type: "string" },
       consent: { type: "string" }, "case-files": { type: "string" }, "max-pages": { type: "string" },
       "finding-evidence": { type: "string" }, "finding-evidence-keys": { type: "string" }, "controlled-epoch": { type: "string" },
+      "controlled-registered": { type: "string" }, "site-parser-commit": { type: "string" },
       offline: { type: "boolean" }, revoke: { type: "string" }, json: { type: "boolean" } } }).values;
   } catch {
     const reason = "arguments-invalid";
@@ -1256,6 +1308,12 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
   const maxPages = values["max-pages"] === undefined ? DEFAULT_MAX_PAGES : Number(values["max-pages"]);
   if (typeof sourcePairs === "string" || typeof ledgerPairs === "string" || !Number.isSafeInteger(maxPages) || maxPages < 1) {
     print(`${USAGE} (invalid: ${typeof sourcePairs === "string" ? sourcePairs : typeof ledgerPairs === "string" ? ledgerPairs : "--max-pages"})`);
+    return 2;
+  }
+  const siteCommit = typeof values["site-parser-commit"] === "string" ? values["site-parser-commit"] : undefined;
+  const registeredEpoch = typeof values["controlled-registered"] === "string" ? values["controlled-registered"] : undefined;
+  if ((siteCommit !== undefined && !SITE_COMMIT_RE.test(siteCommit)) || (registeredEpoch !== undefined && values["controlled-epoch"] !== undefined)) {
+    print(`${USAGE} (invalid: ${siteCommit !== undefined && !SITE_COMMIT_RE.test(siteCommit) ? "--site-parser-commit" : "--controlled-registered with --controlled-epoch"})`);
     return 2;
   }
   const config = (input.resolveConfig ?? loadConfig)();
@@ -1332,8 +1390,17 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
   }
   writeJsonAtomically(manifestPath, manifest);
   let controlled: ReturnType<typeof writeControlledCandidate> | null = null;
-  if (typeof values["controlled-epoch"] === "string") {
-    controlled = writeControlledCandidate(outDir, readJson(values["controlled-epoch"]), consent, nowIso, input.siteAcceptsSecondary);
+  if (typeof values["controlled-epoch"] === "string" || registeredEpoch !== undefined) {
+    // The site parser accepts adherence and secondary only after PORTAL-T43 merges: until the operator names the
+    // site main commit that does (--site-parser-commit), the builder withholds with site-secondary-unavailable.
+    const siteAccepts = input.siteAcceptsSecondary ?? siteCommit !== undefined;
+    if (registeredEpoch === undefined) {
+      controlled = writeControlledCandidate(outDir, readJson(values["controlled-epoch"] as string), consent, nowIso, siteAccepts, siteCommit);
+    } else {
+      const facts = await controlledEpochFacts(repos, defaultLedgers, github, input.readRows ?? ((dir) => readLedgerUnionRecords(dir)));
+      controlled = typeof facts === "string" ? { state: "refused", reason: facts }
+        : writeRegisteredControlledCandidate(outDir, registeredEpoch, facts, consent, nowIso, siteAccepts, siteCommit);
+    }
     if (values.json !== true) print(controlled.state === "candidate" ? `  controlled candidate: ${controlled.file} (never published; reviewed import only)`
       : `  controlled release refused (${controlled.reason})`);
   }

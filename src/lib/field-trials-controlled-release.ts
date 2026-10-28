@@ -20,8 +20,9 @@
  */
 import { createHash } from "node:crypto";
 import { fixedClock } from "./clock.js";
-import { TRIAL_REVISION_RE, type TrialRevisionPins } from "./field-trials-cohorts.js";
+import { TRIAL_REVISION_RE, trialRevisionPins, type TrialRevisionPins } from "./field-trials-cohorts.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
+import { experimentArmForTask, experimentTaskIdentity, ROUTING_EXPERIMENTS } from "./routing-experiments.js";
 import { ROUTING_DRAW_METHOD } from "./worker-provider.js";
 
 export const CONTROLLED_RELEASE_SCHEMA = "field-trials-v1" as const;
@@ -86,6 +87,8 @@ export interface ControlledReleaseInput {
   asOf: string;
   /** Whether the vendored site parser accepts `adherence` and `secondary` (PORTAL-T43). Unproven: false. */
   siteAcceptsSecondary?: boolean;
+  /** The site main commit that accepts those keys; recorded in the private sidecar. */
+  siteParserCommit?: string;
 }
 
 export interface ControlledArm { modelId: string; assigned: number; observed: number; successes: number; ciLower: number; ciUpper: number }
@@ -127,6 +130,7 @@ export interface ControlledSidecar {
   reportingRule: "no-detectable-difference" | "interval-excludes-zero";
   repairedBy: Record<string, string>;
   consentReceipts: string[];
+  siteParserCommit: string | null;
 }
 
 export type ControlledReleaseRefusal =
@@ -315,7 +319,135 @@ export function buildControlledFieldTrialsRelease(input: ControlledReleaseInput)
     difference: { metric: "verified_completion", arm: armA, minus: armB, value: point, ciLower: Math.min(diff.lo, point), ciUpper: Math.max(diff.hi, point) },
     reportingRule: Math.min(diff.lo, point) <= 0 && Math.max(diff.hi, point) >= 0 ? "no-detectable-difference" : "interval-excludes-zero",
     repairedBy: Object.fromEntries(tasks.flatMap((task) => task.repairedBy === null ? [] : [[task.taskId, task.repairedBy]])),
-    consentReceipts: receipts } };
+    consentReceipts: receipts, siteParserCommit: input.siteParserCommit ?? null } };
+}
+
+/** A registered epoch: the live routing experiment it reads, its arms' model ids, and its pre-registered window and seed. */
+interface EpochRegistration {
+  epochId: string;
+  experimentId: string;
+  /** The experiment's arm label (ROUTING_EXPERIMENTS `arms`) -> the model id the release names. */
+  models: Readonly<Record<string, string>>;
+  arms: readonly [string, string];
+  window: { start: string; end: string };
+  seed: string;
+}
+
+/** The first controlled result: Sol 6.1 x Sonnet 5.5, per-task draw at p 0.5, window 2026-09-27..2026-10-24, seed fixed 2026-10-27. */
+export const SOL_SONNET_EPOCH_ID = "sol61-vs-sonnet55";
+const REGISTERED_EPOCHS: readonly EpochRegistration[] = [{
+  epochId: SOL_SONNET_EPOCH_ID, experimentId: "sol61-vs-sonnet55", models: { sol61: "gpt-6.1-sol", sonnet: "claude-sonnet-5-5" },
+  arms: ["gpt-6.1-sol", "claude-sonnet-5-5"], window: { start: "2026-09-27T00:00:00.000Z", end: "2026-10-24T23:59:59.999Z" },
+  seed: "W1-T10843:sol61-vs-sonnet55:2026-10-27",
+}];
+
+/** What the flow read: the raw ledger union rows and the merged pulls (by exact trailer) of the epoch's source repos. */
+export interface LedgerEpochFacts {
+  rows: Iterable<Record<string, unknown>>;
+  merged: readonly { trailerTaskIds: readonly string[]; mergedAt: string | null }[];
+  /** The time through which every source repo's pull history was read to completion, or null when any is incomplete. */
+  mergesObservedThrough: string | null;
+  sourceRepos: readonly string[];
+}
+
+export interface DerivedEpoch {
+  epoch: ControlledEpoch;
+  assignments: EpochAssignment[];
+  outcomes: EpochTaskOutcome[];
+  pins: TrialRevisionPins;
+}
+
+const rec = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+const nonEmpty = (value: unknown): string | undefined => typeof value === "string" && value.length > 0 ? value : undefined;
+
+/**
+ * PRODUCER: derive one registered epoch's builder input from the ledger. Assignments are the experiment's
+ * `worker.assignment` rows (assigned arm from the intention-to-treat record, propensity only when the draw
+ * was recorded through selectionPropensity with ROUTING_DRAW_METHOD); the served arm is the receipt's served
+ * model, else the decision's served arm. Outcomes: merged = a merged pull naming the task as its ONLY
+ * `Remudero-Task` trailer, at or after the task's first assignment; repair rounds = the fix lane's distinct
+ * `fix.dispatch` rounds for the task up to the censoring cutoff. Returns null for an unregistered epoch.
+ */
+export function deriveRegisteredEpoch(epochId: string, facts: LedgerEpochFacts): DerivedEpoch | null {
+  const reg = REGISTERED_EPOCHS.find((entry) => entry.epochId === epochId);
+  const experiment = ROUTING_EXPERIMENTS.find((entry) => entry.id === reg?.experimentId);
+  if (reg === undefined || experiment === undefined) return null;
+  const modelIds = Object.values(reg.models);
+  const armOf = (model: string | undefined) => model === undefined ? null : modelIds.find((id) => model === id || model.startsWith(`${id}-`)) ?? null;
+  const assignments: EpochAssignment[] = [];
+  const assignmentIds = new Map<EpochAssignment, string>();
+  const served = new Map<string, string>();
+  const fixRounds: { taskId: string; at: number; roundId: string | undefined }[] = [];
+  const fixModel = new Map<string, string>();
+  const pinSeen: Record<string, Set<string>> = { harness: new Set(), prompt: new Set(), tool: new Set(), scorer: new Set(), environment: new Set() };
+  for (const row of facts.rows) {
+    const step = nonEmpty(row.step);
+    const taskId = nonEmpty(row.task_id);
+    const at = nonEmpty(row.ts);
+    const receiptId = nonEmpty(row.selection_assignment_id);
+    if (step === "worker.assignment" && taskId !== undefined && at !== undefined && Number.isFinite(ms(at))) {
+      const assignment = rec(row.worker_assignment);
+      const routing = rec(assignment?.routing);
+      const decision = rec(routing?.decision);
+      if (decision?.ab !== experiment.id || experimentTaskIdentity(taskId) === undefined) continue;
+      const considered = Array.isArray(decision.considered) ? decision.considered as unknown[] : [];
+      const claudeModel = nonEmpty(rec(considered.find((entry) => rec(entry)?.provider === "claude"))?.model);
+      if (claudeModel === undefined || !experiment.claudeModel.test(claudeModel)) continue;
+      const itt = rec(routing?.experiment);
+      const label = nonEmpty(itt?.assignedArm) ?? experimentArmForTask(experiment, taskId).arm;
+      const probability = itt?.assignedProbability;
+      const drawn = rec(routing?.propensity)?.method === ROUTING_DRAW_METHOD && typeof probability === "number";
+      const provider = nonEmpty(rec(assignment?.selected)?.provider);
+      const servedLabel = nonEmpty(itt?.servedArm) ?? (provider === undefined ? undefined : experiment.arms[provider as keyof typeof experiment.arms]);
+      const entry: EpochAssignment = { taskId, at: fixedClock(ms(at)).iso(), assignedArm: reg.models[label] ?? label,
+        servedArm: armOf(servedLabel === undefined ? undefined : reg.models[servedLabel] ?? servedLabel),
+        propensity: drawn ? probability as number : "unavailable" };
+      assignments.push(entry);
+      const id = nonEmpty(assignment?.id);
+      if (id !== undefined) assignmentIds.set(entry, id);
+      const pins = trialRevisionPins(rec(rec(row.benchmark_run)?.stack));
+      for (const field of Object.keys(pinSeen)) if (pins[field as keyof TrialRevisionPins] !== null) pinSeen[field]!.add(pins[field as keyof TrialRevisionPins]!);
+    } else if (receiptId !== undefined && (step === "worker.attempt" || step === "verdict") && nonEmpty(row.served_model) !== undefined) {
+      served.set(receiptId, row.served_model as string);
+    } else if (step === "fix.dispatch" && taskId !== undefined && at !== undefined && row.kind !== "proof_amendment" && Number.isFinite(ms(at))) {
+      fixRounds.push({ taskId, at: ms(at), roundId: nonEmpty(row.round_id) });
+    } else if (step === "fix.done" && nonEmpty(row.round_id) !== undefined && nonEmpty(row.served_model) !== undefined) {
+      fixModel.set(row.round_id as string, row.served_model as string);
+    }
+  }
+  for (const entry of assignments) {
+    const receipt = armOf(served.get(assignmentIds.get(entry) ?? ""));
+    if (receipt !== null) entry.servedArm = receipt;
+  }
+  const epoch: ControlledEpoch = { epochId: reg.epochId, arms: reg.arms, randomizationUnit: "task", drawMethod: ROUTING_DRAW_METHOD,
+    drawProbability: 1 / reg.arms.length, window: reg.window,
+    stopping: { afterIso: fixedClock(ms(reg.window.end) + CENSORING_MARGIN_MS).iso(), minObservedPerArm: experiment.minTasksPerArm },
+    seed: reg.seed, corpusRevision: "", sourceRepos: [...facts.sourceRepos] };
+  const first = firstAssignments(epoch, assignments);
+  epoch.corpusRevision = createHash("sha256").update([...first.keys()].sort().join("\n")).digest("hex");
+  const cutoff = ms(reg.window.end) + CENSORING_MARGIN_MS;
+  const readThrough = facts.mergesObservedThrough !== null && ms(facts.mergesObservedThrough) >= cutoff;
+  const mergesOf = new Map<string, number[]>();
+  for (const pull of facts.merged) {
+    const only = pull.trailerTaskIds.length === 1 ? pull.trailerTaskIds[0]! : undefined;
+    if (only === undefined || pull.mergedAt === null || !Number.isFinite(ms(pull.mergedAt))) continue;
+    mergesOf.set(only, [...(mergesOf.get(only) ?? []), ms(pull.mergedAt)]);
+  }
+  const outcomes = [...first.entries()].map(([taskId, row]): EpochTaskOutcome => {
+    const start = ms(row.at);
+    const rounds = new Map<string, string | undefined>();
+    for (const [index, round] of fixRounds.filter((r) => r.taskId === taskId && r.at >= start && r.at <= cutoff).entries()) {
+      rounds.set(round.roundId ?? `unnamed:${index}`, round.roundId);
+    }
+    const repaired = [...new Set([...rounds.values()].flatMap((id) => id === undefined || !fixModel.has(id) ? [] : [fixModel.get(id)!]))];
+    const base = { taskId, fixRounds: rounds.size, ...(repaired.length > 0 ? { repairedBy: repaired.join(",") } : {}) };
+    if (!readThrough) return { ...base, outcome: "unobserved" };
+    const merge = (mergesOf.get(taskId) ?? []).filter((at) => at >= start).sort((a, b) => a - b)[0];
+    return merge === undefined ? { ...base, outcome: "not-merged", mergedAt: null } : { ...base, outcome: "merged", mergedAt: fixedClock(merge).iso() };
+  });
+  const pins = Object.fromEntries(Object.entries(pinSeen).map(([field, seen]) => [field, seen.size === 1 ? [...seen][0]! : null])) as TrialRevisionPins;
+  return { epoch, assignments, outcomes, pins };
 }
 
 function bootstrapDifference(a: readonly number[], b: readonly number[], rng: () => number): { lo: number; hi: number } {
