@@ -9141,6 +9141,8 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T2428: the fast lane's diff classifier. It decides which suites the `ci` and `coverage-ratchet` jobs RUN, so a
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",
+  // W1-T5892: pins the absolute coverage floor a narrowed PR's ratchet reads, and decides whether any shard may narrow.
+  "^scripts/coverage-floor\\.mjs$",
   "^scripts/ci-shard-admission\\.mjs$",
   // 2026-10-10: the flake screen fails ci-shard 1 when a test file the PR adds fails one rerun.
   "^scripts/flake-screen\\.mjs$",

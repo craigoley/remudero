@@ -7419,6 +7419,17 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         const keptHead = keptHeadOfFailedRun();
         const changedFiles = refusedBranchChangedFiles(worktreePath);
         const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha, changedFiles, declaredFiles: task.files }, log, { issues, ledgerPath, runId });
+        // W1-T10919: the runner's scope refused this, so hold the task (W1-T3959's own record) until main moves that
+        // scope or the task is amended; a rebuild on the same tree would be refused identically.
+        if (err.refusalClass === "proof-collected-nothing" && err.runnerConfigDigest !== undefined) {
+          writePriorRefusal(join(config.root, "state"), taskId, {
+            verdict: `proof-collected-nothing: ${boundedVerdictReason(err.message)}`,
+            attempts: 1,
+            escalated: true,
+            preDispatchContractRevision: preDispatchContractRevision(task),
+            runnerConfigDigest: err.runnerConfigDigest,
+          });
+        }
         reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
         log("verdict", {
           verdict: "failed",
@@ -7430,6 +7441,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           refusal_class: err.refusalClass,
           // W1-T10742: the strike classifiers read this as the harness's outcome, never the worker's miss.
           ...(err.inconclusiveProof ? { proof_exec: "exec_error" } : {}),
+          ...(err.runnerConfigDigest !== undefined ? { runner_config_digest: err.runnerConfigDigest } : {}),
           ...(issueUrl ? { issue_url: issueUrl } : {}),
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
