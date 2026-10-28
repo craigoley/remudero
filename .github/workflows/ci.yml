@@ -1791,6 +1791,11 @@ jobs:
         #
         # W1-T255's WHOLE-SUITE retry is gone from this job (the operator rulings of 2026-08-28 —
         # docs/forensics/ci-yml.md); W1-T4398's failed-file, uninstrumented retry replaces it.
+        env:
+          # W1-T5892: every shard pins the floor as of this event, so all eight choose the same one.
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FLOOR_AS_OF: ${{ github.event.pull_request.updated_at }}
         run: |
           # W1-T4406: `merge_group` widens this guard alongside `pull_request` — never replaces it;
           # every pull_request behavior below is untouched. The merge queue's own commit is the
@@ -1838,7 +1843,18 @@ jobs:
           # comment two blocks below is what makes artifact absence fail closed: no step in this job
           # carries a YAML conditional, so a failing shard makes the stable aggregator refuse.
           SELECTION="all"
+          FLOOR_DECISION="full"
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" = "1" ]; then
+            node scripts/coverage-floor.mjs select coverage-floor-pin --as-of "${FLOOR_AS_OF}" \
+              --decision-file "${RUNNER_TEMP}/coverage-floor-decision" || :
+            FLOOR_DECISION="$(cat "${RUNNER_TEMP}/coverage-floor-decision" 2>/dev/null || echo full)"
+            # Only the pin rides on; the verified floor's lcov leaves the workspace before any test runs.
+            cp coverage-floor-pin/pin.json coverage-floor-pin.json 2>/dev/null || :
+            rm -rf coverage-floor-pin
+          fi
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" = "1" ] && [ "$FLOOR_DECISION" != "narrow" ]; then
+            echo "W1-T5892: no fresh verified coverage floor, so this shard runs in full (the coverage-floor line above names why)."
+          elif [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" = "1" ]; then
             git diff -U0 HEAD^1...HEAD > "${RUNNER_TEMP}/affected.diff" 2>/dev/null || : > "${RUNNER_TEMP}/affected.diff"
             node --import tsx -e '
               import { readFileSync, writeFileSync } from "node:fs";
@@ -1938,6 +1954,7 @@ jobs:
           printf '%s\n' "${GITHUB_EVENT_NAME}:${{ steps.classify.outputs.class }}" > coverage-artifact/class
           printf '%s\n' "$(cat coverage-selection.txt 2>/dev/null || echo all)" > coverage-artifact/selection
           if [ -s coverage/selected-files.json ]; then cp coverage/selected-files.json coverage-artifact/selected-files.json; fi
+          if [ -s coverage-floor-pin.json ]; then cp coverage-floor-pin.json coverage-artifact/floor-pin.json; fi
           if [ -s coverage/lcov.info ]; then
             # W1-T5923: source-map every process report HERE, in parallel (~70% of the serial merge);
             # the aggregator replays the recorded line state and range merge in order, byte-identically.
@@ -2228,27 +2245,22 @@ jobs:
             exit 0
           fi
           if grep -qsx narrow coverage-shards/coverage-shard-*/selection; then
-            LCOV=""
-            { gh run list --workflow coverage-nightly.yml --branch main --status completed --limit 5 --json databaseId,createdAt \
-                --jq '.[] | "\(.createdAt) \(.databaseId) coverage-nightly"' || true
-              gh run list --workflow ci.yml --event merge_group --status completed --limit 5 --json databaseId,createdAt \
-                --jq '.[] | "\(.createdAt) \(.databaseId) coverage-merged"' || true; } | sort -r > floor-runs.txt
-            while read -r _ RUN ARTIFACT; do
-              if gh run download "$RUN" -n "$ARTIFACT" -D "floor-${RUN}" && [ -s "floor-${RUN}/lcov.info" ]; then
-                LCOV="floor-${RUN}/lcov.info"
-                echo "W1-T5705: this PR ran a narrowed selection; the absolute floor is read from ${ARTIFACT} run ${RUN}."
-                break
-              fi
-            done < floor-runs.txt
-            if [ -z "$LCOV" ]; then
-              echo "::error::W1-T5705: a narrowed selection found no nightly or merge-group lcov to read the absolute floor from; refusing."
-              exit 1
-            fi
+            # W1-T5892: a narrowed lcov cannot certify the absolute floor. Every narrowed shard pinned one,
+            # and they must agree; the aggregator never re-selects, and refuses a missing or altered pin.
+            LCOV="$(node scripts/coverage-floor.mjs agree coverage-shards coverage-floor-pin)" \
+              || { echo "::error::W1-T5892: the narrowed shards' pinned floor does not verify; refusing."; exit 1; }
+            FLOOR="$(node -e 'const p = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).floor; console.log(`${p.artifact} run ${p.run_id}, measured ${p.measured_at}`)' coverage-floor-pin/pin.json)"
+            echo "W1-T5892: this PR ran a narrowed selection; the absolute floor is the pinned ${FLOOR}."
+            { echo "- W1-T5892 absolute floor (historical baseline): pinned ${FLOOR}"
+              echo "- Added-line coverage of this head: the Diff coverage step above"
+              echo "- Full integration: the merge-group run executes the whole suite"; } >> "$GITHUB_STEP_SUMMARY"
             node scripts/coverage-ratchet.mjs --lcov "$LCOV" --baseline scripts/coverage-baseline.json
             exit 0
           fi
           node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
       - name: Stage the merged lcov for the coverage-merged artifact # W1-T2662, for W1-T2661's reader
+        env:
+          MATRIX_RESULT: ${{ needs.coverage-ratchet.result }}
         run: |
           mkdir -p coverage-merged-artifact
           if [ -s coverage/lcov.info ]; then
@@ -2256,6 +2268,9 @@ jobs:
           else
             echo "skipped" > coverage-merged-artifact/skipped
           fi
+          # W1-T5892: a merge-group lcov whose shards all succeeded records provenance, so it may pin a floor.
+          node scripts/coverage-floor.mjs provenance --producer coverage-merged --lcov coverage-merged-artifact/lcov.info \
+            --out coverage-merged-artifact/provenance.json --matrix-result "$MATRIX_RESULT"
       - name: Upload merged coverage artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
