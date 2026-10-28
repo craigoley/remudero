@@ -87,11 +87,21 @@ test("W1-T10382: codex past its reserve with credits is routed as the credits la
   assert.equal(routed.lane, "codex-credits");
   assert.equal(selectWorkerProviderForPolicy([claudeFull, capacity], AUTOMATIC, 0.5).selection.lane, "codex-credits");
 
-  // Subscription headroom still wins the auction, at every draw value.
-  for (const draw of [0, 0.5, 0.999]) {
-    const healthy = selectWorkerProvider([claudeHealthy, capacity], 5, draw);
-    assert.equal(healthy.provider, "claude", `draw ${draw}`);
-    assert.equal(healthy.lane, undefined);
+  // Subscription headroom wins even when the operator or capability policy prefers Codex.
+  for (const preference of ["automatic", "codex", "claude"] as const) {
+    const policy = { ...AUTOMATIC, preference };
+    for (const draw of [0, 0.5, 0.999]) {
+      const label = `${preference}, draw ${draw}`;
+      const healthy = selectWorkerProviderForPolicy([claudeHealthy, capacity], policy, draw);
+      assert.equal(healthy.selection.provider, "claude", label);
+      assert.equal(healthy.selection.lane, undefined, label);
+      assert.deepEqual(healthy.preferenceBypass, preference === "codex"
+        ? { provider: "codex", reason: "below-reserve" } : undefined, label);
+
+      const credits = selectWorkerProviderForPolicy([claudeFull, capacity], policy, draw);
+      assert.equal(credits.selection.provider, "codex", label);
+      assert.equal(credits.selection.lane, "codex-credits", label);
+    }
   }
 
   // Unlimited credits carry without a balance, and a plain rate-limit hit is what credits exist for.
@@ -107,6 +117,16 @@ test("W1-T10382: codex past its reserve with credits is routed as the credits la
   // Control: under the reserve the subscription lane serves, with no credits label.
   const fresh = select({ rateLimitsByLimitId: { codex: { ...bucket({ credits: CREDITS }), primary: { usedPercent: 40, windowDurationMins: 10080 } } } });
   assert.deepEqual(providerEligibility(fresh, 5), { eligible: true, headroomPercent: 60 });
+  const preferred = selectWorkerProviderForPolicy([claudeHealthy, fresh], { ...AUTOMATIC, preference: "codex" });
+  assert.equal(preferred.selection.provider, "codex", "preference still wins between subscription lanes");
+  assert.equal(preferred.selection.lane, undefined);
+  assert.equal(preferred.preferenceBypass, undefined);
+  const codexOnly = selectWorkerProviderForPolicy([claudeHealthy, capacity], {
+    ...AUTOMATIC, preference: "codex", routableProviders: ["codex"],
+  });
+  assert.equal(codexOnly.selection.provider, "codex", "non-routable subscription headroom cannot bypass policy");
+  assert.equal(codexOnly.selection.lane, "codex-credits");
+  assert.equal(codexOnly.preferenceBypass, undefined);
 });
 
 test("W1-T10382: codex without spendable credits stays ineligible past its reserve", () => {
