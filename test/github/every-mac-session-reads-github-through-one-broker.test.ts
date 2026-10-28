@@ -19,6 +19,7 @@ import { ghExec, ghJson, ghJsonAsync, ghLinesAsync, ghTextAsync } from "#src/lib
 import { buildSweepEffects } from "#src/run-task.js";
 import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/lib/sweep.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
+import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "#src/lib/short-path-root.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -31,11 +32,21 @@ const HOOK = join(ROOT, "hooks/deny-floor.sh");
 const INSTALLER = join(ROOT, "deploy/mac/install-gh-read-broker.sh");
 
 function tmp(t: TestContext, tag: string): string {
-  // Keep the socket below macOS sun_path even under its long default temporary directory.
-  const dir = mkdtempSync(join(tmpdir(), `rmd-${tag[0] ?? "b"}-`));
+  // Include the broker's actual nested path and canonical TMPDIR in the platform socket bound.
+  const prefix = `rmd-${tag[0] ?? "b"}-`;
+  const path = shortPathWhenTooLong(join(tmpdir(), prefix), (root) => join(root, prefix),
+    (candidate) => Buffer.byteLength(join(`${candidate}XXXXXX`, "cache", "remudero", "gh-broker", "broker.sock")) <= MAX_UNIX_SOCKET_PATH_BYTES,
+    existsSync);
+  const dir = mkdtempSync(path);
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
+
+test("broker fixture path fits the platform Unix-socket limit", (t) => {
+  const dir = tmp(t, "transport");
+  const socket = join(dir, "cache", "remudero", "gh-broker", "broker.sock");
+  assert.ok(Buffer.byteLength(socket) <= MAX_UNIX_SOCKET_PATH_BYTES, `fixture socket path exceeds the kernel limit: ${socket}`);
+});
 
 /** A virtual clock: a sleep advances it and yields, so a paced drain runs at full speed. */
 function virtualClock(start = 1_800_000_000_000) {
