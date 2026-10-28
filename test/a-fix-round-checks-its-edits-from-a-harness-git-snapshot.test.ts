@@ -5,13 +5,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
 import type { WorkerResult, SpawnWorkerArgs } from "../src/lib/worker.js";
 // @ts-ignore executable census module has no declaration file.
 import { CENSUS_SNAPSHOT_ROOTS, main, readCensusSnapshot } from "../scripts/census-precheck.mjs";
 
-const ROOT = fileURLToPath(new URL("../", import.meta.url));
+const ROOT = REPO_ROOT;
 const REACH = "test/the-affected-suite-reach-ratchet.test.ts";
 const SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";
 const IMPORT_CLI = `import ${JSON.stringify("../src/run-task.js")};\n`;
@@ -349,4 +350,51 @@ test("a pending main merge gives the census its prospective merged base without 
   assert.ok(snapshot.headPaths.includes("src/branch.ts"));
   assert.equal(repo.git("diff", "--name-only", snapshot.mergeBase, "--", "src/branch.ts"), "src/branch.ts",
     "the branch's own newly unsafe census input remains different from the measured base");
+});
+
+test("the real snapshot checker identifies the inherited reach contract after its merged control passes", async t => {
+  const harness = await import("#src/run-task.js");
+  const repo = gitRepo({ scope: t, kind: "inherited-census-contract" });
+  const f = fixture(repo.dir, true);
+  const baselinePath = "scripts/affected-reach-baseline.json";
+  const current = readFileSync(join(REPO_ROOT, baselinePath), "utf8");
+  const legacy = JSON.parse(current);
+  delete legacy.resolution;
+  // The witnessed old baseline names relative-import resolution. Keep the live baseline's
+  // importer population in this small fixture so both real checker legs exercise identical files.
+  writeFileSync(join(repo.dir, baselinePath), JSON.stringify(legacy));
+  writeFileSync(join(repo.dir, ".gitignore"), "state/\nnode_modules/\nsnapshot.json\nempty-path/\n");
+  repo.git("add", "src", "test", "scripts", "package.json", ".gitignore");
+  repo.git("commit", "-m", "fixture: legacy reach contract");
+  const base = repo.git("rev-parse", "HEAD");
+  repo.git("branch", "inherited-fix");
+  writeFileSync(join(repo.dir, baselinePath), current);
+  repo.git("add", baselinePath);
+  repo.git("commit", "-m", "fixture: approved package-imports contract");
+  const main = repo.git("rev-parse", "HEAD");
+  repo.git("update-ref", "refs/remotes/origin/main", main);
+  repo.git("switch", "inherited-fix");
+  writeFileSync(join(repo.dir, "src/lib/unreached.ts"), "export {};\n// saved fix belongs to this branch\n");
+  repo.git("add", "src/lib/unreached.ts");
+  repo.git("commit", "-m", "fixture: independent source fix");
+  const head = repo.git("rev-parse", "HEAD");
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const log = (step: string, fields: Record<string, unknown> = {}) => { rows.push({ step, fields }); };
+  const snapshot = await harness.writeFixCensusSnapshotAsync(repo.dir, log);
+  assert.ok(snapshot, "the real Git snapshot is available");
+  const refused = await harness.checkFixCensusSnapshotAsync(repo.dir, snapshot, log);
+  assert.ok(refused?.refusal, "the unchanged trusted checker must still refuse the legacy contract");
+
+  // Positive control first: do not mistake an unrelated fixture/setup failure for inherited drift.
+  repo.git("merge", "--no-edit", "origin/main");
+  const mergedSnapshot = await harness.writeFixCensusSnapshotAsync(repo.dir, log);
+  assert.ok(mergedSnapshot);
+  const merged = await harness.checkFixCensusSnapshotAsync(repo.dir, mergedSnapshot, log);
+  assert.equal(merged?.refusal, undefined, "merging main clears the real trusted reach refusal without changing the gate");
+  assert.equal(readFileSync(join(repo.dir, baselinePath), "utf8"), current);
+  assert.match(readFileSync(join(repo.dir, "src/lib/unreached.ts"), "utf8"), /saved fix belongs/);
+
+  const context = (refused.refusal as unknown as { inheritedMain?: Record<string, unknown> }).inheritedMain;
+  assert.deepEqual(context, { state: "inherited", headSha: head, mainSha: main, mergeBase: base, baselinePath },
+    "the refusing result must name its verified inherited context rather than buying another blind model retry");
 });
