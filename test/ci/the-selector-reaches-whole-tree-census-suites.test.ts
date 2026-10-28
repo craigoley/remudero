@@ -3,10 +3,15 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
-import { censusSuiteFiles } from "#scripts/diff-class.mjs";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+// scripts/** sits outside tsconfig's include, so a static import is a TS7016.
+const { censusSuiteFiles } = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "diff-class.mjs")).href)) as {
+  censusSuiteFiles: (changed: string[], root: string) => string[];
+};
 
 /**
  * W1-T4787 — the selector-shadow audit of 2026-09-29 saw five whole-tree suites red on both passes
@@ -42,7 +47,7 @@ export function checkoutOf(repoRoot: string, root: string) {
 `;
 
 const FIXTURE_HELPER = `import { execFileSync } from "node:child_process";
-export function fixtureClone(bare: string, repoDir: string) {
+export function seedFrom(bare: string, repoDir: string) {
   execFileSync("git", ["clone", "--quiet", bare, repoDir]);
 }
 `;
@@ -58,7 +63,7 @@ test("W1-T4787: a suite that enumerates the tree through a helper is a census su
     suite("own-clone", `execFileSync("git", ["clone", "--quiet", REPO_ROOT, dest]);\n`);
     // Controls: the same helper pointed at a scratch remote, and a fixture clone whose DESTINATION is `repoDir`.
     suite("helper-on-a-fixture", `import { checkoutOf } from "${CHECKOUT}";\nconst co = checkoutOf(bare, "/x");\n`);
-    suite("fixture-remote", `import { fixtureClone } from "${FIXTURE_CLONE}";\nfixtureClone(REPO_ROOT, "/x");\n` +
+    suite("fixture-remote", `import { seedFrom } from "${FIXTURE_CLONE}";\nseedFrom(REPO_ROOT, "/x");\n` +
       `execFileSync("git", ["clone", "-q", originGit, repoDir]);\n`);
     const selected = censusSuiteFiles(["src/lib/anything.ts"], root);
     assert.deepEqual(selected, ["test/own-clone.test.ts", "test/through-the-helper.test.ts"]);
