@@ -1,9 +1,19 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 
 export const OPPORTUNITY_EVIDENCE_FILE = "opportunity-outcomes.json";
+/** The path code-health-store's `improvementOutcomeStateDir` names (a test holds the two equal), kept here so the
+ *  daily collector reads the namespace without importing the whole code-health store. */
+export function improvementEffectNamespaceDir(fleetStateDir: string, repository: string, instance: string): string {
+  if (!/^[A-Za-z0-9._/-]{1,128}$/.test(instance) || instance.split("/").some(part => !part || part === "." || part === "..")) throw new RangeError("Invalid improvement instance.");
+  const qualified = repository.toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/.test(qualified) || [".", ".."].includes(qualified.split("/")[1]!)) throw new RangeError("Invalid code health repository.");
+  return join(fleetStateDir, "code-health-repositories", createHash("sha256").update(qualified).digest("hex"), "improvement-effects",
+    createHash("sha256").update(JSON.stringify([qualified, instance])).digest("hex"));
+}
 /** PRIMARY CONTROL: one saved registry, never an archive scan or network read. */
 export const OPPORTUNITY_EVIDENCE_MAX_BYTES = 512 * 1024;
 /** BACKSTOP: refuse larger registries rather than certify a truncated population. */

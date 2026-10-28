@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { improvementOutcomeStateDir } from "./code-health-store.js";
-import { projectGardenerOpportunityEvidence } from "./gardener-opportunity-evidence.js";
+import { improvementEffectNamespaceDir, projectGardenerOpportunityEvidence } from "./gardener-opportunity-evidence.js";
 import { closeSync, constants, fstatSync, openSync, readSync, lstatSync } from "node:fs";
 import { createBoardSnapshotReader, readBoardClosedCollectionReceipt, readOpenBoardSnapshot } from "./board-snapshot-cache.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -89,7 +88,7 @@ function improvementActivity(row: Record<string, unknown>, repository: string, o
 async function activity(source: DailyProgressInstance, fleetStateDir: string, since: string, now: number, signal?: AbortSignal): Promise<{ events: DailyProgressEvent[]; gaps: number; available: boolean }> {
   const events: DailyProgressEvent[] = [];
   let gaps = 0, rowsRead = 0;
-  const roots = [source.stateDir], isolated = improvementOutcomeStateDir(fleetStateDir, source.repository, source.name);
+  const roots = [source.stateDir], isolated = improvementEffectNamespaceDir(fleetStateDir, source.repository, source.name);
   try { if (!lstatSync(isolated).isDirectory()) gaps++; else roots.push(isolated); }
   catch (error) {
     // The optional projection has no history before its first publication. An unreadable existing

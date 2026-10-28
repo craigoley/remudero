@@ -279,6 +279,13 @@ test("daily progress reports improvement checks as activity without inventing co
     appendLedger(join(stateDir, "ledger.ndjson"), { ts: now.iso(), run_id: "daily-control", repository: source.repository, step: "worker.finished", task_id: "W1-T99999" });
     appendLedger(join(stateDir, "ledger.ndjson"), { ts: now.iso(), run_id: "effect-observation", task_id: "IMPROVEMENT", repository: source.repository, step: "opportunity_outcome.effect_observed", opportunity_key: `${source.repository}/improvement:one`, proposal_id: "improvement:one", improvement_source: source, thread_id: source.threadId, effect, publication: "not_confirmed" });
     const isolated = outcomes.improvementOutcomeStateDir(fleet, source.repository, "atlas");
+    const { improvementEffectNamespaceDir } = await import("#src/lib/gardener-opportunity-evidence.js");
+    assert.equal(improvementEffectNamespaceDir(fleet, source.repository, "atlas"), isolated, "the collector's light namespace reader names the producer's namespace");
+    assert.equal(improvementEffectNamespaceDir(fleet, "ACME/Atlas", "atlas"), isolated, "repository identity is case-insensitive like the producer's");
+    for (const [repository, instance] of [[source.repository, "../atlas"], [source.repository, ""], ["not a repository", "atlas"]] as const) {
+      assert.throws(() => improvementEffectNamespaceDir(fleet, repository, instance), RangeError);
+      assert.throws(() => outcomes.improvementOutcomeStateDir(fleet, repository, instance), RangeError);
+    }
     mkdirSync(isolated, { recursive: true });
     appendLedger(join(isolated, "ledger.ndjson"), { ts: now.iso(), run_id: "other-producer-identity", task_id: "OVERSEER", repository: source.repository, step: "opportunity_outcome.effect_observed", opportunity_key: `${source.repository}/improvement:one`, proposal_id: "improvement:one", improvement_source: source, thread_id: source.threadId, effect, publication: "not_confirmed" });
     const second = { ...source, threadId: "thread:improvement:two" };
