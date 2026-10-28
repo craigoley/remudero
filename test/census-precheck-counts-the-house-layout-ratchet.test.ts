@@ -95,6 +95,7 @@ test("a src file the branch adds that names no literal, and a non-src path that 
 function installHook(dir: string): void {
   mkdirSync(join(dir, "hooks"), { recursive: true });
   mkdirSync(join(dir, "scripts", "lib"), { recursive: true });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module" }));
   mkdirSync(join(dir, "src", "lib"), { recursive: true });
   mkdirSync(join(dir, "test", "setup"), { recursive: true });
   writeFileSync(join(dir, "test", "setup", "tmp-hygiene.ts"),
