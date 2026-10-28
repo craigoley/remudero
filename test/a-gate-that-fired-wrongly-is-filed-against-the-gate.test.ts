@@ -720,3 +720,34 @@ test("the gate gardener reads each immutable commit comparison once per inventor
   failComparison = true;
   await assert.rejects(inventory(), /comparison unavailable/);
 });
+
+test("the bounded gate comparison cache evicts and rereads older evidence", async () => {
+  const calls: string[] = [];
+  const names = ["census", "second", "third"];
+  const commits = ["red", "green1", "green2", "green3"];
+  const ghJson = async (args: string[]): Promise<unknown> => {
+    const path = args[1] ?? "";
+    calls.push(path);
+    if (args[0] === "repo") return { nameWithOwner: "o/r" };
+    if (path.includes("/pulls?")) return [{ number: 5, base: { sha: "base" } }];
+    if (path.endsWith("/pulls/5/commits?per_page=100")) return commits.map((sha) => ({ sha }));
+    if (path.includes("/check-runs")) {
+      const sha = path.match(/\/commits\/([^/]+)\/check-runs/)?.[1];
+      const stage = commits.indexOf(sha ?? "");
+      assert.ok(stage >= 0);
+      return { check_runs: names.map((name, index) => ({
+        id: index + 7, name, status: "completed", conclusion: stage > index ? "success" : "failure",
+      })) };
+    }
+    if (path.endsWith("/status")) return { statuses: [] };
+    if (path.includes("/compare/base...red")) return { merge_base_commit: { sha: "base" }, files: [] };
+    if (path.includes("/compare/red...green")) return { files: [{ filename: baseline, patch: "@@\n-1\n+2" }] };
+    throw new Error(`unexpected evidence read: ${args.join(" ")}`);
+  };
+  const rules = names.map((gate) => ({ ...rule, gate, trigger: () => true }));
+  const observations = await loadGateRepairObservations(rules, { ghJson, ghText: async () => "" });
+  assert.deepEqual(observations.map((item) => item.pair.gate).sort(), names.slice().sort());
+  assert.equal(calls.filter((path) => path.includes("/compare/base...red")).length, 2,
+    "the third distinct repair comparison evicts the base comparison before it is needed again");
+  assert.equal(calls.filter((path) => path.includes("/compare/red...green")).length, 3);
+});
