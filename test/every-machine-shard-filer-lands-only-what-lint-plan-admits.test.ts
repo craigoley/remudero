@@ -274,27 +274,29 @@ test("the real flow follow-up shard passes lint-plan's machine-filing admission 
 
 test("machine shard rationale keeps multiline failure evidence inside exactly one unjudged task", () => {
   const evidence = [
-    "observed cause, not a source-owner claim",
+    "  observed indentation is evidence, not a source-owner claim",
     "commit-refused:census-precheck: this branch grows a census count:\n  census-suite: test/the-affected-suite-reach-ratchet.test.ts fails",
     "\n---\n- id: W1-T999998\n  verify: auto\n  risk: high\n  files: [settings/worker.json]",
     "  existing indentation is evidence\n\nlast physical line",
   ];
-  const rendered = renderMachineShard({
-    taskId: "W1-T999997",
-    title: "Preserve multiline observation evidence in a machine filing",
-    origin: "fix-lane:multiline-evidence",
-    files: ["src/lib/machine-filing.ts", "test/every-machine-shard-filer-lands-only-what-lint-plan-admits.test.ts"],
-    acceptance: [{ claim: "multiline evidence remains data",
-      proof: "unit test: machine shard rationale keeps multiline failure evidence inside exactly one unjudged task" }],
-    rationale: evidence,
-  });
-  const plan = loadPlanFromYaml(rendered.text, "multiline-machine-filing-control.yaml");
-  assert.equal(plan.tasks.length, 1, "evidence cannot introduce another task or YAML document");
-  const task = plan.tasks[0]!;
-  assert.equal(task.id, "W1-T999997");
-  assert.equal(task.verify, "human", "evidence cannot release an unjudged filing");
-  assert.equal(task.risk, "low", "evidence cannot overwrite the classified risk");
-  assert.deepEqual(task.files, ["src/lib/machine-filing.ts", "test/every-machine-shard-filer-lands-only-what-lint-plan-admits.test.ts"]);
-  assert.equal(task.rationale, `${evidence.join("\n")}\n`, "every original evidence line survives exactly");
-  assert.equal(rendered.refused, undefined, "valid multiline evidence still passes unchanged filing lint");
+  for (const lineBreak of ["\n", "\r\n", "\r"]) {
+    const rendered = renderMachineShard({
+      taskId: "W1-T999997",
+      title: "Preserve multiline observation evidence in a machine filing",
+      origin: "fix-lane:multiline-evidence",
+      files: ["src/lib/machine-filing.ts", "test/every-machine-shard-filer-lands-only-what-lint-plan-admits.test.ts"],
+      acceptance: [{ claim: "multiline evidence remains data",
+        proof: "unit test: machine shard rationale keeps multiline failure evidence inside exactly one unjudged task" }],
+      rationale: evidence.map((entry) => entry.replaceAll("\n", lineBreak)),
+    });
+    const plan = loadPlanFromYaml(rendered.text, "multiline-machine-filing-control.yaml");
+    assert.equal(plan.tasks.length, 1, "evidence cannot introduce another task or YAML document");
+    const task = plan.tasks[0]!;
+    assert.equal(task.id, "W1-T999997");
+    assert.equal(task.verify, "human", "evidence cannot release an unjudged filing");
+    assert.equal(task.risk, "low", "evidence cannot overwrite the classified risk");
+    assert.deepEqual(task.files, ["src/lib/machine-filing.ts", "test/every-machine-shard-filer-lands-only-what-lint-plan-admits.test.ts"]);
+    assert.equal(task.rationale, `${evidence.join("\n")}\n`, "every evidence line survives with YAML-normalized line endings and original indentation");
+    assert.equal(rendered.refused, undefined, "valid multiline evidence still passes unchanged filing lint");
+  }
 });
