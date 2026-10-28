@@ -8,7 +8,7 @@ import {
   fileTargetJobStore, readTargetExecution, registryDaemonRoot, starterEvidenceId,
   type BootstrapRead, type BuildObservation, type BuildTask, type ExecutionQuery, type ProductBuildOptions, type ProductBuildTarget, type TargetInspection, type TaskRead,
 } from "#src/lib/product-build.js";
-import { createNativeTargetJobRunner, daemonKickPort, daemonTargetJobPort } from "#src/cli/commands/daemon.js";
+import { createNativeTargetRepository, createNativeTargetJobRunner, daemonKickPort, daemonTargetJobPort } from "#src/cli/commands/daemon.js";
 import { runDrain, type DrainOpts, type TargetJobRecord } from "#src/lib/drain.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import { runDaemon, type DaemonDeps, type DaemonOpts } from "#src/lib/daemon.js";
@@ -16,7 +16,7 @@ import { requestKick } from "#src/lib/fleet-control.js";
 import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
 import { DEFAULT_LIVENESS_BOUND_MS } from "#src/lib/non-worker-verdict.js";
 import { loadPlan } from "#src/lib/plan.js";
-import type { StatusProjection } from "#src/lib/status.js";
+import { buildBatchedGithub, defaultCreditStorePath, saveCreditStore, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, type StatusProjection } from "#src/lib/status.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -749,6 +749,7 @@ function nativeFixture(t: TestContext, registry = CORE_ONLY) {
     planPathFor: (_owner, repo) => (repo === "wreckterra" ? planFile : undefined),
     syncPlan: async (path) => (state.syncError === undefined ? { plan: loadPlan(path) } : { error: state.syncError }),
     project: () => new Map([["W9-T1", { independentFailureBlocked: state.held } as StatusProjection]]),
+    repositoryDeps: (owner, repo, coreDeps) => createNativeTargetRepository(core, owner, repo, buildBatchedGithub(owner, repo, { fetchAll: () => [], commitTrailerIndex: () => new Map() }), coreDeps).governors,
     runTask: async (taskId, target) => {
       assert.equal(target.owner, "craigoley");
       assert.equal(target.repo, "wreckterra");
@@ -1247,4 +1248,43 @@ test("W1-T10799: the core daemon refuses a stray marker and holds one it cannot 
   assert.deepEqual(own.calls.runTask, [], "the core daemon never runs a target another instance drives");
   assert.match(String(refusedStray.lines.find((line) => line.step === "console.kick_refused")?.extra.reason), /wreckterra drives this repository/);
   assert.ok(existsSync(nativeMarker(join(own.stateBase, "wreckterra"), "wreckterra", "W9-T1")), "the instance's own marker is untouched");
+});
+
+test("W1-T10799: target admission never inherits Core credit or status for the same task", (t) => {
+  const f = nativeFixture(t);
+  const target = buildBatchedGithub("craigoley", "wreckterra", { fetchAll: () => [], commitTrailerIndex: () => new Map() });
+  saveCreditStore(defaultCreditStorePath(f.ledgerPath), { "W9-T1": { trailer: {
+    source: "trailer", prNumber: 77, prUrl: "https://github.com/craigoley/remudero/pull/77", prState: "MERGED",
+  } } });
+  const coreStore = readFileSync(defaultCreditStorePath(f.ledgerPath), "utf8");
+  const coreCache = JSON.stringify({ tasks: { "W9-T1": { taskId: "W9-T1", status: "merged", merged: true, source: "trailer" } } });
+  writeFileSync(join(f.core, "state", "status.json"), coreCache);
+  const scope = createNativeTargetRepository(f.core, "craigoley", "wreckterra", target);
+  const projected = scope.project(loadPlan(f.targetPlanFile));
+  assert.equal(projected.get("W9-T1")?.merged, false, "an unmerged target does not inherit Core's durable credit");
+  assert.equal(readFileSync(defaultCreditStorePath(f.ledgerPath), "utf8"), coreStore, "target projection preserves Core's credit store");
+  assert.equal(readFileSync(join(f.core, "state", "status.json"), "utf8"), coreCache, "target projection preserves Core's status cache");
+});
+
+test("W1-T10799: a Core PR cannot clear the target repository's dispatch breaker", (t) => {
+  const f = nativeFixture(t);
+  for (let i = 0; i < 4; i++) appendLedger(f.ledgerPath, {
+    step: "run.start", run_id: `W9-T1-${Date.now() + i}`, task_id: "W9-T1", lane: "run-task", repo: "wreckterra",
+  });
+  let coreReads = 0, targetReads = 0;
+  const coreCache = createDispatchBreakerCache();
+  const core = {
+    isCircuitTripped: (id: string) => evaluateDispatchBreakerCorroboratedDetailed(f.ledgerPath, id, coreCache, () => {
+      coreReads++;
+      return [{ number: 77, url: "https://github.com/craigoley/remudero/pull/77", state: "OPEN", headRefName: "run-W9-T1-12345" }];
+    }).state === "tripped",
+  };
+  assert.equal(core.isCircuitTripped("W9-T1"), false, "the Core gateway corroborates its own same-ID PR");
+  coreReads = 0;
+  const target = buildBatchedGithub("craigoley", "wreckterra", { fetchAll: () => [], commitTrailerIndex: () => new Map() });
+  target.listOpenHeadBranches = () => { targetReads++; return []; };
+  const scope = createNativeTargetRepository(f.core, "craigoley", "wreckterra", target, core);
+  assert.equal(scope.governors.isCircuitTripped?.("W9-T1"), true, "only a target PR may corroborate the target's tripped breaker");
+  assert.equal(coreReads, 0, "target admission does not call Core's repository closure");
+  assert.equal(targetReads, 1, "the target gateway is queried for its own evidence");
 });

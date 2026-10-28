@@ -269,9 +269,10 @@ test("W1-T10823: a product build refuses more active builds than its envelope al
     if (nativeState !== "unknown") {
       const rows: Record<string, unknown>[] = [{ ts: requestedAt, run_id: "DAEMON-1", task_id: "DAEMON",
         step: nativeState === "refused" ? "console.kick_refused" : "console.kick_dispatched",
-        lane: "daemon", task: "W9-T1", origin, repo: "wreckterra" }];
+        lane: "daemon", task: "W9-T1", origin, repo: "wreckterra",
+        ...(["running", "silent", "ended"].includes(nativeState) ? { native_run_id: runId } : {}) }];
       if (["running", "silent", "ended"].includes(nativeState)) rows.push({ ts: requestedAt, run_id: runId,
-        task_id: "W9-T1", step: "run.start", lane: "run-task" });
+        task_id: "W9-T1", step: "run.start", lane: "run-task", repo: "wreckterra" });
       if (nativeState === "ended") rows.push({ ts: requestedAt, run_id: runId, task_id: "W9-T1", step: "verdict",
         lane: "run-task", verdict: "pass" });
       writeLedger(rows, { dir: state });

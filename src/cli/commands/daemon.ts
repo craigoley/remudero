@@ -300,6 +300,19 @@ const TARGET_JOB_DAEMON_DEPS = [
   "readLedgerLines", "readDurableReleases",
 ] as const satisfies readonly (keyof DrainDeps & keyof DaemonDeps)[];
 
+/** Repository reads for one bounded target; host capacity still belongs to the Core daemon. */
+export function createNativeTargetRepository(root: string, owner: string, repo: string, github: GitHub, core: Partial<DaemonDeps> = {}) {
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const governors = Object.fromEntries(TARGET_JOB_DAEMON_DEPS.flatMap((key) => core[key] === undefined ? [] : [[key, core[key]]])) as Partial<DrainDeps>;
+  return {
+    project: (plan: Plan) => {
+      github.resetFailureFlags?.();
+      return projectPlan(plan, { ledgerPath, github, skipUncreditedBuildWarning: true }, join(root, "state", "status.json"));
+    },
+    governors,
+  };
+}
+
 export interface NativeTargetJobContext {
   /** The core daemon's config root: its ledger, its kick markers and the job records live under it. */
   root: string;
@@ -314,6 +327,7 @@ export interface NativeTargetJobContext {
   syncPlan: (planPath: string, owner: string, repo: string) => Promise<{ plan: Plan } | { error: string }>;
   /** The merged/open-PR projection bound to the TARGET owner and repository, never the core repository's closures. */
   project: (plan: Plan, owner: string, repo: string) => Map<string, StatusProjection>;
+  repositoryDeps?: (owner: string, repo: string, core: DaemonDeps) => Partial<DrainDeps>;
   runTask: (taskId: string, target: { planPath: string; owner: string; repo: string; plan: Plan; onRunCreated: (runId: string) => void }) => Promise<RunResult>;
   claimHeld: BoundedTargetJobPorts["claimHeld"];
   runDrain?: typeof runDrain;
@@ -1877,9 +1891,7 @@ export async function daemonCommand(
               return "error" in synced ? { error: String(synced.error) } : { plan: synced.plan };
             },
             project: (jobPlan, owner, repo) => {
-              const github = laneGithubFor(owner, repo);
-              github.resetFailureFlags?.();
-              return projectPlan(jobPlan, { ledgerPath, github, skipUncreditedBuildWarning: true }, statusPath);
+              return createNativeTargetRepository(config.root, owner, repo, laneGithubFor(owner, repo)).project(jobPlan);
             },
             runTask: (taskId, job) => runTaskFn(taskId, {
               planPath: job.planPath, config, allowStale: false, pairedTrialHost: "daemon", owner: job.owner, githubFor: laneGithubFor, handOffAtPrOpen: true,
