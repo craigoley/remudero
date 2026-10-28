@@ -24,7 +24,7 @@ import { createGardenerRuntimeWriter } from "#src/lib/gardener-runtime.js";
 
 import { buildInstanceGatewayRoutes } from "#src/lib/instance-gateway.js";
 import { createService } from "#src/lib/service.js";
-import { createRecentActivityCache, feedRecentActivity, recentActivityEntries } from "#src/lib/board.js";
+import { computeRecentActivity, createRecentActivityCache, feedRecentActivity, recentActivityEntries } from "#src/lib/board.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const READ = "one-gateway-read-token";
@@ -661,4 +661,28 @@ test("W1-T6012: an unreadable shard directory recovers on the next qualified rea
     } finally { chmodSync(dir, 0o700); }
     const recovered = await get("/v1/i/site/status"); assert.equal(recovered.status, 200); assert.deepEqual(taskIds(recovered.body), ["SITE-T1"]); assert.equal(recovered.stale, null);
   });
+});
+
+
+test("W1-T6012: a rewritten ledger cannot resurrect events from its previous recent source", t => {
+  const f = fleet(t), planPath = join(f.stateBase, "site", "repos", "remudero-site", "plan", "tasks.yaml");
+  const ledgerPath = join(f.stateBase, "site", "state", "ledger.ndjson");
+  const deps = { plan: loadPlan(planPath), ledgerPath, github: fakeGitHub() };
+  const cache = createRecentActivityCache();
+  const former = [
+    { ts: "2026-01-01T00:00:00.000Z", task_id: "SITE-T2", step: "verdict", verdict: "FAIL", run_id: "former-unknown" },
+    { ts: "2026-01-01T00:01:00.000Z", task_id: "SITE-T1", step: "verdict", verdict: "FAIL", run_id: "former-visible" },
+  ];
+  writeFileSync(ledgerPath, former.map(row => JSON.stringify(row)).join("\n") + "\n");
+  assert.deepEqual(computeRecentActivity(deps, cache).map(entry => entry.taskId), ["SITE-T1"]);
+  writeFileSync(ledgerPath, "");
+  assert.deepEqual(computeRecentActivity(deps, cache), [], "replacing the source clears its formerly visible history");
+  writeFileSync(planPath, task("SITE-T1", "remudero-site") + task("SITE-T2", "remudero-site"));
+  deps.plan = loadPlan(planPath);
+  assert.deepEqual(computeRecentActivity(deps, cache), [], "a later plan cannot resurrect retained rows from the replaced ledger");
+  const current = { ...former[0], ts: "2026-01-01T00:02:00.000Z", run_id: "current-source" };
+  writeFileSync(ledgerPath, JSON.stringify(current) + "\n");
+  const visible = computeRecentActivity(deps, cache);
+  assert.deepEqual(visible.map(entry => entry.taskId), ["SITE-T2"]);
+  assert.equal(visible[0]?.ts, current.ts, "only the current source's event becomes visible");
 });
