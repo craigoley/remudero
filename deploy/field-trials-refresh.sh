@@ -35,9 +35,29 @@ done
 # container writes, including snapshots produced by an older image with 755/644 defaults.
 PRIVATE_OUT="$CORE/state/field-trials"
 mkdir -p "$PRIVATE_OUT"
+# W1-T10832: the owner's consent grant is NOT committed; the operator copies it here. It is passed as
+# --consent only when it is a regular, non-symlink file this user owns with no group or other bits.
+# Anything else withholds the release (no-consent-receipt) and every other step still runs. The
+# hardening sweep below never touches it, so the operator's own mode is what is judged.
+CONSENT_NAME="field-trials-consent-v1.json"
+CONSENT_HOST="${RMD_FIELD_TRIALS_CONSENT:-$PRIVATE_OUT/$CONSENT_NAME}"
+CONSENT_MOUNT=(); CONSENT_ARG=(); CONSENT_EXEC_ARG=()
+if [[ -e "$CONSENT_HOST" || -L "$CONSENT_HOST" ]]; then
+  CONSENT_MODE="$(stat -c '%a' "$CONSENT_HOST" 2>/dev/null || echo 777)"
+  if [[ -f "$CONSENT_HOST" && ! -L "$CONSENT_HOST" && -O "$CONSENT_HOST" && -r "$CONSENT_HOST" ]] \
+    && (( (8#$CONSENT_MODE & 8#077) == 0 )); then
+    CONSENT_MOUNT=(--mount "type=bind,src=$CONSENT_HOST,dst=/field-trials/consent.json,readonly")
+    CONSENT_ARG=(--consent /field-trials/consent.json)
+    if [[ "$CONSENT_HOST" == "$PRIVATE_OUT/$CONSENT_NAME" ]]; then
+      CONSENT_EXEC_ARG=(--consent "/home/node/Remudero/state/field-trials/$CONSENT_NAME")
+    fi
+  else
+    echo "field-trials-refresh: consent file is not an owner-only regular file; release withheld" >&2
+  fi
+fi
 harden_private_output() {
   find "$PRIVATE_OUT" -type d -exec chmod 700 {} +
-  find "$PRIVATE_OUT" -type f -exec chmod 600 {} +
+  find "$PRIVATE_OUT" -type f ! -path "$PRIVATE_OUT/$CONSENT_NAME" -exec chmod 600 {} +
 }
 harden_private_output
 # Also cover a failed or old image that writes a broad-mode temporary file before exiting.
@@ -110,13 +130,13 @@ if (( CREDENTIAL_EXIT != 0 )); then
   docker exec --workdir /home/node/Remudero/daemon-install remudero-daemon \
     /bin/sh -c 'umask 077; exec "$@"' field-trials-refresh /home/node/Remudero/daemon-install/bin/rmd field-trials \
     --offline --ledger core=/home/node/Remudero/state --out-dir /home/node/Remudero/state/field-trials \
-    "${CASE_ARG[@]}" "${REFRESH_ARG[@]}"
+    "${CASE_ARG[@]}" ${CONSENT_EXEC_ARG[@]+"${CONSENT_EXEC_ARG[@]}"} "${REFRESH_ARG[@]}"
   return $?
 fi
 docker run --rm --network host --volumes-from remudero-daemon \
   --mount "type=bind,src=$SITE/state,dst=/field-trials/site,readonly" \
   --mount "type=bind,src=$CONSOLE/state,dst=/field-trials/console,readonly" \
-  ${CASE_MOUNT[@]+"${CASE_MOUNT[@]}"} \
+  ${CASE_MOUNT[@]+"${CASE_MOUNT[@]}"} ${CONSENT_MOUNT[@]+"${CONSENT_MOUNT[@]}"} \
   --env "GH_APP_ID=$APP_ID" --env "GH_APP_INSTALLATION_ID=$INSTALLATION_ID" \
   --env "GH_APP_PRIVATE_KEY_PATH=$KEY_PATH" \
   --workdir /home/node/Remudero/daemon-install --entrypoint /bin/sh "$IMAGE" \
@@ -124,7 +144,7 @@ docker run --rm --network host --volumes-from remudero-daemon \
   --source core=craigoley/remudero --source site=craigoley/remudero-site --source console=craigoley/remudero-console \
   --ledger core=/home/node/Remudero/state --ledger site=/field-trials/site --ledger console=/field-trials/console \
   --out-dir /home/node/Remudero/state/field-trials --max-pages "$MAX_PAGES" \
-  "${CASE_ARG[@]}" "${REFRESH_ARG[@]}"
+  "${CASE_ARG[@]}" ${CONSENT_ARG[@]+"${CONSENT_ARG[@]}"} "${REFRESH_ARG[@]}"
 }
 SNAPSHOT_EXIT=0
 collect_snapshot || SNAPSHOT_EXIT=$?

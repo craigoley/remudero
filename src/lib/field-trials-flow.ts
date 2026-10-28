@@ -28,12 +28,14 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { buildModelFieldNoteCandidate, FIELD_NOTE_WINDOWS_VERSION, parseFieldNoteWindows, parseSiteConsentRegistry, PINNED_SITE_CONSENT_REGISTRY,
-  type AdoptionSelectedCell, type FieldNoteWindows } from "./field-trials-field-note.js";
+  type AdoptionSelectedCell, type FieldNoteWindow, type FieldNoteWindows } from "./field-trials-field-note.js";
 export type { AdoptionSelectedCell } from "./field-trials-field-note.js";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { ghInteractiveRead } from "./github-transport.js";
+import { syncFieldNoteSiteImport, type FieldNoteExport, type SiteImportDeps, type SiteImportOutcome, type SiteRelease } from "./field-trials-site-import.js";
+import { appendLedger } from "./ledger.js";
 import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol } from "./benchmark-paid-pilot.js";
 import { parseRefreshSteps, recordFieldTrialsRefresh, refreshSection, type FieldTrialsRefresh, type RefreshStep } from "./field-trials-refresh.js";
 import type { IssueGateway } from "./escalate.js";
@@ -1347,6 +1349,8 @@ export interface FieldTrialsCommandInput {
   readSiteEvidence?: (path: string) => Promise<unknown>;
   /** W1-T10843: the raw ledger-union rows of one state dir, read for a registered controlled epoch. */
   readRows?: (stateDir: string) => Promise<Record<string, unknown>[]>;
+  /** W1-T10832: the site import's git, stage and REST seams. */
+  siteImport?: SiteImportDeps;
 }
 
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
@@ -1356,26 +1360,40 @@ const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--led
   + "[--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]";
 
 /**
- * W1-T10831 `--field-note <out>`: read the latest private snapshot (no refresh), and write a
- * candidate-unreviewed site field note plus the private record of the window it covered. A withheld
- * result writes nothing and exits 0; a refusal exits 1.
+ * W1-T10831: read the latest private snapshot (no refresh), and write a candidate-unreviewed site field
+ * note plus the private record of the window it covered. W1-T10832: with `released` (the site's history
+ * read from site main) only windows the site released count, and the site's own windows bound the start,
+ * so a replacement for an unmerged import PR covers one window from the last RELEASED end.
  */
-function fieldNoteMode(args: { outDir: string; out: string; nowIso: string; json: boolean; print: (line: string) => void;
-  consentPath: string | undefined; registryPath: string | undefined }): number {
+function exportFieldNoteCandidate(args: { outDir: string; out: string; nowIso: string;
+  consent: FieldTrialsConsent | string | null; registryPath: string | undefined; released?: readonly SiteRelease[] }) {
   const snapshotValue = record(readJson(join(args.outDir, "field-trials-flow-v1.json")));
   const windowsPath = join(args.outDir, "field-trials-field-note-windows.json");
-  const windows = parseFieldNoteWindows(readJson(windowsPath, { version: FIELD_NOTE_WINDOWS_VERSION, windows: [] }));
-  const consent = typeof args.consentPath === "string" ? parseFieldTrialsConsent(readJson(args.consentPath)) : null;
+  const parsed = parseFieldNoteWindows(readJson(windowsPath, { version: FIELD_NOTE_WINDOWS_VERSION, windows: [] }));
+  const releasedIds = new Set(args.released?.map((entry) => entry.releaseId));
+  const recorded = typeof parsed === "string" || args.released === undefined ? parsed
+    : { ...parsed, windows: parsed.windows.filter((entry) => releasedIds.has(entry.releaseId)) };
+  const known = new Set(typeof recorded === "string" ? [] : recorded.windows.map((entry) => entry.releaseId));
+  const siteOnly = (args.released ?? []).filter((entry) => !known.has(entry.releaseId)).map((entry): FieldNoteWindow => ({
+    releaseId: entry.releaseId, windowStart: entry.windowStart, windowEnd: entry.windowEnd, sourceRepos: entry.sourceRepos,
+    sourceDigest: "", consentReceipts: [], createdAt: entry.windowEnd }));
   const registry = args.registryPath === undefined ? PINNED_SITE_CONSENT_REGISTRY : parseSiteConsentRegistry(readJson(args.registryPath));
   const result = snapshotValue?.version !== FIELD_TRIALS_FLOW_VERSION ? { state: "refused" as const, reason: "no-snapshot" }
-    : typeof windows === "string" ? { state: "refused" as const, reason: windows }
-    : buildModelFieldNoteCandidate({ snapshot: snapshotValue as unknown as FieldTrialsFlowSnapshot, consent, registry,
-      windows, salt: pseudonymSalt(args.outDir), nowIso: args.nowIso });
+    : typeof recorded === "string" ? { state: "refused" as const, reason: recorded }
+    : buildModelFieldNoteCandidate({ snapshot: snapshotValue as unknown as FieldTrialsFlowSnapshot, consent: args.consent, registry,
+      windows: { ...recorded, windows: [...recorded.windows, ...siteOnly] }, salt: pseudonymSalt(args.outDir), nowIso: args.nowIso });
   if (result.state === "candidate") {
     writeJsonAtomically(args.out, result.candidate);
-    const recorded = windows as FieldNoteWindows;
-    writeJsonAtomically(windowsPath, { ...recorded, windows: [...recorded.windows, result.window] });
+    writeJsonAtomically(windowsPath, { ...(recorded as FieldNoteWindows), windows: [...(recorded as FieldNoteWindows).windows, result.window] });
   }
+  return result;
+}
+
+/** `--field-note <out>`: a withheld result writes nothing and exits 0; a refusal exits 1. */
+function fieldNoteMode(args: { outDir: string; out: string; nowIso: string; json: boolean; print: (line: string) => void;
+  consentPath: string | undefined; registryPath: string | undefined }): number {
+  const consent = typeof args.consentPath === "string" ? parseFieldTrialsConsent(readJson(args.consentPath)) : null;
+  const result = exportFieldNoteCandidate({ ...args, consent });
   if (args.json) args.print(JSON.stringify(result.state === "candidate"
     ? { state: "candidate", releaseId: result.window.releaseId, windowStart: result.window.windowStart, windowEnd: result.window.windowEnd,
       rows: result.candidate.note.rows.length, withheld: result.candidate.withheld.cells } : result));
@@ -1384,6 +1402,28 @@ function fieldNoteMode(args: { outDir: string; out: string; nowIso: string; json
       + `${result.candidate.note.rows.length} rows, ${result.candidate.withheld.cells} cells withheld; written to ${args.out}`
     : `field-trials: field note ${result.state} (${result.reason})`);
   return result.state === "refused" ? 1 : 0;
+}
+
+/**
+ * W1-T10832: after a good daily refresh, the field-note candidate and its ONE open site import PR. No
+ * consent file, an invalid one or an offline pass withholds without touching the site; otherwise
+ * {@link syncFieldNoteSiteImport} lets the site's stage mode decide. The outcome is ledgered beside
+ * the pass's field-trials.refresh row; it never changes the refresh's exit code.
+ */
+function siteImportPass(args: { outDir: string; nowIso: string; consent: FieldTrialsConsent | string | null; offline: boolean;
+  ledgerPath: string; scriptBlob: string; deps: SiteImportDeps | undefined }): SiteImportOutcome {
+  const outcome: SiteImportOutcome = args.consent === null ? { state: "withheld", reason: "no-consent-receipt" }
+    : typeof args.consent === "string" ? { state: "withheld", reason: args.consent }
+    : args.offline ? { state: "withheld", reason: "offline-pass" }
+    : syncFieldNoteSiteImport({ workRoot: join(args.outDir, "site-import"), nowIso: args.nowIso,
+      exportCandidate: (released): FieldNoteExport => {
+        const result = exportFieldNoteCandidate({ outDir: args.outDir, out: join(args.outDir, "field-note-candidate-latest.json"),
+          nowIso: args.nowIso, consent: args.consent, registryPath: undefined, released });
+        return result.state === "candidate" ? { state: "candidate", note: result.candidate.note } : { state: result.state, reason: result.reason };
+      } }, args.deps);
+  appendLedger(args.ledgerPath, { run_id: `field-trials-site-import-${randomUUID()}`, task_id: "field-trials-refresh",
+    step: "field-trials.site-import", asOf: args.nowIso, scriptBlob: args.scriptBlob, ...outcome });
+  return outcome;
 }
 
 function labelOf(repo: string): string {
@@ -1604,6 +1644,10 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     print("  observational only: no causal claim, no routing change, nothing published");
   }
   if (refreshSteps && snapshot.state !== "unavailable") {
+    const siteImport = siteImportPass({ outDir, nowIso, consent, offline: values.offline === true, ledgerPath: refreshInput.ledgerPath,
+      scriptBlob: scriptBlob as string, deps: input.siteImport });
+    if (values.json !== true) print(`  site import: ${siteImport.state}${"reason" in siteImport ? ` (${siteImport.reason})` : ""}`
+      + `${"prUrl" in siteImport ? ` ${siteImport.pr} ${siteImport.prUrl}` : ""}`);
     recordFieldTrialsRefresh({ ...refreshInput, steps: refreshSteps, snapshotAsOf: snapshot.asOf });
     return 0;
   }
