@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer, connect } from "node:net";
@@ -432,6 +432,36 @@ test("W1-T10279: rmd gh prints what gh would, refuses writes, and needs a live b
   assert.deepEqual([summary.files, summary.reads, summary.served_without_upstream_share], [0, 0, null]);
 });
 
+async function waitForFixtureBroker(
+  dir: string, child: Pick<ChildProcess, "exitCode" | "signalCode">, signal: AbortSignal,
+): Promise<void> {
+  for (;;) {
+    signal.throwIfAborted();
+    if (child.exitCode !== null || child.signalCode !== null)
+      throw new Error(`fixture broker exited before readiness: exit=${child.exitCode}, signal=${child.signalCode}`);
+    if (ghBrokerDirLive(dir) !== undefined) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+test("broker fixture readiness observes owner cancellation and ends its polling", { timeout: 10_000 }, async t => {
+  const child: Pick<ChildProcess, "exitCode" | "signalCode"> = { exitCode: null, signalCode: null };
+  t.after(() => { child.exitCode = 0; });
+  const controller = new AbortController();
+  const reason = new Error("fixture readiness owner cancelled");
+  controller.abort(reason);
+  await assert.rejects(waitForFixtureBroker(tmp(t, "cancelled"), child, controller.signal),
+    error => error === reason);
+});
+
+test("broker fixture readiness refuses an exited real child without waiting for the test timeout", { timeout: 10_000 }, async t => {
+  const child = spawn(process.execPath, ["-e", "process.exit(23)"], { cwd: ROOT, stdio: "ignore" });
+  t.after(() => child.kill());
+  await assert.rejects(waitForFixtureBroker(tmp(t, "exited"), child, t.signal),
+    /fixture broker exited before readiness: exit=23/);
+  assert.equal(child.exitCode, 23, "the child really exited, rather than a canned readiness refusal");
+});
+
 test("W1-T10279: the transport's read entry points use a live broker instead of the floor", { timeout: 180_000 }, async (t) => {
   const dir = tmp(t, "transport");
   // A separate process serves, as on a Mac: a synchronous read blocks this one while it waits.
@@ -453,8 +483,8 @@ test("W1-T10279: the transport's read entry points use a live broker instead of 
   const brokerDir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
   const child = spawn(process.execPath, ["--import", "tsx", bootstrap, brokerDir], { cwd: ROOT, stdio: "ignore" });
   t.after(() => child.kill());
-  // Until the child serves (its startup is slow under a parallel flake screen); the test's own timeout bounds it.
-  while (ghBrokerDirLive(brokerDir) === undefined) await new Promise((resolve) => setTimeout(resolve, 50));
+  // Startup may be slow; cancellation and child exit must end this wait as well as the child.
+  await waitForFixtureBroker(brokerDir, child, t.signal);
   const shim = ghShim([{ when: "", stdout: "FALSIFIER: the real gh ran\n" }]);
   const saved = { cache: process.env.RMD_GH_CACHE_HOME, path: process.env.PATH };
   process.env.RMD_GH_CACHE_HOME = cache;
