@@ -1,0 +1,28 @@
+- id: W1-T10923
+  title: Use Codex account credits when determining provider eligibility
+  repo: remudero
+  depends_on:
+    - W1-T10383
+  type: implement
+  verify: auto
+  risk: medium
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=ac5ca4a17ad12ba6
+  # backlog gardener: placed=2026-10-28T16:44:03.107Z
+  attempts: 0
+  files:
+    - src/lib/worker-provider.ts
+    - test/worker/spawn/use-codex-account-credits-when-determining-provider-eligibility.test.ts
+  acceptance:
+    - claim: "Codex account credits are recognized as available capacity when the subscription window is below its reserve and the reported credit state permits their use."
+      proof: "unit test: credits below reserve make codex eligible"
+    - claim: "Without available credits, or when credit state is absent or unreadable, existing fail-closed eligibility behavior is preserved."
+      proof: "unit test: no usable credits below reserve stays ineligible"
+  origin: "followup:W1-T10383-1793168910073:2026-10-28T06:32:26.787Z:0"
+  rationale: >-
+    From the 2026-10-28 follow-up on W1-T10383-1793168910073, ratified via rmd approve:
+  
+    follow-up harvest [task]: Cherry-pick or adapt `22ade09492` from
+    `origin/run-W1-T10383-1792641636921` onto HEAD, writing the failing tests first — it already
+    matches the design. — from W1-T10383 (run W1-T10383-1793168910073)

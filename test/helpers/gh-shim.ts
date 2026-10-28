@@ -40,8 +40,15 @@ export interface GhShimRoute {
   /** Optional completion marker written after the delay, before the child exits. */
   doneFile?: string;
   /** W1-T6107: write `content` byte for byte to `path` (its directory created) before exiting, the
-   *  file a real `gh run download` would leave, so a step can be driven down its success branch. */
-  writes?: { path: string; content: string };
+   *  file a real `gh run download` would leave, so a step can be driven down its success branch.
+   *  W1-T5892: a list writes every file an artifact holds, and `content` may be binary. */
+  writes?: GhShimWrite | GhShimWrite[];
+}
+
+/** One file a route leaves behind, written byte for byte. */
+export interface GhShimWrite {
+  path: string;
+  content: string | Uint8Array;
 }
 
 export interface GhShim {
@@ -79,7 +86,7 @@ function verbatim(file: string, text: string, redirect: string): string {
 }
 
 /** Stage `writes.content` beside the shim and return the shell step that copies it to `writes.path`. */
-function writeStep(staged: string, writes: { path: string; content: string }): string {
+function writeStep(staged: string, writes: GhShimWrite): string {
   writeFileSync(staged, writes.content);
   return `mkdir -p ${shQuote(dirname(writes.path))} && cat ${shQuote(staged)} > ${shQuote(writes.path)}`;
 }
@@ -98,7 +105,7 @@ function renderScript(routes: GhShimRoute[], callsPath: string, eventsPath: stri
       const body = [
         r.delaySeconds !== undefined ? `sleep ${r.delaySeconds}` : "",
         doneFile !== undefined ? `: > '${doneFile}'` : "",
-        r.writes !== undefined ? writeStep(join(dir, `route-${i}.write`), r.writes) : "",
+        ...[r.writes ?? []].flat().map((w, n) => writeStep(join(dir, `route-${i}-${n}.write`), w)),
         r.stderr !== undefined ? verbatim(join(dir, `route-${i}.err`), r.stderr, " 1>&2") : "",
         r.stdout !== undefined ? verbatim(join(dir, `route-${i}.out`), r.stdout, "") : "",
         r.stdoutEnv !== undefined ? `printf '%s\\n' "\${${r.stdoutEnv}}"` : "",

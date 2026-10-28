@@ -109,6 +109,21 @@ test("W1-T4075: the tick reads run off the main thread while a timer keeps firin
   } finally { clearInterval(timer); await plane.stop(); }
 });
 
+test("the persistent tick reader rotates bounded probes across stable open PRs", async () => {
+  const f = fixtureReader();
+  f.setListed(Array.from({ length: 9 }, (_, i) => i + 10));
+  const produce = createTickReadProducer(f.options, f.io);
+  const visited = new Set<number>();
+  try {
+    for (let pass = 0; pass < 3; pass++) {
+      const facts = await produce({ plan: f.plan });
+      assert.equal(facts.behindMainByPr.size, 3);
+      for (const number of facts.behindMainByPr.keys()) visited.add(number);
+    }
+    assert.equal(visited.size, 9);
+  } finally { rmSync(f.options.config.root, { recursive: true, force: true }); }
+});
+
 test("W1-T4075: one generation serves sweep and board review and credit with one open-PR read", async () => {
   const fixture = fixtureReader();
   const produce = createTickReadProducer(fixture.options, fixture.io);

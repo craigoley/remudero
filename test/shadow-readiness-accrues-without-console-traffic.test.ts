@@ -96,3 +96,26 @@ test("a driven sample stands for no request and shares the per-key throttle with
   sample("v", "", new URLSearchParams(), true);
   assert.deepEqual(sent, [["", 0], ["", 1], ["", 0]], "the real request inside the period rides on the next driven sample, and a driven offer adds none");
 });
+
+test("qualified Inbox sampling retains traffic and exact routes across cursor churn", () => {
+  let ms = T0;
+  const clock: Clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
+  const sent: Array<{ key: string; requests: number }> = [];
+  const current = new Map<string, string>();
+  const sample = createShadowSampler({ clock, defer: run => run(), send: request => { sent.push({ key: request.key, requests: request.requests }); },
+    ...{ identity: (view: string, key: string) => view === "inbox" ? { sharedRequests: true as const, key: current.get(key) } : undefined },
+  });
+  const route = (revision: number) => `cursor=exact-snapshot-${revision}&section=needsYou`;
+  for (let revision = 0; revision <= 60; revision++) {
+    current.clear(); current.set(route(revision), "core/craigoley-remudero/needsYou/page-1");
+    sample("inbox", route(revision), new URLSearchParams(route(revision)));
+  }
+  sample("inbox", "unverified-or-retired-cursor", new URLSearchParams());
+  assert.deepEqual(sent, [{ key: route(0), requests: 1 }], "only a verified logical page gets a throttle bucket, even after sixty cursor changes");
+  ms += VIEW_SHADOW_SAMPLE_MS;
+  current.clear(); current.set(route(61), "core/craigoley-remudero/needsYou/page-1");
+  sample("inbox", route(61), new URLSearchParams(route(61)), true);
+  assert.deepEqual(sent, [{ key: route(0), requests: 1 }, { key: route(61), requests: 61 }], "all real requests survive revisions and the next sample still carries its exact current routing key");
+  sample("inbox", route(61), new URLSearchParams(route(61)), true);
+  assert.equal(sent.length, 2, "the shared driver cannot oversample the logical page");
+});
