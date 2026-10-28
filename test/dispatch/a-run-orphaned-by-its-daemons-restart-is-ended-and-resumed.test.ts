@@ -16,8 +16,10 @@ import { test, type TestContext } from "node:test";
 import { gzipSync } from "node:zlib";
 import { pathToFileURL } from "node:url";
 import {
-  dispatchClaimRef, readRunLedgerState, runBranchHeadFromLsRemote, type ClaimAnchorIdentity,
+  dispatchClaimRef, gitClaimRunnerAsync, reclaimSilentDispatchClaim, readRunLedgerState,
+  runBranchHeadFromLsRemote, type ClaimAnchorIdentity,
 } from "#src/lib/dispatch-claim.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { dispatchesWithoutNewOwnedPr } from "#src/lib/status.js";
 import { readBreakerStrikes } from "#src/lib/breaker-release.js";
@@ -79,8 +81,8 @@ test("W1-T10896: a cross-host claim is still left to the operator at boot", (t) 
   assert.deepEqual(orphanVerdicts(node.rows()), [], "a claim kept for the operator ends no run");
 });
 
-test("W1-T10896: a run orphaned by the restart gets one orphaned-by-restart verdict", (t) => {
-  const node = instance(t, orphanRunRows());
+test("W1-T10896: a run orphaned by the restart gets one orphaned-by-restart verdict", async (t) => {
+  const { node } = await reclaimedOrphan(t);
   // The drop "succeeds" but the claim reappears, so the second boot meets the same dead claim again.
   const claims = { [TASK]: anchorMessage(DEAD_PID, LOCAL, MINT_ISO) };
   node.boot(fakeReserver(claims, { keepOnDrop: true }));
@@ -122,8 +124,7 @@ test("W1-T10896: a run orphaned by the restart gets one orphaned-by-restart verd
 });
 
 test("W1-T10896: the orphaned run pushed head resumes instead of blocking dispatch", async (t) => {
-  const origin = gitRemote(t);
-  const node = instance(t, orphanRunRows());
+  const { origin, node } = await reclaimedOrphan(t);
   assert.equal(dispatchesWithoutNewOwnedPr(node.rows(), TASK), 1);
   const before = runBranchDispatchOpts(runBranchStateFrom(`${origin.head}\trefs/heads/${BRANCH}\n`, undefined,
     pendingWorkerBoundaryHandoffs(node.rawLines())), [], () => {});
@@ -137,6 +138,70 @@ test("W1-T10896: the orphaned run pushed head resumes instead of blocking dispat
   assert.equal(verdicts[0]!.verdict, "handed_off");
   assert.equal(dispatchesWithoutNewOwnedPr(node.rows(), TASK), 0, "the orphan no longer consumes the dispatch budget");
   await resumeOrphan(t, origin, node.rawLines());
+});
+
+/** Reacquire a silent claim through production code, then simulate the new holder's namespace dying. */
+async function reclaimedOrphan(t: TestContext) {
+  const origin = gitRemote(t);
+  const node = instance(t, orphanRunRows().filter((row) => row.step !== "dispatch.claim"));
+  const previous = origin.reserver.holder(TASK)!;
+  const tree = origin.client.git("rev-parse", "HEAD^{tree}");
+  const fresh = origin.client.git("commit-tree", tree, "-p", previous, "-m", anchorMessage(DEAD_PID, LOCAL, MINT_ISO));
+  // The judge's clock advances beyond the real fixture branch's last activity. Only the new anchor's
+  // historical pid/host/mint identity matters to the later boot sweep, which reads the real /proc.
+  const nowMs = Date.now() + 2 * 24 * 60 * 60_000;
+  const measuredAt = nowMs - 24 * 60 * 60_000;
+  const reclaimed = await reclaimSilentDispatchClaim(TASK, {
+    holder: (id) => origin.reserver.holder(id),
+    anchorMessage: (id) => origin.reserver.anchorMessage!(id),
+    drop: (id, options) => origin.reserver.drop(id, options),
+    mintAnchor: () => fresh,
+    attempt: (id, anchor) => origin.reserver.attempt(id, anchor),
+  }, {
+    stateDir: node.stateDir,
+    run: gitClaimRunnerAsync(origin.client.dir),
+    clock: fixedClock(nowMs),
+    readRows: async () => [
+      { step: "dispatch.claim", outcome: "created", run_id: "measured", ts: fixedClock(measuredAt).iso() },
+      { step: "verdict", run_id: "measured", ts: fixedClock(measuredAt + 60 * 60_000).iso() },
+    ],
+    log: (step, fields) => appendLedger(join(node.stateDir, "ledger.ndjson"), {
+      run_id: RUN_ID, task_id: TASK, step, ...fields,
+    }, { clock: fixedClock(Date.parse(MINT_ISO) + 500) }),
+  });
+  assert.equal(reclaimed.anchor, fresh, "production reclaim successfully retries create");
+  assert.equal(origin.reserver.holder(TASK), fresh, "the fresh claim is really on origin");
+  return { origin, node };
+}
+
+test("W1-T10896: a failed reclaim retry never claims another lane's orphan", async (t) => {
+  for (const outcome of ["taken", "unreachable"] as const) {
+    const node = instance(t, orphanRunRows().filter((row) => row.step !== "dispatch.claim"));
+    const reclaimed = await reclaimSilentDispatchClaim(TASK, {
+      holder: () => "old-sha",
+      anchorMessage: () => anchorMessage(DEAD_PID, OTHER_HOST, MINT_ISO),
+      drop: () => true,
+      mintAnchor: () => "lost-sha",
+      attempt: () => outcome,
+    }, {
+      stateDir: node.stateDir,
+      run: async () => ({ status: 0, stdout: "", stderr: "" }),
+      clock: fixedClock(Date.parse("2000-01-03T00:00:00.000Z")),
+      readRows: async () => [
+        { step: "dispatch.claim", outcome: "created", run_id: "measured", ts: "2000-01-02T00:00:00.000Z" },
+        { step: "verdict", run_id: "measured", ts: "2000-01-02T01:00:00.000Z" },
+      ],
+      log: (step, fields) => appendLedger(join(node.stateDir, "ledger.ndjson"), {
+        run_id: RUN_ID, task_id: TASK, step, ...fields,
+      }),
+    });
+    assert.equal(reclaimed.verdict, "reclaim", "the retry is reached");
+    assert.equal(reclaimed.anchor, undefined);
+    assert.equal(node.rows().some((row) => row.step === "dispatch.claim" && row.outcome === "created"), false);
+    node.boot(fakeReserver({ [TASK]: anchorMessage(DEAD_PID, LOCAL, MINT_ISO) }, { heads: { [BRANCH]: HEAD } }));
+    assert.deepEqual(orphanVerdicts(node.rows()), [], "an unsuccessful create proves no run owns the remaining claim");
+    assert.equal(pendingWorkerBoundaryHandoffs(node.rawLines()).has(TASK), false);
+  }
 });
 
 /** Dispatch selection and the real runTask consumer share the receipt the boot sweep actually wrote. */

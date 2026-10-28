@@ -1189,7 +1189,11 @@ export async function reclaimSilentDispatchClaim(
   deps.say?.(`RECLAIMED a silent claim — ${decision.reason}`);
   const fresh = await reserver.mintAnchor();
   const retried = await reserver.attempt(taskId, fresh);
-  return retried === "created" ? { ...decision, dropped, anchor: fresh } : { ...decision, dropped };
+  if (retried !== "created") return { ...decision, dropped };
+  deps.log("dispatch.claim", {
+    ref: dispatchClaimRef(taskId), outcome: retried, ...decideDispatchClaim(retried, { taskId }),
+  });
+  return { ...decision, dropped, anchor: fresh };
 }
 
 /** A run's own claim, renewed on {@link DISPATCH_CLAIM_RENEW_INTERVAL_MS} until `stop()` hands back the sha to release. */
