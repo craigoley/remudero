@@ -253,3 +253,55 @@ test("skill conformance is executed before push on every nonempty diff", () => {
   assert.equal(red.violations.length, 1);
   assert.ok(red.violations[0].startsWith("census-suite: " + SKILL_CONFORMANCE_CENSUS + " fails"));
 });
+
+// @source-text-subject: worker registration source is parsed as data by the trusted harness.
+test("W1-T10798: check:test:test/every-ci-census-is-asked-before-the-push.test.ts is prevented, not retried", () => {
+  const source = readFileSync(join(ROOT, "scripts/census-precheck.mjs"), "utf8");
+  const baseline = readBaseline(readFileSync(join(ROOT, PRECHECK_PARITY_BASELINE), "utf8"));
+  const population = [...new Set([...baseline, ...Object.keys(PRECHECK_PARITY)])];
+  assert.ok(population.length > 50, "positive control: the fixture includes existing census registrations");
+  const added = "test/worker-only-census.test.ts";
+  assert.ok(!(added in PRECHECK_PARITY), "the harness does not know the worker's new suite");
+  const evaluate = (worker: string, members = [...population, added], rows = baseline) =>
+    precheck.censusParityViolations({ changed: ["scripts/census-precheck.mjs"], population: members,
+      readHead: (path: string) => path === PRECHECK_PARITY_BASELINE ? JSON.stringify({ ciOnly: rows }) : worker,
+    }) as string[];
+  const unasked = evaluate(source);
+  assert.equal(unasked.length, 1);
+  assert.ok(unasked[0]!.includes(added));
+  assert.match(unasked[0]!, /model it in PRECHECK_PARITY/);
+  const registered = source.replace("export const PRECHECK_PARITY = {",
+    `export const PRECHECK_PARITY = {\n  "${added}": { modeled: () => [] },`);
+  assert.notEqual(registered, source);
+  assert.deepEqual(evaluate(registered), [], "managed pushes use the worker's direct registration");
+  const triggered = source.replace("export const PRECHECK_ADDITIONAL_RUNS = [",
+    `export const PRECHECK_ADDITIONAL_RUNS = [\n  { testFile: "${added}", script: "census:worker" },`);
+  assert.notEqual(triggered, source);
+  assert.deepEqual(evaluate(triggered), [], "worker table-map registrations also pass");
+  const victim = "test/clock-signature-census.test.ts";
+  const removed = source.replace('"test/clock-signature-census.test.ts": { modeled: clockViolations },', "");
+  assert.notEqual(removed, source);
+  const missing = evaluate(removed, population);
+  assert.equal(missing.length, 1);
+  assert.ok(missing[0]!.includes(victim), "a harness registration cannot mask its removal in the worker");
+  assert.deepEqual(evaluate(removed, population, [...baseline, victim]), [],
+    "a worker baseline row is not stale merely because the harness models it");
+  const stale = evaluate(registered, [...population, added], [...baseline, added]);
+  assert.equal(stale.length, 1);
+  assert.match(stale[0]!, /delete the row/);
+  // Parsing never evaluates top-level worker expressions or a registration's implementation.
+  assert.deepEqual(evaluate(registered + '\nthrow new Error("worker code executed");'), []);
+  assert.throws(() => evaluate('export const PRECHECK_PARITY = computeParity();'), /not statically readable/);
+  assert.throws(() => evaluate('export const PRECHECK_PARITY = { ...computeParity() };'), /not statically readable/);
+  assert.throws(() => evaluate('export const PRECHECK_PARITY = {'), /Unexpected token/);
+  assert.throws(() => precheck.censusParityViolations({ changed: [PRECHECK_PARITY_BASELINE], population,
+    readHead: (path: string) => path === PRECHECK_PARITY_BASELINE ? JSON.stringify({ ciOnly: baseline }) : null,
+  }), /source is unavailable/);
+  assert.deepEqual(precheck.censusParityViolations({ changed: ["src/a.ts"], readHead: () => null, population }), []);
+  let calls = 0;
+  for (const text of [null, "{bad", "{}", '{"ciOnly":42}']) {
+    assert.deepEqual(precheck.censusParityViolations({ changed: [PRECHECK_PARITY_BASELINE],
+      readHead: () => text, population: () => { calls++; return population; } }), []);
+  }
+  assert.equal(calls, 0, "an unreadable baseline does not enumerate suites");
+});

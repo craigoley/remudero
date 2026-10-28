@@ -22,13 +22,14 @@
  * the legacy side is computed on a deferred turn, and the diff and its evidence run in the worker.
  */
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { READ_MODEL_DIRNAME, openShadowCounterDb, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 import { renderView, type ReadModelViewRoutesOptions, type ShadowReadingSpec, type SourcePhase, type ViewBody, type ViewDefinition, type ViewSource } from "./views.js";
-import { readShadowCounters, saveShadowCounter, shadowCounterPath, type ShadowClassification, type ShadowKeyChange, type ViewShadowState } from "./view-shadow-store.js";
+import { readShadowCounters, saveShadowCounter, shadowCounterPath, type ShadowClassification, type ShadowKeyChange, type ShadowPopulation, type ShadowPopulationEvidence, type ViewShadowState } from "./view-shadow-store.js";
 
-export type { ShadowClassification, ViewShadowState } from "./view-shadow-store.js";
+export type { ShadowClassification, ShadowPopulation, ShadowPopulationEvidence, ViewShadowState } from "./view-shadow-store.js";
 
 export const VIEW_SHADOW_DIFF_STEP = "view.shadow_diff";
 export const VIEW_SHADOW_SUMMARY_STEP = "view.shadow_summary";
@@ -695,7 +696,7 @@ function classifyDerived(inputs: readonly string[], judged: ReadonlyArray<{ path
   return { classification: top, reason: `computed from ${inputs.join(" ")}, each explained (${classes.join(", ")})` };
 }
 
-export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys" | "summary" | "view" | "qualificationRefusal"> {
+export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys" | "summary" | "view" | "qualificationRefusal" | "population"> {
   view: string;
   /** How many keys the streak sampled: each owes the cadence's full day of samples. */
   keys: number;
@@ -717,8 +718,8 @@ export function viewShadowPath(stateDir: string): string {
 }
 
 /** Counters survive a restart and a scratch wipe in `path`, written only behind the home read model's lease. */
-export function fileShadowStore(path: string, db: ReadModelDb, lease: ReadModelLease): ShadowStore {
-  const states = storedShadowStates(path, db);
+export function fileShadowStore(path: string, db: ReadModelDb, lease: ReadModelLease, activeQualifications?: Readonly<Record<string, string>>): ShadowStore {
+  const states = storedShadowStates(path, db, activeQualifications);
   let connection: ReadModelDb | undefined;
   let closed = false;
   return {
@@ -736,8 +737,8 @@ export function fileShadowStore(path: string, db: ReadModelDb, lease: ReadModelL
 }
 
 /** The file; until its first save, the `view_shadow` table an older build kept in the DB, so a streak carries over. */
-function storedShadowStates(path: string, db: ReadModelDb): Record<string, ViewShadowState> {
-  const counters = readShadowCounters(path, true);
+function storedShadowStates(path: string, db: ReadModelDb, activeQualifications?: Readonly<Record<string, string>>): Record<string, ViewShadowState> {
+  const counters = readShadowCounters(path, true, activeQualifications);
   if (counters) return counters.states;
   const text = readFileIfExists(path);
   if (text !== undefined) return JSON.parse(text) as Record<string, ViewShadowState>;
@@ -746,22 +747,22 @@ function storedShadowStates(path: string, db: ReadModelDb): Record<string, ViewS
 }
 
 /** Readiness as the persisted counters say, read-only: it shows from boot, before this process compared anything. */
-export function storedShadowReadiness(path: string, db: ReadModelDb, nowMs: number, qualifications: Readonly<Record<string, string>> = {}): ShadowReadiness[] {
-  const counters = readShadowCounters(path, false);
-  return activeReadiness(new Map(Object.entries(counters?.states ?? storedShadowStates(path, db))), qualifications, nowMs, counters?.keyCounts);
+export function storedShadowReadiness(path: string, db: ReadModelDb, nowMs: number, qualifications: Readonly<Record<string, string>> = {}, populations?: ViewShadowOptions["populations"], populationViews?: readonly string[]): ShadowReadiness[] {
+  const counters = readShadowCounters(path, false, qualifications);
+  return activeReadiness(new Map(Object.entries(counters?.states ?? storedShadowStates(path, db))), qualifications, nowMs, counters?.keyCounts, view => requiredPopulation(view, populations, populationViews));
 }
 
 const qualifiedStateKey = (view: string, generation: string | undefined): string => generation === undefined ? view : `\u0000qualification:${JSON.stringify([view, generation])}`;
 
 /** Only the required generation is current; archived generations remain stored, never added or reset. */
-function activeReadiness(states: ReadonlyMap<string, ViewShadowState>, qualifications: Readonly<Record<string, string>>, now: number, keyCounts?: ReadonlyMap<string, number>): ShadowReadiness[] {
+function activeReadiness(states: ReadonlyMap<string, ViewShadowState>, qualifications: Readonly<Record<string, string>>, now: number, keyCounts?: ReadonlyMap<string, number>, population?: (view: string) => PopulationRequirement | undefined): ShadowReadiness[] {
   const views = new Set([...states].map(([key, state]) => state.view ?? key));
   return [...views].sort().flatMap((view) => {
     const generation = qualifications[view];
     const stored = states.get(qualifiedStateKey(view, generation));
     const state = generation === undefined || stored?.qualificationGeneration === generation ? stored : undefined;
     if (state === undefined && generation === undefined) return [];
-    return [shadowReadiness(view, state ?? { ...emptyState(), qualificationGeneration: generation }, now, keyCounts?.get(qualifiedStateKey(view, generation)))];
+    return [shadowReadiness(view, state ?? { ...emptyState(), qualificationGeneration: generation }, now, keyCounts?.get(qualifiedStateKey(view, generation)), population?.(view))];
   });
 }
 
@@ -778,9 +779,9 @@ function emptyState(): ViewShadowState {
  * or a stalled worker only delays it. Measured request traffic raises the floor to 3 x requests-per-day
  * (the rule of three), so a busy view needs more evidence than the cadence gives it.
  */
-export function shadowReadiness(view: string, state: ViewShadowState, nowMs: number, storedKeyCount?: number): ShadowReadiness {
-  const { streakKeys, summary: _summary, view: _storedView, qualificationRefusal, ...s } = state;
-  const keys = Math.max(1, storedKeyCount ?? streakKeys?.length ?? 0);
+export function shadowReadiness(view: string, state: ViewShadowState, nowMs: number, storedKeyCount?: number, requirement?: PopulationRequirement): ShadowReadiness {
+  const { streakKeys, summary: _summary, view: _storedView, qualificationRefusal, population: _population, ...s } = state;
+  const keys = requirement?.population?.pages.length ?? Math.max(1, storedKeyCount ?? streakKeys?.length ?? 0);
   const spanMs = s.firstRequestMs === null ? 0 : nowMs - s.firstRequestMs;
   const requestsPerDay = spanMs >= DAY_MS ? (s.requests * DAY_MS) / spanMs : null;
   const requiredSamples = Math.max(keys * CADENCE_SAMPLES_PER_DAY, Math.ceil(RULE_OF_THREE * (requestsPerDay ?? 0)));
@@ -789,10 +790,65 @@ export function shadowReadiness(view: string, state: ViewShadowState, nowMs: num
   if (streakMs < DAY_MS) reason = s.lastRealMs === null ? "zero real diffs, but for under a day" : "a real diff within the last day";
   else if (s.streakSamples < requiredSamples) reason = `${s.streakSamples} of ${requiredSamples} samples since the last real diff (a day at one per minute for ${keys} key(s))`;
   else reason = `zero real diffs in ${s.streakSamples} samples over ${Math.floor(streakMs / DAY_MS)} day(s)`;
-  const ready = qualificationRefusal === undefined && streakMs >= DAY_MS && s.streakSamples >= requiredSamples;
+  const populationRefusal = requirement === undefined ? undefined : currentPopulationRefusal(state, requirement, nowMs);
+  const ready = qualificationRefusal === undefined && populationRefusal === undefined && streakMs >= DAY_MS && s.streakSamples >= requiredSamples;
+  if (populationRefusal !== undefined) reason = populationRefusal;
   if (qualificationRefusal !== undefined) reason = qualificationRefusal;
   if (!ready && s.skipped) reason += `; ${s.skipped} sample(s) skipped while a side was not ready (last: ${s.lastSkipReason})`;
-  return { view, ...s, keys, requestsPerDay: requestsPerDay === null ? null : Math.round(requestsPerDay), requiredSamples, ready, reason };
+  return { view, ...s, ...(requirement === undefined ? {} : { qualificationGeneration: requirement.population?.generation ?? `${s.qualificationGeneration ?? "unknown"}:pending` }), keys, requestsPerDay: requestsPerDay === null ? null : Math.round(requestsPerDay), requiredSamples, ready, reason };
+}
+
+interface PopulationRequirement { population?: ShadowPopulation; refusal?: string }
+
+/** Missing, throwing and malformed population evidence are distinct refusals, never an empty population. */
+function requiredPopulation(view: string, read?: ViewShadowOptions["populations"], views?: readonly string[]): PopulationRequirement | undefined {
+  if (!read || (views !== undefined && !views.includes(view))) return undefined;
+  try {
+    const populations = read();
+    if (views === undefined && !Object.hasOwn(populations, view)) return undefined;
+    const population = populations[view];
+    if (population === undefined) return { refusal: "no committed current page population" };
+    if (!isRecord(population) || typeof population.policy !== "string" || typeof population.generation !== "string" || population.generation.length === 0 || population.generation.length > 160 ||
+      !/^[a-f0-9]{64}$/.test(population.snapshotKey) || !isRecord(population.scope) || typeof population.scope.instance !== "string" || !population.scope.instance ||
+      typeof population.scope.repository !== "string" || !/^[^/\s]+\/[^/\s]+$/.test(population.scope.repository) || !Array.isArray(population.pages) || population.pages.length === 0) {
+      return { refusal: "current page population is malformed" };
+    }
+    const logical = new Set<string>(), routing = new Set<string>();
+    for (const page of population.pages) {
+      if (!isRecord(page) || typeof page.key !== "string" || typeof page.logicalKey !== "string" || !page.logicalKey || typeof page.incarnation !== "string" || !page.incarnation ||
+        typeof page.section !== "string" || !Number.isSafeInteger(page.index) || page.index < 0 || logical.has(page.logicalKey) || routing.has(page.key)) return { refusal: "current page population has invalid or duplicate bindings" };
+      logical.add(page.logicalKey); routing.add(page.key);
+    }
+    return { population };
+  } catch (error) { return { refusal: `current page population source failed: ${(error as Error).message}` }; }
+}
+
+function populationEvidenceShape(saved: ShadowPopulationEvidence): boolean {
+  return isRecord(saved) && typeof saved.generation === "string" && isRecord(saved.scope) && typeof saved.scope.instance === "string" && typeof saved.scope.repository === "string" && Array.isArray(saved.pages)
+    && saved.pages.every(page => isRecord(page) && typeof page.logicalKey === "string" && typeof page.incarnation === "string" && Number.isSafeInteger(page.samples) && page.samples >= 0
+      && (page.sinceMs === null || Number.isFinite(page.sinceMs)) && (page.lastSampleMs === null || Number.isFinite(page.lastSampleMs))
+      && ((page.samples === 0 && page.sinceMs === null && page.lastSampleMs === null) || (page.samples > 0 && page.sinceMs !== null && page.lastSampleMs !== null)));
+}
+
+function samePopulation(saved: ShadowPopulationEvidence, current: ShadowPopulation): boolean {
+  if (!populationEvidenceShape(saved)) return false;
+  if (saved.generation !== current.generation || saved.scope.instance !== current.scope.instance || saved.scope.repository !== current.scope.repository || saved.pages.length !== current.pages.length) return false;
+  const pages = new Map(saved.pages.map(page => [page.logicalKey, page.incarnation]));
+  return pages.size === saved.pages.length && current.pages.every(page => pages.get(page.logicalKey) === page.incarnation);
+}
+
+function currentPopulationRefusal(state: ViewShadowState, requirement: PopulationRequirement, now: number): string | undefined {
+  if (requirement.refusal !== undefined) return requirement.refusal;
+  const current = requirement.population;
+  if (!current || current.policy !== state.qualificationGeneration) return "current population names another qualification policy";
+  const saved = state.population;
+  if (!saved || !Array.isArray(saved.pages) || !isRecord(saved.scope) || !samePopulation(saved, current)) return "current page population has not committed matching shadow evidence";
+  for (const page of saved.pages) {
+    if (!Number.isSafeInteger(page.samples) || page.samples < 0 || page.sinceMs === null || !Number.isFinite(page.sinceMs) || page.sinceMs > now ||
+      page.lastSampleMs === null || !Number.isFinite(page.lastSampleMs) || page.lastSampleMs > now || page.lastSampleMs < page.sinceMs ||
+      now - page.sinceMs < DAY_MS || page.samples < CADENCE_SAMPLES_PER_DAY) return `current page ${page.logicalKey} still needs its own full day and cadence`;
+  }
+  return undefined;
 }
 
 export interface ViewShadowOptions {
@@ -802,6 +858,10 @@ export interface ViewShadowOptions {
   store?: ShadowStore;
   /** Current producer identities; earlier generations' receipts cannot qualify these projections. */
   qualifications?: Readonly<Record<string, string>>;
+  /** Complete committed producer populations, not a set inferred from sampled requests. */
+  populations?: () => Readonly<Record<string, ShadowPopulation | undefined>>;
+  /** Names that must explicitly refuse qualification when the population read is unavailable. */
+  populationViews?: readonly string[];
 }
 
 export interface ShadowComparison {
@@ -814,6 +874,8 @@ export interface ShadowComparison {
 
 export interface ViewShadow {
   compare(input: { view: string; key: string; requests: number; legacy: ShadowLegacy; body: { data: unknown; asOf: string | null; sources?: readonly ViewSource[] }; qualificationGeneration?: string }): ShadowComparison;
+  /** Traffic remains measured even when a retired routing body cannot supply a comparison. */
+  observeRequests(view: string, requests: number): void;
   readiness(): ShadowReadiness[];
   close(): void;
 }
@@ -825,6 +887,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
   const streakKeys = new Map<string, Set<string>>();
   const persistenceFailed = new Set<string>();
   const qualifications = opts.qualifications ?? {};
+  const populationOf = (view: string) => requiredPopulation(view, opts.populations, opts.populationViews);
   const persist = (key: string, state: ViewShadowState, keys: ShadowKeyChange): void => {
     // A later delta cannot replay a lost append or reset. Reconcile exact membership once after failure.
     try { opts.store?.save(key, state, persistenceFailed.has(key) ? undefined : keys); persistenceFailed.delete(key); }
@@ -841,11 +904,19 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
     else w.samples++;
     for (const d of sample.diffs ?? []) w.diffs[d.classification]++;
     if (now - w.sinceMs < VIEW_SHADOW_SUMMARY_MS) return;
-    const { streakSamples, streakSinceMs, lastRealMs, ready } = shadowReadiness(view, state, now);
+    const { streakSamples, streakSinceMs, lastRealMs, ready } = shadowReadiness(view, state, now, undefined, populationOf(view));
     opts.log(VIEW_SHADOW_SUMMARY_STEP, { view, ...(state.qualificationGeneration === undefined ? {} : { qualificationGeneration: state.qualificationGeneration }), ...w, streakSamples, streakSinceMs, lastRealMs, ready });
     state.summary = { sinceMs: now, samples: 0, skipped: 0, diffs: noDiffs() };
   };
   return {
+    observeRequests(view, requests) {
+      if (!Number.isSafeInteger(requests) || requests < 0) throw new Error("shadow request count must be a nonnegative safe integer");
+      if (requests === 0) return;
+      const state = stateOf(view);
+      state.requests += requests;
+      state.firstRequestMs ??= clock.now();
+      persist(qualifiedStateKey(view, qualifications[view]), state, { reset: false });
+    },
     compare({ view, key, requests, legacy, body, qualificationGeneration }) {
       const now = clock.now();
       const state = stateOf(view);
@@ -853,8 +924,15 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       state.firstRequestMs ??= now;
       const viewUnready = unreadySources(body.sources);
       const required = qualifications[view];
-      const generationUnready = required !== undefined && (qualificationGeneration !== required || legacy.qualificationGeneration !== required)
-        ? `current generation ${required} requires both matched producers (legacy ${legacy.qualificationGeneration ?? "unknown"}, body ${qualificationGeneration ?? "unknown"})` : undefined;
+      const requirement = populationOf(view), population = requirement?.population;
+      const matchedGeneration = population?.generation ?? required;
+      const page = population?.pages.find(page => page.key === key);
+      const dataMatches = (data: unknown) => isRecord(data) && data.snapshotKey === population?.snapshotKey && data.section === page?.section && isRecord(data.page) && data.page.index === page?.index;
+      const populationUnready = requirement === undefined ? undefined : requirement.refusal ?? (state.population !== undefined && !populationEvidenceShape(state.population) ? "persisted current page evidence is malformed"
+        : population?.policy !== required ? "current population names another qualification policy"
+        : !page || !dataMatches(body.data) || !dataMatches(legacy.data) ? "comparison is not bound to a current exact routing page and snapshot" : undefined);
+      const generationUnready = populationUnready ?? (matchedGeneration !== undefined && (qualificationGeneration !== matchedGeneration || legacy.qualificationGeneration !== matchedGeneration)
+        ? `current generation ${matchedGeneration} requires both matched producers (legacy ${legacy.qualificationGeneration ?? "unknown"}, body ${qualificationGeneration ?? "unknown"})` : undefined);
       if (generationUnready === undefined) delete state.qualificationRefusal;
       else state.qualificationRefusal = generationUnready;
       const unready = generationUnready ?? (legacy.unready !== undefined ? `legacy ${legacy.unready}` : viewUnready === undefined ? undefined : `view ${viewUnready}`);
@@ -863,6 +941,25 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         summarize(view, state, now, { skipped: true });
         persist(qualifiedStateKey(view, required), state, { reset: false });
         return { view, key, diffs: [], skipped: unready };
+      }
+      let populationChanged = false;
+      if (population && (!state.population || !samePopulation(state.population, population))) {
+        const previous = state.population;
+        if (previous || state.samples > 0 || (state.streakKeys?.length ?? 0) > 0) {
+          const digest = createHash("sha256").update(JSON.stringify([previous, state.streakSamples, state.streakKeys])).digest("hex");
+          const archiveGeneration = `${required}:retired:${digest}`, archiveKey = qualifiedStateKey(view, archiveGeneration);
+          const archive = structuredClone({ ...state, view, qualificationGeneration: archiveGeneration });
+          try { persist(archiveKey, archive, { reset: true, replace: archive.streakKeys ?? [] }); }
+          catch (error) { persistenceFailed.add(qualifiedStateKey(view, required)); throw error; }
+          states.set(archiveKey, archive);
+        }
+        const old = new Map(previous?.pages.map(page => [page.logicalKey, page]) ?? []);
+        state.population = { generation: population.generation, scope: { ...population.scope }, pages: population.pages.map(page => {
+          const kept = old.get(page.logicalKey);
+          return kept?.incarnation === page.incarnation ? { ...kept } : { logicalKey: page.logicalKey, incarnation: page.incarnation, samples: 0, sinceMs: null, lastSampleMs: null };
+        }) };
+        state.streakKeys = population.pages.map(page => page.logicalKey);
+        populationChanged = true;
       }
       state.samples++;
       state.streakSinceMs ??= now;
@@ -891,8 +988,14 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       const stateKey = qualifiedStateKey(view, required);
       const reset = diffs.some((d) => d.classification === "real");
       if (reset) {
-        Object.assign(state, { streakSamples: 0, streakSinceMs: now, lastRealMs: now, streakKeys: [] });
+        Object.assign(state, { streakSamples: 0, streakSinceMs: now, lastRealMs: now, streakKeys: population?.pages.map(page => page.logicalKey) ?? [] });
         streakKeys.delete(stateKey);
+        if (state.population) for (const page of state.population.pages) Object.assign(page, { samples: 0, sinceMs: null, lastSampleMs: null });
+      } else if (population && page && state.population) {
+        const own = state.population.pages.find(own => own.logicalKey === page.logicalKey && own.incarnation === page.incarnation)!;
+        if (own.lastSampleMs === null || now - own.lastSampleMs >= VIEW_SHADOW_SAMPLE_MS) {
+          own.sinceMs ??= now; own.lastSampleMs = now; own.samples++; state.streakSamples++;
+        }
       } else {
         const keys = streakKeys.get(stateKey) ?? new Set(state.streakKeys ?? []);
         streakKeys.set(stateKey, keys);
@@ -908,17 +1011,19 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, ...(required === undefined ? {} : { qualificationGeneration: required }), classes, ...(legacy.inputs ? { inputs: legacy.inputs } : {}), ...(legacy.paired ? { paired: legacy.paired } : {}), diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
       }
       summarize(view, state, now, { diffs });
-      persist(stateKey, state, { reset, ...(reset ? {} : { add: key }) });
+      persist(stateKey, state, population ? { reset: reset || populationChanged, ...(reset || populationChanged ? { replace: state.population!.pages.map(page => page.logicalKey) } : {}) } : { reset, ...(reset ? {} : { add: key }) });
       return { view, key, diffs };
     },
     readiness: () => activeReadiness(new Map([...states].map(([key, state]) => [key, persistenceFailed.has(key)
-      ? { ...state, qualificationRefusal: "shadow persistence failed; current counters are not committed" } : state])), qualifications, clock.now()),
+      ? { ...state, qualificationRefusal: "shadow persistence failed; current counters are not committed" } : state])), qualifications, clock.now(), undefined, populationOf),
     close: () => opts.store?.close?.(),
   };
 }
 
 /** Offers one view key to the comparator; a `synthetic` offer is the shadow driver's and is no request. */
 export type ShadowSample = (view: string, key: string, params: URLSearchParams, synthetic?: boolean) => void;
+/** Undefined key means unverified evidence: retain traffic, without caching arbitrary raw cursor keys. */
+export interface ShadowSampleIdentity { key?: string; sharedRequests: true }
 
 /**
  * Serve's side: counts every shadow request and passes on at most one per {@link VIEW_SHADOW_SAMPLE_MS}
@@ -928,13 +1033,27 @@ export function createShadowSampler(opts: {
   clock?: Clock;
   sampleMs?: number;
   defer?: (run: () => void) => void;
+  identity?: (view: string, key: string) => ShadowSampleIdentity | undefined;
   send: (sample: { view: string; key: string; params: URLSearchParams; requests: number }) => void;
 }): ShadowSample {
   const clock = opts.clock ?? systemClock;
   const defer = opts.defer ?? ((run: () => void) => void setImmediate(run));
   const last = new Map<string, number>();
   const pending = new Map<string, number>();
+  const viewPending = new Map<string, number>();
   return (view, key, params, synthetic = false) => {
+    const identity = opts.identity?.(view, key);
+    if (identity?.sharedRequests) {
+      viewPending.set(view, (viewPending.get(view) ?? 0) + (synthetic ? 0 : 1));
+      if (identity.key === undefined) return;
+      const id = `${view}\u0000qualified:${identity.key}`, now = clock.now();
+      if (now - (last.get(id) ?? Number.NEGATIVE_INFINITY) < (opts.sampleMs ?? VIEW_SHADOW_SAMPLE_MS)) return;
+      last.set(id, now);
+      const requests = viewPending.get(view) ?? 0;
+      viewPending.set(view, 0);
+      defer(() => opts.send({ view, key, params, requests }));
+      return;
+    }
     const id = `${view}\u0000${key}`;
     const requests = (pending.get(id) ?? 0) + (synthetic ? 0 : 1);
     const now = clock.now();
@@ -956,11 +1075,11 @@ export interface ShadowRequest {
 }
 
 /** Legacy bodies serve's main thread already knows how to compute, rendered for a sampled request. */
-export function legacyViewSampler(opts: { legacy: readonly ViewDefinition[]; post: (request: ShadowRequest) => void; clock?: Clock; defer?: (run: () => void) => void }): ShadowSample {
+export function legacyViewSampler(opts: { legacy: readonly ViewDefinition[]; post: (request: ShadowRequest) => void; clock?: Clock; defer?: (run: () => void) => void; identity?: (view: string, key: string) => ShadowSampleIdentity | undefined }): ShadowSample {
   const clock = opts.clock ?? systemClock;
   const legacy = new Map(opts.legacy.map((view) => [view.name, view]));
   return createShadowSampler({
-    clock, ...(opts.defer ? { defer: opts.defer } : {}),
+    clock, ...(opts.defer ? { defer: opts.defer } : {}), ...(opts.identity ? { identity: opts.identity } : {}),
     send: ({ view, key, params, requests }) => {
       const definition = legacy.get(view);
       const rendered = definition ? renderView(definition, clock, params) : undefined;
@@ -979,9 +1098,9 @@ export function legacyViewSampler(opts: { legacy: readonly ViewDefinition[]; pos
  * handle's shadow driver offers the same sampler every shadowed key on a cadence, so readiness accrues
  * with no console traffic; the per-key throttle is shared, so the driver never adds to its bound.
  */
-export function withViewShadow(handle: { shadow(request: ShadowRequest): void; driveShadow?(sample: ShadowSample): void } | undefined, opts: ReadModelViewRoutesOptions): ReadModelViewRoutesOptions {
+export function withViewShadow(handle: { shadow(request: ShadowRequest): void; driveShadow?(sample: ShadowSample): void; shadowIdentity?(view: string, key: string): ShadowSampleIdentity | undefined } | undefined, opts: ReadModelViewRoutesOptions): ReadModelViewRoutesOptions {
   if (!handle) return opts;
-  const shadow = legacyViewSampler({ legacy: opts.legacy, post: (request) => handle.shadow(request), ...(opts.clock ? { clock: opts.clock } : {}) });
+  const shadow = legacyViewSampler({ legacy: opts.legacy, post: (request) => handle.shadow(request), identity: (view, key) => handle.shadowIdentity?.(view, key), ...(opts.clock ? { clock: opts.clock } : {}) });
   handle.driveShadow?.(shadow);
   return { ...opts, shadow };
 }
