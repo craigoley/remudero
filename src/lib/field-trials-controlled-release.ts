@@ -418,7 +418,7 @@ const nonEmpty = (value: unknown): string | undefined => typeof value === "strin
  * was recorded through selectionPropensity with ROUTING_DRAW_METHOD); the served arm stays unknown until
  * an execution receipt names its served model. Outcomes: merged = a pull verified on main naming the task as its ONLY
  * `Remudero-Task` trailer, at or after the task's first assignment; repair rounds = the fix lane's distinct
- * `fix.dispatch` rounds for the task within the outcome window. Returns null for an unregistered epoch.
+ * `fix.dispatch` and `fix.retrigger` rounds within the outcome window. Returns null for an unregistered epoch.
  */
 export function deriveRegisteredEpoch(epochId: string, facts: LedgerEpochFacts): DerivedEpoch | null {
   const reg = REGISTERED_EPOCHS.find((entry) => entry.epochId === epochId);
@@ -456,7 +456,8 @@ export function deriveRegisteredEpoch(epochId: string, facts: LedgerEpochFacts):
       if (id !== undefined) assignmentIds.set(entry, id);
     } else if (receiptId !== undefined && (step === "worker.attempt" || step === "verdict") && nonEmpty(row.served_model) !== undefined) {
       served.set(receiptId, row.served_model as string);
-    } else if (step === "fix.dispatch" && taskId !== undefined && at !== undefined && row.kind !== "proof_amendment" && Number.isFinite(ms(at))) {
+    } else if ((step === "fix.dispatch" || step === "fix.retrigger") && taskId !== undefined && at !== undefined
+      && row.kind !== "proof_amendment" && Number.isFinite(ms(at))) {
       fixRounds.push({ taskId, at: ms(at), roundId: nonEmpty(row.round_id) });
     } else if (step === "fix.done" && nonEmpty(row.round_id) !== undefined && nonEmpty(row.served_model) !== undefined) {
       fixModel.set(row.round_id as string, row.served_model as string);

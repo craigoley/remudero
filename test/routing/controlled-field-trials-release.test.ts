@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { gzipSync } from "node:zlib";
 import {
   buildControlledFieldTrialsRelease, crossoverBucket, deriveRegisteredEpoch, siteParserViolation, SITE_SECONDARY_COMMIT, type ControlledEpoch, type ControlledReleaseInput, type EpochAssignment,
   type EpochTaskOutcome,
@@ -17,6 +18,7 @@ import { fieldTrialsCommand, verifySiteSecondarySupport, unavailableLedger, writ
 import { FIELD_TRIALS_GITHUB_VERSION } from "#src/lib/field-trials-github.js";
 import { ROUTING_DRAW_METHOD } from "#src/lib/worker-provider.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 /** Vendored verbatim (imports removed) from craigoley/remudero-site at
  * eae03ec12a76227b4bf100d3d318111f43bf573c (PORTAL-T43, PR #207); base contract b80fbbb.
@@ -280,7 +282,7 @@ test("W1-T10843: the controlled release passes the site field-trials-v1 parser",
   assert.deepEqual([refused.state, (refused as { reason: string }).reason], ["refused", "revision-unavailable"]);
 });
 
-test("W1-T10843: a failing assignment audit or an unreached horizon emits no release", () => {
+test("W1-T10843: a failing assignment audit or an unreached horizon emits no release", async () => {
   const refusedWith = (over: Partial<ControlledReleaseInput>, data = fixture()) => {
     const result = buildControlledFieldTrialsRelease(input(over, data));
     assert.equal(result.state, "refused", JSON.stringify(result));
@@ -326,6 +328,7 @@ test("W1-T10843: a failing assignment audit or an unreached horizon emits no rel
   assert.equal(derived.assignments.filter((row) => row.servedArm === null).length, 12, "routing choices are not execution receipts");
   const refusal = buildControlledFieldTrialsRelease({ ...input(), ...derived, pins: PINS });
   assert.deepEqual(refusal, { state: "refused", reason: "assignment-audit-failed", detail: "served-model-missingness" });
+  await assertControlledSourceCompleteness();
 });
 
 test("W1-T10843: arm counts and intervals come from task-level outcomes", () => {
@@ -466,6 +469,31 @@ test("W1-T10843: the Sol x Sonnet release carries pre-registered secondaries and
     "first pass counts only zero-repair main merges, never develop-only merges");
   assert.deepEqual(registered.release.secondary[1]!.arms.map((arm) => arm.value), [0.5, 0.4]);
   assert.deepEqual(registered.sidecar.crossover, { crossed: 28, assignments: 80 }, "execution receipts determine crossover");
+  const fx = productionFixture();
+  const rows = fx.rows.filter((row) => !String(row.step).startsWith("fix."));
+  const merged = [];
+  for (let i = 0; i < 80; i += 1) {
+    merged.push({ trailerTaskIds: [fx.task(i)], mergedAt: "2026-10-10T00:00:00.000Z", mergedOnMain: true });
+    if (i % 2 !== 0) continue;
+    for (let round = 1; round <= 2; round += 1) {
+      const roundId = `retrigger-${i}-${round}`;
+      rows.push({ step: "fix.retrigger", task_id: fx.task(i), ts: "2026-10-05T00:00:00.000Z", round_id: roundId,
+        retrigger: round, strike: 0, round: `fix-${round}`, mode: "ci-log", elapsed_ms: 1000 });
+      rows.push({ step: "fix.done", task_id: fx.task(i), ts: "2026-10-05T00:01:00.000Z", round_id: roundId, served_model: fx.PROD_SON });
+    }
+  }
+  const retrigger = rows.find((row) => row.step === "fix.retrigger")!;
+  rows.push({ ...retrigger }, { ...retrigger, step: "fix.dispatch" });
+  rows.push({ ...retrigger, round_id: "before-assignment", ts: "2026-09-27T00:00:00.000Z" },
+    { ...retrigger, round_id: "after-window", ts: "2026-10-25T00:00:00.000Z" },
+    { ...retrigger, step: "fix.dispatch", kind: "proof_amendment", round_id: "proof-only" });
+  const derived = deriveRegisteredEpoch(EPOCH.epochId, { rows, merged, mergesObservedThrough: AS_OF, sourceRepos: [REPO] })!;
+  const retried = built({ ...derived, pins: PINS });
+  assert.deepEqual(retried.release.arms.map((arm) => [arm.assigned, arm.observed, arm.successes]), [[40, 40, 40], [40, 40, 40]]);
+  assert.deepEqual(retried.release.secondary.map((secondary) => secondary.arms.map((arm) => [arm.value, arm.ciLower, arm.ciUpper])),
+    [[[0, 0, 0], [100, 100, 100]], [[2, 2, 2], [0, 0, 0]]], "retrigger worker rounds count once each, including across step kinds");
+  assert.equal(retried.sidecar.repairedBy[fx.task(0)], fx.PROD_SON);
+  assert.deepEqual(siteParse(retried.release, [REPO]), { ok: true });
 });
 
 /** Raw ledger rows and a GitHub store shaped like production's, for the registered sol61-vs-sonnet55 epoch. */
@@ -502,7 +530,7 @@ function productionFixture() {
         experiment: { id: "sol61-vs-sonnet55", unit: "task", assignedArm: label, assignedProbability: 0.5, servedArm: servedLabel, crossover: crossed(i) } } } });
     rows.push({ step: "worker.attempt", task_id: task(i), ts: iso(at(i) + 60_000), selection_assignment_id: `a${i}`, served_model: modelOf(servedLabel) });
     for (let r = 1; r <= rounds(i); r += 1) {
-      rows.push({ step: "fix.dispatch", task_id: task(i), ts: iso(at(i) + r * 600_000), round_id: `r${i}-${r}` });
+      rows.push({ step: r === 2 ? "fix.retrigger" : "fix.dispatch", task_id: task(i), ts: iso(at(i) + r * 600_000), round_id: `r${i}-${r}` });
       rows.push({ step: "fix.done", task_id: task(i), ts: iso(at(i) + r * 600_000 + 1), round_id: `r${i}-${r}`, served_model: PROD_SON });
     }
     if (merged(i)) pull(i + 1, [task(i)], at(i) + 2 * 86_400_000);
@@ -517,6 +545,66 @@ function productionFixture() {
   const store = (state: string) => ({ version: FIELD_TRIALS_GITHUB_VERSION, repos: { [REPO]: { pulls, commits, deployments: {},
     cursors: { pulls: cursor(state), commits: cursor("complete"), deployments: cursor("complete") } } } });
   return { rows, store, PROD_SOL, PROD_SON, labelOf, crossed, merged, rounds, task };
+}
+
+async function assertControlledSourceCompleteness() {
+  const fx = productionFixture();
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}controlled-ledger-completeness-`));
+  try {
+    const consentPath = join(root, "consent.json");
+    const protocolPath = join(root, "protocol.json");
+    writeFileSync(consentPath, JSON.stringify(CONSENT));
+    writeFileSync(protocolPath, JSON.stringify({ protocol: { version: "benchmark-paid-pilot-v1", pilotId: EPOCH.epochId,
+      revisions: Object.fromEntries(Object.entries(PINS).map(([key, value]) => [`${key}Revision`, value])) } }));
+    const forms = ["ledger.ndjson", "ledger.2026-10-24T00-00-00-000Z.ndjson", "ledger.2026-10-25T00-00-00-000Z.ndjson.gz"];
+    const corpus = forms.map((_, index) => fx.rows.filter((__, i) => i % forms.length === index).map((row) => JSON.stringify(row)).join("\n") + "\n");
+    const run = async (name: string, damage?: (dir: string) => void, reason?: string) => {
+      const dir = join(root, name);
+      const ledger = join(dir, "ledger");
+      const out = join(dir, "out");
+      writeLedger(fx.rows.filter((_, i) => i % 3 === 0), { dir: ledger, rotations: [
+        { at: "2026-10-24T00:00:00.000Z", rows: fx.rows.filter((_, i) => i % 3 === 1) },
+        { at: "2026-10-25T00:00:00.000Z", rows: fx.rows.filter((_, i) => i % 3 === 2), gz: true },
+      ] });
+      mkdirSync(out);
+      writeFileSync(join(out, "field-trials-github-v1.json"), JSON.stringify(fx.store("complete")));
+      damage?.(ledger);
+      const printed: string[] = [];
+      const code = await fieldTrialsCommand(["--source", `core=${REPO}`, "--ledger", `core=${ledger}`, "--out-dir", out, "--consent", consentPath,
+        "--offline", "--controlled-registered", EPOCH.epochId, "--controlled-protocol", protocolPath, "--site-parser-commit", SITE_SECONDARY_COMMIT],
+      buildFieldTrialsFlowSnapshot, { nowIso: AS_OF, print: (line) => printed.push(line), printError: () => undefined,
+        resolveConfig: () => ({ root }), readLedger: async () => unavailableLedger("fixture"), readSiteEvidence: async () => siteMainEvidence });
+      if (reason !== undefined) {
+        assert.equal(code, 1, `${name}: a refused controlled release fails the command`);
+        assert.ok(printed.some((line) => line.includes(`controlled release refused (controlled-ledger-read-failed: ${reason}`)), printed.join("\n"));
+        assert.equal(existsSync(join(out, "controlled")), false, `${name}: neither candidate nor private sidecar`);
+      } else {
+        const files = readdirSync(join(out, "controlled"));
+        assert.equal(files.length, 2);
+        const release = JSON.parse(readFileSync(join(out, "controlled", files.find((file) => file.endsWith(".candidate.json"))!), "utf8"));
+        assert.deepEqual(release.arms.map((arm: FieldTrialsArm) => [arm.assigned, arm.observed]), [[40, 40], [40, 40]], "all three forms contribute tasks");
+        assert.deepEqual(siteParse(release, [REPO]), { ok: true });
+      }
+    };
+    await run("clean");
+    await run("corrupt-gzip", (dir) => writeFileSync(join(dir, "ledger.corrupt.ndjson.gz"), "not gzip"), "unread-archive:");
+    await run("unread-plain", (dir) => mkdirSync(join(dir, "ledger.unread.ndjson")), "unread-archive:");
+    await run("unread-live", (dir) => { rmSync(join(dir, forms[0]!)); mkdirSync(join(dir, forms[0]!)); }, "unread-live:");
+    await run("unread-directory", (dir) => rmSync(dir, { recursive: true }), "unread-directory:");
+    for (const [index, file] of forms.entries()) {
+      for (const [name, text, reason] of [["invalid-json", "{broken}\n", "malformed-invalid-json:"],
+        ["non-object", "[]\n", "malformed-non-object:"]] as const) {
+        await run(`${index}-${name}`, (dir) => {
+          const body = corpus[index]! + text;
+          writeFileSync(join(dir, file), file.endsWith(".gz") ? gzipSync(body) : body);
+        }, reason);
+      }
+    }
+    await run("torn-live-tail", (dir) => writeFileSync(join(dir, forms[0]!), corpus[0]! + "{torn"), "malformed-live-torn-tail:");
+    await run("clean-again");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function registeredOutcomeRelease() {
@@ -669,7 +757,7 @@ test("W1-T10843: an unreadable ledger refuses the registered epoch by name and e
     { nowIso: AS_OF, print: (l) => printed.push(l), printError: () => undefined, readLedger: async () => unavailableLedger("fixture"),
       resolveConfig: () => ({ root }), readRows: async () => { throw new Error("ledger union unreadable"); } });
     assert.equal(code, 1, "a refused controlled release fails the command");
-    assert.match(printed.join("\n"), /controlled release refused \(controlled-ledger-read-failed\)/);
+    assert.match(printed.join("\n"), /controlled release refused \(controlled-ledger-read-failed: ledger union unreadable\)/);
     assert.equal(existsSync(join(dir, "controlled")), false, "no candidate and no sidecar are written");
   } finally {
     rmSync(root, { recursive: true, force: true });

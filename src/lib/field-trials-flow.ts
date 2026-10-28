@@ -1254,7 +1254,19 @@ export function writeRegisteredControlledCandidate(outDir: string, epochId: stri
     ...(siteParserCommit === undefined ? {} : { siteParserCommit }) }));
 }
 
-/** The ledger rows and merged pulls of every source that has a ledger; null when none does or a ledger is unreadable. */
+async function readControlledLedgerRows(stateDir: string): Promise<Record<string, unknown>[]> {
+  const problems: string[] = [];
+  const rows = await readLedgerUnionRecords(stateDir, {
+    onUnreadDirectory: (path) => { problems.push(`unread-directory: ${path}`); },
+    onUnreadArchive: (path) => { problems.push(`unread-archive: ${path}`); },
+    onUnreadLive: (path) => { problems.push(`unread-live: ${path}`); },
+    onMalformedRow: (finding) => { problems.push(`malformed-${finding.kind}: ${finding.path}:${finding.rowOrdinal}`); },
+  });
+  if (problems.length > 0) throw new Error(problems.join("; "));
+  return rows;
+}
+
+/** The ledger rows and merged pulls of every source that has a ledger, or a named source refusal. */
 async function controlledEpochFacts(repos: readonly (readonly [string, string])[], ledgers: ReadonlyMap<string, string>, github: FieldTrialsGithubStore,
   readRows: (stateDir: string) => Promise<Record<string, unknown>[]>): Promise<LedgerEpochFacts | string> {
   const rows: Record<string, unknown>[] = [];
@@ -1266,9 +1278,8 @@ async function controlledEpochFacts(repos: readonly (readonly [string, string])[
     const dir = ledgers.get(label);
     if (dir === undefined) continue;
     try { for (const row of await readRows(dir)) rows.push(row); }
-    catch {
-      const reason = "controlled-ledger-read-failed";
-      return reason;
+    catch (error) {
+      return `controlled-ledger-read-failed: ${error instanceof Error ? error.message : String(error)}`;
     }
     sourceRepos.push(repo);
     const store = github.repos[repo];
@@ -1458,7 +1469,7 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     if (registeredEpoch === undefined) {
       controlled = writeControlledCandidate(outDir, readJson(values["controlled-epoch"] as string), consent, nowIso, siteAccepts, siteCommit);
     } else {
-      const facts = await controlledEpochFacts(repos, defaultLedgers, github, input.readRows ?? ((dir) => readLedgerUnionRecords(dir)));
+      const facts = await controlledEpochFacts(repos, defaultLedgers, github, input.readRows ?? readControlledLedgerRows);
       if (typeof facts !== "string") {
         const stateDir = defaultLedgers.values().next().value ?? join(config.root, "state");
         const loaded = typeof values["controlled-protocol"] === "string" ? record(readJson(values["controlled-protocol"]))
