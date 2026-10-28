@@ -120,8 +120,9 @@ function installHook(dir: string): void {
   mkdirSync(join(dir, "hooks"), { recursive: true });
   mkdirSync(join(dir, "scripts", "lib"), { recursive: true });
   mkdirSync(join(dir, "src", "lib"), { recursive: true });
-  mkdirSync(join(dir, "test"), { recursive: true });
-  symlinkSync(join(REPO_ROOT, "test", "setup"), join(dir, "test", "setup"), "dir");
+  mkdirSync(join(dir, "test", "setup"), { recursive: true });
+  writeFileSync(join(dir, "test", "setup", "tmp-hygiene.ts"),
+    `import ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "test/setup/tmp-hygiene.ts")).href)};\n`);
   copyFileSync(join(REPO_ROOT, "src", "lib", "rule-suites.ts"), join(dir, "src", "lib", "rule-suites.ts"));
   copyFileSync(join(REPO_ROOT, "src", "lib", "trust-root-text.ts"), join(dir, "src", "lib", "trust-root-text.ts"));
   copyFileSync(join(REPO_ROOT, "hooks", "pre-push"), join(dir, "hooks", "pre-push"));
