@@ -15,6 +15,7 @@
     - src/lib/attempt-outcome-attribution.ts
     - src/lib/field-trials-cohorts.ts
     - test/routing/an-attempt-failure-is-attributed-before-it-counts-against-a-model.test.ts
+    - "src/lib/field-trials-flow.ts"
   status: queued
   attempts: 0
   rationale: |

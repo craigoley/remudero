@@ -420,6 +420,8 @@ export interface ReservedTreeProbeHost {
 const goneProcess = (error: unknown): boolean => ["ENOENT", "ESRCH"].includes(String((error as NodeJS.ErrnoException)?.code));
 const dedicatedScopePath = (path: unknown): path is string => typeof path === "string" &&
   /^\/(?:[^/\0\n]+\/)*[^/\0\n]+\.scope$/.test(path) && !path.split("/").some(part => part === "." || part === "..");
+/** A systemd-logind login scope: sshd, the shell and the agent CLI are the owner's ancestors yet outlive it (W1-T10870). */
+const loginSessionScopePath = (path: string): boolean => /\/user-[0-9]+\.slice\/session-[A-Za-z0-9]+\.scope$/.test(path);
 
 /**
  * Record our cgroup v2 membership. A scope is dedicated when every member is in our process group or is one of our
@@ -435,6 +437,7 @@ export function readTestSlotCgroup(host: ReservedTreeProbeHost = {}): TestSlotHo
   try {
     path = /^0::([^\n]+)$/m.exec(read("/proc/self/cgroup"))?.[1] ?? "";
     if (!dedicatedScopePath(path)) return { path, dedicated: false, reason: "not a dedicated cgroup v2 scope" };
+    if (loginSessionScopePath(path)) return { path, dedicated: false, reason: "a login session scope outlives the owner's work" };
     const self = statFields(read("/proc/self/stat"));
     const group = self?.[2];
     if (!/^[1-9][0-9]*$/.test(group ?? "")) throw new Error("owner process group unproven");
@@ -465,7 +468,8 @@ export function readTestSlotCgroup(host: ReservedTreeProbeHost = {}): TestSlotHo
 
 function probeCgroupScope(held: TestSlotHolder, ownerStart: number, read: (path: string) => string,
   readCgroup: (path: string) => string): ReservedTreeEvidence | undefined {
-  if (held.cgroupScope?.dedicated !== true || !dedicatedScopePath(held.cgroupScope.path)) return undefined;
+  if (held.cgroupScope?.dedicated !== true || !dedicatedScopePath(held.cgroupScope.path) ||
+      loginSessionScopePath(held.cgroupScope.path)) return undefined;
   const unknown = (reason: string): ReservedTreeEvidence => ({ state: "unknown", coverage: "cgroup-scope", reason });
   try {
     const raw = read(`/proc/${held.pid}/stat`);
