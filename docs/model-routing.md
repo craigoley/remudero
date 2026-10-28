@@ -311,6 +311,36 @@ $0.20 cache reads, and $20 output per million tokens in its
 while the Codex and Claude routing auction here spends subscriptions. The quoted $4–10 monthly
 personal-agent estimate does not establish Remudero savings.
 
+## A cash deployment's per-minute token ceiling
+
+Azure enforces a deployment's tokens-per-minute quota as a per-request ceiling, partner models
+included: a ~25K-token prompt to a 20,000 TPM deployment returns HTTP 429 at once and can never
+succeed, however long it waits. The daemon holds only data-plane keys, so it cannot read the quota
+from management APIs. It reads it from the deployment's own responses instead: every cash
+chat-completions and Responses reply, success or failure, carries `x-ratelimit-limit-tokens` and
+`x-ratelimit-renewalperiod-tokens`.
+
+- **Where it is learned.** `recordCashCapacity` in `src/lib/worker-provider.ts` keeps the two
+  integers per deployment in `state/cash-capacity.json` (an atomic, owner-only file). A changed
+  limit replaces the old one and writes one `cash.capacity.observed` ledger row; an unchanged limit
+  writes nothing. No number is declared in code or config: the ceiling is whatever the deployment
+  last reported.
+- **A second fit ceiling.** `openWeightDeploymentHolds` gates a request on the smaller of the
+  deployment's context window and its learned limit, using the same prompt estimate plus the
+  completion allowance. A deployment that has not answered yet is gated by its context window
+  alone, so its first request teaches the limit. A candidate skipped for the learned limit is
+  reported as a `capacity_shortfall` naming the deployment, the request's estimate and the limit.
+- **An oversized 429 is not transient.** A 429 whose request estimate exceeds the limit reported by
+  that same response is a `capacity_shortfall`: it is never retried after `retry-after`, and the
+  limit it reported is recorded so the next request skips the deployment before transport. A 429
+  under the limit keeps the ordinary cooldown retry.
+- **Lane readiness.** `cashCapacityReadiness(learnedLimitTokens, needTokens)` is a pure answer
+  (`unlearned`, `covered`, or `shortfall` with the missing tokens) for a lane to call with its
+  observed prompt sizes.
+
+Raising a deployment's quota is the operator's portal step; the next response reports the new limit
+and the ceiling follows it.
+
 ## Paid pilot accounting
 
 Daily and full trial collection count invalid timestamps separately from future rows. Both are
