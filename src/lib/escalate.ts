@@ -8,6 +8,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadMessage } from "./inbox-thread.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
+import { clockFromMillisFn } from "./clock.js";
 import {
   checkOperatorMessage,
   operatorMessageFooter,
@@ -378,6 +379,44 @@ export interface IssueGateway {
  *  awaits. Every sync gateway is one. */
 export type AsyncIssueGateway = { [K in keyof IssueGateway]: Awaitable<IssueGateway[K]> };
 type Awaitable<F> = F extends (...args: infer P) => infer R ? (...args: P) => R | Promise<R> : F;
+
+/** W1-T10750: the line that keys a repository-maintenance issue by repo path, so a re-escalation never duplicates it. */
+export function maintenanceIssueKey(repo: string): string {
+  return `**Repository maintenance:** ${repo}`;
+}
+
+/**
+ * W1-T10750 — the repository-maintenance controller's operator channel over an existing {@link AsyncIssueGateway}
+ * (no new issue writer). `open` files ONE `needs-human` issue keyed by repo path — an issue already open for the
+ * repo is returned, never duplicated — naming every kept leftover with its reason, the last failure and the next
+ * re-survey. `close` posts the recovery comment and closes it, finding the issue by key when its url is not known.
+ */
+export function maintenanceOperatorChannel(issues: AsyncIssueGateway): {
+  open(note: { repo: string; leftovers: Array<{ path: string; reason: string }>; lastReason: string; nextSurveyAt: number }): Promise<string>;
+  close(repo: string, issueUrl: string | undefined, comment: string): Promise<void>;
+} {
+  const findOpen = async (repo: string): Promise<OpenIssue | undefined> =>
+    issues.listOpen ? (await issues.listOpen(NEEDS_HUMAN_LABEL)).find((i) => (i.body ?? "").split(/\r?\n/).includes(maintenanceIssueKey(repo))) : undefined;
+  return {
+    async open(note) {
+      const existing = await findOpen(note.repo);
+      if (existing) return existing.url;
+      const kept = note.leftovers.length === 0 ? ["- none: nothing was left in the store that rmd could name"] :
+        note.leftovers.map((l) => `- \`${l.path}\` kept: ${l.reason}`);
+      const body = [maintenanceIssueKey(note.repo), "",
+        "Repository maintenance exhausted its automatic retries. It keeps re-surveying this store on a growing backoff,",
+        "and this issue closes itself on the first verified success.", "",
+        `**Last failure:** ${note.lastReason}`,
+        `**Next re-survey:** ${clockFromMillisFn(() => note.nextSurveyAt).iso()}`,
+        "**Kept leftovers:**", ...kept, ""].join("\n");
+      return issues.create(`repository maintenance escalated: ${note.repo}`, body, [NEEDS_HUMAN_LABEL]);
+    },
+    async close(repo, issueUrl, comment) {
+      const url = issueUrl ?? (await findOpen(repo))?.url;
+      if (url !== undefined) await issues.closeWithComment?.(url, comment);
+    },
+  };
+}
 
 /** The close transport reports whether GitHub accepted the citation or only the terminal close. */
 export type IssueCloseOutcome = "commented" | "comment_cap";
