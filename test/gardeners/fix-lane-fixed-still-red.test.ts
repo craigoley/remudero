@@ -53,3 +53,15 @@ test("a new repair at the same head is evaluated after a previously cleared roun
   assert.equal(events[0]!.at, Date.parse(at(-2)));
   assert.match(events[0]!.evidence, /repair-again\.tail/);
 });
+
+test("W1-T10781: fix-lane-fixed-still-red clears without a person", () => {
+  const dispatch: LedgerRecord = {
+    step: "fix.dispatch", ts: at(-7), pr_number: 7, round_id: "repair-7", head_sha: "old-head",
+    ci_failures: [{ check: "unit", signature: "a" }],
+  };
+  const other = { ...sweep(-4, "own-red"), ci_failures: [{ check: "lint", signature: "b" }] };
+  const same = { ...sweep(-4, "own-red"), ci_failures: [{ check: "unit", signature: "a" }] };
+  const all = (rows: LedgerRecord[]) => defectEventsOf(rows, NOW).filter(e => e.key.startsWith("fixed-"));
+  assert.deepEqual(all([dispatch, fixed, other]).map(e => e.key), ["fixed-new-red"]);
+  assert.deepEqual(all([dispatch, fixed, same]).map(e => e.key), ["fixed-still-red"]);
+});
