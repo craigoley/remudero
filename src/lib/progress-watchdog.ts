@@ -262,9 +262,9 @@ export function inFlightPass(rows: ReadonlyArray<Record<string, unknown>>, nowMs
  * which replaced a daemon that was posting reviews again.
  *
  * A RESUME is a `daemon.loop_lag` row newer than the newest progress row, written by the current generation (the
- * `actor_pid`, and `host` when stamped, of the newest `daemon.boot`), carrying a positive lag_ms. Its block must have
- * begun (ts - lag_ms) while progress was still inside STALL_RECYCLE_AFTER_MS: a loop already stalled when it blocked
- * is not excused, so a healthy loop's every-minute lag rows cannot reopen the allowance. No new bound.
+ * `actor_pid`, and `host` when stamped, of the newest `daemon.boot`), carrying a positive lag_ms. The block's start
+ * does not affect eligibility: even a block that began after progress was stale has now ended. The existing
+ * STALL_* bounds run from the newest resume, so a second silence still exhausts the allowance. No new bound.
  */
 export function loopResumeFromRows(rows: ReadonlyArray<Record<string, unknown>>, newestProgressMs: number | undefined):
   { resumedMs: number; lagMs: number } | undefined {
@@ -282,7 +282,6 @@ export function loopResumeFromRows(rows: ReadonlyArray<Record<string, unknown>>,
     const lagMs = row.lag_ms;
     if (ms === undefined || ms <= newestProgressMs || ms < bootMs || typeof lagMs !== "number" || !(lagMs > 0)) continue;
     if (row.actor_pid !== boot.actor_pid || (typeof boot.host === "string" && row.host !== boot.host)) continue;
-    if (ms - lagMs - newestProgressMs > STALL_RECYCLE_AFTER_MS) continue;
     if (resume === undefined || ms > resume.resumedMs) resume = { resumedMs: ms, lagMs };
   }
   return resume;

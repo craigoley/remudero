@@ -54,15 +54,29 @@ test("W1-T9516: a loop that resumed after its block is recovering, not stalled",
 });
 
 test("W1-T9516: a resumed loop that makes no progress is still recycled", () => {
-  // A healthy loop's small lag row in the second silence must not reopen the allowance.
-  const smallLag: Row = { ts: "2026-10-14T06:04:00.000Z", step: "daemon.loop_lag", run_id: RUN, actor_pid: PID, host: HOST,
-    phase: "pulse", lag_ms: 90_000, missed_ticks: 1 };
-  const rows = incidentRows([smallLag]);
+  const rows = incidentRows();
   const within = decide(rows, at("2026-10-14T05:52:00.000Z"));
   assert.deepEqual([within.state, within.action], ["STALLED", "capture-diagnostics"], within.reason);
   const verdict = decide(rows, at("2026-10-14T06:06:00.000Z"));
   assert.deepEqual([verdict.state, verdict.action], ["STALLED", "recycle"], verdict.reason);
-  assert.equal(verdict.loopResumedMs, at(RESUME), "the small lag row is not a resume");
+  assert.equal(verdict.loopResumedMs, at(RESUME), "a second silence does not extend the resume allowance");
+});
+
+test("W1-T9516: a block that began after progress was stale still grants a bounded resume", () => {
+  const newestResume = "2026-10-14T06:04:00.000Z";
+  const rows = incidentRows([{ ts: newestResume, step: "daemon.loop_lag", run_id: RUN, actor_pid: PID, host: HOST,
+    phase: "pulse", lag_ms: 90_000, missed_ticks: 1 }]);
+  const recovering = decide(rows, at("2026-10-14T06:06:00.000Z"));
+  assert.deepEqual([recovering.state, recovering.action], ["RECOVERING", "none"], recovering.reason);
+  assert.equal(recovering.loopResumedMs, at(newestResume), "the newest current-pid resume starts the allowance");
+  assert.match(recovering.reason, /resumed at 2026-10-14T06:04:00\.000Z/);
+  assert.match(recovering.reason, /lag_ms 90000/);
+  assert.match(recovering.reason, /newest progress row is 76 min old/);
+  const diagnose = decide(rows, at("2026-10-14T06:20:00.000Z"));
+  assert.deepEqual([diagnose.state, diagnose.action], ["STALLED", "capture-diagnostics"], diagnose.reason);
+  const recycle = decide(rows, at("2026-10-14T06:35:00.000Z"));
+  assert.deepEqual([recycle.state, recycle.action], ["STALLED", "recycle"], recycle.reason);
+  assert.equal(recycle.loopResumedMs, at(newestResume));
 });
 
 test("W1-T9516: a previous generation's loop_lag is not a resume", () => {
