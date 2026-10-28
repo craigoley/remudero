@@ -762,9 +762,8 @@ function nativeFixture(t: TestContext, registry = CORE_ONLY) {
     return { lines: lines.slice(from), spawned };
   };
   const record = (origin: string) => fileTargetJobStore(core).read(origin);
-  return { root, core, checkout, registryPath, stateBase, store, productId, options, service, command, ledgerPath, calls, state, drive, record, log, targetPlanFile: planFile };
+  return { root, core, checkout, registryPath, stateBase, store, productId, inspection, options, service, command, ledgerPath, calls, state, drive, record, log, targetPlanFile: planFile };
 }
-const nativeRefused = async (promise: ReturnType<ProductBuildService["execute"]>) => { const result = await promise; assert.equal(result.ok, false); return result.code; };
 const nativeStarted = async (f: ReturnType<typeof nativeFixture>) => {
   const result = await f.service.execute(actor, f.command());
   assert.ok(result.ok, "the build request is accepted");
@@ -907,22 +906,61 @@ test("W1-T10799: native receipts distinguish queued admitted running and refused
 const nativeOutcome = async (f: ReturnType<typeof nativeFixture>) => { const result = await f.service.execute(actor, f.command()); assert.ok(result.ok); return result.value.receipt.outcome; };
 const nativeKickMarkers = (core: string) => readdirSync(join(core, "state")).filter((name) => name.startsWith("KICK_REQUESTED-"));
 
+// The request side of routing: where a product build request's kick marker goes, and what it refuses. Every file here is
+// real: the product store, the registry, the managed set, the kick markers and the halt flags.
 test("W1-T10799: unreadable or halted routing refuses and live instances retain their own path", async (t) => {
   // An unreadable registry is unknown, never "no daemon".
   const broken = nativeFixture(t, "instances:\n  core:\n  wreckterra:\n");
-  assert.equal(await nativeRefused(broken.service.execute(actor, broken.command())), "target_unreadable");
+  assert.equal(await refused(broken.service.execute(actor, broken.command())), "target_unreadable");
   assert.deepEqual(nativeKickMarkers(broken.core), [], "no marker anywhere");
+  assert.deepEqual(readdirSync(join(broken.stateBase, "wreckterra", "state")), [], "none under the target's root either");
   // A halted core root refuses before any marker, whether paused or stopped.
-  const paused = nativeFixture(t);
-  writeFileSync(join(paused.core, "state", "PAUSE"), "{}");
-  assert.equal(await nativeRefused(paused.service.execute(actor, paused.command())), "fleet_halted");
-  assert.deepEqual(nativeKickMarkers(paused.core), []);
+  for (const flag of ["PAUSE", "STOP"]) {
+    const halted = nativeFixture(t);
+    writeFileSync(join(halted.core, "state", flag), "{}");
+    assert.equal(await refused(halted.service.execute(actor, halted.command())), "fleet_halted", flag);
+    assert.deepEqual(nativeKickMarkers(halted.core), [], flag);
+  }
   // A core root whose state directory this process cannot reach is unreadable.
   const noState = nativeFixture(t);
   const bare = join(noState.root, "bare-core");
   mkdirSync(bare);
-  assert.equal(await nativeRefused(new ProductBuildService({ ...noState.options, root: bare }).execute(actor, noState.command())), "target_unreadable", "a core root with no state directory is unreadable");
-  // An unenrolled target is refused by the request, and by the daemon when a marker arrives anyway.
+  assert.equal(await refused(new ProductBuildService({ ...noState.options, root: bare }).execute(actor, noState.command())), "target_unreadable",
+    "a core root with no state directory is unreadable");
+  // An unenrolled target is refused by the request itself: no marker, and no job is born.
+  const unenrolled = nativeFixture(t);
+  unenrolled.inspection.enrolled = false;
+  assert.equal(await refused(unenrolled.service.execute(actor, unenrolled.command())), "target_not_enrolled");
+  assert.deepEqual(nativeKickMarkers(unenrolled.core), []);
+  // A target whose enrollment this process cannot read is unknown, never enrolled.
+  const unknownEnrollment = nativeFixture(t);
+  unknownEnrollment.inspection.enrolled = undefined;
+  assert.equal(await refused(unknownEnrollment.service.execute(actor, unknownEnrollment.command())), "target_unreadable");
+  assert.deepEqual(nativeKickMarkers(unknownEnrollment.core), []);
+
+  // With no live instance of its own, the marker goes to the CORE root, once, and the same request replays without a second one.
+  const native = nativeFixture(t);
+  const first = await native.service.execute(actor, native.command());
+  assert.ok(first.ok, "an enrolled target with no live instance is accepted, not refused as having no daemon");
+  assert.ok(existsSync(nativeMarker(native.core, "wreckterra", "W9-T1")), "the marker sits under the core daemon's root");
+  const replay = await native.service.execute(actor, native.command());
+  assert.ok(replay.ok && replay.value.replayed && replay.value.receipt.operationId === first.value.receipt.operationId);
+  assert.equal(nativeKickMarkers(native.core).length, 1, "one marker for one request");
+
+  // A live instance keeps its own kick path: the marker goes to ITS root and none to the core root.
+  const own = nativeFixture(t, WITH_OWN);
+  const started = await own.service.execute(actor, own.command());
+  assert.ok(started.ok);
+  const ownMarker = nativeMarker(join(own.stateBase, "wreckterra"), "wreckterra", "W9-T1");
+  assert.ok(existsSync(ownMarker), "the marker sits under the instance's own root");
+  assert.deepEqual(nativeKickMarkers(own.core), [], "none under the core root");
+  const carried = JSON.parse(readFileSync(ownMarker, "utf8")) as { origin?: string };
+  assert.equal(carried.origin, productBuildKickOrigin(own.productId, started.value.receipt.operationId), "the marker carries the origin this request minted");
+});
+
+// The daemon side: what the core daemon does with a marker it is offered.
+test("W1-T10799: the core daemon refuses a stray marker and holds one it cannot read", async (t) => {
+  // An unenrolled target is refused by the daemon when a marker arrives anyway.
   const stray = nativeFixture(t);
   writeFileSync(join(stray.checkout, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/something-else"] }));
   const strayKick = { taskId: "W9-T1", origin: "product:p/op", repo: "wreckterra", requestedAt: new Date().toISOString() };
