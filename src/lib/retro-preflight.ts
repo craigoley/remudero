@@ -690,7 +690,7 @@ function logAttempt(
     cancelled_tests: failure.cancelledTests,
     cancelled_count: failure.cancelledCount ?? null,
     has_summary: failure.hasSummary,
-    process_cleanup_failed: failure.cleanupFailed ?? false,
+    ...(failure.cleanupFailed ? { process_cleanup_failed: true } : {}),
     stdout_excerpt: bounded.stdoutExcerpt,
     stderr_excerpt: bounded.stderrExcerpt,
     output_truncated: bounded.truncated,
