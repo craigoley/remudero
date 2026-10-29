@@ -2643,7 +2643,7 @@ export function buildSweepEffects(
 
   export function fixRungTaskFor(
   */
-  return buildSweepEffectsFromModule(sweepCommandHost({ freshTreeGit: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString() }), deps);
+  return buildSweepEffectsFromModule(sweepCommandHost({ freshTreeGit: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString() }), { ...deps, feedbackLandingStateRoot: deps.feedbackLandingStateRoot ?? deps.config.root });
 }
 
 /**

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mock, test, type TestContext } from "node:test";
-import { parse, stringify } from "yaml";
+import { after, mock, test, type TestContext } from "node:test";
+import { stringify } from "yaml";
 import { runMeasurementCadenceReport } from "#src/lib/measurement-cadence.js";
 import { captureFeedbackReply } from "#src/lib/panel-graph.js";
 import { captureFeedback } from "#src/lib/feedback.js";
@@ -15,7 +15,15 @@ import { readQueuedFeedbackRecords, queuedFeedbackLandings } from "#src/lib/feed
 import { readEscalationAnswers } from "#src/lib/escalation-answers.js";
 import { renderIssueBody } from "#src/lib/escalate.js";
 import { consumeSourceSizeFollowup } from "#src/lib/source-size-followup.js";
-import { captureRepairFeedbackWithPriorVerdict, depReviewCommand } from "#src/run-task.js";
+
+const sweepRoot = mkdtempSync(join(tmpdir(), "rmd-w9734-sweep-"));
+after(() => rmSync(sweepRoot, { recursive: true, force: true }));
+const savedArgv = [...process.argv];
+process.argv.push("--repo-root", sweepRoot);
+let cli: typeof import("#src/run-task.js");
+try { cli = await import("#src/run-task.js"); }
+finally { process.argv.splice(0, process.argv.length, ...savedArgv); }
+const { buildSweepEffects, captureRepairFeedbackWithPriorVerdict, depReviewCommand } = cli;
 
 function fixture(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w9734-"));
@@ -34,6 +42,9 @@ async function observeLanding<T>(run: () => T | Promise<T>) {
   const calls: string[][] = [];
   const real = childProcess.execFileSync;
   mock.method(childProcess, "execFileSync", (file: string, args: string[], opts: object) => {
+    if (file === "git" && args.join(" ") === `-C ${sweepRoot} config --get remote.origin.url`) {
+      return "https://github.com/fixture/repo.git\n";
+    }
     if (args?.some(a => /^(fetch|push|ls-remote|worktree|commit-tree|read-tree|hash-object)$/.test(a))) {
       calls.push([file, ...args]);
       throw new Error("synchronous landing is forbidden in this fixture");
@@ -80,6 +91,12 @@ test("W1-T9734: the measurement cadence captures stage for the async sweep", asy
 
 test("W1-T9734: the grilled reply and the repair capture stage for the async sweep", async t => {
   const f = fixture(t), parent = "fb-grilled";
+  const effects = buildSweepEffects({
+    owner: "fixture", repo: "repo", localRepoName: "repo", repoRoot: sweepRoot,
+    config: { root: f.stateRoot } as never, ledgerPath: f.ledgerPath, runId: "fixture",
+    plan: { tasks: [], byId: new Map() }, log: () => {}, instanceRegistryTextImpl: () => undefined,
+  });
+  const repair = { id: "repair-no-root", raw: "- PR #2\nrepair failed", origin: "repair#other" };
   writeFileSync(join(f.root, "plan", "feedback", `${parent}.yaml`), stringify({
     id: parent, ts: new Date().toISOString(), raw: "choose the owner", attachments: [], origin: "cli", status: "grilling",
   }));
@@ -93,7 +110,7 @@ test("W1-T9734: the grilled reply and the repair capture stage for the async swe
       reactPlusOne: () => {},
     }, { ledgerPath: f.ledgerPath, feedback: { root: f.root, inboxRoot: f.stateRoot, feedbackLand: {} } });
     captureRepairFeedbackWithPriorVerdict(f.root, { id: "repair-window", raw: "- PR #1\nrepair failed", origin: "repair#fixture" }, () => {}, f.stateRoot);
-    captureRepairFeedbackWithPriorVerdict(f.root, { id: "repair-no-root", raw: "- PR #2\nrepair failed", origin: "repair#other" }, () => {});
+    await effects.captureRepairFeedback!(repair);
     return result;
   });
   assert.equal(observed.result.accepted, 1);
@@ -105,9 +122,12 @@ test("W1-T9734: the grilled reply and the repair capture stage for the async swe
   assert.equal(queued.get(`plan/feedback/${parent}.yaml`)?.answered_by, reply.id);
   assert.ok(queued.has("plan/feedback/repair-window.yaml"));
   assert.equal(existsSync(join(f.root, "plan/feedback", `${reply.id}.yaml`)), false);
-  assert.equal(parse(readFileSync(join(f.root, "plan/feedback/repair-no-root.yaml"), "utf8")).raw, "- PR #2\nrepair failed");
+  assert.equal(queued.get("plan/feedback/repair-no-root.yaml")?.raw, repair.raw);
+  assert.equal(queued.get("plan/feedback/repair-no-root.yaml")?.origin, repair.origin);
+  assert.equal(existsSync(join(sweepRoot, "plan/feedback/repair-no-root.yaml")), false);
   const before = [...queued.entries()];
   captureRepairFeedbackWithPriorVerdict(f.root, { id: "repair-window", raw: "changed", origin: "repair#fixture" }, () => {}, f.stateRoot);
+  await effects.captureRepairFeedback!({ ...repair, raw: "changed" });
   assert.deepEqual([...readQueuedFeedbackRecords(f.stateRoot).entries()], before);
 });
 
@@ -175,7 +195,9 @@ test("W1-T9734: daemon dependency migration captures use the wired state root an
     assert.equal(before.length, 1);
     assert.equal(before[0][1].origin, "repair#dep-review");
     assert.equal(existsSync(join(f.root, before[0][0])), false);
-    assert.equal(await run(), 0);
+    const repeated = await observeLanding(run);
+    assert.equal(repeated.result, 0);
+    assert.deepEqual(repeated.calls, []);
     assert.deepEqual([...readQueuedFeedbackRecords(f.stateRoot).entries()], before);
   });
 });
