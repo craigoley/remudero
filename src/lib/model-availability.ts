@@ -121,8 +121,8 @@ function nextStep(state: SuccessorState, model: string, gated: boolean): string 
 }
 
 /**
- * Purely classify catalog successors. A model is only a successor when it is a higher generation
- * in a family already present in a routed ladder. Cash readiness is deliberately the routing gate:
+ * Classify higher generations in routed families, plus catalog-listed cash deployments at the
+ * current generation whose routing is ready. Cash readiness is deliberately the routing gate:
  * Codex can announce a model before Azure has a deployment, while a cash model can be deployed
  * before its local price/shape rows exist.
  */
@@ -140,8 +140,9 @@ export function classifySuccessors(
   for (const catalog of catalogs) {
     for (const model of modelIds(catalog.models)) {
       const parsed = generationOf(model);
-      const routedGeneration = parsed === undefined ? undefined : routed.get(parsed.family);
-      if (routedGeneration === undefined || parsed!.generation <= routedGeneration) continue;
+      if (!parsed) continue;
+      const routedGeneration = routed.get(parsed.family);
+      if (routedGeneration === undefined || parsed.generation < routedGeneration) continue;
       const sources = byModel.get(model) ?? new Set<"cash" | "codex">();
       sources.add(catalog.source);
       byModel.set(model, sources);
@@ -149,6 +150,11 @@ export function classifySuccessors(
   }
 
   return [...byModel.entries()]
+    .filter(([model, sources]) => {
+      const parsed = generationOf(model)!;
+      return parsed.generation > routed.get(parsed.family)!
+        || (sources.has("cash") && openWeightDeploymentReady(model));
+    })
     .map(([model, sourceSet]) => {
       const parsed = generationOf(model)!;
       const sources = [...sourceSet].sort() as Array<"cash" | "codex">;

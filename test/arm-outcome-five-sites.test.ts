@@ -17,6 +17,7 @@ import {
 } from "../src/run-task.js";
 import { isInPlanScope, ORIENTATION_DOC } from "../src/lib/plan-architect.js";
 import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
+import { readQueuedFeedbackRecords } from "#src/lib/feedback-landing.js";
 
 // ── THE DEFECT ────────────────────────────────────────────────────────────────────────
 // `armAutoMerge` RETURNS which of its seven branches it took; it never throws. Five of the
@@ -721,9 +722,13 @@ test("impl-FR SAFETY: a MAJOR bump migrates and still never arms or reaches the 
   const captured = r.steps.find((s) => s.step === "dep-review.migrate.feedback_captured");
   assert.ok(captured);
   assert.equal(captured.feedback_id, "fb-dep-review-baabd25506738b2a");
-  const proposal = readFileSync(join(r.tmp, "plan", "feedback", `${captured.feedback_id}.yaml`), "utf8");
-  assert.match(proposal, /@types\/node 25\.4\.1 -> 26\.1\.2/,
-    "the real migration capture must stay inside this fixture's disposable checkout");
+  const proposalPath = `plan/feedback/${captured.feedback_id}.yaml`;
+  const proposal = readQueuedFeedbackRecords(r.tmp).get(proposalPath);
+  assert.ok(proposal, "the real migration capture must be staged inside this fixture's state root");
+  assert.equal(proposal.id, captured.feedback_id);
+  assert.equal(proposal.origin, "repair#dep-review");
+  assert.match(String(proposal.raw), /@types\/node 25\.4\.1 -> 26\.1\.2/);
+  assert.equal(existsSync(join(r.tmp, proposalPath)), false, "staging moves the checkout copy");
 });
 
 test("impl-FR SAFETY: an unparseable version is likewise never armed and never detected", async () => {

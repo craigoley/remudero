@@ -166,6 +166,7 @@ import {
   spawnDecisionPoint,
   type RoutingDrawSeed,
   type RoutingPropensity,
+  type ProviderLane,
   selectOpenWeightModel,
   type CapacityShortfall,
   hydrateCashCapacity,
@@ -510,7 +511,9 @@ export type RoutingRule =
   | "cash-opus-fallback"
   | "cash-sonnet-fallback"
   | "overflow-fallback"
-  | "cash-trial";
+  | "cash-trial"
+  /** W1-T10382: no subscription had headroom, so prepaid Codex credits carried the spawn ahead of cash. */
+  | "codex-credits";
 
 export interface RoutingDecision {
   rule: RoutingRule;
@@ -530,6 +533,10 @@ export interface RoutingDecision {
     eligible: boolean;
     selected: boolean;
     reason?: string;
+    /** W1-T10382: admitted past its reserve on prepaid credits. */
+    lane?: ProviderLane;
+    /** W1-T10382: the Codex credit balance this read saw; `null` when the balance was unreadable. */
+    creditsBalance?: number | null;
   }>;
   /** Tightest remaining window per subscription read for this decision; `null` means unreadable. */
   headroomPercent: Partial<Record<WorkerProviderId, number | null>>;
@@ -1669,17 +1676,18 @@ export function cashAllowanceFallbackRefusal(config: Config, prompt: string, dep
   }
 }
 
-function cashSonnetAlternatives(prompt: string, config: Config, ctx: { runId?: string; taskId?: string }): string[] {
+export function cashSonnetAlternatives(prompt: string, config: Config, ctx: { runId?: string; taskId?: string }): string[] {
   hydrateCashCapacity(config);
-  const deployment = "gpt-6.1-sol";
-  if (!openWeightDeploymentReady(deployment)) return [];
   const estimatedTokens = openWeightEstimatedTokens(Buffer.byteLength(prompt, "utf8"));
-  const limitTokens = learnedCashLimit(deployment, cashDeploymentEndpoint(config, deployment));
-  if (openWeightDeploymentHolds(deployment, estimatedTokens, limitTokens)) return [deployment];
-  if (limitTokens !== undefined && openWeightDeploymentHolds(deployment, estimatedTokens, Number.POSITIVE_INFINITY)) {
-    recordCashCapacityShortfall(config, { reason: "capacity_shortfall", deployment, estimatedTokens, limitTokens }, ctx);
-  }
-  return [];
+  return ["gpt-6.1-terra", "gpt-6.1-sol"].filter((deployment) => {
+    if (!openWeightDeploymentReady(deployment)) return false;
+    const limitTokens = learnedCashLimit(deployment, cashDeploymentEndpoint(config, deployment));
+    if (openWeightDeploymentHolds(deployment, estimatedTokens, limitTokens)) return true;
+    if (limitTokens !== undefined && openWeightDeploymentHolds(deployment, estimatedTokens, Number.POSITIVE_INFINITY)) {
+      recordCashCapacityShortfall(config, { reason: "capacity_shortfall", deployment, estimatedTokens, limitTokens }, ctx);
+    }
+    return false;
+  });
 }
 
 /** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
@@ -1821,10 +1829,16 @@ export function workerSelectionAssignment(
   };
 }
 
+/** W1-T10382: a credits-lane arm is never drawn beside subscription headroom, so it cannot enrol an experiment. */
+function experimentArms<T extends { eligible: boolean; lane?: ProviderLane }>(considered: readonly T[]): T[] {
+  return considered.map((entry) => (entry.lane ? { ...entry, eligible: false } : entry));
+}
+
 function routingRule(args: SpawnWorkerArgs, input: Parameters<typeof workerSelectionAssignment>[1]): RoutingRule {
   if (args.routingFallback) return args.routingFallback.rule;
   if (args.routingTrial?.arm === "cash" && input.provider === "cash") return "cash-trial";
   if (input.mode !== "multi-provider") return input.mode;
+  if (input.selection?.lane === "codex-credits") return "codex-credits";
   if (input.preferenceBypass) return "preference-bypassed";
   if (input.capabilityPreference) return "capability-preference";
   return input.policy.preference === "automatic" ? "headroom-auction" : "operator-preference";
@@ -1844,6 +1858,8 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
       eligible: verdict.eligible,
       selected: chosen,
       ...(verdict.reason ? { reason: verdict.reason } : {}),
+      ...(verdict.lane ? { lane: verdict.lane } : {}),
+      ...(capacity.credits ? { creditsBalance: capacity.credits.balance } : {}),
     };
   });
   if (!considered.some((entry) => entry.selected)) {
@@ -1855,7 +1871,7 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
   const rule = routingRule(args, input);
   const learner = input.selection?.draw?.learned ? FIX_ROUTING_LEARNER : undefined;
   const ab = rule === "headroom-auction" && learner === undefined && experimentTaskIdentity(args.taskId) !== undefined
-    ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered })
+    ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered: experimentArms(considered) })
     : undefined;
   return {
     rule,
@@ -1897,12 +1913,18 @@ export function auctionDrawSeed(
   capacities: readonly ProviderCapacity[],
   capability: CodexModelTier | undefined,
 ): RoutingDrawSeed {
-  const considered = capacities.map((capacity) => ({
-    provider: capacity.provider,
-    ...(capacity.model ? { model: capacity.model } : {}),
-    eligible: providerEligibility(capacity, policy.reservePercent).eligible,
-  }));
-  const id = policy.preference === "automatic" ? routingExperimentFor({ capability, effort: args.effort, considered }) : undefined;
+  const considered = capacities.map((capacity) => {
+    const verdict = providerEligibility(capacity, policy.reservePercent);
+    return {
+      provider: capacity.provider,
+      ...(capacity.model ? { model: capacity.model } : {}),
+      eligible: verdict.eligible,
+      ...(verdict.lane ? { lane: verdict.lane } : {}),
+    };
+  });
+  const id = policy.preference === "automatic"
+    ? routingExperimentFor({ capability, effort: args.effort, considered: experimentArms(considered) })
+    : undefined;
   const experiment = ROUTING_EXPERIMENTS.find((candidate) => candidate.id === id);
   const unit = experimentTaskIdentity(args.taskId);
   if (experiment && unit) return experimentDrawSeed(experiment, unit);
@@ -3053,6 +3075,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         config, runId: args.runId, taskId: args.taskId,
         cashSqueezed: args.cashSqueezed === true,
         modelApprovals: config.modelApprovals,
+        ...(args.routingTrial?.id === "inbox-bakeoff" && args.routingTrial.arm === "cash" && args.routingTrial.models?.length === 1
+          ? { bakeoffDeployment: args.routingTrial.models[0] } : {}),
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
     );

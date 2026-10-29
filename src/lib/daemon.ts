@@ -45,7 +45,7 @@ import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-revi
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
 import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
-import { runChildOutsideKill, type AdoptedRunChild, type RunChildHandle, type RunChildPending } from "./run-child.js";
+import { planSha, runChildOutsideKill, type AdoptedRunChild, type RunChildHandle, type RunChildPending } from "./run-child.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
@@ -75,6 +75,14 @@ import {
   type PriorityBackfillEstimates,
   type PriorityDeferral,
   type PriorityReservationRelease,
+  applyCuratedSelection,
+  type DrainOpts,
+  type DrainSummary,
+  type StopReason,
+  type TargetJobAdmission,
+  type TargetJobRead,
+  type TargetJobRecord,
+  type TargetJobStatus,
 } from "./drain.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 // Why: drain.ts already owns the overlap partition, so it is reused rather than re-derived (W1-T343).
@@ -135,7 +143,7 @@ import type { RetroTriggerDecision } from "./retro.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
 import type { OrphanSweepReport } from "./worker-containment.js";
 // Type-only — shapes the feedback-landing injection points below (W1-T530).
-import type { LandFeedbackResult } from "./feedback-landing.js";
+import type { FeedbackRefusal, LandFeedbackResult } from "./feedback-landing.js";
 // Type-only — github-posture.ts owns this shape; the real read lives in run-task.ts (W1-T1040).
 import type { GithubPostureFinding } from "./github-posture.js";
 // The Clock port (W1-T2897): declared in "../lib/clock" so every reachable-through-lib import
@@ -459,7 +467,17 @@ export function restartWorkHistory(rawLines: readonly string[], nowMs: number): 
 /** The step a pre-PR handoff writes beside its verdict, and the daemon re-writes for a receipt the live ledger
  *  holds only as a verdict row: verdicts keep the newest 200, so a parked checkpoint aged out of resumption. */
 export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
-export const CHECKPOINT_HANDOFF_REASONS: ReadonlySet<string> = new Set(["freshness_yield", "quiet_worker_round_ended"]);
+/** W1-T10896: `orphaned-by-restart` is the boot sweep's verdict for a run its own daemon restarted under. */
+export const CHECKPOINT_HANDOFF_REASONS: ReadonlySet<string> = new Set(["freshness_yield", "quiet_worker_round_ended", "orphaned-by-restart"]);
+
+export interface WorkerBoundaryCheckpoint {
+  branch: string;
+  headSha: string;
+  resumePhase?: "preopen";
+}
+
+const checkpointPhase = (row: Record<string, unknown>): { resumePhase?: "preopen" } =>
+  row.reason === "orphaned-by-restart" || row.resume_phase === "preopen" ? { resumePhase: "preopen" } : {};
 
 /** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
  *  restore, which consumed nothing (W1-T7806). A matching checkpoint drop consumes the receipt;
@@ -467,8 +485,8 @@ export const CHECKPOINT_HANDOFF_REASONS: ReadonlySet<string> = new Set(["freshne
  *  which run-task writes right after a worker-error verdict of the run that restored the checkpoint, re-pends
  *  the exact receipt that verdict consumed. A run refused before it could restore (a stale engine's lockfile,
  *  2026-10-17 W1-T9089) consumed nothing either; its verdict left the P1 run-branch-already-pushed for 5 h. */
-export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
-  const pending = new Map<string, { branch: string; headSha: string }>();
+export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, WorkerBoundaryCheckpoint> {
+  const pending = new Map<string, WorkerBoundaryCheckpoint>();
   const resumable = (taskId: string, branch: unknown, headSha: unknown): branch is string =>
     typeof branch === "string" && branch.startsWith(`run-${taskId}-`) && /^run-.+-[0-9]+$/.test(branch) &&
     typeof headSha === "string" && /^[a-f0-9]{40}$/.test(headSha);
@@ -482,7 +500,7 @@ export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<
       continue;
     }
     if (row.step === "implement.checkpoint_kept") {
-      if (resumable(row.task_id, row.source_branch, row.head_sha)) pending.set(row.task_id, { branch: row.source_branch, headSha: String(row.head_sha) });
+      if (resumable(row.task_id, row.source_branch, row.head_sha)) pending.set(row.task_id, { branch: row.source_branch, headSha: String(row.head_sha), ...checkpointPhase(row) });
       continue;
     }
     const receipt = row.step === HANDOFF_RECEIPT_STEP ? row.waiting_on !== "pr" && row.waiting_on !== "ci"
@@ -493,14 +511,14 @@ export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<
     if (row.step === "verdict" && typeof row.stage === "string" && PRE_RESTORE_RUN_VERDICT_STAGES.has(row.stage)) continue;
     pending.delete(row.task_id);
     if (receipt && resumable(row.task_id, row.branch, row.head_sha)) {
-      pending.set(row.task_id, { branch: row.branch, headSha: String(row.head_sha) });
+      pending.set(row.task_id, { branch: row.branch, headSha: String(row.head_sha), ...checkpointPhase(row) });
     }
   }
   return pending;
 }
 
 /** The pending receipts whose only live record is a verdict row — what the daemon re-writes at boot. */
-export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[string, { branch: string; headSha: string }]> {
+export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[string, WorkerBoundaryCheckpoint]> {
   const recorded = new Set<string>();
   for (const raw of rawLines) {
     if (!raw.includes(HANDOFF_RECEIPT_STEP)) continue;
@@ -1458,6 +1476,7 @@ export interface DaemonDeps {
   /** Run ONE task through the existing run-task path (default = runTask). W1-T9089: a restart never reaches into a
    *  run; a child run is left running for the next boot to adopt and an in-process lane is awaited. */
   runOne: (taskId: string, options?: {
+    onRunCreated?: (runId: string) => void;
     onChild?: (child: RunChildHandle) => void;
     /** W1-T10000: the run waits for its child's memory admission; no child exists yet. */
     onChildPending?: (pending: RunChildPending) => void;
@@ -1597,6 +1616,13 @@ export interface DaemonDeps {
   /** Delete one kick marker (consumed-once) after the daemon dispatches or refuses it. W1-T10615: `repo` is the
    *  SAME repo the pending kick carried, so the clear names that exact marker, never a sibling repo's. */
   clearKick?: (taskId: string, repo?: string) => void;
+  /** W1-T10799: the repo-scoped kick markers for a MANAGED TARGET with no daemon of its own, which only the core daemon
+   *  may service. Never offered to {@link pendingKicks}' consumer, so a foreign marker cannot dispatch a core task. */
+  pendingTargetJobs?: () => Array<DaemonKick & { repo: string }>;
+  /** W1-T10799: runs ONE such job to its terminal verdict, through the maintained drain. The daemon passes its own deps so
+   *  the job meets every governor this daemon applies, and awaits it: one job occupies the one reserved lane. A `held` or
+   *  `resumed` outcome keeps the marker for a later tick; `ended` and `refused` closed it. */
+  runTargetJob?: (kick: DaemonKick & { repo: string }, daemonDeps: DaemonDeps, onDispatch?: () => void) => Promise<{ state: "ended" | "refused" | "held" | "resumed" }>;
   /** Read and delete the "drain now" marker, consumed once; a defined return means the operator
    *  asked for one immediate dispatch cycle. */
   consumeDrainNow?: () => { origin: string } | null;
@@ -1737,7 +1763,10 @@ export interface DaemonDeps {
    *  row. Every resulting task remains MARKED/PARKED (`author_class: machine`, `verify: human`);
    *  a throw is best-effort and the tick continues. */
   runCiLearningCadence?: () => Promise<
-    CiLearningCadenceRunResult & { filedCount: number; skippedCount: number; refusedCount: number }
+    CiLearningCadenceRunResult & {
+      filedCount: number; skippedCount: number; refusedCount: number;
+      carryRefusedCount?: number; carryRefused?: FeedbackRefusal[];
+    }
   >;
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
    * crosses first (policy data). An undefined return means there is nothing safe to evaluate — a corrupt marker, a
@@ -4109,7 +4138,8 @@ export async function runDaemon(
   // W1-T8676: the blocking runs whose release this process already ledgered, beside the projection's receipt.
   const ledgeredIndependentBlockReleases = new Set<string>();
   for (const [taskId, receipt] of handoffReceiptsToCarry(bootLedgerLines)) {
-    log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true });
+    log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true,
+      ...(receipt.resumePhase ? { resume_phase: receipt.resumePhase } : {}) });
   }
   let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(bootLedgerLines);
   const staleBodyReported = new Set<string>();
@@ -5264,6 +5294,8 @@ export async function runDaemon(
                 reason: result.snapshot.reason,
                 source_bytes: result.snapshot.pressure.sourceBytes,
                 checkpoint_bytes: result.checkpointBytes,
+                checkpoint_read_bytes: result.checkpointReadBytes,
+                checkpoint_written_bytes: result.checkpointWrittenBytes,
                 dimension_cardinality: result.snapshot.pressure.dimensionCardinality,
                 rebuilt_partitions: result.snapshot.pressure.rebuiltPartitions,
               });
@@ -5312,6 +5344,8 @@ export async function runDaemon(
                       filed: result.filedCount,
                       skipped: result.skippedCount,
                       refused: result.refusedCount,
+                      carry_refused: result.carryRefusedCount ?? 0,
+                      carry_refusals: result.carryRefused ?? [],
                       lesson_recurrences: result.lessonRecurrences,
                     });
                   })
@@ -6632,6 +6666,43 @@ export async function runDaemon(
       }
     }
 
+    // W1-T10799: a managed target with no daemon of its own runs ONE bounded job here, in the lane this daemon
+    // reserves for it. Core's own kick has priority, a busy lane or a zero enforced lane target defers the job
+    // explicitly, and a second request in the same tick defers behind the first: this adds no capacity.
+    if (!forcedNext && deps.pendingTargetJobs && deps.runTargetJob) {
+      let pending: Array<DaemonKick & { repo: string }>;
+      try { pending = deps.pendingTargetJobs(); }
+      catch (error) {
+        log("target_job.unknown", { reason: `durable jobs unreadable: ${String(error)}` });
+        ticks++;
+        await sleepUntilSweepWake(pollIntervalMs);
+        continue;
+      }
+      const [job, ...waiting] = pending;
+      if (job) {
+        const laneTarget = enforcedLaneTarget(children.size, tickQueueAdmission?.wipLimit);
+        const wipBudget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
+        if (children.size > 0 || laneTarget < 1 || wipBudget < 1) {
+          log("target_job.capacity_deferred", { task: job.taskId, origin: job.origin, repo: job.repo, in_flight: children.size });
+        } else {
+          for (const other of waiting) log("target_job.capacity_deferred", { task: other.taskId, origin: other.origin, repo: other.repo, reason: "lane reserved by another job" });
+          let closed = false;
+          let charged = false;
+          try { closed = ["ended", "refused"].includes((await deps.runTargetJob(job, deps, () => {
+            if (charged) throw new Error("target job already charged");
+            charged = true;
+            attempted.push(job.taskId);
+          })).state); }
+          catch (e) { log("target_job.error", { task: job.taskId, origin: job.origin, repo: job.repo, error: String((e as Error)?.message ?? e) }); }
+          if (closed) continue;
+        }
+        // Held, resumed or deferred: the marker stays, and the loop paces itself rather than re-reading it at once.
+        ticks++;
+        await sleepUntilSweepWake(pollIntervalMs);
+        continue;
+      }
+    }
+
     // W1-T4077: console PR actions are no longer read here — `startPrActionPump` runs them on their own timer,
     // detached, so a long iteration can neither delay a nudge nor be held by one.
 
@@ -7545,8 +7616,13 @@ export async function runDaemon(
     const phaseFaults: Array<{ phase: string; reason: unknown }> = [];
     const admittedWork = runLanePool(admitted, (id, task) => {
       const startedAtMs = preparedStartTimes.get(id)!;
+      const kick = forcedKick?.taskId === id ? forcedKick : undefined;
+      const bindRun = (runId: string) => {
+        if (kick) log("console.kick_dispatched", { task: id, origin: kick.origin, ...kickRepoField(kick), native_run_id: runId });
+      };
       // Preserve the current worker-boundary handoff; a reservation never preempts it.
-      return deps.runOne(id, { onChild: (child) => {
+      return deps.runOne(id, { onRunCreated: bindRun, onChild: (child) => {
+        bindRun(child.runId);
         childMode = true;
         children.set(child.runId, { ...child, taskId: id });
         batchChildren.set(task, child);
@@ -7954,4 +8030,126 @@ export function reconstructOrphan(
     prUrl: projection.prUrl,
     detail: `${orphan.taskId}: ${why} — orphaned worktree/branch is stale debris, safe to discard`,
   };
+}
+
+/**
+ * W1-T10799 — A MANAGED TARGET WITH NO DAEMON OF ITS OWN runs its one reviewed frontier task as ONE bounded
+ * job the CORE daemon owns. The narrow exception to {@link taskTargetsRepo}'s single-target guard: one job, one
+ * task, one lane, ended at that one dispatch's terminal verdict. It never makes the daemon a multi-repo
+ * scheduler, and it reuses the maintained drain, so every admission gate the drain applies still decides.
+ *
+ * PURE: every read and write is a seam the caller wires (the durable record, the registry, the plan sync, the
+ * dispatch claim, the drain's own deps), so this module keeps its no-filesystem contract.
+ */
+export interface BoundedTargetJobKick { taskId: string; origin: string; repo: string }
+export interface BoundedTargetJobPorts {
+  readJob: (origin: string) => TargetJobRead;
+  writeJob: (record: TargetJobRecord) => void;
+  admit: (repo: string) => TargetJobAdmission;
+  /** The target clone's plan, synced from origin/main through the existing plan-sync refusal. */
+  syncPlan: (owner: string, repo: string) => Promise<{ plan: Plan } | { error: string }>;
+  /** Whether the target's dispatch claim for the task is held; `undefined` is an unreadable remote, never "free". */
+  claimHeld: (taskId: string, repo: string) => Promise<boolean | undefined>;
+  /** The native receipts the CORE ledger holds for this job's origin (`readTargetExecution`). */
+  execution: (record: TargetJobRecord) => { state: string };
+  /** The maintained drain. `onDispatch` runs immediately before the drain's one `runOne` and may throw to refuse it. */
+  drain: (plan: Plan, opts: DrainOpts, onDispatch: () => void) => Promise<DrainSummary>;
+  clearKick: (taskId: string, repo: string) => void;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  nowIso: () => string;
+}
+/** `ended`/`refused` close the job and its marker; `held` and `resumed` keep both for a later tick. */
+export type BoundedTargetJobOutcome =
+  | { state: "ended" | "refused"; reason: string; replayed: boolean }
+  | { state: "held" | "resumed"; reason: string };
+
+/** The drain stop reasons that mean the core daemon's own governors declined, not that the task is unrunnable. */
+const CAPACITY_STOPS: ReadonlySet<StopReason> = new Set<StopReason>([
+  "headroom_exhausted", "headroom_degraded", "cost_governor_deferred", "queue_governor_deferred", "memory_governor_deferred",
+  "quiet_hours_deferred", "new_build_deferred", "wip_deferred", "stopped", "paused",
+]);
+
+export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: BoundedTargetJobPorts, baseOpts: DrainOpts = {}): Promise<BoundedTargetJobOutcome> {
+  const { taskId, origin, repo } = kick;
+  const fields = { task: taskId, origin, repo };
+  const base = (status: TargetJobStatus, prior?: TargetJobRecord, extra: Partial<TargetJobRecord> = {}): TargetJobRecord =>
+    ({ origin, taskId, repo, attempts: prior?.attempts ?? 0, ...extra, status, updatedAt: deps.nowIso() });
+  const held = (reason: string, step = "target_job.held"): BoundedTargetJobOutcome => { deps.log(step, { ...fields, reason }); return { state: "held", reason }; };
+  const close = (record: TargetJobRecord, reason: string, replayed: boolean): BoundedTargetJobOutcome => {
+    if (!replayed) deps.writeJob({ ...record, reason });
+    deps.clearKick(taskId, repo);
+    return { state: record.status as "ended" | "refused", reason, replayed };
+  };
+  const refuse = (prior: TargetJobRecord | undefined, reason: string): BoundedTargetJobOutcome => {
+    deps.log("console.kick_refused", { ...fields, reason });
+    return close(base("refused", prior), reason, false);
+  };
+
+  const read = deps.readJob(origin);
+  if (read.state === "unreadable") return held("job record unreadable", "target_job.unknown");
+  const prior = read.state === "found" ? read.record : undefined;
+  if (prior && (prior.taskId !== taskId || prior.repo.toLowerCase() !== repo.toLowerCase())) return held("job identity conflicts with request", "target_job.unknown");
+  // A closed job is reported, never re-run: the same origin never spends twice.
+  if (prior && (prior.status === "ended" || prior.status === "refused")) {
+    deps.log("target_job.replayed", { ...fields, status: prior.status });
+    return close(prior, prior.reason ?? prior.status, true);
+  }
+
+  const admission = deps.admit(repo);
+  if (admission.state === "unreadable") return held("registry or managed set unreadable", "target_job.unknown");
+  if (admission.state === "not_enrolled") return refuse(prior, "target is not an enrolled managed repository");
+  if (admission.state === "own_instance") return refuse(prior, `${admission.instance} drives this repository; its own kick path owns the task`);
+  if (prior?.owner && prior.owner.toLowerCase() !== admission.owner.toLowerCase()) return held("verified target owner changed", "target_job.unknown");
+
+  if (prior?.status === "admitted") {
+    // A restart or a lost response: recover from the durable record, the native receipts and the dispatch claim.
+    const seen = deps.execution(prior);
+    if (seen.state === "ended") return close({ ...prior, status: "ended", updatedAt: deps.nowIso() }, "terminal verdict recorded", false);
+    const claim = await deps.claimHeld(taskId, repo);
+    if (seen.state === "unknown") return held("native execution receipts unreadable", "target_job.unknown");
+    if (claim !== false || seen.state === "running") {
+      if (prior.reason !== "resumed") {
+        // `updatedAt` stays the dispatch time: the native receipts are correlated from it.
+        deps.writeJob({ ...prior, reason: "resumed" });
+        deps.log("target_job.resumed", { ...fields, claim: claim === undefined ? "unknown" : "held", execution: seen.state });
+      }
+      return { state: "resumed", reason: `dispatch already landed (${seen.state})` };
+    }
+    return held(`previous dispatch unresolved (${seen.state}); claim absent`, "target_job.unknown");
+  }
+
+  const synced = await deps.syncPlan(admission.owner, repo);
+  if ("error" in synced) return held(`target plan not synced: ${synced.error}`, "target_job.plan_unreadable");
+  const task = synced.plan.tasks.find((t) => t.id === taskId);
+  if (!task) return refuse(prior, "unknown task id");
+  if (task.repo.toLowerCase() !== repo.toLowerCase()) return refuse(prior, "task repository conflicts with verified target");
+  const identity = { owner: admission.owner, planRevision: planSha(synced.plan.tasks) };
+
+  // One task, depth 1, max 1, one lane: the job can never re-enter the target plan's other tasks.
+  const opts = applyCuratedSelection({ ...baseOpts, laneCount: 1, wipLimit: 1 }, { taskIds: [taskId], depth: 1 });
+  let dispatched = false;
+  let summary: DrainSummary;
+  try {
+    summary = await deps.drain(synced.plan, opts, () => {
+      // Durable BEFORE the spend, and the receipt only when the drain really starts the run.
+      if (dispatched) throw new Error("bounded job already dispatched");
+      deps.writeJob(base("admitted", prior, { ...identity, attempts: (prior?.attempts ?? 0) + 1 }));
+      dispatched = true;
+      deps.log("console.kick_dispatched", fields);
+    });
+  } catch (error) {
+    // A drain that threw is a failed read of the world, never a terminal verdict: the job stays open and its marker stays.
+    return held(`drain failed${dispatched ? " after dispatch" : ""}: ${String((error as Error)?.message ?? error)}`, "target_job.error");
+  }
+  if (dispatched) {
+    if (summary.stopReason === "error") return held("dispatch outcome unresolved", "target_job.unknown");
+    const dispatchedJob = deps.readJob(origin);
+    if (dispatchedJob.state !== "found") return held("dispatched job record unreadable", "target_job.unknown");
+    deps.log("target_job.ended", { ...fields, stop_reason: summary.stopReason });
+    return close({ ...dispatchedJob.record, status: "ended", updatedAt: deps.nowIso(), stopReason: summary.stopReason }, summary.stopReason, false);
+  }
+  if (CAPACITY_STOPS.has(summary.stopReason) || summary.stopReason === "error") {
+    return held(`${summary.stopReason}${summary.stopDetail ? `: ${summary.stopDetail}` : ""}`, "target_job.capacity_deferred");
+  }
+  return refuse(prior, `drain found the task not runnable (${summary.stopReason})`);
 }

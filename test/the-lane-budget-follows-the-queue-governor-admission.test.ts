@@ -143,8 +143,13 @@ test("the daemon wiring exposes the queue governor's admitting reading", async (
   try {
     let captured: DaemonDeps | undefined;
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      // This board models Core alone; enrollment comes from the fixture, not the live checkout.
+      repoRoot: root,
       readQueuePressure: (floorMib) => ({ availableMib: 16_384, floorMib }),
-      githubFactory: () => board,
+      githubFactory: (_owner, repo) => {
+        assert.equal(repo, "remudero", "the fixture board belongs only to Core");
+        return board;
+      },
       runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
         deps.refreshMerged();
         captured = deps;

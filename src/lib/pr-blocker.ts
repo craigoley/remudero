@@ -18,6 +18,26 @@ export const PR_BLOCKER_OWNERS = {
   "security-alert-hold": "fix-lane", "security-unknown-hold": "security-policy", "other": "NONE",
 } as const satisfies Record<PrBlocker, string>;
 
+export type PrBlockerOwner = typeof PR_BLOCKER_OWNERS[PrBlocker];
+
+/** W1-T9597 — the source module that WRITES each owner's blockers into their `sweep.disposed` row, so a flow remedy
+ *  is filed against its owner, never against the alphabetical first file that quotes the reason text (W1-T9533's
+ *  `base-red` went to fix-lane-gardener.ts). sweep.ts names every blocker and composes its reason; the W1-T4351
+ *  base-red rung writes main-health's stand-down there. `security-unknown-hold`'s sentence is
+ *  `securityHoldReason` below. `NONE` and `operator` have no module: a remedy for them escalates. */
+export const PR_BLOCKER_OWNER_MODULES = {
+  "ci": "src/lib/sweep.ts", "fix-lane": "src/lib/sweep.ts", "main-health": "src/lib/sweep.ts",
+  "review-lane": "src/lib/sweep.ts", "arm": "src/lib/sweep.ts", "armed-idle-merge": "src/lib/sweep.ts",
+  "conflict-rebase": "src/lib/sweep.ts", "strike-ladder": "src/lib/sweep.ts", "deploy-freshness": "src/lib/sweep.ts",
+  "plan-repair": "src/lib/sweep.ts", "ready-draft": "src/lib/sweep.ts", "security-policy": "src/lib/pr-blocker.ts",
+} as const satisfies Record<Exclude<PrBlockerOwner, "NONE" | "operator">, string>;
+
+/** The declared module for a blocker owner, or undefined when the owner declares none. */
+export function blockerOwnerModule(owner: string): string | undefined {
+  return Object.hasOwn(PR_BLOCKER_OWNER_MODULES, owner)
+    ? PR_BLOCKER_OWNER_MODULES[owner as keyof typeof PR_BLOCKER_OWNER_MODULES] : undefined;
+}
+
 export interface BlockerFacts {
   baseRedStandDown?: boolean;
   baseCaused?: boolean;

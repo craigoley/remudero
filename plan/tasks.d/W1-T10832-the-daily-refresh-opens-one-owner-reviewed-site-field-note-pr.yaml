@@ -9,6 +9,9 @@
   risk: high  # writes a PR on a public repository; a wrongly armed PR or an unreviewed stamp would publish data without the owner
   band_meaning: blast-radius
   priority: 1  # Craig 2026-10-27: field trials live on the site, by automation rather than hand PRs
+  # refusal-amendment (W1-T10832, run DAEMON-1793261281327@a35d38801afe49b412cee8616fe6a2a3060d137e, 2026-10-29T12:49:46.451Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The connector rejected the required PR-body update, so the exact consent command and digest cannot be placed in the implementation PR body from this session.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 field-trials ask; consent file approved by Craig at ~13:45Z the same day (receipt owner-2026-10-27-craig-oley)"
@@ -20,6 +23,8 @@
     - src/run-task.ts
     - test/routing/a-field-note-candidate-opens-one-reviewed-site-pr.test.ts
     - test/deploy/the-field-trials-refresh-passes-the-host-consent-file.test.ts
+    - "src/lib/field-trials-refresh.ts"
+    - "src/lib/sweep.ts"
   rationale: |
     READ 2026-10-27: core origin/main 07dbdcc77, remudero-site main b80fbbb, the host read-only.
 
