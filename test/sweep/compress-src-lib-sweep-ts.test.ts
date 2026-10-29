@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -12,31 +12,39 @@ const { countCommentLines } = createRequire(import.meta.url)("#scripts/comment-l
 };
 
 // @source-text-subject: this task changes source prose and must preserve every code line.
-// Captured before compression at dde8a92c463ea090413f985c5d7d8c6a67f6c5e3.
-const BEFORE = {
-  comments: 5403,
-  codeLines: 19610,
-  codeHash: "d0f53000d9cc21cdc51f25515624fc67c0b2aa61fa67788f30b38ee11fae887a",
-};
+const SOURCE_PATH = "src/lib/sweep.ts";
+const TEST_PATH = "test/sweep/compress-src-lib-sweep-ts.test.ts";
+
+function git(args: string[]): string {
+  const result = spawnSync("git", args, { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+  assert.equal(result.status, 0, `git ${args[0]} failed: ${result.error ?? result.stderr}`);
+  return result.stdout.trimEnd();
+}
 
 function executableLines(source: string): string {
   return stripComments(source).split("\n").map(line => line.trimEnd())
     .filter(line => line.trim()).join("\n");
 }
 
-test("W1-T10821: comment compression preserves executable code", () => {
-  const source = readFileSync(join(REPO_ROOT, "src/lib/sweep.ts"), "utf8");
-  const code = executableLines(source);
-  assert.equal(code.split("\n").length, BEFORE.codeLines);
-  assert.equal(createHash("sha256").update(code).digest("hex"), BEFORE.codeHash,
+test("W1-T10821: comment compression preserves executable code", (t) => {
+  const base = git(["merge-base", "origin/main", "HEAD"]);
+  const added = git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`, "--", TEST_PATH]);
+  if (added !== TEST_PATH) {
+    t.skip("the compression proof applies while this test is added by the PR");
+    return;
+  }
+  const before = git(["show", `${base}:${SOURCE_PATH}`]);
+  const source = readFileSync(join(REPO_ROOT, SOURCE_PATH), "utf8");
+  assert.equal(executableLines(source), executableLines(before),
     "all non-comment code lines, including literal contents and types, must remain identical");
-  const { comments } = countCommentLines(source, "src/lib/sweep.ts");
-  assert.ok(comments > 0, "the measurement must see the retained comments");
-  assert.ok(comments < BEFORE.comments,
-    `comments must decrease from the measured pre-compression source: ${comments} >= ${BEFORE.comments}`);
+  const previousComments = countCommentLines(before, SOURCE_PATH).comments;
+  const comments = countCommentLines(source, SOURCE_PATH).comments;
+  assert.ok(previousComments > 0 && comments > 0, "the measurement must see comments in both sources");
+  assert.ok(comments < previousComments,
+    `comments must decrease from the PR base: ${comments} >= ${previousComments}`);
 });
 
-test("the compression fingerprint retains literals and detects executable edits", () => {
+test("comment stripping retains literals and detects executable edits", () => {
   const source = 'const url = "https://example.com"; // explanation\nconst n = 1;';
   assert.equal(executableLines(source), 'const url = "https://example.com";\nconst n = 1;');
   assert.equal(executableLines(source), executableLines(source.replace("explanation", "shorter")));
