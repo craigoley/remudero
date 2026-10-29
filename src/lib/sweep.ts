@@ -16666,6 +16666,8 @@ export interface FixDispatchEnvelope {
   /** The in-process mutex key the sweep held when it decided; the child's registration holds it until the child settles. */
   fixKey: string;
   decidedAtMs: number;
+  /** The original admission wait survives retries and daemon restarts. */
+  admissionSinceMs?: number;
   /** The canonical task context the sweep saw (`planContextDigestFor`); a child that reads another one refuses. */
   planContextDigest?: string;
   dedupeKey?: string;
@@ -16673,7 +16675,9 @@ export interface FixDispatchEnvelope {
 
 /** The envelope for a decision, as plain JSON. Throws when the view or the evidence is not serializable: the dispatch then stays in process. */
 export function buildFixDispatchEnvelope(
-  pr: OpenPrView, evidence: FixDispatchEvidence, facts: { fixKey: string; decidedAtMs: number; planContextDigest?: string; dedupeKey?: string },
+  pr: OpenPrView, evidence: FixDispatchEvidence, facts: {
+    fixKey: string; decidedAtMs: number; admissionSinceMs?: number; planContextDigest?: string; dedupeKey?: string;
+  },
 ): FixDispatchEnvelope {
   const serializable: Omit<FixDispatchEvidence, "progressJudge"> & { progressJudge?: FixProgressJudge } = { ...evidence };
   delete serializable.progressJudge;
@@ -16685,6 +16689,7 @@ export function readFixDispatchEnvelope(raw: unknown): FixDispatchEnvelope | und
   if (typeof raw !== "object" || raw === null) return undefined;
   const e = raw as Partial<FixDispatchEnvelope>;
   if (e.schema !== 1 || typeof e.fixKey !== "string" || typeof e.decidedAtMs !== "number") return undefined;
+  if (e.admissionSinceMs !== undefined && (typeof e.admissionSinceMs !== "number" || !Number.isFinite(e.admissionSinceMs))) return undefined;
   const { pr, evidence } = e;
   if (typeof pr !== "object" || pr === null || typeof pr.prNumber !== "number" || typeof pr.prUrl !== "string" || typeof pr.headSha !== "string") return undefined;
   if (typeof evidence !== "object" || evidence === null || !Array.isArray(evidence.unmetCriteria)) return undefined;
@@ -16781,6 +16786,7 @@ export async function runFixDispatchChild(inputs: Record<string, unknown>, deps:
         deps.onPhase?.(phase);
         deps.log("sweep.fix.child_phase", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, phase });
       },
+      { signal: new AbortController().signal, admissionSinceMs: envelope.admissionSinceMs },
     );
     const declined = fixClaimDeclinedReason(outcome);
     if (declined !== undefined) throw new Error(`fix dispatch refused: ${declined}`);
@@ -19120,7 +19126,7 @@ export async function runSweep(
     let envelope: FixDispatchEnvelope;
     try {
       envelope = buildFixDispatchEnvelope(pr, evidence, { fixKey: claim.fixKey, decidedAtMs: deps.now?.() ?? systemClock.now(),
-        planContextDigest: deps.planContextDigestFor?.(pr), dedupeKey });
+        admissionSinceMs: claim.control.admissionSinceMs, planContextDigest: deps.planContextDigestFor?.(pr), dedupeKey });
     } catch (error) {
       log("sweep.fix.child_envelope_refused", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
       return false;

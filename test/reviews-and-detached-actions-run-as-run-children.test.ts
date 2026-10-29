@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
-import { fixedClock } from "#src/lib/clock.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import { configPath, type Config } from "#src/lib/config.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { appendLedger } from "#src/lib/ledger.js";
@@ -1002,7 +1002,9 @@ async function proveFreshFixAdmissionAcrossRestart() {
   const { runDetachedWork, buildSweepEffects } = await import("#src/run-task.js");
   for (const admission of ["refused", "unreadable", "throws", "admitted"] as const) {
     const f = fixture();
-    const clock = fixedClock(Date.parse("2026-10-12T12:00:00Z"));
+    let nowMs = Date.parse("2026-10-12T12:00:00Z");
+    const clock = clockFromMillisFn(() => nowMs);
+    const admissionSinceMs = clock.now() - 120_000;
     let releaseRead!: () => void;
     let finishReview!: (value: RunResult) => void;
     const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
@@ -1022,6 +1024,7 @@ async function proveFreshFixAdmissionAcrossRestart() {
       ] }];
       let planReads = 0;
       let dispatches = 0;
+      const dispatchControls: Array<Parameters<SweepDeps["dispatchFix"]>[3]> = [];
       let pressureReads = 0;
       let enteredRead!: () => void;
       const reading = new Promise<void>(resolve => { enteredRead = resolve; });
@@ -1048,7 +1051,10 @@ async function proveFreshFixAdmissionAcrossRestart() {
           assert.equal(args.plan.byId.get(FIX_TASK)?.risk, "high", "the real builder receives this child's fresh canonical plan");
           const effects = buildSweepEffects(args);
           assert.equal(typeof effects.dispatchFix, "function", "the production sweep dispatcher was reconstructed");
-          return { ...effects, dispatchFix: () => { dispatches++; } };
+          return { ...effects, dispatchFix: (...args: Parameters<SweepDeps["dispatchFix"]>) => {
+            dispatches++;
+            dispatchControls.push(args[3]);
+          } };
         },
       };
       const engine = detachedEngine(f);
@@ -1090,14 +1096,21 @@ async function proveFreshFixAdmissionAcrossRestart() {
       void adoptChildWork({ ...launchedReview, taskId: FIX_TASK, work: review }, f.log);
       await runSweep([fixPr({ prUrl: "https://github.com/foreign-owner/remudero/pull/9379" })], {
         arm: () => {}, close: () => {}, escalate: () => {}, log: f.log, runId: "restart-producer", now: clock.now,
-        ledgerPath: join(f.stateRoot, "ledger.ndjson"), readLedger: () => [{ step: "fix.dispatch", task_id: FIX_TASK, head_sha: "old-head" }],
+        ledgerPath: join(f.stateRoot, "ledger.ndjson"), readLedger: () => [
+          { step: "fix.dispatch", task_id: FIX_TASK, head_sha: "old-head" },
+          { step: "fix.done", task_id: FIX_TASK, head_sha: FIX_HEAD, subtype: "admission_abandoned", admission_since_ms: admissionSinceMs },
+        ],
         appendLine: () => {}, detachFixWait: true, planContextDigestFor: riskJudgePlanContextDigestFor(loadPlan(planPath)),
         dispatchFix: () => assert.fail("the producer must dispatch through its child"),
       });
       await reading;
       assert.equal(planReads, 0, "the child has not yet read the canonical plan");
+      resetChildWork();
+      nowMs += 60_000;
       const restarted = await runDaemon(loadPlan(planPath), {
-        adoptRunChildren: f.adopt, refreshMerged: () => () => true, openPrCount: () => 0, now: clock.date,
+        adoptRunChildren: () => adoptRunChildren({ stateRoot: f.stateRoot, instance: defaultInstance(f.root).name,
+          log: f.log, settledRunIds: new Set() }, { pollMs: 5, watch: false, clock: clock.now }),
+        refreshMerged: () => () => true, openPrCount: () => 0, now: clock.date,
         runOne: async id => result(id), sleep: async () => { await flush(); }, log: f.log,
         checkFreshness: () => ({ stale: true, oldSha: "a".repeat(40), newSha: "b".repeat(40) }),
         sweep: async () => {}, sweepLight: async () => {}, sleepUntilSweepWake: async () => "timeout",
@@ -1106,6 +1119,19 @@ async function proveFreshFixAdmissionAcrossRestart() {
       assert.equal(restarted.stopReason, "stale");
       assert.deepEqual(f.rows.findLast(row => row.step === "daemon.freshness_drain.completed")?.detached_children_left_running,
         { review: 1, "fix-dispatch": 1 }, "the restart exits with the producer's actual fix child still checking live evidence");
+      assert.equal(childWorkCount(), 2, "a fresh registry adopts both children without draining them");
+      assert.equal(detachedSweepActionCount(), 0, "neither child becomes an in-process drain wait");
+      for (const child of children) {
+        const status = readStatus(child.dir);
+        assert.ok(status.ok);
+        assert.equal(status.value.state, "running", "the freshness exit leaves each child running");
+      }
+      const savedWork = readWorkSpec(children[1]!.dir);
+      assert.ok(savedWork && savedWork !== "malformed");
+      const savedEnvelope = readFixDispatchEnvelope(savedWork.inputs?.envelope);
+      assert.ok(savedEnvelope);
+      assert.equal(savedEnvelope.admissionSinceMs, admissionSinceMs,
+        "the pre-restart admission timestamp survives the producer, disk spec and fresh adoption without a retry reset");
       writePlan("high");
       releaseRead();
       assert.equal(await childDone, admission === "admitted" ? 0 : 1);
@@ -1114,6 +1140,13 @@ async function proveFreshFixAdmissionAcrossRestart() {
       assert.equal(status.value.state, admission === "admitted" ? "done" : "failed");
       assert.equal(planReads, 1);
       assert.equal(dispatches, admission === "admitted" ? 1 : 0);
+      if (admission === "admitted") {
+        assert.equal(dispatchControls[0]?.admissionSinceMs, admissionSinceMs,
+          "the rebuilt dispatcher receives the original retry timestamp after the freshness restart");
+        assert.equal(dispatchControls[0]?.signal.aborted, false, "the child owns a fresh, live signal");
+        assert.equal(clock.now() - dispatchControls[0]!.admissionSinceMs!, 180_000,
+          "the retry age includes the wait before the producer and the time across restart");
+      }
       if (admission === "admitted" || admission === "refused") {
         assert.ok(pressureReads >= 2, "the runtime's default admission controller reads fresh capacity at construction and claim");
         const capacity = f.rows.filter(row => row.step === "sweep.fix_capacity");
@@ -1311,6 +1344,24 @@ test("W1-T9114: the fix child rechecks, dispatches through the sweep's own dispa
   const throwing = harness({ dispatch: () => { throw new Error("dispatch failed before the worker started"); } });
   await assert.rejects(runFixDispatchChild(wire(), throwing.deps), /dispatch failed before the worker started/);
   assert.equal(throwing.held(), 0, "a throwing dispatcher releases the child's grant");
+
+  for (const admissionSinceMs of [undefined, 0, 123]) {
+    const h = harness({ dispatch: (_pr, _evidence, _onPhase, control) => {
+      assert.equal(control?.admissionSinceMs, admissionSinceMs, "absent and zero retry timestamps are preserved too");
+      assert.equal(control?.signal.aborted, false);
+    } });
+    await runFixDispatchChild({ envelope: JSON.parse(JSON.stringify({ ...envelope, admissionSinceMs })) }, h.deps);
+    assert.equal(h.built(), 1);
+    assert.equal(h.held(), 0);
+  }
+  for (const admissionSinceMs of [null, "123", NaN, Infinity]) {
+    const h = harness();
+    await assert.rejects(runFixDispatchChild({ envelope: JSON.parse(JSON.stringify({ ...envelope, admissionSinceMs })) }, h.deps),
+      /no readable decision envelope/, "an unreadable retry timestamp refuses instead of resetting admission");
+    assert.equal(h.built(), 0);
+    assert.equal(h.held(), 0);
+    assert.equal(h.calls.length, 0);
+  }
 
   const refusals: Array<[string, Partial<FixDispatchChildPorts> & { dispatch?: SweepDeps["dispatchFix"] }, RegExp, Record<string, unknown>?]> = [
     ["a fleet hold", { hold: () => "STOP: operator" }, /admission is held: STOP/],
