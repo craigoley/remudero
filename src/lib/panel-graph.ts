@@ -620,7 +620,7 @@ export function captureFeedbackReply(
   });
   let landingError: string | undefined;
   try {
-    const staged = queuedFeedbackLandings(deps.inboxRoot).includes(feedbackEntryRepoPath(entry.id)) ? { error: undefined }
+    const staged = capture !== captureFeedback && queuedFeedbackLandings(deps.inboxRoot).includes(feedbackEntryRepoPath(entry.id)) ? { error: undefined }
       : queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
     const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
     if (input.replyTo !== undefined) {
