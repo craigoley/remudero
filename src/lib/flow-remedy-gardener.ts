@@ -14,7 +14,7 @@ import { PR_TERMINAL_STEP } from "./ledger-carry.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { loadPlanFromYaml, newTestPath } from "./plan.js";
-import { PR_BLOCKERS, type PrBlocker } from "./pr-blocker.js";
+import { blockerOwnerModule, PR_BLOCKERS, type PrBlocker } from "./pr-blocker.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { LedgerRecord } from "./retro.js";
 import { ADMISSION_FLOW_STEP, observeAdmissionFlow, type AdmissionFlowInput, type AdmissionFlowReport } from "./flow-gardener.js";
@@ -75,6 +75,8 @@ export interface LadderKind {
   fallbackFiles?: readonly string[];
   /** Admission proposals have a one-remedy/one-owner-judgment shadow budget, not live effects. */
   shadowAdmission?: boolean;
+  /** W1-T9597: a `<PR blocker>:<reason>` key is owned by its declared owner's module, never by a text search. */
+  declaredOwners?: boolean;
 }
 
 function flowCauseLabel(cause: string): string {
@@ -89,6 +91,7 @@ export const FLOW_LADDER: LadderKind = {
   ownerLine: a => `Owner ${a.price.owners.includes("NONE") ? "NONE is absent" : a.price.owners.join(", ") + " failed to clear eligible episodes"}.`,
   evidenceLine: (pr, hours, reason) => `- PR #${pr}: ${hours.toFixed(2)} PR-hours — ${reason}`,
   escalationSummary: cause => `Flow blocker: ${cause} still costs PR-hours`,
+  declaredOwners: true,
 };
 
 export const ADMISSION_FLOW_LADDER: LadderKind = { ...FLOW_LADDER, prefix: "admission-flow", shadowAdmission: true };
@@ -385,9 +388,22 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
   return { episodes, charges, priced, candidates, ladder, next };
 }
 
+/** W1-T9597 — a PR blocker's remedy is owned by the module its declared owner names (`PR_BLOCKER_OWNER_MODULES`), read
+ *  off the charges' `blocker_owner`; no text search runs. No module, or charges naming several owners, is no owner. */
+function declaredOwnerFile(action: FlowAction, kind: LadderKind): { file: string; line: string } {
+  const owners = [...new Set([...action.charges.map(c => c.owner), ...action.price.owners])].sort();
+  const file = owners.length === 1 ? blockerOwnerModule(owners[0]!) : undefined;
+  if (file === undefined) {
+    throw new Error(`${kind.stem} gardener: no source owner found for ${action.price.key}: declared owner ` +
+      `${owners.join(", ") || "(none)"} names no module in PR_BLOCKER_OWNER_MODULES`);
+  }
+  return { file, line: `${owners[0]} → ${file}` };
+}
+
 export function draftShard(action: FlowAction, taskId: string, search: OwnerSearch, kind: LadderKind): string {
   const [blocker, ...reason] = action.price.key.split(":");
-  const matches = search.filesContaining(reason.join(":"));
+  const owner = kind.declaredOwners && PR_BLOCKERS.includes(blocker as PrBlocker) ? declaredOwnerFile(action, kind) : undefined;
+  const matches = owner ? [{ file: owner.file, hits: 0 }] : search.filesContaining(reason.join(":"));
   const found = matches.length ? matches : search.filesContaining(blocker!);
   const files = (found.length ? found : (kind.fallbackFiles ?? []).filter(f => search.fileExists(f)).map(file => ({ file, hits: 0 })))
     .sort((a, b) => b.hits - a.hits || a.file.localeCompare(b.file));
@@ -406,7 +422,7 @@ export function draftShard(action: FlowAction, taskId: string, search: OwnerSear
       proof: `grep: test("${taskId}: ${kind.stem}-${stem} clears without a person" in ${testPath}` }],
     note: `Filed by ${kind.stem} at rung ${action.rung}; measure the cause's share of PR-hours after the build merges.`,
     rationale: [action.reason, kind.ownerLine(action),
-      `Source owner: ${files[0]!.file}. Top five PRs by observed hours, with original blocker reasons:`,
+      `Source owner: ${owner?.line ?? files[0]!.file}. Top five PRs by observed hours, with original blocker reasons:`,
       ...[...evidence].sort((a, b) => b[1].hours - a[1].hours || a[0] - b[0]).slice(0, 5)
         .map(([pr, e]) => kind.evidenceLine(pr, e.hours, e.reason)),
       ...(action.prior ? [`Previous remedy ${action.prior.task.id}: ${action.prior.task.files.join(", ")}; ${action.prior.effect?.reason}. Take a structurally different remedy.`] : []),

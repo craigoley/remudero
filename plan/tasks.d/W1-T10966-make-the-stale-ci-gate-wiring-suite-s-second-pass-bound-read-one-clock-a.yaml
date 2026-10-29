@@ -1,0 +1,29 @@
+- id: W1-T10966
+  title: Make the stale-ci-gate wiring suite's second-pass bound read one clock, and name why its 'no second gh call' assertion flaked
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - test/stale-ci-gate-wiring.test.ts
+    - src/lib/open-prs-rest.ts
+    - src/lib/sweep.ts
+  acceptance:
+    - claim: The suite stamps the fixture PR's lastActivityAt from the same injected clock the sweep is given (INCIDENT_NOW_MS), not from a real-clock offset, so the staleness rung and the second-pass bound cannot depend on when the suite runs
+      proof: "grep: INCIDENT_NOW_MS - 60 in test/stale-ci-gate-wiring.test.ts"
+    - claim: The second-pass end-to-end case is pinned by a named test that asserts no second gh call and exactly one recorded re-aggregate key across two fresh buildEffects instances sharing one ledger, with no wall-clock input
+      proof: "unit test: the stale-gate wiring suite reads one clock so a second pass never re-drives"
+    - claim: The suite records the measured cause of the flake at the second-pass assertion (which of clock mixing, ledger rows from the first pass not yet visible to the second reader, or shared temp state it was), citing what was read in open-prs-rest.ts and sweep.ts
+      proof: "grep: FLAKE CAUSE in test/stale-ci-gate-wiring.test.ts"
+  origin: followup:W1-T10684-1793156193061:2026-10-28T03:00:08.391Z:0
+  rationale: >-
+    From the 2026-10-28 follow-up on W1-T10684-1793156193061, ratified via rmd approve:
+  
+    follow-up harvest [research]: read `test/stale-ci-gate-wiring.test.ts` near line 399, and the
+    code in `src/lib/open-prs-rest.ts` it exercises, for shared state, clock or env dependence, or
+    ordering — this is the likely root cause of the flake. — from W1-T10684 (run
+    W1-T10684-1793156193061)

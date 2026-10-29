@@ -38,7 +38,7 @@ import type { RunResult } from "../../lib/run-result.js";
 import { dropTierRowsBeforePush, prePushGateRefusal } from "../../lib/pre-push-refusal.js";
 import type { Tier } from "../../lib/tier.js";
 import { routeSpecialists, taskMetadataFromPrinciples } from "../../lib/specialist-panel.js";
-import { type DaemonFreshness, pendingWorkerBoundaryHandoffs } from "../../lib/daemon.js";
+import { type DaemonFreshness, type WorkerBoundaryCheckpoint, pendingWorkerBoundaryHandoffs } from "../../lib/daemon.js";
 import { defaultListCandidates, defaultReadMarkers, killProcessGroup } from "../../lib/worker-containment.js";
 import { sweepStaleTempDirsAsync, type TempSweepOpts, type TempSweepSummary } from "../../lib/tmp.js";
 import { IMAGE_BUILD_SHA_PATH } from "../../lib/deployer.js";
@@ -1081,6 +1081,8 @@ export interface RunTaskContext {
   github: GitHub;
   isMerged: (task: Task) => boolean;
   ledgerPath: string;
+  /** Resolved repository credit writer follows this same run into its separate body function. */
+  persistCredit?: (task: Task, pr: { number: number; url: string }, files: readonly string[] | undefined) => ReturnType<typeof persistVerifiedCredit>;
   log: (step: string, extra?: Record<string, unknown>) => void;
   openTaskIds: ReadonlySet<string>;
   opts: RunTaskBodyOptions;
@@ -1100,6 +1102,18 @@ export interface RunTaskContext {
   workerStateSensor: WorkerStateSensor;
   /** Swaps the whole plan for one of this run's task after the body's last plan read, before the first agent wait. */
   releasePlan?: () => void;
+}
+
+/** Persist a verified implementation credit in the repository state carried by this native run. */
+export function persistRunTaskCredit(
+  ctx: Pick<RunTaskContext, "ledgerPath" | "persistCredit">,
+  task: Task,
+  pr: { number: number; url: string },
+  files: readonly string[] | undefined,
+): ReturnType<typeof persistVerifiedCredit> {
+  return ctx.persistCredit === undefined
+    ? persistVerifiedCredit(ctx.ledgerPath, task, pr, files)
+    : ctx.persistCredit(task, pr, files);
 }
 
 export type ManagedCheckoutRefresh = { release: () => void } & (
@@ -4158,6 +4172,13 @@ export async function runTask(
   opts: ProbeAdmissionOptions & {
     planPath?: string;
     config?: Config;
+    /** Persist a caller's exact native run identity before any asynchronous work or spend. */
+    onRunCreated?: (runId: string) => void;
+    /** A bounded target keeps its repository projection and verified credit in the same namespace. */
+    repositoryState?: {
+      project: (plan: Plan) => Map<string, StatusProjection>;
+      persistCredit: (task: Task, pr: { number: number; url: string }, files: readonly string[] | undefined) => ReturnType<typeof persistVerifiedCredit>;
+    };
     /** W1-T7096: the drain and the CLI ask the production LLM progress judge in the fix rung. */
     productionProgressJudge?: boolean;
     preopenGate?: RunTaskBodyOptions["preopenGate"];
@@ -4618,6 +4639,7 @@ export async function runTask(
   // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
   // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
   const runId = `${taskId}-${Date.now()}`;
+  opts.onRunCreated?.(runId);
   const log = benchmarkRunLedgerLogger((step, fields) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...fields }),
     opts.benchmarkStackEvidence ?? workerBoundaryStack);
@@ -4773,7 +4795,7 @@ export async function runTask(
   // owner/repo, so lanes 2..N hit a warm `knownBoardPrs` index (a `mode: "delta"` fetch)
   // instead of each paying `mode: "full"`. Absent it, this is byte-identical to before.
   const github = opts.github ?? opts.githubFor?.(owner, task.repo) ?? createDaemonGatewayFactory(config.root, log)(owner, task.repo);
-  const projection = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
+  const projection = opts.repositoryState?.project(plan) ?? projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
   // W1-T322/W1-T367: computed once per run off the SAME plan+projection already built above —
   // the SHIPS-UNWIRED marker verification set both `runReviewFn` and `runFixRung` below consult.
@@ -4995,6 +5017,7 @@ export async function runTask(
       github,
       isMerged,
       ledgerPath,
+      persistCredit: opts.repositoryState?.persistCredit,
       log: runLog,
       openTaskIds,
       opts,
@@ -5480,7 +5503,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
   };
 
   // W1-T8676: the boundary checkpoint this run restored, which `failOnWorkerError` keeps through a worker error.
-  let restoredCheckpoint: { branch: string; headSha: string } | undefined;
+  let restoredCheckpoint: WorkerBoundaryCheckpoint | undefined;
   /** W1-T10752: main's merge into the restored checkpoint, open in the worktree; its paths gate the pre-open check. */
   let restoredReconcile: { mainSha: string; paths: string[] } | undefined;
   let reconcilePrompt = "";
@@ -5496,20 +5519,22 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
   };
   /** W1-T8676/W1-T9786: the restored checkpoint a failed exit keeps, unless this run pushed its own branch (the newer
    *  checkpoint, W1-T7837). Read while the worktree stands; only a proven absence (exit 1) keeps it. */
-  const checkpointToKeep = (): { branch: string; headSha: string } | undefined => restoredCheckpoint !== undefined &&
+  const checkpointToKeep = (): WorkerBoundaryCheckpoint | undefined => restoredCheckpoint !== undefined &&
     hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).status === 1
     ? restoredCheckpoint : undefined;
   /** W1-T10752: the head a RETURNED failed verdict of a restored run keeps, read while the worktree stands: this run's own pushed
    *  tip when origin holds it and it differs from the restored head (the newer work), else the restored checkpoint. A run that
    *  restored nothing keeps nothing. Written after the verdict, which consumed the receipt, so the next run resumes the head. */
-  const keptHeadOfFailedRun = (): { branch: string; headSha: string } | undefined => {
+  const keptHeadOfFailedRun = (): WorkerBoundaryCheckpoint | undefined => {
     if (restoredCheckpoint === undefined) return undefined;
     const remote = hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]);
     const pushed = remote.status === 0 ? remote.stdout.trim() : "";
-    return /^[0-9a-f]{40}$/.test(pushed) && pushed !== restoredCheckpoint.headSha ? { branch, headSha: pushed } : restoredCheckpoint;
+    return /^[0-9a-f]{40}$/.test(pushed) && pushed !== restoredCheckpoint.headSha
+      ? { ...restoredCheckpoint, branch, headSha: pushed } : restoredCheckpoint;
   };
-  const keepFailedRunHead = (kept: { branch: string; headSha: string } | undefined, stage: string): void => {
-    if (kept) log("implement.checkpoint_kept", { task_id: taskId, source_branch: kept.branch, head_sha: kept.headSha, failed_stage: stage });
+  const keepFailedRunHead = (kept: WorkerBoundaryCheckpoint | undefined, stage: string): void => {
+    if (kept) log("implement.checkpoint_kept", { task_id: taskId, source_branch: kept.branch, head_sha: kept.headSha, failed_stage: stage,
+      ...(kept.resumePhase ? { resume_phase: kept.resumePhase } : {}) });
   };
   /**
    * A worker returned an ERROR envelope (max_turns, max_budget_usd, execution
@@ -5533,7 +5558,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     log("verdict", { ...v.ledger, ...terminalVerdictFields(r), ...(reason ? { reason } : {}) });
     if (keptCheckpoint) {
       log("implement.checkpoint_kept", { task_id: taskId, source_branch: keptCheckpoint.branch, head_sha: keptCheckpoint.headSha,
-        failed_stage: stage, failed_subtype: r.subtype });
+        failed_stage: stage, failed_subtype: r.subtype,
+        ...(keptCheckpoint.resumePhase ? { resume_phase: keptCheckpoint.resumePhase } : {}) });
     }
     say(
       `verdict: ${v.verdict} (${r.subtype}) at ${stage} · ${r.numTurns} turns · notional $${costUsd.toFixed(4)}`,
@@ -6081,8 +6107,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       log("implement.scope_recovery_fresh", { recovery_path: scopeRecovery.path,
         reason: scopeRecovery.status === "verified" ? "amendment closed without granting scope" : scopeRecovery.reason });
     }
+    const resumeAtPreopen = restoredCheckpoint?.resumePhase === "preopen";
     // ── Recon (read-only).
-    say("recon worker");
+    if (!resumeAtPreopen) say("recon worker");
     // W1-T37 / MASTER-PLAN §8A Tier 2: the plan is RETRIEVED, not injected — the recon prompt
     // carries a content-hash-cached PLAN INDEX derived from the master plan, not the plan body.
     // `loadPlanIndex` is non-fatal when the source is missing and never writes a generated file.
@@ -6146,7 +6173,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     let reusedReconArtifact: ReconArtifact | undefined;
     let reconMasked = false;
 
-    if (opts.maskRecon) {
+    if (resumeAtPreopen) {
+      reconMasked = true;
+      log("implement.preopen_resumed", { source_branch: restoredCheckpoint?.branch, source_head_sha: restoredCheckpoint?.headSha });
+    } else if (opts.maskRecon) {
       // W1-T2512 (RECON factor, arm B): the spawn is SKIPPED ENTIRELY — never issued, not even
       // once — and the recon artifact store is NEITHER READ NOR WRITTEN: `loadReconArtifact`/
       // `writeReconArtifact` both sit inside the branch below, which this `if` skips outright,
@@ -6497,12 +6527,21 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // FIRST one: it accumulates, and at DIAGNOSE_AT_STRIKES (two) an evidence-only DIAGNOSE
     // worker (mount steps UP, §9) runs BEFORE any third patch attempt — that third attempt's
     // prompt carries the diagnose findings verbatim, never a third blind patch (acceptance #1).
-    noteRestartPhase("implementing");
-    say("implement worker");
+    if (!resumeAtPreopen) {
+      noteRestartPhase("implementing");
+      say("implement worker");
+    }
     const workerHeadReflogBefore = readWorktreeHeadReflog(worktreePath);
     // W1-T9030: the head every round starts from — after a checkpoint restore it is the harness's own merge commit.
     let roundHeadBefore = worktreeHeadOrUndefined(worktreePath);
-    let impl!: WorkerResult;
+    // No worker ran for a pre-open resume. Keep an empty report/continuation context for the existing
+    // opener and gate-repair path; never account it or emit an implement.done worker receipt.
+    let impl: WorkerResult = {
+      sessionId: "", costUsd: 0, numTurns: 0, text: "", blocks: [], stderr: "", subtype: "checkpoint_restored",
+      isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: "", effort: "",
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
+    };
+    const fullText = (r: WorkerResult) => workerTranscript(r);
     // W1-T7697: retain disk work before releasing a lane; a failed checkpoint is never a handoff.
     const yieldAtWorkerBoundary = async (waitingOn: string, phase = waitingOn): Promise<RunResult | undefined> => {
       noteRestartPhase(phase === "checkpoint" ? "checkpointed" : phase === "decision" ? "implementing" : phase);
@@ -6520,7 +6559,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       const headSha = hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim();
       for (const row of freshnessYieldRows({ waitingOn, branch, headSha, undeclared,
         ...(freshness ? { freshness: { oldSha: freshness.oldSha, newSha: freshness.newSha } } : { recycle }) })) {
-        log(row.step, row.step === "verdict" ? { ...row.fields, cost_usd: costUsd, ...terminalVerdictFields(impl) } : row.fields);
+        const fields = { ...row.fields, ...(resumeAtPreopen ? { resume_phase: "preopen" } : {}) };
+        log(row.step, row.step === "verdict" ? { ...fields, cost_usd: costUsd, ...terminalVerdictFields(impl) } : fields);
       }
       return { taskId, runId, merged: false, costUsd, verdict: "handed_off" };
     };
@@ -6654,14 +6694,18 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       // 19:52:37.704Z) against a session limit whose own message said it reset at 20:50Z, 57m23s
       // later. The schedule lives in classify.ts (transientBackoffMs, bounded); this passes only
       // the clock, so a test can drive the whole thing without a real timer.
-      driverResult = await runDiagnoseThenRetry({
-        fixProgressJudge: ctx.spawnInjected ? undefined : productionFixProgressJudge({ cwd: worktreePath, settingsFile }),
-        progressInput: buildFixProgressInput({ taskId, headSha: "implement", currentRed: [], ledger: [] }),
-        attempt: attemptImplement,
-        diagnose: dispatchDiagnose,
-        log,
-        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-      });
+      if (resumeAtPreopen) {
+        driverResult = { outcome: "success", strikes: 0, transientRetries: 0, diagnosed: false, attempts: 0 };
+      } else {
+        driverResult = await runDiagnoseThenRetry({
+          fixProgressJudge: ctx.spawnInjected ? undefined : productionFixProgressJudge({ cwd: worktreePath, settingsFile }),
+          progressInput: buildFixProgressInput({ taskId, headSha: "implement", currentRed: [], ledger: [] }),
+          attempt: attemptImplement,
+          diagnose: dispatchDiagnose,
+          log,
+          sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        });
+      }
     } catch (e) {
       if (!(e instanceof ImplementBudgetBreach)) throw e;
       // Exits the diagnose-then-retry loop immediately — `impl` (the breaching attempt) is
@@ -6726,8 +6770,6 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
     const implFail = failOnWorkerError(impl, "implement", driverResult.reason);
     if (implFail) return implFail;
-
-    const fullText = (r: WorkerResult) => workerTranscript(r);
 
     // ── DECISION_REQUEST → auto-choose RECOMMENDED → resume (§4).
     const decision = parseDecisionRequest(fullText(impl));
@@ -6826,7 +6868,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // stop always resumes; whether a later stop resumes again is the progress judge's call (W1-T7096).
     const checkpointStops: CheckpointStop[] = [];
     let checkpointJudge: FixProgressJudge | undefined;
-    for (;;) {
+    for (; !resumeAtPreopen;) {
       const tipSubject = lastCommitSubject(worktreePath);
       const roundReport = parseReport(fullText(impl));
       const roundTip = classifyRoundTip({
@@ -7140,7 +7182,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       if (claim && resolved) {
         const v = alreadySatisfiedVerdict(impl, costUsd, "implement", resolved);
         // Make the credit the dispatcher's too, or its next projection re-dispatches the task.
-        const credit = persistVerifiedCredit(ledgerPath, task, resolved, github.changedFiles?.(resolved.url));
+        const credit = persistRunTaskCredit(ctx, task, resolved, github.changedFiles?.(resolved.url));
         log("already_satisfied.credit_persisted", { pr_number: resolved.number, outcome: credit });
         try {
           worktreeRemove(repoDir, worktreePath);
@@ -8317,7 +8359,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     }
     log("run.error", { error: String((err as Error)?.message ?? err) });
     // W1-T9786: nor is a thrown harness error (W1-T9047's refused push), so this exit keeps it too.
-    let keptThroughThrow: { branch: string; headSha: string } | undefined;
+    let keptThroughThrow: WorkerBoundaryCheckpoint | undefined;
     try {
       keptThroughThrow = verdictWritten ? undefined : checkpointToKeep();
     } catch (error) {
@@ -8328,7 +8370,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     endThrownRun(log, verdictWritten, "run.error", err, costUsd);
     if (keptThroughThrow) {
       log("implement.checkpoint_kept", { task_id: taskId, source_branch: keptThroughThrow.branch, head_sha: keptThroughThrow.headSha,
-        failed_stage: "run.error", failed_cause: runErrorCause(err) });
+        failed_stage: "run.error", failed_cause: runErrorCause(err),
+        ...(keptThroughThrow.resumePhase ? { resume_phase: keptThroughThrow.resumePhase } : {}) });
     }
     // Reclaim the worktree even on an unexpected throw — a dead run must not
     // leave debris that blocks the next one (start-of-run prune is the backstop,

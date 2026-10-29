@@ -42,3 +42,11 @@
     grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
     schedule, worker stop or live/public release. Human readiness remains required; do not
     auto-dispatch or infer readiness from archive.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it touches secrets, auth, tokens or permissions (\"OAuth\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-28T23:01:55.550Z"
+    pin: "2d2dfde6f4a473faabc100e25ed6af7f93dc004df43a15e552849429c812f6d9"
