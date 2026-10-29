@@ -1,0 +1,75 @@
+id: fb-issue-craigoley-remudero-15309
+ts: 2026-10-29T20:39:03.285Z
+raw: >-
+  craigoley/remudero#15309: [BLOCKED]
+  ci-friction-check-test-test-benchmark-worker-caller-census-test-ts: CI
+  friction: check:test:test/benchmark-worker-caller-census.test.ts keeps costing
+  fix rounds and the gardener cannot remedy it alone [needs-human,
+  escalation-blocked, needs-question]
+
+
+  **Class:** BLOCKED
+
+  **Task:** ci-friction-check-test-test-benchmark-worker-caller-census-test-ts
+
+  **Host:** 5a6a63c2ca53
+
+  **Run:** GARDEN-ci-friction-1793224452266
+
+
+  check:test:test/benchmark-worker-caller-census.test.ts cost 11.3 PR minute(s)
+  across 1 round(s) on 1 pull request(s) (seven-day half-life).
+
+
+  Why this needs a person: no code in src/ or scripts/ names
+  check:test:test/benchmark-worker-caller-census.test.ts, so no remedy can be
+  drafted against it; no declared workflow job resolves it; the failing test
+  test/benchmark-worker-caller-census.test.ts imports no src/ or scripts/ module
+  at runtime (no located runtime import).
+
+
+  ## Options
+
+  - **design-remedy** — name the mechanism and file it as a task; the gardener
+  measures it like any rung
+
+  - **accept-cost** — retire the cause: add a task with origin
+  ci-friction:check:test:test/benchmark-worker-caller-census.test.ts and a
+  retirement field
+
+
+  ## Recommendation
+
+  design-remedy
+
+
+  _Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy).
+  Closing this issue does_
+
+  _not resolve the underlying block by itself — act on it, then resume via `rmd
+  drain`._
+
+
+  **To answer:** reply on this issue (repository owner only — every other reply
+  is
+
+  counted and ignored) or reply in the console's escalation panel. Either lands
+  in the
+
+  same place the next fix round reads.
+
+
+  https://github.com/craigoley/remudero/issues/15309
+
+
+  issue-revalidation (W1-T8864): The issue specifies a concrete design‑remedy
+  task that is not yet covered by any existing plan task.
+attachments: []
+origin: issue#15309
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

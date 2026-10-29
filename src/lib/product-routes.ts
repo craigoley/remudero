@@ -206,7 +206,7 @@ export function buildProductBuildRoutes(options: ProductBuildOptions): Route[] {
 /** Resume an adopted product case; build and plan-proposal actions retain the HIGH-tier spend guards. */
 export function buildProductCaseRoutes(options: ProductCaseOptions): Route[] {
   const service = new ProductCaseService(options);
-  const codes = { ...repositoryStatus, ...buildStatus, envelope_missing: 409, handoff_unavailable: 503 };
+  const codes = { ...repositoryStatus, ...buildStatus, ...deploymentStatus, binding_not_found: 409, envelope_missing: 409, handoff_unavailable: 503 };
   return [{ method: "POST", path: "/v1/products/case", scope: "write", tier: "high", async handler(req, res) {
     res.setHeader("Cache-Control", "private, no-store");
     const reply = (code: number, body: Record<string, unknown>) => sendJson(res, code, { version: PRODUCT_CASE_VERSION, ...body });
