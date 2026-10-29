@@ -13,6 +13,7 @@
   files:
     - src/lib/serve.ts
     - test/the-gateway-reads-current-code.test.ts
+    - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
   acceptance:
     - claim: "The actual default local Git subprocess can wait while an unrelated HTTP response and scheduled callback complete, and the assessment completes after its child is released"
       proof: "unit test: W1-T10898: local checkout reads leave unrelated HTTP work responsive"
@@ -38,7 +39,7 @@
       src: "https://nodejs.org/learn/asynchronous-work/dont-block-the-event-loop"
     - claim: "The exact serving-process profiles and Vercel request warnings establish a bounded functional-read failure, while retaining separate monitor and read-model causes"
       src: "products-functional-read-stall-finding-20261028.json; products-production-runtime-logs-20261028.json; products-actual-loop-stall-metadata-20261028.json"
-  note: "Reserved through the normal Core allocator as bce049c5574baeb28dc2c85dccd0171d2bf0d6f4; this is a private unjudged draft, not task publication or implementation credit. Shared-file custody and normal source dependency are explicit. No task-specific budget override. Field Trials and other owners' CI/Azure-memory work remain outside this task."
+  note: "Reserved through the normal Core allocator as bce049c5574baeb28dc2c85dccd0171d2bf0d6f4; this is a private unjudged draft, not task publication or implementation credit. Shared-file custody and normal source dependency are explicit. No task-specific budget override. Field Trials and other owners' CI/Azure-memory work remain outside this task. October28 exact operator approval Actual user asynchronous reply call_65937f1f921b4248bcc8cde80468080c item0: add only test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts and tighten serve.ts raw-Git site allowance from5to4 because its blocking default site is removed. All scanner assertions, remaining ceilings and task behavior/scope otherwise stay unchanged. No new model call, gate waiver, service change or deployment."
   risk_ruling:
     verdict: "operator"
     action: proceed
@@ -46,6 +47,7 @@
     reasons:
       - "Direct operator reply Actual human asynchronous reply call_721bd4d721444e5aaac502ec389e1817 item0: Approve this exact operator release. This is operator approval of the prepared two-existing-file asynchronous local-Git responsiveness repair, not a model verdict."
       - "The single approved native judgment timed out without a ruling; its exact assignment and timeout receipt are retained, with no retry or replacement model call. Preserve checkout, identity and handoff decisions, existing timeouts, budgets, permissions, providers, billing, services and every ownership, test, review, CI and protected-merge gate. No deployment or new operational authority."
-    judged_at: "2026-10-28T15:57:59.674Z"
-    pin: "f8345ef4c255e94170837a0c9175cc735549652393066bf0e5a7c18dc8625dcc"
-    operator_release_pin: "474620909260d7aaef530f39655f2a3dfe2c32d15998f4f395cfa923108f00ba"
+      - "Direct operator Actual user asynchronous reply call_65937f1f921b4248bcc8cde80468080c item0: Approve this test-only scope addition. October28 exact operator approval Actual user asynchronous reply call_65937f1f921b4248bcc8cde80468080c item0: add only test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts and tighten serve.ts raw-Git site allowance from5to4 because its blocking default site is removed. All scanner assertions, remaining ceilings and task behavior/scope otherwise stay unchanged. No new model call, gate waiver, service change or deployment."
+    judged_at: "2026-10-28T20:24:11.383Z"
+    pin: "94e3e5212168f81c14d3b99442ef04c9438bf2aa851cad70c4e827671601c3db"
+    operator_release_pin: "53be9e7a0b344bdde5a3e16768f8ba2e86477fda930d249f8108c01e061d8af4"

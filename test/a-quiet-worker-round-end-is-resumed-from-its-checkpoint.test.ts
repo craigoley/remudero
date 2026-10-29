@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import { setImmediate as flush } from "node:timers/promises";
 import { test } from "node:test";
-import { handoffReceiptsToCarry, pendingWorkerBoundaryHandoffs, runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import {
+  CHECKPOINT_HANDOFF_REASONS, handoffReceiptsToCarry, pendingWorkerBoundaryHandoffs,
+  runBranchDispatchOpts, runBranchStateFrom, runDaemon, type DaemonDeps,
+} from "#src/lib/daemon.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
 import type { RunResult } from "#src/lib/run-result.js";
+import {
+  TASK as ORPHAN_TASK, RUN_ID, BRANCH as ORPHAN_BRANCH, HEAD as ORPHAN_HEAD,
+  MINT_ISO, DEAD_PID, LOCAL, anchorMessage, orphanRunRows, fakeReserver, instance, gitRemote, orphanVerdicts,
+} from "#test/helpers/restart-orphan.js";
 
 const TASK = "W1-T8133";
 const BRANCH = `run-${TASK}-1791807256528`;
@@ -106,3 +113,41 @@ test("W1-T8133: a mid-session quiet handoff is resumable on the next tick", asyn
   assert.equal(rows.find(({ step, extra }) =>
     step === "daemon.iteration" && extra?.resumes_handoff === BRANCH)?.extra?.task, TASK);
 });
+
+test("W1-T10896: the daemon resumes only the exact orphaned head", (t) => {
+  // The claim and the pushed branch live on a real remote, read through the git reserver the daemon uses.
+  const origin = gitRemote(t);
+  const resumed = `${origin.head}\trefs/heads/${ORPHAN_BRANCH}\n`;
+  const blocked = (lines: readonly string[]) =>
+    runBranchDispatchOpts(runBranchStateFrom(resumed, undefined, pendingWorkerBoundaryHandoffs(lines)), [], () => {})
+      .hasPushedRunBranch!(ORPHAN_TASK);
+  const node = instance(t, orphanRunRows());
+  assert.equal(blocked(node.rawLines()), true, "before the boot sweep the pushed branch blocks dispatch");
+
+  node.boot(origin.reserver);
+  assert.equal(origin.claimTip(), "", "the dead claim is dropped from origin");
+  const verdict = orphanVerdicts(node.rows())[0]!;
+  assert.equal(CHECKPOINT_HANDOFF_REASONS.has(String(verdict.reason)), true, "its reason is a checkpoint handoff reason");
+  assert.equal(verdict.branch, ORPHAN_BRANCH);
+  assert.equal(verdict.head_sha, origin.head, "the receipt names origin's exact pushed head");
+  assert.equal(blocked(node.rawLines()), false, "the exact pushed head is a resumable checkpoint");
+  const pending = pendingWorkerBoundaryHandoffs(node.rawLines());
+  assert.deepEqual(pending.get(ORPHAN_TASK), { branch: ORPHAN_BRANCH, headSha: origin.head, resumePhase: "preopen" });
+  // A re-push moves the tip off the receipt, so that head blocks again.
+  const moved = `${"f".repeat(40)}\trefs/heads/${ORPHAN_BRANCH}\n`;
+  assert.equal(runBranchDispatchOpts(runBranchStateFrom(moved, undefined, pending), [], () => {}).hasPushedRunBranch!(ORPHAN_TASK), true);
+});
+
+test("W1-T10896: a run that already opened its PR gets the verdict without a resume receipt", (t) => {
+  const prUrl = "https://github.com/o/r/pull/1";
+  const seed = [...orphanRunRows(), { ts: "2000-01-01T00:40:00.000Z", run_id: RUN_ID, task_id: ORPHAN_TASK, step: "pr.opened", pr_url: prUrl }];
+  const node = instance(t, seed);
+  const reserver = fakeReserver({ [ORPHAN_TASK]: anchorMessage(DEAD_PID, LOCAL, MINT_ISO) }, { heads: { [ORPHAN_BRANCH]: ORPHAN_HEAD } });
+  node.boot(reserver);
+  const verdict = orphanVerdicts(node.rows())[0]!;
+  assert.equal(verdict.pr_url, prUrl);
+  assert.equal(verdict.head_sha, undefined);
+  assert.deepEqual(reserver.askedHeads, [], "a run with its own PR is not resumed from its branch");
+  assert.equal(pendingWorkerBoundaryHandoffs(node.rawLines()).get(ORPHAN_TASK), undefined);
+});
+

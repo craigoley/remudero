@@ -2635,6 +2635,49 @@ export function realDeploySensorsAsync(o: RealDeployOpts, gh: (args: string[]) =
   });
 }
 
+type DeployFactName = "newestBakedSha" | "imagePublished" | "imageBuildInFlight" | "imageBakedCommitsBehind" | "imageRecycleManual";
+/** Sync deploy deps or their async sensors: every getter may answer now or later. */
+export type DeployFactSensors = {
+  [K in DeployFactName]?: (...args: Parameters<NonNullable<DeployDeps[K]>>) =>
+    ReturnType<NonNullable<DeployDeps[K]>> | Promise<ReturnType<NonNullable<DeployDeps[K]>>>;
+};
+/** W1-T9552: one pass's deploy facts; a getter that threw is kept by name so a reader can replay it. */
+export interface DeployFacts {
+  newestBakedSha?: string;
+  imagePublished?: boolean;
+  imageBuildInFlight?: boolean;
+  imageBakedCommitsBehind?: number;
+  imageRecycleManual?: boolean;
+  thrown: Partial<Record<Exclude<DeployFactName, "newestBakedSha">, unknown>>;
+}
+
+/**
+ * W1-T9552: the fleet-state reconciler's deploy facts, awaited once per pass. Each fact is
+ * `undefined` when its read fails, exactly as its getter answers. A throw from `newestBakedSha`
+ * propagates (no rows can be built); any other throw is kept in `thrown` for replay, so the
+ * reconciler still records that row's `reconcile.unreadable`. The reads are the ones the rows ask:
+ * `imageBuildInFlight` only for an image the registry says is unpublished.
+ */
+export async function readDeployFactsAsync(sensors: DeployFactSensors): Promise<DeployFacts> {
+  const facts: DeployFacts = { thrown: {} };
+  const baked = await sensors.newestBakedSha?.();
+  if (!baked) return facts;
+  facts.newestBakedSha = baked;
+  const read = async <K extends keyof DeployFacts["thrown"]>(name: K, get: () => unknown): Promise<void> => {
+    try {
+      (facts as unknown as Record<string, unknown>)[name] = await get();
+    } catch (error) {
+      // Kept, not erased: the snapshot reader rethrows it, so the row records `reconcile.unreadable`.
+      facts.thrown[name] = error;
+    }
+  };
+  await read("imagePublished", () => sensors.imagePublished?.(baked));
+  if (facts.imagePublished === false) await read("imageBuildInFlight", () => sensors.imageBuildInFlight?.());
+  await read("imageBakedCommitsBehind", () => sensors.imageBakedCommitsBehind?.());
+  await read("imageRecycleManual", () => sensors.imageRecycleManual?.());
+  return facts;
+}
+
 export function realDeployDeps(o: RealDeployOpts): DeployDeps;
 export function realDeployDeps(o: RealDeployOpts, sensorExec: DeploySensorExec): Omit<DeployDeps, DeploySensorName> & AsyncDeploySensors;
 export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec): Omit<DeployDeps, DeploySensorName> & {

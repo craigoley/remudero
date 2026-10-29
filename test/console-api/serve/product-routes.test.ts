@@ -703,10 +703,11 @@ test("W1-T10615: the served product build operation matches the authenticated AP
     assert.equal((await send("bob", build)).status, 404);
     assert.equal((await send("alice", { ...build, planEvidenceId: "unapproved" })).status, 409);
     assert.equal(shim.calls().length, 1, "only the unapproved plan reached the transport, and only for the repository identity read");
-    // No live daemon instance drives the target yet: there is nowhere the kick could be delivered.
+    // No live daemon instance drives the target (W1-T10799): the core daemon owns the job, so the request reaches the
+    // same task checks a driven target does, and the claim another lane holds refuses it explicitly.
     const undriven = await send("alice", build);
     assert.equal(undriven.status, 409);
-    assert.equal(undriven.body.error, "target_daemon_missing");
+    assert.equal(undriven.body.error, "task_claimed");
     writeFileSync(registry, "instances:\n  core:\n    github_repo: craigoley/remudero\n  wreckterra:\n    github_repo: craigoley/wreckterra\n");
     // The task is already claimed by another lane, so the assembled operation refuses it explicitly.
     const claimed = await send("alice", build);

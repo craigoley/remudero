@@ -41,7 +41,7 @@ test("W1-T8876: the benchmark cohort runs only when its inputs changed", async (
     await tick(hooks);
     assert.equal(runs, 1, "past the 15-minute floor, unchanged inputs still skip the pass");
 
-    const checkpoint = join(stateDir, "benchmark-cohort-v1.json");
+    const checkpoint = join(stateDir, "benchmark-cohort-index.json");
     const before = { bytes: readFileSync(checkpoint, "utf8"), mtimeMs: statSync(checkpoint).mtimeMs };
     const again = await hooks.runBenchmarkCohortPass();
     assert.equal(again.state, "complete");

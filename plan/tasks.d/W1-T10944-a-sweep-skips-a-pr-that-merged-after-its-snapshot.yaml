@@ -1,0 +1,36 @@
+- id: W1-T10944
+  title: A sweep re-reads a PR's live state before it acts, and skips a PR that merged or closed after its snapshot
+  repo: remudero
+  depends_on: []
+  priority: 4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium
+  origin: operator-session#plan-pr-merge-recon-2026-10-28
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-sweep-skips-a-pr-that-merged-after-its-snapshot.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: Before the sweep acts on a PR (a branch update, an auto-merge arm or direct merge, or a review-lane or fix dispatch), it re-reads that PR's live state after the open-PR snapshot it was disposed from. A PR the live read shows merged or closed is skipped with no write and no dispatch, and exactly one ledger line names it, its live state and the reason. A failed live read is never read as open, and the PR is not acted on that pass. A PR still open is acted on as before
+      proof: "unit test: test/sweep/a-sweep-skips-a-pr-that-merged-after-its-snapshot.test.ts"
+    - claim: The sweep writes the skip as its own ledger step
+      proof: "grep: sweep\\.live_state_skipped in src/lib/sweep.ts"
+  rationale: |
+    OBSERVED in the remudero ledger (operator recon 2026-10-28; the newest ledger ts read was 2026-10-28T15:14:10.795Z). In each case below the sweep acted on a PR from an open-PR snapshot taken before that PR merged.
+    - #14910 merged at 2026-10-27T19:23:26Z. At 19:29:11.635Z a light pass wrote sweep.refresh.decided ("overlap: main changed 1 of this PR's files") and sweep.update_branch.attempted. At 19:29:13.045Z branch.update_requested (via sweep:ready-overlap, expected head 803a4702b) failed with "gh: head ref does not exist (HTTP 422)", and sweep.update_branch.error followed at 19:29:13.046Z. At 19:56:27.339Z the sweep still wrote automerge.plan_pr_held, and at 19:56:27.356Z sweep.disposed mergeable.
+    - #14817 merged at 2026-10-28T01:32:48Z. At 01:36:33.017Z and 02:14:41.726Z the sweep wrote sweep.disposed (disposition mergeable, acted false, head 982a8b229): "review success, required checks green — arming auto-merge".
+    - #15031 merged at 2026-10-28T03:02:08Z. At 04:02:49.827Z the sweep wrote sweep.disposed: "checks green, review never posted — running the review lane on #15031". pr.terminal (state merged) was written only at 04:56:20.230Z.
+    CORRECTION: the 2026-10-28 recon said #15031's merge probes read "conflict" after its merge. That is wrong. The sweep.merge_probe "conflict" lines at 04:44:44.082Z, 06:22:21.285Z and 07:19:04.364Z are pr_number 14793, 15063 and 15063; they only mention #15031 elsewhere in the line.
+    INFERRED: the open-PR list a pass works from can be tens of minutes old by the time the pass reaches a PR. A merge in that gap is not seen until a later snapshot. The writes this produced were refused harmlessly (a 422) or were dispositions with acted false. But a review-lane or fix dispatch on a merged PR would spend a model round on nothing.
+  design: |
+    Re-read only at the act, not at every disposition: one fresh read per PR the pass is about to write to or dispatch for, through the existing transport and read broker. Do not add a second pass or poll. Keep today's dispositions, holds and remedies for a PR that is still open.
+    Return three values from the live read: open, terminal (merged or closed, with which) and unreadable. A catch must not collapse unreadable into open (doctrine: a catch returning a success-shaped literal is a claim).
+    Write the skip with the existing ledger writer as one line per PR per pass, carrying pr_number, head_sha, live state, merged_at when merged, and the reason from the read that produced the decision.
+  falsifier: |
+    A fixture whose snapshot lists a PR as open while its live read says merged. Delete only the new live re-read: the fixture must reach the act (an update-branch, arm or dispatch call on the fake) and fail criterion 2. Restore the re-read and pass. A fixture whose read throws must neither act nor record the PR as open. An open PR's fixture must act unchanged.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-28 at priority low (4). Every line cited above can be re-read with rmd ledger-grep on the PR number, filtered by pr_number.

@@ -1,0 +1,71 @@
+- id: W1-T10948
+  title: Bounded census and static producers retain complete native outcomes and explicit deferred work
+  repo: remudero
+  depends_on:
+    - W1-T10947
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12
+  risk: high
+  band_meaning: blast-radius
+  origin: operator-approved-followups:2026-10-28
+  plan_refs:
+    - W1-T9953
+    - W1-T9951
+    - W1-T5882
+  files:
+    - scripts/census-precheck.mjs
+    - scripts/list-rule-suites.mjs
+    - scripts/preflight-author.mjs
+    - scripts/author-static-phase.mjs
+    - scripts/lib/census-parent-budget.mjs
+    - scripts/lib/author-rule-owner.mjs
+    - test/ci/census-parent-budget.test.ts
+    - test/ci/author-rule-owner.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: Recover only the remaining producer-budget and source-author isolation controls from
+    foundation f6e362e5; do not rebuild the already shipped full-fallback policy W1-T9953 or queue
+    fixture PR15262. Preserve the newer maintained native TAP judge while adding the parent budget
+    and serial judged-child policy together. Admission bounds may defer unstarted work as
+    PARTIAL/over-capacity; failed assertions, timeouts, truncated/no-summary/ghost files, canceled
+    or incomplete closure remain failed or unmeasured. Preserve the approved five serial static
+    tiers, each at most 120 seconds, within the existing 32-phase/one-hour maximum; no check becomes
+    skippable or new time/unchanged-failure retry is granted. Cover real default children,
+    parser/default/catch arms, cancellation, clean owner release and isolated HOME/TMP/auth context.
+    No ambient real credentials or fleet state in fixtures. Register census-parent-budget.test.ts
+    beside PRECHECK_PARITY in scripts/census-precheck.mjs and prove its real pre-push execution; it
+    is a real rule suite, not an exclusion.
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
+  acceptance:
+    - claim: the budgeted census retains native completeness judgment and serial child ownership
+      proof: 'grep: test("W1-T10948: the budgeted census retains native completeness judgment and serial
+        child ownership" in test/ci/census-parent-budget.test.ts'
+    - claim: static tiers defer only unstarted work while failed and incomplete native results cannot
+        become PASS
+      proof: 'grep: test("W1-T10948: static tiers defer only unstarted work while failed and incomplete
+        native results cannot become PASS" in test/ci/author-rule-owner.test.ts'
+  falsifier: "Add the exact named real-path controls in the computed test folders using package
+    aliases and the shared root helper. Establish the failing current-main behavior, restore the
+    smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
+    the named assertion to fail, then restore it. Preserve baseline failures, partial runs and
+    old-head evidence; never make unchanged failures green through repetition. "

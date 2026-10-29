@@ -1,0 +1,25 @@
+- id: W1-T10940
+  title: Read the transcripts behind W1-T10781's fixed-still-red PRs and name the recovery failure before any dispatch behavior changes
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=3bc535b5a62f6ff0
+  # backlog gardener: placed=2026-10-29T01:30:16.152Z
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T10781-fix-lane-fixed-still-red.yaml
+  acceptance:
+    - claim: "The W1-T10781 shard records, from the cited run tails (state/runs/DAEMON-*-fix1-*.tail for PRs #11487, #13895, #14326, #12582 and #11949), one named recovery failure and the evidence for it, or states which tails could not be obtained"
+      proof: "grep: FIXED-STILL-RED RECOVERY FINDING in plan/tasks.d/W1-T10781-fix-lane-fixed-still-red.yaml"
+  origin: followup:DAEMON-1793172279613:2026-10-28T08:20:27.809Z:0
+  rationale: >-
+    From the 2026-10-28 follow-up on https://github.com/craigoley/remudero/pull/15065, ratified
+    via rmd approve:
+  
+    follow-up harvest [research]: obtain the cited incident transcripts to identify the recovery
+    failure before changing dispatch behavior. — from W1-T10781 (run DAEMON-1793172279613,
+    https://github.com/craigoley/remudero/pull/15065)

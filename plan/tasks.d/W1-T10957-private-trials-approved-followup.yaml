@@ -1,0 +1,76 @@
+- id: W1-T10957
+  title: Recurring private coding canaries isolate their workspace and prove native resource closure
+  repo: remudero
+  depends_on:
+    - W1-T10956
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12
+  risk: high
+  band_meaning: blast-radius
+  origin: operator-approved-followups:2026-10-28
+  plan_refs:
+    - W1-T10875
+    - W1-T4574
+  files:
+    - src/lib/model-canary-coding.ts
+    - src/lib/model-canary-runner.ts
+    - src/lib/model-canary-command.ts
+    - src/lib/model-canary-ledger.ts
+    - test/model-canary-command.test.ts
+    - test/routing/model-canary-coding-isolation.test.ts
+    - test/routing/model-canary-native-session.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: "Integrate the approved private benchmark portion of 0f701b6d only after the real execution
+    metrics are available. Extend the existing model-canary mechanism, not a new scheduler:
+    deterministic equivalent single-call/structured-output/tool/coding tasks, same
+    effort/context/cache cohorts, fixed seeds/order rotation and explicit eligibility. Bound native
+    parent-plus-child CPU/memory/heap/scratch/output/clock; use a genuine serial lease and prove
+    cancellation/descendant closure. Coding runs use an isolated non-Git sandbox with synthetic
+    fixtures and no real auth, fleet state, paid tools, arbitrary install, host mount or network
+    unless the exact existing contract authorizes it. Maintain separate author/refusal/partial,
+    correctness, invocation, usage/cost and served-identity evidence. Keep execution unarmed until
+    an owner qualifies and explicitly releases its existing controls; no new schedule or public
+    publication is authorized."
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
+  acceptance:
+    - claim: the existing private coding executor contains filesystem and credential effects and closes
+        its real descendants
+      proof: 'grep: test("W1-T10957: the existing private coding executor contains filesystem and
+        credential effects and closes its real descendants" in test/model-canary-command.test.ts'
+    - claim: paired trial results retain correctness, native resource and missing-identity evidence
+        without changing schedules
+      proof: 'grep: test("W1-T10957: paired trial results retain correctness, native resource and
+        missing-identity evidence without changing schedules" in
+        test/routing/model-canary-coding-isolation.test.ts'
+    - claim: The real default production path invokes scoreCodingControl; an unused export, declaration or
+        re-export is insufficient.
+      proof: "grep: scoreCodingControl( in src/lib/model-canary-runner.ts"
+    - claim: The real default production path invokes codingLedgerSave; an unused export, declaration or
+        re-export is insufficient.
+      proof: "grep: codingLedgerSave( in src/lib/model-canary-command.ts"
+  falsifier: "Add the exact named real-path controls in the computed test folders using package
+    aliases and the shared root helper. Establish the failing current-main behavior, restore the
+    smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
+    the named assertion to fail, then restore it. Preserve baseline failures, partial runs and
+    old-head evidence; never make unchanged failures green through repetition. "

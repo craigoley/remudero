@@ -60,6 +60,7 @@ const DECLARED_RUNTIME_FIXTURE: Record<string, string> = {
   // distinctive so the never-printed assertion below can search for it verbatim rather than
   // matching a substring some unrelated output happens to contain.
   RMD_OPENWEIGHT_API_KEY: "openweight-key-fixture-3f9c1d",
+  RMD_CASH_EASTUS_API_KEY: "eastus-key-fixture-8ca921",
   RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.test/anthropic",
   RMD_FOUNDRY_CLAUDE_API_KEY: "foundry-key-fixture-6b84d2",
 };
@@ -977,7 +978,7 @@ function printDaemonRunEnvNames(scriptPath: string = HOST_UPDATE_SCRIPT, extraEn
   const out = r.stdout ?? "";
   const block = out.slice(out.indexOf("docker run -d --name remudero-daemon"), out.indexOf("./bin/rmd daemon"));
   assert.ok(block.length > 0, "the daemon invocation must be present in --print-daemon-run output");
-  return [...block.matchAll(/-e\s+([A-Z_][A-Z0-9_]*)=/g)].map((m) => m[1]);
+  return [...block.matchAll(/-e\s+([A-Z_][A-Z0-9_]*)(?==|\s|$)/g)].map((m) => m[1]);
 }
 
 /** Extract a bash array literal's elements by name, tolerant of either single- or multi-line form. */
@@ -1320,7 +1321,7 @@ test("W1-T1069: MUTANT: a fallback array edited out of sync with deploy/runtime-
   // Proves the consistency test above actually discriminates, rather than passing on any six names.
   const recycleSrc = readFileSync(SCRIPT, "utf8");
   const mutated = recycleSrc.replace(
-    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)",
+    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_CASH_EASTUS_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)",
     "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S)",
   );
   assert.notEqual(mutated, recycleSrc, "the mutation target must actually be present and unique");

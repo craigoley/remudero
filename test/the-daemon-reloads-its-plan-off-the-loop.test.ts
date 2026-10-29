@@ -113,7 +113,7 @@ test("W1-T7743: async plan loading wraps a listed-shard read failure as PlanErro
     () => loadPlanAtRefAsync("fixture-root", "plan/tasks.yaml", "HEAD", runGit),
     /cannot read plan shard at HEAD in fixture-root: Error: cat-file unavailable/,
   );
-  assert.deepEqual(commands, ["show", "ls-tree", "cat-file"]);
+  assert.deepEqual(commands, ["show", "ls-tree", "ls-tree", "cat-file"], "the shard listing, the blob-id listing, then the batch");
 });
 
 test("W1-T7743: planReloader returns the fresh plan after origin/main moves with sync spawns trapped", async () => {
