@@ -367,7 +367,7 @@ function launcherFixture(): { root: string; log: string; proc: string; env: Node
   const env: NodeJS.ProcessEnv = {
     PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: root, GH_TOKEN: "fixture-token", FAKE_DOCKER_LOG: log,
     RMD_SERVE_REPO_DIR: join(root, "code"), RMD_SERVE_GENS_DIR: join(root, "gens"), RMD_SERVE_DOCKERENV_PATH: join(root, "no-dockerenv"),
-    RMD_INSTANCE_REGISTRY: join(root, "no-registry"), RMD_MEMINFO_PATH: join(root, "no-meminfo"), RMD_SERVE_BANNER_WAIT_S: "1",
+    RMD_MEMINFO_PATH: join(root, "no-meminfo"), RMD_SERVE_BANNER_WAIT_S: "1",
     RMD_SERVE_ADMIT_MEMINFO_PATH: join(proc, "meminfo"), RMD_SERVE_ADMIT_VMSTAT_PATH: join(proc, "vmstat"),
     RMD_SERVE_ADMIT_PSI_PATH: join(proc, "psi"), RMD_SERVE_ADMIT_SAMPLE_S: "0.05",
     // This env drops NODE_TEST_CONTEXT, so deploy/scratch-mounts.sh's test guard cannot see a test.

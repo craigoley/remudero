@@ -1,3 +1,4 @@
+import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/legacy-host-launch.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -134,13 +135,13 @@ function writeStubs(bin: string): void {
 }
 
 function run(command: string, args: string[], fx: Fixture, extraEnv: Record<string, string> = {}) {
-  const result = spawnSync(BASH_BIN, [command, ...args], {
+  const result = spawnSync(BASH_BIN, [command === RECYCLE ? legacyHostScript(fx.root, command, fx.registry) : command, ...args], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...withoutRegistrySelection(process.env),
       PATH: `${fx.bin}:${process.env.PATH ?? ""}`,
-      RMD_INSTANCE_REGISTRY: fx.registry,
+      ...(command === RECYCLE ? {} : { RMD_INSTANCE_REGISTRY: fx.registry }),
       RMD_UNIT_DIR: fx.unitDir,
       RMD_BIN_DIR: fx.bin,
       RMD_TEST_CALLS: fx.calls,

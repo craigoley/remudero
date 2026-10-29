@@ -3230,8 +3230,11 @@ async function withPrivateRegistryCodexProfile<T>(
     profile = { name, overrides: ["-c", `default_permissions=${JSON.stringify(name)}`,
       "-c", `permissions.${name}.extends=${JSON.stringify(readOnly ? ":read-only" : ":workspace")}`,
       "-c", `permissions.${name}.filesystem={${inline}}`, "-c", `permissions.${name}.network.enabled=${review || !readOnly}`] };
-    writeFileSync(path, text, { flag: "wx", mode: 0o600 });
-    identity = lstatSync(path);
+    const created = openSync(path, "wx", 0o600);
+    try {
+      writeFileSync(created, text);
+      identity = fstatSync(created);
+    } finally { closeSync(created); }
   } catch (error) {
     // Unavailable private profile is unknown containment, never a fallback to broad workspace reads.
     if (error instanceof InstanceRegistryRuntimeError) throw error;

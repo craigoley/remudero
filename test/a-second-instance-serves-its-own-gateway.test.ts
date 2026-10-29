@@ -1,3 +1,4 @@
+import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/legacy-host-launch.js";
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -65,15 +66,14 @@ exit 1
 }
 
 function runServe(root: ReturnType<typeof fixture>, instance: string, dockerMarker = join(root.root, "no-dockerenv")): ReturnType<typeof spawnSync> {
-  return spawnSync("bash", [SCRIPT, "--instance", instance, "--dry-run"], {
+  return spawnSync("bash", [legacyHostScript(root.root, SCRIPT, root.registry), "--instance", instance, "--dry-run"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...withoutRegistrySelection(process.env),
       PATH: `${join(root.root, "bin")}:${process.env.PATH ?? ""}`,
       GH_TOKEN: "test-token",
       FAKE_SITE_STATE: root.state,
-      RMD_INSTANCE_REGISTRY: root.registry,
       RMD_SERVE_REPO_DIR: root.code,
       RMD_SERVE_DOCKER_NETWORK: "rmd-test-net",
       RMD_SERVE_DOCKERENV_PATH: dockerMarker,
@@ -127,7 +127,7 @@ test("the legacy invocation stays the core gateway on port 4317", () => {
       cwd: REPO_ROOT,
       encoding: "utf8",
       env: {
-        ...process.env,
+        ...withoutRegistrySelection(process.env),
         PATH: `${join(root.root, "bin")}:${process.env.PATH ?? ""}`,
         GH_TOKEN: "test-token",
         RMD_STATE_DIR: root.state,

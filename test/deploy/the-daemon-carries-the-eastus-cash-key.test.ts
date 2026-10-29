@@ -1,3 +1,4 @@
+import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/legacy-host-launch.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -48,7 +49,7 @@ esac
 exit 0
 `, { mode: 0o755 });
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...withoutRegistrySelection(process.env),
     HOME: root,
     PATH: `${bin}:${process.env.PATH ?? ""}`,
     RMD_STATE_DIR: state,
@@ -67,7 +68,6 @@ exit 0
     RMD_OPENWEIGHT_API_KEY: "",
     RMD_FOUNDRY_CLAUDE_API_KEY: "",
     RMD_FOUNDRY_CLAUDE_ENDPOINT: "",
-    RMD_INSTANCE_REGISTRY: join(root, "absent-registry"),
     RMD_RECYCLE_FIRST_BOOT: "1",
     RMD_RECYCLE_DOCKERENV_PATH: join(root, "absent-dockerenv"),
     RMD_RECYCLE_HOST_LOCK: join(root, "recycle.lock"),
@@ -82,7 +82,7 @@ exit 0
     FIXTURE_ENV: envFile,
   };
   function run(script: string, args: string[] = []) {
-    const result = spawnSync("bash", [script, ...args], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 30_000 });
+    const result = spawnSync("bash", [script.startsWith("deploy/") ? legacyHostScript(root, script) : script, ...args], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 30_000 });
     assert.equal(result.status, 0, `${result.error ?? ""}\n${result.stdout}\n${result.stderr}`);
     return result.stdout + result.stderr;
   }

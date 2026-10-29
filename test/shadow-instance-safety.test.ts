@@ -617,6 +617,41 @@ test("selected runtime worker unknown and cleanup outcomes stay explicit", async
   }
 });
 
+test("selected Codex profile identity belongs to the exclusive creation handle", async (t) => {
+  const fixture = runtimeRegistryFixture(), codexHome = join(fixture.root, "codex-home");
+  const cwd = join(fixture.root, "checkout"), original = new Error("contained creation race");
+  mkdirSync(codexHome); mkdirSync(cwd);
+  const realWrite = fs.writeFileSync;
+  let artifact = "", substitutions = 0;
+  const writeMock = t.mock.method(fs, "writeFileSync", ((...args: Parameters<typeof fs.writeFileSync>) => {
+    realWrite(...args);
+    if (substitutions !== 0 || typeof args[1] !== "string" || !args[1].startsWith("default_permissions=")) return;
+    artifact = join(codexHome, readdirSync(codexHome)[0]!);
+    renameSync(artifact, artifact + ".original");
+    realWrite(artifact, args[1]);
+    substitutions++;
+  }) as typeof fs.writeFileSync);
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(runtimeRegistryRunner()(() => spawnCodexWorker({
+      cwd, workerHome: fixture.root, prompt: "contained creation probe",
+      settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: ["Read", "Bash"],
+      containment: { spawn: () => { throw original; }, teardown: () => {} },
+    }, { root: fixture.root, claudeBin: "/unused", workerProviders: {
+      enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome,
+    } }), { envPath: fixture.selected }), error => {
+      assert.ok(error instanceof runtimeRegistry.InstanceRegistryRuntimeError);
+      assert.match(error.message, /worker_profile_cleanup_unknown/);
+      assert.equal(error.cause, original);
+      assert.equal(error.message.includes(fixture.root), false);
+      return true;
+    });
+    assert.equal(substitutions, 1);
+    assert.equal(readFileSync(artifact, "utf8"), readFileSync(artifact + ".original", "utf8"),
+      "equal replacement bytes remain unknown identity and are retained");
+  } finally { writeMock.mock.restore(); syncBuiltinESMExports(); fixture.cleanup(); }
+});
+
 test("selected private denials follow scratch-backed Claude invocations without polluting the rendered template", async () => {
   const fixture = runtimeRegistryFixture(), operator = join(fixture.root, "operator");
   const selected = join(operator, ".config", "remudero", "selected-registry.yaml");

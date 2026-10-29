@@ -1,3 +1,4 @@
+import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/legacy-host-launch.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -102,7 +103,7 @@ function runRecycle(opts: RunOpts): Run {
   writeStubs(dir);
 
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...withoutRegistrySelection(process.env),
     PATH: `${dir}:${process.env.PATH ?? ""}`,
     STUB_REC: rec,
     RMD_RECYCLE_WAIT_S: "1",
@@ -121,21 +122,14 @@ function runRecycle(opts: RunOpts): Run {
     // container" guard does not fire merely because the TEST RUNNER itself is sandboxed.
     RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "a-recycle-checkout-no-such-dockerenv-marker"),
   };
-  // W1-T3596 ships `.remudero/daemon-instances.yaml`, and an unscoped recycle with no explicit
-  // RMD_STATE_DIR now refuses on THAT ("no --instance given while ... declares instances") before
-  // the STATE_DIR predicate this suite exists to measure. The bare default is still reachable
-  // wherever no registry is readable — the compatibility arm W1-T3596 preserves byte-for-byte —
-  // so point the registry at an absent file and keep this suite measuring its own subject. The
-  // tests that pass `stateDir` have already named a target and never reach that refusal either
-  // way; `extraEnv` below still overrides this for anything that wants the registry present.
-  env.RMD_INSTANCE_REGISTRY = join(tmpdir(), "a-recycle-checkout-no-such-instance-registry.yaml");
+  // An isolated instance-less default reaches the legacy state-dir guard without explicit selection.
   delete env.RMD_STATE_DIR;
   delete env.RMD_RECYCLE_FIRST_BOOT;
   if (opts.stateDir !== undefined) env.RMD_STATE_DIR = opts.stateDir;
   if (opts.home !== undefined) env.HOME = opts.home;
   Object.assign(env, opts.extraEnv ?? {});
 
-  const r = spawnSync("bash", [opts.scriptPath ?? SCRIPT, ...(opts.extraArgs ?? [])], {
+  const r = spawnSync("bash", [legacyHostScript(dir, opts.scriptPath ?? SCRIPT), ...(opts.extraArgs ?? [])], {
     encoding: "utf8",
     cwd: REPO_ROOT,
     env,

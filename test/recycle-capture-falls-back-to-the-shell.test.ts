@@ -1,3 +1,4 @@
+import { legacyHostScript } from "#test/helpers/legacy-host-launch.js";
 // W1-T2553: `deploy/recycle-container.sh` captured a declared runtime variable ONLY from
 // `docker inspect` when a container existed; the shell fallback sat in the `else` branch reached
 // only when NO container existed. That was fine while containers were started carrying a token,
@@ -62,7 +63,7 @@ function fakeDockerDir(containerEnv: string[]): string {
 
 function runScript(opts: { containerEnv: string[]; shellEnv: Record<string, string> }) {
   const dir = fakeDockerDir(opts.containerEnv);
-  return spawnSync("bash", [SCRIPT], {
+  return spawnSync("bash", [legacyHostScript(dir, SCRIPT)], {
     encoding: "utf8",
     timeout: 60000,
     env: {
@@ -80,13 +81,6 @@ function runScript(opts: { containerEnv: string[]; shellEnv: Record<string, stri
       // at origin/main: 1/4 passing (only the source-level case, which never spawns the script);
       // with this override, 4/4. Sibling recycle suites already pass it for the same reason.
       RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "recycle-capture-no-such-dockerenv-marker"),
-      // W1-T3596, the same argument as the two overrides above and the same shape: an unscoped
-      // recycle now refuses BEFORE any credential capture once `.remudero/daemon-instances.yaml`
-      // declares instances, and this suite is unscoped by construction (naming an instance would
-      // pin a state dir and container this suite has no business asserting). Point the registry at
-      // an absent file, which is exactly the legacy path W1-T3596 preserves byte-for-byte, so the
-      // capture branch under test is still the one reached.
-      RMD_INSTANCE_REGISTRY: join(tmpdir(), "recycle-capture-no-such-instance-registry.yaml"),
       ...opts.shellEnv,
     },
   });

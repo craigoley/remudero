@@ -1,3 +1,4 @@
+import { legacyHostScript } from "#test/helpers/legacy-host-launch.js";
 // W1-T6160, criterion 3: the explicit commissioning mode is the ONLY thing that may supersede an
 // outgoing author. An ordinary recycle still keeps a non-empty outgoing RMD_GIT_AUTHOR_* over a
 // conflicting shell export (W1-T3454's container-first contract), later ordinary recycles keep a
@@ -189,7 +190,7 @@ function seedContainer(fx: Fixture, inst: Instance, env: string[], persisted?: [
 
 function recycle(fx: Fixture, args: string[], env: Record<string, string> = {}, scripts = { recycler: RECYCLER, entrypoint: ENTRYPOINT }): Run {
   writeFileSync(join(fx.rec, "calls"), "");
-  const r = spawnSync("bash", [scripts.recycler, ...args], {
+  const r = spawnSync("bash", [legacyHostScript(fx.root, scripts.recycler, fx.registry), ...args], {
     encoding: "utf8",
     timeout: 120_000,
     env: {
@@ -199,7 +200,6 @@ function recycle(fx: Fixture, args: string[], env: Record<string, string> = {}, 
       STUB_WORLD: fx.world,
       STUB_REC: fx.rec,
       STUB_ENTRYPOINT: scripts.entrypoint,
-      RMD_INSTANCE_REGISTRY: fx.registry,
       RMD_RECYCLE_DOCKERENV_PATH: join(fx.root, "no-such-dockerenv"),
       RMD_RECYCLE_WAIT_S: "1",
       RMD_RECYCLE_POLL_S: "1",
