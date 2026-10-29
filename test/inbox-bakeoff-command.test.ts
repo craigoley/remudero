@@ -10,6 +10,9 @@ import type { Proposal } from "../src/lib/inbox.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { inboxBakeoffCommand } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
+import { selectOpenWeightModel } from "#src/lib/worker-provider.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -79,6 +82,22 @@ test("inbox-bakeoff command runs its orchestration through injected, non-spendin
     assert.equal(cloneCalls.length, 1, "an absent checkout uses the injected local clone exactly once");
     assert.match(cloneCalls[0]?.[2] ?? "", /^[^/]+\/[^/]+$/);
     assert.equal(calls.length, BAKEOFF_CANDIDATES.length, "every candidate is routed through the injected fake, never a paid worker");
+    const terra = BAKEOFF_CANDIDATES.filter((candidate) => candidate.model === "gpt-6.1-terra");
+    assert.deepEqual(terra.map((candidate) => candidate.effort), ["low", "medium", "high"]);
+    for (const candidate of terra) {
+      const args = calls.find((call) => call.routingTrial?.reason === `bake-off candidate ${candidate.id}`);
+      assert.ok(args);
+      assert.deepEqual(args.routingTrial?.models, ["gpt-6.1-terra"]);
+      assert.equal(args.effort, candidate.effort);
+      assert.notDeepEqual(args.tools, []);
+      assert.equal(args.mountProvider, "cash");
+      const selection = selectOpenWeightModel(loadMounts(mountsPath(REPO_ROOT)).capabilities,
+        args.model as string, args.effort as string, Buffer.byteLength(args.prompt),
+        { only: args.routingTrial?.models });
+      assert.equal(selection.model, candidate.model);
+      assert.equal(selection.effort, candidate.effort);
+      assert.equal(selection.capability, "balanced");
+    }
     assert.ok(calls.slice(0, -1).every((args) => args.routingTrial?.id === "inbox-bakeoff"));
     assert.equal(calls.at(-1)?.routingTrial, undefined, "the subscription candidate is not given a cash routing trial");
     assert.ok(calls.some((args) => Array.isArray(args.tools) && args.tools.length === 0), "the no-tools candidate stays no-tools");

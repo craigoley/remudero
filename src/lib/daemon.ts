@@ -143,7 +143,7 @@ import type { RetroTriggerDecision } from "./retro.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
 import type { OrphanSweepReport } from "./worker-containment.js";
 // Type-only — shapes the feedback-landing injection points below (W1-T530).
-import type { LandFeedbackResult } from "./feedback-landing.js";
+import type { FeedbackRefusal, LandFeedbackResult } from "./feedback-landing.js";
 // Type-only — github-posture.ts owns this shape; the real read lives in run-task.ts (W1-T1040).
 import type { GithubPostureFinding } from "./github-posture.js";
 // The Clock port (W1-T2897): declared in "../lib/clock" so every reachable-through-lib import
@@ -467,7 +467,17 @@ export function restartWorkHistory(rawLines: readonly string[], nowMs: number): 
 /** The step a pre-PR handoff writes beside its verdict, and the daemon re-writes for a receipt the live ledger
  *  holds only as a verdict row: verdicts keep the newest 200, so a parked checkpoint aged out of resumption. */
 export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
-export const CHECKPOINT_HANDOFF_REASONS: ReadonlySet<string> = new Set(["freshness_yield", "quiet_worker_round_ended"]);
+/** W1-T10896: `orphaned-by-restart` is the boot sweep's verdict for a run its own daemon restarted under. */
+export const CHECKPOINT_HANDOFF_REASONS: ReadonlySet<string> = new Set(["freshness_yield", "quiet_worker_round_ended", "orphaned-by-restart"]);
+
+export interface WorkerBoundaryCheckpoint {
+  branch: string;
+  headSha: string;
+  resumePhase?: "preopen";
+}
+
+const checkpointPhase = (row: Record<string, unknown>): { resumePhase?: "preopen" } =>
+  row.reason === "orphaned-by-restart" || row.resume_phase === "preopen" ? { resumePhase: "preopen" } : {};
 
 /** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
  *  restore, which consumed nothing (W1-T7806). A matching checkpoint drop consumes the receipt;
@@ -475,8 +485,8 @@ export const CHECKPOINT_HANDOFF_REASONS: ReadonlySet<string> = new Set(["freshne
  *  which run-task writes right after a worker-error verdict of the run that restored the checkpoint, re-pends
  *  the exact receipt that verdict consumed. A run refused before it could restore (a stale engine's lockfile,
  *  2026-10-17 W1-T9089) consumed nothing either; its verdict left the P1 run-branch-already-pushed for 5 h. */
-export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
-  const pending = new Map<string, { branch: string; headSha: string }>();
+export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, WorkerBoundaryCheckpoint> {
+  const pending = new Map<string, WorkerBoundaryCheckpoint>();
   const resumable = (taskId: string, branch: unknown, headSha: unknown): branch is string =>
     typeof branch === "string" && branch.startsWith(`run-${taskId}-`) && /^run-.+-[0-9]+$/.test(branch) &&
     typeof headSha === "string" && /^[a-f0-9]{40}$/.test(headSha);
@@ -490,7 +500,7 @@ export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<
       continue;
     }
     if (row.step === "implement.checkpoint_kept") {
-      if (resumable(row.task_id, row.source_branch, row.head_sha)) pending.set(row.task_id, { branch: row.source_branch, headSha: String(row.head_sha) });
+      if (resumable(row.task_id, row.source_branch, row.head_sha)) pending.set(row.task_id, { branch: row.source_branch, headSha: String(row.head_sha), ...checkpointPhase(row) });
       continue;
     }
     const receipt = row.step === HANDOFF_RECEIPT_STEP ? row.waiting_on !== "pr" && row.waiting_on !== "ci"
@@ -501,14 +511,14 @@ export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<
     if (row.step === "verdict" && typeof row.stage === "string" && PRE_RESTORE_RUN_VERDICT_STAGES.has(row.stage)) continue;
     pending.delete(row.task_id);
     if (receipt && resumable(row.task_id, row.branch, row.head_sha)) {
-      pending.set(row.task_id, { branch: row.branch, headSha: String(row.head_sha) });
+      pending.set(row.task_id, { branch: row.branch, headSha: String(row.head_sha), ...checkpointPhase(row) });
     }
   }
   return pending;
 }
 
 /** The pending receipts whose only live record is a verdict row — what the daemon re-writes at boot. */
-export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[string, { branch: string; headSha: string }]> {
+export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[string, WorkerBoundaryCheckpoint]> {
   const recorded = new Set<string>();
   for (const raw of rawLines) {
     if (!raw.includes(HANDOFF_RECEIPT_STEP)) continue;
@@ -1753,7 +1763,10 @@ export interface DaemonDeps {
    *  row. Every resulting task remains MARKED/PARKED (`author_class: machine`, `verify: human`);
    *  a throw is best-effort and the tick continues. */
   runCiLearningCadence?: () => Promise<
-    CiLearningCadenceRunResult & { filedCount: number; skippedCount: number; refusedCount: number }
+    CiLearningCadenceRunResult & {
+      filedCount: number; skippedCount: number; refusedCount: number;
+      carryRefusedCount?: number; carryRefused?: FeedbackRefusal[];
+    }
   >;
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
    * crosses first (policy data). An undefined return means there is nothing safe to evaluate — a corrupt marker, a
@@ -4125,7 +4138,8 @@ export async function runDaemon(
   // W1-T8676: the blocking runs whose release this process already ledgered, beside the projection's receipt.
   const ledgeredIndependentBlockReleases = new Set<string>();
   for (const [taskId, receipt] of handoffReceiptsToCarry(bootLedgerLines)) {
-    log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true });
+    log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true,
+      ...(receipt.resumePhase ? { resume_phase: receipt.resumePhase } : {}) });
   }
   let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(bootLedgerLines);
   const staleBodyReported = new Set<string>();
@@ -5280,6 +5294,8 @@ export async function runDaemon(
                 reason: result.snapshot.reason,
                 source_bytes: result.snapshot.pressure.sourceBytes,
                 checkpoint_bytes: result.checkpointBytes,
+                checkpoint_read_bytes: result.checkpointReadBytes,
+                checkpoint_written_bytes: result.checkpointWrittenBytes,
                 dimension_cardinality: result.snapshot.pressure.dimensionCardinality,
                 rebuilt_partitions: result.snapshot.pressure.rebuiltPartitions,
               });
@@ -5328,6 +5344,8 @@ export async function runDaemon(
                       filed: result.filedCount,
                       skipped: result.skippedCount,
                       refused: result.refusedCount,
+                      carry_refused: result.carryRefusedCount ?? 0,
+                      carry_refusals: result.carryRefused ?? [],
                       lesson_recurrences: result.lessonRecurrences,
                     });
                   })

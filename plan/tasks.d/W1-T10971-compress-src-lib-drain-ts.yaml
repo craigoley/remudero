@@ -1,0 +1,35 @@
+- id: W1-T10971
+  title: "Compress the 900 comment lines in src/lib/drain.ts without changing executable code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "comment-compression:src/lib/drain.ts"
+  files:
+    - src/lib/drain.ts
+    - test/dispatch/compress-src-lib-drain-ts.test.ts
+  acceptance:
+    - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
+      proof: "unit test: W1-T10971: comment compression preserves executable code"
+  rationale: |
+    Observed 900 comment lines in src/lib/drain.ts. This is maintenance debt, never a merge ceiling.
+    Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
+    Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.
+    Add the named regression in test/dispatch/compress-src-lib-drain-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
+    Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
+    Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed scope is comment compression in one source file plus a regression test; acceptance requires measurable comment reduction and preservation of executable tokens and behavioral assertions."
+      - "The rationale explicitly preserves invariants, test-pinned text, owners, stops and deployment holds, and prohibits a new hard comment ceiling or release override."
+      - "This is a filing-time assessment with no diff supplied; the new test is explicitly planned, and the supplied gates report no concerning condition."
+    judged_at: "2026-10-29T13:52:57.519Z"
+    pin: "6644ff6e82edcb9ac435e054cfc8eae6466fd4e74f7f89a2f49d253dcb3668b3"

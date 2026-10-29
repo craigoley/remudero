@@ -21,7 +21,7 @@ import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../
 import { ghExec, ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
@@ -69,7 +69,7 @@ import { getHeapStatistics } from "node:v8";
 import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
 import { ledgerMemoHolders } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
-import { type Plan } from "../../lib/plan.js";
+import { loadPlan, type Plan } from "../../lib/plan.js";
 import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
 import { runnerConfigDigest, terminalPreDispatchRefusalRevisions } from "../../lib/dispatch-repair.js";
@@ -77,7 +77,7 @@ import { loadMounts, mountsPath } from "../../lib/mounts.js";
 import { loadPolicy, policyPath } from "../../lib/policy.js";
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
-import { dispatchClaimRef, findClaimMintRow, releaseReplacedContainerClaims, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
+import { bootSweepDispatchClaims, dispatchClaimRef, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
 import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
@@ -102,7 +102,7 @@ import { wireSweepWakeToDaemon } from "../../lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "../../lib/github-app.js";
 import { LEDGER_REQUEST_STEP, realScopedMint, startDaemonGitCredentialSocket, type ScopedTokenMint } from "../../lib/secret-boundary.js";
 import { automaticBranchReapStateFileName, orphanRunBranchEvidenceReader } from "../../lib/branch-reaper.js";
-import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
+import { repoRoot, resolveOwnerRepo, writeDaemonTargetRecord } from "../../lib/repo-location.js";
 import { resolveRepoLayout } from "../../lib/repo-layout.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { liveInflightRuns, readCheckoutDepth } from "../../lib/report-commands.js";
@@ -958,6 +958,9 @@ export async function daemonCommand(
   let tickReadGeneration: ReadGeneration<TickReadFacts> | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
   const targetCheckoutRoot = daemonTargetCheckoutRoot(target, config.root);
+  const targetRecordWrite = writeDaemonTargetRecord(join(config.root, "state"),
+    { owner: target.owner, repo: target.repo, isSelf: target.isSelf, checkoutRoot: targetCheckoutRoot });
+  if (!targetRecordWrite.written) log("daemon.target_record_failed", { reason: targetRecordWrite.reason });
   const targetCommitTrailerIndex = () =>
     buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot })();
   const gatewayFor = createDaemonGatewayFactory(config.root, log, {
@@ -1176,15 +1179,14 @@ export async function daemonCommand(
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
   const landedClaimRerunReported = new Set<string>();
   try {
-    const swept = releaseReplacedContainerClaims(deps.bootClaimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", target.repo)), {
+    // W1-T10896: the sweep also judges this host's own pre-restart claims and ends the runs they held.
+    bootSweepDispatchClaims(deps.bootClaimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", target.repo)), {
       localHost: hostname(),
       lockHeldSinceMs: bootClaimLock.now(),
       lockHeldSinceIso: bootClaimLock.iso(),
-      findMintRow: (taskId, anchor) => findClaimMintRow(dirname(ledgerPath), taskId, anchor),
+      stateDir: dirname(ledgerPath),
+      log,
     });
-    for (const claim of swept) {
-      log("dispatch.claim_released", { ref: dispatchClaimRef(claim.taskId), surface: "boot-sweep", arm: claim.arm, release: claim.release, dropped: claim.dropped, reason: claim.reason });
-    }
   } catch (error) {
     log("dispatch.claim_sweep_failed", { surface: "boot-sweep", error: String((error as Error)?.message ?? error).slice(0, 300) });
   }

@@ -26,6 +26,45 @@
 import { SHARE_ENV, Worker } from "node:worker_threads";
 import { performance } from "node:perf_hooks";
 
+/** A synchronous child-process call long enough to name when it froze the loop (W1-T5718). */
+export interface SyncSpawnEntry {
+  via: string;
+  command: string;
+  first_arg?: string;
+  duration_ms: number;
+  /** The first frame outside the shared spawn leaves: the code that reached the leaf (W1-T7745). */
+  caller?: string;
+  /** The shared leaf the spawn went through (`hostWorktreeGit`, `ghExecFile`…), when one was on the stack. */
+  leaf?: string;
+  /** True when no frame outside the leaves was on the stack, so `caller` is the leaf itself. */
+  caller_is_leaf?: true;
+  /** W1-T9577: for an anonymous `caller`, the named functions that reached it (`callerChain`), so it is named. */
+  caller_chain?: string[];
+}
+
+/** W1-T9577: one caller's share of a window — EVERY sync spawn it made, whatever each one's length. */
+export interface SyncSpawnCallerTotal {
+  caller?: string;
+  caller_chain?: string[];
+  leaf?: string;
+  caller_is_leaf?: true;
+  total_ms: number;
+  calls: number;
+}
+
+/** What one `daemon.loop_lag` row reads about its own interval: the longest spawn and the total sync-spawn time. */
+export interface LagIntervalReading {
+  top: SyncSpawnEntry | undefined;
+  sync_spawn_ms: number;
+  /** W1-T9577: present once the interval spawned — its callers by total, and the time none of them holds. */
+  by_caller?: SyncSpawnCallerTotal[];
+  unnamed_ms?: number;
+  /** W1-T9754: present once the interval made an ASYNC spawn — the time those held the loop inside the spawn
+   *  call itself (the fork), and their callers by that total. An idle interval reads as before. */
+  async_spawn_sync_ms?: number;
+  async_by_caller?: SyncSpawnCallerTotal[];
+}
+
 export type StallLog = (step: string, extra?: Record<string, unknown>) => void;
 
 /** One tick's lateness as the daemon measured it: the input the bound is a quantile of. */
@@ -375,7 +414,9 @@ export const DAEMON_LOOP_STALL_STEPS: LoopStallSteps = {
 export interface LoopStallProfilerOptions {
   /** W1-T10074: the step names its rows carry; absent, {@link DAEMON_LOOP_STALL_STEPS}. */
   steps?: LoopStallSteps;
-  /** The synchronous spawn time since the previous call: one heartbeat's share of W1-T7745's window. */
+  /** The full sync-spawn meter reading since the previous heartbeat, including its bounded caller shares. */
+  takeSyncSpawn?: () => LagIntervalReading;
+  /** Numeric-only fallback when takeSyncSpawn is absent: one heartbeat's share of W1-T7745's window. */
   takeSyncSpawnMs?: () => number;
   /** Seam: start the watchdog from its source. Defaults to an eval worker that does not hold the process open. */
   spawn?: (source: string, workerData: { shared: SharedArrayBuffer }) => Worker;
@@ -398,7 +439,7 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
   const steps = options.steps ?? DAEMON_LOOP_STALL_STEPS;
   const shared = new Int32Array(new SharedArrayBuffer(4 * Int32Array.BYTES_PER_ELEMENT));
   const lags: number[] = [];
-  const beats = new Map<number, { lagMs: number; syncSpawnMs: number }>();
+  const beats = new Map<number, { lagMs: number; syncSpawnMs: number; syncSpawn?: LagIntervalReading }>();
   let intervalMs: number | undefined;
   let sink: StallLog | undefined;
   let worker: Worker | undefined;
@@ -430,8 +471,9 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
     try {
       const nowMs = performance.now();
       const count = Atomics.add(shared, BEAT, 1) + 1;
-      const syncSpawnMs = options.takeSyncSpawnMs?.() ?? 0;
-      beats.set(count, { lagMs: Math.max(0, nowMs - lastBeatAtMs - period()), syncSpawnMs });
+      const syncSpawn = options.takeSyncSpawn?.();
+      const syncSpawnMs = syncSpawn?.sync_spawn_ms ?? options.takeSyncSpawnMs?.() ?? 0;
+      beats.set(count, { lagMs: Math.max(0, nowMs - lastBeatAtMs - period()), syncSpawnMs, syncSpawn });
       beats.delete(count - BEATS_KEPT);
       lastBeatAtMs = nowMs;
       heartbeat = setTimeout(beat, period());
@@ -445,9 +487,13 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
     const closing = beats.get(message.beat + 1);
     const lagMs = Math.round(closing?.lagMs ?? message.silent_ms);
     const syncSpawnMs = Math.round(closing?.syncSpawnMs ?? 0);
+    const reading = closing?.syncSpawn;
     sink?.(steps.profile, {
       lag_ms: lagMs,
       sync_spawn_ms: syncSpawnMs,
+      ...(reading?.top === undefined ? {} : { sync_spawn_top: reading.top }),
+      ...(reading?.by_caller === undefined ? {} : { sync_spawn_by_caller: reading.by_caller }),
+      ...(reading?.unnamed_ms === undefined ? {} : { sync_spawn_unnamed_ms: reading.unnamed_ms }),
       unattributed_ms: Math.max(0, lagMs - syncSpawnMs),
       bound_ms: Atomics.load(shared, BOUND),
       unprofiled_ms: message.unprofiled_ms,

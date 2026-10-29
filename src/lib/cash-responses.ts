@@ -1,4 +1,10 @@
-/** Azure Responses transport for Sol 6.1. Retain reasoning and call items between tool turns. */
+/** Deployment-specific Responses efforts; transport selection and request validation share this table. */
+export const CASH_RESPONSES_DEPLOYMENTS: Readonly<Partial<Record<string, readonly string[]>>> = {
+  "gpt-6.1-sol": ["low", "medium", "high", "xhigh", "max"],
+  "gpt-6.1-terra": ["none", "low", "medium", "high", "xhigh", "max"],
+};
+
+/** Azure Responses transport. Retain reasoning and call items between tool turns. */
 export class CashResponsesConversation {
   private input: Record<string, unknown>[];
 
@@ -8,8 +14,9 @@ export class CashResponsesConversation {
 
   body(model: string, effort: string, maxOutputTokens: number, tools: Record<string, unknown>[], format?: string): string {
     const reasoningEffort = effort === "default" ? "medium" : effort;
-    if (!["low", "medium", "high", "xhigh", "max"].includes(reasoningEffort)) {
-      throw new Error(`cash Sol 6.1 does not support reasoning effort ${effort}`);
+    const allowed = CASH_RESPONSES_DEPLOYMENTS[model] ?? [];
+    if (!allowed.includes(reasoningEffort)) {
+      throw new Error(`cash ${model} does not support reasoning effort ${effort}; allowed: ${allowed.join(", ")}`);
     }
     return JSON.stringify({ model, input: this.input, store: false, include: ["reasoning.encrypted_content"],
       reasoning: { effort: reasoningEffort }, max_output_tokens: maxOutputTokens,
