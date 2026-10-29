@@ -15757,6 +15757,10 @@ function readFixRungEnd(lines: Array<Record<string, unknown>>, taskId: string | 
     } else if (line.step === "fix.done" && line.worker_exit === "exit" && typeof line.worker_exit_code === "number" &&
         line.worker_exit_code !== 0 && (line.pushed_head_sha === undefined || line.pushed_head_sha === line.head_sha)) {
       stalled = true; // the same end by an error exit code that moved nothing
+    } else if (line.step === "fix.done" && line.subtype === "push_failed" &&
+        (line.pushed_head_sha === undefined || line.pushed_head_sha === line.head_sha)) {
+      // W1-T10991: W1-T9618's unlanded push exits 0 and moves nothing; read live, it held #15108 16 hours.
+      stalled = true;
     } else if (line.step === "fix.resolved") {
       stalled = false;
     } else if (line.step === "fix.done" && line.flake_claim === "requeue_deferred") {
