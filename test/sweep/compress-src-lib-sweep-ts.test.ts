@@ -26,15 +26,22 @@ function executableLines(source: string): string {
     .filter(line => line.trim()).join("\n");
 }
 
-test("W1-T10821: comment compression preserves executable code", (t) => {
+test("W1-T10821: comment compression preserves executable code", () => {
+  const source = readFileSync(join(REPO_ROOT, SOURCE_PATH), "utf8");
+  // This three-line explanation was compressed to one line by this PR. Check it even when
+  // the test is already present at the comparison base, without freezing the whole module.
+  const importCycleComment = source.match(/^\/\/ W1-T2384:[^\n]*(?:\n\/\/[^\n]*)*/m)?.[0];
+  assert.ok(importCycleComment, "the import-cycle explanation must remain present");
+  const importCycleComments = countCommentLines(importCycleComment, SOURCE_PATH).comments;
+  assert.ok(importCycleComments > 0 && importCycleComments < 3,
+    `the original three-line import-cycle explanation must stay compressed: ${importCycleComments}`);
+
   const base = git(["merge-base", "origin/main", "HEAD"]);
   const added = git(["diff", "--name-only", "--diff-filter=A", `${base}...HEAD`, "--", TEST_PATH]);
   if (added !== TEST_PATH) {
-    t.skip("the compression proof applies while this test is added by the PR");
     return;
   }
   const before = git(["show", `${base}:${SOURCE_PATH}`]);
-  const source = readFileSync(join(REPO_ROOT, SOURCE_PATH), "utf8");
   assert.equal(executableLines(source), executableLines(before),
     "all non-comment code lines, including literal contents and types, must remain identical");
   const previousComments = countCommentLines(before, SOURCE_PATH).comments;
