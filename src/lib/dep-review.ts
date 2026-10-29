@@ -81,10 +81,14 @@ function parseVersion(v: string): [number, number, number] | null {
   return [Number(m[1]), Number(m[2]), Number(m[3] ?? "0")];
 }
 
-/** The letter words of a version's suffix (`24.22.0-bookworm-slim` → `bookworm slim`): a Docker tag's variant. */
+/** A version suffix's variant: its segments, less any counter that follows a letters-only label. So
+ *  `24.22.0-bookworm-slim` → `bookworm slim` and `4.0.0-beta.2` → `beta`, while a variant's own digits stay
+ *  (`3.13.1-windowsservercore-ltsc2025` → `windowsservercore ltsc2025`, `alpine3.21` → `alpine3 21`). */
 function versionVariant(v: string): string | undefined {
-  const suffix = /^v?\d+(?:\.\d+){1,3}([-+].*)$/.exec(v.trim())?.[1];
-  return suffix === undefined ? undefined : (suffix.match(/[a-z]+/gi) ?? []).join(" ").toLowerCase();
+  const suffix = /^v?\d+(?:\.\d+){1,3}[-+](.*)$/.exec(v.trim())?.[1];
+  if (suffix === undefined) return undefined;
+  const segments = suffix.toLowerCase().split(/[-+.]/);
+  return segments.filter((seg, i) => !(/^\d+$/.test(seg) && /^[a-z]+$/.test(segments[i - 1] ?? ""))).join(" ");
 }
 
 function bumpLevel(from: string, to: string): SemverLevel {
