@@ -576,3 +576,94 @@ millisecond hops `transportMs`, `fetchMs`, `coreMs`, `applyMs`, `paintMs`, `tota
 `clockOffsetMs`. Rows are paced to about one a second after a burst of 60; the answer counts what was
 `dropped`, and a `console.latency_dropped` row (at most one a minute) carries the count. Schema:
 `ConsoleTelemetryRequest` in `openapi/daemon.yaml`.
+
+## DAILY PR CUTOFF FINDING
+
+**2026-10-29; runtime cause remains unknown; activation is not qualified.** This finding refreshes
+the repository evidence for W1-T10985. At 17:12:26 UTC, all three deployment-registry state roots
+were absent in this worker environment; live state is outside this worker's read authority.
+No authoritative manifest, immutable report revision, required-source receipt or natural hourly
+publication receipt was readable here. An absent local store must not be interpreted as an empty
+live corpus: `readDailyProgressManifest` can return generation zero for an uninitialized location.
+
+The task's commissioning provenance reports three natural hourly jobs on October 29 with
+`lastSuccessAt: null` and `closedThrough: 2026-10-26`, plus disabled repository and consolidated
+Today/Yesterday views. Those are inherited observations, not refreshed job clocks or current
+source measurements. The reported memory repair, PR #15244, does not establish source coverage,
+publication adoption or serving readiness.
+
+**Scope and missing evidence.** The checked-in deployment registry names the following candidate
+sources. The exact current authorized repository set must instead come from the validated
+repository evidence inventory through `readDailyProgressRepositories`; that inventory was
+unavailable. Neither the registry nor the number of historical jobs proves its current membership.
+
+| Registry repository / instance | Candidate required PR source | Last successful cutoff / current state |
+|---|---|---|
+| `craigoley/remudero` / `core` | `craigoley/remudero:prs:core` | Unknown; receipt and saved rows unavailable to this investigation |
+| `craigoley/remudero-site` / `site` | `craigoley/remudero-site:prs:site` | Unknown; receipt and saved rows unavailable to this investigation |
+| `craigoley/remudero-console` / `console` | `craigoley/remudero-console:prs:console` | Unknown; receipt and saved rows unavailable to this investigation |
+
+**Requested cutoffs.** The installed `dailyWindow` reader gives these civil-midnight boundaries
+in `America/New_York`. They describe windows to reconcile, not observed successful collections.
+
+| Civil report date | Window start (UTC, inclusive) | Window end (UTC, exclusive) / required closed-day cutoff |
+|---|---|---|
+| 2026-10-26 | 2026-10-26T04:00:00Z | 2026-10-27T04:00:00Z |
+| 2026-10-27 | 2026-10-27T04:00:00Z | 2026-10-28T04:00:00Z |
+| 2026-10-28 (Yesterday at the investigation clock) | 2026-10-28T04:00:00Z | 2026-10-29T04:00:00Z |
+| 2026-10-29 (Today at the investigation clock) | 2026-10-29T04:00:00Z | 2026-10-30T04:00:00Z |
+
+For Today the requested cutoff is the actual collection job clock, capped at the window end;
+that job clock is unknown here. Use each manifest job's `lastAttemptAt`, `lastSuccessAt` and
+`nextDueAt`, and each revision's `generatedAt`, rather than substituting this investigation's
+clock. Date aliases resolve at the reader's clock. Adjacent civil midnights, rather than a fixed
+24-hour subtraction, also handle daylight-saving transitions.
+
+**Verified mechanism, unverified runtime trigger.** In `collectDailyProgress`, a required PR source
+is complete only when `readBoardClosedCollectionReceipt` validates its repository, clocks and
+saved-row digest, its state is complete, and its last success reaches `min(job clock, window end)`.
+Truncation records partial evidence; a failed attempt records unavailable evidence while retaining
+the prior success. Missing or invalid receipts cannot certify saved rows. A configured unowned or
+missing source remains not collected; invalid PR identities or clocks downgrade completeness.
+These are distinct possibilities, none demonstrated as the live cause. A stale serving envelope
+is another distinction: `readDailyProgressReport` judges required-source freshness at one hour,
+so freshness alone does not prove report-window completeness.
+
+Each pass revisits Today, Yesterday, seven prior civil days in total, and due historical closure.
+Any incomplete required source in any selected date keeps job success from advancing; closure
+advances only for consecutive complete closed days. Thus a historical gap can coexist with a
+complete current-day source. Conversely, `closedThrough` initially defaults to two civil dates
+before Today when no prior job exists: the inherited October 26 value alone does not prove that
+October 26 was observed complete. Per-date revisions and receipts are needed to separate inherited
+history from current collection gaps.
+
+**Corpus and positive controls: unavailable.** No current corpus inventory, newest source timestamp,
+digest reconciliation, or sampled report was available. PR #15244 is a provenance candidate for
+the known fleet-PR control; its authoritative merge identity, timestamp, attribution and membership
+in the saved report were not independently reconciled here. The independently reconciled sampled
+report control is also outstanding. This is neither a zero-result sweep nor a source-complete
+finding. Existing fixture checks exercise calendar and receipt semantics only; they cannot supply
+these production controls or establish that every required source was read.
+
+**Publication and activation remain separate.** `dailyProgressUnit` stages collection output;
+`commitDailyProgressPublication` requires the ownership fence and matching base generation before
+the manifest becomes authoritative. A staged generation alone is not publication evidence.
+The inherited `view_disabled` reads identify a serving-switch boundary, not the state of the
+retained reports or the cause of a source gap. Current hourly commits, rollover and authenticated
+repository/consolidated reads remain unverified. Daily and the existing Console holds stay unchanged.
+
+**Disposition.** No separate product repair is justified by the available evidence. Resume the
+read-only reconciliation where the maintained readers can access authorized runtime evidence,
+retaining failed observations and both positive controls. If all required cutoffs and sampled
+reports reconcile, close the source-gap hypothesis and examine publication/activation separately.
+W1-T10829 already owns the memory mechanism; W1-T10898 owns gateway responsiveness, and
+CONSOLE-T143 remains held per the task record. None is evidence of a PR-source cutoff repair;
+do not duplicate them or release a hold from this finding.
+
+Bounded references: `.remudero/daemon-instances.yaml`; the W1-T10985, W1-T10829 and W1-T10898 task
+records; `src/lib/daily-progress-calendar.ts` (`dailyWindow`, `nextDailyDue`);
+`src/lib/daily-progress-collector.ts` (`readDailyProgressRepositories`, `collectDailyProgress`);
+`src/lib/board-snapshot-cache.ts` (`readBoardClosedCollectionReceipt`);
+`src/lib/daily-progress-store.ts` (`readDailyProgressManifest`, `readDailyProgressRevision`,
+`commitDailyProgressPublication`); `src/lib/read-model-slow-lane.ts` (`dailyProgressUnit`);
+`src/lib/daily-progress-view.ts` (`readDailyProgressReport`); and the serving-switch contract above.

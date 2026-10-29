@@ -108,3 +108,20 @@ test("#11720: a stall on a different blocker still opens its own issue", async (
   await escalate(issues, stall("own-red", 45, "2026-10-14T16:00:00.000Z"));
   assert.equal(issues.created.length, 2);
 });
+
+test("#15368: an ownerless stall and a held repair drop their moving parts too, so one stall keeps one issue", async () => {
+  const ownerless = (minutes: number, since: string) =>
+    `PR stage stalled: #${PR_NUMBER} ${PR_URL} — escalated for ${minutes} minutes (owner: none); since ${since}; DIAGNOSIS: unknown signature`;
+  assert.equal(stalledStageEscalationSummary(ownerless(0, "2026-10-29T06:44:21.421Z")),
+    `PR stage stalled: #${PR_NUMBER} ${PR_URL} — escalated; DIAGNOSIS: unknown signature`);
+  assert.equal(stalledStageEscalationSummary(`${stall("own-red", 65, "2026-10-29T10:39:44.125Z")}; the fleet itself withheld the repair for 20 of those minutes`),
+    `PR stage stalled: #${PR_NUMBER} ${PR_URL} — own-red; DIAGNOSIS: unknown signature`);
+  const issues = issueStore();
+  await escalate(issues, ownerless(0, "2026-10-29T06:44:21.421Z"));
+  await escalate(issues, ownerless(0, "2026-10-29T07:25:48.771Z"));
+  await escalate(issues, `${stall("own-red", 65, "2026-10-29T10:39:44.125Z")}; the fleet itself withheld the repair for 20 of those minutes`);
+  await escalate(issues, `${stall("own-red", 90, "2026-10-29T10:39:44.125Z")}; the fleet itself withheld the repair for 45 of those minutes`);
+  assert.equal(issues.created.length, 2, issues.created.map((i) => i.title).join("\n"));
+  assert.equal(issues.comments.length, 2);
+  assert.ok(issues.created.every((i) => !/minutes|since|owner: none/.test(i.title)));
+});
