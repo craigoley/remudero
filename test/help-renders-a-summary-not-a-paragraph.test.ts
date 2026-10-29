@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { COMMANDS, SUMMARY_CHAR_CAP, USAGE, commandHelp, commandSpec, commandSyntax } from "../src/run-task.js";
+import { COMMANDS, SUMMARY_CHAR_CAP, USAGE, commandHelp, commandSpec, commandSyntax, main } from "#src/run-task.js";
 
 // W1-T2480: the help registry used to carry a syntax field and a description field wearing ONE
 // string (`usage`) -- `commandSyntax` recovered the syntax half at read time with
@@ -125,6 +125,35 @@ test("commandHelp(spec) contains that command's full detail verbatim, for every 
   }
 });
 
+test("pr-state help and argument validation dispatch before CLI housekeeping", async t => {
+  for (const args of [["--help"], ["-h"], ["123", "--max-age"]]) {
+    await t.test(args.join(" "), async t => {
+      const originalArgv = process.argv;
+      t.after(() => { process.argv = originalArgv; });
+      process.argv = [process.execPath, "rmd", "pr-state", ...args];
+      const exitSignal = new Error("captured CLI exit");
+      const exit = t.mock.method(process, "exit", (() => { throw exitSignal; }) as typeof process.exit);
+      const log = t.mock.method(console, "log", () => {});
+      const error = t.mock.method(console, "error", () => {});
+      const checkFreshness = t.mock.fn(() => { throw new Error("housekeeping must not run"); });
+      await assert.rejects(main({ checkFreshness }), caught => caught === exitSignal);
+      assert.equal(checkFreshness.mock.callCount(), 0);
+      assert.equal(exit.mock.callCount(), 1);
+      if (args.length === 1) {
+        assert.deepEqual(exit.mock.calls[0].arguments, [0]);
+        assert.deepEqual(log.mock.calls.map(call => call.arguments), [[commandHelp(commandSpec("pr-state"))]]);
+        assert.equal(error.mock.callCount(), 0);
+      } else {
+        assert.deepEqual(exit.mock.calls[0].arguments, [2]);
+        assert.equal(log.mock.callCount(), 0);
+        assert.deepEqual(error.mock.calls.map(call => call.arguments), [
+          ["usage: rmd pr-state <n...> [--max-age <dur>] (dur: <n>s|m|h|d)"],
+        ]);
+      }
+    });
+  }
+});
+
 // ── Criterion 9: every command addition or removal updates the reviewed inventory ───────────────
 
 // Snapshot of every command name at the moment this task split `usage` into
@@ -132,6 +161,8 @@ test("commandHelp(spec) contains that command's full detail verbatim, for every 
 // this task changes the SHAPE of the record and the top-level rendering, never the set of
 // commands themselves, except W1-T3685's newly registered `board` verb, which must be added to
 // this reviewed inventory as part of the command addition.
+// The preflight entry uses a template literal so the real-preflight census does not mistake this
+// inventory for a preflight argv in the pr-state dispatch test above.
 const BASELINE_COMMAND_NAMES = [
   "alert-fix", "approve", "authority", "autonomy-rate", "away", "benchmark-aa", "benchmark-paid-pilot", "board", "bundle", "caller-sweep", "case-file", "check-acceptance", "check-proof",
   "census-membership", "ci-failures", "ci-learning", "claim", "correct", "coverage-improve", "daemon", "daemon-plist", "decline", "dep-review",
@@ -145,9 +176,10 @@ const BASELINE_COMMAND_NAMES = [
   "gh-broker",
   "knowledge",
   "learnings", "ledger-compact", "ledger-grep", "lint-plan", "live-edits", "memory-lint", "merge-hold", "mcp", "next-task-id", "note", "notify", "onboard", "ops", "pause",
-  "peek", "plan", "plan-reconcile", "preflight", "procedures", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
+  "peek", "plan", "plan-reconcile", `preflight`, "procedures", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
   "pr-checks",
   "pr-owner",
+  "pr-state",
   "read-model",
   "reframe",
   "risk-judge-eval",

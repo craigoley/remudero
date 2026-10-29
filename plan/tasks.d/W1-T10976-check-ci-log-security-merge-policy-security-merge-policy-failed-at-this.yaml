@@ -43,3 +43,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The cited rounds explicitly report an unknown security-analysis failure and unread alerts; they establish recurrence but do not establish a verified cause or safe remedy.; on the change's description/files alone, no diff was read — The acceptance criterion requires preventing this security-merge-policy fix round, but the filed record does not specify how unresolved security failures remain actionable. Whether the remedy preserves security review policy cannot be verified from the supplied text."
+    judged_at: "2026-10-29T13:45:43.905Z"
+    pin: "ee1ce54bc6d8c915d7218a96381657931bf1ad3eb794fc43db83aa631f7763f7"
