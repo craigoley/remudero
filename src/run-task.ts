@@ -18066,7 +18066,8 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
     return 2;
   }
   const planPathArg = flagValue(rest, "--plan");
-  const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(repoRoot, "plan", "tasks.yaml");
+  const planRoot = planPathArg !== undefined ? repoRoot : instanceVerbPlanRoot().root;
+  const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(planRoot, "plan", "tasks.yaml");
   let plan: Plan;
   try {
     plan = loadPlan(planPath);
@@ -18123,7 +18124,7 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
   let unmergedIds: Set<string>;
   let evidenceNote: string;
   try {
-    const { dump, ref } = (deps.readMergeEvidenceLog ?? defaultMergeEvidenceLog)(repoRoot);
+    const { dump, ref } = (deps.readMergeEvidenceLog ?? defaultMergeEvidenceLog)(planRoot);
     unmergedIds = new Set(classifyFailingMergeEvidence(openIds, dump).without);
     evidenceNote = `merge evidence: ${ref}`;
   } catch (e) {
@@ -18137,9 +18138,9 @@ export async function proofQueueAuditCommand(rest: string[], deps: ProofQueueAud
 
   const population = plan.tasks.filter((t) => unmergedIds.has(t.id));
   const report = proofQueueAudit(population, {
-    resolveNameFilteredCandidates: (rawName) => resolveNameFilteredCandidates(repoRoot, rawName),
-    pathExists: (rel) => existsSync(join(repoRoot, rel)),
-    grepMatches: (pattern, path) => grepPatternMatches(repoRoot, pattern, path),
+    resolveNameFilteredCandidates: (rawName) => resolveNameFilteredCandidates(planRoot, rawName),
+    pathExists: (rel) => existsSync(join(planRoot, rel)),
+    grepMatches: (pattern, path) => grepPatternMatches(planRoot, pattern, path),
   });
 
   const offendingTaskCount = new Set(report.offenders.map((o) => o.taskId)).size;
@@ -20669,7 +20670,7 @@ export function ratifyCommand(rest: string[], deps: { now?: () => Date; ratified
     return 2;
   }
   const contractVersion = RUNG_CONTRACT_VERSIONS[rung];
-  const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
+  const policy = deps.policy ?? loadPolicy(policyPath(instanceVerbPlanRoot().root));
   const policyBlock = ratificationPolicyBlock(policy, rung);
   const row = buildRatificationRow(rung, policyBlock, contractVersion, deps.ratifiedBy ?? process.env.USER ?? "operator", deps.now?.() ?? new Date());
   console.log(
@@ -36815,7 +36816,7 @@ export async function ruleCommand(
  *  the release path, `P7` the proposal path. Deliberately not an EXISTENCE test: a well-formed
  *  but unknown id is refused BY NAME one step later, which reads better than "unknown proposal". */
 export function namesATask(token: string): boolean {
-  return /^W\d+-T[0-9A-Za-z]+$/.test(token);
+  return /^[A-Z][A-Z0-9]*-T[0-9A-Za-z]+$/.test(token);
 }
 
 /** W1-T4050 — the proposal `approveParkedTask` stages when `risk.verifyHumanReleaseEnabled` is
@@ -37112,7 +37113,7 @@ export async function approveCommand(
       runId: `APPROVE-${proposalId}`,
       // W1-T4050: LIVE read, same as the risk-judge call site — never memoized, so a merged
       // `plan/policy.yaml` edit governs the very next `rmd approve` with no daemon restart.
-      riskPolicy: readRiskPolicy(policyPath(repoRoot)),
+      riskPolicy: readRiskPolicy(policyPath(located?.ok ? located.root : dirname(dirname(planPath)))),
       stageProposal: (proposal) =>
         void stageInboxProposalOnce(join(config.root, "state", "inbox-proposals.json"), proposal),
       recordDurableRelease: (task) => recordOperatorRelease(join(config.root, "state"), task, (deps.clock ?? systemClock).iso()),

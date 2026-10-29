@@ -16,7 +16,7 @@
  */
 // @source-text-subject — the production-wiring assertions below intentionally inspect module boundaries.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -57,7 +57,6 @@ test("run-task supplies its resolved repository context without report-commands 
   assert.match(cliSource, /doctorCommand\(rest, \{ repoRoot \}\)/);
   assert.match(cliSource, /statusCommand\(rest, \{ usage: USAGE, repoRoot, resolveOwnerRepo \}\)/);
   assert.match(cliSource, /learningsCommand\(rest, \{ usage: USAGE, repoRoot, resolveOwnerRepo \}\)/);
-  assert.match(cliSource, /traceCommand\(rest, \{ usage: USAGE, commandSyntax: commandSyntax\("trace"\), repoRoot, resolveOwnerRepo \}\)/);
 });
 
 /** Points `$HOME` at a synthetic `~/.config/remudero/config.json` for the duration of `fn` —
@@ -397,6 +396,31 @@ test("traceCommand: a task whose origin names a feedback entry READS that entry 
     traceCommand([taskId], { repoRoot: root, resolveOwnerRepo: () => ({ owner: "o", repo: "r" }) }),
   );
   assert.equal(rc, 0, "a task that resolves reverse-traces successfully");
+});
+
+test("traceCommand: the injected task resolver selects the target plan and feedback root", async (t) => {
+  const { root, taskId } = traceFixture();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const seen: string[] = [];
+  const output: string[] = [];
+  const log = console.log;
+  console.log = (...args) => output.push(args.join(" "));
+  try {
+    const rc = await withFakeHome(root, () => traceCommand([taskId], {
+      repoRoot: join(root, "engine-without-a-plan"),
+      resolveOwnerRepo: () => ({ owner: "engine-owner", repo: "engine" }),
+      resolveTaskPlan: (id) => {
+        seen.push(id);
+        return { ok: true, root, owner: "target-owner" };
+      },
+    }));
+    assert.equal(rc, 0);
+    assert.deepEqual(seen, [taskId]);
+    assert.match(output.join("\n"), /the operator's original words/);
+    assert.match(output.join("\n"), /reverse/);
+  } finally {
+    console.log = log;
+  }
 });
 
 test("traceCommand: an origin naming a MISSING feedback entry still traces, noting the gap", async () => {

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { parse, stringify } from "yaml";
 import {
   readDaemonTargetRecord,
   resolveVerbPlanRoot,
@@ -68,12 +69,14 @@ function instance(t: TestContext): Instance {
 const consumerRecord = (f: Instance): DaemonTargetRecord =>
   ({ owner: "craigoley", repo: "remudero-site", isSelf: false, checkoutRoot: f.target });
 
-interface Run { code: number | null; out: string; err: string; released: Array<Record<string, unknown>> }
+interface Run { code: number | null; out: string; err: string; calls: string[]; released: Array<Record<string, unknown>> }
 
 /** `rmd <argv>`, the real CLI in a child, cwd = the fixture engine checkout, HOME = the fixture's. */
-function rmd(f: Instance, argv: string[]): Run {
+function rmd(f: Instance, argv: string[], script?: string): Run {
   const shim = ghShim([{ when: "", stderr: "t10925 test: unexpected gh call", exit: 1 }], { kind: "t10925-gh" });
-  const r = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), join(REPO_ROOT, "src", "run-task.ts"), ...argv], {
+  const entry = script === undefined ? [join(REPO_ROOT, "src", "run-task.ts"), ...argv]
+    : ["--input-type=module", "-e", `const cli = await import(${JSON.stringify(join(REPO_ROOT, "src", "run-task.ts"))});\n${script}`];
+  const r = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), ...entry], {
     cwd: f.engine.dir,
     encoding: "utf8",
     timeout: 180_000,
@@ -90,10 +93,11 @@ function rmd(f: Instance, argv: string[]): Run {
       GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
     },
   });
+  const calls = shim.calls();
   rmSync(shim.dir, { recursive: true, force: true });
   const released = (readLedgerLines(f.ledgerPath) as Array<Record<string, unknown>>)
     .filter((row) => row.step === "dispatch.breaker_released");
-  return { code: r.status, out: r.stdout, err: r.stderr, released };
+  return { code: r.status, out: r.stdout, err: r.stderr, calls, released };
 }
 
 test("W1-T10925: the default plan reader resolves cwd, target and explicit checkout plans", (t) => {
@@ -106,6 +110,11 @@ test("W1-T10925: the default plan reader resolves cwd, target and explicit check
   assert.deepEqual(resolveVerbPlanRoot(TARGET_TASK, input), { ok: true, root: f.target, via: "target", target });
   assert.deepEqual(resolveVerbPlanRoot(TARGET_TASK, { ...input, argv: ["--repo-root", f.target] }),
     { ok: true, root: f.target, via: "repo-root" });
+  assert.deepEqual(resolveVerbPlanRoot(undefined, input), { ok: true, root: f.target, via: "target", target });
+  assert.deepEqual(resolveVerbPlanRoot(undefined, { ...input, argv: ["--repo-root", f.engine.dir] }),
+    { ok: true, root: f.engine.dir, via: "repo-root" });
+  assert.deepEqual(resolveVerbPlanRoot(undefined, { ...input, stateDir: () => undefined }),
+    { ok: true, root: f.engine.dir, via: "cwd" });
 
   const searched = [join(f.engine.dir, "plan", "tasks.yaml"), join(f.target, "plan", "tasks.yaml")];
   assert.deepEqual(resolveVerbPlanRoot("PORTAL-T000", input), {
@@ -235,4 +244,80 @@ test("W1-T10925: a consumer claim reserves on the target repo", (t) => {
     execFileSync("git", ["-C", origin.dir, "for-each-ref", "--format=%(objectname)", "refs/rmd-dispatch/PORTAL-T999"], { encoding: "utf8" }).trim();
   assert.match(held(targetOrigin), /^[0-9a-f]{40}$/, "the claim ref exists on the TARGET repo's origin");
   assert.equal(held(engineOrigin), "", "and not on the engine's origin");
+});
+
+test("W1-T10925: approve, check-acceptance and case-file act on the consumer task", (t) => {
+  const f = instance(t);
+  assert.deepEqual(writeDaemonTargetRecord(f.stateDir, consumerRecord(f)), { written: true });
+  writeFileSync(join(f.target, "plan", "policy.yaml"), readFileSync(join(REPO_ROOT, "plan", "policy.yaml")));
+  const bodyPath = join(f.root, "body.txt");
+  writeFileSync(bodyPath, `Remudero-Task: ${TARGET_TASK}\n`);
+  const approved = rmd(f, ["approve", TARGET_TASK]);
+  assert.equal(approved.code, 2, approved.err);
+  assert.match(approved.out, /PORTAL-T999 is verify:auto/);
+  assert.doesNotMatch(approved.err, /unknown (task|proposal)/);
+
+  const checked = rmd(f, ["check-acceptance", bodyPath]);
+  assert.equal(checked.code, 0, checked.err);
+  assert.match(checked.out, /criteria source:\s+PORTAL-T999's shard via the body trailer/);
+  assert.match(checked.out, /criteria parsed:\s+1/);
+
+  const filed = rmd(f, ["case-file", TARGET_TASK, "--json"]);
+  assert.equal(filed.code, 0, filed.err);
+  assert.equal(JSON.parse(filed.out).taskId, TARGET_TASK);
+  assert.ok(filed.calls.some(call => call.includes("craigoley/remudero-site")), JSON.stringify(filed.calls));
+  assert.ok(filed.calls.every(call => !/craigoley\/remudero(?:\s|$)/.test(call)), JSON.stringify(filed.calls));
+});
+
+test("W1-T10925: proposal verbs, ratify and proof audit use the instance plan", (t) => {
+  const f = instance(t);
+  assert.deepEqual(writeDaemonTargetRecord(f.stateDir, consumerRecord(f)), { written: true });
+  const policy = parse(readFileSync(join(REPO_ROOT, "plan", "policy.yaml"), "utf8"));
+  policy.autoTriage.minIntervalMinutes.value = 37;
+  writeFileSync(join(f.target, "plan", "policy.yaml"), stringify(policy));
+  // Instance-wide verbs must never open this engine plan or policy.
+  writeFileSync(f.enginePlan, "not: [valid yaml");
+  writeFileSync(join(f.engine.dir, "plan", "policy.yaml"), "not: [valid yaml");
+  mkdirSync(join(f.target, "test"));
+  writeFileSync(join(f.target, "test", "positive.test.ts"), 'test("it holds", () => {});\n');
+  const run = rmd(f, [], `
+    const results = {};
+    async function capture(name, fn) {
+      const lines = [];
+      const log = console.log, error = console.error;
+      console.log = console.error = (...args) => lines.push(args.join(" "));
+      try { results[name] = { code: await fn(), output: lines.join("\\n") }; }
+      finally { console.log = log; console.error = error; }
+    }
+    await capture("single", () => cli.approveCommand(["P999"]));
+    await capture("batch", () => cli.approveCommand(["P998", "P999"]));
+    await capture("inbox", () => cli.inboxActionCliCommand("archive", ["P999"]));
+    await capture("verdict", () => cli.proposalVerdictCliCommand("decline", ["P999", "--reason", "fixture"]));
+    await capture("ratify", () => cli.ratifyCommand(["autoTriage"]));
+    const { loadPolicy } = await import(${JSON.stringify(join(REPO_ROOT, "src/lib/policy.ts"))});
+    const { computeOperationHash } = await import(${JSON.stringify(join(REPO_ROOT, "src/lib/ratification.ts"))});
+    results.targetHash = computeOperationHash(loadPolicy(${JSON.stringify(join(f.target, "plan", "policy.yaml"))}).values.autoTriage,
+      cli.RUNG_CONTRACT_VERSIONS.autoTriage);
+    await capture("audit", () => cli.proofQueueAuditCommand([], {
+      readMergeEvidenceLog: root => { results.evidenceRoot = root; return { dump: "\\x01", ref: "fixture" }; },
+      executeProof: () => "unreadable",
+    }));
+    console.log(JSON.stringify(results));
+  `);
+  assert.equal(run.code, 0, run.err);
+  const results = JSON.parse(run.out);
+  assert.equal(results.single.code, 2);
+  assert.match(results.single.output, /unknown proposal 'P999'/);
+  assert.equal(results.batch.code, 2);
+  assert.match(results.batch.output, /unknown proposal\(s\) P998, P999/);
+  assert.equal(results.inbox.code, 1);
+  assert.match(results.inbox.output, /unknown.proposal|not.found/i);
+  assert.equal(results.verdict.code, 1);
+  assert.equal(results.verdict.output, 'rmd decline: no active proposal "P999"');
+  assert.equal(results.ratify.code, 0);
+  assert.ok(results.ratify.output.includes(results.targetHash), results.ratify.output);
+  assert.equal(results.audit.code, 0);
+  assert.equal(results.evidenceRoot, f.target);
+  assert.match(results.audit.output, /1 open\+unmerged task\(s\), 1 proof\(s\) resolved/);
+  assert.match(results.audit.output, /name-not-found\s+0 task\(s\)/);
 });

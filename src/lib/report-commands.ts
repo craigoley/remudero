@@ -1111,7 +1111,7 @@ export interface CaseFileCommandInput extends ReportRepoContext {
  */
 export const MAX_CASE_FILE_BATCH_TASKS = 200;
 
-const CASE_FILE_TASK_ID = /^W\d+-T\d+$/;
+const CASE_FILE_TASK_ID = /^[A-Z][A-Z0-9]*-T\d+$/;
 
 /** `--tasks <id,id,...>` and `--tasks-file <path>` (ids split on commas or whitespace), deduped in order. */
 function caseFileBatchIds(rest: string[]): string[] | string {
@@ -1186,6 +1186,7 @@ export async function caseFileCommand(rest: string[], deps: CaseFileCommandInput
   const asOf = (deps.nowIso ?? (() => systemClock.iso()))();
   const tasks: Task[] = [];
   const roots: string[] = [];
+  const owners: Array<string | undefined> = [];
   for (const taskId of taskIds) {
     const located = deps.readTask ? undefined : deps.resolveTaskPlan?.(taskId);
     if (located && !located.ok) { err(`rmd case-file: ${taskId} is not in the plan (${located.error})`); return 2; }
@@ -1194,6 +1195,7 @@ export async function caseFileCommand(rest: string[], deps: CaseFileCommandInput
     if (!task) { err(`rmd case-file: ${taskId} is not in the plan (${resolveRepoLayout(taskRoot).planMonolith})`); return 2; }
     tasks.push(task);
     roots.push(taskRoot);
+    owners.push(located?.ok ? located.owner : undefined);
   }
   const stateDir = deps.stateDir ?? join((deps.loadConfig ?? loadConfig)().root, "state");
   const ledgers = batch ? await (deps.readLedgers ?? readTaskCaseLedgers)(stateDir, taskIds, asOf)
@@ -1203,7 +1205,8 @@ export async function caseFileCommand(rest: string[], deps: CaseFileCommandInput
   // older task read as indeterminate. The daemon's persisted snapshot turns it into a delta read.
   const github = (owner: string, repo: string) => gateway ??= (deps.buildGithub ?? buildBatchedGithub)(owner, repo,
     { snapshotCache: createBoardSnapshotCache(dirname(stateDir), owner, repo) });
-  const files = tasks.map((task, index) => assembleCaseFile(task, ledgers.get(task.id)!, asOf, roots[index]!, deps, github));
+  const files = tasks.map((task, index) => assembleCaseFile(task, ledgers.get(task.id)!, asOf, roots[index]!,
+    owners[index] === undefined ? deps : { ...deps, resolveOwnerRepo: () => ({ owner: owners[index]!, repo: task.repo }) }, github));
   // JSON is also the default so every evidence state, source, and as-of remains machine-readable.
   out(JSON.stringify(batch ? files : files[0], null, 2));
   return 0;
