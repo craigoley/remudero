@@ -587,6 +587,7 @@ export function captureFeedbackReply(
   deps: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
   input: FeedbackReplyInput,
   continuation?: CanonicalGrillContinuation,
+  capture: typeof captureFeedback = captureFeedback,
 ): { entry: FeedbackEntry; landingError?: string } {
   if (continuation !== undefined) {
     const id = input.replyTo;
@@ -608,7 +609,7 @@ export function captureFeedbackReply(
   }
   const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
   const land = { stateRoot: deps.inboxRoot };
-  const entry = captureFeedback(deps.root, {
+  const entry = capture(deps.root, {
     raw,
     attachments: input.attachments ?? [],
     origin: input.origin,
@@ -619,7 +620,8 @@ export function captureFeedbackReply(
   });
   let landingError: string | undefined;
   try {
-    const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
+    const staged = queuedFeedbackLandings(deps.inboxRoot).includes(feedbackEntryRepoPath(entry.id)) ? { error: undefined }
+      : queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
     const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
     if (input.replyTo !== undefined) {
       setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id,

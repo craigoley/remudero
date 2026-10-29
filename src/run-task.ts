@@ -12083,7 +12083,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "dep-review", ...extra });
   const proposalRoot = deps.root ?? repoRoot;
-  const captureProposal = deps.captureMigrationFeedback ?? depReviewProposalCapture(deps.landingStateRoot);
+  const captureProposal = deps.captureMigrationFeedback ?? depReviewProposalCapture(
+    deps.landingStateRoot ?? (deps.root === undefined ? undefined : config.root));
   const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
   const dependabot = isDependabotAuthor({ login: view.author?.login ?? "" });
   const actions = deps.actions ?? (deps.gh === undefined ? defaultDepReviewActions(owner, repo) : undefined);
@@ -21482,6 +21483,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         planReconcile === undefined ? {} : { planReconcile: { ...planReconcile } };
       const report = await (deps.measurementReport ?? runMeasurementCadenceReportAsync)({
         stateDir: join(root, "state"),
+        landingStateRoot: root,
         cwd: repoRoot,
         escalate: policyFor().values.measurementCadence.escalate,
         // W1-T2266: the adoption report's shape-1/2/3 static scans read THIS process's own
@@ -31348,8 +31350,7 @@ export function captureRepairFeedbackWithPriorVerdict(
     return;
   }
   const capture = { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin };
-  if (landingStateRoot === undefined) captureFeedback(root, capture);
-  else stageFeedbackCapture(root, landingStateRoot, capture);
+  stageFeedbackCapture(root, landingStateRoot, capture);
 }
 
 /** The one-shot boundary owns and drains its judgment pool before returning a summary. */
