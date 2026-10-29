@@ -67,7 +67,7 @@ function capacity(root: string, effort = "low") {
   { rateLimits: { limitId: "codex", primary: { usedPercent: 10 } } }, { root, claudeBin: "/unused" }, undefined, effort);
 }
 
-async function runWorker(dir: string, taskId: string, selection = capacity(dir), executable?: string) {
+async function runWorker(dir: string, taskId: string, selection = capacity(dir), executable?: string, pinnedModel?: string) {
   const bin = join(dir, "codex-fixture");
   writeFileSync(bin, `#!${process.execPath}\nconsole.log(JSON.stringify({type:'thread.started',thread_id:'trial'}));\nconsole.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:process.argv[process.argv.indexOf('--model')+1]}}));\nconsole.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:2,output_tokens:1}}));\n`);
   chmodSync(bin, 0o700);
@@ -75,7 +75,7 @@ async function runWorker(dir: string, taskId: string, selection = capacity(dir),
   mkdirSync(home, { recursive: true });
   return spawnCodexWorker({ cwd: dir, prompt: "report selected model", settingsFile: join(REPO_ROOT, "settings/worker.json"),
     workerHome: home, tools: ["Read"], taskId, runId: "trial-run" },
-  { root: dir, claudeBin: "/unused", workerProviders: { codexBin: executable ?? bin } }, selection);
+  { root: dir, claudeBin: "/unused", workerProviders: { codexBin: executable ?? bin, codexModel: pinnedModel } }, selection);
 }
 const auditRows = (dir: string) => readFileSync(ledgerPathFor({ root: dir }), "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
 
@@ -166,6 +166,8 @@ test("W1-T10842: intention-to-treat rows record the assigned arm and the served 
   assert.equal(assignment.experiment.seed, protocol.pilotRequest.assignmentSeed);
   assert.equal(receipt.assignment_id, assignment.assignment_id);
   assert.equal(receipt.requested_model, TERRA);
+  assert.equal(receipt.total_cost_usd, result.costUsd);
+  assert.equal(Object.hasOwn(receipt, "cost_usd"), false, "the audit mirrors cost without a second pricing producer");
   assert.equal(receipt.served_model, null, "Codex exec does not report a served model; never echo the requested model");
   assert.equal(receipt.served_model_reason, result.servedModelReason);
   assert.equal(typeof receipt.served_model_reason, "string");
@@ -230,7 +232,7 @@ test("a Codex spawn failure leaves an assigned row and a reasoned missing receip
   const receipt = rows.find(row => row.step === "codex_experiment.receipt");
   assert.equal(receipt.assignment_id, assignment.assignment_id);
   assert.equal(receipt.success, false);
-  assert.equal(receipt.cost_usd, null);
+  assert.equal(receipt.total_cost_usd, null);
   assert.equal(receipt.served_model, null);
   assert.match(receipt.served_model_reason, /absent-codex/);
 });
@@ -262,12 +264,27 @@ test("Codex admission refuses corrupt registration, mismatched calibration and g
   const assignment = { ts: new Date(NOW).toISOString(), step: "codex_experiment.assignment", task_id: tasks[0]!.taskId,
     assignment_id: "positive-control", experiment: { trialId: fixture.protocol.trialId } };
   const receipt = { ts: new Date(NOW).toISOString(), step: "codex_experiment.receipt", assignment_id: "positive-control",
-    served_model: TERRA, billing_mode: "subscription", cost_usd: 0 };
-  for (const patch of [{}, { served_model: null }, { billing_mode: null }, { cost_usd: null }, { guardrail_fired: true }]) {
+    served_model: TERRA, billing_mode: "subscription", total_cost_usd: 0 };
+  for (const patch of [{}, { served_model: null }, { billing_mode: null }, { total_cost_usd: null }, { total_cost_usd: 1 }, { guardrail_fired: true }]) {
     writeFileSync(ledger, [assignment, { ...receipt, ...patch }].map(row => JSON.stringify(row)).join("\n") + "\n");
     const decision = await experiments.codexExperimentArmForTask(input);
     assert.equal(decision.state, Object.keys(patch).length === 0 ? "assigned" : "inactive", JSON.stringify(decision));
   }
+  const { total_cost_usd: _cost, ...legacyReceipt } = receipt;
+  for (const legacyCost of [0, null, 1]) {
+    writeFileSync(ledger, [assignment, { ...legacyReceipt, cost_usd: legacyCost }].map(row => JSON.stringify(row)).join("\n") + "\n");
+    assert.equal((await experiments.codexExperimentArmForTask(input)).state, legacyCost === 0 ? "assigned" : "inactive");
+  }
+  writeFileSync(ledger, [assignment, { ...receipt, total_cost_usd: null, cost_usd: 0 }].map(row => JSON.stringify(row)).join("\n") + "\n");
+  assert.equal((await experiments.codexExperimentArmForTask(input)).state, "inactive", "an unknown summary cannot fall back to a legacy zero");
   writeFileSync(ledger, "{bad-json}\n");
   assert.deepEqual(await experiments.codexExperimentArmForTask(input), { state: "inactive", reason: "guardrail-evidence-unreadable" });
+});
+
+test("an explicit Codex model pin bypasses the registered trial", async t => {
+  const { dir } = ownedFixtureDir(t, "codex-pinned");
+  const { protocol } = await registered(dir);
+  const task = tasks.find(task => paidPilotArmFor(protocol.pilotRequest.assignmentSeed, task.taskId) === "paid")!;
+  assert.equal((await runWorker(dir, task.taskId, capacity(dir), undefined, SOL)).text, SOL);
+  assert.equal(auditRows(dir).some(row => row.step.startsWith("codex_experiment.")), false);
 });

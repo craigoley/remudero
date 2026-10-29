@@ -3149,7 +3149,7 @@ export async function spawnCodexWorker(
   selection?: Pick<ProviderCapacity, "model" | "effort"> & Partial<Pick<ProviderCapacity, "modelDecision">>,
 ): Promise<CodexWorkerResult> {
   const decision = selection?.modelDecision;
-  const trial = decision && args.taskId && !config.workerProviders?.codexModel && !decision.preferredModel && !decision.switchback
+  const trial = decision && args.taskId && config.workerProviders?.codexModel === undefined && !decision.preferredModel && !decision.switchback
     ? await codexExperimentArmForTask({ stateDir: join(config.root, "state"), taskId: args.taskId,
       provider: "codex", capability: decision?.requestedCapability, effort: selection?.effort, model: selection?.model })
     : undefined;
@@ -3190,7 +3190,7 @@ export async function spawnCodexWorker(
       step: "codex_experiment.receipt", assignment_id: assignmentId, experiment: assignment,
       requested_model: selection?.model, served_model: result?.servedModel ?? null,
       served_model_reason: result?.servedModelReason ?? failure ?? "worker produced no receipt",
-      billing_mode: "subscription", cost_usd: result?.costUsd ?? null, notional_cost_usd: result?.notionalCostUsd ?? null,
+      billing_mode: "subscription", total_cost_usd: result?.costUsd ?? null, notional_cost_usd: result?.notionalCostUsd ?? null,
       worker_duration_ms: result?.workerDurationMs, tokens: result?.tokens, success: result ? !result.isError : false,
       crossover: result?.servedModel == null ? null : result.servedModel !== assignment.assignedModel });
   }

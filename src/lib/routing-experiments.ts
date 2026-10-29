@@ -221,7 +221,7 @@ export async function codexExperimentArmForTask(input: { stateDir: string; taskI
       && (row.experiment as CodexExperimentAssignment | undefined)?.trialId === protocol.trialId).map(row => row.assignment_id));
     const receipts = evidence.rows.filter(row => row.step === "codex_experiment.receipt" && assignments.has(row.assignment_id));
     if (receipts.some(row => typeof row.served_model !== "string" || row.billing_mode !== "subscription"
-      || row.cost_usd !== 0 || row.guardrail_fired === true))
+      || (Object.hasOwn(row, "total_cost_usd") ? row.total_cost_usd : row.cost_usd) !== 0 || row.guardrail_fired === true))
       return inactive("guardrail-fired");
     const assigned = experimentArmForTask(epoch, taskId, protocol);
     const assignedArm = assigned.arm as "control" | "paid";
