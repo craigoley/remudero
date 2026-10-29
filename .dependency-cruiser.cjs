@@ -85,3 +85,93 @@ module.exports = {
     },
   },
 };
+
+/**
+ * Repository integration for dependency-cruiser's extraction lifecycle, at the exact version package.json pins.
+ * Its ordinary extractor keeps every AST until the entire traversal finishes.
+ * Run that extractor once per file (depth one), retaining only its root record;
+ * follow every resolved edge here, then analyze the COMPLETE graph once. This
+ * bounds AST retention to one file without changing SWC, resolution or rules.
+ * Internal entry points are version-pinned and checked against native graphs.
+ * Requiring this file as a config still returns only the configuration above.
+ */
+async function scanArchitecture() {
+  const { dirname, join } = require("node:path");
+  const { pathToFileURL } = require("node:url");
+  const { findPackageJSON } = require("node:module");
+  const { parseArgs } = require("node:util");
+  const { values, positionals } = parseArgs({
+    options: { "output-type": { type: "string", default: "err" } },
+    allowPositionals: true,
+  });
+  const root = dirname(findPackageJSON("dependency-cruiser", pathToFileURL(__filename)));
+  const version = require(join(root, "package.json")).version;
+  // The pin is package.json's, so a Dependabot bump that moves it and the lockfile together is scanned by the
+  // new version, and this file's suite (heap bound, native-graph controls) decides whether its internals still
+  // fit. A literal here turned every such bump red by construction (#15177, 18.6.0 -> 18.7.0).
+  const pinned = require(join(__dirname, "package.json")).devDependencies?.["dependency-cruiser"];
+  if (typeof pinned !== "string" || !/^\d+\.\d+\.\d+$/.test(pinned)) {
+    throw new Error(`Architecture integration needs an exact dependency-cruiser pin in package.json; found ${pinned}`);
+  }
+  if (version !== pinned) {
+    throw new Error(`Architecture integration requires dependency-cruiser ${pinned}; found ${version}`);
+  }
+  // dependency-cruiser swallows a missing SWC binding and silently uses Acorn.
+  // Load the configured parser explicitly so that cannot produce a green scan.
+  require("@swc/core");
+  const load = (path) => import(pathToFileURL(join(root, "src", path)).href);
+  const [
+    { assertCruiseOptionsValid }, { normalizeCruiseOptions },
+    { default: normalizeRuleSet }, { default: assertRuleSetValid },
+    { default: normalizeFiles }, { default: normalizeResolveOptions },
+    { default: gather }, { default: extract }, { default: analyze }, { default: reportWrap },
+  ] = await Promise.all([
+    load("main/options/assert-validity.mjs"), load("main/options/normalize.mjs"),
+    load("main/rule-set/normalize.mjs"), load("main/rule-set/assert-validity.mjs"),
+    load("main/files-and-dirs/normalize.mjs"), load("main/resolve-options/normalize.mjs"),
+    load("extract/gather-initial-sources.mjs"), load("extract/index.mjs"),
+    load("analyze/index.mjs"), load("main/report-wrap.mjs"),
+  ]);
+  const files = normalizeFiles(positionals.length ? positionals : ["src"]);
+  const options = normalizeCruiseOptions(assertCruiseOptionsValid({
+    ruleSet: module.exports, validate: true, outputType: values["output-type"],
+  }), files);
+  options.ruleSet = normalizeRuleSet(assertRuleSetValid(options.ruleSet));
+  const resolveOptions = await normalizeResolveOptions(undefined, options);
+  const pending = gather(files, options).reverse();
+  const visited = new Set();
+  const extracted = [];
+  while (pending.length) {
+    const source = pending.pop();
+    if (visited.has(source)) continue;
+    visited.add(source);
+    // extract() clears its parser caches before AND after each call. Depth-one
+    // child records contain no dependencies and are replaced by their own scan.
+    const record = extract([source], { ...options, maxDepth: 1 }, resolveOptions)
+      .find((entry) => entry.source === source);
+    if (!record) throw new Error(`Architecture extraction omitted ${source}`);
+    extracted.push(record);
+    for (const dependency of [...record.dependencies].reverse()) {
+      if (dependency.followable && !dependency.matchesDoNotFollow) pending.push(dependency.resolved);
+    }
+  }
+  // Match the native extractor's completion of external/unresolved/core nodes.
+  const modules = extracted.reduce((all, record) => all.concat(record,
+    record.dependencies.filter((dep) => !dep.followable && !all.some((m) => m.source === dep.resolved))
+      .map((dep) => ({
+        source: dep.resolved, followable: dep.followable, coreModule: dep.coreModule,
+        couldNotResolve: dep.couldNotResolve, matchesDoNotFollow: dep.matchesDoNotFollow,
+        dependencyTypes: dep.dependencyTypes, dependencies: [],
+      }))), []);
+  const report = await reportWrap(analyze(modules, options, files), options);
+  process.stdout.write(report.output);
+  process.stderr.write(`Architecture AST retention window: 1 file (${visited.size} files scanned)\n`);
+  process.exitCode = report.exitCode;
+}
+
+if (require.main === module) {
+  scanArchitecture().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

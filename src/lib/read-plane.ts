@@ -6,48 +6,10 @@ import { fileURLToPath } from "node:url";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { rawCallSites } from "./raw-call-sites.js";
 import { startLoopStallProfiler, type LoopLagReading, type LoopStallProfiler, type LoopStallProfilerOptions,
-  type StallLog } from "./loop-stall-profiler.js";
+  type StallLog, type LagIntervalReading, type SyncSpawnEntry, type SyncSpawnCallerTotal } from "./loop-stall-profiler.js";
+export type { LagIntervalReading, SyncSpawnEntry, SyncSpawnCallerTotal } from "./loop-stall-profiler.js";
 
 export const READ_PLANE_KIND = "remudero-tick-reads";
-
-/** A synchronous child-process call long enough to name when it froze the loop (W1-T5718). */
-export interface SyncSpawnEntry {
-  via: string;
-  command: string;
-  first_arg?: string;
-  duration_ms: number;
-  /** The first frame outside the shared spawn leaves: the code that reached the leaf (W1-T7745). */
-  caller?: string;
-  /** The shared leaf the spawn went through (`hostWorktreeGit`, `ghExecFile`…), when one was on the stack. */
-  leaf?: string;
-  /** True when no frame outside the leaves was on the stack, so `caller` is the leaf itself. */
-  caller_is_leaf?: true;
-  /** W1-T9577: for an anonymous `caller`, the named functions that reached it (`callerChain`), so it is named. */
-  caller_chain?: string[];
-}
-
-/** W1-T9577: one caller's share of a window — EVERY sync spawn it made, whatever each one's length. */
-export interface SyncSpawnCallerTotal {
-  caller?: string;
-  caller_chain?: string[];
-  leaf?: string;
-  caller_is_leaf?: true;
-  total_ms: number;
-  calls: number;
-}
-
-/** What one `daemon.loop_lag` row reads about its own interval: the longest spawn and the total sync-spawn time. */
-export interface LagIntervalReading {
-  top: SyncSpawnEntry | undefined;
-  sync_spawn_ms: number;
-  /** W1-T9577: present once the interval spawned — its callers by total, and the time none of them holds. */
-  by_caller?: SyncSpawnCallerTotal[];
-  unnamed_ms?: number;
-  /** W1-T9754: present once the interval made an ASYNC spawn — the time those held the loop inside the spawn
-   *  call itself (the fork), and their callers by that total. An idle interval reads as before. */
-  async_spawn_sync_ms?: number;
-  async_by_caller?: SyncSpawnCallerTotal[];
-}
 
 export interface ReadPlaneSample {
   loop_delay_max_ms: number;
@@ -303,7 +265,7 @@ export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?
   });
   // W1-T7746: idle until the daemon reports its first tick, which gives it the interval its bound is made of.
   const stallProfiler = startLoopStallProfiler({
-    takeSyncSpawnMs: () => sample.takeLagInterval(STALL_PROFILE_CONSUMER).sync_spawn_ms, ...options.stallProfiler });
+    takeSyncSpawn: () => sample.takeLagInterval(STALL_PROFILE_CONSUMER), ...options.stallProfiler });
   return {
     sample,
     stallProfiler,

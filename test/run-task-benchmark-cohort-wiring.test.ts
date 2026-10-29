@@ -74,7 +74,7 @@ test("benchmark cohort backlog progresses during supervised idle starvation", as
     assert.ok(entrypoint.includes('remaining=$((300 - ($(date +%s) - pulse_started)))'),
       "maintenance time is part of the existing PR-probe interval");
     for (let i = 0; i < 3; i += 1) assert.equal(await runBenchmarkCohortIdlePass(stateDir), 0);
-    const checkpoint = JSON.parse(readFileSync(join(stateDir, "benchmark-cohort-v1.json"), "utf8"));
+    const checkpoint = JSON.parse(readFileSync(join(stateDir, "benchmark-cohort-index.json"), "utf8"));
     assert.equal(checkpoint.sources.length, 9);
     assert.equal(checkpoint.lastGood.sourceRows.assignments, 9,
       "finite backlog reaches a completed checkpoint without a model worker");

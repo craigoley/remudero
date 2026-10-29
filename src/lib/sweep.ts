@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 import { HOST_GIT_CONFIG, hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError } from "./worktree-git.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
-import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
+import { runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
@@ -627,7 +627,13 @@ function assessReviewReuse(
  *  episode opened a NEW issue: #11698 and #11720 for #11679, same head and contract, 85 minutes apart. The full
  *  reason, with its age and start, stays in the issue's detail. Any other reason is returned unchanged. */
 export function stalledStageEscalationSummary(reason: string): string {
-  return reason.replace(/^(PR stage stalled: .+?) for \d+ minutes \(BACKSTOP \d+\); since [^;]*;/, "$1;");
+  // An ownerless stall reads "(owner: none)" where an owned one reads "(BACKSTOP <n>)", and a held repair appends
+  // its withheld minutes: both kept the title moving, so #15368 got four issues for one head and cause (#15403,
+  // #15414, #15453, #15476), and 16 open issues on 2026-10-29 carried the unstripped "(owner: none); since".
+  if (!reason.startsWith("PR stage stalled: ")) return reason;
+  return reason
+    .replace(/^(PR stage stalled: .+?) for \d+ minutes \((?:BACKSTOP \d+|owner: none)\); since [^;]*;/, "$1;")
+    .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
 }
 
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
@@ -1030,8 +1036,12 @@ export function fixHeadAcceptable(head: string | undefined, taskId: string, synt
   // `run-<id>-<dispatch epoch>` head or the exact `run-<id>` head when its id already ends in the
   // lane's own epoch. Preserve that full id as the strike/review key; only the ownership
   // equivalence changes. A run branch claiming a DIFFERENT task remains refused.
-  return ownRunBranch || exactSyntheticLaneBranch || !isDispatchedRunBranch(head);
+  // `run-unfiled-<epochMs>` claims no task (UNFILED_RUN_SENTINEL), so it is task-less, not mis-trailered: its
+  // `Remudero-Task: PR-<n>` trailer made the fix lane refuse it as foreign on every pass (#15232, 2026-10-29).
+  return ownRunBranch || exactSyntheticLaneBranch || UNFILED_RUN_BRANCH.test(head) || !isDispatchedRunBranch(head);
 }
+
+const UNFILED_RUN_BRANCH = new RegExp(`^run-${UNFILED_RUN_SENTINEL}-\\d+$`);
 
 /**
  * WHY a fix dispatch just declined an uncreditable head, as ONE aggregatable token.
@@ -1588,7 +1598,7 @@ export interface BuildSweepEffectsDeps {
   headRehomeImpl?: HeadRehomePorts;
   reproduceFailingTestsOnMainImpl?: SweepDeps["reproduceFailingTestsOnMain"];
   /** W1-T7853: lands the fold debt the pull wrote; unset means the real `landFeedback`. */
-  landFeedbackImpl?: (root: string) => { landed: boolean; error?: string };
+  landFeedbackImpl?: (root: string) => { landed: boolean; error?: string } | Promise<{ landed: boolean; error?: string }>;
   /** W1-T8396: the failing tests' import closure and the trial-merge probe a refresh arm decides from. */
   readTestImportClosureImpl?: SweepDeps["readTestImportClosure"];
   reproduceFailingTestsOnMergeImpl?: SweepDeps["reproduceFailingTestsOnMerge"];
@@ -5094,7 +5104,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           log,
           land: deps.landFeedbackImpl,
         };
-        return landFoldDebt(pullFoldDebtEntries(input), input);
+        return await landFoldDebt(pullFoldDebtEntries(input), input);
       } catch (e) {
         log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];
@@ -6974,6 +6984,8 @@ export interface OpenPrView {
    *  dead, which keep {@link reviewPendingIsStale}'s timeout behaviour. Only the real gateway sets
    *  this, from the durable pending ledger row. */
   reviewPendingOwnerDead?: boolean;
+  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete";
+  reviewPendingOwnerGoneReason?: string;
   /** W1-T2299 — when the current `reviewState` reading was posted, read off the same rollup entry
    *  already scanned. NOT A BODY-EDIT TIMESTAMP, and must never be documented as one: GitHub
    *  exposes no body-specific time field, so this detects ACTIVITY AFTER A VERDICT and a gaming
@@ -11703,6 +11715,12 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: (pr, policy, _ageDays, now) => {
       if (pr.reviewState === "pending") {
         if (pr.reviewPendingOwnerDead === true) {
+          if (pr.reviewPendingOwnerGone === "refused-after-pending") {
+            return `checks green, the pending review's post was refused after it began (${pr.reviewPendingOwnerGoneReason}) — re-running the review lane on #${pr.prNumber}`;
+          }
+          if (pr.reviewPendingOwnerGone === "promise-harvest-incomplete") {
+            return `checks green, its promise harvest did not complete — re-running the review lane on #${pr.prNumber}`;
+          }
           return `checks green, remudero-review owner proven dead — re-running the review lane on #${pr.prNumber}`;
         }
         const age = reviewPendingAgeMinutes(pr, now);
@@ -14588,18 +14606,25 @@ function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray
 
 function promiseHarvestRetryView(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): OpenPrView {
   // A completed harvest hold proves no review owns this pending status; reuse the unattended-review route.
-  return incompletePromiseHarvestFromLedger(pr, lines) ? { ...pr, reviewPendingOwnerDead: true } : pr;
+  return incompletePromiseHarvestFromLedger(pr, lines)
+    ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "promise-harvest-incomplete" }
+    : pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerGone === undefined
+      ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : pr;
 }
 
 function completedRefusalRetryView(pr: OpenPrView, prior: PriorActions): OpenPrView {
   const key = reviewOutcomeKeyForPr(pr);
-  const attemptedAt = prior.reviewFreshnessRefusals.get(key)?.attemptedAt ??
-    prior.reviewHostGapRefusals.get(key)?.attemptedAt ?? prior.reviewTimedOutReadRefusals.get(key);
+  const freshness = prior.reviewFreshnessRefusals.get(key);
+  const hostGap = prior.reviewHostGapRefusals.get(key);
+  const attemptedAt = freshness?.attemptedAt ?? hostGap?.attemptedAt ?? prior.reviewTimedOutReadRefusals.get(key);
+  const refusalReason = freshness?.attemptedAt !== undefined ? freshness.reason ?? `reviewer-code freshness ${freshness.freshness}`
+    : hostGap?.attemptedAt !== undefined ? `reviewer host gap: ${hostGap.hostGap} (${hostGapProblem(hostGap.hostGap)})` : "reservation read timed out";
   const pendingSince = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
   // Only a completed refusal on this exact input after this pending post proves its owner finished.
   return pr.reviewState === "pending" && attemptedAt !== undefined &&
     Number.isFinite(pendingSince) && attemptedAt >= pendingSince
-    ? { ...pr, reviewPendingOwnerDead: true } : pr;
+    ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "refused-after-pending",
+      reviewPendingOwnerGoneReason: refusalReason.replace(/[\r\n]+/g, " ").slice(0, 300) } : pr;
 }
 
 /** W1-T529 — WHAT EACH LANE'S STAND-DOWN COSTS, named so the cost is chosen rather than discovered,
@@ -14756,6 +14781,7 @@ function isRetryableReviewerCodeFreshnessRefusal(
 interface ReviewerCodeFreshnessRefusal {
   attemptedAt: number | undefined;
   freshness: "stale" | "unreadable";
+  reason?: string;
   /** Present only on a stale refusal emitted by postReviewStatusGuarded. A missing or malformed
    * value must never license recovery: an old ledger row cannot prove what source it required. */
   requiredOriginMainSha?: string;
@@ -15470,6 +15496,7 @@ function priorActionsFromLedger(
             reviewFreshnessRefusals.set(key, {
               attemptedAt: Number.isNaN(parsed) ? undefined : parsed,
               freshness: line.reviewer_code_freshness,
+              ...(typeof line.reason === "string" ? { reason: line.reason } : {}),
               ...(line.reviewer_code_freshness === "stale" && typeof line.origin_main_sha === "string"
                 ? { requiredOriginMainSha: line.origin_main_sha }
                 : {}),
@@ -15605,19 +15632,33 @@ function priorActionsFromLedger(
 /** W1-T10608 — the disposed-line field naming the ONE main adoption a terminal design hold may spend per PR. */
 export const DESIGN_HOLD_MAIN_ADOPTION_FIELD = "design_hold_main_adoption";
 
+type DesignHoldMainAdoptionDecision = "due" | "updater-unavailable" | "main-tip-unavailable" |
+  "distance-unavailable" | "not-behind" | "already-attempted" | "contract-amended" | "pass-budget-spent";
+
 /**
  * W1-T10608 — A DESIGN HOLD ON A HEAD BEHIND MAIN TAKES MAIN ONCE BEFORE A PERSON IS ASKED. PR #13416 sat 39.6 h at
  * "fix needs design at this exact head" until an operator merged main into it: the hold keys on the head, which only
  * a person moved. Due while main holds commits the head lacks, and only if no earlier pass on this PR spent the
  * adoption — read back from `sweep.disposed`, which rotation retains — so a refused or futile refresh escalates as before.
  */
+function designHoldMainAdoptionDecision(
+  pr: Pick<OpenPrView, "prNumber">, lines: ReadonlyArray<Record<string, unknown>>,
+  behindMainBy: number | undefined, mainTipSha: string | undefined, canUpdateBranch: boolean,
+): DesignHoldMainAdoptionDecision {
+  if (!canUpdateBranch) return "updater-unavailable";
+  if (mainTipSha === undefined) return "main-tip-unavailable";
+  if (behindMainBy === undefined) return "distance-unavailable";
+  if (behindMainBy <= 0) return "not-behind";
+  return lines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+    typeof row[DESIGN_HOLD_MAIN_ADOPTION_FIELD] === "string") ? "already-attempted" : "due";
+}
+
+/** Preserve the existing boolean API; the sweep retains the decision that produced it. */
 export function designHoldMainAdoptionDue(
   pr: Pick<OpenPrView, "prNumber">, lines: ReadonlyArray<Record<string, unknown>>,
   behindMainBy: number | undefined, mainTipSha: string | undefined, canUpdateBranch: boolean,
 ): boolean {
-  if (!canUpdateBranch || mainTipSha === undefined || behindMainBy === undefined || behindMainBy <= 0) return false;
-  return !lines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
-    typeof row[DESIGN_HOLD_MAIN_ADOPTION_FIELD] === "string");
+  return designHoldMainAdoptionDecision(pr, lines, behindMainBy, mainTipSha, canUpdateBranch) === "due";
 }
 
 export type TerminalFixDesignHandoff =
@@ -17253,8 +17294,6 @@ const strikeLadderMergeBases = new Map<string, Map<string, string>>();
 
 /** Deployment deltas alone admit this full-sweep rung; elapsed time never makes a model due. */
 export async function runSweepBakeoff(input: DeploymentBakeoffInput): Promise<void> {
-  const state = readBakeoffTrialState(input.stateDir);
-  if (!state.pending && findUntrialedModels(input.deployed, state.trialed).length === 0) return;
   await runDeploymentBakeoff(input);
 }
 
@@ -19178,6 +19217,8 @@ export async function runSweep(
         acted,
         reason: shownReason,
         head_sha: pr.headSha,
+        ...(disposition === "post-review" && pr.reviewPendingOwnerGone !== undefined
+          ? { owner_gone_cause: pr.reviewPendingOwnerGone } : {}),
         ...(stuckStages.has(stageKey({ pr_number: pr.prNumber, ...blockerRow })) ? { stage_stuck: true } : {}),
         // W1-T4633 — the branch a reversible plan-resequence close must keep; the reaper reads it.
         ...(disposition === "stale" && acted && pr.headRefName && reason.includes(PLAN_RESEQUENCE_CLOSE_MARKER)
@@ -19345,8 +19386,9 @@ export async function runSweep(
       log("sweep.plan_resequence_close.held", { pr_number: pr.prNumber, task_id: pr.taskId, reason: pr.planResequenceHeld });
     }
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
-    const harvestIncomplete = incompletePromiseHarvestFromLedger(pr, ledgerLines);
     const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines);
+    pr = { ...pr, reviewPendingOwnerGone: dispositionView.reviewPendingOwnerGone,
+      reviewPendingOwnerGoneReason: dispositionView.reviewPendingOwnerGoneReason };
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
     const unknownWaits = mergeabilityUnknownWaits.get(pr.prNumber);
     const dispositionFacts: DispositionFacts = {
@@ -19391,9 +19433,6 @@ export async function runSweep(
         }
       }
     }
-    if (disposition === "post-review" && harvestIncomplete) {
-      reason = `checks green, prior cause promise-harvest-incomplete — re-running the review lane on #${pr.prNumber}`;
-    }
     // W1-T7850 — A VERDICT REFUSED BECAUSE ITS REVIEWER CHECKOUT VANISHED is a host gap: re-review the same head
     // and body (the ordinary freshness gate sends a stale daemon to a fresh-tree worktree), paced and escalated
     // through the W1-T7837 planner. Never the freshness backoff, which probes the daemon's own loaded code.
@@ -19424,7 +19463,8 @@ export async function runSweep(
         prior.reviewDelivered.delete(reviewKey);
         hostGapRefusal.requestedForRefusal = true;
         disposition = "post-review";
-        reason = `the verdict was computed but its post was refused (${checkout}) — a host gap, not an unproven source; ${hostGapPlan.reason}`;
+        reason = dispositionView.reviewPendingOwnerGone === "refused-after-pending" ? derived.reason
+          : `the verdict was computed but its post was refused (${checkout}) — a host gap, not an unproven source; ${hostGapPlan.reason}`;
       } else {
         disposition = hostGapPlan.kind === "escalate" ? "blocked-ambiguous" : "wait";
         reason = hostGapPlan.reason;
@@ -19905,7 +19945,7 @@ export async function runSweep(
         `proof-repair rounds refused twice at this head (${pr.repeatedFixRefusal}) — no strike spent — ` +
         `the plan-shard flag is the next rung`;
     }
-    let terminalDesignHold: { amended: boolean; mainAdoption?: true; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string } | undefined;
+    let terminalDesignHold: { amended: boolean; mainAdoption?: true; mainAdoptionDecision: DesignHoldMainAdoptionDecision; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string } | undefined;
     // W1-T10339: a PR with no task trailer is judged on its BODY, so the body is an input a stand-down read.
     const standDownBodySha = carriesTaskTrailer(pr) ? undefined : prBodyDigest(pr.body);
     let designReleasedByBody = false;
@@ -19945,9 +19985,10 @@ export async function runSweep(
           const amended = current !== undefined && standingOn !== undefined &&
             (current !== standingOn || semantic !== undefined && semantic.standingOn !== semantic.observed);
           const behindBy = deps.behindMainByPr?.get(pr.prNumber);
-          const mainAdoption = !amended && !designMainAdoptionSpent &&
-            designHoldMainAdoptionDue(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
-          terminalDesignHold = { amended, ...(mainAdoption ? { mainAdoption: true as const } : {}),
+          const mainAdoptionDecision = amended ? "contract-amended" : designMainAdoptionSpent ? "pass-budget-spent" :
+            designHoldMainAdoptionDecision(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
+          const mainAdoption = mainAdoptionDecision === "due";
+          terminalDesignHold = { amended, mainAdoptionDecision, ...(mainAdoption ? { mainAdoption: true as const } : {}),
             revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
           disposition = amended || mainAdoption ? "blocked-fixable" : "refused-escalate";
           reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
@@ -20381,6 +20422,7 @@ export async function runSweep(
     if (gardenRecordRefusal !== undefined) extraDisposedFields = { ...extraDisposedFields, garden_record_refusal: gardenRecordRefusal };
     if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_hold: true, stand_down_site: standDownHold.site };
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true, needs_design_round_id: terminalDesignHold.roundId,
+      design_hold_main_adoption_decision: terminalDesignHold.mainAdoptionDecision,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
       ...(terminalDesignHold.semantic === undefined ? {} : { progress_task_semantic_revision: terminalDesignHold.semantic.standingOn }) };
     const selectedContractRefresh = async (

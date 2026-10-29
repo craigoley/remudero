@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.3
+  # refusal-amendment (W1-T10661, run DAEMON-1793261281327@f4a25ce82040a489db41686f92b9c233cc6eaf94, 2026-10-29T11:03:31.670Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The declared renderer cannot enforce report publication or prevent fix dispatch when proofs are omitted.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
