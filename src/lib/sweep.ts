@@ -14608,7 +14608,7 @@ function completedRefusalRetryView(pr: OpenPrView, prior: PriorActions): OpenPrV
   const hostGap = prior.reviewHostGapRefusals.get(key);
   const attemptedAt = freshness?.attemptedAt ?? hostGap?.attemptedAt ?? prior.reviewTimedOutReadRefusals.get(key);
   const refusalReason = freshness?.attemptedAt !== undefined ? freshness.reason ?? `reviewer-code freshness ${freshness.freshness}`
-    : hostGap?.attemptedAt !== undefined ? `reviewer host gap: ${hostGap.hostGap}` : "reservation read timed out";
+    : hostGap?.attemptedAt !== undefined ? `reviewer host gap: ${hostGap.hostGap} (${hostGapProblem(hostGap.hostGap)})` : "reservation read timed out";
   const pendingSince = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
   // Only a completed refusal on this exact input after this pending post proves its owner finished.
   return pr.reviewState === "pending" && attemptedAt !== undefined &&

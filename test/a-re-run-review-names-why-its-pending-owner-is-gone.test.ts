@@ -112,6 +112,7 @@ test("W1-T9732: a completed host-gap refusal keeps its retry cause", async t => 
   assert.equal(row.owner_gone_cause, "refused-after-pending");
   assert.match(String(row.reason), /the pending review's post was refused after it began/);
   assert.match(String(row.reason), /host gap: cwd-missing/);
+  assert.match(String(row.reason), /review worktree reclaimed/);
   assert.match(String(row.reason), /re-running the review lane on #9732$/);
   assert.equal(f.posted.length, 1);
 });

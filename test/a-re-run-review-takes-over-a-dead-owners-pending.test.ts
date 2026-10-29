@@ -188,6 +188,8 @@ test("W1-T8088: a dead owner is re-reviewed once, and the next pass reads the re
     };
     const before = view();
     assert.equal(before.reviewPendingOwnerDead, true);
+    assert.equal(before.reviewPendingOwnerGone, "owner-pid-dead");
+    assert.equal(before.reviewPendingOwnerGoneReason, undefined);
     assert.equal(deriveDisposition(before, DEFAULT_SWEEP_POLICY, h.now).disposition, "post-review");
     let reviewed = 0;
     const deps: SweepDeps = {
@@ -210,6 +212,8 @@ test("W1-T8088: a dead owner is re-reviewed once, and the next pass reads the re
     assert.equal(assessPendingReviewOwner(record, { isPidAlive: (pid) => pid === process.pid, getProcessStartTime: () => null }), "active");
     const after = view();
     assert.equal(after.reviewPendingOwnerDead, undefined);
+    assert.equal(after.reviewPendingOwnerGone, undefined);
+    assert.equal(after.reviewPendingOwnerGoneReason, undefined);
     const decision = deriveDisposition(after, DEFAULT_SWEEP_POLICY, Date.now());
     assert.equal(decision.disposition, "wait");
     assert.match(decision.reason, /a review is already in flight/);
