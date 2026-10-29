@@ -627,7 +627,13 @@ function assessReviewReuse(
  *  episode opened a NEW issue: #11698 and #11720 for #11679, same head and contract, 85 minutes apart. The full
  *  reason, with its age and start, stays in the issue's detail. Any other reason is returned unchanged. */
 export function stalledStageEscalationSummary(reason: string): string {
-  return reason.replace(/^(PR stage stalled: .+?) for \d+ minutes \(BACKSTOP \d+\); since [^;]*;/, "$1;");
+  // An ownerless stall reads "(owner: none)" where an owned one reads "(BACKSTOP <n>)", and a held repair appends
+  // its withheld minutes: both kept the title moving, so #15368 got four issues for one head and cause (#15403,
+  // #15414, #15453, #15476), and 16 open issues on 2026-10-29 carried the unstripped "(owner: none); since".
+  if (!reason.startsWith("PR stage stalled: ")) return reason;
+  return reason
+    .replace(/^(PR stage stalled: .+?) for \d+ minutes \((?:BACKSTOP \d+|owner: none)\); since [^;]*;/, "$1;")
+    .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
 }
 
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
