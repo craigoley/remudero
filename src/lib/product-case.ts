@@ -252,7 +252,9 @@ export class ProductCaseService {
     const rows = read.ok && read.torn === 0 ? read.rows.filter(row => row.run_id === native.runId && (row.task_id === undefined || row.task_id === build.taskId))
       .sort((a, b) => Date.parse(String(a.ts)) - Date.parse(String(b.ts))) : [];
     const heads = rows.filter(row => typeof row.head_sha === "string" && /^[a-f0-9]{40}$/.test(row.head_sha));
-    const head = String(heads.at(-1)?.head_sha ?? "unknown");
+    // Cleanup may capture an older worktree after the run has observed a repaired PR head.
+    const sourceHeads = heads.filter(row => row.step !== "local.qualification");
+    const head = String(sourceHeads.at(-1)?.head_sha ?? heads.at(-1)?.head_sha ?? "unknown");
     const base = { actor, productId: original.id, objectiveRevision: build.objectiveRevision, repository,
       operationId: build.operationId, runId: native.runId, taskId: build.taskId, head, execution: native.state };
     const localRows = rows.filter(row => row.step === "local.qualification" && row.head_sha === head);

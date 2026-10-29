@@ -212,6 +212,41 @@ test("W1-T10865: failed incomplete foreign and stale evidence cannot pass", asyn
   const redAgain = (await f.request()).body.evidence.hosted.filter((item: { current: boolean }) => item.current);
   assert.equal(redAgain.length, 1);
   assert.equal(redAgain[0].outcome, "failed", "reusing an earlier failed receipt must not leave a later success current");
+
+  await t.test("a late qualification cannot replace an already observed repair head", async t => {
+    const f = await fixture(t);
+    const producer = consumerSource(f);
+    assert.equal((await producer.produce()).result.ok, true);
+    const qualifiedHead = f.head;
+    const captured = f.capture();
+    assert.equal(captured.verdict, "passed");
+    const qualified = await f.request();
+    const earlier = qualified.body.evidence.local.filter((item: { current: boolean }) => item.current);
+    assert.equal(earlier.length, 1);
+    assert.equal(earlier[0].outcome, "succeeded");
+    assert.equal(earlier[0].receipt.head, qualifiedHead);
+
+    f.head = "e".repeat(40);
+    f.row("pr.checks", { head_sha: f.head, conclusion: "green" });
+    f.configure();
+    renameSync(f.ledger, join(f.root, "state/ledger.20261028T000000000Z.ndjson"));
+    writeFileSync(f.ledger, "");
+    assert.equal(f.capture().digest, captured.digest, "cleanup captures the unchanged worktree at the older head");
+    f.repo.cleanup();
+
+    const reply = await f.request();
+    assert.equal(reply.status, 200, JSON.stringify(reply.body));
+    const local = reply.body.evidence.local.filter((item: { current: boolean }) => item.current);
+    assert.equal(local.length, 1);
+    assert.equal(local[0].outcome, "unknown", "head B has no qualification even when head A is captured later");
+    assert.equal(local[0].receipt.head, f.head);
+    assert.ok(reply.body.evidence.local.some((item: { id: string; current: boolean; outcome: string }) =>
+      item.id === earlier[0].id && item.outcome === "succeeded" && !item.current), "the earlier success stays stored as historical evidence");
+    const hosted = reply.body.evidence.hosted.filter((item: { current: boolean }) => item.current);
+    assert.equal(hosted.length, 1);
+    assert.equal(hosted[0].outcome, "succeeded");
+    assert.equal(hosted[0].receipt.head, f.head);
+  });
 });
 
 test("W1-T10865: required check and status overlaps preserve failures and pending through the served collector", async t => {
