@@ -81,16 +81,27 @@ function parseVersion(v: string): [number, number, number] | null {
   return [Number(m[1]), Number(m[2]), Number(m[3] ?? "0")];
 }
 
+/** The letter words of a version's suffix (`24.22.0-bookworm-slim` → `bookworm slim`): a Docker tag's variant. */
+function versionVariant(v: string): string | undefined {
+  const suffix = /^v?\d+(?:\.\d+){1,3}([-+].*)$/.exec(v.trim())?.[1];
+  return suffix === undefined ? undefined : (suffix.match(/[a-z]+/gi) ?? []).join(" ").toLowerCase();
+}
+
 function bumpLevel(from: string, to: string): SemverLevel {
   const a = parseVersion(from);
   const b = parseVersion(to);
   if (!a || !b) return "unknown";
+  // A variant change (bookworm → trixie, beta → rc) can hide behind equal numbers: fail closed, like a major.
+  const variants = [versionVariant(from), versionVariant(to)];
+  if (variants[0] !== undefined && variants[1] !== undefined && variants[0] !== variants[1]) return "major";
   if (b[0] !== a[0]) return "major";
   if (b[1] !== a[1]) return "minor";
   return "patch";
 }
 
-const FROM_TO_RE = /\bfrom\s+v?(\d+(?:\.\d+){1,3}(?:[-+][\w.]*)?)\s+to\s+v?(\d+(?:\.\d+){1,3}(?:[-+][\w.]*)?)/gi;
+// A version may carry several suffix segments, as a Docker tag does (`24.22.0-bookworm-slim`, #15176), and never
+// takes a sentence's closing period.
+const FROM_TO_RE = /\bfrom\s+v?(\d+(?:\.\d+){1,3}(?:[-+]\w+(?:\.\w+)*)*)\s+to\s+v?(\d+(?:\.\d+){1,3}(?:[-+]\w+(?:\.\w+)*)*)/gi;
 
 /**
  * Parse every `from X to Y` version pair out of one text block. Dependabot emits
@@ -117,7 +128,7 @@ const DEPENDABOT_SUMMARY_LINE_RE = /^\s*(?:Updates|Bumps)\b/i;
  *  Not "structurally total": it legitimately does not match an unprefixed line, and that no-op is
  *  the arm the fixture exists to pin. */
 export const CONVENTIONAL_TITLE_PREFIX_RE = /^\s*[a-z][\w-]*(?:\([\w./-]+\))?!?:\s*/i;
-const DEPENDENCY_VERSION = String.raw`v?(\d+(?:\.\d+){1,3}(?:[-+][\w.]*)?)`;
+const DEPENDENCY_VERSION = String.raw`v?(\d+(?:\.\d+){1,3}(?:[-+]\w+(?:\.\w+)*)*)`;
 
 export interface DepReviewBumpFact {
   dependency: string;
