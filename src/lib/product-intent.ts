@@ -89,7 +89,17 @@ export const productDeployReceiptSchema = z.object({
   outcome: z.enum(["succeeded", "failed", "running", "unknown", "blocked"]), reason: text(500),
   observation: z.object({ expectedRevision: revision, receiptSetDigest: hash }).strict().optional(),
 }).strict();
-export const productEvidenceReceiptSchema = z.discriminatedUnion("channel", [...productRunReceiptSchema.options, productDeployReceiptSchema]);
+export const productPhoneReceiptSchema = z.object({
+  channel: z.literal("mobile"), actor: text(512).regex(/^operator:.+$/), productId: productIdSchema, objectiveRevision: revision,
+  repository: runReceiptFields.repository, provenance: z.literal("operator-attested"), source: z.literal("physical-phone-browser"),
+  deployEvidenceId: text(128), deploymentId: productDeployReceiptSchema.shape.deploymentId.unwrap(),
+  target: z.enum(["preview", "production"]), commit: z.string().regex(/^[a-f0-9]{40}$/),
+  url: httpUrl.refine(value => new URL(value).protocol === "https:"),
+  platform: z.enum(["ios", "android"]), browser: text(160), deviceModel: text(160), scenarioId: text(120),
+  outcome: z.enum(["passed", "failed", "blocked"]), observedAt: instant,
+}).strict();
+export type ProductPhoneReceipt = z.infer<typeof productPhoneReceiptSchema>;
+export const productEvidenceReceiptSchema = z.discriminatedUnion("channel", [...productRunReceiptSchema.options, productDeployReceiptSchema, productPhoneReceiptSchema]);
 export type ProductDeployReceipt = z.infer<typeof productDeployReceiptSchema>;
 export type ProductEvidenceReceipt = z.infer<typeof productEvidenceReceiptSchema>;
 export type LocalQualification = z.infer<typeof localQualificationSchema>;
