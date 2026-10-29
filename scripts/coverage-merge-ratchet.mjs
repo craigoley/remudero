@@ -472,7 +472,7 @@ function recordLineState(coverage) {
 }
 
 /** The largest V8 offset a raw script's whole-script ranges reach: its generated extent. */
-function generatedExtent(script) {
+export function generatedExtent(script) {
   let extent = -1;
   for (const fn of script?.functions ?? []) for (const range of fn?.ranges ?? []) {
     if (range.startOffset === 0 && range.endOffset > extent) extent = range.endOffset;
