@@ -1743,7 +1743,14 @@ export async function traceCommand(
   const located = opts.resolveTaskPlan?.(id);
   const repoDir = located?.ok ? located.root : reportRepoRoot(opts);
   const planPath = join(repoDir, "plan", "tasks.yaml");
-  const plan = loadPlan(planPath);
+  let plan: Plan;
+  try {
+    plan = loadPlan(planPath);
+  } catch (e) {
+    if (!located || located.ok) throw e;
+    console.error(`rmd trace: '${id}' (${located.error}); cannot load plan for feedback tracing: ${String((e as Error)?.message ?? e)}`);
+    return 2;
+  }
   const config = loadConfig();
   const ownerRepo = reportOwnerRepo(opts, repoDir);
   const { owner, repo: defaultRepo } = located?.ok && located.owner

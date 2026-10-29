@@ -189,6 +189,28 @@ test("W1-T10925: a miss names every plan searched and the repo-root to use", (t)
   assert.ok(checked.err.includes(`read its plan with --repo-root ${f.target}`), checked.err);
   assert.match(checked.out, /criteria source:\s+the body Acceptance: block/);
 
+  const feedbackId = "operator-note";
+  mkdirSync(join(f.engine.dir, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(f.engine.dir, "plan", "feedback", `${feedbackId}.yaml`),
+    `id: ${feedbackId}\nstatus: new\nraw: operator note\nts: ${new Date().toISOString()}\n`);
+  const feedback = rmd(f, ["trace", feedbackId]);
+  assert.equal(feedback.code, 0, feedback.err);
+  assert.ok(feedback.out.includes(`### rmd trace ${feedbackId} (forward`), feedback.out);
+
+  // A resolver miss must survive the feedback fallback's cwd-plan read, including unreadable paths.
+  rmSync(f.enginePlan);
+  for (const condition of ["missing", "unreadable"]) {
+    if (condition === "unreadable") mkdirSync(f.enginePlan);
+    const traced = rmd(f, ["trace", "PORTAL-T000"]);
+    assert.equal(traced.code, 2, traced.err);
+    assert.ok(traced.err.includes(`rmd trace: 'PORTAL-T000' (not found in ${f.enginePlan} (unreadable:`), traced.err);
+    assert.ok(traced.err.includes(`, ${targetPlan}; this instance targets craigoley/remudero-site`), traced.err);
+    assert.ok(traced.err.includes(`read its plan with --repo-root ${f.target}`), traced.err);
+    assert.equal(traced.released.length, 0);
+  }
+  rmSync(f.enginePlan, { recursive: true });
+  writeFileSync(f.enginePlan, planYaml(ENGINE_TASK, "remudero"));
+
   // No record, two consumer checkouts that both hold the id: refuse — never guess from repos/.
   rmSync(join(f.stateDir, "daemon-target.json"));
   const other = join(f.root, "repos", "remudero-docs");
@@ -255,6 +277,12 @@ test("W1-T10925: trace refuses an unknown task and feedback id with the searched
     assert.deepEqual(errors, [
       `rmd trace: '${id}' is neither a known task id (${enginePlan}) nor a feedback entry (plan/feedback/${id}.yaml)`,
     ]);
+
+    rmSync(enginePlan);
+    await assert.rejects(traceCommand([id], context), /ENOENT/);
+    await assert.rejects(traceCommand([id], {
+      ...context, resolveTaskPlan: () => ({ ok: true, root: f.engine.dir }),
+    }), /ENOENT/);
   } finally {
     console.error = oldError;
     if (oldHome === undefined) delete process.env.HOME;
