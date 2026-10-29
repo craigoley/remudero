@@ -11,6 +11,7 @@ import { ProductBuildService, productBuildKickOrigin, productPlanOrigin, readTar
 import { buildProductCaseRoutes } from "#src/lib/product-routes.js";
 import { captureLocalQualificationReceipt, readLocalQualificationReceipt } from "#src/lib/local-qualification-receipt.js";
 import { resolveProjectPreflight } from "#src/lib/ci-project-preflight.js";
+import { defaultPreflightSpawn } from "#src/lib/commit-message.js";
 import type { PreflightSummary } from "#src/lib/ci-parity.js";
 import { ghTextAsync } from "#src/lib/github-transport.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -19,7 +20,7 @@ import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { makeRuntimeFixture } from "#test/helpers/native-runtime-fixture.js";
 import { declaredBody, violations } from "#test/helpers/openapi-strict.js";
-import { preflightCommand, runTask } from "#src/run-task.js";
+import { preflightCommand, runTask } from "#test/helpers/run-task-test.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import type { TestSlotOptions } from "#src/lib/test-slot.js";
@@ -141,8 +142,11 @@ function consumerSource(f: Awaited<ReturnType<typeof fixture>>) {
   const produce = async () => {
     const project = resolveProjectPreflight(f.repo.dir);
     assert.equal(project.kind, "consumer");
-    const status = await preflightCommand(["--from", "HEAD^"], { projectRoot: f.repo.dir, projectTestSlot: fixtureSlots(f.root) });
-    const summary = JSON.parse(readFileSync(join(f.repo.dir, "coverage/preflight-summary.json"), "utf8")) as PreflightSummary & { qualityProfile: string };
+    const summaryPath = join(f.repo.dir, "coverage/preflight-summary.json");
+    const status = await preflightCommand(["--from", "HEAD^", "--summary-file", summaryPath], {
+      projectRoot: f.repo.dir, projectTestSlot: fixtureSlots(f.root), spawn: defaultPreflightSpawn,
+    });
+    const summary = JSON.parse(readFileSync(summaryPath, "utf8")) as PreflightSummary & { qualityProfile: string };
     return { result: { ok: status === 0, steps: summary.steps }, summary };
   };
   return { produce, put };
