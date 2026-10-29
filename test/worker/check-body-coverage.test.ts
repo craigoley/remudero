@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Task } from "#src/lib/plan.js";
-import { renderImplementPrompt } from "#src/lib/prompt-render.js";
+import { renderImplementPrompt, renderImplementPromptWithParts } from "#src/lib/prompt-render.js";
 import { judgeReview } from "#src/lib/review.js";
 
 const task = {
@@ -15,7 +15,7 @@ const task = {
 } satisfies Task;
 
 test("W1-T10661: check:body-coverage is prevented, not retried", () => {
-  const prompt = renderImplementPrompt(task, "", "run", "", "", "", "", true);
+  const { prompt } = renderImplementPromptWithParts(task, "", "run", "", "", "", "", true);
   const report = prompt.split("# ACCEPTANCE REPORT\n")[1]?.split("\n# OUTPUT CONTRACT")[0];
   assert.ok(report, "the initial implement prompt supplies a report scaffold before any fix round");
   for (const criterion of task.acceptance) {
