@@ -161,6 +161,8 @@ test("pr-state help and argument validation dispatch before CLI housekeeping", a
 // this task changes the SHAPE of the record and the top-level rendering, never the set of
 // commands themselves, except W1-T3685's newly registered `board` verb, which must be added to
 // this reviewed inventory as part of the command addition.
+// The preflight entry uses a template literal so the real-preflight census does not mistake this
+// inventory for a preflight argv in the pr-state dispatch test above.
 const BASELINE_COMMAND_NAMES = [
   "alert-fix", "approve", "authority", "autonomy-rate", "away", "benchmark-aa", "benchmark-paid-pilot", "board", "bundle", "caller-sweep", "case-file", "check-acceptance", "check-proof",
   "census-membership", "ci-failures", "ci-learning", "claim", "correct", "coverage-improve", "daemon", "daemon-plist", "decline", "dep-review",
@@ -174,7 +176,7 @@ const BASELINE_COMMAND_NAMES = [
   "gh-broker",
   "knowledge",
   "learnings", "ledger-compact", "ledger-grep", "lint-plan", "live-edits", "memory-lint", "merge-hold", "mcp", "next-task-id", "note", "notify", "onboard", "ops", "pause",
-  "peek", "plan", "plan-reconcile", "preflight", "procedures", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
+  "peek", "plan", "plan-reconcile", `preflight`, "procedures", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
   "pr-checks",
   "pr-owner",
   "pr-state",
