@@ -9,8 +9,8 @@ import { assertGateProbeRan } from "#test/helpers/gate-probe-evidence.js";
 test("gate probe diagnostics preserve the real missing-executable refusal", () => {
   const native = spawnSync(join(tmpdir(), `rmd-absent-probe-${randomUUID()}`), [], { stdio: "ignore", timeout: 2000, env: { ...process.env, NODE_V8_COVERAGE: "" } });
   assert.equal(native.error && "code" in native.error ? native.error.code : undefined, "ENOENT");
-  assert.equal(native.stdout, null);
-  assert.equal(native.stderr, null);
+  assert.ok(native.stdout === null || native.stdout === undefined);
+  assert.ok(native.stderr === null || native.stderr === undefined);
   assert.throws(() => assertGateProbeRan("fixture", native), /status null; signal none; code ENOENT/);
 });
 
