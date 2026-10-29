@@ -6,8 +6,13 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
-import { countCommentLines } from "#scripts/comment-load-ratchet.mjs";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+// scripts/ is outside tsconfig's include; load the real counter with its explicit runtime contract.
+const COMMENT_LOAD_SCRIPT = "#scripts/comment-load-ratchet.mjs";
+const { countCommentLines } = await import(COMMENT_LOAD_SCRIPT) as {
+  countCommentLines: (text: string, path: string) => { comments: number; code: number };
+};
 
 // Snapshot at 3b28ef9e3, before compression: 2,018 comment lines (the filing measured 2,008).
 // Fingerprint token kinds, raw literal contents and preceding line breaks (ASI), including types.
