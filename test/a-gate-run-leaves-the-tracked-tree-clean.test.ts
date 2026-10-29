@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { assertGateProbeRan } from "#test/helpers/gate-probe-evidence.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -91,7 +92,7 @@ test("W1-T2791 (acceptance 1): running the fast gate's OWN source-size step leav
   const dirtied = dirtiedBy(GATE_CHECKOUT.root, () => {
     const r = runProbe("npm", ["run", "--silent", entry.script]);
     // The exit code is NOT the assertion — it is recorded only so a failure here is diagnosable.
-    assert.ok(r.status === 0 || r.status === 1, `the step ran (status ${r.status}): ${r.stderr}`);
+    assertGateProbeRan(entry.script, r);
   });
   assert.deepEqual(dirtied, [], "a gate run must leave the tracked tree exactly as it found it");
 });
@@ -111,13 +112,12 @@ test("W1-T2791 (acceptance 1): running the fast gate's OWN source-size step leav
 test("W1-T2791 (acceptance 3): EVERY step the fast gate runs leaves the tracked tree byte-identical, not just the one guarded by name", () => {
   const offenders: string[] = [];
   for (const entry of FAST_GATE_STEPS) {
-    let status: number | null = null;
     const dirtied = dirtiedBy(GATE_CHECKOUT.root, () => {
-      status = runProbe("npm", ["run", "--silent", entry.script]).status;
+      const probe = runProbe("npm", ["run", "--silent", entry.script]);
+      // A step that never RAN dirties nothing and would pass this loop for the wrong reason — the
+      // vacuity acceptance 1 guards with the same assertion. Exit code is otherwise not the subject.
+      assertGateProbeRan(entry.script, probe);
     });
-    // A step that never RAN dirties nothing and would pass this loop for the wrong reason — the
-    // vacuity acceptance 1 guards with the same assertion. Exit code is otherwise not the subject.
-    assert.ok(status === 0 || status === 1, `${entry.script} ran (status ${status})`);
     if (dirtied.length > 0) offenders.push(`${entry.job} (npm run ${entry.script}) dirtied: ${dirtied.join(", ")}`);
   }
   assert.deepEqual(
