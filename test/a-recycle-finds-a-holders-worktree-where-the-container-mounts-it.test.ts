@@ -146,7 +146,8 @@ test("W1-T9713: a worker in a scratch worktree is attributed to its lock", t => 
   const r = recycle(t);
   assert.match(r.stderr, /REFUSING — 1 lane-holding and 0 lane-less/);
   const worker = r.stderr.split("\n").find(line => line.includes("pid 4321  age 5s"));
-  assert.ok(worker?.includes(`lane ${TASK}`));
+  assert.ok(worker, "the drain reports the busy worker");
+  assert.ok(worker.includes(`lane ${TASK}`));
   assert.ok(worker.includes(`worktrees: ${r.live}`), "the busy-worker line names the host dir read");
 });
 
