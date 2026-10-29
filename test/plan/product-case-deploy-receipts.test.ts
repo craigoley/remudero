@@ -7,6 +7,7 @@ import { test, type TestContext } from "node:test";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { ProductDeploymentService, vercelDeploymentProvider } from "#src/lib/product-deployment.js";
 import { buildProductCaseRoutes } from "#src/lib/product-routes.js";
+import { ghProductBuildTarget, productBuildKickOrigin } from "#src/lib/product-build.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { declaredBody, violations } from "#test/helpers/openapi-strict.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -14,6 +15,7 @@ import { ghShim } from "#test/helpers/gh-shim.js";
 const actor = "clerk:alice", team = "team_fixture", head = "a".repeat(40);
 const repository = { id: 1234, owner: "fixture", name: "game" };
 const now = "2026-10-29T00:00:00.000Z";
+const trusted = "remudero-reviewer[bot]";
 
 async function fixture(t: TestContext, hostedChange?: string) {
   const root = ownedFixtureDir(t, "case-deploy-receipts").dir;
@@ -30,7 +32,8 @@ async function fixture(t: TestContext, hostedChange?: string) {
   assert.ok(store.transition(actor, { version: "product-intent-v1", requestId: "deploy-repository-001", id: productId,
     expectedRevision: 1, expectedObjectiveRevision: 1,
     repository: { ...repository, provider: "github", defaultBranch: "main", visibility: "public", verifiedAt: now },
-    stageEvidence: [{ id: "case-hosted:fixture", stage: "build", outcome: "succeeded", objectiveRevision: 1, observedAt: now,
+    stageEvidence: hostedChange === "collector" ? [{ id: "reviewed-plan", stage: "plan", outcome: "succeeded", objectiveRevision: 1, observedAt: now,
+      references: [{ label: "Reviewed task W9-T1", url: "https://github.com/fixture/game/pull/7" }] }] : [{ id: "case-hosted:fixture", stage: "build", outcome: "succeeded", objectiveRevision: 1, observedAt: now,
       references: [{ label: "Hosted qualification", url: "https://github.com/fixture/game/pull/8" }],
       ...(hostedChange === "legacy" ? {} : { receipt: hostedReceipt }) }] }).ok);
   if (hostedChange === "later failed") assert.ok(store.transition(actor, { version: "product-intent-v1", requestId: "later-hosted-000001", id: productId,
@@ -79,6 +82,23 @@ async function fixture(t: TestContext, hostedChange?: string) {
     expectedRevision: hostedChange === "later failed" ? 3 : 2, expectedObjectiveRevision: 1 });
   assert.ok(binding.ok, JSON.stringify(binding));
   const operationId = binding.value.receipt.operationId;
+  let hostedConclusion = hostedChange === "later failed" ? "failure" : "success";
+  let mergeCommit: string | null = null;
+  const hostedText = async (args: string[]) => {
+    const path = args.at(-1)!;
+    if (path.includes("/matching-refs/")) return "[]";
+    if (path.endsWith("/protection/required_status_checks")) return JSON.stringify({ contexts: ["test", "remudero-review"] });
+    if (path.includes("/check-runs?")) {
+      if (hostedConclusion === "unreadable") throw new Error("hosted provider unavailable");
+      return JSON.stringify({ total_count: 1, check_runs: [{ id: 1, name: "test", head_sha: head, status: "completed", conclusion: hostedConclusion }] });
+    }
+    if (path.includes("/status?")) return JSON.stringify({ total_count: 1, statuses: [
+      { context: "remudero-review", state: "success", creator: { login: trusted, type: "Bot" } }] });
+    if (path.includes("/reviews?")) return "[]";
+    assert.equal(path, "repos/fixture/game/pulls/8");
+    return JSON.stringify({ number: 8, merged_at: mergeCommit ? now : null, merge_commit_sha: mergeCommit,
+      head: { sha: head }, base: { ref: "main", repo: { id: repository.id } } });
+  };
   const current = () => { const read = store.read(actor, productId); assert.ok(read.ok); return read.value; };
   const command = () => ({ version: "product-case-v1", action: "observe-deployment", command: {
     productId, operationId, expectedRevision: current().revision, expectedObjectiveRevision: current().objectiveRevision } });
@@ -90,19 +110,53 @@ async function fixture(t: TestContext, hostedChange?: string) {
       if (loseResponse) { loseResponse = false; throw new Error("response lost after durable commit"); }
       body = value;
     } };
-    await buildProductCaseRoutes({ root, planText: async () => JSON.stringify({ number: 8, merged_at: null, merge_commit_sha: null,
-      head: { sha: head }, base: { ref: "main", repo: { id: repository.id } } }), ...extra })[0]!.handler(req as never, res as never, {} as never);
+    await buildProductCaseRoutes({ root, planText: hostedText, planTrustedReviewer: trusted, ...extra })[0]!.handler(req as never, res as never, {} as never);
     const parsed = JSON.parse(body);
     assert.deepEqual(violations(parsed, declaredBody("/v1/products/case", "POST", res.statusCode)), []);
     return { status: res.statusCode, body: parsed };
   };
-  return { root, store, productId, operationId, command, request, current, calls,
+  return { root, store, productId, operationId, command, request, current, calls, hostedText,
+    set hostedConclusion(value: string) { hostedConclusion = value; },
+    set mergeCommit(value: string) { mergeCommit = value; },
     get deployment() { return deployment; }, set deployment(value) { deployment = value; },
     set status(value: number) { httpStatus = value; }, set unreadable(value: boolean) { unreadable = value; },
     set truncated(value: boolean) { truncated = value; }, get probes() { return probes; },
     set loseResponse(value: boolean) { loseResponse = value; },
     set others(value: typeof others) { others = value; }, set providerReply(value: typeof providerReply) { providerReply = value; },
     set probeBody(value: () => BodyInit) { probeBody = value; }, set beforeProbe(value: () => void) { beforeProbe = value; } };
+}
+
+async function collectedFixture(t: TestContext) {
+  const f = await fixture(t, "collector");
+  const command = { version: "product-case-v1", action: "build", command: {
+    version: "product-build-v1", requestId: "deploy-source-build-001", productId: f.productId,
+    planEvidenceId: "reviewed-plan", taskId: "W9-T1", expectedRevision: 2, expectedObjectiveRevision: 1 } };
+  const operationId = `pbuild_${createHash("sha256").update(JSON.stringify(command.command)).digest("hex")}`;
+  const runId = "W9-T1-1793300000000", requestedAt = new Date(Date.now() - 10_000).toISOString();
+  const product = f.current();
+  assert.ok(f.store.transition(actor, { version: "product-intent-v1", requestId: "deploy-source-queued-001", id: f.productId,
+    expectedRevision: product.revision, expectedObjectiveRevision: 1, stageEvidence: [{ id: operationId, stage: "build", outcome: "queued",
+      objectiveRevision: 1, observedAt: requestedAt, references: [{ label: "Build task W9-T1", url: "https://github.com/fixture/game" }] }] }).ok);
+  const rows = [
+    { step: "console.kick_dispatched", task: "W9-T1", origin: productBuildKickOrigin(f.productId, operationId), native_run_id: runId },
+    { step: "run.start" }, { step: "pr.opened", head_sha: head, pr_url: "https://github.com/fixture/game/pull/8" },
+    { step: "verdict", verdict: "handed_off" },
+  ];
+  writeFileSync(join(f.root, "state/ledger.ndjson"), rows.map(row => JSON.stringify({ ts: new Date().toISOString(),
+    run_id: runId, task_id: "W9-T1", repo: repository.name, ...row })).join("\n") + "\n");
+  const collect = async (conclusion: string) => {
+    f.hostedConclusion = conclusion;
+    const reply = await f.request(command, { daemonRoot: () => ({ state: "found", root: f.root, instance: "fixture" }),
+      target: ghProductBuildTarget({ text: f.hostedText }) });
+    assert.equal(reply.status, 200, JSON.stringify(reply.body));
+    const current = reply.body.evidence.hosted.filter((item: { current: boolean }) => item.current);
+    assert.equal(current.length, 1);
+    assert.equal(current[0].receipt.operationId, operationId);
+    assert.equal(current[0].receipt.runId, runId);
+    assert.equal(current[0].receipt.head, head);
+    return current[0];
+  };
+  return Object.assign(f, { collect });
 }
 
 test("W1-T10866: deployment binds its tested source project and answering URL", async t => {
@@ -149,6 +203,34 @@ test("W1-T10866: deployment binds its tested source project and answering URL", 
   writeFileSync(journal, original);
 });
 
+test("W1-T10866: deployment binds its tested source project and answering URL — replayed hosted failure", async t => {
+  const f = await collectedFixture(t);
+  const failed = await f.collect("failure");
+  assert.equal(failed.outcome, "failed");
+  const blocked = await f.request();
+  assert.equal(blocked.status, 200); assert.equal(blocked.body.evidence.deploy[0].outcome, "blocked");
+  assert.equal(f.probes, 0);
+  assert.equal((await f.collect("success")).outcome, "succeeded");
+  const succeeded = await f.request();
+  assert.equal(succeeded.status, 200);
+  const success = succeeded.body.evidence.deploy.find((item: { outcome: string }) => item.outcome === "succeeded");
+  assert.ok(success?.current); assert.equal(f.probes, 1);
+  const failedAgain = await f.collect("failure");
+  assert.equal(failedAgain.outcome, "failed"); assert.equal(failedAgain.id, failed.id);
+  const stored = new ProductIntentStore({ root: f.root }).read(actor, f.productId);
+  assert.ok(stored.ok);
+  assert.deepEqual(stored.value.stageEvidence.filter(item => item.receipt?.channel === "hosted").map(item => item.outcome), ["failed", "succeeded"]);
+  const command = f.command();
+  for (const reply of await Promise.all([f.request(command), f.request(command)])) {
+    assert.equal(reply.status, 200, JSON.stringify(reply.body));
+    const current = reply.body.evidence.deploy.filter((item: { current: boolean }) => item.current);
+    assert.equal(current.length, 1); assert.equal(current[0].outcome, "blocked");
+    assert.equal(reply.body.evidence.deploy.find((item: { id: string }) => item.id === success.id).current, false);
+    assert.deepEqual(reply.body.evidence.deploy.find((item: { id: string }) => item.id === success.id).receipt, success.receipt);
+  }
+  assert.equal(f.probes, 1, "a replayed hosted failure must refuse readiness probing");
+});
+
 test("W1-T10866: preview production and failed deployment outcomes stay separate", async t => {
   const cases = [
     ["project", "refusal", { projectId: "prj_foreign" }], ["team", "refusal", { ownerId: "team_foreign" }],
@@ -187,6 +269,49 @@ test("W1-T10866: preview production and failed deployment outcomes stay separate
   assert.deepEqual(production.body.evidence.deploy.map((item: { receipt: { target: string } }) => item.receipt.target), ["preview", "production"]);
 });
 
+test("W1-T10866: preview production and failed deployment outcomes stay separate — hosted outcome replay", async t => {
+  for (const source of ["tested head", "verified merge"]) await t.test(source, async t => {
+    const f = await collectedFixture(t);
+    if (source === "verified merge") {
+      f.mergeCommit = "c".repeat(40);
+      f.deployment.gitSource.sha = "c".repeat(40);
+    }
+    f.others = [{ ...f.deployment, id: "dpl_production", target: "production" }];
+    const success = await f.collect("success");
+    assert.equal(success.outcome, "succeeded");
+    const succeeded = await f.request(); assert.equal(succeeded.status, 200);
+    const successes = succeeded.body.evidence.deploy;
+    assert.equal(successes.length, 2); assert.notEqual(successes[0].id, successes[1].id);
+    const failure = await f.collect("failure");
+    assert.equal(failure.outcome, "failed");
+    const blocked = await f.request(); assert.equal(blocked.status, 200);
+    assert.equal(f.probes, 2);
+    assert.equal((await f.collect("success")).id, success.id);
+    const recovered = await f.request(); assert.equal(recovered.status, 200);
+    assert.equal(recovered.body.replayed, true);
+    assert.deepEqual(recovered.body.evidence.deploy.filter((item: { current: boolean }) => item.current), successes);
+    assert.equal(f.probes, 4);
+    assert.equal((await f.collect("failure")).id, failure.id);
+    const failedAgain = await f.request(); assert.equal(failedAgain.status, 200);
+    assert.equal(failedAgain.body.replayed, true);
+    const current = failedAgain.body.evidence.deploy.filter((item: { current: boolean }) => item.current);
+    assert.deepEqual(current.map((item: { outcome: string; receipt: { target: string; commit: string } }) =>
+      [item.outcome, item.receipt.target, item.receipt.commit]),
+    [["blocked", "preview", f.deployment.gitSource.sha], ["blocked", "production", f.deployment.gitSource.sha]]);
+    for (const outcome of ["unreadable", "pending"]) {
+      const hosted = await f.collect(outcome);
+      assert.equal(hosted.outcome, outcome === "unreadable" ? "unknown" : "running");
+      const reply = await f.request(); assert.equal(reply.status, 200);
+      const current = reply.body.evidence.deploy.filter((item: { current: boolean }) => item.current);
+      assert.equal(current.length, 2);
+      assert.deepEqual(current.map((item: { outcome: string }) => item.outcome), outcome === "unreadable" ? ["unknown", "unknown"] : ["blocked", "blocked"]);
+      for (const success of successes) assert.deepEqual(reply.body.evidence.deploy.find((item: { id: string }) => item.id === success.id), { ...success, current: false });
+    }
+    assert.equal(f.probes, 4, "failed, unreadable and running hosted results never reach the served URL");
+    assert.equal(new ProductIntentStore({ root: f.root }).read(actor, f.productId).ok, true);
+  });
+});
+
 test("W1-T10866: preview production and failed deployment outcomes stay separate — source and transport controls", async t => {
   const merge = "c".repeat(40);
   await t.test("an older provider port cannot claim deployment evidence", async t => {
@@ -201,15 +326,20 @@ test("W1-T10866: preview production and failed deployment outcomes stay separate
     const f = await fixture(t); f.deployment.gitSource.sha = merge;
     const shim = ghShim([{ when: "api repos/fixture/game/pulls/8", stdout: JSON.stringify({ number: 8, merged_at: now, merge_commit_sha: merge,
       head: { sha: head }, base: { ref: "main", repo: { id: repository.id } } }) }]);
+    for (const path of ["branches/main/protection/required_status_checks", `commits/${head}/check-runs?per_page=100`,
+      `commits/${head}/status?per_page=100`, "pulls/8/reviews?per_page=100"]) {
+      shim.addRoute({ when: path, stdout: await f.hostedText(["api", `repos/fixture/game/${path}`]) });
+    }
     const previousPath = process.env.PATH; process.env.PATH = `${shim.dir}:${previousPath}`;
     t.after(() => { process.env.PATH = previousPath; rmSync(shim.dir, { recursive: true, force: true }); });
     const reply = await f.request(undefined, { planText: undefined });
     assert.equal(reply.status, 200); assert.equal(reply.body.evidence.deploy[0].outcome, "succeeded");
-    assert.equal(shim.calls().filter(call => call.includes("repos/fixture/game/pulls/8")).length, 1);
+    assert.equal(shim.calls().filter(call => call.endsWith("repos/fixture/game/pulls/8")).length, 3);
   });
   for (const change of ["matching", "foreign repository", "foreign head", "foreign base", "unmerged", "unreadable"]) await t.test(`merge ${change}`, async t => {
     const f = await fixture(t); f.deployment.gitSource.sha = merge;
-    const planText = async () => {
+    const planText = async (args: string[]) => {
+      if (args.at(-1) !== "repos/fixture/game/pulls/8") return f.hostedText(args);
       if (change === "unreadable") throw new Error("merge unavailable");
       return JSON.stringify({ number: 8, merged_at: change === "unmerged" ? null : now, merge_commit_sha: merge,
         head: { sha: change === "foreign head" ? "f".repeat(40) : head },
@@ -423,6 +553,7 @@ test("W1-T10866: replay restart and concurrent edits preserve deployment history
   await t.test("a hosted failure arriving during the probe refuses success", async t => {
     const f = await fixture(t);
     f.beforeProbe = () => {
+      f.hostedConclusion = "failure";
       const product = f.current(), hosted = product.stageEvidence[0]!;
       assert.ok(f.store.transition(actor, { version: "product-intent-v1", requestId: "concurrent-hosted-001", id: f.productId,
         expectedRevision: product.revision, expectedObjectiveRevision: 1,

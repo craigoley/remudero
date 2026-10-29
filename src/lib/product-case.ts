@@ -314,29 +314,35 @@ export class ProductCaseService {
 
   private async hostedSource(product: StoredProduct, actor: string, commit: string): Promise<{ accepted: boolean; unreadable?: boolean; reason: string }> {
     let unavailable: string | undefined;
-    const latest = new Map<string, StoredProduct["stageEvidence"][number]>();
+    const tested = new Map<string, StoredProduct["stageEvidence"][number]>();
     for (const item of product.stageEvidence) {
       const receipt = item.receipt;
       if (receipt?.channel === "hosted" && receipt.actor === actor && receipt.productId === product.id &&
         receipt.repository.id === product.repository?.id && receipt.objectiveRevision === product.objectiveRevision && item.objectiveRevision === product.objectiveRevision) {
-        latest.set(`${receipt.operationId}:${receipt.runId}`, item);
+        if (item.outcome === "succeeded" && receipt.review === "success" && receipt.contexts.length &&
+          receipt.contexts.every(context => context.conclusion === "success")) tested.set(`${receipt.operationId}:${receipt.runId}:${receipt.head}`, item);
       }
     }
-    for (const item of latest.values()) {
+    for (const item of tested.values()) {
       const receipt = item.receipt;
       if (item.outcome !== "succeeded" || receipt?.channel !== "hosted" || receipt.review !== "success" ||
         !receipt.contexts.length || receipt.contexts.some(context => context.conclusion !== "success")) continue;
-      if (receipt.head === commit) return { accepted: true, reason: "hosted-tested source" };
       const repo = product.repository!;
       for (const ref of item.references) {
         const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/([1-9][0-9]*)$/.exec(ref.url);
         if (!match || `${match[1]}/${match[2]}`.toLowerCase() !== `${repo.owner}/${repo.name}`.toLowerCase()) continue;
         try {
-          const pull = z.object({ number: revision, merged_at: z.string().datetime().nullable(), merge_commit_sha: z.string().nullable(), head: z.object({ sha: z.string() }),
-            base: z.object({ ref: z.string(), repo: z.object({ id: revision }) }) }).parse(JSON.parse(await (this.options.planText ?? ghTextAsync)(
-            ["api", `repos/${repo.owner}/${repo.name}/pulls/${match[3]}`], { timeout: 20_000, maxBuffer: 256 * 1024 })));
-          if (pull.merged_at !== null && pull.number === Number(match[3]) && pull.head.sha === receipt.head && pull.base.repo.id === repo.id &&
-            pull.base.ref === repo.defaultBranch && pull.merge_commit_sha === commit) return { accepted: true, reason: "verified default-branch merge of hosted-tested source" };
+          if (receipt.head !== commit) {
+            const pull = z.object({ number: revision, merged_at: z.string().datetime().nullable(), merge_commit_sha: z.string().nullable(), head: z.object({ sha: z.string() }),
+              base: z.object({ ref: z.string(), repo: z.object({ id: revision }) }) }).parse(JSON.parse(await (this.options.planText ?? ghTextAsync)(
+              ["api", `repos/${repo.owner}/${repo.name}/pulls/${match[3]}`], { timeout: 20_000, maxBuffer: 256 * 1024 })));
+            if (pull.merged_at === null || pull.number !== Number(match[3]) || pull.head.sha !== receipt.head || pull.base.repo.id !== repo.id ||
+              pull.base.ref !== repo.defaultBranch || pull.merge_commit_sha !== commit) continue;
+          }
+          // Outcome receipts replay in place; their append order cannot identify the current hosted result.
+          const current = await this.hosted(product, receipt.head, { pr_url: ref.url });
+          if (current.outcome === "succeeded") return { accepted: true, reason: receipt.head === commit ? "hosted-tested source" : "verified default-branch merge of hosted-tested source" };
+          if (current.outcome === "unknown") unavailable = current.reason;
         } catch (error) {
           unavailable = `hosted source merge unreadable: ${String(error).slice(0, 400)}`;
         }
