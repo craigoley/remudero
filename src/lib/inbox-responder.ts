@@ -555,14 +555,15 @@ function receiptExtra(receipt: CausalAnswerReceipt): ThreadMessageExtra {
 
 /** A persisted outcome precedes acknowledgement. An indeterminate effect is never replayed. */
 export async function answerThread(threadId: string, deps: InboxResponderDeps): Promise<ThreadDecision["action"] | undefined> {
-  if (!deps.scope) return answerLegacyThread(threadId, deps);
-  const scope = deps.scope, proposalId = proposalIdOfThread(threadId);
+  const proposalId = proposalIdOfThread(threadId);
   if (!proposalId) return undefined;
-  const key = createHash("sha256").update(JSON.stringify([scope.repository, threadId])).digest("hex");
+  const key = createHash("sha256").update(JSON.stringify([deps.scope?.repository ?? null, threadId])).digest("hex");
   let lock: ReturnType<typeof acquireInflightLock>;
   try { lock = acquireInflightLock(join(dirname(deps.threadStorePath), "thread-answer-locks"), key, { run_id: `inbox-answer:${key}` }); }
   catch (error) { if (error instanceof InflightLockError) return undefined; throw error; }
   try {
+    if (!deps.scope) return await answerLegacyThread(threadId, deps);
+    const scope = deps.scope;
     const read = readAllThreads({ threadStorePath: deps.threadStorePath });
     if (read.status === "unresolved") throw new Error(read.reason);
     const stored = read.threads.get(threadId) ?? [];
