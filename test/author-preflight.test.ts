@@ -1,22 +1,23 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getPriority } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
-import { ownedFixtureDir } from '#test/helpers/owned-fixture-dir.js';
+import { makeTempDir } from '#src/lib/tmp.js';
 import { gitRepo } from './helpers/git-repo.js';
 
 // A retro can reach these fixtures without an admitted parent lease after its
 // outer slot wait bound. Keep fixture admission in owned scratch in BOTH shapes;
 // the enclosing author/runner retains its unchanged real host resource admission.
-const fixtureSlots = ownedFixtureDir({ after }, 'author-preflight-slots');
+const fixtureSlotDir = makeTempDir('author-preflight-slots');
 const originalSlotDir = process.env.RMD_TEST_SLOT_DIR;
-process.env.RMD_TEST_SLOT_DIR = fixtureSlots.dir;
+process.env.RMD_TEST_SLOT_DIR = fixtureSlotDir;
 after(() => {
   if (originalSlotDir === undefined) delete process.env.RMD_TEST_SLOT_DIR;
   else process.env.RMD_TEST_SLOT_DIR = originalSlotDir;
+  rmSync(fixtureSlotDir, { recursive: true, force: true });
 });
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
