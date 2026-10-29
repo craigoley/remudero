@@ -103,15 +103,15 @@ async function fixture(t: TestContext) {
   row("pr.opened", { head_sha: head, pr_url: "https://github.com/craigoley/wreckterra/pull/8" });
   row("verdict", { verdict: "handed_off" });
   assert.deepEqual(readTargetExecution(join(root, "state"), { taskId, origin: productBuildKickOrigin(productId, operationId), repo: "wreckterra", requestedAt, nowMs: Date.now() }), { state: "ended", runId });
-  const route = () => buildProductCaseRoutes(options)[0]!;
+  const route = (planText?: typeof ghTextAsync) => buildProductCaseRoutes({ ...options, ...(planText ? { planText } : {}) })[0]!;
   // Invoke the maintained handler with the same verified identity carrier as serve.
-  const request = async () => {
+  const request = async (planText?: typeof ghTextAsync) => {
     const { Readable } = await import("node:stream");
     const req = Readable.from([Buffer.from(JSON.stringify(command))]);
     Object.assign(req, { [Symbol.for("remudero.service.verifiedActor")]: actor });
     let body = "";
     const res = { setHeader() {}, writeHead(code: number) { this.statusCode = code; }, statusCode: 200, end(value: string) { body = value; } };
-    await route().handler(req as never, res as never, {} as never);
+    await route(planText).handler(req as never, res as never, {} as never);
     return { status: res.statusCode, body: JSON.parse(body) };
   };
   return { root, repo, get head() { return head; }, set head(value: string) { head = value; }, store, productId, operationId, command, row, ledger, options, shim, configure, request,
@@ -172,6 +172,8 @@ test("W1-T10865: served reconciliation binds real local and hosted receipts", as
   assert.equal(reply.status, 200, JSON.stringify(reply.body));
   assert.equal(reply.body.evidence.local[0].outcome, "succeeded");
   assert.equal(reply.body.evidence.hosted[0].outcome, "succeeded");
+  assert.equal(f.shim.calls().filter(call => call.includes(`commits/${f.head}/status`)).length, 1,
+    "required contexts and native review must share the validated status snapshot");
   for (const channel of ["local", "hosted"]) {
     const receipt = reply.body.evidence[channel][0].receipt;
     assert.equal(receipt.actor, actor);
@@ -391,6 +393,67 @@ test("W1-T10865: replay restart and concurrent edits retain one receipt — evid
 });
 
 test("W1-T10865: failed incomplete foreign and stale evidence cannot pass — hosted controls", async t => {
+  const nativeStatus = (state: string, login = trusted) => ({ context: "remudero-review", state,
+    creator: { login, type: "Bot" } });
+  const green = { statuses: [nativeStatus("success")] };
+  const statusSnapshots = [
+    ["later failure", green, { statuses: [nativeStatus("success"), { context: "test", state: "failure" }] }, "succeeded", "success"],
+    ["later full page", green, { statuses: Array.from({ length: 100 }, () => nativeStatus("success")) }, "succeeded", "success"],
+    ["later truncated total", green, { total_count: 100, statuses: [nativeStatus("success")] }, "succeeded", "success"],
+    ["later unreadable response", green, "unreadable", "succeeded", "success"],
+    ["later forged poster", green, { statuses: [nativeStatus("success", "stranger")] }, "succeeded", "success"],
+    ["forged snapshot cannot borrow later provenance", { statuses: [nativeStatus("success", "stranger")] }, green, "unknown", "absent"],
+    ["failed snapshot cannot borrow later provenance", { statuses: [nativeStatus("failure")] }, green, "failed", "failure"],
+    ["pending snapshot cannot borrow later provenance", { statuses: [nativeStatus("pending")] }, green, "running", "pending"],
+    ["full snapshot cannot borrow later provenance", { statuses: Array.from({ length: 100 }, () => nativeStatus("success")) }, green, "unknown", "unknown"],
+  ] as const;
+  for (const [name, first, later, outcome, review] of statusSnapshots) await t.test(name, async t => {
+    const f = await fixture(t);
+    const when = `commits/${f.head}/status`;
+    f.shim.addRoute({ when, stdout: JSON.stringify(first) });
+    const priorReads = f.shim.calls().filter(call => call.includes(when)).length;
+    let reads = 0;
+    const reply = await f.request(async (args, options) => {
+      const text = await ghTextAsync(args, options);
+      if (args[1]?.includes(when) && ++reads === 1) {
+        f.shim.addRoute({ when, stdout: typeof later === "string" ? later : JSON.stringify(later) });
+      }
+      return text;
+    });
+    assert.equal(reply.status, 200, JSON.stringify(reply.body));
+    const current = reply.body.evidence.hosted.filter((item: { current: boolean }) => item.current);
+    assert.equal(current.length, 1);
+    assert.equal(current[0].outcome, outcome);
+    assert.equal(current[0].receipt.review, review);
+    assert.equal(reads, 1, "native provenance must not fetch an unchecked second combined-status response");
+    assert.equal(f.shim.calls().filter(call => call.includes(when)).length - priorReads, 1);
+    const stored = f.store.read(actor, f.productId); assert.ok(stored.ok);
+    const receipt = stored.value.stageEvidence.find(item => item.id === current[0].id); assert.ok(receipt);
+    assert.equal(receipt.outcome, outcome);
+    assert.deepEqual(receipt.receipt, current[0].receipt);
+  });
+  for (const observation of ["matching", "foreign head", "foreign repository", "changed state", "missing actor"]) {
+    await t.test(`native identity fallback: ${observation}`, async t => {
+      const f = await fixture(t);
+      const when = `commits/${f.head}/status`;
+      const priorReads = f.shim.calls().filter(call => call.includes(when)).length;
+      f.shim.addRoute({ when, stdout: JSON.stringify({ statuses: [{ context: "remudero-review", state: "success" }] }) });
+      f.shim.addRoute({ when: "api graphql", stdout: JSON.stringify({ data: { repository: {
+        nameWithOwner: observation === "foreign repository" ? "other/repository" : "craigoley/wreckterra",
+        object: { oid: observation === "foreign head" ? "f".repeat(40) : f.head, status: { context: {
+          context: "remudero-review", state: observation === "changed state" ? "FAILURE" : "SUCCESS",
+          creator: observation === "missing actor" ? null : { login: "remudero-reviewer", __typename: "Bot" },
+        } } },
+      } } }) });
+      const reply = await f.request();
+      assert.equal(reply.status, 200, JSON.stringify(reply.body));
+      const current = reply.body.evidence.hosted.filter((item: { current: boolean }) => item.current);
+      assert.equal(current.length, 1);
+      assert.equal(current[0].outcome, observation === "matching" ? "succeeded" : "unknown");
+      assert.equal(f.shim.calls().filter(call => call.includes(when)).length - priorReads, 1);
+      assert.equal(f.shim.calls().filter(call => call.includes("api graphql")).length, 1);
+    });
+  }
   const scenarios = [
     ["empty required set", "protection/required_status_checks", { contexts: [], checks: [] }, "unknown"],
     ["truncated check page", "/check-runs", { total_count: 100, check_runs: [] }, "unknown"],

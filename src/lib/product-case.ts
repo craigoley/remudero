@@ -324,7 +324,10 @@ export class ProductCaseService {
         .parse(await api(`${slug}/pulls/${match[3]}/reviews?per_page=100`));
       const hold = classifyChangesRequested({ headSha: head }, reviews);
       const trusted = this.options.planTrustedReviewer ?? process.env[REVIEWER_IDENTITY_ENV] ?? "";
-      const review = resolveReviewProvenance(await readReviewStatusEntry(repo.owner, repo.name, head, fetcher), trusted);
+      // Bind provenance to the bounded status snapshot used for required contexts. The reader's
+      // GraphQL identity fallback still verifies the repository, head and unchanged review state.
+      const review = resolveReviewProvenance(await readReviewStatusEntry(repo.owner, repo.name, head,
+        async args => args[1] === "graphql" ? fetcher(args) : statuses), trusted);
       const failures = ["failure", "error", "cancelled", "timed_out", "action_required", "startup_failure", "stale"];
       const contexts = names.map(name => {
         const pin = required.checks?.find(check => check.context === name)?.app_id;
