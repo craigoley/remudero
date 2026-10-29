@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { aaStackHash } from "#src/lib/benchmark-aa.js";
 import { prospectiveAaDir } from "#src/lib/benchmark-aa-prospective.js";
 import type { BenchmarkAaReport } from "#src/lib/benchmark-aa.js";
-import { runBenchmarkAaReadiness } from "#src/lib/benchmark-aa-readiness.js";
+import { runBenchmarkAaReadiness, type BenchmarkAaReadinessInput } from "#src/lib/benchmark-aa-readiness.js";
 import { activateBenchmarkPaidPilot, PAID_PILOT_AA_RECEIPT_MAX_AGE_MS, PAID_PILOT_STOPPING_RULE,
   PAID_PILOT_WINDOW_MS, type PaidPilotEvidence } from "#src/lib/benchmark-paid-pilot.js";
 import { codexBalancedAttemptAdmission, codexBalancedTrialCommand, registerCodexBalancedTrial,
@@ -36,7 +36,7 @@ function request(effort: "low" | "medium" = "low"): CodexBalancedTrialRequest {
       primaryOutcome: "verified-completion", maturityDays: 14, protocolText: "operator protocol" } };
 }
 
-function runtime(stateDir: string): CodexBalancedTrialInput["readiness"] {
+function runtime(stateDir: string): Omit<BenchmarkAaReadinessInput, "stateDir" | "trialId"> {
   return { config: { overflow: "none" }, env: {}, clock: fixedClock(NOW),
     instanceRoots: [{ instance: "fixture", stateDir }], loadPlanTasks: () => plan,
     runtimePins: () => ({ harnessRevision: { source: "executing-module-git", revision: SHA }, revisions: {
@@ -47,8 +47,8 @@ function runtime(stateDir: string): CodexBalancedTrialInput["readiness"] {
     grade: async () => ({ verdict: "pass", passed: 1, failed: 0, unmeasurable: 0, holdouts: 0, reasons: [] }) };
 }
 
-function input(stateDir: string, req = request()): CodexBalancedTrialInput {
-  return { stateDir, request: req, readiness: runtime(stateDir), clock: fixedClock(NOW),
+function input(stateDir: string, req = request(), readiness = runtime(stateDir)): CodexBalancedTrialInput {
+  return { stateDir, request: req, readiness: registration => runBenchmarkAaReadiness({ ...readiness, ...registration }), clock: fixedClock(NOW),
     readCatalog: async () => ["gpt-6.1-sol", "gpt-6.1-terra"] };
 }
 
@@ -56,7 +56,7 @@ async function calibrated(stateDir: string, req = request()) {
   const args = input(stateDir, req);
   const registered = await registerCodexBalancedTrial(args);
   assert.ok(registered.ok, JSON.stringify(registered));
-  const ready = await runBenchmarkAaReadiness({ ...args.readiness, stateDir, trialId: req.manifest.trialId });
+  const ready = await runBenchmarkAaReadiness({ ...runtime(stateDir), stateDir, trialId: req.manifest.trialId });
   assert.equal(ready.state, "receipt-emitted", JSON.stringify(ready));
   req.phase = "ab";
   return args;
@@ -215,12 +215,23 @@ test("registration rejects malformed requests and refuses unknown runtime pins b
     mutate(req);
     assert.deepEqual(await registerCodexBalancedTrial({ ...args, request: req }), { ok: false, reason });
   }
-  const result = await registerCodexBalancedTrial({ ...args, readiness: { ...args.readiness, runtimePins: () => ({
-    ...runtime(dir).runtimePins(), harnessRevision: { state: "unavailable", reason: "fixture" } }) } });
+  const result = await registerCodexBalancedTrial(input(dir, request(), { ...runtime(dir), runtimePins: () => ({
+    ...runtime(dir).runtimePins(), harnessRevision: { state: "unavailable", reason: "fixture" } }) }));
   assert.ok(!result.ok && result.reason.includes("runtime-pin-unknown:harnessRevision"), JSON.stringify(result));
   assert.equal(existsSync(prospectiveAaDir(dir, request().manifest.trialId)), false);
-  assert.ok((await registerCodexBalancedTrial({ ...args, readiness: { ...args.readiness,
-    dispatcherFor: () => { assert.fail("registration must never dispatch an attempt"); } } })).ok);
+  const noDispatch = input(dir, request(), { ...runtime(dir),
+    dispatcherFor: () => { assert.fail("registration must never dispatch an attempt"); } });
+  let readinessCalls = 0;
+  assert.ok((await registerCodexBalancedTrial({ ...noDispatch, readiness: registration => {
+    readinessCalls += 1;
+    assert.equal(registration.stateDir, dir);
+    assert.equal(registration.trialId, request().manifest.trialId);
+    assert.deepEqual(registration.manifest, request().manifest);
+    assert.equal(registration.maxPairs, 0);
+    assert.equal(registration.clock.now(), NOW);
+    return noDispatch.readiness(registration);
+  } })).ok);
+  assert.equal(readinessCalls, 1);
 });
 
 test("the A/B binds pilot consent, arms, effort, revisions and eligible task metadata", async t => {
@@ -261,8 +272,7 @@ test("registration reports an unwritable protocol and refuses API-billed calibra
     renameSync(backup, dir);
   }
   const { dir: apiDir } = ownedFixtureDir(t, "balanced-api-refusal");
-  const api = input(apiDir);
-  const result = await registerCodexBalancedTrial({ ...api, readiness: { ...api.readiness,
-    config: { overflow: "api_key" }, env: { ANTHROPIC_API_KEY: "fixture-only" } } });
+  const result = await registerCodexBalancedTrial(input(apiDir, request(), { ...runtime(apiDir),
+    config: { overflow: "api_key" }, env: { ANTHROPIC_API_KEY: "fixture-only" } }));
   assert.ok(!result.ok && result.reason.includes("api-billing-refused-before-spawn"), JSON.stringify(result));
 });

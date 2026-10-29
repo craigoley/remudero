@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { aaStackHash, parseAaTrialManifest, type AaTrialManifest, type BenchmarkAaCommandInput } from "./benchmark-aa.js";
 import { listProspectiveAaRegistrations, prospectiveAaDir, type ProspectiveAaProtocol } from "./benchmark-aa-prospective.js";
-import { runBenchmarkAaReadiness, type BenchmarkAaReadinessInput, type FrozenPopulation, type ReadinessTask } from "./benchmark-aa-readiness.js";
 import { citeAaReceipt, paidArmPauseReasons, parsePaidPilotRequest, PAID_PILOT_CASH_CEILING_USD,
   PAID_PILOT_STOPPING_RULE, PAID_PILOT_WINDOW_MS, type PaidPilotAaCitation, type PaidPilotEvidence,
   type PaidPilotProtocol, type PaidPilotRequest } from "./benchmark-paid-pilot.js";
@@ -27,12 +26,23 @@ export interface CodexBalancedTrialRequest {
   pilotRequest: unknown;
 }
 
-export interface CodexBalancedTrialInput<T extends ReadinessTask = ReadinessTask> {
+export interface CodexBalancedTrialInput {
   stateDir: string;
   request: unknown;
-  readiness: Omit<BenchmarkAaReadinessInput<T>, "stateDir" | "trialId" | "manifest" | "maxPairs" | "out">;
+  // The CLI owns the readiness runtime; registration supplies the pinned request and never runs pairs.
+  readiness: (request: { stateDir: string; trialId: string; manifest: AaTrialManifest; maxPairs: 0; clock: Clock }) => Promise<{
+    state: "receipt-emitted" | "withheld" | "refused";
+    refusals: string[];
+    receipt: { state: "emitted" | "withheld" };
+  }>;
   clock?: Clock;
   readCatalog?: () => Promise<string[]>;
+}
+
+interface RegisteredPopulation {
+  denominator: number;
+  eligible: { taskId: string }[];
+  digest: string;
 }
 
 export interface CodexBalancedTrialProtocol {
@@ -54,7 +64,7 @@ export interface CodexBalancedTrialProtocol {
 
 type Refusal = { ok: false; reason: string };
 export type CodexBalancedTrialResult = Refusal
-  | { ok: true; phase: "aa"; protocol: ProspectiveAaProtocol; population: FrozenPopulation }
+  | { ok: true; phase: "aa"; protocol: ProspectiveAaProtocol; population: RegisteredPopulation }
   | { ok: true; phase: "ab"; protocol: CodexBalancedTrialProtocol; path: string };
 const refuse = (reason: string): Refusal => ({ ok: false, reason });
 
@@ -105,7 +115,7 @@ function registeredAa(stateDir: string, manifest: AaTrialManifest) {
 }
 
 // One effort per calibration preserves the existing A/A invariant: both labels run one identical stack.
-export async function registerCodexBalancedTrial<T extends ReadinessTask>(input: CodexBalancedTrialInput<T>): Promise<CodexBalancedTrialResult> {
+export async function registerCodexBalancedTrial(input: CodexBalancedTrialInput): Promise<CodexBalancedTrialResult> {
   const parsed = parseRequest(input.request);
   if (!parsed.ok) return parsed;
   const { request, manifest } = parsed;
@@ -121,14 +131,14 @@ export async function registerCodexBalancedTrial<T extends ReadinessTask>(input:
     if (cited.citation.trialId !== manifest.trialId || cited.citation.stackHash !== aaStackHash(manifest.stack)) return refuse("aa-stack-mismatch");
     if (cited.citation.allocationReceiptHash !== aa.protocol.allocationReceiptHash) return refuse("aa-population-mismatch");
   }
-  const readiness = await runBenchmarkAaReadiness({ ...input.readiness, clock, stateDir: input.stateDir,
+  const readiness = await input.readiness({ clock, stateDir: input.stateDir,
     trialId: manifest.trialId, manifest, maxPairs: 0 });
   if (readiness.state === "refused") return refuse(readiness.refusals.join(","));
   const aa = registeredAa(input.stateDir, manifest);
   if (!aa.ok) return aa;
   const frozen = readJson(join(prospectiveAaDir(input.stateDir, manifest.trialId), "population.json"), "aa-population");
   if (!frozen.ok) return frozen;
-  const population = frozen.value as FrozenPopulation;
+  const population = frozen.value as RegisteredPopulation;
   if (request.phase === "aa") return { ok: true, phase: "aa", protocol: aa.protocol, population };
   if (readiness.receipt.state !== "emitted" || cited === undefined || !cited.ok) return refuse("aa-receipt-not-passing");
   let catalog: string[];

@@ -42262,7 +42262,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["claim", (rest) => rest.includes("--hold") ? claimHoldCommand(rest) : claimCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "balanced" ? await codexBalancedTrialCommand(rest.slice(1), (request, stateDir) =>
-    registerCodexBalancedTrial({ request, stateDir, readiness: benchmarkAaReadinessRuntime(stateDir) }))
+    registerCodexBalancedTrial({ request, stateDir, readiness: (registration) =>
+      runBenchmarkAaReadiness({ ...benchmarkAaReadinessRuntime(stateDir), ...registration }) }))
     : rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
       (request) => runBenchmarkAaReadiness({ ...benchmarkAaReadinessRuntime(request.stateDir), ...request }))
