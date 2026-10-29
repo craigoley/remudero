@@ -81,17 +81,18 @@ function parseVersion(v: string): [number, number, number] | null {
   return [Number(m[1]), Number(m[2]), Number(m[3] ?? "0")];
 }
 
-/** A version suffix's variant, compared exactly: any change to it fails closed (`bookworm-slim` → `trixie-slim`,
- *  `ubuntu.22.04` → `ubuntu.24.04`, `debian-11` → `debian-12`, `ltsc2022` → `ltsc2025`). Only a pre-release counter
+/** A version suffix's variant, compared exactly and case-sensitively, as a registry compares tags: any change to it fails
+ *  closed (`bookworm-slim` → `trixie-slim`, `ubuntu.22.04` → `ubuntu.24.04`, `debian-11` → `debian-12`, `ltsc2022` →
+ *  `ltsc2025`, `bookworm-slim` → `Bookworm-slim`). Only a pre-release counter
  *  on a known pre-release label is not variant (`4.0.0-beta.1` → `4.0.0-beta.2` reads `beta` both times): a closed
  *  list, because every heuristic that guessed which digits were counters misread some base image's version. */
 function versionVariant(v: string): string | undefined {
-  const suffix = /^v?\d+(?:\.\d+){1,3}[-+](.*)$/.exec(v.trim())?.[1]?.toLowerCase();
+  const suffix = /^v?\d+(?:\.\d+){1,3}[-+](.*)$/.exec(v.trim())?.[1];
   if (suffix === undefined) return undefined;
   return PRE_RELEASE_COUNTER.exec(suffix)?.[1] ?? suffix;
 }
 
-const PRE_RELEASE_COUNTER = /^(alpha|beta|rc|pre|preview|next|canary|dev)[.-]?\d+$/;
+const PRE_RELEASE_COUNTER = /^(alpha|beta|rc|pre|preview|next|canary|dev)[.-]?\d+$/i;
 
 function bumpLevel(from: string, to: string): SemverLevel {
   const a = parseVersion(from);

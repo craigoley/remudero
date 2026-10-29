@@ -34,16 +34,19 @@ test("a changed tag variant fails closed even when the numbers barely move, and 
   assert.equal(overallSemverLevel("chore(deps): bump node from 24.21.0-ubuntu.22.04 to 24.21.0-ubuntu.24.04", ""), "major");
   assert.equal(overallSemverLevel("chore(deps): bump x from 4.0.0-beta.1 to 4.0.0-beta.2", ""), "patch");
   assert.equal(overallSemverLevel("chore(deps): bump x from 4.0.0-beta.2 to 4.0.0-rc.1", ""), "major");
+  assert.equal(overallSemverLevel("chore(deps): bump x from 1.2.3-bookworm-slim to 1.2.4-Bookworm-slim", ""), "major");
   assert.equal(overallSemverLevel("chore(deps): bump x from 1.2.3 to 1.3.0", ""), "minor");
   assert.equal(overallSemverLevel("chore(deps): bump x to the latest", ""), "unknown");
 });
 
-test("a Docker tag whose variant changes by any one digit fails closed, whatever the variant's shape", () => {
+test("a Docker tag whose variant changes by any one character fails closed, whatever the variant's shape", () => {
   const variants = ["bookworm-slim", "debian-11", "ubuntu.22.04", "windowsservercore-ltsc2022", "alpine3.20", "noble-20240801", "jammy-cuda12.4"];
+  // Each digit moves by one, each letter flips case and each separator swaps: a registry tag is an exact string.
+  const mutate = (ch: string) => /\d/.test(ch) ? String((Number(ch) + 1) % 10)
+    : /[a-z]/.test(ch) ? ch.toUpperCase() : ch === "-" ? "." : "-";
   for (const variant of variants) {
-    const digits = [...variant].flatMap((ch, i) => (/\d/.test(ch) ? [i] : []));
-    for (const i of digits) {
-      const moved = variant.slice(0, i) + String((Number(variant[i]) + 1) % 10) + variant.slice(i + 1);
+    for (let i = 0; i < variant.length; i++) {
+      const moved = variant.slice(0, i) + mutate(variant[i]) + variant.slice(i + 1);
       const title = `chore(deps): bump x from 1.2.3-${variant} to 1.2.4-${moved}`;
       assert.equal(overallSemverLevel(title, ""), "major", title);
     }
