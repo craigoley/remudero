@@ -1,0 +1,32 @@
+- id: W1-T10968
+  title: "THE CODE PR pushes STAGE SLOWED — p50 2 per PR against a 1 per PR baseline over the last 24 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-regression:code:pushes:all"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/the-code-pushes-flow-stage-recovers.test.ts
+  acceptance:
+    - claim: "the code pushes stage returns under 2x its baseline p50"
+      proof: "grep: test(\"the code pushes stage recovers\" in test/sweep/the-code-pushes-flow-stage-recovers.test.ts"
+  note: "Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open."
+  rationale: |
+    code PRs, stage pushes: p50 2 per PR against a 1 per PR baseline (rolling).
+    Last 24 h: n 39, p50 2, p90 5 per PR.
+    Slowest PRs: #15041 (14 per PR), #15027 (8 per PR), #15022 (7 per PR).
+    Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.95
+    reasons:
+      - "high-risk verdict at confidence 0.95 — on the change's description/files alone, no diff was read — The filing reports aggregate push counts and three PR references but supplies no shared cause or bounded remedy; its finding cannot be verified from the supplied evidence.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration in a proposed new file; it does not demonstrate that push counts recover below twice the baseline."
+    judged_at: "2026-10-29T04:04:34.574Z"
+    pin: "183d310cec8fbc27c09cd6864e0d2b840dca45c6a997d7ce4d924d769df1aa5b"

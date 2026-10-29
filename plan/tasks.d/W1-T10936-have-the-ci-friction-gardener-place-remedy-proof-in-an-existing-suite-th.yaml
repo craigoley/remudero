@@ -7,7 +7,10 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=0647fdca921af3b1
+  # backlog gardener: placed=2026-10-29T01:30:16.152Z
   attempts: 0
   files:
     - src/lib/ci-friction-remedy.ts

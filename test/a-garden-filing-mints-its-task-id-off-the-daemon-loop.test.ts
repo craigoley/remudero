@@ -126,7 +126,7 @@ test("W1-T7742: every minting gardener files with the async-minted id while the 
   assert.match(readFileSync(join(f.root, hot.apply(f.ws, hotPlan, {}, hotHeld)!.paths[0]!), "utf8"), /W1-T9002/);
 
   const ladder = flowGardenSpec(f.deps, { owner: "acme", repo: "remudero", mintTaskId: mint, ownerSearch: search, ledgerRecords: () => [], planState: () => ({ tasks: [] }), prOutcomes: () => new Map() });
-  const ladderAction = { class: "draft" as const, target: "escalated:fixture", reason: "recurring", origin: "flow-blocker:escalated:fixture", rung: 1, price: { key: "escalated:fixture", hours: 2, prs: 2, owners: ["NONE"] }, charges: [], population: [2] };
+  const ladderAction = { class: "draft" as const, target: "own-red:fixture", reason: "recurring", origin: "flow-blocker:own-red:fixture", rung: 1, price: { key: "own-red:fixture", hours: 2, prs: 2, owners: ["fix-lane"] }, charges: [], population: [2] };
   const ladderPlan = { actions: [ladderAction], acting: [ladderAction.class] };
   const ladderHeld = await ladder.prepare!(f.ws, ladderPlan, true);
   assert.match(readFileSync(join(f.root, ladder.apply(f.ws, ladderPlan, {}, ladderHeld)!.paths[0]!), "utf8"), /W1-T9003/);
