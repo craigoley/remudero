@@ -20,7 +20,7 @@ import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, realDeploySensorsAsync, type AsyncDeploySensors } from "./deployer.js";
+import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, readDeployFactsAsync, realDeploySensorsAsync, type AsyncDeploySensors, type DeployFacts } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
 import { probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
 import {
@@ -1549,39 +1549,34 @@ export type PlanScopedFixRoundInput = {
   };
 };
 
-/** Build the deploy rows with asynchronous sensors; latch reconciliation remains synchronous. */
+/**
+ * Build the deploy rows from one awaited snapshot (W1-T9552): `readDeployFactsAsync` runs every
+ * git, gh and docker read before any row exists, and the rows' getters answer from it — a getter
+ * that threw replays the same throw, so `reconcile.unreadable` outcomes are unchanged. The image
+ * build dispatch stays live and awaited; latch reconciliation remains synchronous.
+ */
 export async function deployStateRowsOffLoop(
   reader: Omit<DeployStateReader, "deploy"> & { deploy: DeployStateReader["deploy"] | AsyncDeploySensors },
   history: readonly Record<string, unknown>[],
   onUnreadableLatch?: (error: unknown) => void,
 ): Promise<FleetStateRow[]> {
-  const deploy = reader.deploy;
-  const rows: FleetStateRow[] = [];
-  const baked = await deploy.newestBakedSha?.();
-  if (baked) {
-    rows.push({
-      pipeline: "image", target: baked, desired: `published image containing ${baked}`,
-      observe: () => deploy.imagePublished?.(baked),
-      inFlight: () => deploy.imageBuildInFlight?.(),
-      repair: async () => {
-        if (!deploy.dispatchImageBuild) throw new Error("image build dispatch unavailable");
-        await deploy.dispatchImageBuild();
-      },
-    }, {
-      pipeline: "deploy", target: baked, desired: `healthy deployed image containing ${baked}`,
-      observe: async () => {
-        const behind = await deploy.imageBakedCommitsBehind?.();
-        return behind === undefined ? undefined : behind === 0;
-      },
-      inFlight: async () => {
-        if (deploy.imageRecycleManual?.() === true) return true;
-        const published = await deploy.imagePublished?.(baked);
-        return published === true ? false : published === false ? true : undefined;
-      },
-      repair: () => { if (!reader.deployRequested()) reader.requestDeploy(); },
-    });
-  }
-  return [...rows, ...deployStateRows({ ...reader, deploy: {} }, history, onUnreadableLatch)];
+  const facts = await readDeployFactsAsync(reader.deploy);
+  const replay = <K extends keyof DeployFacts["thrown"]>(name: K): DeployFacts[K] => {
+    if (name in facts.thrown) throw facts.thrown[name];
+    return facts[name];
+  };
+  return deployStateRows({
+    ...reader,
+    deploy: {
+      newestBakedSha: () => facts.newestBakedSha,
+      // The snapshot read publication for the baked sha, the only one `deployStateRows` asks about.
+      imagePublished: () => replay("imagePublished"),
+      imageBuildInFlight: () => replay("imageBuildInFlight"),
+      imageBakedCommitsBehind: () => replay("imageBakedCommitsBehind"),
+      imageRecycleManual: () => replay("imageRecycleManual") === true,
+      dispatchImageBuild: reader.deploy.dispatchImageBuild,
+    },
+  }, history, onUnreadableLatch);
 }
 
 export interface BuildSweepEffectsDeps {
@@ -4623,7 +4618,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             readMergeFacts: (n: number) => fixRebaseMergeFactsFromRest(owner, repo, n),
             // W1-T2671: same ci-log-only base-gap reader as the run-loop call site above.
             readRedBaseRefreshFacts: (n: number) => redBaseRefreshFactsFromRest(owner, repo, n),
+            reproduceFailingTestsOnMerge: deps.reproduceFailingTestsOnMergeImpl,
+
             updateBranch: (n: number) => ghUpdateBranch(owner, repo, n),
+            updateBranchAtHead: (n: number, head: string) => ghUpdateBranch(owner, repo, n, undefined, undefined, undefined, head),
             // W1-T1044: THIS is the call site the measured incident actually hit — a fix-rung
             // worker spawned from a `dispatchFix` disposition ran 8,970s as a direct child of
             // the daemon, parking `await deps.sweep()` (daemon.ts) for the whole of it. The
@@ -4659,7 +4657,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             branchClaim,
           },
         });
-        keepWorktree = rung?.superseded !== undefined;
+        keepWorktree = rung?.superseded !== undefined || rung?.retainWorktree !== undefined;
       } catch (e) {
         // W1-T2402: a signal-terminated spawn (this fleet's own `killProcessGroup`/forced-deploy/
         // wall-clock-reclaim paths, or a genuine host OOM — indistinguishable by signal alone, see
@@ -4678,7 +4676,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // it does today.
         if (outcome.rethrow) throw e;
       } finally {
-        // W1-T4105: a superseded worker's worktree is kept for diagnosis.
+        // Superseded workers and held census recovery keep their original checkout.
         if (worktreePath && !keepWorktree) {
           try {
             worktreeRemoveForBuild(repoDir, worktreePath);
@@ -5336,8 +5334,14 @@ export async function refreshStaleRollupAfterRefusal(
   if (!staleRollupRefreshApplies(pr)) {
     return `no stale-rollup refresh: GitHub reports mergeable=${String(pr.mergeable)}, mergeableState=${pr.mergeableState ?? "unknown"}`;
   }
-  const priorRefresh = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber);
-  if (priorRefresh.length > 0) {
+  // updateBranchViaGh catches transport failures and returns bare "error". Neither that result
+  // nor a transient thrown exception confirms a new head; give either one later guarded retry.
+  // Two failures spend the allowance so a persistent transport problem cannot loop forever.
+  const refreshRows = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber);
+  const unconfirmed = (l: Record<string, unknown>) => l.outcome === "error" ||
+    (typeof l.outcome === "string" && l.outcome.startsWith("error:") && armFailureAction(l.outcome) === "transient");
+  const priorRefresh = refreshRows.filter((l) => !unconfirmed(l));
+  if (priorRefresh.length > 0 || refreshRows.length >= 2) {
     if (rowsAtHead(ledgerLines, STALE_ROLLUP_REFRESH_EXHAUSTED_STEP, pr).length > 0) {
       return "stale-rollup refresh already spent for this PR; escalated once at this head";
     }
@@ -12968,15 +12972,41 @@ export interface FixRoundBranchClaim {
   /** `undefined` once held; a string is the stand-down reason. */
   reacquire(): string | undefined;
   last(): InflightLockHandle;
+  /** Positive current lock identity; absent on an older adapter means UNKNOWN. */
+  verify?(): string | undefined;
 }
 
 export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => InflightLockHandle | string): FixRoundBranchClaim {
   let held: InflightLockHandle | undefined = first;
   let last = first;
+  let verificationRequired = false;
+  const verify = () => {
+    verificationRequired = true;
+    if (!held) return "branch claim is not held";
+    try {
+      const fd = fs.openSync(held.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      let raw: string;
+      try {
+        if (!fs.fstatSync(fd).isFile()) return "branch claim identity is unreadable";
+        const bytes = Buffer.alloc(4097);
+        const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
+        if (length > 4096) return "branch claim identity is unreadable";
+        raw = bytes.subarray(0, length).toString("utf8");
+      } finally { fs.closeSync(fd); }
+      const info = parseInflightLockInfo(raw);
+      if (!info || !info.host || !info.startedAt || info.run_id !== held.info.run_id || info.pid !== held.info.pid ||
+          info.host !== held.info.host || info.startedAt !== held.info.startedAt) return "branch claim belongs to another owner";
+      return undefined;
+    } catch {
+      const reason = "branch claim identity is unavailable";
+      return reason;
+    }
+  };
   return {
     id: () => held?.info.run_id,
     release: () => {
-      held?.release();
+      // A refresh that verified ownership must not later unlink an unknown or replacement holder.
+      if (!verificationRequired || verify() === undefined) held?.release();
       held = undefined;
     },
     reacquire: () => {
@@ -12987,6 +13017,7 @@ export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => Inf
       return undefined;
     },
     last: () => last,
+    verify,
   };
 }
 
@@ -17374,6 +17405,10 @@ export async function runSweep(
   sweepDeps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary> {
+  const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
+  const memoryHeldSummaries = memoryHeld.map((pr) =>
+    lightPassMemoryWaitSummary(pr, sweepDeps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
+  openPrs = openPrs.filter((pr) => !memoryHeld.includes(pr));
   // W1-T7096: every round this pass dispatches is judged by the judge this pass was given.
   const deps: SweepDeps = {
     ...sweepDeps,
@@ -17781,6 +17816,23 @@ export async function runSweep(
       ? { verdict: "escalate", loop: "former fixed bound reached (no progress judge wired)", reason: "unwired caller keeps the pre-W1-T7096 bound" }
       : { verdict: "continue", reason: "unwired caller keeps the pre-W1-T7096 bound" };
   });
+  const progressMemoryWait = { verdict: "unavailable", reason: "progress judgment waiting for memory admission" } as const;
+  const hostGapMemoryWait: HostGapRereviewAction = { kind: "hold", reason: progressMemoryWait.reason, progress: progressMemoryWait };
+  const judgeWithMemoryWait = async <T>(pr: OpenPrView, judgeAndRecord: () => Promise<T>, waiting: T): Promise<T> => {
+    if (lightPassActionScope.getStore() !== undefined) return judgeAndRecord();
+    let onMemoryWait!: () => void;
+    const memoryWait = new Promise<"memory-wait">((resolve) => { onMemoryWait = () => resolve("memory-wait"); });
+    const settled = lightPassActionScope.run({ onMemoryWait }, judgeAndRecord);
+    const first = await Promise.race([settled, memoryWait]);
+    if (first !== "memory-wait") return first;
+    const key = lightPassHeadKey(pr);
+    const hold = { sinceMs: deps.now ? deps.now() : systemClock.now() };
+    lightPassMemoryWaits.set(key, hold);
+    detachSweepAction(settled.finally(() => {
+      if (lightPassMemoryWaits.get(key) === hold) lightPassMemoryWaits.delete(key);
+    }), { actionKind: "light-pass-action", taskId: escalationTaskIdFor(pr) });
+    return waiting;
+  };
   {
     const judged = deps.fixProgressJudge !== undefined;
     const next: OpenPrView[] = [];
@@ -17825,13 +17877,17 @@ export async function runSweep(
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
         formerCeiling: pr.repeatedFixRefusal !== undefined ? 2 : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason });
-      const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
-        { ...progressWitness(pr), judge: progressJudge, firstRound: true });
-      appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
-        pr_number: pr.prNumber, head_sha: pr.headSha,
-        site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
-        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
-        round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
+      const judgeAndRecord = async () => {
+        const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
+          { ...progressWitness(pr), judge: progressJudge, firstRound: true });
+        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
+          pr_number: pr.prNumber, head_sha: pr.headSha,
+          site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
+          parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
+          round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
+        return result;
+      };
+      const result = await judgeWithMemoryWait(pr, judgeAndRecord, progressMemoryWait);
       if (result.verdict === "escalate") {
         next.push({ ...pr, progressEscalation: { loop: result.loop, reason: result.reason, judged } });
         continue;
@@ -19348,13 +19404,13 @@ export async function runSweep(
       const hostGapState = { history: facts.history, skips,
         ...(paced ? { lastReviewAtMs: Math.max(facts.lastReviewAtMs ?? Number.NEGATIVE_INFINITY, hostGapRefusal.attemptedAt ?? Number.NEGATIVE_INFINITY) } : {}),
         nowMs: now, observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
-      const hostGapPlan = await planHostGapRereview(hostGapState, {
+      const hostGapPlan = await judgeWithMemoryWait(pr, () => planHostGapRereview(hostGapState, {
         ...progressWitness(pr), ledger: ledgerLines,
         judge: deps.fixProgressJudge,
         input: hostGapProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha }, hostGapState),
         log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
           task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
-      });
+      }), hostGapMemoryWait);
       const checkout = hostGapProblem(hostGapRefusal.hostGap);
       if (hostGapPlan.kind === "rereview") {
         const reviewKey = reviewOutcomeKeyForPr(pr);
@@ -19372,7 +19428,10 @@ export async function runSweep(
       } else {
         disposition = hostGapPlan.kind === "escalate" ? "blocked-ambiguous" : "wait";
         reason = hostGapPlan.reason;
-        if (hostGapPlan.progress?.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, hostGapPlan.progress.reason);
+        if (hostGapPlan.progress?.verdict === "unavailable") {
+          judgedUnavailable.set(pr.prNumber, hostGapPlan.progress.reason);
+          pr.progressContinue = { reason: hostGapPlan.progress.reason, unavailable: true };
+        }
       }
     }
     if (hostGapRefusal !== undefined && disposition === "post-review")
@@ -19760,13 +19819,13 @@ export async function runSweep(
         const facts = hostGapRereviewFacts(pr, ledgerLines);
         const hostGapState = { history: facts.history, skips, lastReviewAtMs: facts.lastReviewAtMs, nowMs: now,
           observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
-        const hostGap = await planHostGapRereview(hostGapState, {
+        const hostGap = await judgeWithMemoryWait(pr, () => planHostGapRereview(hostGapState, {
           ...progressWitness(pr), ledger: ledgerLines,
           judge: deps.fixProgressJudge,
           input: hostGapProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha }, hostGapState),
           log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
             task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
-        });
+        }), hostGapMemoryWait);
         if (hostGap.kind === "rereview") {
           const reviewKey = reviewOutcomeKeyForPr(pr);
           if (!deps.dryRun) {
@@ -19782,7 +19841,10 @@ export async function runSweep(
         } else {
           disposition = hostGap.kind === "escalate" ? "blocked-ambiguous" : "wait";
           reason = hostGap.reason;
-          if (hostGap.progress?.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, hostGap.progress.reason);
+          if (hostGap.progress?.verdict === "unavailable") {
+            judgedUnavailable.set(pr.prNumber, hostGap.progress.reason);
+            pr.progressContinue = { reason: hostGap.progress.reason, unavailable: true };
+          }
         }
       } else {
         const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
@@ -20062,14 +20124,18 @@ export async function runSweep(
             formerCeiling: MAX_REARMS_AFTER_DISARM_PER_HEAD,
             parkedReason: `re-arm: ${rearms} merge queue ejections at this head`, operatorAnswer: pr.pendingAnswer?.constraint });
           input.remedyHistory = rearmRows;
-          const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
-            { ...progressWitness(pr), judge: deps.fixProgressJudge });
-          appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
-            site: "re-arm", pr_number: pr.prNumber, head_sha: pr.headSha,
-            former_ceiling: input.formerCeiling, parked_reason: input.parkedReason, red_class: input.redClass,
-            round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...progress, ...receipt });
+          const progress = await judgeWithMemoryWait<FixProgressResult>(pr, async () => {
+            const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
+              { ...progressWitness(pr), judge: progressJudge });
+            appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+              site: "re-arm", pr_number: pr.prNumber, head_sha: pr.headSha,
+              former_ceiling: input.formerCeiling, parked_reason: input.parkedReason, red_class: input.redClass,
+              round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...progress, ...receipt });
+            return progress;
+          }, progressMemoryWait);
           rearmExhausted = progress.verdict === "escalate";
           rearmUnavailable = progress.verdict === "unavailable";
+          if (rearmUnavailable) pr.progressContinue = { reason: progress.reason, unavailable: true };
           rearmReason = progress.verdict === "escalate" ? `fix progress loop: ${progress.loop} — ${progress.reason}`
             : progress.reason;
           rearmIncidentFields = { ...rearmIncidentFields,
@@ -20799,15 +20865,19 @@ export async function runSweep(
                   if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
-                const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
-                  { ...progressWitness(pr), judge: progressJudge, firstRound: true });
-                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
-                  pr_number: pr.prNumber, head_sha: pr.headSha,
-                  site: progressParkedReason?.split(":")[0] ?? "fix-strike",
-                  parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
-                  red_class: input.redClass, round_count: input.rounds.length, signals: input.signals,
-                  ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
+                const result = await judgeWithMemoryWait<FixProgressResult>(pr, async () => {
+                  const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
+                    { ...progressWitness(pr), judge: progressJudge, firstRound: true });
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
+                    pr_number: pr.prNumber, head_sha: pr.headSha,
+                    site: progressParkedReason?.split(":")[0] ?? "fix-strike",
+                    parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
+                    red_class: input.redClass, round_count: input.rounds.length, signals: input.signals,
+                    ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
+                  return result;
+                }, progressMemoryWait);
                 if (result.verdict === "unavailable") {
+                  pr.progressContinue = { reason: result.reason, unavailable: true };
                   acted = false;
                   standDownReason = result.reason;
                   return false;
@@ -22568,13 +22638,17 @@ export async function runSweep(
   }
 
   const summary: SweepSummary = {
-    total: openPrs.length,
+    total: openPrs.length + memoryHeld.length,
     byDisposition,
     actionsTaken,
     actionsFailed,
     actions,
     noneCount,
   };
+  for (const held of memoryHeldSummaries) {
+    summary.byDisposition.wait += held.byDisposition.wait;
+    summary.actions.push(...held.actions);
+  }
   log("sweep.summary", {
     ...summary.byDisposition,
     total: summary.total,
