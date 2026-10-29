@@ -5291,6 +5291,8 @@ export async function runDaemon(
                 reason: result.snapshot.reason,
                 source_bytes: result.snapshot.pressure.sourceBytes,
                 checkpoint_bytes: result.checkpointBytes,
+                checkpoint_read_bytes: result.checkpointReadBytes,
+                checkpoint_written_bytes: result.checkpointWrittenBytes,
                 dimension_cardinality: result.snapshot.pressure.dimensionCardinality,
                 rebuilt_partitions: result.snapshot.pressure.rebuiltPartitions,
               });
