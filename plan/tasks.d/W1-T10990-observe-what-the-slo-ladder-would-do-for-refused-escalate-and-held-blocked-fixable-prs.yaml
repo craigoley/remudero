@@ -34,3 +34,14 @@
   note: |
     Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-29 as an observation proposal at priority normal (2).
     Read-only: no change to sloLadderDue, strikeLadderDue, decideSloRung, BLOCKER_SLO_MS or any cap is authorized by this task. Any change is a separate filing.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "The filed scope authorizes one report only and explicitly prohibits changes to code, configuration, ledger, ladder gates, or caps; any implementation requires a separate filing."
+      - "Acceptance requires two replay windows, a positive control, ledger coverage counts and freshness, per-head eligibility and cap checks, and actual PR outcomes, providing a concrete verification plan."
+      - "The operator-filed observation proposal follows the stated practice of measuring projected effects before changing behavior; its recommendation does not authorize closures, requeues, or policy changes."
+      - "the judge said proceed, but W1-T10990: at verify: auto it fails lint (proof-dialect)"
+    judged_at: "2026-10-29T23:35:53.439Z"
+    pin: "82ed7ad303dd895d7d18ae03cf5d51bfeae2df3f9b68f8180b20364904270c44"
