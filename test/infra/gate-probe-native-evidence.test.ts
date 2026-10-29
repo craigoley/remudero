@@ -25,7 +25,7 @@ function runRealGateCaller(): string {
     const child = spawnSync(process.execPath, ["--max-old-space-size=128", "--import", "tsx", "--test",
       "--test-name-pattern=" + pattern, "test/a-gate-run-leaves-the-tracked-tree-clean.test.ts"], {
       cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 256 * 1024,
-      env: { ...process.env, PATH: bin + delimiter + (process.env.PATH ?? ""), NODE_V8_COVERAGE: "" },
+      env: { ...process.env, PATH: bin + delimiter + (process.env.PATH ?? ""), NODE_V8_COVERAGE: "", NODE_TEST_CONTEXT: undefined },
     });
     assert.equal(child.error, undefined, "the actual gate fixture must start");
     assert.equal(child.signal, null);
