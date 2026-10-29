@@ -5,7 +5,10 @@
   type: recon
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=3bc535b5a62f6ff0
+  # backlog gardener: placed=2026-10-29T01:30:16.152Z
   attempts: 0
   files:
     - plan/tasks.d/W1-T10781-fix-lane-fixed-still-red.yaml

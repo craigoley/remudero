@@ -77,7 +77,7 @@ import { loadMounts, mountsPath } from "../../lib/mounts.js";
 import { loadPolicy, policyPath } from "../../lib/policy.js";
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
-import { dispatchClaimRef, findClaimMintRow, releaseReplacedContainerClaims, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
+import { bootSweepDispatchClaims, dispatchClaimRef, releaseLandedDispatchClaims, claimMintedByRerun, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "../../lib/dispatch-claim.js";
 import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
@@ -1179,15 +1179,14 @@ export async function daemonCommand(
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
   const landedClaimRerunReported = new Set<string>();
   try {
-    const swept = releaseReplacedContainerClaims(deps.bootClaimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", target.repo)), {
+    // W1-T10896: the sweep also judges this host's own pre-restart claims and ends the runs they held.
+    bootSweepDispatchClaims(deps.bootClaimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", target.repo)), {
       localHost: hostname(),
       lockHeldSinceMs: bootClaimLock.now(),
       lockHeldSinceIso: bootClaimLock.iso(),
-      findMintRow: (taskId, anchor) => findClaimMintRow(dirname(ledgerPath), taskId, anchor),
+      stateDir: dirname(ledgerPath),
+      log,
     });
-    for (const claim of swept) {
-      log("dispatch.claim_released", { ref: dispatchClaimRef(claim.taskId), surface: "boot-sweep", arm: claim.arm, release: claim.release, dropped: claim.dropped, reason: claim.reason });
-    }
   } catch (error) {
     log("dispatch.claim_sweep_failed", { surface: "boot-sweep", error: String((error as Error)?.message ?? error).slice(0, 300) });
   }
