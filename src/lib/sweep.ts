@@ -17785,6 +17785,21 @@ export async function runSweep(
       ? { verdict: "escalate", loop: "former fixed bound reached (no progress judge wired)", reason: "unwired caller keeps the pre-W1-T7096 bound" }
       : { verdict: "continue", reason: "unwired caller keeps the pre-W1-T7096 bound" };
   });
+  const judgeWithMemoryWait = async (pr: OpenPrView, judgeAndRecord: () => Promise<FixProgressResult>): Promise<FixProgressResult> => {
+    if (lightPassActionScope.getStore() !== undefined) return judgeAndRecord();
+    let onMemoryWait!: () => void;
+    const memoryWait = new Promise<"memory-wait">((resolve) => { onMemoryWait = () => resolve("memory-wait"); });
+    const settled = lightPassActionScope.run({ onMemoryWait }, judgeAndRecord);
+    const first = await Promise.race([settled, memoryWait]);
+    if (first !== "memory-wait") return first;
+    const key = lightPassHeadKey(pr);
+    const hold = { sinceMs: deps.now ? deps.now() : systemClock.now() };
+    lightPassMemoryWaits.set(key, hold);
+    detachSweepAction(settled.finally(() => {
+      if (lightPassMemoryWaits.get(key) === hold) lightPassMemoryWaits.delete(key);
+    }), { actionKind: "light-pass-action", taskId: escalationTaskIdFor(pr) });
+    return { verdict: "unavailable", reason: "progress judgment waiting for memory admission" };
+  };
   {
     const judged = deps.fixProgressJudge !== undefined;
     const next: OpenPrView[] = [];
@@ -17839,27 +17854,7 @@ export async function runSweep(
           round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
         return result;
       };
-      let result: FixProgressResult;
-      if (lightPassActionScope.getStore() !== undefined) result = await judgeAndRecord();
-      else {
-        let onMemoryWait!: () => void;
-        const memoryWait = new Promise<"memory-wait">((resolve) => { onMemoryWait = () => resolve("memory-wait"); });
-        const settled = lightPassActionScope.run({ onMemoryWait }, judgeAndRecord);
-        const first = await Promise.race([settled, memoryWait]);
-        if (first === "memory-wait") {
-          const key = lightPassHeadKey(pr);
-          const hold = { sinceMs: deps.now ? deps.now() : systemClock.now() };
-          lightPassMemoryWaits.set(key, hold);
-          detachSweepAction(settled.finally(() => {
-            if (lightPassMemoryWaits.get(key) === hold) lightPassMemoryWaits.delete(key);
-          }), { actionKind: "light-pass-action", taskId: escalationTaskIdFor(pr) });
-          const reason = "progress judgment waiting for memory admission";
-          judgedUnavailable.set(pr.prNumber, reason);
-          next.push({ ...pr, progressContinue: { reason, unavailable: true } });
-          continue;
-        }
-        result = first;
-      }
+      const result = await judgeWithMemoryWait(pr, judgeAndRecord);
       if (result.verdict === "escalate") {
         next.push({ ...pr, progressEscalation: { loop: result.loop, reason: result.reason, judged } });
         continue;
@@ -20827,15 +20822,19 @@ export async function runSweep(
                   if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
-                const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
-                  { ...progressWitness(pr), judge: progressJudge, firstRound: true });
-                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
-                  pr_number: pr.prNumber, head_sha: pr.headSha,
-                  site: progressParkedReason?.split(":")[0] ?? "fix-strike",
-                  parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
-                  red_class: input.redClass, round_count: input.rounds.length, signals: input.signals,
-                  ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
+                const result = await judgeWithMemoryWait(pr, async () => {
+                  const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
+                    { ...progressWitness(pr), judge: progressJudge, firstRound: true });
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
+                    pr_number: pr.prNumber, head_sha: pr.headSha,
+                    site: progressParkedReason?.split(":")[0] ?? "fix-strike",
+                    parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
+                    red_class: input.redClass, round_count: input.rounds.length, signals: input.signals,
+                    ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
+                  return result;
+                });
                 if (result.verdict === "unavailable") {
+                  pr.progressContinue = { reason: result.reason, unavailable: true };
                   acted = false;
                   standDownReason = result.reason;
                   return false;
