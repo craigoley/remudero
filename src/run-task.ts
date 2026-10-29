@@ -792,7 +792,9 @@ import {
   planReconcileLanding,
   recordDecision,
   recordRuling,
+  type CiLearningFilingResult,
   type CiLearningShardLander,
+  type FeedbackRefusal,
   type LandCiLearningShardsOptions,
   type LandFeedbackResult,
   type PlanReconcileLand,
@@ -15203,6 +15205,7 @@ export function ciLearningCommand(
       // A refusal is NAMED. A rung that silently dropped what the linter would not accept would be
       // reporting a clean run over a record it could not write.
       for (const rf of filing.refused) console.log(`  REFUSED by the task linter (${rf.reason}): ${rf.findingId}`);
+      for (const rf of filing.carryRefused ?? []) console.log(`  CARRY REFUSED (${rf.reason}): ${rf.path}`);
     } catch (e) {
       // NAMED, never swallowed: "drafted but not filed" is a different outcome from "filed", and an
       // operator reading this must be able to tell them apart.
@@ -26397,6 +26400,8 @@ export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResul
   filedCount: number;
   skippedCount: number;
   refusedCount: number;
+  carryRefusedCount: number;
+  carryRefused: FeedbackRefusal[];
 }
 
 /**
@@ -26471,11 +26476,12 @@ export function buildCiLearningCadenceRunner(deps: {
     let filed = 0;
     let skipped = 0;
     let refused = 0;
+    let carryRefused: FeedbackRefusal[] = [];
     if (result.drafts.length > 0 || pendingOrigins.length > 0) {
       try {
         const mintTaskId = deps.mintTaskId ?? ciLearningTaskIdMinter(deps.checkoutRoot, (step, fields) =>
           appendLedger(join(deps.root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${at.getTime()}`, task_id: "DAEMON", step, ...fields }));
-        const filing = deps.fileShards
+        const filing: CiLearningFilingResult = deps.fileShards
           ? deps.fileShards(result.drafts, deps.checkoutRoot, {
               mintTaskId,
               planOrigins: idempotencyOrigins,
@@ -26492,6 +26498,7 @@ export function buildCiLearningCadenceRunner(deps: {
         filed = filing.filed.length;
         skipped = filing.skipped.length;
         refused = filing.refused.length;
+        carryRefused = filing.carryRefused ?? [];
       } catch {
         // Counts stay zero — "drafted but not filed" is a distinct outcome and the row below says so.
       }
@@ -26517,6 +26524,8 @@ export function buildCiLearningCadenceRunner(deps: {
       filedCount: filed,
       skippedCount: skipped,
       refusedCount: refused,
+      carryRefusedCount: carryRefused.length,
+      carryRefused,
     };
     (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
     return completed;
