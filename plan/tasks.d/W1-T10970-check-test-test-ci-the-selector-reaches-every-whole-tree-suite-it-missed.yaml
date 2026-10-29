@@ -1,0 +1,45 @@
+- id: W1-T10970
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts cost 10.9 PR minute(s) across 3 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.32
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts"
+  files:
+    - src/lib/tmp.ts
+    - test/ci/check-test-test-ci-the-selector-reaches-every-whole-tree-suite-it-missed.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts"
+      proof: "unit test: W1-T10970: check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts cost 10.9 PR minute(s) (seven-day half-life) across 3 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/tmp.ts: test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts imports it
+    - test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts: named by the failing check
+    - the rounds name a failing test: test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #15046 (https://github.com/craigoley/remudero/pull/15046) at 2026-10-29T03:42:25.217Z: ci-log round — ci-shard (8/8): test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts; clock-sweep-report (merge the shards, classify, deliver): unknown runner failure location
+        failing tests: W1-T4787: the selector reaches every whole-tree census suite the shadow record saw missed; W1-T9432: a renewed claim or a moving run branch keeps the claim; W1-T9106: the launcher applies the learned ceiling to the daemon verb only
+        log excerpt:
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-8.log" || : > "$FLAKE_RETRY_DIR/shard-8.log"
+          | not ok 408 - W1-T4787: the selector reaches every whole-tree census suite the shadow record saw missed
+          |   ---
+          |   duration_ms: 3645.539346
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts:1:1737'
+          |   failureType: 'testCodeFailure'
+          |   error: 'run 36525454210 (#7740, W1-T4754): test/a-gate-run-leaves-the-tracked-tree-clean.test.ts is in the census set'
+          |   code: 'ERR_ASSERTION'
+          |   name: 'Asserti
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

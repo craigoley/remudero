@@ -369,6 +369,10 @@ if [ -z "${RMD_OPENWEIGHT_API_KEY:-}" ]; then
   RMD_OPENWEIGHT_API_KEY="$(read_cash_boot_secret "${RMD_OPENWEIGHT_API_KEY_PATH:-$CASH_SECRET_DIR/openweight-api-key}")" ||
     echo "rmd-relaunch: cash API key unavailable; subscription work remains available" >&2
 fi
+if [ -z "${RMD_CASH_EASTUS_API_KEY:-}" ]; then
+  RMD_CASH_EASTUS_API_KEY="$(read_cash_boot_secret "${RMD_CASH_EASTUS_API_KEY_PATH:-$CASH_SECRET_DIR/cash-eastus-api-key}")" ||
+    echo "rmd-relaunch: RMD_CASH_EASTUS_API_KEY: eastus cash key unavailable; that deployment stays unavailable" >&2
+fi
 if [ -z "${RMD_FOUNDRY_CLAUDE_API_KEY:-}" ]; then
   RMD_FOUNDRY_CLAUDE_API_KEY="$(read_cash_boot_secret "${RMD_FOUNDRY_CLAUDE_API_KEY_PATH:-$CASH_SECRET_DIR/foundry-claude-api-key}")" ||
     echo "rmd-relaunch: Foundry key unavailable; cash Opus remains unavailable" >&2
@@ -377,7 +381,7 @@ if [ -z "${RMD_FOUNDRY_CLAUDE_ENDPOINT:-}" ]; then
   RMD_FOUNDRY_CLAUDE_ENDPOINT="$(read_cash_boot_secret "${RMD_FOUNDRY_CLAUDE_ENDPOINT_PATH:-$CASH_SECRET_DIR/foundry-claude-endpoint}")" ||
     echo "rmd-relaunch: Foundry endpoint unavailable; cash Opus remains unavailable" >&2
 fi
-export RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT
+export RMD_OPENWEIGHT_API_KEY RMD_CASH_EASTUS_API_KEY RMD_FOUNDRY_CLAUDE_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT
 CASH_BOOT_SECRETS
 }
 
@@ -1595,6 +1599,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   -e RMD_RESTART_THROTTLE_S=120 \\
   -e RMD_FRESHNESS_RESTART_MAX=100 \\
   -e RMD_OPENWEIGHT_API_KEY \\
+  -e RMD_CASH_EASTUS_API_KEY \\
   -e RMD_FOUNDRY_CLAUDE_API_KEY \\
   -e RMD_FOUNDRY_CLAUDE_ENDPOINT \\
   -v ${CODEX_DIR}:/home/node/.codex \\
