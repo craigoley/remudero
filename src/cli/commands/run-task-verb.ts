@@ -5330,8 +5330,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
   } = ctx;
   // W1-T4655: set BEFORE the write, so no thrown-run exit (endThrownRun) writes a second verdict.
   let verdictWritten = false;
+  let prOpened = false;
   const log: RunTaskContext["log"] = (step, extra) => {
     if (step === "verdict") verdictWritten = true;
+    if (step === "pr.opened") prOpened = true;
     ctxLog(step, extra);
   };
   const restartPhase = ctx.restartPhase ?? { current: "recon" };
@@ -5559,11 +5561,27 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     provisionedInstallHash = current;
     reprovisionWorktreeDependencies(repoDir, worktreePath, reason, { ...opts.worktreeBaseDeps, log });
   };
-  /** W1-T8676/W1-T9786: the restored checkpoint a failed exit keeps, unless this run pushed its own branch (the newer
-   *  checkpoint, W1-T7837). Read while the worktree stands; only a proven absence (exit 1) keeps it. */
-  const checkpointToKeep = (): WorkerBoundaryCheckpoint | undefined => restoredCheckpoint !== undefined &&
-    hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).status === 1
-    ? restoredCheckpoint : undefined;
+  /** W1-T9815: after a failed verdict, keep the newest proven pre-PR head while the worktree still stands. */
+  const keepCheckpointOnFailedExit = (stage: string, failure: Record<string, unknown>): void => {
+    if (prOpened) return;
+    let kept: WorkerBoundaryCheckpoint | undefined;
+    try {
+      const remote = hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]);
+      if (remote.status === 1) {
+        kept = restoredCheckpoint;
+      } else if (remote.status === 0 && /^[0-9a-f]{40}$/.test(remote.stdout.trim())) {
+        kept = { branch, headSha: remote.stdout.trim() };
+      } else {
+        log("implement.checkpoint_keep_unproven", { task_id: taskId, status: remote.status,
+          error: remote.stderr || "origin tip could not be read", failed_stage: stage });
+      }
+    } catch (error) {
+      log("implement.checkpoint_keep_unproven", { task_id: taskId, failed_stage: stage,
+        error: String((error as Error)?.message ?? error) });
+    }
+    if (kept) log("implement.checkpoint_kept", { task_id: taskId, source_branch: kept.branch, head_sha: kept.headSha,
+      failed_stage: stage, ...failure, ...(kept.resumePhase ? { resume_phase: kept.resumePhase } : {}) });
+  };
   /** W1-T10752: the head a RETURNED failed verdict of a restored run keeps, read while the worktree stands: this run's own pushed
    *  tip when origin holds it and it differs from the restored head (the newer work), else the restored checkpoint. A run that
    *  restored nothing keeps nothing. Written after the verdict, which consumed the receipt, so the next run resumes the head. */
@@ -5589,19 +5607,15 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
   const failOnWorkerError = (r: WorkerResult, stage: string, reason?: string): RunResult | null => {
     const v = workerErrorVerdict(r, costUsd, stage);
     if (!v) return null;
-    // W1-T8676: a worker error is not the checkpoint's fault.
-    const keptCheckpoint = v.verdict === "failed" ? checkpointToKeep() : undefined;
+    log("verdict", { ...v.ledger, ...terminalVerdictFields(r), ...(reason ? { reason } : {}) });
+    if (v.verdict === "failed") {
+      keepCheckpointOnFailedExit(stage, { failed_subtype: r.subtype, failed_cause: r.subtype });
+    }
     try {
       worktreeRemove(repoDir, worktreePath);
       log("worktree.remove", { on: `${stage}.error` });
     } catch (e) {
       log("worktree.remove.error", { on: `${stage}.error`, error: String((e as Error)?.message ?? e) });
-    }
-    log("verdict", { ...v.ledger, ...terminalVerdictFields(r), ...(reason ? { reason } : {}) });
-    if (keptCheckpoint) {
-      log("implement.checkpoint_kept", { task_id: taskId, source_branch: keptCheckpoint.branch, head_sha: keptCheckpoint.headSha,
-        failed_stage: stage, failed_subtype: r.subtype,
-        ...(keptCheckpoint.resumePhase ? { resume_phase: keptCheckpoint.resumePhase } : {}) });
     }
     say(
       `verdict: ${v.verdict} (${r.subtype}) at ${stage} · ${r.numTurns} turns · notional $${costUsd.toFixed(4)}`,
@@ -8382,6 +8396,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         cost_usd: costUsd,
         ...terminalVerdictFields(null),
       });
+      keepCheckpointOnFailedExit("worker.abandoned", { failed_cause: err.reasonClass });
       say(
         `verdict: failed — worker abandoned after ${Math.round(evidence.elapsedMs / 1000)}s of silence ` +
           `(bound ${Math.round(evidence.boundMs / 1000)}s, last observed state: ${evidence.lastState ?? "unknown"})`,
@@ -8408,6 +8423,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         cost_usd: costUsd,
         ...terminalVerdictFields(null),
       });
+      keepCheckpointOnFailedExit("worker.bounded_output", { failed_cause: err.reasonClass });
       say(
         `verdict: failed — Codex worker ${err.stream} output exceeded ${err.limitBytes} bytes ` +
           `(${err.observedBytes} observed)`,
@@ -8421,21 +8437,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
     log("run.error", { error: String((err as Error)?.message ?? err) });
-    // W1-T9786: nor is a thrown harness error (W1-T9047's refused push), so this exit keeps it too.
-    let keptThroughThrow: WorkerBoundaryCheckpoint | undefined;
-    try {
-      keptThroughThrow = verdictWritten ? undefined : checkpointToKeep();
-    } catch (error) {
-      // Unproven (a refused worktree pointer): keep nothing, as before, and never replace the run's own error.
-      log("implement.checkpoint_keep_unproven", { task_id: taskId, error: String((error as Error)?.message ?? error) });
-    }
+    const failedThroughThrow = !verdictWritten;
     // W1-T4655: the run DID end, so it gets ONE terminal row naming the harness cause.
     endThrownRun(log, verdictWritten, "run.error", err, costUsd);
-    if (keptThroughThrow) {
-      log("implement.checkpoint_kept", { task_id: taskId, source_branch: keptThroughThrow.branch, head_sha: keptThroughThrow.headSha,
-        failed_stage: "run.error", failed_cause: runErrorCause(err),
-        ...(keptThroughThrow.resumePhase ? { resume_phase: keptThroughThrow.resumePhase } : {}) });
-    }
+    if (failedThroughThrow) keepCheckpointOnFailedExit("run.error", { failed_cause: runErrorCause(err) });
     // Reclaim the worktree even on an unexpected throw — a dead run must not
     // leave debris that blocks the next one (start-of-run prune is the backstop,
     // but clean up eagerly here too). Best-effort; the ledger already has the
