@@ -22,3 +22,11 @@
     Last 24 h: n 21, p50 15.7, p90 101.3 min.
     Slowest PRs: #15132 (141.5 min), #15211 (118.6 min), #15246 (101.3 min).
     Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filing supplies aggregate timings and three PR references, but no shared cause or bounded remedy; it explicitly leaves finding what those PRs share for future investigation. The proposed implementation therefore cannot be assessed against the operator escalation rule from the supplied evidence.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; that establishes text presence, not the claimed recovery of live stage timing below twice baseline."
+    judged_at: "2026-10-29T04:04:13.890Z"
+    pin: "0cb4c8eed0842b43e65de62bd5b56632ef6685eca98e7ba7e3f2508c689fd43a"
