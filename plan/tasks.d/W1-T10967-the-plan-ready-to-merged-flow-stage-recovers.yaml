@@ -1,0 +1,32 @@
+- id: W1-T10967
+  title: "THE PLAN PR ready_to_merged STAGE SLOWED ON THE LIGHT SURFACE — p50 15.7 min against a 6.3 min baseline over the last 24 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 3.4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-regression:plan:ready_to_merged:light"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/the-plan-ready-to-merged-flow-stage-recovers.test.ts
+  acceptance:
+    - claim: "the plan ready_to_merged stage on the light surface returns under 2x its baseline p50"
+      proof: "grep: test(\"the plan ready_to_merged stage recovers\" in test/sweep/the-plan-ready-to-merged-flow-stage-recovers.test.ts"
+  note: "Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open."
+  rationale: |
+    plan PRs, stage ready_to_merged on the light surface: p50 15.7 min against a 6.3 min baseline (rolling).
+    Last 24 h: n 21, p50 15.7, p90 101.3 min.
+    Slowest PRs: #15132 (141.5 min), #15211 (118.6 min), #15246 (101.3 min).
+    Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filing supplies aggregate timings and three PR references, but no shared cause or bounded remedy; it explicitly leaves finding what those PRs share for future investigation. The proposed implementation therefore cannot be assessed against the operator escalation rule from the supplied evidence.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; that establishes text presence, not the claimed recovery of live stage timing below twice baseline."
+    judged_at: "2026-10-29T04:04:13.890Z"
+    pin: "0cb4c8eed0842b43e65de62bd5b56632ef6685eca98e7ba7e3f2508c689fd43a"

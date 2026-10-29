@@ -1324,6 +1324,10 @@ function nextCurated(
     if (isMerged(id)) continue;
     const t = plan.byId.get(id);
     if (!t) continue;
+    if (opts.isIndependentFailureBlocked?.(id)) {
+      opts.onFiltered?.(t, "blocked");
+      continue;
+    }
     if (!taskPreconditionHolds(t, opts)) continue;
     // Same indeterminate-read semantics as the natural path (W1-T119): a curation-panel selection
     // is still dispatch, and must not re-run work whose own GitHub read failed.
@@ -2759,3 +2763,18 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   }
   return summary("max_reached", `${max} task(s)`);
 }
+
+/** W1-T10799: the types of ONE bounded native job for a managed target, owned beside the drain that runs it. */
+export type TargetJobStatus = "queued" | "admitted" | "ended" | "refused";
+/** The durable record of ONE job, keyed by the kick origin `ProductBuildService` mints for the request. */
+export interface TargetJobRecord {
+  origin: string; taskId: string; repo: string; status: TargetJobStatus;
+  /** How many times the drain was entered for this job; a replay never raises it past a dispatch that happened. */
+  attempts: number; updatedAt: string; reason?: string; stopReason?: string;
+  owner?: string; planRevision?: string; runId?: string;
+}
+/** `unreadable` is its own state: a record this process cannot read is never "no job", so it can never respend. */
+export type TargetJobRead = { state: "found"; record: TargetJobRecord } | { state: "absent" } | { state: "unreadable" };
+/** Who may run a target repository's task: this daemon natively, its own live instance, or nobody. */
+export type TargetJobAdmission =
+  | { state: "native"; owner: string } | { state: "own_instance"; instance: string } | { state: "not_enrolled" } | { state: "unreadable" };

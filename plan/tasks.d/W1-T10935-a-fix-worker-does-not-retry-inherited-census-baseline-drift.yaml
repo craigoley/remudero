@@ -3,14 +3,15 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   dispatch_hold: true
   principles: { tdd: strict }
   risk: high
   band_meaning: span
   budget_usd: 8.00
   priority: 1
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-10-29T07:20:21.496Z
   attempts: 0
   author_class: machine
   origin: "source-census-main-drift:PR15183; operator-authorized cash/retro publication follow-through"

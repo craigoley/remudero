@@ -8,12 +8,15 @@
  * success. These tests drive the PRODUCTION sweep adapter's push and the real runFixRung.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildSweepEffects, FixRoundPushError, harnessCommitForShellLessWorker, runFixRung } from "./helpers/run-task-test.js";
+import {
+  buildSweepEffects, FixRoundPushError, ghUpdateBranch, harnessCommitForShellLessWorker,
+  preserveInheritedCensusWork, readInheritedCensusContextAsync, runFixRung, writeFixCensusSnapshotAsync,
+} from "#test/helpers/run-task-test.js";
 import { buildFixProgressInput } from "../src/lib/fix-progress-judge.js";
 import { ghJsonAsync } from "../src/lib/github-transport.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -95,6 +98,8 @@ test("W1-T8833: a sweep fix round whose branch gained a main merge mid-round lan
     const rows: Row[] = [];
     let pushed: unknown;
     let ownerReads = 0;
+    let refreshArgs: unknown[] | undefined;
+    const mergedProbe = async () => [];
     // The PRODUCTION adapter, with no push injected: what reaches runFixRung is the entrypoint's own wiring.
     const effects = buildSweepEffects({
       owner: "craigoley",
@@ -114,6 +119,8 @@ test("W1-T8833: a sweep fix round whose branch gained a main merge mid-round lan
       armSessionPrsOverride: false,
       captureRepairFeedbackImpl: () => {},
       ghRunImpl: () => {},
+      ghUpdateBranchImpl: (...args: unknown[]) => { refreshArgs = args; return { ok: true }; },
+      reproduceFailingTestsOnMergeImpl: mergedProbe,
       spawnWallClockBoundMsOverride: 1,
       reclaimWorkerImpl: () => {},
       disarmImpl: () => undefined,
@@ -136,7 +143,12 @@ test("W1-T8833: a sweep fix round whose branch gained a main merge mid-round lan
       captureWorktreeSnapshotImpl: () => ({ headSha: "birth123" }),
       buildFixRungDispatchArgsImpl: () => ({}),
       openTaskIdsFromPlanImpl: () => new Set([TASK]),
-      runFixRungImpl: async (args: { deps: { push: (wt: string, branch: string, sha: string, prior: string) => unknown } }) => {
+      runFixRungImpl: async (args: { deps: { push: (wt: string, branch: string, sha: string, prior: string) => unknown;
+        updateBranchAtHead?: (pr: number, head: string) => { ok: boolean }; reproduceFailingTestsOnMerge?: unknown } }) => {
+        assert.ok(args.deps.updateBranchAtHead, "the actual cold adapter offers an exact-head capability");
+        assert.equal(args.deps.reproduceFailingTestsOnMerge, mergedProbe, "the cold adapter also carries its trial-merge producer");
+        assert.equal((await args.deps.updateBranchAtHead(11133, fx.base)).ok, true);
+        assert.deepEqual(refreshArgs, ["craigoley", "remudero-fixture", 11133, undefined, undefined, undefined, fx.base]);
         // The round's leased push, guarded on the head it was dispatched at, after the refresh moved the remote.
         pushed = await Promise.resolve(args.deps.push(fx.lane.dir, BRANCH, fx.committed, fx.base)).then(() => "landed", (e: unknown) => e);
         return { outcome: "stood_down", strikes: 0, retriggers: 0, reason: "test" };
@@ -236,4 +248,224 @@ test("W1-T8833: the progress judge reads a push_failed round as not landed", asy
   assert.equal(round.pushedHead, undefined, "no head is credited to it");
   assert.equal(input.signals.pushFailedRounds, 1);
   assert.equal(input.signals.reviewerOnlyFailurePersists, 0, "it cleared nothing and failed nothing on the reviewer's side");
+});
+
+
+async function censusRefreshOwner(t: import("node:test").TestContext) {
+  const { refreshInheritedCensusRefusal } = await import("#src/cli/commands/fix.js");
+  const { fixRoundBranchClaim } = await import("#src/lib/sweep.js");
+  const { acquireInflightLock } = await import("#src/lib/inflight-lock.js");
+  const repo = gitRepo({ scope: t, kind: "census-refresh-owner" });
+  const root = join(repo.dir, "state", "owner");
+  mkdirSync(root, { recursive: true }); mkdirSync(join(repo.dir, "scripts"));
+  writeFileSync(join(repo.dir, ".gitignore"), "state/\n");
+  writeFileSync(join(repo.dir, "scripts/affected-reach-baseline.json"), '{"importerCount":1}');
+  writeFileSync(join(repo.dir, "source.ts"), "export const saved = 0;\n");
+  repo.git("add", "."); repo.git("commit", "-m", "fixture: old baseline");
+  const base = repo.git("rev-parse", "HEAD");
+  repo.git("branch", "refresh");
+  writeFileSync(join(repo.dir, "scripts/affected-reach-baseline.json"), '{"resolution":"package-imports","importerCount":1}');
+  repo.git("add", "scripts"); repo.git("commit", "-m", "fixture: main migration");
+  const main = repo.git("rev-parse", "HEAD"); repo.git("update-ref", "refs/remotes/origin/main", main);
+  repo.git("switch", "refresh");
+  const snapshot = await writeFixCensusSnapshotAsync(repo.dir, () => {}); assert.ok(snapshot);
+  const context = await readInheritedCensusContextAsync(repo.dir, snapshot); assert.equal(context.state, "inherited");
+  if (context.state !== "inherited") throw new Error("fixture context unavailable");
+  const lock = acquireInflightLock(join(root, "locks"), "refresh", { run_id: "TEST-refresh" });
+  const claim = fixRoundBranchClaim(lock, () => { throw new Error("unexpected reacquire"); });
+  t.after(() => lock.release());
+  let updates = 0;
+  const rows: Row[] = [];
+  const deps: Parameters<typeof refreshInheritedCensusRefusal>[1] = {
+    branchClaim: claim, readLiveState: () => ({ ok: true, state: "OPEN" }),
+    readLiveHead: () => ({ ok: true, headSha: base, headRefName: "refresh" }),
+    readCiRollup: () => [{ name: "ci-gate", conclusion: "SUCCESS" }],
+    readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 1 }),
+    reproduceFailingTestsOnMerge: async (_pr, files) => files.map(file => ({ file, outcome: "passes", duration_ms: 1, cached: false })),
+    updateBranchAtHead: (_pr, head) => { assert.equal(head, base); updates++; return { ok: true }; },
+    log: (step, extra) => rows.push({ step, ...extra }),
+  };
+  const input = { root, worktreePath: repo.dir, branch: "refresh", prUrl: PR_URL, prNumber: 11133, snapshotPath: snapshot, context };
+  return { repo, root, base, main, lock, claim, context, deps, input, rows,
+    evidence: { readInheritedCensusContextAsync, preserveInheritedCensusWork },
+    run: () => refreshInheritedCensusRefusal(input, deps, { readInheritedCensusContextAsync, preserveInheritedCensusWork }),
+    updates: () => updates };
+}
+
+test("census baseline refresh respects live owners and the exact head", async t => {
+  for (const mode of ["foreign-owner", "unknown-owner", "oversize-owner", "malformed-owner", "directory-owner", "released-owner", "head-changed", "branch-changed", "ci-in-flight", "no-ci", "merge-unknown", "context-changed", "update-refused"] as const) {
+    await t.test(mode, async t => {
+      const fx = await censusRefreshOwner(t);
+      if (mode === "foreign-owner") writeFileSync(fx.lock.path, JSON.stringify({ ...fx.lock.info, run_id: "FOREIGN-live" }));
+      if (mode === "unknown-owner") unlinkSync(fx.lock.path);
+      if (mode === "oversize-owner") writeFileSync(fx.lock.path, "x".repeat(4097));
+      if (mode === "malformed-owner") writeFileSync(fx.lock.path, "not a holder");
+      if (mode === "directory-owner") { unlinkSync(fx.lock.path); mkdirSync(fx.lock.path); }
+      if (mode === "released-owner") fx.claim.release();
+      if (mode === "head-changed") {
+        let reads = 0;
+        fx.deps.readLiveHead = () => ({ ok: true, headSha: ++reads === 1 ? fx.base : fx.main, headRefName: "refresh" });
+      }
+      if (mode === "branch-changed") fx.deps.readLiveHead = () => ({ ok: true, headSha: fx.base, headRefName: "sibling" });
+      if (mode === "ci-in-flight") fx.deps.readCiRollup = () => [{ name: "old-red", conclusion: "FAILURE" }, { name: "running", status: "IN_PROGRESS" }];
+      if (mode === "no-ci") fx.deps.readCiRollup = () => [];
+      if (mode === "merge-unknown") fx.deps.readMergeFacts = () => ({ mergeable: "UNKNOWN", behindBy: 1 });
+      if (mode === "context-changed") fx.deps.reproduceFailingTestsOnMerge = async (_pr, files) => {
+        fx.repo.git("update-ref", "refs/remotes/origin/main", fx.base);
+        return files.map(file => ({ file, outcome: "passes", duration_ms: 1, cached: false }));
+      };
+      if (mode === "update-refused") fx.deps.updateBranchAtHead = () => ({ ok: false, error: "expected_head_sha mismatch" });
+      writeFileSync(join(fx.repo.dir, "source.ts"), "export const saved = 1;\n");
+      fx.repo.git("add", "source.ts");
+      writeFileSync(join(fx.repo.dir, "source.ts"), "export const saved = 0;\n");
+      const index = fx.repo.git("rev-parse", ":source.ts");
+      const worktree = fx.repo.git("hash-object", "source.ts");
+      assert.notEqual(index, worktree);
+      assert.equal(fx.repo.git("diff", "HEAD"), "", "HEAD-to-disk diff cannot see the staged fix");
+      const before = fx.repo.git("status", "--porcelain=v1");
+      const result = await fx.run();
+      assert.equal(result.outcome, "held", JSON.stringify(fx.rows)); assert.equal(fx.updates(), 0);
+      assert.equal(fx.repo.git("status", "--porcelain=v1"), before, "refusal keeps unpublished work unchanged");
+      assert.equal(fx.repo.git("rev-parse", ":source.ts"), index);
+      assert.equal(fx.repo.git("hash-object", "source.ts"), worktree);
+      if (mode === "foreign-owner") {
+        fx.claim.release(); // the real outer finally must preserve a holder this refresh rejected
+        assert.equal(JSON.parse(readFileSync(fx.lock.path, "utf8")).run_id, "FOREIGN-live");
+      }
+    });
+  }
+});
+
+test("census baseline refresh respects live owners and the exact head while preserving both tracked edit layers", async t => {
+  for (const mode of ["staged-reverted", "staged-and-unstaged", "staged-overlap"] as const) {
+    await t.test(mode, async t => {
+      const fx = await censusRefreshOwner(t);
+      const path = mode === "staged-overlap" ? "scripts/affected-reach-baseline.json" : "source.ts";
+      const original = readFileSync(join(fx.repo.dir, path));
+      writeFileSync(join(fx.repo.dir, path), "staged fix\n"); fx.repo.git("add", path);
+      writeFileSync(join(fx.repo.dir, path), mode === "staged-and-unstaged" ? "unstaged fix\n" : original);
+      const index = fx.repo.git("rev-parse", `:${path}`);
+      const worktree = fx.repo.git("hash-object", path);
+      const before = fx.repo.git("status", "--porcelain=v1");
+      assert.notEqual(index, worktree);
+      if (mode !== "staged-and-unstaged") assert.equal(fx.repo.git("diff", "HEAD"), "");
+      const result = await fx.run();
+      assert.equal(result.outcome, mode === "staged-overlap" ? "held" : "requested", JSON.stringify(fx.rows));
+      assert.equal(fx.updates(), mode === "staged-overlap" ? 0 : 1);
+      assert.equal(fx.repo.git("status", "--porcelain=v1"), before);
+      assert.equal(fx.repo.git("rev-parse", `:${path}`), index);
+      assert.equal(fx.repo.git("hash-object", path), worktree);
+      assert.equal(fx.repo.git("rev-parse", "HEAD"), fx.base);
+      if (mode === "staged-overlap") {
+        await assert.rejects(fx.evidence.preserveInheritedCensusWork(fx.root, fx.repo.dir, "refresh", fx.context), /overlaps main/);
+        assert.match(result.reason, /context changed/);
+        assert.equal(fx.rows.some(row => row.outcome === "work-preserved"), false);
+        return;
+      }
+      const saved = fx.rows.find(row => row.outcome === "work-preserved")!;
+      assert.match(String(saved.index_recovery_ref), /^refs\/rmd-recovery\//);
+      assert.equal(fx.repo.git("rev-parse", `${saved.index_recovery_ref}:${path}`), index);
+      assert.equal(fx.repo.git("rev-parse", `${saved.index_recovery_ref}^`), fx.base);
+      if (mode === "staged-and-unstaged") {
+        assert.match(String(saved.recovery_ref), /^refs\/rmd-recovery\//);
+        assert.equal(fx.repo.git("rev-parse", `${saved.recovery_ref}:${path}`), worktree);
+      } else assert.equal(worktree, fx.repo.git("rev-parse", `HEAD:${path}`));
+    });
+  }
+});
+
+test("census refresh durably preserves staged unstaged and untracked work without changing any owner tree", async t => {
+  const fx = await censusRefreshOwner(t);
+  fx.repo.git("branch", "sibling", fx.main);
+  writeFileSync(join(fx.repo.dir, "source.ts"), "export const saved = 1;\n"); fx.repo.git("add", "source.ts");
+  writeFileSync(join(fx.repo.dir, "source.ts"), "export const saved = 2;\n");
+  writeFileSync(join(fx.repo.dir, "unpublished.txt"), "untracked fix\n");
+  const before = fx.repo.git("status", "--porcelain=v1");
+  assert.equal((await fx.run()).outcome, "requested"); assert.equal(fx.updates(), 1);
+  assert.equal(fx.repo.git("status", "--porcelain=v1"), before);
+  assert.equal(fx.repo.git("show", ":source.ts"), "export const saved = 1;");
+  assert.equal(readFileSync(join(fx.repo.dir, "source.ts"), "utf8"), "export const saved = 2;\n");
+  const saved = fx.rows.find(row => row.outcome === "work-preserved")!.saved_path as string;
+  assert.match(readFileSync(join(saved, "index.patch"), "utf8"), /saved = 1/);
+  assert.match(readFileSync(join(saved, "worktree.patch"), "utf8"), /saved = 2/);
+  assert.match(readFileSync(join(saved, "untracked.patch"), "utf8"), /untracked fix/);
+  assert.equal(fx.repo.git("rev-parse", "sibling"), fx.main);
+  assert.equal(fx.repo.git("rev-parse", "HEAD"), fx.base);
+});
+
+test("census refresh retains failed merged checks overlaps unavailable reads and preservation errors", async t => {
+  for (const mode of ["growth", "unrunnable", "missing-probe", "unwired-owner", "unverified-owner", "unleased-updater", "overlap", "reader-error", "save-error", "tracked-only"] as const) {
+    await t.test(mode, async t => {
+      const fx = await censusRefreshOwner(t);
+      if (mode === "growth" || mode === "unrunnable") fx.deps.reproduceFailingTestsOnMerge = async (_pr, files) =>
+        files.map(file => ({ file, outcome: mode === "growth" ? "fails" : "unrunnable", duration_ms: 1, cached: false }));
+      if (mode === "missing-probe") fx.deps.reproduceFailingTestsOnMerge = undefined;
+      if (mode === "unwired-owner") fx.deps.branchClaim = undefined;
+      if (mode === "unverified-owner") fx.deps.branchClaim = { ...fx.claim, verify: undefined };
+      let legacyUpdates = 0;
+      if (mode === "unleased-updater") {
+        fx.deps.updateBranchAtHead = undefined;
+        Object.assign(fx.deps, { updateBranch: () => { legacyUpdates++; return { ok: true }; } });
+      }
+      if (mode === "overlap") {
+        writeFileSync(join(fx.repo.dir, "scripts/affected-reach-baseline.json"), "changed saved baseline\n");
+      }
+      if (mode === "reader-error") fx.deps.readCiRollup = () => { throw new Error("read unavailable"); };
+      if (mode === "save-error") {
+        // Real default preservation must fail; no fake that bypasses its filesystem arm.
+        writeFileSync(join(fx.repo.dir, "unpublished.txt"), "saved fix\n");
+        writeFileSync(join(fx.root, "recovery"), "file blocks recovery directory");
+      }
+      if (mode === "tracked-only") writeFileSync(join(fx.repo.dir, "source.ts"), "export const saved = 3;\n");
+      const before = fx.repo.git("status", "--porcelain=v1");
+      const result = await fx.run();
+      assert.equal(result.outcome, mode === "tracked-only" ? "requested" : "held", JSON.stringify(fx.rows));
+      assert.equal(fx.repo.git("status", "--porcelain=v1"), before);
+      assert.equal(fx.updates(), mode === "tracked-only" ? 1 : 0);
+      assert.equal(legacyUpdates, 0, "a historical updater without CAS is never a refresh capability");
+      if (mode === "overlap") await assert.rejects(fx.evidence.preserveInheritedCensusWork(fx.root, fx.repo.dir, "refresh", fx.context), /overlaps main/);
+      if (mode === "tracked-only") assert.match(String(fx.rows.find(row => row.outcome === "work-preserved")!.recovery_ref), /^refs\/rmd-recovery\//);
+    });
+  }
+});
+
+
+test("the native census refresh sends its expected head to the actual REST adapter", async () => {
+  const { withLiveWritesAllowed } = await import("#src/lib/live-write-guard.js");
+  let argv: string[] = [];
+  const result = withLiveWritesAllowed(() => ghUpdateBranch("fixture", "repo", 1,
+    ((_file: string, args: readonly string[]) => { argv = [...args]; return "{}"; }) as unknown as typeof import("node:child_process").execFileSync,
+    "fix-rung", () => {}, PRIOR));
+  assert.equal(result.ok, true);
+  assert.deepEqual(argv, ["api", "--method", "PUT", "repos/fixture/repo/pulls/1/update-branch", "-f", `expected_head_sha=${PRIOR}`]);
+});
+
+test("the initial run branch claim retakes only its registered worktree and refuses unknown holders", async t => {
+  const { claimRunTaskFixBranch } = await import("#src/cli/commands/run-task-verb.js");
+  const fx = await censusRefreshOwner(t);
+  const input = { inflightDir: join(fx.root, "native-claims"), claimKey: "branch", runId: "TEST-initial",
+    repoDir: fx.repo.dir, worktreePath: fx.repo.dir, branch: "refresh" };
+  const claim = claimRunTaskFixBranch(input);
+  t.after(() => claim.release());
+  assert.equal(claim.verify!(), undefined);
+  claim.release();
+  assert.equal(claim.reacquire(), undefined, "the real registered owner can retake a released round");
+  assert.equal(claim.verify!(), undefined);
+  claim.release();
+  mkdirSync(claim.last().path);
+  assert.match(claim.reacquire()!, /branch claim unavailable/);
+  assert.throws(() => claimRunTaskFixBranch(input), /EEXIST/);
+  assert.equal(readFileSync(join(fx.repo.dir, "source.ts"), "utf8"), "export const saved = 0;\n");
+  rmSync(claim.last().path, { recursive: true });
+  assert.equal(claim.reacquire(), undefined);
+  claim.release();
+  fx.repo.git("switch", "--detach", fx.base);
+  assert.match(claim.reacquire()!, /ownership is not confirmed/);
+  fx.repo.git("switch", "refresh");
+  const missing = claimRunTaskFixBranch({ ...input, worktreePath: join(fx.repo.dir, "missing-owner") });
+  missing.verify!(); missing.release();
+  assert.match(missing.reacquire()!, /branch claim unavailable/);
+  const other = claimRunTaskFixBranch({ ...input, worktreePath: fx.root });
+  other.verify!(); other.release();
+  assert.match(other.reacquire()!, /ownership is not confirmed/);
 });

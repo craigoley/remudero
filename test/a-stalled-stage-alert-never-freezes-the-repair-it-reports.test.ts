@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test, type TestContext } from "node:test";
-import { openEscalationStandDownReason } from "#src/run-task.js";
 import {
   findDuplicateEscalation,
+  openEscalationStandDownReason,
   taskContractRevision,
   type IssueGateway,
   type OpenIssue,

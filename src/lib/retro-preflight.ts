@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { acquireTestSlotAsync, lowPriorityCommand, testSlotExecutionAllowed, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotOptions } from "./test-slot.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
+import { killProcessGroup } from "./worker-containment.js";
 
 /** PRIMARY CONTROL: maximum combined stdout/stderr bytes retained for one preflight attempt. */
 export const RETRO_PREFLIGHT_CAPTURE_BYTES = 16 * 1024;
@@ -63,7 +64,7 @@ export const RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS = 60 * 60 * 1000;
  * has no completed suite verdict. {@link runRetroPrepublishPreflight} stands down rather than
  * retrying against an unchanged bound. `tests_failed` still enters the repair rung.
  */
-const BOUND_FAILURE_CLASSES = new Set(["process_timeout", "output_limit_exceeded", "process_spawn_failed"]);
+const BOUND_FAILURE_CLASSES = new Set(["process_timeout", "output_limit_exceeded", "process_spawn_failed", "process_cleanup_failed"]);
 /** W1-T10144: the diff classes ci.yml's plan-reading lane narrows by changed paths (W1-T5698). */
 const CHANGED_PATH_CLASSES = new Set(["PLAN_ONLY", "DOCS_ONLY"]);
 const MAX_FAILING_TESTS = 20;
@@ -76,6 +77,8 @@ export interface RetroPrepublishCommandResult {
   stdout: string;
   stderr: string;
   error?: Error;
+  /** A failed signal is not proof of cleanup, even when the command later closes. */
+  cleanupError?: Error;
 }
 
 export type RetroPrepublishRunner = (
@@ -123,6 +126,7 @@ interface AttemptFailure {
   cancelledTests: string[];
   cancelledCount: number | undefined;
   hasSummary: boolean;
+  cleanupFailed?: boolean;
 }
 
 /** W1-T6111: what the suite run's host-wide test slot came to, carried onto the attempt row. */
@@ -186,11 +190,33 @@ export function runRetroPrepublishCommand(
     let stderr = "";
     let capturedBytes = 0;
     let processError: Error | undefined;
+    let cleanupError: Error | undefined;
+    let escalation: ReturnType<typeof setTimeout> | undefined;
+    let exited = false;
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"],
+      // Only this command owns the group. Never signal the caller's inherited group.
+      detached: true,
     });
+    const signalOwnedGroup = (signal: NodeJS.Signals): void => {
+      if (child.pid === undefined) return; // A spawn failure never established a group.
+      try { killProcessGroup(child.pid, signal); }
+      catch (cause) {
+        const error = cause instanceof Error
+          ? cause : new Error("retro preflight owned-group signal failed", { cause });
+        cleanupError ??= error;
+        processError ??= Object.assign(new Error("retro preflight owned-group cleanup failed", { cause: error }), { code: "EPROCESSGROUP" });
+      }
+    };
+    const stop = (error: Error): void => {
+      // Callers preserve the first bound; late output cannot replace it.
+      processError = error;
+      signalOwnedGroup("SIGTERM");
+      // One responsive escalation for a TERM-resistant command, not another attempt budget.
+      escalation = setTimeout(() => signalOwnedGroup("SIGKILL"), 1_000);
+    };
     const capture = (target: "stdout" | "stderr", chunk: Buffer): void => {
       const remaining = Math.max(0, options.maxBuffer - capturedBytes);
       if (remaining > 0) {
@@ -200,14 +226,13 @@ export function runRetroPrepublishCommand(
       }
       capturedBytes += chunk.byteLength;
       if (capturedBytes > options.maxBuffer && !processError) {
-        processError = Object.assign(new Error(`retro preflight output exceeded ${options.maxBuffer} bytes`), { code: "ENOBUFS" });
-        child.kill("SIGTERM");
+        stop(Object.assign(new Error(`retro preflight output exceeded ${options.maxBuffer} bytes`), { code: "ENOBUFS" }));
       }
     };
     child.stdout.on("data", (chunk: Buffer) => { capture("stdout", chunk); armStallBound(); });
     child.stderr.on("data", (chunk: Buffer) => { capture("stderr", chunk); armStallBound(); });
     child.once("error", (error) => {
-      processError = error;
+      processError ??= error;
     });
     // W1-T2803: the bound is on SILENCE, re-armed on every chunk, so it never decays with the
     // suite count. `startedAt` is carried into the message because the BOUND alone cannot tell a
@@ -217,18 +242,18 @@ export function runRetroPrepublishCommand(
     let timer: ReturnType<typeof setTimeout> | undefined;
     const armStallBound = (): void => {
       if (timer) clearTimeout(timer);
+      if (processError) return;
       timer = setTimeout(() => {
         if (!processError) {
           const elapsedMs = Date.now() - startedAt;
-          processError = Object.assign(
+          stop(Object.assign(
             new Error(
               `retro preflight produced no output for ${options.timeout}ms ` +
                 `(elapsed ${elapsedMs}ms at the stall, command: ${command})`,
             ),
             { code: "ETIMEDOUT" },
-          );
+          ));
         }
-        child.kill("SIGTERM");
       }, options.timeout);
     };
     armStallBound();
@@ -239,20 +264,30 @@ export function runRetroPrepublishCommand(
     const backstop = setTimeout(() => {
       if (!processError) {
         const elapsedMs = Date.now() - startedAt;
-        processError = Object.assign(
+        stop(Object.assign(
           new Error(
             `retro preflight exceeded the ${options.totalBackstopMs ?? RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS}ms total backstop ` +
               `(elapsed ${elapsedMs}ms, command: ${command})`,
           ),
           { code: "ETIMEDOUT" },
-        );
+        ));
       }
-      child.kill("SIGTERM");
     }, options.totalBackstopMs ?? RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS);
+    child.once("exit", () => {
+      exited = true;
+      clearTimeout(escalation);
+      // A wrapper may close while a private-stdio descendant survives, including on exit zero.
+      signalOwnedGroup("SIGKILL");
+    });
     child.once("close", (status, signal) => {
       clearTimeout(timer);
       clearTimeout(backstop);
-      resolve({ status, signal, stdout, stderr, ...(processError ? { error: processError } : {}) });
+      clearTimeout(escalation);
+      if (!exited) signalOwnedGroup("SIGKILL"); // Spawn failure can close without an exit event.
+      // Wait for actual command closure. A denied signal never invents a death/lease-release
+      // receipt or a successful result; foreign detached groups remain outside this guarantee.
+      resolve({ status, signal, stdout, stderr, ...(processError ? { error: processError } : {}),
+        ...(cleanupError ? { cleanupError } : {}) });
     });
   });
 }
@@ -419,10 +454,15 @@ export function classifyPreflightOutput(output: string): PreflightOutcomeClassif
   return { failingTests: [...failing], cancelledTests: [...cancelled], cancelledCount, hasSummary };
 }
 
+function processCleanupFailed(result: RetroPrepublishCommandResult): boolean {
+  return !!result.cleanupError || (result.error as NodeJS.ErrnoException | undefined)?.code === "EPROCESSGROUP";
+}
+
 function exitClass(result: RetroPrepublishCommandResult, ordinaryFailure: string): string {
   if (result.error && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") return "process_timeout";
   if (result.error && (result.error as NodeJS.ErrnoException).code === "ENOBUFS") return "output_limit_exceeded";
-  if (result.error) return "process_spawn_failed";
+  if (processCleanupFailed(result)) return "process_cleanup_failed";
+  if (result.error || result.cleanupError) return "process_spawn_failed";
   if (result.signal) return "process_signaled";
   return ordinaryFailure;
 }
@@ -456,7 +496,7 @@ const listArg = ["--import", "tsx", "scripts/diff-class.mjs"];
 /** W1-T10144: the arguments that narrow the listing the way ci.yml narrows a plan-only PR; broad otherwise. */
 async function changedPathScope(worktreePath: string, run: RetroPrepublishRunner,
   changedFiles: (worktreePath: string) => Promise<RetroChangedFiles>, tmpRoot: string,
-): Promise<{ args: string[]; selection: SuiteSelection; cleanup: () => void }> {
+): Promise<{ args: string[]; selection: SuiteSelection; cleanup: () => void; failure?: RetroPrepublishCommandResult }> {
   const broad = (reason: string, changedPathCount: number | null = null) => ({
     args: [], selection: { mode: "broad" as const, reason, changedPathCount, broadSuiteCount: null }, cleanup: () => {} });
   const changed = await changedFiles(worktreePath);
@@ -474,9 +514,14 @@ async function changedPathScope(worktreePath: string, run: RetroPrepublishRunner
   const cleanup = () => rmSync(dir, { recursive: true, force: true });
   const verdict = await run(process.execPath, [...listArg, "--changed-files", list], commandOptions(worktreePath));
   const diffClass = normalizedOutput(verdict.stdout).trim();
-  if (verdict.status !== 0 || !CHANGED_PATH_CLASSES.has(diffClass)) {
+  if (processCleanupFailed(verdict)) {
     cleanup();
-    return broad(`diff class ${diffClass || `unreadable (exit ${verdict.status})`}`, changed.files.length);
+    return { ...broad("diff class cleanup unconfirmed", changed.files.length), failure: verdict };
+  }
+  if (verdict.status !== 0 || verdict.error || !CHANGED_PATH_CLASSES.has(diffClass)) {
+    cleanup();
+    return broad(verdict.error ? "diff class unavailable (command error)"
+      : `diff class ${diffClass || `unreadable (exit ${verdict.status})`}`, changed.files.length);
   }
   return { args: ["--changed-files", list], cleanup,
     selection: { mode: "changed-paths", reason: `diff class ${diffClass}`, changedPathCount: changed.files.length, broadSuiteCount: null } };
@@ -490,6 +535,7 @@ async function enumerateSuites(worktreePath: string, run: RetroPrepublishRunner,
   selection: SuiteSelection;
 }> {
   const scope = await changedPathScope(worktreePath, run, changedFiles, tmpRoot);
+  if (scope.failure) return { suites: [], result: scope.failure, selection: scope.selection };
   let result: RetroPrepublishCommandResult;
   try {
     result = await run(process.execPath, [...listArg, "--list-plan-reading-suites", ...scope.args], commandOptions(worktreePath));
@@ -514,7 +560,7 @@ async function runAttempt(
   const testSlot = deps?.testSlot;
   const enumeration = await enumerateSuites(worktreePath, run, deps?.changedFiles ?? retroBranchChangedFiles, deps?.tmpRoot ?? tmpdir());
   const selection = enumeration.selection;
-  if (enumeration.result.status !== 0 || enumeration.suites.length === 0) {
+  if (enumeration.result.status !== 0 || enumeration.result.error || enumeration.result.cleanupError || enumeration.suites.length === 0) {
     return {
       ok: false,
       suiteCount: enumeration.suites.length,
@@ -523,7 +569,7 @@ async function runAttempt(
       failure: {
         exitClass: exitClass(
           enumeration.result,
-          enumeration.result.status !== 0 ? "suite_enumeration_failed" : "suite_enumeration_empty",
+          enumeration.result.status !== 0 || enumeration.result.error || enumeration.result.cleanupError ? "suite_enumeration_failed" : "suite_enumeration_empty",
         ),
         status: enumeration.result.status,
         signal: enumeration.result.signal,
@@ -533,6 +579,7 @@ async function runAttempt(
         cancelledTests: [],
         cancelledCount: undefined,
         hasSummary: false,
+        cleanupFailed: processCleanupFailed(enumeration.result),
       },
     };
   }
@@ -571,7 +618,7 @@ async function runAttempt(
   }
   const stdout = normalizedOutput(result.stdout);
   const stderr = normalizedOutput(result.stderr);
-  if (result.status === 0) {
+  if (result.status === 0 && !result.error && !result.cleanupError) {
     return { ok: true, suiteCount: enumeration.suites.length, elapsedMs: Math.max(0, now() - startedAt), slot: slotRow, selection };
   }
   const classified = classifyPreflightOutput(`${stdout}\n${stderr}`);
@@ -591,6 +638,7 @@ async function runAttempt(
       cancelledTests: classified.cancelledTests,
       cancelledCount: classified.cancelledCount,
       hasSummary: classified.hasSummary,
+      cleanupFailed: processCleanupFailed(result),
     },
   };
 }
@@ -653,6 +701,7 @@ function logAttempt(
     cancelled_tests: failure.cancelledTests,
     cancelled_count: failure.cancelledCount ?? null,
     has_summary: failure.hasSummary,
+    ...(failure.cleanupFailed ? { process_cleanup_failed: true } : {}),
     stdout_excerpt: bounded.stdoutExcerpt,
     stderr_excerpt: bounded.stderrExcerpt,
     output_truncated: bounded.truncated,
@@ -726,6 +775,8 @@ export async function runRetroPrepublishPreflight(
     const named = first.failure!.failingTests.length;
     const interruption = first.failure!.exitClass === "process_spawn_failed"
       ? "preflight could not start"
+      : first.failure!.exitClass === "process_cleanup_failed"
+      ? "preflight could not confirm its owned process-group cleanup"
       : "preflight hit an execution bound";
     opts.log("retro.preflight_repair_stood_down", {
       attempt: 1,
@@ -739,7 +790,7 @@ export async function runRetroPrepublishPreflight(
       reason: named === 0
         ? `the ${first.failure!.exitClass} failure carries no failing test name in retained output — ` +
           `${interruption}; the suite verdict is incomplete, so standing down under the same conditions`
-        : `the ${first.failure!.exitClass} bound stopped the run after it named ${named} failing test(s) — ` +
+        : `the ${first.failure!.exitClass} ${first.failure!.exitClass === "process_cleanup_failed" ? "failure ended the attempt" : "bound stopped the run"} after it named ${named} failing test(s) — ` +
           `${interruption}; retained output is not a complete plan verdict, so standing down under the same conditions`,
       ...provenanceFields(opts.provenance),
     });
