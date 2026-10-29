@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 import { HOST_GIT_CONFIG, hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError } from "./worktree-git.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
-import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
+import { runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
@@ -15605,19 +15605,33 @@ function priorActionsFromLedger(
 /** W1-T10608 — the disposed-line field naming the ONE main adoption a terminal design hold may spend per PR. */
 export const DESIGN_HOLD_MAIN_ADOPTION_FIELD = "design_hold_main_adoption";
 
+type DesignHoldMainAdoptionDecision = "due" | "updater-unavailable" | "main-tip-unavailable" |
+  "distance-unavailable" | "not-behind" | "already-attempted" | "contract-amended" | "pass-budget-spent";
+
 /**
  * W1-T10608 — A DESIGN HOLD ON A HEAD BEHIND MAIN TAKES MAIN ONCE BEFORE A PERSON IS ASKED. PR #13416 sat 39.6 h at
  * "fix needs design at this exact head" until an operator merged main into it: the hold keys on the head, which only
  * a person moved. Due while main holds commits the head lacks, and only if no earlier pass on this PR spent the
  * adoption — read back from `sweep.disposed`, which rotation retains — so a refused or futile refresh escalates as before.
  */
+function designHoldMainAdoptionDecision(
+  pr: Pick<OpenPrView, "prNumber">, lines: ReadonlyArray<Record<string, unknown>>,
+  behindMainBy: number | undefined, mainTipSha: string | undefined, canUpdateBranch: boolean,
+): DesignHoldMainAdoptionDecision {
+  if (!canUpdateBranch) return "updater-unavailable";
+  if (mainTipSha === undefined) return "main-tip-unavailable";
+  if (behindMainBy === undefined) return "distance-unavailable";
+  if (behindMainBy <= 0) return "not-behind";
+  return lines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+    typeof row[DESIGN_HOLD_MAIN_ADOPTION_FIELD] === "string") ? "already-attempted" : "due";
+}
+
+/** Preserve the existing boolean API; the sweep retains the decision that produced it. */
 export function designHoldMainAdoptionDue(
   pr: Pick<OpenPrView, "prNumber">, lines: ReadonlyArray<Record<string, unknown>>,
   behindMainBy: number | undefined, mainTipSha: string | undefined, canUpdateBranch: boolean,
 ): boolean {
-  if (!canUpdateBranch || mainTipSha === undefined || behindMainBy === undefined || behindMainBy <= 0) return false;
-  return !lines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
-    typeof row[DESIGN_HOLD_MAIN_ADOPTION_FIELD] === "string");
+  return designHoldMainAdoptionDecision(pr, lines, behindMainBy, mainTipSha, canUpdateBranch) === "due";
 }
 
 export type TerminalFixDesignHandoff =
@@ -17253,8 +17267,6 @@ const strikeLadderMergeBases = new Map<string, Map<string, string>>();
 
 /** Deployment deltas alone admit this full-sweep rung; elapsed time never makes a model due. */
 export async function runSweepBakeoff(input: DeploymentBakeoffInput): Promise<void> {
-  const state = readBakeoffTrialState(input.stateDir);
-  if (!state.pending && findUntrialedModels(input.deployed, state.trialed).length === 0) return;
   await runDeploymentBakeoff(input);
 }
 
@@ -19905,7 +19917,7 @@ export async function runSweep(
         `proof-repair rounds refused twice at this head (${pr.repeatedFixRefusal}) — no strike spent — ` +
         `the plan-shard flag is the next rung`;
     }
-    let terminalDesignHold: { amended: boolean; mainAdoption?: true; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string } | undefined;
+    let terminalDesignHold: { amended: boolean; mainAdoption?: true; mainAdoptionDecision: DesignHoldMainAdoptionDecision; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string } | undefined;
     // W1-T10339: a PR with no task trailer is judged on its BODY, so the body is an input a stand-down read.
     const standDownBodySha = carriesTaskTrailer(pr) ? undefined : prBodyDigest(pr.body);
     let designReleasedByBody = false;
@@ -19945,9 +19957,10 @@ export async function runSweep(
           const amended = current !== undefined && standingOn !== undefined &&
             (current !== standingOn || semantic !== undefined && semantic.standingOn !== semantic.observed);
           const behindBy = deps.behindMainByPr?.get(pr.prNumber);
-          const mainAdoption = !amended && !designMainAdoptionSpent &&
-            designHoldMainAdoptionDue(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
-          terminalDesignHold = { amended, ...(mainAdoption ? { mainAdoption: true as const } : {}),
+          const mainAdoptionDecision = amended ? "contract-amended" : designMainAdoptionSpent ? "pass-budget-spent" :
+            designHoldMainAdoptionDecision(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
+          const mainAdoption = mainAdoptionDecision === "due";
+          terminalDesignHold = { amended, mainAdoptionDecision, ...(mainAdoption ? { mainAdoption: true as const } : {}),
             revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
           disposition = amended || mainAdoption ? "blocked-fixable" : "refused-escalate";
           reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
@@ -20381,6 +20394,7 @@ export async function runSweep(
     if (gardenRecordRefusal !== undefined) extraDisposedFields = { ...extraDisposedFields, garden_record_refusal: gardenRecordRefusal };
     if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_hold: true, stand_down_site: standDownHold.site };
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true, needs_design_round_id: terminalDesignHold.roundId,
+      design_hold_main_adoption_decision: terminalDesignHold.mainAdoptionDecision,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
       ...(terminalDesignHold.semantic === undefined ? {} : { progress_task_semantic_revision: terminalDesignHold.semantic.standingOn }) };
     const selectedContractRefresh = async (

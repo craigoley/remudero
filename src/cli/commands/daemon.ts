@@ -21,7 +21,7 @@ import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../
 import { ghExec, ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
@@ -69,7 +69,7 @@ import { getHeapStatistics } from "node:v8";
 import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
 import { ledgerMemoHolders } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
-import { type Plan } from "../../lib/plan.js";
+import { loadPlan, type Plan } from "../../lib/plan.js";
 import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
 import { runnerConfigDigest, terminalPreDispatchRefusalRevisions } from "../../lib/dispatch-repair.js";
@@ -102,7 +102,7 @@ import { wireSweepWakeToDaemon } from "../../lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "../../lib/github-app.js";
 import { LEDGER_REQUEST_STEP, realScopedMint, startDaemonGitCredentialSocket, type ScopedTokenMint } from "../../lib/secret-boundary.js";
 import { automaticBranchReapStateFileName, orphanRunBranchEvidenceReader } from "../../lib/branch-reaper.js";
-import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
+import { repoRoot, resolveOwnerRepo, writeDaemonTargetRecord } from "../../lib/repo-location.js";
 import { resolveRepoLayout } from "../../lib/repo-layout.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { liveInflightRuns, readCheckoutDepth } from "../../lib/report-commands.js";
@@ -958,6 +958,9 @@ export async function daemonCommand(
   let tickReadGeneration: ReadGeneration<TickReadFacts> | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
   const targetCheckoutRoot = daemonTargetCheckoutRoot(target, config.root);
+  const targetRecordWrite = writeDaemonTargetRecord(join(config.root, "state"),
+    { owner: target.owner, repo: target.repo, isSelf: target.isSelf, checkoutRoot: targetCheckoutRoot });
+  if (!targetRecordWrite.written) log("daemon.target_record_failed", { reason: targetRecordWrite.reason });
   const targetCommitTrailerIndex = () =>
     buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot })();
   const gatewayFor = createDaemonGatewayFactory(config.root, log, {

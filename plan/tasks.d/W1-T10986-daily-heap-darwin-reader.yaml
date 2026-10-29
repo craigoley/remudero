@@ -1,0 +1,41 @@
+- id: W1-T10986
+  repo: remudero
+  title: Give the Daily heap proof its real Darwin memory reader
+  type: implement
+  verify: auto
+  author_class: machine
+  risk: low
+  priority: 1
+  budget_usd: 8
+  status: queued
+  attempts: 0
+  depends_on:
+    - W1-T10829
+  plan_refs:
+    - W1-T10829
+    - W1-T9952
+  files:
+    - test/console-api/read-model/daily-progress-projection.test.ts
+  origin: cockpit-closeout:darwin-daily-heap:operator-authorized-2026-10-29
+  rationale: The queue owner's exact939f450fdf0a8163dbd5a50d174d0e2143c92889 author receipt completed4677tests with4676pass and1fail across433reported physical files. The Daily heap fixture failed before its child spawn because readMemoryHeadroom() had no Darwin vmStat reader and returnedundefined. The current fixture still calls that default. An explicit-reader probe alone is neither admission nor proofPASS. The owner has not filed a separate repair.
+  design: Repair only the existing Daily projection test fixture. Use the maintained readVmStat port from test-slot.ts when measuring the actual Darwin host, following the existing readMemoryHeadroom(undefined,{vmStat:readVmStat}) convention. Keep the Linux reading and all production APIs unchanged. Retain assertHeapAdmission's admitted outcome, executionAllowed, exact recorded host pool, finite measured headroom and parent-plus-child memory reservation checks; never accept open, inherited, wait_bound_exceeded, unrecorded, unavailable or insufficient capacity. Preserve the unchanged slow-lane heap, selected and unrelated workloads, raw replay bound, full counts, source gaps, deduplication and all original assertions. Add a deterministic existing-suite case proving the fixture supplies its Darwin reader rather than relying solely on a real Mac being available; an injected parser/branch check is not a substitute for the real admitted heap workload. Remove only the reader wiring and observe that dedicated case fail, restore exactly and observe success under normal admission. Keep unavailable capacity a refusal, no test skip or success substitution. A real Mac heap run requires the ordinary native capacity, disk, memory, parent and child reservation checks; if unavailable record NOT_RUN. Preserve package imports and repo-root helpers. No production source, test-slot policy, allowances, scanner, service, schedule, ownership, review or consumer-hold change. Validate the committed tree through normal author/coverage/hosted/native review and protected publication; Linux success is not Mac success.
+  acceptance:
+    - claim: The existing heap fixture supplies the real Darwin memory reader while retaining unavailable and unrecorded admission refusals
+      proof: "unit test: Daily heap proof supplies its Darwin reader and preserves admission refusals"
+    - claim: The full Daily collection workload still runs inside the unchanged production heap under recorded capacity admission
+      proof: "unit test: Daily progress collection stays inside the unchanged slow-lane heap"
+      kind: guard
+    - claim: The fixture explicitly wires the maintained Darwin vmStat reader rather than accepting unmeasured capacity
+      proof: "grep: vmStat: readVmStat in test/console-api/read-model/daily-progress-projection.test.ts"
+  falsifier: Delete only the fixture's Darwin-reader wiring. The dedicated portability test must fail with real TAP; restoring it must pass. A spawn failure, unavailable capacity, skipped case or absent summary is not the required control. Keep the original full heap and refusal tests.
+  note: Bounded test-only repair, not a memory-policy change or permission to retry the failed939f author run. Refresh actual ownership, task credit and open-head subject/source overlap before building. All prior failed receipts remain failed; no current-head test result is claimed by filing.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed design confines the remedy to one existing test fixture and specifies the maintained Darwin reader convention while preserving production APIs, heap limits and capacity admission refusals."
+      - "The plan requires deterministic reader-wiring coverage, removal-and-restoration verification and the real admitted workload; unavailable Mac capacity must remain NOT_RUN, and prior failed evidence remains failed."
+      - "The filing-time gates show no waiver or policy change, and the declared scope contains no secrets, permissions, destructive operations or irreversible action. No implementation result is claimed."
+    judged_at: "2026-10-29T15:09:41.845Z"
+    pin: "7fcb1df64dddff7ab3e26dd83c04fd6048e762f779639141fb6463d8b5a73371"

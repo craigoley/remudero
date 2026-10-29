@@ -112,20 +112,21 @@ test("W1-T9786: a restored checkpoint stays pending after its run throws a harne
   } finally { f.cleanup(); }
 });
 
-test("W1-T9786: a thrown run that pushed its own branch keeps nothing", async () => {
+test("W1-T9786: a thrown run that pushed its own branch keeps its own head", async () => {
   // Its own branch is the newer checkpoint (W1-T7837), so the restored one is not re-pended.
   const f = checkpointFixture();
+  let own: string | undefined;
   try {
     await assert.rejects(dispatch(f, async (cwd) => {
-      const own = f.origin.git("-C", cwd, "rev-parse", "--abbrev-ref", "HEAD");
+      own = f.origin.git("-C", cwd, "rev-parse", "--abbrev-ref", "HEAD");
       f.origin.git("-C", cwd, "push", "--quiet", "origin", `HEAD:refs/heads/${own}`);
       throw new Error("Command failed: gh pr create --head x\nHTTP 502");
     }), /HTTP 502/);
     const rows = f.readRows();
     assert.ok(rows.some((row) => row.step === "implement.checkpoint_restored"));
     assert.equal(rows.find((row) => row.step === "verdict")?.stage, "run.error");
-    assert.equal(rows.some((row) => row.step === "implement.checkpoint_kept"), false);
-    assert.equal(pendingWorkerBoundaryHandoffs(lines(rows)).size, 0);
+    assert.equal(rows.find((row) => row.step === "implement.checkpoint_kept")?.source_branch, own);
+    assert.deepEqual(pendingWorkerBoundaryHandoffs(lines(rows)).get(TASK), { branch: own, headSha: f.headSha });
   } finally { f.cleanup(); }
 });
 
