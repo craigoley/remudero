@@ -12,10 +12,10 @@ import { rm as rmAsync } from "node:fs/promises";
 import { RUN_AGENT_WAIT_HEAP_STEP, type AgentWaitHeap } from "../../lib/agent-wait-heap.js";
 import { type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
 import { type FixRoundReapplyPorts } from "../../lib/fix-round-reapply.js";
-import { productionFixProgressJudge, type JobRequeueOutcome } from "../../lib/sweep.js";
+import { fixRoundBranchClaim, productionFixProgressJudge, type JobRequeueOutcome } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { resolveRepoLayout } from "../../lib/repo-layout.js";
@@ -271,6 +271,7 @@ export interface RunTaskCommandHost {
   readonly ghLiveHead: (prUrl: string, gh?: (args: string[]) => unknown) => LiveHeadResult;
   readonly captureWorktreeSnapshotViaGit: (worktreePath: string) => WorktreeSnapshot | undefined;
   readonly ghUpdateBranch: (owner: string, repo: string, prNumber: number, exec?: typeof execFileSync, via?: string, record?: BranchUpdateRecorder, expectedHeadSha?: string) => { ok: boolean; error?: string };
+  readonly fixBranchClaimKey: (owner: string, repo: string, branch: string) => string;
   readonly redBaseRefreshFactsFromRest: (owner: string, repo: string, prNumber: number, fetch?: GhApiFetcher) => RedBaseRefreshFacts;
   readonly fixRebaseMergeFactsFromRest: (owner: string, repo: string, prNumber: number, fetch?: GhApiFetcher) => FixRebaseMergeFacts;
   readonly reclaimAbandonedWorker: (info: { runId: string; taskId: string; elapsedMs: number }, deps?: {
@@ -827,6 +828,8 @@ export interface FixRungOutcome {
    */
   standDownReason?: string;
   superseded?: FixSuperseded;
+  /** The recovery checkout still owns unpublished work, including unprovable preservation. */
+  retainWorktree?: string;
   /**
    * W1-T1095: set only when `outcome === "parked"` — the prerequisite PR number
    * {@link outOfDiffBlockerFor} found. The rung spent ZERO strikes reaching this outcome
@@ -5039,6 +5042,25 @@ export async function runTask(
   });
 }
 
+/** The initial run uses the same branch lease as the cold fix lane; unknown owners never get reclaimed. */
+export function claimRunTaskFixBranch(input: {
+  inflightDir: string; claimKey: string; runId: string; repoDir: string; worktreePath: string; branch: string;
+}): FixRoundBranchClaim {
+  const take = () => acquireInflightLock(input.inflightDir, input.claimKey, { run_id: input.runId, reclaim: false });
+  return fixRoundBranchClaim(take(), () => {
+    try {
+      const owners = listRegisteredWorktrees(input.repoDir).filter(w => w.branch === input.branch);
+      if (owners.length !== 1 || realpathSync(owners[0]!.path) !== realpathSync(input.worktreePath)) {
+        return "this run's branch worktree ownership is not confirmed";
+      }
+      return take();
+    } catch (error) {
+      const reason = `branch claim unavailable: ${String(error)}`;
+      return reason;
+    }
+  });
+}
+
 export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost): Promise<RunResult> {
   const {
     BRANCH_NAME_CONTRACT_PART,
@@ -7684,6 +7706,23 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // drain/daemon path and the manual `rmd run-task` path both reach it, so both
     // get the rung for free (no duplicated fix-dispatch logic).
     if (review.state !== "success") {
+      const claimKey = host.fixBranchClaimKey(owner, task.repo, branch);
+      let branchClaim: FixRoundBranchClaim;
+      try {
+        branchClaim = claimRunTaskFixBranch({ inflightDir: join(config.root, "state", "inflight"), claimKey,
+          runId, repoDir, worktreePath, branch });
+        const reason = branchClaim.verify!();
+        if (reason) {
+          branchClaim.release();
+          throw new Error(reason);
+        }
+      } catch (error) {
+        const reason = `fix branch ownership unavailable: ${String(error)}`;
+        log("fix.stood_down", { site: "rung.branch_claim", head_sha: review.headSha, reason });
+        log("verdict", { verdict: "blocked", pr_url: prUrl, reason, cost_usd: costUsd,
+          ...terminalVerdictFields(impl) });
+        return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+      }
       const rung = await runFixRung({
         guardRoundHead: true,
         // A run on the real worker spawn is a production run: it always asks the LLM judge.
@@ -7709,6 +7748,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         openTaskIds,
         reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
         deps: {
+          branchClaim,
           writeFixCensusSnapshot: writeFixCensusSnapshotAsync,
           // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
           spawn: trackRepairLadder(spawn, { config, log }),
@@ -7779,6 +7819,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           // W1-T8396: this rung's own checkout already holds the head, so its trial merge needs no fetch of it.
           reproduceFailingTestsOnMerge: buildBaseReproductionProbe(config, worktreePath, ledgerPath, (s, extra) => log(s, extra), { merge: true }),
           updateBranch: (n) => ghUpdateBranch(owner, task.repo, n),
+          updateBranchAtHead: (n, head) => ghUpdateBranch(owner, task.repo, n, undefined, undefined, undefined, head),
           // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
           // reclaim of whatever it abandoned — see runFixRung's own deps doc. W1-T1219: reads
           // `fixSpawnWallClockBoundMs`, its OWN policy row, not the sweep tick's.
@@ -7802,7 +7843,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           commitGeneratorOutput: (o) => commitGeneratorOutputViaGit(o),
           packageScripts: readPackageScriptsFor(worktreePath),
         },
-      });
+      }).finally(() => branchClaim.release());
       review = rung.review;
       if (rung.outcome === "spawn_abandoned") {
         // W1-T1044: the worker never demonstrably returned — never a strike (see

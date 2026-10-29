@@ -392,3 +392,33 @@ test("the native census refresh sends its expected head to the actual REST adapt
   assert.equal(result.ok, true);
   assert.deepEqual(argv, ["api", "--method", "PUT", "repos/fixture/repo/pulls/1/update-branch", "-f", `expected_head_sha=${PRIOR}`]);
 });
+
+test("the initial run branch claim retakes only its registered worktree and refuses unknown holders", async t => {
+  const { claimRunTaskFixBranch } = await import("#src/cli/commands/run-task-verb.js");
+  const fx = await censusRefreshOwner(t);
+  const input = { inflightDir: join(fx.root, "native-claims"), claimKey: "branch", runId: "TEST-initial",
+    repoDir: fx.repo.dir, worktreePath: fx.repo.dir, branch: "refresh" };
+  const claim = claimRunTaskFixBranch(input);
+  t.after(() => claim.release());
+  assert.equal(claim.verify!(), undefined);
+  claim.release();
+  assert.equal(claim.reacquire(), undefined, "the real registered owner can retake a released round");
+  assert.equal(claim.verify!(), undefined);
+  claim.release();
+  mkdirSync(claim.last().path);
+  assert.match(claim.reacquire()!, /branch claim unavailable/);
+  assert.throws(() => claimRunTaskFixBranch(input), /EEXIST/);
+  assert.equal(readFileSync(join(fx.repo.dir, "source.ts"), "utf8"), "export const saved = 0;\n");
+  rmSync(claim.last().path, { recursive: true });
+  assert.equal(claim.reacquire(), undefined);
+  claim.release();
+  fx.repo.git("switch", "--detach", fx.base);
+  assert.match(claim.reacquire()!, /ownership is not confirmed/);
+  fx.repo.git("switch", "refresh");
+  const missing = claimRunTaskFixBranch({ ...input, worktreePath: join(fx.repo.dir, "missing-owner") });
+  missing.verify!(); missing.release();
+  assert.match(missing.reacquire()!, /branch claim unavailable/);
+  const other = claimRunTaskFixBranch({ ...input, worktreePath: fx.root });
+  other.verify!(); other.release();
+  assert.match(other.reacquire()!, /ownership is not confirmed/);
+});

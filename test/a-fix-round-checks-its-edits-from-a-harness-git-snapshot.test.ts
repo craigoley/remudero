@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { renderFixPrompt } from "../src/lib/prompt-render.js";
 import type { WorkerResult, SpawnWorkerArgs } from "../src/lib/worker.js";
@@ -473,6 +475,241 @@ test("inherited census baseline drift refreshes before another fix worker", asyn
   assert.ok(rows.some(row => row.step === "fix.census_refresh" && row.fields.outcome === "requested"));
 });
 
+
+async function productionCensusCaller(t: TestContext, competingOwner: boolean | "replaced" = false) {
+  const fx = await inheritedContractFixture(t);
+  const { harness, repo, baselinePath, current, base } = fx;
+  const origin = gitRepo({ scope: t, bare: true, kind: "census-caller-origin" });
+  const root = join(repo.dir, "state", "run-task");
+  const id = "W1-T10935TEST";
+  const url = "https://github.com/craigoley/remudero/pull/1";
+  const planText = `- id: ${id}\n  title: cleanup is confirmed\n  repo: remudero\n  type: implement\n` +
+    `  verify: auto\n  risk: high\n  origin: test\n  status: queued\n  files: [src/lib/unreached.ts]\n`;
+  repo.git("switch", "-c", "caller-base", base);
+  for (const path of ["package.json", "package-lock.json"]) {
+    writeFileSync(join(repo.dir, path), readFileSync(join(ROOT, path)));
+  }
+  mkdirSync(join(repo.dir, "plan"));
+  writeFileSync(join(repo.dir, "plan/tasks.yaml"), planText);
+  // The real proof sandbox sees only its checkout and dependencies. Carry the unchanged suite
+  // and its local import closure into the fixture, rather than reaching outside that sandbox.
+  const copied = new Set<string>(["src/run-task.ts"]);
+  const copyTrusted = (path: string) => {
+    if (copied.has(path)) return;
+    copied.add(path);
+    const text = readFileSync(join(ROOT, path), "utf8");
+    mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
+    writeFileSync(join(repo.dir, path), text);
+    for (const match of text.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)["'](\.[^"']+|#(?:src|scripts|test)\/[^"']+)["']/g)) {
+      const spec = match[1]!;
+      const localPath = spec.startsWith("#") ? spec.slice(1) : posix.normalize(posix.join(posix.dirname(path), spec));
+      const resolved = [localPath, localPath.replace(/\.js$/, ".ts")].find(p => existsSync(join(ROOT, p)));
+      if (resolved) copyTrusted(resolved);
+    }
+  };
+  copyTrusted(REACH); copyTrusted("test/setup/tmp-hygiene.ts");
+  repo.git("add", "plan", "package.json", "package-lock.json", "src", "scripts", "test");
+  repo.git("commit", "-m", "fixture: runnable caller contract");
+  const oldMain = repo.git("rev-parse", "HEAD");
+  repo.git("remote", "add", "origin", origin.dir);
+  repo.git("push", "origin", `${oldMain}:refs/heads/main`);
+  writeFileSync(join(repo.dir, baselinePath), current);
+  repo.git("add", baselinePath); repo.git("commit", "-m", "fixture: approved main contract");
+  const newMain = repo.git("rev-parse", "HEAD");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  const clone = gitRepo({ scope: t, cloneFrom: origin.dir, kind: "census-caller-clone" });
+  const local = join(root, "repos/remudero");
+  renameSync(clone.dir, local);
+  symlinkSync(join(ROOT, "node_modules"), join(local, "node_modules"), "dir");
+  const planPath = join(root, "tasks.yaml"); writeFileSync(planPath, planText);
+  const shim = ghShim([]);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${savedPath}`;
+  t.after(() => { process.env.PATH = savedPath; rmSync(shim.dir, { recursive: true, force: true }); });
+  let calls = 0, head = "", worktree = "", branch = "";
+  const worker = (text: string): WorkerResult => ({ sessionId: "fixture", costUsd: 0, numTurns: 1, text,
+    blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, permissionDenials: [],
+    childEnvKeys: [], model: "test", effort: "test", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {}, compactionEvents: [], qualitySuspect: false });
+  const result = await withLiveWritesAllowed(() => harness.runTask(id, {
+    skipGitSync: true, owner: "craigoley", planPath,
+    config: { root, claudeBin: "/bin/true", installRoot: ROOT, workerProviders: { harnessCommitsFix: true } },
+    github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+    claimReserver: { mintAnchor: () => "fixture-anchor", attempt: () => "created", holder: () => undefined, drop: () => true },
+    externalWaitFreshness: () => undefined,
+    containmentExec: async token => ({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
+    isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
+    spawn: async args => {
+      calls++;
+      assert.ok(calls <= 2, "the production caller must refresh before any fix model retry");
+      if (calls === 1) return worker("RECON REPORT\nOBSERVED: fixture");
+      worktree = args.cwd!;
+      branch = repo.git("-C", worktree, "branch", "--show-current");
+      writeFileSync(join(worktree, "src/lib/unreached.ts"), "export const cleanup = true;\n");
+      repo.git("-C", worktree, "add", "src/lib/unreached.ts");
+      repo.git("-C", worktree, "commit", "-m", "fix(fixture): finish cleanup");
+      repo.git("-C", worktree, "push", "origin", `HEAD:refs/heads/${branch}`);
+      head = repo.git("-C", worktree, "rev-parse", "HEAD");
+      repo.git("push", "origin", `${newMain}:refs/heads/main`);
+      repo.git("-C", worktree, "fetch", "origin");
+      shim.addRoute({ when: "--json headRefName", stdout: JSON.stringify({ headRefName: branch, headRefOid: head, body: "" }) });
+      shim.addRoute({ when: "--json headRefOid", stdout: JSON.stringify({ headRefOid: head, headRefName: branch }) });
+      shim.addRoute({ when: "--json body", stdout: JSON.stringify({ body: "" }) });
+      shim.addRoute({ when: "--json files", stdout: JSON.stringify({ files: [{ path: "src/lib/unreached.ts" }] }) });
+      shim.addRoute({ when: "check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "success" }] }) });
+      shim.addRoute({ when: "/status", stdout: JSON.stringify({ statuses: [] }) });
+      shim.addRoute({ when: "--json statusCheckRollup", stdout: JSON.stringify({ statusCheckRollup: [{ name: "ci", conclusion: "SUCCESS" }] }) });
+      shim.addRoute({ when: "compare/", stdout: JSON.stringify({ behind_by: 1 }) });
+      shim.addRoute({ when: "pulls/1", stdout: JSON.stringify({ state: "open", merged: false, mergeable: true, mergeable_state: "clean", head: { sha: head, ref: branch }, base: { sha: newMain, ref: "main" } }) });
+      return worker(`REPORT\nPR_URL: ${url}\n`);
+    },
+    runReview: async () => {
+      if (competingOwner === true) {
+        const { acquireInflightLock } = await import("#src/lib/inflight-lock.js");
+        const foreign = acquireInflightLock(join(root, "state/inflight"), harness.fixBranchClaimKey("craigoley", "remudero", branch),
+          { run_id: "FOREIGN-live", reclaim: false });
+        t.after(() => foreign.release());
+      }
+      if (competingOwner === "replaced") {
+        const { default: fs } = await import("node:fs");
+        const open = fs.openSync;
+        const path = join(root, "state/inflight", `${harness.fixBranchClaimKey("craigoley", "remudero", branch)}.lock`);
+        t.mock.method(fs, "openSync", (file: Parameters<typeof open>[0], flags: Parameters<typeof open>[1], mode?: Parameters<typeof open>[2]) => {
+          if (file === path && typeof flags === "number") {
+            writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), run_id: "FOREIGN-live" }));
+          }
+          return open(file, flags, mode);
+        });
+      }
+      return { state: "failure", headSha: head, reviewerOutcome: "failure", testTheater: false, summary: "cleanup needs proof",
+        floorDegraded: false, capped: false, keywordOnly: false, planOnly: false, criteria: [] };
+    },
+  }));
+  const rows = readFileSync(join(root, "state/ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(result.verdict, "blocked", JSON.stringify(rows));
+  assert.equal(calls, 2);
+  const updates = shim.calls().filter(call => call.includes("update-branch"));
+  const claimPath = join(root, "state/inflight", `${harness.fixBranchClaimKey("craigoley", "remudero", branch)}.lock`);
+  assert.equal(existsSync(worktree), true, "the old checkout is retained until normal native recovery");
+  if (competingOwner) {
+    assert.equal(updates.length, 0);
+    assert.equal(JSON.parse(readFileSync(claimPath, "utf8")).run_id, "FOREIGN-live");
+    assert.ok(rows.some(row => row.step === "fix.stood_down" && row.site === "rung.branch_claim"));
+    return;
+  }
+  assert.ok(rows.some(row => row.step === "fix.census_refresh" && row.outcome === "requested"),
+    JSON.stringify(rows.filter(row => row.step === "fix.census_refresh")));
+  assert.equal(updates.length, 1);
+  assert.ok(updates[0]!.includes(`expected_head_sha=${head}`));
+  assert.equal(existsSync(claimPath), false);
+}
+
+test("inherited census baseline drift refreshes before another fix worker through production runTask", async t => {
+  await productionCensusCaller(t);
+});
+
+test("census baseline refresh respects live owners and the exact head through production runTask", async t => {
+  await t.test("live holder", async t => productionCensusCaller(t, true));
+  await t.test("holder replaces the newly acquired claim", async t => productionCensusCaller(t, "replaced"));
+});
+
+test("census baseline refresh respects live owners and the exact head through sweep cleanup", async t => {
+  for (const mode of ["overlap", "save-error", "foreign-owner", "head-changed", "ordinary-cleanup"] as const) {
+    await t.test(mode, async t => {
+      const { harness, repo, head, main, rows, log, baselinePath } = await inheritedContractFixture(t);
+      const { DEFAULT_SWEEP_POLICY } = await import("#src/lib/sweep.js");
+      if (mode === "overlap") {
+        repo.git("switch", "--detach", main);
+        writeFileSync(join(repo.dir, "src/lib/unreached.ts"), "export const mainEdit = true;\n");
+        repo.git("add", "src/lib/unreached.ts"); repo.git("commit", "-m", "fixture: main edits saved-work path");
+        repo.git("update-ref", "refs/remotes/origin/main", repo.git("rev-parse", "HEAD"));
+        repo.git("switch", "inherited-fix");
+      }
+      const root = join(repo.dir, "state", "sweep");
+      for (const dir of ["repos", "tmp", "worktrees"]) mkdirSync(join(root, dir), { recursive: true });
+      symlinkSync(repo.dir, join(root, "repos/remudero"), "dir");
+      const id = "W1-T10935TEST", branch = `run-${id}-1`;
+      const url = "https://github.com/craigoley/remudero/pull/1";
+      const task = { id, title: "cleanup is confirmed", risk: "low", files: ["src/lib/unreached.ts"], acceptance: [], verify: "auto", status: "queued" };
+      let worktree = "", status = "", indexBlob = "", worktreeBlob = "", spawned = 0, updated = 0;
+      let outcome: Awaited<ReturnType<typeof harness.runFixRung>> | undefined;
+      const saveWork = (path: string) => {
+        writeFileSync(join(path, "src/lib/unreached.ts"), "export const saved = 1;\n");
+        repo.git("-C", path, "add", "src/lib/unreached.ts");
+        writeFileSync(join(path, "src/lib/unreached.ts"), "export const saved = 2;\n");
+        writeFileSync(join(path, "unpublished.txt"), "untracked fix\n");
+        if (mode === "save-error") writeFileSync(join(root, "recovery"), "blocks preservation directory");
+        status = repo.git("-C", path, "status", "--porcelain=v1");
+        indexBlob = repo.git("-C", path, "rev-parse", ":src/lib/unreached.ts");
+        worktreeBlob = repo.git("-C", path, "hash-object", "src/lib/unreached.ts");
+        assert.notEqual(indexBlob, worktreeBlob, "the fixture contains distinct staged and unstaged edits");
+      };
+      const { worktreeRemove } = await import("#src/lib/worker.js");
+      const effects = harness.buildSweepEffects({
+        owner: "craigoley", repo: "remudero", repoRoot: ROOT, localRepoName: "remudero",
+        config: { root, claudeBin: "/bin/true", workerProviders: { harnessCommitsFix: true } } as import("#src/lib/config.js").Config,
+        ledgerPath: join(root, "ledger.ndjson"), runId: "TEST-sweep-refresh",
+        plan: { tasks: [task], byId: new Map([[id, task]]) } as unknown as import("#src/lib/plan.js").Plan,
+        log, policy: DEFAULT_SWEEP_POLICY, reviewRunner: async () => 0,
+        issuesImpl: { create: () => "https://github.com/craigoley/remudero/issues/1" },
+        stallNotice: () => {}, armImpl: () => "armed", armSessionPrsOverride: false,
+        captureRepairFeedbackImpl: () => {}, ghRunImpl: () => {}, disarmImpl: () => undefined,
+        ghUpdateBranchImpl: () => { updated++; return { ok: true }; },
+        reproduceFailingTestsOnMergeImpl: async (_pr, files) => files.map(file => ({ file, outcome: "passes", duration_ms: 1, cached: false })),
+        readJsonImpl: async () => ({ headRefName: branch, headRefOid: head, body: "" }),
+        registeredWorktreeOwnerImpl: () => worktree || undefined,
+        dispatchFixPreflightStandDownImpl: async () => undefined,
+        resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
+        worktreeRemoveImpl: (_repo, path) => worktreeRemove(repo.dir, path),
+        createFixRungWorktreeImpl: (_repo, path) => {
+          worktree = path;
+          repo.git("worktree", "add", "--detach", path, head);
+          return undefined;
+        },
+        runFixRungImpl: async args => {
+          if (mode === "ordinary-cleanup") {
+            saveWork(worktree);
+            return { outcome: "stood_down", review: args.initialReview, strikes: 0, retriggers: 0, reason: "ordinary terminal outcome" };
+          }
+          let reads = 0;
+          outcome = await harness.runFixRung({ ...args, deps: { ...args.deps,
+            writeFixCensusSnapshot: async (path, log) => {
+              saveWork(path);
+              if (mode === "foreign-owner") {
+                const lock = args.deps.branchClaim!.last();
+                writeFileSync(lock.path, JSON.stringify({ ...lock.info, run_id: "FOREIGN-live" }));
+              }
+              return harness.writeFixCensusSnapshotAsync(path, log);
+            },
+            readLiveState: () => ({ ok: true, state: "OPEN" }),
+            readLiveHead: () => ({ ok: true, headSha: mode === "head-changed" && ++reads > 1 ? main : head, headRefName: branch }),
+            readCiRollup: () => [{ name: "ci", conclusion: "SUCCESS" }],
+            readMergeFacts: () => ({ mergeable: "MERGEABLE", behindBy: 1 }),
+            fetchPrDiffFiles: () => ["src/lib/unreached.ts"],
+            spawn: async () => { spawned++; throw new Error("held recovery must not spawn a worker"); },
+          } });
+          return outcome;
+        },
+      });
+      await withLiveWritesAllowed(() => effects.dispatchFix!({ prNumber: 1, prUrl: url, headSha: head, taskId: id,
+        priorStrikes: 0, mergeState: "clean", checksState: "failure" } as never,
+      { unmetCriteria: [{ claim: "cleanup is confirmed", proof: "unit test: cleanup is confirmed", met: false, reason: "needs proof" }] } as never));
+      assert.ok(worktree, JSON.stringify(rows));
+      assert.equal(existsSync(worktree), mode !== "ordinary-cleanup", "outer cleanup obeys the real rung's retention signal");
+      if (mode === "ordinary-cleanup") return;
+      assert.equal(outcome?.outcome, "stood_down", JSON.stringify(rows));
+      assert.ok(outcome?.retainWorktree);
+      assert.equal(repo.git("-C", worktree, "status", "--porcelain=v1"), status);
+      assert.equal(repo.git("-C", worktree, "rev-parse", ":src/lib/unreached.ts"), indexBlob);
+      assert.equal(repo.git("-C", worktree, "hash-object", "src/lib/unreached.ts"), worktreeBlob);
+      assert.equal(readFileSync(join(worktree, "unpublished.txt"), "utf8"), "untracked fix\n");
+      assert.equal(spawned, 0); assert.equal(updated, 0);
+      const held = rows.find(row => row.step === "fix.census_refresh" && row.fields.outcome === "held");
+      assert.ok(held, JSON.stringify(rows));
+      assert.match(String(held.fields.reason), mode === "overlap" ? /overlaps main/ : mode === "save-error" ? /unavailable/ : mode === "foreign-owner" ? /another owner/ : /head|branch changed/);
+    });
+  }
+});
 
 test("census baseline refresh never excuses new growth or an edited baseline", async t => {
   const { harness, repo, baselinePath, current, log } = await inheritedContractFixture(t);

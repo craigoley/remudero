@@ -42843,6 +42843,7 @@ function runTaskCommandHost(): RunTaskCommandHost {
     ghLiveHead,
     captureWorktreeSnapshotViaGit,
     ghUpdateBranch,
+    fixBranchClaimKey,
     redBaseRefreshFactsFromRest,
     fixRebaseMergeFactsFromRest,
     reclaimAbandonedWorker,

@@ -4662,7 +4662,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             branchClaim,
           },
         });
-        keepWorktree = rung?.superseded !== undefined;
+        keepWorktree = rung?.superseded !== undefined || rung?.retainWorktree !== undefined;
       } catch (e) {
         // W1-T2402: a signal-terminated spawn (this fleet's own `killProcessGroup`/forced-deploy/
         // wall-clock-reclaim paths, or a genuine host OOM — indistinguishable by signal alone, see
@@ -4681,7 +4681,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // it does today.
         if (outcome.rethrow) throw e;
       } finally {
-        // W1-T4105: a superseded worker's worktree is kept for diagnosis.
+        // Superseded workers and held census recovery keep their original checkout.
         if (worktreePath && !keepWorktree) {
           try {
             worktreeRemoveForBuild(repoDir, worktreePath);

@@ -2116,7 +2116,7 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
   const log = (outcome: string, reason: string, extra: Record<string, unknown> = {}) =>
     deps.log("fix.census_refresh", { pr_number: input.prNumber, head_sha: context.headSha, main_sha: context.mainSha,
       merge_base: context.mergeBase, baseline_path: context.baselinePath, outcome, reason, ...extra });
-  const held = (reason: string) => { log("held", reason); return { outcome: "held" as const, reason }; };
+  const held = (reason: string, extra: Record<string, unknown> = {}) => { log("held", reason, extra); return { outcome: "held" as const, reason }; };
   if (deps.branchClaim === undefined) return held("native refresh branch claim is not wired");
   if (deps.branchClaim.verify === undefined) return held("native refresh ownership verification is not wired");
   if (!deps.readLiveState || !deps.readLiveHead || !deps.readCiRollup ||
@@ -2143,7 +2143,9 @@ export async function refreshInheritedCensusRefusal(input: InheritedCensusRefres
     if (before) return held(before);
     const reach = "test/the-affected-suite-reach-ratchet.test.ts";
     const trial = await deps.reproduceFailingTestsOnMerge({ prNumber: input.prNumber, headSha: context.headSha } as OpenPrView, [reach], context.mainSha);
-    if (trial.setup_error || trial.length !== 1 || trial[0]?.file !== reach || trial[0].outcome !== "passes") return held("unchanged reach check did not pass on the trial merge");
+    if (trial.setup_error || trial.length !== 1 || trial[0]?.file !== reach || trial[0].outcome !== "passes") {
+      return held("unchanged reach check did not pass on the trial merge", { trial_outcomes: [...trial], setup_error: trial.setup_error });
+    }
     const saved = await evidence.preserveInheritedCensusWork(input.root, input.worktreePath, input.branch, context);
     log("work-preserved", "saved work is durable; current checkout is unchanged", saved);
     const after = await check();
@@ -3957,7 +3959,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         if (checked?.refusal?.inheritedMain?.state === "inherited") {
           const refresh = await refreshInheritedCensusRefusal({ root: opts.config.root, worktreePath: opts.worktreePath,
             branch: opts.branch, prUrl: opts.prUrl, prNumber, snapshotPath: censusSnapshotPath, context }, deps, host);
-          return { outcome: refresh.outcome === "requested" ? "base_refreshed" : "stood_down", review, strikes, retriggers, reason: refresh.reason };
+          return { outcome: refresh.outcome === "requested" ? "base_refreshed" : "stood_down", review, strikes, retriggers,
+            reason: refresh.reason, standDownReason: refresh.reason, retainWorktree: refresh.reason };
         }
       }
     }
