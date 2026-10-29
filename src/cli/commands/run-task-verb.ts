@@ -50,7 +50,7 @@ import { resolveInstallRoot } from "../../lib/install-root.js";
 import { escalate, escalateAsync, ghIssueGateway, ghIssueGatewayAsync, tryEscalate, type Escalation, type EscalationJudgeVerdict, type AsyncIssueGateway, type IssueGateway } from "../../lib/escalate.js";
 import { mapRestPr, prStateFromRest, singlePrRestArgs, type ReviewReuseFacts, type GhApiFetcher, type RestPullRow, type RestRollupEntry } from "../../lib/open-prs-rest.js";
 import { probeMerge, type MergedTypecheckPorts } from "../../lib/merge-probe.js";
-import { recordDecision } from "../../lib/feedback-landing.js";
+import { recordDecision, recordDecisionAsync } from "../../lib/feedback-landing.js";
 import { preflightFailureNotice, preflightSummaryPath } from "../../lib/ci-parity.js";
 import { coverageNarrowSuites, type CoverageRun, type CoverageVerdict } from "../../lib/coverage-narrow.js";
 import { buildAffectedSuitesGraph, type AffectedSelection } from "../../lib/affected-suites.js";
@@ -1090,7 +1090,7 @@ export interface RunTaskContext {
   owner: string;
   plan: Plan;
   planPath: string;
-  recordDecisionFn: typeof recordDecision;
+  recordDecisionFn: typeof recordDecision | typeof recordDecisionAsync;
   repoRoot: string;
   runId: string;
   runReviewFn: RunTaskCommandHost["runReview"];
@@ -4299,10 +4299,10 @@ export async function runTask(
     /** Injectable decision-record writer+lander (W1-T191, write site 1) — lets a behavioral
      *  test drive a REAL runTask() through the DECISION_REQUEST auto-choose branch and assert
      *  exactly what it writes/lands, without ever shelling out to a real git/gh. Default: the
-     *  real {@link recordDecision} (feedback-landing.js), which writes
+     *  real {@link recordDecisionAsync} (feedback-landing.js), which writes
      *  `plan/decisions.d/<taskId>-<runId>.md` and lands it via the shared decisions-landing
      *  bridge — the same mechanism W1-T243 proved for `plan/feedback/**`. */
-    recordDecision?: typeof recordDecision;
+    recordDecision?: typeof recordDecision | typeof recordDecisionAsync;
     /** W1-T1045: override the resolved clock bound (ms) — the SAME injection convention as
      *  every other opt-in seam above. Default: `policy.values.workerAbandon`, read below. */
     workerAbandonMs?: number;
@@ -4625,7 +4625,7 @@ export async function runTask(
   const rawSpawn = opts.spawn ?? spawnWorker;
   const runReviewFn = opts.runReview ?? runReview;
   const fetchPrBodyFn = opts.fetchPrBody ?? fetchPrBodyViaGh;
-  const recordDecisionFn = opts.recordDecision ?? recordDecision;
+  const recordDecisionFn = opts.recordDecision ?? recordDecisionAsync;
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
   const owner = opts.owner ?? resolveOwner();
@@ -6791,7 +6791,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         // mentions this file), and best-effort landed via the SAME commit-bridge mechanism
         // W1-T243 proved for `plan/feedback/**`, so `repoRoot` never sits dirty waiting for
         // an operator to notice (the defect this task fixes).
-        landed = recordDecisionFn(repoRoot, {
+        landed = (await recordDecisionFn(repoRoot, {
           taskId,
           runId,
           options: decision.options,
@@ -6799,7 +6799,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           band: recordVerdict.band,
           reason: recordVerdict.reason,
           ...(decision.falsifier ? { falsifier: decision.falsifier } : {}),
-        }).landed;
+        })).landed;
       }
       log("decision.autochoose", {
         chosen,
