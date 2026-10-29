@@ -140,8 +140,9 @@ function harness(result: (args: SpawnWorkerArgs) => WorkerResult, opts: { pushLa
     loadMounts: () => ({}) as never,
     resolveMount: () => MOUNT,
     spawn: async (args) => {
-      prompts.push(args.prompt);
-      return result(args);
+      const worker = result(args);
+      prompts.push(args.promptFor?.({ provider: worker.provider ?? "claude", harnessOwnsGit: worker.provider === "codex" }) ?? args.prompt);
+      return worker;
     },
     ensureTaskTrailer: (prUrl) => {
       trailers.push(prUrl);
@@ -380,14 +381,15 @@ test("W1-T9667: a harness-owned repair prompt names no push or PR open", async (
   const claudeAlert = alertFixPrompt(ALERT, alertTaskId(ALERT));
   assert.ok(claudeAlert.includes("`git push origin HEAD` (NOT -u);") && claudeAlert.includes("gh pr create"));
   assert.ok(!claudeAlert.includes("THE PR BODY IS ALREADY WRITTEN"));
-  // Dispatched on a claude mount, both lanes keep the claude prompt: the router may still pick codex afterwards.
+  // The selected provider, rather than the requested mount, determines the prompt contract.
   const h = harness(() => codexResult(undefined, `REPORT\nPR_URL: ${FIX_PR}\n`));
   try {
     await h.main(request([FAILING_TEST]));
     await h.alert();
     const bodyFile = /THE PR BODY IS ALREADY WRITTEN, by the dispatcher, at: (\S+)/.exec(h.prompts[0]!)![1]!;
-    assert.equal(h.prompts[0], mainRepairFixPrompt(request([FAILING_TEST]), bodyFile));
-    assert.equal(h.prompts[1], claudeAlert);
+    assert.equal(h.prompts[0], mainRepairFixPrompt(request([FAILING_TEST]), bodyFile, true));
+    const alertBodyFile = /THE PR BODY IS ALREADY WRITTEN, by the dispatcher, at: (\S+)/.exec(h.prompts[1]!)![1]!;
+    assert.equal(h.prompts[1], alertFixPrompt(ALERT, alertTaskId(ALERT), { bodyFile: alertBodyFile }));
   } finally {
     h.cleanup();
   }

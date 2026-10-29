@@ -123,6 +123,66 @@ describe("test/sweep/fix-lane-escalated-none-fix-needs-design-at-this-exact-head
     assert.deepEqual([...f.state.refreshedPrs].sort(), [13416, 13417]);
   });
 
+  const refusalCases: Array<{
+    reason: string;
+    configure: (deps: SweepDeps, rows: Record<string, unknown>[]) => void;
+  }> = [
+    { reason: "updater-unavailable", configure: (deps) => { delete deps.updateBranch; } },
+    { reason: "main-tip-unavailable", configure: (deps) => { deps.readMainTip = async () => undefined; } },
+    { reason: "distance-unavailable", configure: (deps) => { deps.behindMainByPr = new Map(); } },
+    { reason: "not-behind", configure: (deps) => { deps.behindMainByPr = new Map([[13416, 0]]); } },
+    { reason: "already-attempted", configure: (_deps, rows) => {
+      rows.push({ step: "sweep.disposed", pr_number: 13416, [DESIGN_HOLD_MAIN_ADOPTION_FIELD]: "conflict" });
+    } },
+  ];
+
+  for (const scenario of refusalCases) {
+    test(`a terminal design hold records the exact main-adoption refusal arm (${scenario.reason})`, async () => {
+      const rows = designRows();
+      const f = fixture(rows);
+      scenario.configure(f.deps, rows);
+      await runSweep([pr()], f.deps);
+      assert.equal(lastDisposed(rows).design_hold_main_adoption_decision, scenario.reason);
+      assert.equal(lastDisposed(rows).disposition, "refused-escalate");
+      assert.equal(f.state.refreshed, 0);
+      assert.equal(f.state.dispatched, 0);
+      assert.equal(f.state.admissions, 0);
+      assert.equal(f.state.escalated, 1);
+    });
+  }
+
+  test("a due main adoption records eligibility separately from its update result", async () => {
+    const rows = designRows();
+    const f = fixture(rows, { outcome: "conflict" });
+    await runSweep([pr()], f.deps);
+    assert.equal(lastDisposed(rows).design_hold_main_adoption_decision, "due");
+    assert.equal(lastDisposed(rows)[DESIGN_HOLD_MAIN_ADOPTION_FIELD], "conflict");
+    assert.equal(f.state.refreshed, 1);
+    assert.equal(f.state.dispatched, 0);
+  });
+
+  test("an amended contract records that its existing refresh path owns the design handoff", async () => {
+    const rows = designRows();
+    const f = fixture(rows);
+    f.deps.readTaskContractRevision = () => "contract-B";
+    await runSweep([pr()], f.deps);
+    assert.equal(lastDisposed(rows).design_hold_main_adoption_decision, "contract-amended");
+    assert.equal(lastDisposed(rows).disposition, "blocked-fixable");
+  });
+
+  test("a second design-held head records the spent main-adoption pass budget", async () => {
+    const second = pr({ prNumber: 13417, prUrl: "https://github.com/o/remudero/pull/13417", taskId: "W1-T13417" });
+    const rows = [...designRows(), ...designRows().map(row => ({ ...row, task_id: "W1-T13417",
+      ...(row.repair_pr_url === undefined ? {} : { repair_pr_url: second.prUrl }) }))];
+    const f = fixture(rows);
+    await runSweep([pr(), second], f.deps);
+    assert.equal(lastDisposed(rows, 13416).design_hold_main_adoption_decision, "due");
+    assert.equal(lastDisposed(rows, 13417).design_hold_main_adoption_decision, "pass-budget-spent");
+    assert.equal(f.state.refreshed, 1);
+    assert.equal(f.state.escalated, 1);
+    assert.equal(f.state.dispatched, 0);
+  });
+
   test("the adoption is due only with a main tip, a refresh seam, a positive distance and no prior adoption", () => {
     const view = { prNumber: 13416 };
     assert.equal(designHoldMainAdoptionDue(view, [], 2, MAIN, true), true);

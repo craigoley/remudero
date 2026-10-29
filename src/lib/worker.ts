@@ -180,6 +180,7 @@ import {
   openWeightReservationUsd,
   readOpenWeightAllowance,
   spawnCodexWorker,
+  codexHarnessCommits,
   codexReadOnly,
   spawnOpenWeightWorker,
   FOUNDRY_CLAUDE_API_KEY_ENV,
@@ -450,6 +451,7 @@ export interface WorkerSelectionAssignment {
   version: 1;
   id: string;
   phase: "pre-execution";
+  harness_owns_git?: boolean;
   requested: {
     model: string;
     effort: string;
@@ -1153,6 +1155,8 @@ export interface SpawnWorkerArgs {
   /** Models whose drafts already failed this proposal's lint; context fit still applies first. */
   avoidModels?: readonly string[];
   prompt: string;
+  /** Render the lane contract after routing; absent preserves the supplied prompt. */
+  promptFor?: (route: { provider: WorkerProviderId; harnessOwnsGit: boolean }) => string;
   /** Resume an existing session (auto-choose round-trip, fix rounds). */
   resumeSessionId?: string;
   /** W1-T10164: identity comes from the prior result, not the requested mount. contextPrompt is
@@ -1617,6 +1621,11 @@ export function harnessOwnsGitFor(tools: readonly string[] | undefined): boolean
   return !tools.includes("Bash");
 }
 
+function harnessOwnsGitForProvider(args: SpawnWorkerArgs, provider: WorkerProviderId): boolean {
+  if (provider === "codex") return codexHarnessCommits(args);
+  return harnessOwnsGitFor(provider === "cash" ? args.cashTools ?? args.tools : args.tools);
+}
+
 export function cashCanServeToolSurface(tools: readonly string[] | undefined): boolean {
   // AN EMPTY BOUND IS NOT AN ABSENT ONE. `tools: []` is a DELIBERATE declaration carried by every
   // pure-judge rung here — `RISK_JUDGE_TOOLS` (lib/risk-judge.ts) is literally `[]`, and both
@@ -1893,6 +1902,7 @@ function emitWorkerSelectionAssignment(
   input: Parameters<typeof workerSelectionAssignment>[1],
 ): string | undefined {
   const assignment = workerSelectionAssignment(args, input);
+  if (args.promptFor) assignment.harness_owns_git = harnessOwnsGitForProvider(args, input.provider);
   console.error(JSON.stringify({ event: "worker.selection.assigned", assignment }));
   // W1-T4614: before the provider call, so every commit this worker makes in its run worktree names this assignment.
   stampAssignmentIfRunWorktree(args.cwd, assignment.id);
@@ -2514,11 +2524,22 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   validateWorkerMcpIsolation(args);
+  if (args.promptFor) {
+    const promptFor = args.promptFor;
+    const prompts = new Map<string, string>();
+    // Cash admission and its recursive retry must consume one rendering of the same contract.
+    args = { ...args, promptFor: route => {
+      const key = `${route.provider}:${route.harnessOwnsGit}`;
+      if (!prompts.has(key)) prompts.set(key, promptFor(route));
+      return prompts.get(key)!;
+    } };
+  }
   const executions = new Map<WorkerProviderId, ReturnType<typeof workerExecutionForProvider>>();
   const executionFor = (provider: WorkerProviderId) => {
     let execution = executions.get(provider);
     if (!execution) {
-      execution = workerExecutionForProvider(args, provider);
+      const prompt = args.promptFor?.({ provider, harnessOwnsGit: harnessOwnsGitForProvider(args, provider) }) ?? args.prompt;
+      execution = workerExecutionForProvider({ ...args, prompt }, provider);
       execution.prompt = withWorkspaceCleanup(execution.prompt);
       executions.set(provider, execution);
     }
@@ -3075,6 +3096,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         config, runId: args.runId, taskId: args.taskId,
         cashSqueezed: args.cashSqueezed === true,
         modelApprovals: config.modelApprovals,
+        ...(args.routingTrial?.id === "inbox-bakeoff" && args.routingTrial.arm === "cash" && args.routingTrial.models?.length === 1
+          ? { bakeoffDeployment: args.routingTrial.models[0] } : {}),
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
     );

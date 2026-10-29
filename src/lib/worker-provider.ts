@@ -1336,6 +1336,8 @@ export interface OpenWeightSelectionOptions {
   ready?: (deployment: string) => boolean;
   /** Restricts the row to these deployments, keeping row order (the cash trial's model list). */
   only?: readonly string[];
+  /** Inbox replay measures a ready deployment independently of its production routing row. */
+  bakeoffDeployment?: string;
 }
 
 /**
@@ -1369,7 +1371,14 @@ export function selectOpenWeightModel(
     options.config ? cashDeploymentEndpoint(options.config, deployment) : undefined);
   const capability = openWeightCapabilityForRequestedModel(capabilities, requestedModel);
   const rowCandidates = openWeightCandidatesForCapability(capabilities, capability, requestedEffort);
-  const configured = options.only ? rowCandidates.filter((candidate) => options.only!.includes(candidate)) : rowCandidates;
+  const ready = options.ready ?? ((deployment: string) => openWeightDeploymentReady(deployment));
+  const trial = options.bakeoffDeployment;
+  if (trial !== undefined && (!ready(trial) ||
+    (CASH_RESPONSES_DEPLOYMENTS[trial] && !CASH_RESPONSES_DEPLOYMENTS[trial]!.includes(requestedEffort ?? "medium")))) {
+    throw new Error(`inbox bake-off deployment '${trial}' is not ready at effort '${requestedEffort ?? "medium"}'`);
+  }
+  const configured = trial !== undefined ? [trial]
+    : options.only ? rowCandidates.filter((candidate) => options.only!.includes(candidate)) : rowCandidates;
   // Cash and subscription are separate billing lanes. A normal cash request keeps the measured
   // OSS/nano order, but a cash request reached only after a blocked subscription auction may use
   // Luna first. The context gate still wins: a squeeze never routes an oversized prompt to Luna.
@@ -1378,7 +1387,6 @@ export function selectOpenWeightModel(
   const candidates = options.cashSqueezed && luna.length > 0
     ? [...luna, ...configured.filter((candidate) => !luna.includes(candidate))]
     : configured;
-  const ready = options.ready ?? ((deployment: string) => openWeightDeploymentReady(deployment));
   const allowed = candidates.filter((candidate) =>
     SAFE_OPENWEIGHT_MODEL_ID.test(candidate) && modelAllowed(candidate, { modelApprovals: options.modelApprovals }));
   // PREFER READY, ELSE BEHAVE AS BEFORE: with no ready candidate every existing refusal still fires.

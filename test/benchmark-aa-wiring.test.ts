@@ -2,11 +2,17 @@
 // command registry, refuses bad input by name, and keeps a stale report when its sources fail.
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { benchmarkAaCommand, buildBenchmarkAaReport, type BenchmarkAaReport } from "../src/lib/benchmark-aa.js";
 import { COMMANDS, HANDLERS } from "../src/run-task.js";
+import type { AaTrialManifest } from "#src/lib/benchmark-aa.js";
+import { runProspectiveAa } from "#src/lib/benchmark-aa-prospective.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const SHA = "d".repeat(40);
 const NOW = "2026-09-27T12:10:00.000Z";
@@ -80,6 +86,43 @@ test("rmd benchmark-aa is a registered operator verb that reaches the A/A report
     assert.ok(printed.some((line) => /receipt benchmark-aa-receipt-v1 [0-9a-f]{16} written to /.test(line)));
     assert.equal(JSON.parse(readFileSync(saved, "utf8")).lateEvidence.state, "none", "the second run read the first as its prior");
   });
+});
+
+test("the balanced operator verb invokes registration and the real readiness runtime", async t => {
+  const { dir } = ownedFixtureDir(t, "balanced-operator-verb");
+  const configDir = join(dir, ".config", "remudero");
+  const stateDir = join(dir, "state");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(stateDir);
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({ claudeBin: "/bin/true", root: dir }));
+  const tasks = Array.from({ length: 12 }, (_, i) => ({ taskId: `CLI-${i}`, taskClass: "implement", risk: "low" }));
+  const manifest: AaTrialManifest = { version: "benchmark-aa-trial-v1", trialId: "balanced-cli-aa",
+    cohort: { kind: "public-fixture" }, stack: { provider: "codex", model: "gpt-6.1-sol", effort: "low",
+      harnessRevision: SHA, promptRevision: SHA, toolRevision: SHA, scorerRevision: SHA, environmentRevision: SHA },
+    labels: ["A1", "A2"], strataRevision: "v1", tasks };
+  const requestPath = join(dir, "request.json");
+  writeFileSync(requestPath, JSON.stringify({ phase: "aa", manifest, selections: tasks.map(({ taskId }) => ({
+    task_id: taskId, worker_assignment: { selected: { provider: "codex", effort: "low" },
+      routing: { decision: { capability: "balanced" } } } })) }));
+  assert.ok((await runProspectiveAa({ action: "register", stateDir,
+    manifest: { ...manifest, trialId: "balanced-existing-aa" }, clock: fixedClock(Date.parse(NOW)) })).ok);
+  const homedir = t.mock.method(os, "homedir", () => dir);
+  syncBuiltinESMExports();
+  const printed: string[] = [];
+  const log = t.mock.method(console, "log", (line: string) => { printed.push(line); });
+  try {
+    const code = await HANDLERS.get("benchmark-aa")!(["balanced", "--request", requestPath, "--state-dir", stateDir]);
+    assert.equal(code, 2);
+    const result = JSON.parse(printed.at(-1)!) as { ok: boolean; reason: string };
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /another-prospective-aa-active:.*balanced-existing-aa/);
+    const followUps = readFileSync(join(stateDir, "benchmark-aa-readiness.follow-ups.ndjson"), "utf8");
+    assert.match(followUps, /"trialId":"balanced-cli-aa"/);
+  } finally {
+    log.mock.restore();
+    homedir.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test("rmd benchmark-aa refuses bad input by name before reading any ledger", async () => {

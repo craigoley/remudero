@@ -1,0 +1,97 @@
+- id: W1-T10937
+  repo: remudero
+  title: Preserve directly evidenced CodeQL file coverage with its own measurement identity
+  type: implement
+  verify: auto
+  author_class: machine
+  status: queued
+  attempts: 0
+  priority: 1
+  budget_usd: 18
+  risk: high
+  band_meaning: span
+  principles:
+    tdd: strict
+  depends_on: [W1-T10889]
+  plan_refs:
+    - W1-T10560
+    - W1-T10889
+  files:
+    - scripts/code-health-provenance.mjs
+    - src/lib/code-health-projection.ts
+    - test/infra/code-health-contract.test.ts
+    - test/console-api/views/code-health-projection.test.ts
+    - docs/views.md
+  origin: >-
+    cockpit-codeql-scope: Natural main CodeQL run40728512605 after merged PR15190
+    preserves source identity but all three language packets remain partial because no original
+    artifact has the analysisTarget role. No new scan or opportunity was induced.
+  rationale: >-
+    The original scan includes a different native source of processed-file evidence. CodeQL's
+    exact2.27.3 release contains diagnostic queries for successfully extracted files, separately
+    from its expected-file baseline. Supporting verified processed-file diagnostics can preserve
+    real measurements without treating result locations or expected files as measured coverage.
+    A distinct method identity must prevent comparison with the legacy explicit-target method.
+  design: >-
+    First verify the original diagnostic representation against authoritative CodeQL2.27.3 sources
+    and the actual production output shape. The researched release tag resolves to
+    ea3abbb69c242cf3b92527b56d32fe3eb7c6919b. Its diagnostic queries identify
+    js/diagnostics/successfully-extracted-files, py/diagnostics/successfully-extracted-files and
+    actions/diagnostics/successfully-extracted-files, with the successfully-extracted-files tag.
+    Preserve exact source references and realistic bounded test fixtures; do not guess how an
+    unobserved original location or descriptor is encoded. If a required producer fact cannot be
+    established, retain partial evidence and emit only bounded allowlisted structural diagnostics.
+
+    Add a separately named quality-scope method, codeql-extracted-files, for directly evidenced
+    processed-file diagnostics from the matching language family and source run. Resolve known
+    descriptor references strictly, validate the original source identity and invocation, and
+    require bounded repository-relative resolved locations. Reject ambiguous descriptors, foreign
+    languages, invalid encodings, escaping or absolute paths, missing or contradictory completion,
+    malformed populations and over-bound inputs. Deduplicate only canonical matching paths.
+    Expected-file notifications, baseline metrics, arbitrary artifacts, alert/result locations,
+    finding counts and configured glob intent cannot supply the measured population. Unknown or
+    empty diagnostic populations never become complete or healthy. Preserve the legacy
+    explicit-analysis-targets path and its current refusals; do not silently relabel extracted
+    evidence as legacy role evidence or union incomparable methods.
+
+    Extend the internal provenance reader only for this explicit quality-method case. Keep coverage
+    restricted to instrumented-source-files and preserve every existing repository/SHA/run/attempt,
+    tool/rules/config/exclusions, completion, shape, size, file-count, state and hash guard. Bind the
+    new scope hash to its method and canonical file population so the same paths under different
+    methods cannot compare as unchanged; retain method-code fingerprints. Add reader and comparison
+    tests and demonstrate real production producer-to-reader wiring. Keep code-health-source-v1's
+    bounded metadata publication and privacy limits, without raw source paths, result messages,
+    security contents or extra credentials in diagnostics or artifacts. Document the processed-file
+    scope and limits in the existing view guide, without claiming comprehensive security coverage.
+
+    No workflow, scanner, query suite, exclusion, severity, threshold, schedule, resource allowance,
+    ownership, admission, review, dispatch, merge, service lifecycle or UI hold changes. No new scan,
+    paid work on view reads, forced collector, manufactured finding or write-parity fixture.
+    Validate on the actual committed tree through normal admission, author checks, stored-body
+    proofs, hosted checks and native review. After merge, qualify only naturally produced main
+    evidence and authenticated intended-repository/consolidated reads. Source merge alone grants
+    no score, planning availability, measured benefit, consumer release or runtime readiness.
+  acceptance:
+    - claim: Quality provenance preserves verified CodeQL processed files under a distinct measurement method
+      proof: "unit test: Code health preserves original extracted-file coverage with its own method identity"
+    - claim: Baselines foreign diagnostics malformed populations and missing evidence cannot establish measured coverage
+      proof: "unit test: Code health extracted-file evidence refuses inferred foreign and incomplete populations"
+    - claim: The production reader preserves source binding legacy refusals and comparison boundaries for the new method
+      proof: "unit test: Code health source reader preserves extracted-file identity and comparison guards"
+  falsifier: >-
+    Remove descriptor/language/source binding, admit expected-file or result-location evidence,
+    skip invalid members, ignore completion contradictions, erase the method from the scope hash,
+    or accept the new method for coverage. Each corresponding negative test must fail. Removing
+    the new verified producer path must fail its positive integration test while all legacy
+    explicit-target and coverage refusals remain exercised. Keep physical file and actual test
+    summaries, including failed/NOT_RUN receipts, and qualify each exact head separately.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.87
+    reasons:
+      - "The filed scope confines the remedy to provenance production, reading, tests and documentation, with a distinct measurement identity and explicit comparison boundaries."
+      - "The design requires authoritative source verification and retention of partial evidence when producer facts cannot be established; acceptance criteria cover malformed, foreign and incomplete populations."
+      - "The supplied record explicitly excludes credentials, policy changes, new scans and release authorization. No concerning gate outcome is shown; implementation correctness remains unverified at filing time."
+    judged_at: "2026-10-28T17:59:36.252Z"
+    pin: "eb217eca3935f41a12b1069693dc1508079a3e0be50c7bcc4dbacd4916835b04"
