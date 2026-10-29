@@ -38,6 +38,8 @@ import { TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { parseGateSandboxMeasurement, type GateSandboxMeasurement } from "./gate-sandbox-metrics.js";
 import { spoolEscalation, withdrawSpooledEscalation } from "./host-escalation-spool.js";
+import { preopenGateHealth, type PreopenGateHealth } from "./preopen-gate-health.js";
+import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 
 export const PREOPEN_GATE_STEP = "implement.preopen_gate";
 export const PREOPEN_UNMEASURED_ALERT_AT = 3;
@@ -75,24 +77,32 @@ export function updatePreopenGateAlert(opts: {
   try {
     const rows = opts.readRows();
     const streak = detectUnmeasuredPreopenStreak(rows);
+    const health = preopenGateHealth(rows, (opts.clock ?? systemClock).now());
     const prior = rows.findLast(row => row.step === `${PREOPEN_GATE_STEP}.alert` && (row.action === "raised" || row.action === "cleared"));
     const identity = { taskId: "HARNESS", summary: "fleet pre-open gates are unmeasured" };
     const meta = { source: PREOPEN_GATE_STEP, host: opts.host ?? "fleet", clock: opts.clock ?? systemClock };
-    if (streak.alert && (prior?.action !== "raised" || prior.streak_first_ts !== streak.firstTs)) {
+    const lastGate = rows.findLast(row => row.step === PREOPEN_GATE_STEP);
+    const unhealthy = health.state === "unhealthy";
+    if ((unhealthy || streak.alert) && (prior?.action !== "raised" || unhealthy && prior.health_state !== "unhealthy")) {
       spoolEscalation(opts.stateDir, {
         ...identity, class: "BLOCKED", runId: String(streak.firstRunId), headDedup: "independent",
-        detail: `${streak.consecutive} consecutive pre-open gates were unmeasured across the fleet. ` +
+        detail: unhealthy ? `${health.nonPassStreak} measured non-passes since last pass ${health.lastPass}; ` +
+          `historical pass rate ${health.passRate}, streak probability ${health.streakProbability}. Dominant failures: ` +
+          health.failedSteps.map(step => `${step.name} (${step.count}): ${step.detail ?? "no recorded detail"}`).join("; ")
+          : `${streak.consecutive} consecutive pre-open gates were unmeasured across the fleet. ` +
           `First: ${streak.firstTs} (run ${streak.firstRunId}); newest: ${streak.newestTs}. Reason: ${streak.reason}`,
         options: [
           { label: "repair gate execution", detail: "inspect the named containment or backstop failure on the host and restore measured gates" },
-          { label: "wait for recovery", detail: "builds continue; the next measured pass or fail clears this alert" },
+          { label: "wait for recovery", detail: "builds continue; a canary pass clears an unhealthy alert" },
         ],
         recommendation: "repair gate execution",
         consequence: "build pull requests continue opening without a measured local fast gate",
       }, meta);
-      opts.log(`${PREOPEN_GATE_STEP}.alert`, { consecutive: streak.consecutive, streak_first_ts: streak.firstTs, action: "raised" });
-    } else if (streak.consecutive === 0 && prior?.action === "raised") {
-      withdrawSpooledEscalation(opts.stateDir, identity, "A pre-open gate was measured again (pass or fail); the unmeasured streak has ended.", meta);
+      opts.log(`${PREOPEN_GATE_STEP}.alert`, { consecutive: streak.consecutive, streak_first_ts: streak.firstTs,
+        health_state: health.state, action: "raised" });
+    } else if (prior?.action === "raised" && (lastGate?.result === "pass" ||
+      (prior.health_state !== "unhealthy" && !unhealthy && streak.consecutive === 0))) {
+      withdrawSpooledEscalation(opts.stateDir, identity, "The pre-open gate recovered; its alert condition has ended.", meta);
       opts.log(`${PREOPEN_GATE_STEP}.alert`, { consecutive: 0, streak_first_ts: prior.streak_first_ts, action: "cleared" });
     }
   } catch (error) {
@@ -123,7 +133,8 @@ export type PreopenGateResult = (
   | { kind: "pass"; durationMs: number; containment?: GateContainmentMode; pushGate?: PreopenPushGate }
   | ({ kind: "fail"; failedSteps: string[]; durationMs: number; containment?: GateContainmentMode; pushGate?: PreopenPushGate } & GateStepDetail)
   | ({ kind: "unmeasured"; reason: string; durationMs: number; deadlineEnforcedBy?: GateDeadlineEnforcer; containment?: GateContainmentMode } & GateStepDetail)
-) & { sandboxMetrics?: GateSandboxMeasurement };
+  | { kind: "skipped"; reason: "gate-unhealthy"; durationMs: number }
+) & { sandboxMetrics?: GateSandboxMeasurement; containment?: GateContainmentMode; backstopMs?: number; backstopBasis?: PreopenGateHealth["backstopBasis"]; canary?: boolean };
 
 /**
  * W1-T9556 — who ended a gate at its backstop: coreutils `timeout` (needs no node loop), the deadline runner
@@ -197,6 +208,7 @@ export function gateStepIsEnvironment(detail: string): boolean {
 }
 
 export interface PreopenGateOptions {
+  history?: { stateDir: string; readRows: () => readonly Record<string, unknown>[] };
   /** Runs the fast gate in `cwd`; resolves when the child exits, whatever its status. */
   runGate?: (cwd: string) => Promise<GateRun>;
   readFile?: (path: string) => string;
@@ -490,7 +502,7 @@ export const GATE_SUMMARY_NAME = "preflight-summary.json";
 export function defaultRunGate(
   cwd: string, harnessRmd?: string, log?: GateLog, deadline: RunGateDeadline = {}, containment: RunGateContainment = {},
 ): Promise<GateRun> {
-  const backstopMs = deadline.backstopMs ?? PREOPEN_GATE_BACKSTOP_MS;
+  const backstopMs = deadline.backstopMs ?? preopenGateHealth([], (deadline.clock ?? systemClock).now()).backstopMs;
   const timeoutBin = deadline.timeoutBin === undefined ? gateTimeoutBin() : deadline.timeoutBin;
   const startedAt = (deadline.clock ?? systemClock).now();
   const deadlineAt = startedAt + backstopMs;
@@ -586,7 +598,37 @@ export async function runPreopenGate(worktreePath: string, deps: PreopenGateOpti
   const clock = deps.clock ?? systemClock;
   const now = () => clock.now();
   const startedAt = now();
-  const run = await (deps.runGate ?? ((cwd) => defaultRunGate(cwd, undefined, deps.log, {}, { contain: deps.contain, readFile: deps.readFile })))(worktreePath);
+  let health: PreopenGateHealth;
+  let lease: InflightLockHandle | undefined;
+  try {
+    const stateDir = deps.history?.stateDir;
+    const rows = deps.history?.readRows() ?? [];
+    health = preopenGateHealth(rows, startedAt);
+    if (health.state === "unhealthy" && stateDir) {
+      try {
+        lease = acquireInflightLock(join(stateDir, "preopen-canary"), "gate", { run_id: `preopen-${process.pid}-${startedAt}` });
+      } catch (error) {
+        if (!(error instanceof InflightLockError)) throw error;
+        return { kind: "skipped", reason: "gate-unhealthy", durationMs: 0,
+          backstopMs: health.backstopMs, backstopBasis: health.backstopBasis, canary: false };
+      }
+    }
+  } catch (error) {
+    return { kind: "unmeasured", reason: `pre-open gate admission failed: ${String(error)}`, durationMs: 0 };
+  }
+  try {
+    const result = await measurePreopenGate(worktreePath, deps, health.backstopMs, startedAt);
+    // An injected runner without history owns its deadline; do not claim a bound it did not use.
+    if (deps.runGate && !deps.history) return result;
+    return { ...result, backstopMs: health.backstopMs, backstopBasis: health.backstopBasis, canary: lease !== undefined };
+  } finally {
+    lease?.release();
+  }
+}
+
+async function measurePreopenGate(worktreePath: string, deps: PreopenGateOptions, backstopMs: number, startedAt: number): Promise<PreopenGateResult> {
+  const now = () => (deps.clock ?? systemClock).now();
+  const run = await (deps.runGate ?? ((cwd) => defaultRunGate(cwd, undefined, deps.log, { backstopMs, clock: deps.clock }, { contain: deps.contain, readFile: deps.readFile })))(worktreePath);
   const fast = classifyGateRun(run, now() - startedAt);
   if (fast.kind === "unmeasured") return fast;
   // W1-T10267: a procfs write in a changed test blocks until timeout-minutes in CI; refuse it here, before a PR opens.
@@ -615,7 +657,7 @@ export async function runPreopenGate(worktreePath: string, deps: PreopenGateOpti
  * Carried onto a result the procfs or push gate rebuilt, and recorded on the `implement.preopen_gate` row. Empty for a pass.
  */
 export function preopenGateStepDetail(result: PreopenGateResult): GateStepDetail {
-  if (result.kind === "pass") return {};
+  if (result.kind === "pass" || result.kind === "skipped") return {};
   return { ...(result.failedDetail ? { failedDetail: result.failedDetail } : {}), ...(result.environmentSteps ? { environmentSteps: result.environmentSteps } : {}) };
 }
 
@@ -624,7 +666,7 @@ export function preopenGateStepDetail(result: PreopenGateResult): GateStepDetail
 export const PUSH_GATE_STEP_NAME = "push-gate";
 
 /** Pass and fail are the child's exit status (0 and 1) as the harness observed it; anything else is unmeasured. */
-function classifyGateRun(run: GateRun, durationMs: number): PreopenGateResult {
+function classifyGateRun(run: GateRun, durationMs: number): Exclude<PreopenGateResult, { kind: "skipped" }> {
   const containment = { ...(run.containment ? { containment: run.containment } : {}), ...(run.sandboxMetrics ? { sandboxMetrics: run.sandboxMetrics } : {}) };
   if (run.error !== undefined) {
     return { kind: "unmeasured", reason: run.error, durationMs, ...(run.deadlineEnforcedBy ? { deadlineEnforcedBy: run.deadlineEnforcedBy } : {}), ...containment };
@@ -652,6 +694,7 @@ export function preopenGateLedgerFields(result: PreopenGateResult): Record<strin
   const containment = result.containment === undefined ? {} : { launcher: "harness", containment: result.containment, env_allowlist: PREOPEN_GATE_ENV_ALLOWLIST_NAME };
   const push = "pushGate" in result && result.pushGate ? result.pushGate : undefined;
   return {
+    ...(result.backstopMs === undefined ? {} : { backstop_ms: result.backstopMs, backstop_basis: result.backstopBasis, canary: result.canary }),
     ...(failedDetail ? { failed_detail: failedDetail } : {}),
     ...(environmentSteps ? { environment_steps: environmentSteps } : {}),
     ...containment,
