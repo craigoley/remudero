@@ -77,7 +77,12 @@ async function daemonDeps(board: GitHub, planPath: string): Promise<DaemonDeps> 
   try {
     let captured: DaemonDeps | undefined;
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
-      githubFactory: () => board,
+      // This board models Core alone; enrollment comes from the fixture, not the live checkout.
+      repoRoot: root,
+      githubFactory: (_owner, repo) => {
+        assert.equal(repo, "remudero", "the fixture board belongs only to Core");
+        return board;
+      },
       runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
         deps.refreshMerged();
         captured = deps;

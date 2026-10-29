@@ -1,0 +1,52 @@
+- id: W1-T10960
+  title: Retain explicit readiness decisions for live App OAuth runtime adoption and public
+    field-trial release
+  repo: remudero
+  depends_on: []
+  type: manual
+  verify: human
+  budget_usd: 0
+  risk: high
+  band_meaning: blast-radius
+  origin: operator-approved-followups:2026-10-28
+  plan_refs:
+    - W1-T10573
+    - W1-T10331
+    - W1-T9795
+    - W1-T10756
+    - W1-T10831
+    - W1-T10832
+    - W1-T10878
+  files: []
+  status: queued
+  priority: 4
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: "This is a held operator checklist, not a dispatchable implementation or permission to act.
+    Reconcile with the existing responsible owners: staged private App key/launcher/installation
+    permissions and real mint, Claude OAuth/human reauthentication, runtime/image/automatic
+    ACR/recycle adoption and public field-trial consent. Each has a named ready/held/deferred
+    disposition, qualified source, exact private evidence and concrete action. Preserve SHADOW,
+    Craig override, W7740 and all current resource/spend/Janitor settings. Do not disable Janitor
+    from obsolete history. No rollout, auth flow, public release, schedule or worker interruption
+    occurs before the responsible human is ready. Existing approvals in another owner scope must be
+    verified there; this filing neither revokes nor widens them."
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Human readiness remains required; do not
+    auto-dispatch or infer readiness from archive.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it touches secrets, auth, tokens or permissions (\"OAuth\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-28T23:01:55.550Z"
+    pin: "2d2dfde6f4a473faabc100e25ed6af7f93dc004df43a15e552849429c812f6d9"

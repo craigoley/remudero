@@ -1,0 +1,50 @@
+- id: W1-T10945
+  title: Observe why PRs that add no reach importer go red on the reach ratchet after the W1-T10820 re-measure, before any class-wide repair
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: recon
+  verify: human
+  risk: low
+  origin: operator-session#plan-pr-merge-recon-2026-10-28
+  plan_refs:
+    - W1-T10820
+    - W1-T5702
+    - W1-T10793
+    - W1-T10935
+  files:
+    - docs/recon/reach-ratchet-reds-without-a-new-importer.md
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The report lists every reach-ratchet refusal (the suite test/the-affected-suite-reach-ratchet.test.ts failing in CI or in a fix round's census check) from 2026-10-27T23:15:08Z, when #14861 merged, to seven days after this filing merges. Each row has the PR, task, head, merge-base and main shas, the refused metric with both numbers, and the named new importers"
+      proof: "demonstration: the operator reads the report and sees one row per refusal in the window, with the newest ledger ts read and a positive control showing the query saw its corpus"
+    - claim: For each refusal that names no new importer, the report measures the record's metrics at the PR's merge base, at its head, and at main when it was refused, and says whether the PR's own diff or main's movement crossed the record
+      proof: "demonstration: the operator reads the report and sees the three measurements and an attribution (PR diff, main movement or unknown) for every refusal that names no new importer"
+    - claim: The report applies the falsifier and either closes the class hypothesis or names one mechanism shared by the cohort
+      proof: "demonstration: the operator reads the report and sees the falsifier's result and either a closed hypothesis with the separate causes kept or one named mechanism"
+    - claim: Only if one mechanism is named, the report recommends an implement task whose acceptance is that a PR adding no importer stays green when main adds one, and names the code it would change
+      proof: "demonstration: the operator reads the report and sees either that recommendation with its code path or a statement that none is made"
+  rationale: |
+    The operator's 2026-10-28 brief states that the W1-T10820 (#14861) one-time re-measure requires exact equality, so every new #src/run-task.js importer that lands on main turns open PRs red again.
+    OBSERVED at origin/main 9acbbe93f: recordedVerdict in test/the-affected-suite-reach-ratchet.test.ts requires exact equality only for the one transition, a main record with no resolution to "package-imports". Main's scripts/affected-reach-baseline.json has carried resolution "package-imports" since #14861 merged at 2026-10-27T23:15:08Z (1010 / 85 / 48.983050847457626). From then on the check is the shrink-only rule (reachVerdict), and the exact-equality branch cannot fire for a PR cut from main after that merge.
+    OBSERVED: the exact-equality refusal text ("must equal the live measurement exactly") appears once in the whole ledger (683 archives plus the live file): #14861's own fix round at 2026-10-27T16:58:49Z. #14861 carries a commit "re-measure after main's W1-T9549 alias importer", the importer from #14967, which merged at 21:50:57Z. So #14967 forced one re-measure during the transition.
+    OBSERVED: after 23:15:08Z the shrink-only rule refused fix rounds and PRs for W1-T10562, W1-T9114, W1-T10798 (#15022), W1-T10799, W1-T10408, W1-T10896 and W1-T10897, with "importerCount: 1011 > 1010" or "medianReachPercent: 48.984034833091435 > 48.983050847457626". Some of these refusals name the PR's own new importer, which is the ratchet working. Others name "new importers: none" and overshoot the median by about 0.001 points (W1-T10798 at 02:12Z, 02:14Z and 05:15Z, escalated at 05:17Z; W1-T10562 at 01:22Z; W1-T9114 at 01:18Z; W1-T10799 at 04:33Z; W1-T10896 at 11:29Z).
+    OBSERVED: origin/main 9acbbe93f passes the suite (# tests 6, # pass 6, # fail 0) and reads medianReachPercent 48.87073522345026, below the record.
+    INFERRED, not established: a refusal that names no new importer could come from main moving the median, or from the PR's own new or removed suites shifting the median denominator. A recurrence count is a class signal, not a diagnosis (doctrine: recurrence is a class signal), so this task observes before any repair. W1-T10793 (the ci-friction gardener's rung-1 task on this suite) and W1-T10935 (inherited pre-transition baseline drift) cover adjacent causes. Keep both and every per-PR disposition unchanged.
+  falsifier: |
+    If every refusal in the window that names no new importer reproduces at the PR's head measured against its own merge base (that is, the PR's own diff crosses the record), the hypothesis that main's importers turn importer-free PRs red is closed and no class-wide repair is filed. If main's measurement at refusal time is at or under the record for those PRs, the same conclusion holds. Only a cohort where the PR's diff stays under the record while main's movement crosses it supports the class.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-28 at priority normal (2), as an observation proposal first.
+    Read-only: no baseline edit, threshold change, exemption or re-measure is authorized by this task. Any repair is a separate filing.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "The filed scope declares one recon report and explicitly prohibits baseline edits, threshold changes, exemptions and re-measurement; any repair requires a separate filing."
+      - "The acceptance requires refusal-level evidence, three-SHA measurements, a positive control and a falsifier before recommending any repair, consistent with the stated observation-before-class-wide-repair doctrine."
+      - "The supplied gates identify an operator-authored filing; the declared scope requests no secrets access, deletion, irreversible action or merge, deploy, infrastructure or review policy change."
+      - "the judge said proceed, but W1-T10945: at verify: auto it fails lint (proof-dialect)"
+    judged_at: "2026-10-28T22:19:16.251Z"
+    pin: "a25316d8ee85a73d99a6d7d8f7f0561911e91416c3faed4a002a93382c81fef2"

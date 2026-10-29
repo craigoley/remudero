@@ -98,45 +98,46 @@ function countingRunner(): { calls: string[][]; runGit: GitRunner } {
 
 // ── (1) THE CALL COUNT IS CONSTANT IN THE SHARD COUNT ────────────────────────────────────────
 
-test("readOriginShardsAtRef reads 50 shards in exactly two git calls — one ls-tree, one cat-file --batch", () => {
+// The shard listing, then readBlobsAtRef's own listing of blob ids (PR-15230's by-id read), then the batch.
+test("readOriginShardsAtRef reads 50 shards in exactly three git calls — two ls-tree, one cat-file --batch", () => {
   const { calls, runGit } = countingRunner();
   const shards = readOriginShardsAtRef("/repo", "plan", runGit, "origin/main");
 
   assert.equal(shards.length, SHARD_COUNT, "the fixture must actually supply 50 shards, or the count below is vacuous");
   assert.equal(
     calls.length,
-    2,
-    `50 shards must cost 2 git calls, not 1 per shard — got ${calls.length}: ${calls.map((a) => a[0]).join(",")}`,
+    3,
+    `50 shards must cost 3 git calls, not 1 per shard — got ${calls.length}: ${calls.map((a) => a[0]).join(",")}`,
   );
-  assert.deepEqual(calls.map((a) => a[0]), ["ls-tree", "cat-file"]);
+  assert.deepEqual(calls.map((a) => a[0]), ["ls-tree", "ls-tree", "cat-file"]);
   assert.equal(calls.filter((a) => a[0] === "show").length, 0, "no per-shard `git show` may survive");
-  assert.deepEqual(calls[1], ["cat-file", "--batch"], "the batch form is the one that takes its object list on stdin");
+  assert.deepEqual(calls[2], ["cat-file", "--batch"], "the batch form is the one that takes its object list on stdin");
 });
 
-test("materializeOriginShards writes 50 shards to disk from the same two git calls, byte-for-byte", () => {
+test("materializeOriginShards writes 50 shards to disk from the same three git calls, byte-for-byte", () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "rmd-spawncount-mat-"));
   const { calls, runGit } = countingRunner();
   const got = materializeOriginShards("/repo", "plan", tmpDir, runGit, "origin/main");
 
   assert.equal(got.length, SHARD_COUNT);
-  assert.equal(calls.length, 2, `writing 50 shards must still cost 2 git calls — got ${calls.length}`);
+  assert.equal(calls.length, 3, `writing 50 shards must still cost 3 git calls — got ${calls.length}`);
   // The multi-byte shard is FIRST, so a char-sliced batch parse corrupts the ones after it.
   assert.equal(readFileSync(join(tmpDir, "tasks.d", shardName(0)), "utf8"), task("W9-T000", true));
   assert.equal(readFileSync(join(tmpDir, "tasks.d", shardName(SHARD_COUNT - 1)), "utf8"), task("W9-T049"));
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test("loadPlanAtRef reads a 50-shard plan in exactly three git calls — show, ls-tree, cat-file --batch", () => {
+test("loadPlanAtRef reads a 50-shard plan in exactly four git calls — show, two ls-tree, cat-file --batch", () => {
   const { calls, runGit } = countingRunner();
   const plan = loadPlanAtRef("/repo", "plan/tasks.yaml", "HEAD", runGit);
 
   assert.equal(plan.tasks.length, SHARD_COUNT + 1, "one monolith task plus 50 shard tasks");
   assert.equal(
     calls.length,
-    3,
-    `50 shards must cost 3 git calls, not 52 — got ${calls.length}: ${calls.map((a) => a[0]).join(",")}`,
+    4,
+    `50 shards must cost 4 git calls, not 52 — got ${calls.length}: ${calls.map((a) => a[0]).join(",")}`,
   );
-  assert.deepEqual(calls.map((a) => a[0]), ["show", "ls-tree", "cat-file"]);
+  assert.deepEqual(calls.map((a) => a[0]), ["show", "ls-tree", "ls-tree", "cat-file"]);
 });
 
 // ── (2)+(3) THE PLAN IS UNCHANGED, AND THE BYTES SURVIVE THE FRAMING ─────────────────────────
