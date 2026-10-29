@@ -1676,17 +1676,18 @@ export function cashAllowanceFallbackRefusal(config: Config, prompt: string, dep
   }
 }
 
-function cashSonnetAlternatives(prompt: string, config: Config, ctx: { runId?: string; taskId?: string }): string[] {
+export function cashSonnetAlternatives(prompt: string, config: Config, ctx: { runId?: string; taskId?: string }): string[] {
   hydrateCashCapacity(config);
-  const deployment = "gpt-6.1-sol";
-  if (!openWeightDeploymentReady(deployment)) return [];
   const estimatedTokens = openWeightEstimatedTokens(Buffer.byteLength(prompt, "utf8"));
-  const limitTokens = learnedCashLimit(deployment, cashDeploymentEndpoint(config, deployment));
-  if (openWeightDeploymentHolds(deployment, estimatedTokens, limitTokens)) return [deployment];
-  if (limitTokens !== undefined && openWeightDeploymentHolds(deployment, estimatedTokens, Number.POSITIVE_INFINITY)) {
-    recordCashCapacityShortfall(config, { reason: "capacity_shortfall", deployment, estimatedTokens, limitTokens }, ctx);
-  }
-  return [];
+  return ["gpt-6.1-terra", "gpt-6.1-sol"].filter((deployment) => {
+    if (!openWeightDeploymentReady(deployment)) return false;
+    const limitTokens = learnedCashLimit(deployment, cashDeploymentEndpoint(config, deployment));
+    if (openWeightDeploymentHolds(deployment, estimatedTokens, limitTokens)) return true;
+    if (limitTokens !== undefined && openWeightDeploymentHolds(deployment, estimatedTokens, Number.POSITIVE_INFINITY)) {
+      recordCashCapacityShortfall(config, { reason: "capacity_shortfall", deployment, estimatedTokens, limitTokens }, ctx);
+    }
+    return false;
+  });
 }
 
 /** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
