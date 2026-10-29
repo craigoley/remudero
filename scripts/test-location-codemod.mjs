@@ -120,6 +120,10 @@ export function stringLiteralMask(text) {
     let prev = "";
     let beforePrev = "";
     const parens = [];
+    const braces = [];
+    let functionExpressionPending = false;
+    let closedFunctionParams = false;
+    let closedFunctionBody = false;
     while (i < n) {
       const c = text[i];
       const d = text[i + 1];
@@ -135,6 +139,7 @@ export function stringLiteralMask(text) {
           i += point.length;
         }
         const word = text.slice(start, i);
+        if (word === "function") functionExpressionPending = ["=", "(", "[", ",", ":", "return", "=>"].includes(prev);
         // Once a for-in or for-of separator is consumed, a name on its right may be a template tag.
         const bindingEnd = IDENT_PART.test(Array.from(prev).at(-1) ?? "") || [")", "]", "}"].includes(prev);
         const loopOperator = (word === "of" || word === "in") && atLoopLevel
@@ -148,7 +153,8 @@ export function stringLiteralMask(text) {
       if (c === "`") {
         const keyword = /^(return|throw|yield|await|case|typeof|void|delete|new|in)$/.test(prev);
         const tail = Array.from(prev).at(-1) ?? "";
-        const tagged = (IDENT_PART.test(tail) || tail === ")" || tail === "]" || tail === "`") && !keyword;
+        const tagged = ((IDENT_PART.test(tail) || tail === ")" || tail === "]" || tail === "`") && !keyword)
+          || (prev === "}" && closedFunctionBody);
         i += 1;
         template(tagged ? 2 : 1);
         prev = "`";
@@ -162,13 +168,21 @@ export function stringLiteralMask(text) {
       // A top-level initializer or semicolon commits this header to a regular for loop.
       // Defaults inside a destructured binding do not consume its eventual in/of separator.
       if (atLoopLevel && (c === "=" || c === ";")) loop.separator = false;
-      if (c === "{") depth += 1;
-      else if (c === "}") { if (untilBrace && depth === 0) return; depth -= 1; }
+      if (c === "{") {
+        braces.push(prev === ")" && closedFunctionParams);
+        depth += 1;
+      } else if (c === "}") {
+        if (untilBrace && depth === 0) return;
+        closedFunctionBody = braces.pop() === true;
+        depth -= 1;
+      }
       if (c === "[") brackets += 1;
       else if (c === "]") brackets -= 1;
-      if (c === "(") parens.push(prev === "for" || (prev === "await" && beforePrev === "for")
-        ? { separator: true, depth, brackets } : null);
-      else if (c === ")") parens.pop();
+      if (c === "(") {
+        const functionParams = prev === "function" || (beforePrev === "function" && functionExpressionPending);
+        parens.push(prev === "for" || (prev === "await" && beforePrev === "for")
+          ? { separator: true, depth, brackets } : functionParams ? { functionParams: true } : null);
+      } else if (c === ")") closedFunctionParams = parens.pop()?.functionParams === true;
       if (!/\s/.test(c)) prev = c;
       i += 1;
     }

@@ -122,6 +122,27 @@ test("W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.t
   assert.equal(observedResult.rewritten, 0);
   assert.match(observedResult.unresolved[0], /raw spelling/);
 
+  for (const expression of [
+    "function(parts) { return String.raw(parts); }",
+    "function named(parts) { return String.raw(parts); }",
+  ]) {
+    const functionTag = `const raw = ${expression}\`` + fixtureImport("./fixture.js") + "`; raw;";
+    assert.equal(census(functionTag).status, 0, "control: the census sees the function tag's import");
+    assert.equal(runInNewContext(functionTag), fixtureImport("./fixture.js"));
+    const functionResult = rewriteSource(functionTag, "test/ci/suites/fixture.test.ts");
+    assert.equal(functionResult.text, functionTag, "the function expression observes raw template text");
+    assert.equal(functionResult.rewritten, 0);
+    assert.equal(functionResult.unresolved.length, 1);
+    assert.match(functionResult.unresolved[0], /raw spelling/);
+    assert.equal(runInNewContext(functionResult.text), fixtureImport("./fixture.js"));
+  }
+  const afterDeclaration = "function named(parts) { return String.raw(parts); } const value = `"
+    + fixtureImport("./fixture.js") + "`; value;";
+  const declarationResult = rewriteSource(afterDeclaration, "test/ci/suites/fixture.test.ts");
+  assert.equal(declarationResult.rewritten, 1, "a template after a function declaration is ordinary data");
+  assert.deepEqual(declarationResult.unresolved, []);
+  assert.equal(runInNewContext(declarationResult.text), runInNewContext(afterDeclaration));
+
   const forInOrdinary = "const keys = []; for (const key in `"
     + fixtureImport("./fixture.js") + "`) keys.push(key); keys.join(',');";
   const forInOrdinaryResult = rewriteSource(forInOrdinary, "test/ci/suites/fixture.test.ts");
