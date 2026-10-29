@@ -77,13 +77,27 @@ export const productRunReceiptSchema = z.discriminatedUnion("channel", [
   }).strict(),
 ]);
 export type ProductRunReceipt = z.infer<typeof productRunReceiptSchema>;
+export const productDeployReceiptSchema = z.object({
+  channel: z.literal("deploy"), actor: text(512), productId: productIdSchema, objectiveRevision: revision,
+  operationId: z.string().regex(/^pdeploy_[a-f0-9]{64}$/),
+  repository: runReceiptFields.repository, projectId: text(64).regex(/^[A-Za-z0-9_-]+$/), teamId: text(64).regex(/^[A-Za-z0-9_-]+$/),
+  deploymentId: text(128).regex(/^[A-Za-z0-9_-]+$/).nullable(), target: z.enum(["preview", "production"]).nullable(),
+  providerCreatedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
+  commit: z.string().regex(/^[a-f0-9]{40}$/).nullable(),
+  url: httpUrl.refine(value => new URL(value).protocol === "https:").nullable(),
+  readyState: text(80).nullable(), servedStatus: z.number().int().min(100).max(599).nullable(),
+  outcome: z.enum(["succeeded", "failed", "running", "unknown", "blocked"]), reason: text(500),
+}).strict();
+export const productEvidenceReceiptSchema = z.discriminatedUnion("channel", [...productRunReceiptSchema.options, productDeployReceiptSchema]);
+export type ProductDeployReceipt = z.infer<typeof productDeployReceiptSchema>;
+export type ProductEvidenceReceipt = z.infer<typeof productEvidenceReceiptSchema>;
 export type LocalQualification = z.infer<typeof localQualificationSchema>;
 const stageEvidenceSchema = z.object({
   id: text(128), stage: z.enum(["research", "repository", "plan", "build", "review", "deploy", "improve"]),
   outcome: productEvidenceOutcomeSchema,
   objectiveRevision: revision, observedAt: instant,
   references: z.array(z.object({ label: text(120), url: httpUrl }).strict()).max(16),
-  receipt: productRunReceiptSchema.optional(),
+  receipt: productEvidenceReceiptSchema.optional(),
 }).strict();
 
 /** Trusted mechanisms only: never reachable from the browser brief schema; grants no execution authority. */
