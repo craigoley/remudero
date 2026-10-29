@@ -29,6 +29,8 @@ test("a changed tag variant fails closed even when the numbers barely move, and 
   assert.equal(overallSemverLevel("chore(deps): bump python from 3.13.0-windowsservercore-ltsc2022 to 3.13.1-windowsservercore-ltsc2025", ""), "major");
   assert.equal(overallSemverLevel("chore(deps): bump node from 24.21.0-alpine3.20 to 24.21.1-alpine3.21", ""), "major");
   assert.equal(overallSemverLevel("chore(deps): bump python from 3.13.0-windowsservercore-ltsc2022 to 3.13.1-windowsservercore-ltsc2022", ""), "patch");
+  assert.equal(overallSemverLevel("chore(deps): bump x from 1.2.3-debian-11 to 1.2.4-debian-12", ""), "major");
+  assert.equal(overallSemverLevel("chore(deps): bump x from 1.2.3-debian-12 to 1.2.4-debian-12", ""), "patch");
   assert.equal(overallSemverLevel("chore(deps): bump x from 4.0.0-beta.1 to 4.0.0-beta.2", ""), "patch");
   assert.equal(overallSemverLevel("chore(deps): bump x from 1.2.3 to 1.3.0", ""), "minor");
   assert.equal(overallSemverLevel("chore(deps): bump x to the latest", ""), "unknown");
