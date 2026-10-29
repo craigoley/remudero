@@ -41,8 +41,8 @@ function runRealGateCaller(): string {
     assert.equal(child.signal, null);
     const summary = child.stdout.split(/\r?\n/).filter(line => /^# (tests|pass|fail|skipped) [0-9]+$/.test(line)).join("; ");
     assert.equal(child.status, 1, "the unexecutable npm probe must fail the actual gate fixture: " + summary);
-    assert.match(child.stdout, /^not ok [0-9]+ - W1-T2791 [(]acceptance 1[)]: running the fast gate's OWN source-size step leaves the tracked tree byte-identical$/m,
-      "the named real caller must fail");
+    const failed = child.stdout.split(/\r?\n/).find(line => /^not ok [0-9]+ - /.test(line));
+    assert.equal(failed?.replace(/^not ok [0-9]+ - /, ""), title, "the named real caller must fail");
     assert.match(child.stdout, /^# fail 1$/m);
     callerOutput = child.stdout;
     return callerOutput;
