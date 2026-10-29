@@ -20086,14 +20086,18 @@ export async function runSweep(
             formerCeiling: MAX_REARMS_AFTER_DISARM_PER_HEAD,
             parkedReason: `re-arm: ${rearms} merge queue ejections at this head`, operatorAnswer: pr.pendingAnswer?.constraint });
           input.remedyHistory = rearmRows;
-          const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
-            { ...progressWitness(pr), judge: deps.fixProgressJudge });
-          appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
-            site: "re-arm", pr_number: pr.prNumber, head_sha: pr.headSha,
-            former_ceiling: input.formerCeiling, parked_reason: input.parkedReason, red_class: input.redClass,
-            round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...progress, ...receipt });
+          const progress = await judgeWithMemoryWait(pr, async () => {
+            const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
+              { ...progressWitness(pr), judge: progressJudge });
+            appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+              site: "re-arm", pr_number: pr.prNumber, head_sha: pr.headSha,
+              former_ceiling: input.formerCeiling, parked_reason: input.parkedReason, red_class: input.redClass,
+              round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...progress, ...receipt });
+            return progress;
+          });
           rearmExhausted = progress.verdict === "escalate";
           rearmUnavailable = progress.verdict === "unavailable";
+          if (rearmUnavailable) pr.progressContinue = { reason: progress.reason, unavailable: true };
           rearmReason = progress.verdict === "escalate" ? `fix progress loop: ${progress.loop} — ${progress.reason}`
             : progress.reason;
           rearmIncidentFields = { ...rearmIncidentFields,

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   detachedSweepActionCount, drainDetachedSweepActions, productionFixProgressJudge,
-  runSweep, runSweepLightPass, type OpenPrView, type SweepDeps,
+  MAX_REARMS_AFTER_DISARM_PER_HEAD, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps,
 } from "#src/lib/sweep.js";
 
 function deferred() {
@@ -13,27 +13,44 @@ function deferred() {
 
 const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-function fixture(waitForMemory = true, holdJudge = waitForMemory, priorStrikes = 3) {
+function fixture(waitForMemory = true, holdJudge = waitForMemory, priorStrikes: number | "re-arm" = 3) {
   const now = Date.now();
   const rows: Record<string, unknown>[] = [];
   const admission = deferred();
   const entered = deferred();
   let spawns = 0;
   const dispatched: number[] = [];
+  const armed: number[] = [];
   const reviewed: number[] = [];
   const pr: OpenPrView = {
     prNumber: 9814, prUrl: "https://github.com/fixture/repo/pull/9814", taskId: "W1-T9814",
     headSha: "memory-held-head", checksState: "red", reviewState: "pending", unmetCriteria: [],
-    priorStrikes, autoMergeArmed: false, lastActivityAt: new Date(now).toISOString(),
+    priorStrikes: typeof priorStrikes === "number" ? priorStrikes : 0,
+    autoMergeArmed: false, lastActivityAt: new Date(now).toISOString(),
     reviewInputDigest: "body-A", redRequiredChecks: ["ci"],
     ciFailures: [{ name: "ci", logTail: "Error: fixture assertion failed" }],
   };
+  if (priorStrikes === "re-arm") {
+    Object.assign(pr, { checksState: "green", reviewState: "success", redRequiredChecks: [], ciFailures: [] });
+    rows.push({ step: "sweep.disposed", pr_number: pr.prNumber, pr_url: pr.prUrl,
+      head_sha: pr.headSha, disposition: "mergeable", acted: true, arm_outcome: "armed" });
+    for (let i = 0; i < MAX_REARMS_AFTER_DISARM_PER_HEAD; i++) {
+      rows.push({ step: "automerge.rearmed_after_disarm", pr_number: pr.prNumber,
+        head_sha: pr.headSha, rearm_count: i + 1 });
+    }
+  }
   const deps: SweepDeps = {
     ledgerPath: "/unused/t9814-ledger", runId: "SWEEP-T9814", now: () => now,
     readLedger: () => [...rows],
     appendLine: (_path, row) => { rows.push({ ts: new Date(now).toISOString(), ...row }); },
     readTaskContractRevision: () => "contract-A",
-    arm: () => { assert.fail("red CI cannot arm"); },
+    arm: (candidate) => {
+      assert.equal(priorStrikes, "re-arm", "red CI cannot arm");
+      armed.push(candidate.prNumber);
+      return "armed";
+    },
+    readMergeQueueMembership: () => "not-queued",
+    readLedgerUnion: () => ({ complete: false, lines: [] }),
     close: () => { assert.fail("no close authorized"); },
     escalate: () => { assert.fail("a continue verdict cannot escalate"); },
     dispatchFix: (candidate) => { dispatched.push(candidate.prNumber); },
@@ -53,7 +70,7 @@ function fixture(waitForMemory = true, holdJudge = waitForMemory, priorStrikes =
         return { text: 'FIX_PROGRESS: {"verdict":"continue","reason":"fixture permits repair"}' } as never;
       } }),
   };
-  return { pr, deps, rows, admission, entered, dispatched, reviewed, spawns: () => spawns };
+  return { pr, deps, rows, admission, entered, dispatched, armed, reviewed, spawns: () => spawns };
 }
 
 test("W1-T9814: a full pass stands down on a head held by a memory-waiting light-pass action", async (t) => {
@@ -93,7 +110,7 @@ test("W1-T9814: a full pass stands down on a head held by a memory-waiting light
 });
 
 test("W1-T9814: a full pass progress judgment waiting for memory leaves the pass", async (t) => {
-  for (const priorStrikes of [1, 3]) {
+  for (const priorStrikes of [1, 3, "re-arm"] as const) {
     await t.test(`priorStrikes=${priorStrikes}`, async () => {
       const f = fixture(true, true, priorStrikes);
       const ready = { ...f.pr, prNumber: 9815, headSha: "ready-head", checksState: "green" as const,
@@ -106,6 +123,7 @@ test("W1-T9814: a full pass progress judgment waiting for memory leaves the pass
         assert.equal(returned, true, "admission must not hold the rest of the full pass");
         assert.deepEqual(f.reviewed, [9815], "another head progresses during the memory wait");
         assert.deepEqual(f.dispatched, []);
+        assert.deepEqual(f.armed, []);
         assert.equal(f.rows.some((row) => row.step === "fix.progress_judged"), false);
         assert.match(String(f.rows.findLast((row) => row.pr_number === 9814 && row.step === "sweep.disposed")?.stand_down_reason),
           /progress judgment waiting for memory admission/);
@@ -128,12 +146,14 @@ test("W1-T9814: a full pass progress judgment waiting for memory leaves the pass
         const judged = f.rows.find((row) => row.step === "fix.progress_judged");
         assert.equal(judged?.verdict, "continue");
         assert.equal(judged?.reason, "fixture permits repair");
+        if (priorStrikes === "re-arm") assert.equal(judged?.site, "re-arm");
         await runSweep([f.pr], f.deps);
         assert.equal(f.spawns(), 1, "the next pass consumes the settled judgment");
         const reused = f.rows.findLast((row) => row.step === "fix.progress_reused");
         assert.equal(reused?.input_key, judged?.input_key);
         assert.equal(reused?.judged_at, judged?.ts);
-        assert.deepEqual(f.dispatched, [9814]);
+        assert.deepEqual(f.dispatched, priorStrikes === "re-arm" ? [] : [9814]);
+        assert.deepEqual(f.armed, priorStrikes === "re-arm" ? [9814] : []);
         await pass;
       } finally {
         f.admission.resolve();
@@ -145,13 +165,14 @@ test("W1-T9814: a full pass progress judgment waiting for memory leaves the pass
 });
 
 test("W1-T9814: an unheld head is judged by the full pass as today", async (t) => {
-  for (const priorStrikes of [1, 3]) {
+  for (const priorStrikes of [1, 3, "re-arm"] as const) {
     await t.test(`priorStrikes=${priorStrikes}`, async () => {
       const f = fixture(false, false, priorStrikes);
       await runSweep([f.pr], f.deps);
       assert.equal(f.spawns(), 1);
       assert.equal(f.rows.find((row) => row.step === "fix.progress_judged")?.verdict, "continue");
-      assert.deepEqual(f.dispatched, [9814]);
+      assert.deepEqual(f.dispatched, priorStrikes === "re-arm" ? [] : [9814]);
+      assert.deepEqual(f.armed, priorStrikes === "re-arm" ? [9814] : []);
       assert.equal(detachedSweepActionCount(), 0);
       const slow = fixture(false, true, priorStrikes);
       let returned = false;
@@ -162,9 +183,11 @@ test("W1-T9814: an unheld head is judged by the full pass as today", async (t) =
         assert.equal(returned, false, "a judgment without a memory-wait signal stays inline");
         assert.equal(detachedSweepActionCount(), 0);
         assert.deepEqual(slow.dispatched, []);
+        assert.deepEqual(slow.armed, []);
         slow.admission.resolve();
         await pass;
-        assert.deepEqual(slow.dispatched, [9814]);
+        assert.deepEqual(slow.dispatched, priorStrikes === "re-arm" ? [] : [9814]);
+        assert.deepEqual(slow.armed, priorStrikes === "re-arm" ? [9814] : []);
       } finally {
         slow.admission.resolve();
         await pass;
