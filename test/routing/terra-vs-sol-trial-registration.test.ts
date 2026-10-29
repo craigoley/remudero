@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { aaStackHash } from "#src/lib/benchmark-aa.js";
@@ -246,11 +246,20 @@ test("the A/B binds pilot consent, arms, effort, revisions and eligible task met
 
 test("registration reports an unwritable protocol and refuses API-billed calibration", async t => {
   const { dir } = ownedFixtureDir(t, "balanced-write-refusal");
-  const args = await calibrated(dir);
-  chmodSync(dir, 0o500);
+  mkdirSync(join(dir, "state"));
+  const args = await calibrated(join(dir, "state"));
+  const { dir: backupDir } = ownedFixtureDir(t, "balanced-write-backup");
+  const backup = join(backupDir, "calibrated");
   try {
-    assert.deepEqual(await registerCodexBalancedTrial(args), { ok: false, reason: "trial-registration-unwritable:EACCES" });
-  } finally { chmodSync(dir, 0o700); }
+    assert.deepEqual(await registerCodexBalancedTrial({ ...args, readCatalog: async () => {
+      renameSync(dir, backup);
+      writeFileSync(dir, "not a directory");
+      return ["gpt-6.1-sol", "gpt-6.1-terra"];
+    } }), { ok: false, reason: "trial-registration-unwritable:ENOTDIR" });
+  } finally {
+    rmSync(dir, { force: true });
+    renameSync(backup, dir);
+  }
   const { dir: apiDir } = ownedFixtureDir(t, "balanced-api-refusal");
   const api = input(apiDir);
   const result = await registerCodexBalancedTrial({ ...api, readiness: { ...api.readiness,

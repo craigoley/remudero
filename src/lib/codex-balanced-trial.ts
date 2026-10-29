@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { aaStackHash, parseAaTrialManifest, type AaTrialManifest } from "./benchmark-aa.js";
+import { aaStackHash, parseAaTrialManifest, type AaTrialManifest, type BenchmarkAaCommandInput } from "./benchmark-aa.js";
 import { listProspectiveAaRegistrations, prospectiveAaDir, type ProspectiveAaProtocol } from "./benchmark-aa-prospective.js";
 import { runBenchmarkAaReadiness, type BenchmarkAaReadinessInput, type FrozenPopulation, type ReadinessTask } from "./benchmark-aa-readiness.js";
 import { citeAaReceipt, paidArmPauseReasons, parsePaidPilotRequest, PAID_PILOT_CASH_CEILING_USD,
@@ -166,8 +166,10 @@ export async function registerCodexBalancedTrial<T extends ReadinessTask>(input:
     pilotRequest: { ...pilotRequest, protocolText } };
   const protocol: CodexBalancedTrialProtocol = { ...body, digest: hash(body) };
   const path = join(input.stateDir, `${VERSION}.${protocol.trialId}.json`);
-  mkdirSync(input.stateDir, { recursive: true });
-  try { writeFileSync(path, `${JSON.stringify(protocol, null, 2)}\n`, { flag: "wx", mode: 0o600 }); }
+  try {
+    mkdirSync(input.stateDir, { recursive: true });
+    writeFileSync(path, `${JSON.stringify(protocol, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+  }
   catch (error) {
     const reason = (error as NodeJS.ErrnoException).code === "EEXIST" ? "trial-already-registered"
       : `trial-registration-unwritable:${(error as NodeJS.ErrnoException).code ?? "unknown"}`;
@@ -187,7 +189,7 @@ export function codexBalancedAttemptAdmission(input: { protocol: PaidPilotProtoc
 }
 
 export async function codexBalancedTrialCommand(rest: string[], run: (request: unknown, stateDir: string) => Promise<CodexBalancedTrialResult>,
-  deps: { print?: (line: string) => void; resolveStateDir?: () => string } = {}): Promise<number> {
+  deps: Pick<BenchmarkAaCommandInput, "print" | "resolveStateDir"> = {}): Promise<number> {
   const print = deps.print ?? console.log;
   let values;
   try { values = parseArgs({ args: rest, strict: true, options: { request: { type: "string" }, "state-dir": { type: "string" } } }).values; }
