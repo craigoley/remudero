@@ -73,12 +73,10 @@ export type ReviewState = "success" | "failure" | "pending";
 /** States the commit-status poster accepts. */
 export type PostableReviewState = ReviewState;
 
-/** Stable identity for the material a review judges: the PR head binds the diff, the exact body the authored claims,
- *  so a new commit OR a body edit earns a fresh retry budget while comments, labels and other `updated_at` churn do
- *  not. The revision rearms the same evidence only after a material reviewer-contract change, independent of boot
- *  commits, provider choice and model sampling. Bumped to v2 (W1-T3580) because W1-T3564 changed proof-execution
- *  semantics (the closed console suite registry) without advancing this revision, so a v1 terminal cached before
- *  that change stayed an exact cache hit and replayed instead of executing the newly routable proofs. */
+/** Stable review identity: head binds the diff; exact body binds authored claims. Only a commit or body edit
+ * earns a fresh retry budget, not comments, labels or `updated_at` churn. Contract changes rearm evidence independently
+ * of boot commits, provider or sampling. W1-T3580 bumped v2: W1-T3564 changed the closed console suite registry
+ * without a revision bump, so cached v1 terminals replayed instead of executing newly routable proofs. */
 export const REVIEW_ENGINE_REVISION = "trusted-proof-receipts-v1";
 /** Changes both exact-head identities when the proof loader's verdict semantics change. */
 const PROOF_LOAD_REVISION = "cannot-load-v1";
@@ -263,16 +261,10 @@ export function lastReviewDecisionTerminal(
   return terminal;
 }
 
-/**
- * The live ledger file's lines, as plain records — this module's own reader, routed through
- * {@link readLedgerUnionRecordsSync} (`ledger-union.ts`, W1-T2898) rather than `status.ts`'s
- * `readLedgerLines` (W1-T2895): `review.ts` importing a VALUE from `status.ts` closed three of
- * the thirteen import cycles `npm run cycle-ratchet` tolerated. `maxRotations: 0` reads the live
- * file alone, never rotations — identical scope to `readLedgerLines`; `dedupe: false` keeps every
- * line exactly as ledgered, matching `readLedgerLines`' own no-dedup behaviour byte for byte. Only
- * the array of records is used here — never `readLedgerLines`' `.torn`/`.present` metadata, which
- * none of this module's three call sites read.
- */
+/** Read live ledger records through {@link readLedgerUnionRecordsSync} (W1-T2898), avoiding the `status.ts`
+ * value import that closed three of thirteen tolerated cycles (W1-T2895). `maxRotations: 0` and `dedupe: false`
+ * preserve `readLedgerLines`' live-only scope and every ledgered row. None of the three callers uses its
+ * `.torn`/`.present` metadata. */
 function readLiveLedgerRecords(ledgerPath: string): Array<Record<string, unknown>> {
   return readLedgerUnionRecordsSync(dirname(ledgerPath), { maxRotations: 0, dedupe: false }).rows;
 }
@@ -996,14 +988,10 @@ export function pinnedVitestCli(cwd: string): string {
   return join(cwd, "node_modules", "vitest", "vitest.mjs");
 }
 
-/** W1-T3073 — a body shaped `<exact test path>::<suffix>`. THIS GRAMMAR DOES NOT EXIST. `unit test:`
- *  has exactly two forms, and this is neither: the `::` makes it fail {@link TEST_PATH_EXACT_RE},
- *  so it used to fall through to the bare-TITLE arm, where the WHOLE string — path, separator and
- *  title together — was escaped into one `--test-name-pattern`. No test is named that, so it matched
- *  zero and the criterion degraded silently to the keyword floor. MEASURED: W1-T3071's four proofs
- *  all resolved `not_executable` while its filing still merged green. Refusing it here is what makes
- *  the changed-task lint path block it at authoring time, since `proofDialectViolations` grades a
- *  `null` from the shared parser as a blocking `proof-dialect` violation. */
+/** W1-T3073: `<exact test path>::<suffix>` is neither of `unit test:`'s two forms. It fails
+ * {@link TEST_PATH_EXACT_RE}; falling through escaped the entire path+separator+title as a name filter and matched
+ * zero tests, silently degrading to the keyword floor. W1-T3071's four proofs all read `not_executable` on a green
+ * filing. Returning `null` here lets `proofDialectViolations` block authoring as `proof-dialect`. */
 const TEST_PATH_TITLE_SEPARATOR_RE = /^(test\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?)::([\s\S]*)$/;
 const GREP_FENCE_RE = /`(grep\s+[^`]+)`/;
 const UNSAFE_FENCE_CHARS_RE = /[;&`$<>\n]/;
@@ -1621,10 +1609,9 @@ function tokenizeFenced(s: string): string[] {
   return tokens;
 }
 
-/** WHY this verdict is capped, as one short token for the ledger line and the posted status. A CAPPED `0/N` is four
- *  situations wearing one face: proofs that never parsed, proofs that parsed and named nothing, proofs whose execution
- *  errored, and a run with no checkout. PURE and DIAGNOSTIC. TRAP: telling those four apart from outside cost a full
- *  recon once — the code-span defect behind #1037's 0/4 and #1057's 0/6 (docs/forensics/review.md). */
+/** Diagnostic cap reason: unparsed proofs, no matches, execution errors or no checkout; pure and diagnostic.
+ * Trap: distinguishing these externally cost a full recon for the code-span defect (#1037: 0/4; #1057: 0/6).
+ * Record: docs/forensics/review.md. */
 export function cappedReason(
   criteria: ReadonlyArray<Pick<CriterionVerdict, "proof_exec" | "proof_skip">>,
 ): string | undefined {
@@ -1640,11 +1627,10 @@ export function cappedReason(
     .join(",");
 }
 
-/** A `grep:` pattern WHOLLY enclosed in a matching pair of delimiters (W1-T2544) — a Markdown artifact, never what the
- *  author meant, since `grep -arn --` runs with no `-F` and a delimiter is then a character that must appear in the
- *  file. DISTINCT from {@link parseWhitelistedProof}'s code-span strip, which unwraps the WHOLE proof: this is the
- *  pattern INSIDE an otherwise well-formed proof, which parses perfectly and then matches nothing. EXACT, NEVER A
- *  HEURISTIC. TRAP: two retro cycles wrapped patterns in double quotes (#3356) and backticks (#3413). */
+/** Detect an exactly delimiter-wrapped `grep:` pattern (W1-T2544), not the whole-proof code span stripped by
+ * {@link parseWhitelistedProof}. `grep -arn --` has no `-F`: delimiters inside a valid proof become required text
+ * and match nothing. No heuristic: only a simple matching pair qualifies. Traps: double quotes (#3356), backticks
+ * (#3413), across two retro cycles. */
 export function wrappedGrepPattern(proof: string): { delimiter: string; bare: string } | undefined {
   const m = /^\s*grep:\s*(.+?)\s+in\s+\S+\s*$/.exec(proof ?? "");
   if (!m) return undefined;
@@ -2777,35 +2763,22 @@ function vitestNameFilterScope(w: WhitelistedProof, cwd: string): string[] {
   return titleHits.length > 0 ? titleHits : files;
 }
 
-/**
- * A runner absent from the checkout is a host gap, not evidence that its proof failed.
- *
- * ON THE SHARED ENVELOPE because the error-subclass census refused this PR for the count growing
- * 59 -> 60, and src/lib/errors.ts's header names adoption as the remedy: "each later migration that
- * adopts this envelope lowers its own recorded number instead of the census silently absorbing more
- * debt". Raising the ceiling is the option that census exists to make deliberate, not the default.
- *
- * `kind: "usage"` IS THE NEAREST OF THREE, NOT THE RIGHT ONE, and saying so is cheaper than a
- * reader later inferring a meaning that was never intended. A host missing a runner is neither a
- * plan fault nor a git fault nor CLI misuse; a `host` kind would be truer and means editing
- * src/lib/errors.ts, which is outside W1-T3312's declared `files:`. Nothing depends on the label:
- * this error is caught by `instanceof` inside `review.ts` and never reaches the process boundary,
- * which is also why `GENERIC_EXIT_CODE` keeps behaviour identical.
- *
- * `runnerPath` stays a public field because the catch site reads it; `details` carries it too so a
- * ledger row need not re-parse the message.
- */
+/** A missing checkout runner is a host gap, not a failed proof (W1-T3312).
+ * Use the shared error envelope: the error-subclass census grew 59 -> 60, and src/lib/errors.ts prescribes adoption
+ * over raising its ceiling. `kind: "usage"` is only the nearest available kind: this is neither plan/git fault nor
+ * CLI misuse; a truer `host` kind needs an out-of-scope errors.ts edit. Caught here by `instanceof`, it never reaches
+ * the process boundary; `GENERIC_EXIT_CODE` preserves behaviour. Public `runnerPath` serves the catch;
+ * `details` also carries it so ledger readers need not parse the message. */
 class ProofRunnerUnavailableError extends RmdError {
   constructor(readonly runnerPath: string) {
     super("usage", GENERIC_EXIT_CODE, `proof runner is absent from this checkout: ${runnerPath}`, { runnerPath });
   }
 }
 
-/** The Chromium builds a `test` proof needs on THIS host, derived from the pinned Playwright's own `browsers.json` —
- * the same source `npx playwright install` reads, so the two cannot disagree. Scoped to the Chromium family, the only
- * one this repo's suites launch; the `-` → `_` rewrite is Playwright's on-disk convention, so `chromium-headless-shell`
- * rev 1234 lives in `chromium_headless_shell-1234` and `chromium` rev 1234 in `chromium-1234`. TRAP: `ci` installs
- * before every test job and the review host never did, so #863's bump posted `executed_fail` on passing code (#892). */
+/** Required Chromium builds come from pinned Playwright's `browsers.json`, the same source its installer uses.
+ * Only Chromium-family defaults qualify; Playwright's disk convention maps `chromium-headless-shell` revision 1234
+ * to `chromium_headless_shell-1234`, and `chromium` to `chromium-1234`. Trap: CI installed browsers but review hosts
+ * did not, so #863's bump falsely posted `executed_fail` (#892). */
 export function requiredChromiumDirs(browsersJsonText: string): string[] {
   const parsed = JSON.parse(browsersJsonText) as { browsers?: { name?: string; revision?: string | number; installByDefault?: boolean }[] };
   const wanted = [];
@@ -2832,10 +2805,9 @@ export interface BrowserPreflightDeps {
   log?: (msg: string) => void;
 }
 
-/** Mirror `ci`'s browser-install step on the review host, ONCE per process, before the first `test` proof runs — see
- *  {@link requiredChromiumDirs} for the incident this closes. Best-effort like {@link ensureDeps}: it never throws and
- *  never decides a verdict, since a preflight that could fail a criterion would relocate the false-FAIL problem it
- *  removes. Returns a FACT: `"ok"`, `"installed"`, `"failed"`, or `"unreadable"`. */
+/** Mirror CI's browser install once per process before the first test proof; incident: {@link requiredChromiumDirs}.
+ * Best-effort like {@link ensureDeps}: never throws or decides a verdict, which would recreate the false-FAIL problem.
+ * Returns the observed `"ok"`, `"installed"`, `"failed"` or `"unreadable"`. */
 export function ensureBrowsers(deps: BrowserPreflightDeps): "ok" | "installed" | "failed" | "unreadable" {
   if (deps.browsersJsonText === null) return "unreadable";
   let required: string[];
@@ -3021,20 +2993,13 @@ function couldBeInterpolatedTitle(cwd: string, rawName: string): boolean {
   return stdout.split("\n").some((line) => interpolatedTitleStaticChunks(line).some((c) => rawName.includes(c)));
 }
 
-/** `grep -rl -F` over the checkout's test files as a plain list, or `null` when grep produced none. TRAP: it does NOT
- *  interpret the exit code — BSD grep exits 1 with EMPTY stderr both for "searched, found nothing" and for "the
- *  directory does not exist", so {@link resolveNameFilteredCandidates} draws that line with a control probe.
- *
- *  `--exclude-dir=mutants-*` (W1-T3734 round): `test/helpers/mutant-module.ts`'s own header documents
- *  `test/mutants-XXXXXX/` as a DELIBERATE throwaway shadow checkout of the whole tracked tree, written inside
- *  `test/` on purpose (moving it under `os.tmpdir()` reintroduces a MEASURED coverage-attribution collapse —
- *  see that file). This raw filesystem `grep`, unlike `ci.yml`'s own `test/**` patterns, is not git-aware and
- *  has no notion of "throwaway": while such a shadow checkout is alive, it silently doubles every candidate a
- *  concurrently-running name-filtered proof resolves for any fixture file the copy happens to contain — MEASURED
- *  live: `test/check-proof-executor-parity.test.ts`'s pinned candidate-set assertion reddened on a JOINED set
- *  naming `test/mutants-<random>/test/...`, with zero relation to the diff running alongside it. The shadow dirs
- *  are already gitignored (`test/mutants-*` dirs) and never real committed content, so excluding them here changes
- *  nothing a real proof could legitimately resolve to. */
+/** List test candidates with `grep -rl -F`, or null on no output. Trap: BSD grep exits 1 with empty stderr
+ * for both no match and missing directory; {@link resolveNameFilteredCandidates} uses a control probe.
+ * Exclude `mutants-*` (W1-T3734): test/helpers/mutant-module.ts deliberately creates gitignored shadow checkouts
+ * inside `test/mutants-XXXXXX/` to avoid the measured coverage-attribution collapse from OS temp directories. This filesystem grep
+ * is not git-aware: live shadows doubled candidates and broke test/check-proof-executor-parity.test.ts's pinned
+ * set with `test/mutants-<random>/test/...` entries unrelated to its diff. These shadows are never legitimate
+ * committed proof targets; CI's `test/**` patterns already exclude them. */
 function grepFilesContaining(cwd: string, fixedPattern: string): string[] | null {
   try {
     const stdout = execFileSync(
@@ -3672,9 +3637,8 @@ function isFileWrapperResultName(name: string): boolean {
 /** `(not )?ok <n> - <name>` — a node TAP result line, possibly indented for a nested subtest. */
 const TAP_RESULT_LINE_RE = /^\s*(ok|not ok) \d+ - (.+?)\s*$/;
 
-/** The node test runner's trailing summary block (`# tests N`, `# pass N`, …, `# duration_ms N`) is written ONCE,
- *  after every file in the glob finishes — the one reliable signal that a `--test-name-pattern` run over {@link
- *  TEST_GLOB} ran to genuine completion rather than being cut off by {@link execWhitelistedProof}'s timeout kill. */
+/** Node writes its trailing summary (`# tests N`, `# pass N`, …, `# duration_ms N`) once all files finish.
+ * It proves a {@link TEST_GLOB} name-filtered run completed rather than hitting {@link execWhitelistedProof}'s timeout. */
 function hasFinalSummary(stdout: string): boolean {
   return /^# duration_ms\b/m.test(stdout);
 }
@@ -3734,13 +3698,10 @@ export function nameFilteredOutcome(stdout: string, stderr = ""): ProofResult {
   return anyRealFailure ? "fail" : "pass";
 }
 
-/** A Vitest `--reporter=tap` result line, indentation PRESERVED — MEASURED against installed
- *  Vitest 5.0.0, never assumed. Its TAP is NESTED, unlike node's flat stream: the file's own outer
- *  wrapper prints at column 0 (`not ok 1 - a.test.ts # time=8ms {`), and every real leaf result is
- *  indented beneath it (`    ok 1 - real test name # time=1ms`). That depth, not the wrapper's own
- *  name suffix, is what {@link vitestNameFilteredOutcome} uses to tell a file wrapper from a leaf —
- *  {@link isFileWrapperResultName}'s suffix match cannot, because Vitest appends its own `# time=`/
- *  `# SKIP` comment AFTER the file name, which no longer ends in `.test.ts`. */
+/** Vitest 5.0.0's measured TAP nests leaves under column-zero file wrappers, unlike node TAP.
+ * Wrappers: `not ok 1 - a.test.ts # time=8ms {`; leaves: `    ok 1 - real test name # time=1ms`.
+ * {@link vitestNameFilteredOutcome} uses indentation: {@link isFileWrapperResultName}'s suffix check cannot
+ * recognise wrappers with Vitest's trailing `# time=`/`# SKIP` comments. */
 export const VITEST_TAP_RESULT_LINE_RE = /^( *)(ok|not ok) \d+ - (.+?)\s*$/;
 /** The TAP13 plan line (`1..N`) Vitest's reporter writes ONCE, before any file's results — the
  *  declared file count this run selected. Used the same way node's `# duration_ms` summary is used
@@ -4775,18 +4736,11 @@ export const DENIED_LABEL_ANSWER_RE = /^[*_`'")\]\s]*:\s*(?:(?:no|nope)(?![ \t]*
  *  IMMEDIATELY before the shorthand, like the copular arm: an anywhere-in-sentence negator would silence a genuine
  *  claim sharing a sentence with an unrelated one. */
 export const DENIED_ATTRIBUTIVE_RE = /\b(?:not|never|isn't|aren't|wasn't)\s+(?:a|an|the)?\s*$/i;
-/** Is the shorthand a member of a parenthesised enumeration rather than a label?
- *
- * TRAP (W1-T2679, measured on #3569): `(capped+override, capped+plan-only):` reaches the label arm because a closing
- * bracket then a colon is exactly the shape W1-T395 ruled a label. But there the shorthand names a VERDICT STATE being
- * discussed, not the diff, and every PR touching the arm gate, the calibration bands or the acceptance parser has
- * cause to write these names in prose.
- *
- * The signal is available without guessing: an enumeration opens a bracket and separates siblings with a comma.
- * `(Plan-only): no source touched.` opens a bracket and has no comma, so it stays a label. Only a comma INSIDE the
- * still-open bracket, on this line, makes it a list.
- *
- * FALSIFIER: test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts. */
+/** Distinguish parenthesised enumerations from shorthand labels (W1-T2679, #3569).
+ * Trap: `(capped+override, capped+plan-only):` reached W1-T395's closing-bracket-plus-colon label arm, but names
+ * verdict states, not the diff. Arm-gate/calibration/parser PRs need these names in prose.
+ * Require a comma inside a still-open bracket on this line. `(Plan-only): no source touched.` has none and stays
+ * a label. Falsifier: test/a-verdict-state-named-in-prose-is-read-as-a-scope-claim.test.ts. */
 function shorthandIsInsideEnumeration(report: string, index: number): boolean {
   const lineStart = report.lastIndexOf("\n", index - 1) + 1;
   let depth = 0;
@@ -9737,22 +9691,13 @@ function changeIsConfinedToRegistry(diff: string, file: string): boolean {
   return !walkDiff(diff).some((l) => l.file === file && l.kind === "del");
 }
 
-/**
- * The W1-T3171 subtraction: a CI job registration the repo's own censuses make unavoidable.
- *
- * Rule 25 refuses an instrument beside `src/` because a weakened instrument could hide a product
- * regression shipped next to it. Here there IS no product change to hide — every `src/` path in
- * the diff is a registration map, and adding a ci.yml job FORCES entries in both. Returns the
- * paths to subtract from the VERDICT, never from the reported evidence.
- *
- * All three conditions must hold, and each closes a different hole:
- *   (a) every instrument in the diff is one of the two CI workflows — so an unrelated instrument
- *       cannot ride along on a registration;
- *   (b) ci.yml adds at least one job and EVERY added job is registered in BOTH ci-gate.yml and
- *       the parity table — an unmatched name is not this shape (and a workflow edit that adds no
- *       job at all, a `run:`/trigger/timeout change, never reaches the carve-out);
- *   (c) every product `src/` path is a registry file confined to its own declaration.
- */
+/** W1-T3171: subtract unavoidable CI registration paths from the verdict, never from reported evidence.
+ * Rule 25 separates instruments from product changes that weakened instruments could hide; here src changes
+ * only register jobs, and ci.yml additions force both maps. All conditions must hold:
+ * (a) every changed instrument is one of the two CI workflows, excluding unrelated instruments;
+ * (b) ci.yml adds jobs, all registered in both ci-gate.yml and the parity table; unmatched jobs or changes only
+ * to run/trigger/timeout do not qualify;
+ * (c) every product src path is a registry file changed only within its declaration. */
 /** True when this diff ADDS a `scripts/<stem>.*` file — the "new in this diff" half of the
  *  step-wired pairing. A step invoking a PRE-EXISTING script is an ordinary workflow edit and earns
  *  no carve-out; only a gate that did not exist before has no prior version to be mis-graded. */
@@ -9874,18 +9819,11 @@ export type InstrumentChangeDirection = "tightening" | "loosening" | "introduced
 
 /** Every `"key": <number>` pair on one diff line, as [key, value]. A line carrying no such pair
  *  yields nothing, which is what makes an unparseable hunk fall through to `undetermined` below. */
-/**
- * Keys whose value is PROVENANCE or PROSE — when, where, by what command and why a number was
- * captured. None of them is an allowance, so refreshing one cannot loosen the ceiling the number
- * sets, and an HONEST re-capture is obliged to move them: `cycle-baseline.json`'s own
- * `_methodology` says its count is re-derived AT `capturedAtSha`.
- *
- * Deliberately narrow, and the exclusions are the point. Across `scripts/*-baseline.json` the
- * other string-valued keys are `path`, `reason`, `id`, `testFile`, `target`, `literal` and
- * `scopeConfig` — every one of them NAMES AN EXEMPTED ENTRY or repoints the scope being measured,
- * so adding one IS a loosening. Those stay unaccountable, which is what stops a diff from
- * lowering one ceiling while quietly adding an exemption beside it and still reading `tightening`.
- */
+/** Provenance/prose keys record when, where, how and why a number was captured, never an allowance.
+ * Honest recapture must update them: cycle-baseline.json's `_methodology` derives counts at `capturedAtSha`.
+ * Exclude `path`, `reason`, `id`, `testFile`, `target`, `literal`, `scopeConfig`: these scripts/*-baseline.json
+ * string keys name exemptions or repoint measured scope. Treat them as unaccountable so lowering a ceiling cannot
+ * conceal a new exemption and still grade `tightening`. */
 const INSTRUMENT_CAPTURE_KEYS: ReadonlySet<string> = new Set([
   "capturedAt",
   "capturedAtSha",
@@ -9919,20 +9857,12 @@ function numericRowsOn(text: string): Array<[string, number]> {
   return out;
 }
 
-/** W1-T3133 — classify ONE instrument path's change in THIS diff.
- *
- *  `introduced`: the file is NEW here and something that READS it is added or changed in the same
- *  diff. A baseline nothing reads has no grading power, and a lone new JSON must not become a way to
- *  pre-place a lax bound for a later PR — the same requirement W1-T2521 puts on a new census gate.
- *
- *  `tightening`: EVERY changed line is either a removed grandfather entry, or a numeric value moved
- *  in this instrument's DECLARED stricter direction. Any added entry, any value moved the other way,
- *  or ANY hunk this parser cannot account for makes the whole file `undetermined` — one unreadable
- *  hunk must never be skipped while the rest of the file grades tightening.
- *
- *  THE ONE ADMITTED ADDITION: a new key naming a source file this SAME diff adds has no prior bound
- *  to loosen, so it does not spoil a tightening verdict. A new key for a PRE-EXISTING file does,
- *  which is the loophole where a generous ceiling would hide real growth. */
+/** W1-T3133: classify one instrument's change. `introduced` requires a new file and an added/changed reader
+ * in the same diff (W1-T2521): an unread baseline has no grading power and cannot pre-place a lax bound.
+ * `tightening` requires every changed line to remove a grandfather entry or move a number in its declared stricter
+ * direction. Added entries, opposite movement or any unaccounted hunk make the whole file `undetermined`.
+ * Exception: a new key for a source file this diff also adds has no prior bound to loosen. A key for a pre-existing
+ * file still disqualifies tightening, preventing generous ceilings from hiding growth. */
 export function classifyInstrumentChange(diff: string, diffFiles: string[], file: string): InstrumentChangeDirection {
   if (fileIsNewInDiff(diff, file)) {
     const stem = scriptStem(file);
@@ -11102,9 +11032,8 @@ export interface ReviewStatusPostAttempt {
 
 export type ReviewStatusDecision = { post: true } | { post: false; reason: string };
 
-/** THE PURE W1-T228 GATE — the falsifier this task exists to prove is a unit fixture, exactly like {@link
- * judgeReview}. Order matters: LIFECYCLE is checked FIRST, because arguing about which verdict is stronger on a PR
- * nobody can act on any more is moot. */
+/** Pure W1-T228 gate, falsified by unit fixtures like {@link judgeReview}. Check lifecycle first:
+ * verdict strength is irrelevant on a PR nobody can act on. */
 export function decideReviewStatusPost(
   attempt: ReviewStatusPostAttempt,
   prior: PostedReviewStatusRecord | undefined,
@@ -11209,13 +11138,11 @@ export interface ReviewStatusLockHandle {
   release(): void;
 }
 
-/** Acquire the per-task review-status MUTEX — the SAME O_EXCL create-or-fail primitive {@link
- * import("./drain-lock.js").acquireDrainLock} and {@link import("./inflight-lock.js").acquireInflightLock} use.
- * Creation is atomic, so two racing acquirers cannot both win it, and a stale lock (holder pid dead, or the file
- * unreadable) is reclaimed via {@link reclaimStaleLock}, whose delete is conditioned on the lock's on-disk identity,
- * so two reclaimers of the SAME dead lock cannot both believe they hold it (W1-T289). Adapted from a SINGLETON GUARD
- * to a MUTEX: where those THROW on finding a live holder, this WAITS (bounded by `timeoutMs`) and retries, the callers
- * here being N uncoordinated posters that must all eventually run their own read-decide-write. */
+/** Per-task review-status mutex using the atomic O_EXCL primitive from
+ * {@link import("./drain-lock.js").acquireDrainLock} and {@link import("./inflight-lock.js").acquireInflightLock}.
+ * Dead-pid or unreadable locks are reclaimed by {@link reclaimStaleLock}, conditioned on on-disk identity so two
+ * reclaimers cannot both win (W1-T289). Unlike those singleton guards, wait and retry up to `timeoutMs`:
+ * uncoordinated posters must each run their own read-decide-write. */
 export async function acquireReviewStatusLock(
   lockPath: string,
   opts: AcquireReviewStatusLockOpts = {},
@@ -11374,12 +11301,10 @@ function reviewerCodePublicationRefusal(
   return `reviewer code freshness is unprovable; withholding a terminal verdict: ${freshness.reason}`;
 }
 
-/** THE single call path for posting `remudero-review` from here on (W1-T228). Acquires the per-task lock, reads the
- * ledger and live PR lifecycle FRESH inside it, decides via the pure {@link decideReviewStatusPost}, and either posts
- * or refuses. EVERY attempt is ledgered, refusals included (`review.post_refused`), so a refused write leaves a trace
- * instead of silent blindness. W1-T135: a post that still THROWS — transient retries exhausted inside {@link
- * postReviewStatus}, or a permanent error it never retried — is caught HERE, ledgered as `review.post_failed` carrying
- * the verdict that could not be posted, and returned as `{posted:false}` like an ordinary refusal. */
+/** Single `remudero-review` posting path (W1-T228): lock, read fresh ledger and lifecycle, then
+ * {@link decideReviewStatusPost} posts or refuses. Ledger every attempt, including `review.post_refused`.
+ * W1-T135: catch exhausted transient or permanent {@link postReviewStatus} errors here, ledger `review.post_failed`
+ * with the unposted verdict, and return `{posted:false}` like a refusal. */
 export async function postReviewStatusGuarded(
   opts: PostReviewStatusGuardedOpts,
 ): Promise<PostReviewStatusGuardedResult> {
@@ -11598,23 +11523,12 @@ export async function postReviewStatusGuarded(
 
 // ── W1-T913: post remudero-review=pending at DETECTION, before judging ──────
 
-/** W1-T3647: the TTL beyond which a `remudero-review=pending` claim is RECLAIMABLE rather than
- *  deferred to forever (see {@link postReviewPending}'s idempotent-no-op guard, below). #5672
- *  measured the failure this closes: a claim taken at 23:42 was still pending at 01:42 (2h) while
- *  its owning run was demonstrably dead — busy on a different PR.
- *
- *  DERIVED, NOT A ROUND GUESS, from two numbers already measured and checked into this repo:
- *  (1) 14 — the WIDEST acceptance-criteria count across the whole live plan, measured 2026-09-17
- *  over every `plan/tasks.d/*.yaml` (1,613 criteria total; max 14 in one task file). A review
- *  posts pending BEFORE it runs a single proof, then executes its criteria's proofs serially, so
- *  this is a real, checked-in bound on how many proof-runs ONE review may need to finish — not a
- *  guessed multiplier. (2) `proofTimeoutMs` (plan/policy.yaml) — this repo's own MEASURED per-proof
- *  ceiling, 180_000ms; see that file's "THE 30000 REGRESSION" comment for the measurement (a real,
- *  passing suite timed at 52.9s on a dev host and still over 60s on the reviewer host) that set it.
- *
- *  14 * 180_000ms = 2_520_000ms (42m): comfortably above a real review's serial proof-execution
- *  time, and comfortably inside #5672's observed 2h-stale window, which the falsifier requires
- *  this constant to treat as reclaimable. */
+/** Reclaim pending claims after this TTL; see {@link postReviewPending}. #5672 observed a 23:42 claim still
+ * pending at 01:42 (2h), its owning run dead and busy on another PR.
+ * Derivation: the live plan's widest task had 14 criteria on 2026-09-17 (1,613 criteria across
+ * `plan/tasks.d/*.yaml`). Pending posts precede serial proofs, so multiply 14 by policy's measured
+ * `proofTimeoutMs` = 180_000ms: 2_520_000ms (42m), above serial proof time but below #5672's 2h falsifier.
+ * See plan/policy.yaml's "THE 30000 REGRESSION": a passing suite took 52.9s locally and over 60s on the reviewer. */
 export const REVIEW_LOCK_TTL_MS = 14 * 180_000;
 
 export interface PostReviewPendingOpts {
@@ -11651,21 +11565,15 @@ export interface PostReviewPendingResult {
   lifecycle?: "merged" | "closed";
 }
 
-/** THE ONE PENDING-POST ENTRY POINT (design (a)/(d)): every detector — `runReview`'s own start, `reviewCommand`'s own
- * start, and transitively the sweep's post-review dispatch — calls this ONCE, at DETECTION, before the worktree, proof
- * and reviewer-spawn work a review's latency is spent on. It goes through {@link postReviewStatusGuarded}, so the
- * W1-T135 retry, the W1-T228 lifecycle refusal and the W1-T203 reviewer identity all apply. A fresh lifecycle read
- * precedes local deduplication; the shared commit status also guards against claims from other hosts.
- * (1) NEVER REGRESS A TERMINAL VERDICT FOR THE SAME REVIEW INPUT TO PENDING:
- * {@link decideReviewStatusPost}'s precedence only refuses `executed -> no_evidence`, and a pending attempt is always
- * `no_evidence`, so a prior `no_evidence` TERMINAL verdict for this head would sail through; a changed body is a fresh
- * input and may post again. (2) IDEMPOTENT PER INPUT, BUT ONLY INSIDE {@link REVIEW_LOCK_TTL_MS} (W1-T3647): a
- * `review.pending_posted` line for this exact head+body digest is a no-op while its own `ts` reads younger than the
- * TTL unless its owner is proven dead (W1-T8088). An unreadable clock FAILS TOWARD HOLDING, never toward reclaim, since
- * the alternative is two reviewers judging the same head. A READABLE age at or past the TTL also reclaims: this call
- * posts itself as the new holder and names the run it took over from, rather than deferring forever to a claim its
- * own owning run may already be dead. The posted status carries the posting `run_id`, which is what sweep.ts's
- * `OpenPrView.reviewPendingSince` producer derives its staleness clock from. */
+/** Single pending-post entry point (design (a)/(d)): `runReview`, `reviewCommand` and transitively sweep
+ * call once at detection, before worktree/proof/reviewer work. {@link postReviewStatusGuarded} supplies W1-T135
+ * retry, W1-T228 lifecycle refusal and W1-T203 identity. Read fresh lifecycle before local dedup; shared status
+ * guards other hosts. Never regress a terminal verdict for the same input: {@link decideReviewStatusPost}
+ * only refuses `executed -> no_evidence`, so pending could otherwise overwrite a `no_evidence` terminal.
+ * A changed body is fresh input. Exact head+body claims are idempotent only within {@link REVIEW_LOCK_TTL_MS}
+ * (W1-T3647), unless the owner is proven dead (W1-T8088). Unreadable clocks hold to avoid duplicate reviewers;
+ * readable age at/past TTL reclaims, naming the replaced run. Posted `run_id` supplies sweep.ts's
+ * `OpenPrView.reviewPendingSince` staleness clock. */
 export async function postReviewPending(opts: PostReviewPendingOpts): Promise<PostReviewPendingResult> {
   const lifecycle = await readReviewLifecycle(opts.fetchLifecycle);
   if (lifecycle.merged || lifecycle.closed) {
@@ -11858,12 +11766,9 @@ export function currentRepairLeaseHolder(
   return prior && prior.headSha === sha ? prior : undefined;
 }
 
-/** ADVISORY, NOT A MUTEX (W1-T3646 design: "must not block a human, and never gate CI... it is
- *  not a permission check on pushing"). The answer is unconditionally `true` regardless of
- *  `holder`, so nothing that calls this before letting a push through can accidentally turn a
- *  visible claim into a refusal — a claimed PR stays repairable by anyone who decides to
- *  (criterion 2). Exported so an integration point has one obvious call to make instead of
- *  inventing its own (wrong) check against the holder. */
+/** Advisory lease, never a mutex (W1-T3646: "must not block a human, and never gate CI... it is
+ * not a permission check on pushing"). Always return `true` regardless of `holder`: anyone may repair a claimed PR
+ * (criterion 2). Export one integration point so callers do not invent a holder-based refusal. */
 export function repairLeaseAllowsPush(_holder: RepairLeaseRecord | undefined): true {
   return true;
 }
