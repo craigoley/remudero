@@ -42,6 +42,7 @@ RMD_DAEMON_RUNTIME_ENV_VARS=(
   RMD_GIT_AUTHOR_EMAIL
   NODE_OPTIONS
   RMD_OPENWEIGHT_API_KEY
+  RMD_CASH_EASTUS_API_KEY
   RMD_FOUNDRY_CLAUDE_ENDPOINT
   RMD_FOUNDRY_CLAUDE_API_KEY
 )
@@ -53,6 +54,8 @@ RMD_DERIVED_RUNTIME_ENV_VARS=(
 )
 
 RMD_OPENWEIGHT_API_KEY_PATH="${RMD_OPENWEIGHT_API_KEY_PATH:-${HOME:-/root}/.local/share/remudero/secrets/openweight-api-key}"
+
+RMD_CASH_EASTUS_API_KEY_PATH="${RMD_CASH_EASTUS_API_KEY_PATH:-${HOME:-/root}/.local/share/remudero/secrets/cash-eastus-api-key}"
 
 # W1-T1222: the console's own runtime names, read by `resolveServeHosts` in src/lib/serve.ts, NOT
 # by the daemon — a separate list rather than folded into the one above because

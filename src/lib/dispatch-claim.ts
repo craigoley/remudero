@@ -306,6 +306,8 @@ export interface DispatchClaimReserver {
   list?(): string[];
   /** W1-T9432: extend the claim at `expect` by one renewal commit; see {@link DispatchClaimRenewal}. */
   renew?(taskId: string, expect: string): DispatchClaimRenewal;
+  /** W1-T10896: origin's tip of `refs/heads/<branch>`, `undefined` when absent or unreadable. */
+  branchHead?(branch: string): string | undefined;
 }
 
 export interface ClaimGitDeps {
@@ -344,6 +346,9 @@ export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReser
     },
     list() {
       return claimIdsFromLsRemote(deps.run(["ls-remote", "origin", "refs/rmd-dispatch/*"]));
+    },
+    branchHead(branch) {
+      return runBranchHeadFromLsRemote(deps.run(["ls-remote", "origin", `refs/heads/${branch}`]), branch);
     },
     anchorMessage(taskId, expect) {
       const sha = expect ?? this.holder(taskId);
@@ -647,7 +652,7 @@ export function releaseDispatchClaim(
     evidenceObserved?: boolean;
     /** W1-T2784: probe seam for the dead-claimant arm. Optional and last, so every existing
      *  caller and test fake keeps today's three-arm behavior unchanged when it's omitted. */
-    livenessProbe?: () => ClaimantLivenessProbe | undefined;
+    livenessProbe?: (anchor: ClaimAnchorIdentity) => ClaimantLivenessProbe | undefined;
     replacedProbe?: (anchor: ClaimAnchorIdentity) => ReplacedClaimantProbe | undefined;
   } = {},
 ): DispatchClaimReleaseResult {
@@ -660,7 +665,7 @@ export function releaseDispatchClaim(
     judged = reserver.holder(taskId);
     anchorIdentity = judged ? parseClaimAnchorMessage(reserver.anchorMessage?.(taskId, judged)) : undefined;
     // The pid is only meaningful once an anchor parsed — probe after, never before.
-    if (anchorIdentity) liveness = i.livenessProbe?.();
+    if (anchorIdentity) liveness = i.livenessProbe?.(anchorIdentity);
     if (anchorIdentity) replaced = i.replacedProbe?.(anchorIdentity);
   }
   const decision = decideDispatchClaimRelease({
@@ -781,6 +786,113 @@ function parseLedgerRow(line: string): { kind: "row"; row: Record<string, unknow
   }
 }
 
+/** W1-T10896: the same-host probe runTask's `taken` arm builds, for a sweep meeting a claim it does not own.
+ *  An unreadable namespace boot declines to the operator arm, as it does there. */
+export function sameHostLivenessProbe(localHost: string): (anchor: ClaimAnchorIdentity) => ClaimantLivenessProbe | undefined {
+  return (anchor) => {
+    const namespaceBootMs = readNamespaceBootMs();
+    if (namespaceBootMs === undefined) return undefined;
+    return { localHost, namespaceBootMs, namespaceBootIso: fixedClock(namespaceBootMs).iso(), pidPresent: pidIsPresent(anchor.pid) };
+  };
+}
+
+/** W1-T10896: the verdict reason for a run whose own daemon restarted under it. A checkpoint handoff reason
+ *  in daemon.ts, so a verdict carrying the run's pushed head is a resume receipt. */
+export const ORPHANED_BY_RESTART = "orphaned-by-restart";
+
+/** What this instance's ledger holds for one run id; `prUrl` is the run's own `pr.opened`. */
+export interface RunLedgerState {
+  readonly started: boolean;
+  readonly verdict: boolean;
+  readonly prUrl?: string;
+}
+
+/** W1-T10896: reads the full run history, including starts before mint and verdicts in later rotations. */
+export function readRunLedgerState(
+  stateDir: string,
+  runId: string,
+  _anchor: ClaimAnchorIdentity,
+  fs: LedgerGrepFsDeps = realLedgerFs,
+): RunLedgerState {
+  let started = false;
+  let verdict = false;
+  let prUrl: string | undefined;
+  const names = fs.existsSync(stateDir) ? fs.readdirSync(stateDir) : [];
+  const files = ledgerRotationEntries(names, stateDir)
+    .map((entry) => ({ path: entry.path, gzip: entry.form === "gzip" }));
+  if (fs.existsSync(ledgerLivePath(stateDir))) files.push({ path: ledgerLivePath(stateDir), gzip: false });
+  for (const file of files) {
+    for (const line of claimLedgerText(file, fs).split("\n")) {
+      if (!line.includes(runId)) continue;
+      const parsed = parseLedgerRow(line);
+      if (parsed.kind !== "row" || parsed.row.run_id !== runId) continue;
+      if (parsed.row.step === "run.start") started = true;
+      if (parsed.row.step === "verdict") verdict = true;
+      if (parsed.row.step === "pr.opened" && typeof parsed.row.pr_url === "string") prUrl = parsed.row.pr_url;
+    }
+  }
+  return { started, verdict, ...(prUrl !== undefined ? { prUrl } : {}) };
+}
+
+/** The tip `git ls-remote origin refs/heads/<branch>` names for exactly `branch`, or `undefined`. */
+export function runBranchHeadFromLsRemote(res: { status: number | null; stdout?: string | null }, branch: string): string | undefined {
+  if (res.status !== 0) return undefined;
+  for (const line of (res.stdout ?? "").split("\n")) {
+    const [sha, ref] = line.trim().split("\t");
+    if (ref === `refs/heads/${branch}` && sha !== undefined && /^[a-f0-9]{40}$/.test(sha)) return sha;
+  }
+  return undefined;
+}
+
+/** W1-T10896: the reads that end a run whose claim the same-host arm released. */
+export interface RestartOrphanReads {
+  runState: (runId: string, anchor: ClaimAnchorIdentity) => RunLedgerState;
+  branchHead: (branch: string) => string | undefined;
+}
+
+/** One boot-swept claim; `orphanVerdict` is the `verdict` row's fields for a run the restart orphaned. */
+export type BootSweptClaim = DispatchClaimReleaseResult & { taskId: string; orphanVerdict?: Record<string, unknown> };
+
+/**
+ * W1-T10896: the ONE terminal verdict for the run that minted a claim the same-host arm released. The run id is
+ * the claim's mint row's; the run must have started and have no verdict, so a second boot writes none. With
+ * its pushed head and no PR of its own the row is a checkpoint receipt; without, it carries none. `handed_off`
+ * is a non-worker verdict (non-worker-verdict.ts), so it is never a strike.
+ */
+function restartOrphanVerdict(
+  taskId: string,
+  anchor: ClaimAnchorIdentity,
+  liveness: ClaimantLivenessProbe,
+  mintRow: ClaimMintRow | undefined,
+  reads: RestartOrphanReads,
+): Record<string, unknown> | undefined {
+  const runId = mintRow?.runId;
+  if (runId === undefined || !runId.startsWith(`${taskId}-`)) return undefined;
+  const state = reads.runState(runId, anchor);
+  if (!state.started || state.verdict) return undefined;
+  const branch = `run-${runId}`;
+  const headSha = state.prUrl === undefined ? reads.branchHead(branch) : undefined;
+  return {
+    run_id: runId,
+    task_id: taskId,
+    verdict: "handed_off",
+    reason: ORPHANED_BY_RESTART,
+    surface: "boot-sweep",
+    claim_ref: dispatchClaimRef(taskId),
+    claim_anchor: `${anchor.pid}@${anchor.host} ${anchor.mintedAtIso}`,
+    namespace_boot: liveness.namespaceBootIso,
+    detail: `run ${runId} minted its claim before this host's PID namespace started ${liveness.namespaceBootIso} ` +
+      `and pid ${anchor.pid} is absent, so its daemon restarted under it and it cannot end itself`,
+    ...(state.prUrl !== undefined ? { pr_url: state.prUrl } : {}),
+    ...(headSha !== undefined ? { branch, head_sha: headSha } : {}),
+  };
+}
+
+/**
+ * The boot sweep. W1-T5047's replaced-container probe judges a claim another host of this instance minted;
+ * W1-T10896's `livenessProbe` judges one THIS host minted before its PID namespace booted (an in-place restart),
+ * and `restartOrphan` then ends that claim's run.
+ */
 export function releaseReplacedContainerClaims(
   reserver: DispatchClaimReserver,
   i: {
@@ -789,20 +901,61 @@ export function releaseReplacedContainerClaims(
     lockHeldSinceIso: string;
     findMintRow: (taskId: string, anchor: ClaimAnchorIdentity) => ClaimMintRow | undefined;
     isMerged?: (taskId: string) => boolean;
+    livenessProbe?: (anchor: ClaimAnchorIdentity) => ClaimantLivenessProbe | undefined;
+    restartOrphan?: RestartOrphanReads;
   },
-): Array<DispatchClaimReleaseResult & { taskId: string }> {
-  return (reserver.list?.() ?? []).map((taskId) => ({
-    taskId,
-    ...releaseDispatchClaim(taskId, reserver, {
+): BootSweptClaim[] {
+  const probe = i.livenessProbe;
+  return (reserver.list?.() ?? []).map((taskId) => {
+    // What the release judged, seen through its probes, so the verdict names the same anchor and namespace boot.
+    const seen: { anchor?: ClaimAnchorIdentity; mintRow?: ClaimMintRow; liveness?: ClaimantLivenessProbe } = {};
+    const result = releaseDispatchClaim(taskId, reserver, {
       evidenceObserved: i.isMerged?.(taskId) === true,
-      replacedProbe: (anchor) => ({
-        localHost: i.localHost,
-        lockHeldSinceMs: i.lockHeldSinceMs,
-        lockHeldSinceIso: i.lockHeldSinceIso,
-        mintRow: i.findMintRow(taskId, anchor),
-      }),
-    }),
-  }));
+      ...(probe ? { livenessProbe: (anchor: ClaimAnchorIdentity) => (seen.liveness = probe(anchor)) } : {}),
+      replacedProbe: (anchor) => {
+        seen.anchor = anchor;
+        seen.mintRow = i.findMintRow(taskId, anchor);
+        return { localHost: i.localHost, lockHeldSinceMs: i.lockHeldSinceMs, lockHeldSinceIso: i.lockHeldSinceIso, mintRow: seen.mintRow };
+      },
+    });
+    const { anchor, liveness } = seen;
+    const sameHostArm = result.arm === "dead-claimant" && result.dropped && sameHost(anchor?.host, liveness?.localHost);
+    const orphanVerdict = sameHostArm && anchor && liveness && i.restartOrphan
+      ? restartOrphanVerdict(taskId, anchor, liveness, seen.mintRow, i.restartOrphan)
+      : undefined;
+    return { taskId, ...result, ...(orphanVerdict ? { orphanVerdict } : {}) };
+  });
+}
+
+/** W1-T10896: the daemon's boot sweep, ledgering every decision and each restart-orphaned run's verdict. */
+export function bootSweepDispatchClaims(
+  reserver: DispatchClaimReserver,
+  i: {
+    localHost: string;
+    lockHeldSinceMs: number;
+    lockHeldSinceIso: string;
+    stateDir: string;
+    log: (step: string, fields: Record<string, unknown>) => void;
+  },
+): BootSweptClaim[] {
+  const swept = releaseReplacedContainerClaims(reserver, {
+    localHost: i.localHost,
+    lockHeldSinceMs: i.lockHeldSinceMs,
+    lockHeldSinceIso: i.lockHeldSinceIso,
+    findMintRow: (taskId, anchor) => findClaimMintRow(i.stateDir, taskId, anchor),
+    // An in-place restart keeps the hostname, so only the same-host arm can judge its claims.
+    livenessProbe: sameHostLivenessProbe(i.localHost),
+    restartOrphan: {
+      runState: (runId, anchor) => readRunLedgerState(i.stateDir, runId, anchor),
+      branchHead: (branch) => reserver.branchHead?.(branch),
+    },
+  });
+  for (const claim of swept) {
+    const { taskId, arm, release, dropped, reason } = claim;
+    i.log("dispatch.claim_released", { ref: dispatchClaimRef(taskId), surface: "boot-sweep", arm, release, dropped, reason });
+    if (claim.orphanVerdict) i.log("verdict", claim.orphanVerdict);
+  }
+  return swept;
 }
 
 export interface LandedClaimSweepInputs {
@@ -1036,7 +1189,11 @@ export async function reclaimSilentDispatchClaim(
   deps.say?.(`RECLAIMED a silent claim — ${decision.reason}`);
   const fresh = await reserver.mintAnchor();
   const retried = await reserver.attempt(taskId, fresh);
-  return retried === "created" ? { ...decision, dropped, anchor: fresh } : { ...decision, dropped };
+  if (retried !== "created") return { ...decision, dropped };
+  deps.log("dispatch.claim", {
+    ref: dispatchClaimRef(taskId), outcome: retried, ...decideDispatchClaim(retried, { taskId }),
+  });
+  return { ...decision, dropped, anchor: fresh };
 }
 
 /** A run's own claim, renewed on {@link DISPATCH_CLAIM_RENEW_INTERVAL_MS} until `stop()` hands back the sha to release. */

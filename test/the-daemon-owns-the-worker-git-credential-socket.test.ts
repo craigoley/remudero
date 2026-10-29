@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import { createConnection } from "node:net";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -21,6 +21,7 @@ import { buildWorkerEnv } from "../src/lib/env.js";
 import { mintScopedToken } from "../src/lib/github-app.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { fileTargetJobStore } from "#src/lib/product-build.js";
 import {
   daemonGitCredentialSocketPath,
   realScopedMint,
@@ -28,7 +29,8 @@ import {
   startDaemonGitCredentialSocket,
   type ScopedTokenMint,
 } from "../src/lib/secret-boundary.js";
-import type { GitHub } from "../src/lib/status.js";
+import { buildBatchedGithub, defaultCreditStorePath, saveCreditStore, type GitHub, type PrRef } from "#src/lib/status.js";
+import { createNativeTargetRepository } from "#src/cli/commands/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   CLAUDE_BIN_ENV_OVERRIDE,
@@ -43,6 +45,7 @@ import {
 import { buildSweepHook, daemonCommand, gitCredentialFixSpawn, runTask, unwireOwnCheckoutCredentialHelper } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 /** `git credential fill` for one owner/repo URL, asynchronously, with its stdin closed. */
 function credentialFill(cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
@@ -808,4 +811,244 @@ test("an unreadable or half-wired checkout neither stops the boot repair nor hid
 
   const gone = join(tmpdir(), `${RMD_TMP_PREFIX}never-created`);
   assert.equal(sharesHarnessCheckout(gone, `${gone}/.`), true, "a path that does not exist still compares by its resolved form");
+});
+
+// ── W1-T10799: a managed target with no daemon of its own, run as the core daemon's bounded job ─
+
+/** Core drives remudero; the two enrolled targets have NO live instance of their own. */
+const CORE_ONLY_REGISTRY = "instances:\n  core:\n    github_repo: craigoley/remudero\n";
+
+/** The target repository's own plan: the product task, and an ordinary one the job must never touch. */
+const TARGET_PLAN = `
+- id: W9-T1
+  title: the product's first source task
+  repo: wreckterra
+  type: implement
+  depends_on: []
+  status: queued
+  origin: product-plan#prd_x/plan-approved-1
+  budget_usd: 10
+- id: W9-T3
+  title: an ordinary queued task of the same plan
+  repo: wreckterra
+  type: implement
+  depends_on: []
+  status: queued
+`;
+
+test("W1-T10799: a missing target clone creates its parent and a failed clone never dispatches", async (t) => {
+  const root = ownedFixtureDir(t, "bounded-target-clone-failure").dir;
+  const home = join(root, "home");
+  const coreRoot = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root: coreRoot }));
+  mkdirSync(join(coreRoot, "state"), { recursive: true });
+  const selfPlan = join(root, "self-plan.yaml");
+  writeFileSync(selfPlan, "[]\n");
+  const checkout = gitRepo({ scope: t, kind: "bounded-clone-core" }).dir;
+  mkdirSync(join(checkout, ".remudero"));
+  writeFileSync(join(checkout, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
+  writeFileSync(join(checkout, ".remudero", "daemon-instances.yaml"), CORE_ONLY_REGISTRY);
+  const reposDir = join(coreRoot, "repos");
+  const cloneDir = join(reposDir, "wreckterra");
+  const gh = ghShim([{ when: "repo clone", stderr: "target clone denied by fixture", exit: 1 }], { kind: "bounded-target-clone" });
+  t.after(() => rmSync(gh.dir, { recursive: true, force: true }));
+  const previous = { HOME: process.env.HOME, PATH: process.env.PATH, CI: process.env.CI, GITHUB_ACTIONS: process.env.GITHUB_ACTIONS };
+  process.env.HOME = home;
+  process.env.PATH = `${gh.dir}:${previous.PATH ?? ""}`;
+  delete process.env.CI;
+  delete process.env.GITHUB_ACTIONS;
+  const origin = "product:prd_clone/op_1";
+  const dispatched: string[] = [];
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", selfPlan, "--max", "0"], {
+      repoRoot: checkout,
+      githubFactory: () => OFFLINE_GITHUB,
+      startGithubAppRefresh: () => ({ armed: false }),
+      runTask: (async (taskId: string) => {
+        dispatched.push(taskId);
+        throw new Error("a failed clone must never reach runTask");
+      }) as never,
+      runDaemon: (async (_plan: unknown, daemonDeps: DaemonDeps) => {
+        assert.equal(existsSync(reposDir), false, "the clone's parent is absent before the job starts");
+        await assert.rejects(
+          daemonDeps.runTargetJob!({ taskId: "W9-T1", origin, repo: "wreckterra" }, daemonDeps),
+          /target clone denied by fixture/,
+        );
+        assert.ok(statSync(reposDir).isDirectory(), "the production clone path creates the missing parent");
+        assert.equal(existsSync(cloneDir), false, "the failed clone leaves no target checkout");
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      }) as never,
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(gh.calls().filter((call) => call.startsWith("repo clone ")), [`repo clone craigoley/wreckterra ${cloneDir}`]);
+    assert.deepEqual(dispatched, [], "clone failure spends no task attempt");
+    assert.deepEqual(fileTargetJobStore(coreRoot).read(origin), { state: "absent" }, "no admission is recorded before plan sync");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+// The core daemon's OWN composition root, not a hand-wired runner: it binds the job to the target clone, reads the
+// target's dispatch claim from that clone's origin, and hands the job's worker the daemon's one credential socket.
+test("W1-T10799: one managed target without a daemon reaches one bounded native job through core wiring and shared WIP", async (t) => {
+  const root = ownedFixtureDir(t, "bounded-target-daemon").dir;
+  const home = join(root, "home");
+  const coreRoot = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root: coreRoot }));
+  mkdirSync(join(coreRoot, "state"), { recursive: true });
+  const selfPlan = join(root, "self-plan.yaml");
+  writeFileSync(selfPlan, "[]\n");
+
+  // The target's origin carries its own plan; its clone sits where the core daemon keeps managed clones.
+  const origin = gitRepo({ bare: true, scope: t, kind: "bounded-job-origin" });
+  const seed = gitRepo({ seedCommit: false, scope: t, kind: "bounded-job-seed" });
+  seed.addRemote("origin", origin.dir);
+  mkdirSync(join(seed.dir, "plan"));
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), TARGET_PLAN);
+  seed.git("add", "-A");
+  seed.git("commit", "-q", "-m", "seed");
+  seed.git("push", "-q", "-u", "origin", "main");
+  const checkout = join(root, "checkout");
+  execFileSync("git", ["clone", "-q", origin.dir, checkout], { stdio: "pipe" });
+  mkdirSync(join(checkout, ".remudero"));
+  writeFileSync(join(checkout, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra", "craigoley/gammaterra"] }));
+  writeFileSync(join(checkout, ".remudero", "daemon-instances.yaml"), CORE_ONLY_REGISTRY);
+  const reposDir = join(coreRoot, "repos");
+  mkdirSync(reposDir);
+  execFileSync("git", ["clone", "-q", origin.dir, join(reposDir, "wreckterra")], { stdio: "pipe" });
+  // A clone whose `.git` is a symlink is one the pinned host git refuses to read: its claim is unknown, never free.
+  mkdirSync(join(reposDir, "gammaterra"));
+  symlinkSync(join(reposDir, "wreckterra", ".git"), join(reposDir, "gammaterra", ".git"));
+
+  // Both jobs already dispatched once, so each must recover from its durable record and its claim, never respend blindly.
+  const origins: Record<string, string> = { wreckterra: "product:prd_x/op_1", gammaterra: "product:prd_x/op_2" };
+  const store = fileTargetJobStore(coreRoot);
+  for (const repo of Object.keys(origins)) {
+    store.write({ origin: origins[repo]!, taskId: "W9-T1", repo, status: "admitted", attempts: 1, updatedAt: new Date().toISOString() });
+  }
+
+  const socketPath = daemonGitCredentialSocketPath(join(coreRoot, "state"));
+  const previous = { HOME: process.env.HOME, CI: process.env.CI, GITHUB_ACTIONS: process.env.GITHUB_ACTIONS };
+  process.env.HOME = home;
+  delete process.env.CI;
+  delete process.env.GITHUB_ACTIONS;
+  const outcomes: Record<string, unknown> = {};
+  const taskCalls: Array<{ taskId: string; opts: Record<string, unknown> }> = [];
+  const corePrs: PrRef[] = [];
+  const targetPrs: PrRef[] = [];
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", selfPlan, "--max", "0"], {
+      repoRoot: checkout,
+      githubFactory: (_owner: string, repo: string) => ({ ...OFFLINE_GITHUB,
+        listOpenHeadBranches: () => repo === "remudero" ? corePrs : repo === "wreckterra" ? targetPrs : [],
+      }),
+      readQueuePressure: (floorMib: number) => ({ availableMib: floorMib * 10, floorMib, tier: "fits" }),
+      startGithubAppRefresh: () => ({ armed: true, ready: Promise.resolve() }),
+      gitCredentialMint: async (repo: string) => ({ ok: true, token: `scoped-for-${repo}` }),
+      runTask: (async (taskId: string, opts: Record<string, unknown>) => {
+        taskCalls.push({ taskId, opts });
+        assert.equal(typeof opts.onRunCreated, "function", "the core composition supplies the durable native identity hook");
+        (opts.onRunCreated as (runId: string) => void)(`${taskId}-1234`);
+        const runningJob = store.read("product:fresh/one");
+        assert.ok(runningJob.state === "found" && runningJob.record.runId === `${taskId}-1234`,
+          "the native identity is durable before the worker's first asynchronous read");
+        const snapshot = await (opts.planSnapshot as () => Promise<{ plan: { tasks: Array<{ id: string; repo: string }> } }>)();
+        assert.equal(snapshot.plan.tasks.find((task) => task.id === taskId)?.repo, "wreckterra", "runTask reads the exact selected target plan snapshot");
+        targetPrs.push({ number: 1, url: "https://github.com/craigoley/wreckterra/pull/1", state: "OPEN", headRefName: `run-${taskId}-1` });
+        return { taskId, runId: `${taskId}-wired`, merged: false, costUsd: 5, verdict: "handed_off", prUrl: targetPrs[0]!.url };
+      }) as never,
+      runDaemon: (async (_plan: unknown, daemonDeps: DaemonDeps) => {
+        for (const repo of ["wreckterra", "gammaterra"]) {
+          outcomes[repo] = await daemonDeps.runTargetJob!({ taskId: "W9-T1", origin: origins[repo]!, repo }, {} as DaemonDeps);
+        }
+        assert.equal(daemonDeps.openPrCount!(), 2, "both unresolved durable target jobs occupy shared WIP after restart");
+        // Resolve the fixture records, then fill all but the last slot on Core's board.
+        for (const repo of Object.keys(origins)) store.write({ origin: origins[repo]!, taskId: "W9-T1", repo, status: "ended", attempts: 1, updatedAt: new Date().toISOString() });
+        daemonDeps.refreshMerged();
+        daemonDeps.checkQueueGovernor!();
+        const limit = daemonDeps.readQueueAdmission!()!.wipLimit;
+        for (let n = 1; n < limit; n++) corePrs.push({ number: n, url: `https://github.com/craigoley/remudero/pull/${n}`, state: "OPEN", headRefName: `run-W1-T${n}-1` });
+        daemonDeps.refreshMerged();
+        assert.equal(daemonDeps.openPrCount!(), limit - 1);
+        const gates = { checkQueueGovernor: daemonDeps.checkQueueGovernor } as DaemonDeps;
+        [outcomes.fresh, outcomes.concurrent] = await Promise.all([
+          daemonDeps.runTargetJob!({ taskId: "W9-T1", origin: "product:fresh/one", repo: "wreckterra" }, gates),
+          daemonDeps.runTargetJob!({ taskId: "W9-T3", origin: "product:fresh/two", repo: "wreckterra" }, gates),
+        ]);
+        assert.equal((outcomes.concurrent as { state: string }).state, "held", "concurrent requests reserve the shared lane before awaiting plan sync");
+        assert.equal(daemonDeps.openPrCount!(), limit, "the first target PR consumes the last shared WIP slot");
+        outcomes.waiting = await daemonDeps.runTargetJob!({ taskId: "W9-T3", origin: "product:fresh/two", repo: "wreckterra" }, gates);
+        assert.equal((outcomes.waiting as { state: string }).state, "held", "the second job defers on target WIP even with a free lane");
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      }) as never,
+    });
+    assert.equal(code, 0);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dirname(socketPath), { recursive: true, force: true });
+  }
+
+  assert.equal((outcomes.wreckterra as { state: string }).state, "held", "a free claim cannot disprove an earlier spend");
+  assert.equal((outcomes.fresh as { state: string }).state, "ended", "a new origin enters one maintained drain");
+  assert.deepEqual(taskCalls.map((call) => call.taskId), ["W9-T1"], "exactly one dispatch across both recovered jobs");
+  assert.equal(taskCalls[0]!.opts.planPath, join(reposDir, "wreckterra", "plan", "tasks.yaml"), "the target clone's own plan, derived as resolveDaemonTarget derives it");
+  assert.equal(taskCalls[0]!.opts.owner, "craigoley", "bound to the verified target owner");
+  assert.equal(taskCalls[0]!.opts.gitCredentialSocketPath, socketPath, "the job's worker gets the daemon's one credential socket");
+  const ended = store.read(origins.wreckterra!);
+  assert.ok(ended.state === "found" && ended.record.status === "ended");
+
+  // A claim that cannot be read is unknown: the job resumes from its record and is never dispatched a second time.
+  assert.equal((outcomes.gammaterra as { state: string }).state, "resumed", "an unreadable claim is held, never read as free");
+  const ledger = readFileSync(join(coreRoot, "state", "ledger.ndjson"), "utf8").split("\n").filter((line) => line.includes("target_job.resumed"));
+  assert.equal(ledger.length, 1, "the resumption is ledgered once");
+  assert.ok(ledger[0]!.includes('"claim":"unknown"'), "and it records that the claim could not be read");
+});
+
+test("W1-T10799: the native runner persists identity before plan reads and aborts on a failed durable write", async (t) => {
+  const root = ownedFixtureDir(t, "bounded-native-identity").dir;
+  const config: Config = { root, claudeBin: "/bin/true" };
+  const writes: string[] = [];
+  let reads = 0;
+  const refusedWrite = new Error("durable identity write failed");
+  await assert.rejects(runTask("W9-T1", {
+    config, owner: "craigoley",
+    onRunCreated: (runId) => { writes.push(runId); throw refusedWrite; },
+    planSnapshot: async () => { reads++; throw new Error("fixture plan unavailable"); },
+  }), (error) => error === refusedWrite);
+  assert.equal(reads, 0, "a failed durable write prevents all asynchronous plan work");
+  assert.equal(writes.length, 1);
+  assert.match(writes[0]!, /^W9-T1-\d+$/);
+  assert.equal(existsSync(join(root, "state", "ledger.ndjson")), false, "the refused write starts no native run");
+});
+
+// Keep the worker entry-point check beside its existing native integration coverage.
+test("W1-T10799: the native worker rechecks target credit before dependency admission", async (t) => {
+  const root = ownedFixtureDir(t, "bounded-target-worker-credit").dir;
+  mkdirSync(join(root, "state"), { recursive: true });
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const planPath = join(root, "target-plan.yaml");
+  writeFileSync(planPath, TARGET_PLAN.replace("depends_on: []", "depends_on: [W9-T3]"));
+  const target = buildBatchedGithub("craigoley", "wreckterra", { fetchAll: () => [], commitTrailerIndex: () => new Map() });
+  saveCreditStore(defaultCreditStorePath(ledgerPath), { "W9-T1": { trailer: {
+    source: "trailer", prNumber: 77, prUrl: "https://github.com/craigoley/remudero/pull/77", prState: "MERGED",
+  } } });
+  const coreStore = readFileSync(defaultCreditStorePath(ledgerPath), "utf8");
+  const scope = createNativeTargetRepository(root, "craigoley", "wreckterra", target);
+  const options = { skipGitSync: true, planPath, config: { root, claudeBin: "/bin/true" },
+    owner: "craigoley", github: target, spawn: async () => { throw new Error("no worker may spawn"); } };
+  const legacy = await runTask("W9-T1", options);
+  assert.equal(legacy.verdict, "task_already_merged", "positive control: the default Core reader sees the colliding credit");
+  const beforeWorkerCache = readFileSync(join(root, "state", "status.json"), "utf8");
+  await assert.rejects(runTask("W9-T1", { ...options, repositoryState: scope }), /unmerged dependenc/i,
+    "the bounded worker uses target credit and reaches the real unmet dependency guard");
+  assert.equal(readFileSync(defaultCreditStorePath(ledgerPath), "utf8"), coreStore);
+  assert.equal(readFileSync(join(root, "state", "status.json"), "utf8"), beforeWorkerCache, "the worker preserves Core's cache");
 });
