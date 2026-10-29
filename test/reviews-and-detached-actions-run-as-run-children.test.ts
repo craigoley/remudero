@@ -999,7 +999,7 @@ const fixPr = (over: Partial<OpenPrView> = {}): OpenPrView => ({
 });
 
 async function proveFreshFixAdmissionAcrossRestart() {
-  const { runDetachedWork } = await import("#src/run-task.js");
+  const { runDetachedWork, buildSweepEffects } = await import("#src/run-task.js");
   for (const admission of ["refused", "unreadable", "throws", "admitted"] as const) {
     const f = fixture();
     const clock = fixedClock(Date.parse("2026-10-12T12:00:00Z"));
@@ -1042,9 +1042,13 @@ async function proveFreshFixAdmissionAcrossRestart() {
         },
         ...(admission === "unreadable" ? { claimFixAdmission: () => undefined as never } : {}),
         ...(admission === "throws" ? { claimFixAdmission: () => { throw new Error("admission evidence unreadable"); } } : {}),
-        dispatcher: (plan: Plan) => {
-          assert.equal(plan.byId.get(FIX_TASK)?.risk, "high", "the child reconstructs with the current canonical risk, not the producer's low risk");
-          return { dispatchFix: () => { dispatches++; } };
+        buildEffects: (args: Parameters<typeof buildSweepEffects>[0]) => {
+          assert.equal(args.owner, "foreign-owner", "the rebuilt sweep targets the saved PR owner after target.owner was dropped");
+          assert.equal(args.repo, "remudero");
+          assert.equal(args.plan.byId.get(FIX_TASK)?.risk, "high", "the real builder receives this child's fresh canonical plan");
+          const effects = buildSweepEffects(args);
+          assert.equal(typeof effects.dispatchFix, "function", "the production sweep dispatcher was reconstructed");
+          return { ...effects, dispatchFix: () => { dispatches++; } };
         },
       };
       const engine = detachedEngine(f);
@@ -1063,6 +1067,9 @@ async function proveFreshFixAdmissionAcrossRestart() {
             children.push({ dir, status });
             const child = Object.assign(new EventEmitter(), { pid: process.pid, unref() {} });
             if (work.kind === "fix-dispatch") {
+              assert.equal(Object.hasOwn(work.inputs ?? {}, "owner"), false, "the producer drops target.owner before the child reconstructs it");
+              assert.equal((work.inputs?.envelope as FixDispatchEnvelope).pr.prUrl,
+                "https://github.com/foreign-owner/remudero/pull/9379");
               childDone = runChildMain(["--run-dir", dir], {
                 env: {}, signals: { on() {}, off() {} }, clock: clock.now, stderr: () => {},
                 loadRunPath: async () => ({ runDetachedWork: (next: DetachedWorkSpec, ctx: Parameters<typeof runDetachedWork>[1]) => runDetachedWork(next, ctx, ports) }),
@@ -1081,7 +1088,7 @@ async function proveFreshFixAdmissionAcrossRestart() {
       const launchedReview = await host.spawnReview({ pr: { prNumber: 7, headSha: review.headSha! }, reviewKey: "restart-review", reviewAttemptId: undefined });
       assert.ok(launchedReview, JSON.stringify(f.rows.filter(row => row.step === "run_child.fallback")));
       void adoptChildWork({ ...launchedReview, taskId: FIX_TASK, work: review }, f.log);
-      await runSweep([fixPr()], {
+      await runSweep([fixPr({ prUrl: "https://github.com/foreign-owner/remudero/pull/9379" })], {
         arm: () => {}, close: () => {}, escalate: () => {}, log: f.log, runId: "restart-producer", now: clock.now,
         ledgerPath: join(f.stateRoot, "ledger.ndjson"), readLedger: () => [{ step: "fix.dispatch", task_id: FIX_TASK, head_sha: "old-head" }],
         appendLine: () => {}, detachFixWait: true, planContextDigestFor: riskJudgePlanContextDigestFor(loadPlan(planPath)),
@@ -1351,7 +1358,8 @@ test("W1-T9114: the run path maps live PR evidence and reads the canonical task 
       fixKey: `${FIX_TASK}@${FIX_HEAD}`, decidedAtMs: 1,
       planContextDigest: riskJudgePlanContextDigestFor(loadPlan(planPath))({ taskId: FIX_TASK }),
     });
-    const work: DetachedWorkSpec = { ...fix, inputs: { envelope } };
+    const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: envelope.pr.prNumber, headSha: envelope.pr.headSha,
+      fixKey: envelope.fixKey, inputs: { envelope } };
     const ctx = { taskId: FIX_TASK, runId: "work-fix-runtime-1" };
     const reads: string[][] = [];
     const dispatched: OpenPrView[] = [];
@@ -1389,6 +1397,10 @@ test("W1-T9114: the run path maps live PR evidence and reads the canonical task 
     assert.equal(built, 1);
     assert.deepEqual(dispatched, [envelope.pr]);
     assert.equal(planReads, 1, "the dispatcher and recheck share this dispatch's one fresh plan");
+    await assert.rejects(runDetachedWork({ ...work, prNumber: 7 }, ctx, ports), /saved PR target does not match its child spec/);
+    await assert.rejects(runDetachedWork({ ...work, inputs: { envelope, repo: "another-repo" } }, ctx, ports),
+      /saved PR target does not match its child spec/);
+    assert.equal(dispatched.length, 1, "a mismatched child identity cannot dispatch");
 
     const refused = async (reason: RegExp) => {
       await assert.rejects(runDetachedWork(work, ctx, ports), reason);
@@ -1468,7 +1480,8 @@ test("W1-T9114: the fix run path reads real fleet holds and ledgers each refusal
     const envelope = buildFixDispatchEnvelope(fixPr(), { unmetCriteria: UNMET }, {
       fixKey: `${FIX_TASK}@${FIX_HEAD}`, decidedAtMs: 1,
     });
-    const work: DetachedWorkSpec = { ...fix, inputs: { envelope } };
+    const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: envelope.pr.prNumber, headSha: envelope.pr.headSha,
+      fixKey: envelope.fixKey, inputs: { envelope } };
     let liveReads = 0;
     let dispatchers = 0;
     const ports = {

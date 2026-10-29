@@ -41684,7 +41684,7 @@ import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js"
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
 import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, runChildModeIsOn, spawnRunChild, type DetachedWorkSpec, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
-import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, runFixDispatchChild, type FixDispatchChildPorts } from "./lib/sweep.js";
+import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, readFixDispatchEnvelope, runFixDispatchChild, type FixDispatchChildPorts } from "./lib/sweep.js";
 import { classEstimate, classTypical } from "./lib/host-memory-learning.js";
 import { type RunChildMode } from "./lib/policy.js";
 import {
@@ -42706,6 +42706,8 @@ export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, re
  */
 type DetachedFixRuntimePorts = Partial<Pick<FixDispatchChildPorts, "hold" | "log" | "claimFixAdmission">> & {
   dispatcher?: (plan: Plan) => ReturnType<FixDispatchChildPorts["dispatcher"]>;
+  /** The production builder's argument boundary: tests may replace its write effect after calling the real builder. */
+  buildEffects?: typeof buildSweepEffects;
   readFixPressure?: SweepDeps["readFixPressure"];
   planPath?: string;
   planSnapshot?: (options: { allowStale?: boolean }) => SyncedPlan;
@@ -42753,11 +42755,20 @@ export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: stri
 async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void }, ports: DetachedFixRuntimePorts): Promise<RunResult> {
   const inputs = work.inputs ?? {};
   // Every read is lazy: the child reads its envelope first, and an unreadable one refuses before any config, plan or PR is read.
+  const envelope = readFixDispatchEnvelope(inputs.envelope);
+  const target = envelope === undefined ? undefined : prUrlTarget(envelope.pr.prUrl);
+  if (envelope !== undefined && (target === undefined || target.number !== envelope.pr.prNumber ||
+      (work.prNumber !== undefined && target.number !== work.prNumber) ||
+      (work.headSha !== undefined && work.headSha !== envelope.pr.headSha) ||
+      (typeof inputs.repo === "string" && inputs.repo.toLowerCase() !== target.repo.toLowerCase()))) {
+    throw new Error("fix dispatch refused: the saved PR target does not match its child spec");
+  }
   let configMemo: ReturnType<typeof loadConfig> | undefined;
   const cfg = () => (configMemo ??= ports.config ?? loadConfig());
   let selfMemo: ReturnType<typeof resolveOwnerRepo> | undefined;
   const self = () => (selfMemo ??= resolveOwnerRepo());
-  const repoName = (): string => (typeof inputs.repo === "string" ? inputs.repo : self().repo);
+  const repoName = (): string => target?.repo ?? self().repo;
+  const ownerName = (): string => target?.owner ?? self().owner;
   const ledgerPath = (): string => ledgerPathFor(cfg());
   const log = (step: string, extra: Record<string, unknown> = {}): void => {
     appendLedger(ledgerPath(), { run_id: ctx.runId, task_id: ctx.taskId, step, lane: "sweep-fix", ...extra });
@@ -42765,7 +42776,8 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
   let planMemo: ReturnType<typeof loadPlan> | undefined;
   const planNow = (): Plan => {
     if (planMemo) return planMemo;
-    const planPath = ports.planPath ?? (repoName() === self().repo ? join(repoRoot, "plan", "tasks.yaml") : join(cfg().root, "repos", repoName(), "plan", "tasks.yaml"));
+    const planPath = ports.planPath ?? (ownerName() === self().owner && repoName() === self().repo
+      ? join(repoRoot, "plan", "tasks.yaml") : join(cfg().root, "repos", repoName(), "plan", "tasks.yaml"));
     const synced = syncPlanOrRefuse(planPath, { allowStale: false, log: ports.log ?? log, say: () => {}, planSnapshot: ports.planSnapshot });
     if ("error" in synced) throw new Error(synced.error);
     return planMemo = synced.plan;
@@ -42798,15 +42810,16 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
       const plan = planNow();
       const task = plan.byId.get(taskId);
       if (task === undefined) return { found: false };
-      projection ??= projectPlan(plan, { ledgerPath: ledgerPath(), github: ports.github ?? buildBatchedGithub(self().owner, repoName()) });
+      projection ??= projectPlan(plan, { ledgerPath: ledgerPath(), github: ports.github ?? buildBatchedGithub(ownerName(), repoName()) });
       const status = projection.get(taskId);
       if (!status || status.indeterminate) throw new Error(`task ${taskId}'s merge projection is unreadable`);
       const digest = riskJudgePlanContextDigestFor(plan)({ taskId });
       return { found: true, merged: status.merged,
         retired: task.status === "blocked" && task.retirement !== undefined, ...(digest === undefined ? {} : { contextDigest: digest }) };
     },
-    dispatcher: () => ports.dispatcher ? ports.dispatcher(planNow()) : buildSweepEffects({ productionProgressJudge: true, owner: self().owner, repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
-      plan: planNow(), log, policy: DEFAULT_SWEEP_POLICY }),
+    dispatcher: () => ports.dispatcher ? ports.dispatcher(planNow()) : (ports.buildEffects ?? buildSweepEffects)({ productionProgressJudge: true,
+        owner: ownerName(), repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
+        plan: planNow(), log, policy: DEFAULT_SWEEP_POLICY }),
   });
   return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
 }
