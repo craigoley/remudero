@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { assertGateProbeRan } from "#test/helpers/gate-probe-evidence.js";
 
 test("gate probe diagnostics preserve the real missing-executable refusal", () => {
-  const native = spawnSync(join(tmpdir(), `rmd-absent-probe-${randomUUID()}`), [], { stdio: "ignore", timeout: 2000 });
+  const native = spawnSync(join(tmpdir(), `rmd-absent-probe-${randomUUID()}`), [], { stdio: "ignore", timeout: 2000, env: { ...process.env, NODE_V8_COVERAGE: "" } });
   assert.equal(native.error && "code" in native.error ? native.error.code : undefined, "ENOENT");
   assert.equal(native.stdout, null);
   assert.equal(native.stderr, null);
@@ -15,7 +15,7 @@ test("gate probe diagnostics preserve the real missing-executable refusal", () =
 });
 
 test("gate probe diagnostics preserve the real native timeout and signal", () => {
-  const native = spawnSync(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", timeout: 100 });
+  const native = spawnSync(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", timeout: 100, env: { ...process.env, NODE_V8_COVERAGE: "" } });
   assert.equal(native.error && "code" in native.error ? native.error.code : undefined, "ETIMEDOUT");
   assert.equal(native.signal, "SIGTERM");
   assert.equal(native.stdout, null);
@@ -25,14 +25,14 @@ test("gate probe diagnostics preserve the real native timeout and signal", () =>
 
 test("gate probe diagnostics retain ordinary real zero and one exits", () => {
   for (const code of [0, 1]) {
-    const native = spawnSync(process.execPath, ["-e", `process.exit(${code})`], { stdio: "ignore", timeout: 2000 });
+    const native = spawnSync(process.execPath, ["-e", `process.exit(${code})`], { stdio: "ignore", timeout: 2000, env: { ...process.env, NODE_V8_COVERAGE: "" } });
     assert.equal(native.status, code);
     assert.doesNotThrow(() => assertGateProbeRan("fixture", native));
   }
 });
 
 test("gate probe diagnostics do not retain child output above the old capture ceiling", () => {
-  const native = spawnSync(process.execPath, ["-e", "process.stdout.write('x'.repeat(3 * 1024 * 1024))"], { stdio: "ignore", timeout: 5000 });
+  const native = spawnSync(process.execPath, ["-e", "process.stdout.write('x'.repeat(3 * 1024 * 1024))"], { stdio: "ignore", timeout: 5000, env: { ...process.env, NODE_V8_COVERAGE: "" } });
   assert.equal(native.status, 0);
   assert.equal(native.stdout, null);
   assert.equal(native.stderr, null);
@@ -57,5 +57,5 @@ test("gate probe diagnostics refuse a missing status without inventing a native 
 
 
 test("gate probe diagnostics distinguish an unclassified signal from no signal", () => {
-  assert.throws(() => assertGateProbeRan("fixture", { status: null, signal: "SIGUSR2" }), /status null; signal unclassified; code none/);
+  assert.throws(() => assertGateProbeRan("fixture", { status: null, signal: "SIG_PRIVATE_PAYLOAD" as NodeJS.Signals }), /status null; signal unclassified; code none/);
 });

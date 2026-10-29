@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { constants } from "node:os";
 import type { SpawnSyncReturns } from "node:child_process";
 
 type ProbeResult = Pick<SpawnSyncReturns<unknown>, "status" | "signal" | "error">;
-const NATIVE_CODES = new Set(["ENOENT", "EACCES", "EPERM", "ETIMEDOUT", "ENOBUFS", "ENOMEM", "E2BIG"]);
-const NATIVE_SIGNALS = new Set(["SIGTERM", "SIGKILL", "SIGABRT", "SIGSEGV", "SIGBUS", "SIGINT", "SIGQUIT", "SIGHUP"]);
+const NATIVE_CODES = new Set(Object.keys(constants.errno));
+const NATIVE_SIGNALS = new Set(Object.keys(constants.signals));
 
 /** Silent probes still return native failure evidence; output/message/argv are not needed. */
 export function assertGateProbeRan(label: string, result: ProbeResult): void {
