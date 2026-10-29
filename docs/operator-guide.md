@@ -2090,3 +2090,80 @@ restart or path check fails before any request reaches the shared file, restore 
 and local files together. Once any shared request has been made, do not point cash back at the
 old local files: they omit that spend. Hold cash dispatch until an operator reconciles the shared
 and local reservations; restart the daemons with cash disabled so subscription work can continue.
+
+### MERGE HOLD ADOPTION FINDING
+
+Evidence reconciliation for W1-T10987, observed 2026-10-29. PR #14620's merge is verified;
+its initiating process and direct-versus-asynchronous merge path remain **UNKNOWN**. The
+GitHub-recorded merger account is known. Loaded native effector adoption of repair #14942
+remains **UNVERIFIED**. A merged repair and passing private controls do not establish which
+code a running daemon loaded, or explain a historical merge.
+
+| Source clock (UTC) | Evidence and provenance | Supported finding / limit |
+| --- | --- | --- |
+| 2026-10-27T01:38:01Z | GitHub #14620 issue timeline, `auto_merge_disabled` event | An earlier disable event is recorded. This is not the later scoped hold, nor evidence that auto-merge stayed disabled. |
+| 2026-10-27T16:07:27.884Z | Filed W1-T10987 rationale, scoped hold engagement | Recorded task evidence; native ledger row not independently available in this worker. |
+| 2026-10-27T16:20:23.647Z | Filed W1-T10987 rationale, full-review arm refusal | A recorded refusal of that arm; it does not identify another request or GitHub's eventual merge path. |
+| 2026-10-27T16:22:17Z | GitHub #14620 REST pull response and timeline `merged` event | Merged as `91d2c8c292e7940c7d587279e79dc262f7e39ccd`; `merged_by` and the event actor both identify `remudero-fleet[bot]`. |
+| 2026-10-27T22:38:58Z | GitHub #14942 pull response | Repair merged as `38627e6dfe6b59a8ace5f00db0c8220d4ff6c16b`, from head `cafaf19192136ad417c26a56e15319b69fd4674e`, after #14620's merge. |
+| 2026-10-29T14:12:25.532Z | Filed W1-T10987 rationale, authorized #14620 release saved | Recorded completed release; not independently read back from the native ledger here. Do not repeat or reopen it. |
+| Observation on 2026-10-29; enabling time UNKNOWN | GitHub #14620 REST `auto_merge` object | `enabled_by.login` is `remudero-fleet[bot]`, method `squash`. This identifies an account, not the originating process, request time or final API route. |
+
+Public provenance: [#14620](https://github.com/craigoley/remudero/pull/14620), its
+[REST pull record](https://api.github.com/repos/craigoley/remudero/pulls/14620), its
+[timeline](https://api.github.com/repos/craigoley/remudero/issues/14620/timeline?per_page=100),
+and [#14942](https://github.com/craigoley/remudero/pull/14942). The bounded timeline response
+contained 45 entries, including the merge event as a positive control. It does not establish
+the missing enable time or an exhaustive audit history. The recorded early disable and later
+`auto_merge` object are retained separately rather than reconciled by inventing an enable event.
+The hold/refusal/release times above come from the
+[filed task record](../plan/tasks.d/W1-T10987-merge-hold-adoption-attribution.yaml).
+Source timestamps retain their original precision; no worker clock is substituted for them.
+
+The native ledger corpus is inaccessible under this worker's permission profile. Coverage of
+compressed rotations, plain rotations and the live file is **NOT MEASURED**, not zero files or
+zero matching events. The corpus's newest timestamp, deduplicated chronology, engage/release
+positive controls and any anomalous ledger timestamps therefore remain UNKNOWN. No native
+transcripts or runtime-bound adoption receipt were available to reconcile those gaps. This
+finding uses bounded GitHub connector reads; it does not claim a native GitHub broker receipt.
+
+The inspected source at `8c654c1a3cf7265719d1162ac1862ffd77c41f91` contains
+`assertOperatorMergeUnheld` in `src/lib/arm-auto-merge.ts`. It requires present, untorn live
+hold evidence and refuses a confirmed hold before the final write. This is source evidence,
+not loaded-image evidence. A checkout SHA, Serve version, unrelated process image or source
+ancestry cannot establish native daemon/effector adoption. No runtime-bound process/source
+identity connecting the active native effectors to #14942 or a verified successor was obtained.
+
+Private regression controls were inspected and exercised against that source revision:
+
+| Control | What it establishes | What it cannot establish |
+| --- | --- | --- |
+| `test/automerge-hold.test.ts`: `admission withholds the final merge effect` | Four controlled await interleavings (auto, direct, queue, plan) inject a hold during admission and assert no final effect plus `hold-refused`. | Which interleaving, if any, occurred for #14620. |
+| `test/security-merge-effectors.test.ts`: `refuses a hold arriving during security metadata` | Six sync/async arm, REST and enqueue cases run real adapters against a private executable shim; a metadata-time hold refuses every outward write. | Live adoption or the identity of a historical caller. |
+| Same suite: `final merge fences refuse unreadable configuration and torn hold evidence` and `a late real-effector hold remains a named refusal through the` | Unavailable/torn evidence refuses; six fallback routes retain named hold refusals. | Complete native ledger coverage or historical causation. |
+
+The focused run passed 20 tests with zero failures: the 17 controls above, the same suite's
+positive control reaching all seven real outward adapters through the offline executable,
+and two `test/rest-merge-fallback.test.ts` controls refusing unfenced sync/async REST ports.
+These are private fixtures; no live hold or merge was exercised.
+
+#14942's PR body separately reports an earlier private erasure control: 19 failures in 109
+cases with production changes removed, versus a passing repaired run. That is an attributed
+author report, not a new erasure experiment in this reconciliation. The four interleaving
+controls demonstrate a guard gap separately from #14620; they do not prove that gap caused it.
+The final fence also cannot cancel a merge HTTP request already sent before a hold.
+
+A sweep request, an auto-merge enable action, GitHub's asynchronous completion and a direct
+merge effect are distinct events. Neither timing near the refused arm nor the matching bot
+accounts identifies the originating request. No authoritative audit evidence here selects
+among those paths. If an independent path is established, do not attribute #14620 to the
+repaired interleavings.
+
+Bounded recommendation: retain historical path attribution as UNKNOWN and runtime protection
+as unverified until the existing owner can supply an authorized ledger-union receipt with
+per-form coverage, engage/release controls and window bounds, and a runtime-bound identity for
+the active effectors. Audit/request evidence must connect an initiating request to the merge
+before claiming causation. An unrecoverable caller stays UNKNOWN; do not repeatedly collect
+the same evidence. This finding requires no hold toggle, merge, restart, deployment or policy
+change, and grants no authority for those actions. Any newly demonstrated repair belongs in a
+separate guarded task with an ownership check.
