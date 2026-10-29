@@ -40,6 +40,25 @@ const repoRoot = REPO_ROOT;
 const depcruiseBin = join(repoRoot, "node_modules", ".bin", "depcruise");
 const configPath = join(repoRoot, ".dependency-cruiser.cjs");
 
+test("depcruise rejects an unsupported dependency-cruiser version with its diagnostic and exit code 1", () => {
+  // Change only the child's cached manifest, preserving installed bytes and the real CLI entrypoint.
+  const scan = spawnSync(process.execPath, ["-e", `
+    const Module = require("node:module");
+    const { pathToFileURL } = require("node:url");
+    const config = process.argv[1];
+    const manifest = Module.findPackageJSON("dependency-cruiser", pathToFileURL(config));
+    require(manifest).version = "0.0.0-unsupported";
+    process.argv = [process.execPath, config, "src"];
+    Module.runMain(config);
+  `, configPath], { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.equal(scan.error, undefined);
+  assert.equal(scan.signal, null, scan.stderr);
+  assert.equal(scan.status, 1, scan.stderr);
+  assert.equal(scan.stdout, "", "an incompatible version must not produce a successful scan report");
+  assert.match(scan.stderr,
+    /Error: Architecture integration requires dependency-cruiser 18\.6\.0; found 0\.0\.0-unsupported/);
+});
+
 /** Runs the default architecture integration over the fixture's `src/`. Captures nonzero exits. */
 function runDepcruise(fixtureRoot: string): { status: number; output: string } {
   try {
