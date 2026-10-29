@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildCiLearningCadenceRunner, ciLearningCommand } from "#src/run-task.js";
+import { buildCiLearningCadenceRunner, ciLearningCommand } from "#test/helpers/run-task-test.js";
 import { runDaemon } from "#src/lib/daemon.js";
 import type { CiLearningFilingResult, FeedbackRefusal } from "#src/lib/feedback-landing.js";
 import { loadPlan } from "#src/lib/plan.js";
