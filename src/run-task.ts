@@ -792,7 +792,9 @@ import {
   planReconcileLanding,
   recordDecision,
   recordRuling,
+  type CiLearningFilingResult,
   type CiLearningShardLander,
+  type FeedbackRefusal,
   type LandCiLearningShardsOptions,
   type LandFeedbackResult,
   type PlanReconcileLand,
@@ -1067,6 +1069,10 @@ import {
 } from "./lib/inbox.js";
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
 import { renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
+import type { DeployedModel, DeploymentBakeoffCandidate } from "./lib/bakeoff-trigger.js";
+import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
+import { runSweepBakeoff } from "./lib/sweep.js";
+import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError } from "./lib/worker-provider.js";
 import { createDraftStatsSession, type DraftStats } from "./lib/draft-routing.js";
 import {
   buildFeedbackDocket,
@@ -1299,6 +1305,7 @@ import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/ben
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher,
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
+import { codexBalancedTrialCommand, registerCodexBalancedTrial } from "./lib/codex-balanced-trial.js";
 import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
 import { proceduresCommand, proceduresProductionInput } from "./lib/procedures-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
@@ -15198,6 +15205,7 @@ export function ciLearningCommand(
       // A refusal is NAMED. A rung that silently dropped what the linter would not accept would be
       // reporting a clean run over a record it could not write.
       for (const rf of filing.refused) console.log(`  REFUSED by the task linter (${rf.reason}): ${rf.findingId}`);
+      for (const rf of filing.carryRefused ?? []) console.log(`  CARRY REFUSED (${rf.reason}): ${rf.path}`);
     } catch (e) {
       // NAMED, never swallowed: "drafted but not filed" is a different outcome from "filed", and an
       // operator reading this must be able to tell them apart.
@@ -21476,6 +21484,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   /** The adoption fixture does not run the independent proof-debt audit. */
   proofDebtInput?: () => MeasurementCadenceReportOpts["proofDebt"];
   successorWatch?: (opts: SuccessorWatchOptions) => Promise<SuccessorWatchReading>;
+  bakeoff?: { rawSpawn?: typeof spawnWorker; repoClone?: (args: string[]) => void | Promise<void> };
   /** Keep the production escalation path injectable so cadence fixtures never create GitHub issues. */
   successorEscalate?: typeof tryEscalate;
   handRunCensus?: MeasurementCadenceReportOpts["handRunCensus"];
@@ -21544,6 +21553,19 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
               successorEscalate: deps.successorEscalate,
             })
           : undefined,
+      });
+      const bakeoffConfig = configFor();
+      const bakeoffMounts = loadMounts(mountsPath(repoRoot));
+      const baseMount = bakeoffMounts.synthesis.inbox_draft;
+      const replay = createInboxBakeoffReplay(bakeoffConfig, INBOX_BAKEOFF_DEFAULT_SAMPLE, deps.bakeoff?.rawSpawn,
+        runInboxBakeoff, deps.bakeoff?.repoClone);
+      await runSweepBakeoff({
+        stateDir: join(root, "state"),
+        deployed: measurementBakeoffDeployments(bakeoffMounts),
+        incumbent: { id: "incumbent", label: `incumbent ${baseMount.model} (${baseMount.effort})`,
+          model: baseMount.model, billing: baseMount.provider === "cash" ? "cash" : "subscription",
+          effort: baseMount.effort, tools: true },
+        replay,
       });
       // W1-T3970: the pure plan reconciler is only useful when this production hook supplies the
       // same shard bytes and credit projection as `rmd plan-reconcile`. Build the map once per
@@ -26378,6 +26400,8 @@ export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResul
   filedCount: number;
   skippedCount: number;
   refusedCount: number;
+  carryRefusedCount: number;
+  carryRefused: FeedbackRefusal[];
 }
 
 /**
@@ -26452,11 +26476,12 @@ export function buildCiLearningCadenceRunner(deps: {
     let filed = 0;
     let skipped = 0;
     let refused = 0;
+    let carryRefused: FeedbackRefusal[] = [];
     if (result.drafts.length > 0 || pendingOrigins.length > 0) {
       try {
         const mintTaskId = deps.mintTaskId ?? ciLearningTaskIdMinter(deps.checkoutRoot, (step, fields) =>
           appendLedger(join(deps.root, "state", LEDGER_FILENAME), { run_id: `CI-LEARNING-${at.getTime()}`, task_id: "DAEMON", step, ...fields }));
-        const filing = deps.fileShards
+        const filing: CiLearningFilingResult = deps.fileShards
           ? deps.fileShards(result.drafts, deps.checkoutRoot, {
               mintTaskId,
               planOrigins: idempotencyOrigins,
@@ -26473,6 +26498,7 @@ export function buildCiLearningCadenceRunner(deps: {
         filed = filing.filed.length;
         skipped = filing.skipped.length;
         refused = filing.refused.length;
+        carryRefused = filing.carryRefused ?? [];
       } catch {
         // Counts stay zero — "drafted but not filed" is a distinct outcome and the row below says so.
       }
@@ -26498,6 +26524,8 @@ export function buildCiLearningCadenceRunner(deps: {
       filedCount: filed,
       skippedCount: skipped,
       refusedCount: refused,
+      carryRefusedCount: carryRefused.length,
+      carryRefused,
     };
     (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
     return completed;
@@ -35132,15 +35160,15 @@ const INBOX_BAKEOFF_DEFAULT_SAMPLE = 8;
 /**
  * `rmd inbox-bakeoff [--sample <n>]` (W1-T4907) — replay a fixed sample of the real open inbox proposals (the first
  * `n` by id, so two runs see the same ones) through each candidate lane on the PRODUCTION draft path, then print the
- * ranking by lint-clean drafts per cash dollar. It spends real cash and subscription capacity, which is why it is a
- * verb the operator runs and never a rung the daemon does. It writes `inbox.bakeoff` rows only; the production
+ * ranking by lint-clean drafts per cash dollar. The deployment cadence shares this replay path.
+ * It writes `inbox.bakeoff` rows only; the production
  * `inbox.drafted` rows, the draft cache and routing are untouched, so the table cannot move the lead by itself.
  */
 export async function inboxBakeoffCommand(
   rest: string[],
   rawSpawn: typeof spawnWorker = spawnWorker,
   replay: typeof runInboxBakeoff = runInboxBakeoff,
-  repoClone: (args: string[]) => void = (args) => { ghExec(args, { stdio: "inherit" }); },
+  repoClone: (args: string[]) => void | Promise<void> = async (args) => { await ghTextAsync(args); },
 ): Promise<number> {
   const badArg = unknownArgError("inbox-bakeoff", rest, ["--sample"], []);
   if (badArg) {
@@ -35153,66 +35181,126 @@ export async function inboxBakeoffCommand(
     console.error(`inbox-bakeoff: --sample must be a positive integer, got ${sampleRaw}\n${USAGE}`);
     return 2;
   }
-  const config = loadConfig();
+  const replayCandidates = createInboxBakeoffReplay(loadConfig(), sample, rawSpawn, replay, repoClone);
+  if (!replayCandidates) {
+    console.error("inbox-bakeoff: no open inbox proposals to replay");
+    return 1;
+  }
+  console.log(renderBakeoff(await replayCandidates()));
+  return 0;
+}
+
+export function measurementBakeoffDeployments(mounts: Mounts): DeployedModel[] {
+  const efforts = ["low", "medium", "high"];
+  return [
+    ...Object.keys(OPENWEIGHT_PRICES).filter((model) => openWeightDeploymentReady(model)).map((model): DeployedModel => ({
+      model, billing: "cash", efforts: efforts.filter((effort) => !CASH_RESPONSES_DEPLOYMENTS[model] || CASH_RESPONSES_DEPLOYMENTS[model]!.includes(effort)),
+      readinessDigest: createHash("sha256").update(JSON.stringify([OPENWEIGHT_PRICES[model], OPENWEIGHT_CONTEXT_WINDOWS[model],
+        OPENWEIGHT_TEMPERATURE[model], CASH_RESPONSES_DEPLOYMENTS[model] ?? null])).digest("hex"),
+    })),
+    ...[...new Set(Object.values(mounts.capabilities?.claudeCandidates ?? {}).flat())].map((model): DeployedModel => ({
+      model, billing: "subscription", efforts,
+      readinessDigest: createHash("sha256").update(JSON.stringify([model, efforts])).digest("hex"),
+    })),
+  ];
+}
+
+function createInboxBakeoffReplay(
+  config: Config,
+  sample: number,
+  rawSpawn: typeof spawnWorker = spawnWorker,
+  replay: typeof runInboxBakeoff = runInboxBakeoff,
+  repoClone: (args: string[]) => void | Promise<void> = async (args) => { await ghTextAsync(args); },
+) {
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals = parseProposalRegistry(readFileIfExists(registryPath))
     .sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true }))
     .slice(0, sample);
-  if (proposals.length === 0) {
-    console.error("inbox-bakeoff: no open inbox proposals to replay");
-    return 1;
-  }
-  const { owner, repo } = resolveOwnerRepo();
-  const runId = `BAKEOFF-${Date.now()}`;
-  const ledgerPath = ledgerPathFor(config);
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "inbox-bakeoff", step, lane: "inbox-bakeoff", ...extra });
-
-  const settingsFile = renderWorkerSettings({
-    templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
-    hooksDir: join(resolveInstallRoot(config), "hooks"),
-    outPath: join(config.root, "tmp", `inbox-bakeoff-settings-${runId}.json`),
-  });
-  validateWorkerSettingsFile(settingsFile);
-  const repoDir = join(config.root, "repos", repo);
-  if (!existsSync(repoDir)) {
-    mkdirSync(dirname(repoDir), { recursive: true });
-    repoClone(["repo", "clone", `${owner}/${repo}`, repoDir]);
-  }
-  const baseMount = loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
-  const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
-  try {
-    // Match the production draft rung: a monolith-only sample silently omits shard dependencies.
-    const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
-    const spawnFor = (candidate: BakeoffCandidate) => async (_proposal: Proposal, prompt: string) => {
-      const cash = candidate.billing === "cash";
-      // A cash candidate is pinned by restricting the cash ladder to its one deployment; the subscription candidate
-      // by giving the spawn a Claude mount. Neither writes a selection assignment — this is a measurement, not a route.
-      const args = buildInboxDraftSpawnArgs({
-        cwd: worktreePath,
-        settingsFile,
-        prompt,
-        config,
-        mount: cash ? { ...baseMount, model: candidate.mountModel ?? baseMount.model }
-          : { ...baseMount, model: "sonnet", provider: "claude" },
-        disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
-      });
-      return await rawSpawn({
-        ...args,
-        ...(candidate.effort === undefined ? {} : { effort: candidate.effort }),
-        onSelectionAssignment: undefined,
-        ...(cash ? { routingTrial: { id: "inbox-bakeoff", arm: "cash", reason: `bake-off candidate ${candidate.id}`, models: [candidate.model] } } : {}),
-        ...(candidate.tools ? {} : { tools: [] }),
-      });
-    };
-    const rows = await replay({ proposals, planText, spawnFor, log, runId });
-    console.log(`inbox-bakeoff: ${proposals.length} proposals (${proposals.map((p) => p.id).join(", ")}) on branch ${branch}\n`);
-    console.log(renderBakeoff(rows));
-    return 0;
-  } finally {
-    worktreeRemove(repoDir, worktreePath);
-    removeRunLock(worktreePath);
-  }
+  if (proposals.length === 0) return undefined;
+  return async (candidates?: readonly DeploymentBakeoffCandidate[]) => {
+    const { owner, repo } = resolveOwnerRepo();
+    const runId = `BAKEOFF-${Date.now()}`;
+    const ledgerPath = ledgerPathFor(config);
+    const log = (step: string, extra: Record<string, unknown> = {}) =>
+      appendLedger(ledgerPath, { run_id: runId, task_id: "inbox-bakeoff", step, lane: "inbox-bakeoff", ...extra });
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", `inbox-bakeoff-settings-${runId}.json`),
+    });
+    validateWorkerSettingsFile(settingsFile);
+    const repoDir = join(config.root, "repos", repo);
+    if (!existsSync(repoDir)) {
+      mkdirSync(dirname(repoDir), { recursive: true });
+      await repoClone(["repo", "clone", `${owner}/${repo}`, repoDir]);
+    }
+    const mounts = loadMounts(mountsPath(repoRoot));
+    const baseMount = mounts.synthesis.inbox_draft;
+    const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
+    try {
+      // Match the production draft rung: a monolith-only sample silently omits shard dependencies.
+      const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
+      const refusals = new Map<string, string>();
+      const spawnFor = (candidate: BakeoffCandidate) => {
+        let queue: Promise<unknown> = Promise.resolve();
+        const spawn = async (_proposal: Proposal, prompt: string) => {
+          const prior = refusals.get(candidate.id);
+          if (prior) throw new Error(`bake-off candidate ${candidate.id} stopped: ${prior}`);
+          const cash = candidate.billing === "cash";
+          // The trial pins its deployment separately from the inbox mount's routing capability.
+          const args = buildInboxDraftSpawnArgs({
+            cwd: worktreePath, settingsFile, prompt, config,
+            mount: cash ? { ...baseMount, provider: "cash", model: candidate.mountModel ?? baseMount.model }
+              : { ...baseMount, model: candidate.model, provider: "claude" },
+            disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+          });
+          let result: WorkerResult;
+          try {
+            result = await rawSpawn({
+              ...args,
+              ...(candidate.effort === undefined ? {} : { effort: candidate.effort }),
+              onSelectionAssignment: undefined,
+              ...(cash && candidate.id !== "incumbent" ? { routingTrial: {
+                id: "inbox-bakeoff", arm: "cash", reason: `bake-off candidate ${candidate.id}`, models: [candidate.model],
+              } } : {}),
+              ...(candidate.tools ? {} : { tools: [] }),
+            });
+          } catch (error) {
+            if (error instanceof OpenWeightAllowanceExhaustedError) refusals.set(candidate.id, error.limit);
+            throw error;
+          }
+          if (result.budgetRefused) {
+            const reason = result.cashAllowanceLimit ?? "fleet";
+            refusals.set(candidate.id, reason);
+            return { ...result, text: "", blocks: [], usageRefusal: { matched: reason } };
+          }
+          return result;
+        };
+        return (proposal: Proposal, prompt: string) => {
+          // Draft batches run concurrently; serialize paid calls so a refusal stops the candidate.
+          const next = queue.then(() => spawn(proposal, prompt), () => spawn(proposal, prompt));
+          queue = next;
+          return next;
+        };
+      };
+      const rows = await replay({ proposals, planText, spawnFor, candidates, log: (step, extra = {}) => {
+        const candidate = candidates?.find((candidate) => candidate.id === extra.candidate);
+        const refusal = refusals.get(String(extra.candidate));
+        log(step, { ...extra, ...(candidate ? { model: candidate.model } : {}),
+          ...(refusal ? { status: "partial", refusal } : {}) });
+      }, runId });
+      for (const row of rows) {
+        const refusal = refusals.get(row.candidate);
+        if (refusal) row.label += ` PARTIAL (${refusal})`;
+      }
+      console.log(`inbox-bakeoff: ${proposals.length} proposals (${proposals.map((p) => p.id).join(", ")}) on branch ${branch}\n`);
+      return rows;
+    } finally {
+      worktreeRemove(repoDir, worktreePath);
+      removeRunLock(worktreePath);
+      rmSync(settingsFile, { force: true });
+    }
+  };
 }
 
 /**
@@ -41160,7 +41248,7 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "benchmark-aa",
-    syntax: "rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>] | readiness --trial-id <id> [--trial <manifest.json>] [--instance-root <name>=<state-dir>]... [--max-pairs <n>] [--out <receipt.json>] [--json]",
+    syntax: "rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | balanced --request <aa-or-ab-request.json> [--state-dir <dir>] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>] | readiness --trial-id <id> [--trial <manifest.json>] [--instance-root <name>=<state-dir>]... [--max-pairs <n>] [--out <receipt.json>] [--json]",
     summary: "Report an A/A integrity trial: two labels, one pinned stack, and no winner.",
     detail: "W1-T4575: reads a public-fixture or explicitly opted-in trial manifest (benchmark-aa-trial-v1) naming one pinned stack (provider, model, effort, harness, prompt, tool, scorer and environment revisions), a strata revision and its tasks. Each task takes one of two labels by a sha256 draw over the trial and task ids, so a retry or a new run never moves it; non-starters and retries stay in the original arm. Reads the three-form ledger union and, unless --no-cohort, the benchmark-cohort-v1 projection, and reports the sample-ratio test against 50/50 (chi-square and exact binomial), assignment-to-terminal-to-verified-outcome joins, per-arm served-model and resource missingness, fallbacks and crossovers, outcome maturity and censoring, and the observed difference with a 95% interval. API cash estimates, subscription notional cost, invoices and unknown cost stay separate; unknown is never zero. It never declares a winner. It writes one dated private report with a privacy-safe benchmark-aa-receipt-v1 to --out (default <state-dir>/benchmark-aa-v1.<trial>.json); a refresh that cannot read its sources keeps that report and marks it stale. It changes no routing, blocks no dispatch, review or merge, and spends nothing. W1-T4647: `prospective register` records a manifest as a prospective A/A under <state-dir>/benchmark-aa-prospective/<trial>/; when normal dispatch admits one of its tasks, the daemon runs two sealed side attempts through the paired-trial seam, labelled with both labels in a seeded order and both on the manifest's one pinned stack, graded by the task's own proofs, never pushed, reviewed or merged, one pair at a time under the per-attempt cap. It is subscription only: an attempt whose billing resolves to api is refused before spawn and recorded, and cash is reported as zero observed. `prospective report` writes the same benchmark-aa-v1 report and receipt from the trial's own ledger, with each attempt as one unit and its graded outcome in place of the case-file join; `prospective pause` stops new pairs. Nothing is read, logged or spawned without a registered trial, and it never activates, resumes or reads the paid pilot. W1-T5341: `readiness` runs a fresh prospective calibration: it reconciles the trial's registration across every live instance root in the fleet registry (or each --instance-root), refusing an unreadable root or a duplicate trial, derives harness, prompt, tool, scorer and environment pins from this process and refuses any unknown or drifting pin before dispatch, freezes the eligible population once with its denominator and refusals, then runs pending pairs in a seeded order through the same paired seam, never replaying a completed pair. It reports untriggered exclusions, per-arm per-stage missingness, observed cash apart from notional usage (unknown counted, never zero) and source completeness, writes the calibration receipt only when its integrity predicates pass, and otherwise names the next machine-repairable gap and records it once (recording is not filing: a task exists only after the opportunity intake's governed triage files it) to <state-dir>/benchmark-aa-readiness.follow-ups.ndjson. Subscription only; it holds no dispatch, PR or daemon and never activates the paid pilot.",
   },
@@ -42324,7 +42412,10 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["test-place", (rest) => testPlaceCommand(rest)],
   ["claim", (rest) => rest.includes("--hold") ? claimHoldCommand(rest) : claimCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
-  ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
+  ["benchmark-aa", async (rest) => rest[0] === "balanced" ? await codexBalancedTrialCommand(rest.slice(1), (request, stateDir) =>
+    registerCodexBalancedTrial({ request, stateDir, readiness: (registration) =>
+      runBenchmarkAaReadiness({ ...benchmarkAaReadinessRuntime(stateDir), ...registration }) }))
+    : rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
       (request) => runBenchmarkAaReadiness({ ...benchmarkAaReadinessRuntime(request.stateDir), ...request }))
     : await benchmarkAaCommand(rest, (input) => buildBenchmarkAaReport(input))],

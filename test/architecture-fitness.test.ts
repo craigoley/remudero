@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 /**
  * W1-T9872: every tracked test file under test/ at ANY depth (relative to test/, minus test/fixtures/)
@@ -28,21 +29,40 @@ function testCorpus(): { dir: string; files: string[] } {
  * MASTER-PLAN §5 TIER 3 (W1-T26): "src/lib imports nothing from spike/CLI" is
  * declared in `.dependency-cruiser.cjs` as the `lib-no-spike-or-cli` rule. A
  * declared rule is not the same as an ACTIVE one — these tests are the
- * falsifier: they run the real `dependency-cruiser` binary (not a stub) over
+ * falsifier: they run the real `dependency-cruiser` integration over
  * a planted fixture and assert it exits non-zero citing the rule by name, and
  * over a clean fixture and assert it exits zero. Without this, "0 violations"
  * from a fresh gate is exactly the neon-drift `_probe(x)` trap LEARNINGS
  * warns about — suspicious until falsified, not proof of anything.
  */
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = REPO_ROOT;
 const depcruiseBin = join(repoRoot, "node_modules", ".bin", "depcruise");
 const configPath = join(repoRoot, ".dependency-cruiser.cjs");
 
-/** Runs the real depcruise binary over `src/` inside `fixtureRoot`. Never throws on a nonzero exit. */
+test("depcruise rejects an unsupported dependency-cruiser version with its diagnostic and exit code 1", () => {
+  // Change only the child's cached manifest, preserving installed bytes and the real CLI entrypoint.
+  const scan = spawnSync(process.execPath, ["-e", `
+    const Module = require("node:module");
+    const { pathToFileURL } = require("node:url");
+    const config = process.argv[1];
+    const manifest = Module.findPackageJSON("dependency-cruiser", pathToFileURL(config));
+    require(manifest).version = "0.0.0-unsupported";
+    process.argv = [process.execPath, config, "src"];
+    Module.runMain(config);
+  `, configPath], { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.equal(scan.error, undefined);
+  assert.equal(scan.signal, null, scan.stderr);
+  assert.equal(scan.status, 1, scan.stderr);
+  assert.equal(scan.stdout, "", "an incompatible version must not produce a successful scan report");
+  assert.match(scan.stderr,
+    /Error: Architecture integration requires dependency-cruiser 18\.6\.0; found 0\.0\.0-unsupported/);
+});
+
+/** Runs the default architecture integration over the fixture's `src/`. Captures nonzero exits. */
 function runDepcruise(fixtureRoot: string): { status: number; output: string } {
   try {
-    const output = execFileSync(process.execPath, [depcruiseBin, "src", "--config", configPath], {
+    const output = execFileSync(process.execPath, [configPath, "src"], {
       cwd: fixtureRoot,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -94,6 +114,142 @@ test("depcruise is a clean fixture (no spike/CLI import from src/lib): zero exit
 test("depcruise over remudero's OWN src tree is clean today (the rule is live, not just fixture-tested)", () => {
   const { status, output } = runDepcruise(repoRoot);
   assert.equal(status, 0, `expected remudero's real src/lib to be clean, got ${status}. output:\n${output}`);
+});
+
+function architectureScan(root: string, bounded: boolean) {
+  return spawnSync(process.execPath, ["--max-old-space-size=512",
+    ...(bounded ? [configPath, "src"] : [depcruiseBin, "src", "--config", configPath]),
+    "--output-type", "json"], {
+    cwd: root, encoding: "utf8", timeout: 120_000, maxBuffer: 32 << 20,
+    env: { ...process.env, NODE_OPTIONS: "", NODE_V8_COVERAGE: "" },
+  });
+}
+
+/** Evidence only: native traversal with its SWC cache released before each real parse.
+ * This child never runs the repository traversal or installs a production preload.
+ * The SWC parser, source files, resolver, graph analysis and rules remain native.
+ */
+function nativeReferenceScan(root: string) {
+  return spawnSync(process.execPath, ["--max-old-space-size=512", "-e", `
+    (async () => {
+      const { createRequire, findPackageJSON } = require("node:module");
+      const { dirname, join } = require("node:path");
+      const { pathToFileURL } = require("node:url");
+      const [config, cli] = process.argv.slice(1);
+      const localRequire = createRequire(config);
+      const packageRoot = dirname(findPackageJSON("dependency-cruiser", pathToFileURL(config)));
+      const swc = localRequire("@swc/core");
+      const { clearCache } = await import(pathToFileURL(join(packageRoot,
+        "src/extract/swc/parse.mjs")).href);
+      const parse = swc.parseFileSync;
+      let releases = 0;
+      swc.parseFileSync = function (...args) {
+        clearCache();
+        releases++;
+        return Reflect.apply(parse, this, args);
+      };
+      process.on("exit", () => console.error("Native reference SWC cache releases: " + releases));
+      process.argv = [process.execPath, cli, "src", "--config", config, "--output-type", "json"];
+      await import(pathToFileURL(cli).href);
+    })().catch(error => { console.error(error); process.exitCode = 1; });
+  `, configPath, depcruiseBin], {
+    cwd: root, encoding: "utf8", timeout: 120_000, maxBuffer: 32 << 20,
+    env: { ...process.env, NODE_OPTIONS: "", NODE_V8_COVERAGE: "" },
+  });
+}
+
+function graphPopulation(output: string) {
+  const graph = JSON.parse(output);
+  return { modules: graph.modules, violations: graph.summary.violations,
+    rules: graph.summary.ruleSetUsed, folders: graph.folders };
+}
+
+test("W1-T10946: the default full-source architecture scan completes within its unchanged heap bound", (t) => {
+  const scan = spawnSync("npm", ["run", "--silent", "depcruise", "--", "--output-type", "json"], {
+    cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000, maxBuffer: 32 << 20,
+    env: { ...process.env, NODE_OPTIONS: "--max-old-space-size=512", NODE_V8_COVERAGE: "" },
+  });
+  assert.equal(scan.error, undefined);
+  assert.equal(scan.status, 0, scan.stderr);
+  assert.match(scan.stderr, /AST retention window: 1 file/);
+  assert.match(JSON.parse(scan.stdout).summary.environment.transpilersFound
+    .find((parser: { name: string }) => parser.name === "swc").currentVersion, /^@swc\/core@/,
+  "the configured SWC parser must actually load; package availability alone permits Acorn fallback");
+  const native = architectureScan(REPO_ROOT, false);
+  t.diagnostic(`512 MiB, unmodified native: ${native.status}/${native.signal}\n${native.stderr}`);
+  assert.equal(native.error, undefined);
+  if (native.status === 0) {
+    assert.deepEqual(graphPopulation(scan.stdout), graphPopulation(native.stdout));
+  } else {
+    assert.equal(native.signal, "SIGABRT", native.stderr);
+    assert.match(native.stderr, /heap out of memory|Reached heap limit/);
+  }
+  // An OOM has no complete graph. Always require a separate complete native
+  // reference, including on that path; accepting the bounded output alone is vacuous.
+  const reference = nativeReferenceScan(REPO_ROOT);
+  t.diagnostic(`512 MiB, native cache-release reference: ${reference.status}/${reference.signal}\n${reference.stderr}`);
+  assert.equal(reference.error, undefined);
+  assert.equal(reference.signal, null, reference.stderr);
+  assert.equal(reference.status, 0, reference.stderr);
+  const releases = /Native reference SWC cache releases: (\d+)/.exec(reference.stderr);
+  assert.ok(releases && Number(releases[1]) > 600, "the reference must really parse the full source with SWC");
+  assert.deepEqual(graphPopulation(scan.stdout), graphPopulation(reference.stdout),
+    "the complete full-source module/edge/rule population must match even when the unmodified native scan OOMs");
+  assert.ok(JSON.parse(scan.stdout).modules.length > 600, "the full source graph was scanned");
+  t.diagnostic(`512 MiB: default=${scan.status}, native=${native.status}/${native.signal}, reference=${reference.status}`);
+});
+
+test("W1-T10946: planted forbidden imports remain detected and removal of the memory fix restores the measured retention failure", (t) => {
+  const fixture = buildFixture(`import { spikeMarker } from "../spike.js";\nexport const widget = spikeMarker;\n`);
+  try {
+    mkdirSync(join(fixture, "src", "cli"));
+    writeFileSync(join(fixture, "src", "cli", "verb.ts"), 'import "../run-task.js";\n');
+    writeFileSync(join(fixture, "src", "run-task.ts"), 'import "./lib/widget.js";\n');
+    writeFileSync(join(fixture, "src", "spike.ts"), 'import "./lib/widget.js";\nexport const spikeMarker = 1;\n');
+    writeFileSync(join(fixture, "src", "lib", "skill-workshop.ts"), 'import "./golden-corpus.js";\n');
+    writeFileSync(join(fixture, "src", "lib", "golden-corpus.ts"), 'export const heldOut = 1;\n');
+    const bounded = architectureScan(fixture, true);
+    const reference = architectureScan(fixture, false);
+    assert.equal(bounded.error, undefined);
+    assert.equal(reference.error, undefined);
+    assert.equal(bounded.status, 0, bounded.stderr);
+    assert.equal(reference.status, 0, reference.stderr);
+    assert.deepEqual(graphPopulation(bounded.stdout), graphPopulation(reference.stdout));
+    const released = nativeReferenceScan(fixture);
+    assert.equal(released.error, undefined);
+    assert.equal(released.status, 0, released.stderr);
+    assert.deepEqual(graphPopulation(released.stdout), graphPopulation(reference.stdout),
+      "the evidence hook must preserve the native planted-rule population");
+    const names = new Set(JSON.parse(bounded.stdout).summary.violations.map((v: { rule: { name: string } }) => v.rule.name));
+    for (const name of ["lib-no-spike-or-cli", "cli-no-run-task", "drafter-never-sees-held-out-set", "no-circular"]) {
+      assert.ok(names.has(name), `planted ${name} must be detected`);
+    }
+    // A narrow chain with large syntax bodies separates retained ASTs from graph size.
+    const body = Array.from({ length: 10_000 }, (_, n) => `const value${n} = { nested: [${n}, "payload"] };`).join("\n");
+    for (let n = 0; n < 60; n++) {
+      const edge = n < 59 ? `import "./large-${n + 1}.js";\n` : "";
+      writeFileSync(join(fixture, "src", `large-${n}.ts`), edge + body);
+    }
+    const fixed = architectureScan(fixture, true);
+    assert.equal(fixed.error, undefined);
+    assert.equal(fixed.status, 0, fixed.stderr);
+    assert.equal(JSON.parse(fixed.stdout).modules.filter((m: { source: string }) => /large-\d+\.ts$/.test(m.source)).length, 60);
+    const erased = architectureScan(fixture, false);
+    t.diagnostic(`512 MiB, large AST chain: bounded=${fixed.status}/${fixed.signal}, erased=${erased.status}/${erased.signal}`);
+    assert.equal(erased.error, undefined);
+    assert.equal(erased.signal, "SIGABRT", `unbounded terminal outcome: ${erased.status}\n${erased.stderr}`);
+    assert.match(erased.stderr, /heap out of memory|Reached heap limit/);
+    for (let n = 0; n < 60; n++) {
+      writeFileSync(join(fixture, "src", `large-${n}.ts`), n < 59 ? `import "./large-${n + 1}.js";\n` : "");
+    }
+    const compact = architectureScan(fixture, false);
+    assert.equal(compact.error, undefined);
+    assert.equal(compact.status, 0, compact.stderr);
+    assert.deepEqual(graphPopulation(fixed.stdout), graphPopulation(compact.stdout),
+      "removing dependency-free syntax must preserve the entire module/edge/rule population");
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 // ── Playwright teardown-race guard (the #632/#645 flake): a `return page.<method>(...)` inside a
