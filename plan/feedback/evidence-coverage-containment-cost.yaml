@@ -19,7 +19,7 @@ raw: >-
   2026-10-22T17:59:07.863Z through 2026-10-29T17:59:07.863Z; overrides rejected.
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/15580
 summary:
