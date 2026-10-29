@@ -38,6 +38,24 @@ function originalStructure(input) {
   const metrics = run.properties?.metricResults;
   const notificationCount = items(run.invocations).reduce((total, invocation) => Math.min(limit, total +
     items(invocation.toolExecutionNotifications).filter(notification => expectedFiles(notification?.descriptor?.id)).length), 0);
+  // CodeQL 2.27.3: Diagnostics/ExtractedFiles.ql (js/py), SuccessfullyExtractedFiles.ql (actions).
+  // W1-T10937: count known IDs, never infer a population from unverified notification encodings.
+  const extractedIds = ["js", "py", "actions"].map(family => `${family}/diagnostics/successfully-extracted-files`);
+  const notifications = [];
+  for (const invocation of items(run.invocations)) {
+    notifications.push(...items(invocation?.toolExecutionNotifications).slice(0, limit - notifications.length));
+    if (notifications.length === limit) break;
+  }
+  const matchingCounts = values => extractedIds.map(id => values.filter(value => value === id).length);
+  const extracted = notifications.filter(notification => extractedIds.includes(notification?.descriptor?.id));
+  const processedFiles = {
+    descriptors: matchingCounts(items(driver.notifications).map(descriptor => descriptor?.id)),
+    directNotifications: matchingCounts(extracted.map(notification => notification.descriptor.id)),
+    indexedNotifications: notifications.filter(notification => Number.isSafeInteger(notification?.descriptor?.index) && notification.descriptor.index >= 0).length,
+    locationArrays: extracted.filter(notification => Array.isArray(notification.locations)).length,
+    locationCount: extracted.reduce((total, notification) => Math.min(limit, total + count(notification.locations)), 0),
+    invalidLocations: extracted.filter(notification => notification.locations !== undefined && !Array.isArray(notification.locations)).length
+  };
   return {
     version: "code-health-original-structure-v1", sourceFormat: "original-sarif", scopeMethod: "explicit-analysis-targets", countLimit: limit,
     tool: { codeql: /CodeQL/i.test(driver.name), semanticVersion: versionShape("semanticVersion", semanticVersion),
@@ -48,7 +66,7 @@ function originalStructure(input) {
     codeql: { metricResults: shape(metrics), metricCount: count(metrics),
       baselineMetrics: items(metrics).filter(metric => Number.isFinite(metric?.baseline)).length,
       expectedFileDescriptors: items(driver.notifications).filter(notification => expectedFiles(notification?.id)).length,
-      expectedFileNotifications: notificationCount }
+      expectedFileNotifications: notificationCount }, processedFiles
   };
 }
 

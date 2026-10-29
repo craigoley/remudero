@@ -5,6 +5,35 @@ assemble it from raw routes. The first view is `nav-badge` (arch plan Phase 0, i
 moves every view onto the projector's `node:sqlite` read model, and Phase 2 pushes `view → version`
 over one SSE stream (below); the wire shape below is the contract those phases keep.
 
+## Code-health processed-file evidence
+
+Code-health source metadata describes the measured subset of a completed analysis. It does not
+attest comprehensive security coverage. Quality currently requires explicit `analysisTarget`
+artifacts; coverage requires `instrumented-source-files`. Expected-file baselines, findings,
+configured globs and arbitrary artifact locations cannot establish a measured population.
+
+The pinned CodeQL 2.27.3 sources at `ea3abbb69c242cf3b92527b56d32fe3eb7c6919b` identify
+`js/diagnostics/successfully-extracted-files`, `py/diagnostics/successfully-extracted-files` and
+`actions/diagnostics/successfully-extracted-files`, each tagged `successfully-extracted-files`:
+[JavaScript](https://github.com/github/codeql/blob/ea3abbb69c242cf3b92527b56d32fe3eb7c6919b/javascript/ql/src/Diagnostics/ExtractedFiles.ql),
+[Python](https://github.com/github/codeql/blob/ea3abbb69c242cf3b92527b56d32fe3eb7c6919b/python/ql/src/Diagnostics/ExtractedFiles.ql),
+[Actions](https://github.com/github/codeql/blob/ea3abbb69c242cf3b92527b56d32fe3eb7c6919b/actions/ql/src/Diagnostics/SuccessfullyExtractedFiles.ql).
+These queries establish diagnostic intent. Their original production descriptor and location
+encoding still needs verification before a `codeql-extracted-files` measurement can be emitted
+or admitted by the reader. Missing verified populations remain partial with no scope hash.
+
+The exporter's existing structural diagnostic adds `processedFiles`. Its `descriptors` and
+`directNotifications` arrays contain counts in JavaScript, Python, Actions order.
+`indexedNotifications` counts numeric descriptor references without resolving them.
+`locationArrays`, `locationCount` and `invalidLocations` describe location containers on direct
+known-ID notifications; they do not validate their members or count measured files. Each count
+saturates at the existing 20,000 limit, with at most 20,000 execution notifications inspected
+across invocations. Counts can guide verification on naturally produced output without publishing
+source paths, messages, snippets or security contents. They cannot attest completion, source
+identity or exclusions, or grant comparison eligibility, health, planning availability or view
+admission. The existing measurement-code fingerprint still covers the exporter, including changes
+to its structural diagnostics.
+
 ## Body
 
 ```json

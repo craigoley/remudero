@@ -198,6 +198,8 @@ test("Code health exporter keeps original source diagnostics bounded and private
     tool: { codeql: true, semanticVersion: "absent", version: "valid", selected: "version" },
     artifacts: { shape: "array", count: 1, analysisTargets: 1 },
     codeql: { metricResults: "array", metricCount: 3, baselineMetrics: 1, expectedFileDescriptors: 1, expectedFileNotifications: 1 },
+    processedFiles: { descriptors: [0, 0, 0], directNotifications: [0, 0, 0], indexedNotifications: 0,
+      locationArrays: 0, locationCount: 0, invalidLocations: 0 },
   });
   for (const malformed of [`{"${sentinel}": "${secretPath}", broken`, JSON.stringify({ sarif: sentinel }),
     JSON.stringify({ ...input, sarif: { ...input.sarif, runs: [null] } })]) {
@@ -215,6 +217,59 @@ test("Code health exporter keeps original source diagnostics bounded and private
     assert.equal(diagnostic.codeql.baselineMetrics, Array.isArray(metricResults) ? 20_000 : 0);
     assert.ok(!JSON.stringify(diagnostic).includes(sentinel));
   }
+});
+
+test("Code health extracted-file evidence refuses inferred foreign and incomplete populations", () => {
+  // Diagnostic encodings are structural probes until an original production population is verified.
+  const ids = ["js", "py", "actions"].map(family => `${family}/diagnostics/successfully-extracted-files`);
+  for (const [index, id] of ids.entries()) {
+    const value = originalOutput(), run = value.sarif.runs[0]!;
+    run.artifacts = [];
+    run.tool.driver.notifications = [{ id, properties: { tags: ["successfully-extracted-files"] } }];
+    Object.assign(run.invocations[0]!, { toolExecutionNotifications: [{ descriptor: { id },
+      message: { text: "PRIVATE_PROCESSED_SOURCE" }, locations: [{ physicalLocation: {
+        artifactLocation: { uri: "private/PRIVATE_PROCESSED_SOURCE.ts", uriBaseId: "%SRCROOT%" },
+      } }] }] });
+    for (const directoryMode of [false, true]) {
+      const result = exportOriginal(value, directoryMode);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.metadata.state, "partial");
+      assert.deepEqual(result.metadata.scope, { kind: "explicit-analysis-targets", fileCount: 0, hash: null });
+      const counts = [0, 0, 0]; counts[index] = 1;
+      assert.deepEqual(JSON.parse(result.stdout).processedFiles, { descriptors: counts, directNotifications: counts,
+        indexedNotifications: 0, locationArrays: 1, locationCount: 1, invalidLocations: 0 });
+      assert.ok(!JSON.stringify(result).includes("PRIVATE_PROCESSED_SOURCE"));
+    }
+  }
+  for (const locations of [undefined, null, {}, [], [null], new Array(20_001).fill({})]) {
+    const value = originalOutput(), run = value.sarif.runs[0]!;
+    run.artifacts = [];
+    run.properties.metricResults = [{ baseline: 1000 }];
+    run.tool.driver.notifications = [{ id: ids[0] }, { id: "cli/expected-extracted-files/javascript" }];
+    Object.assign(run.invocations[0]!, { toolExecutionNotifications: [{ descriptor: { index: 0 }, locations },
+      { descriptor: { id: ids[0] }, locations }] });
+    const result = exportOriginal(value);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.metadata.state, "partial");
+    assert.equal(result.metadata.scope.hash, null);
+    const facts = JSON.parse(result.stdout).processedFiles;
+    assert.equal(facts.indexedNotifications, 1);
+    assert.deepEqual(facts.directNotifications, [1, 0, 0], "an index is not resolved by assumption");
+    assert.equal(facts.locationCount, Array.isArray(locations) ? Math.min(locations.length, 20_000) : 0);
+    assert.equal(facts.invalidLocations, locations === undefined || Array.isArray(locations) ? 0 : 1);
+    assert.ok(Buffer.byteLength(result.stdout) < 2048);
+  }
+  const large = originalOutput(), run = large.sarif.runs[0]!;
+  run.artifacts = [];
+  run.tool.driver.notifications = new Array(20_001).fill({ id: ids[0] });
+  Object.assign(run.invocations[0]!, { toolExecutionNotifications: new Array(20_001).fill({
+    descriptor: { id: ids[0] }, locations: new Array(2).fill({}),
+  }) });
+  const bounded = exportOriginal(large);
+  assert.equal(bounded.metadata.state, "partial");
+  assert.deepEqual(JSON.parse(bounded.stdout).processedFiles, { descriptors: [20_000, 0, 0],
+    directNotifications: [20_000, 0, 0], indexedNotifications: 0, locationArrays: 20_000,
+    locationCount: 20_000, invalidLocations: 0 });
 });
 
 test("Code health exporter preserves source identity refusals and legacy evidence", () => {
