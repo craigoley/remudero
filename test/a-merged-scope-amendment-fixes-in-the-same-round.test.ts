@@ -173,6 +173,9 @@ test("scope recovery verifies content, preserves modes and deletions, and never 
   const f = fixture(t);
   const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42, amendmentNumber: 99,
     paths: [path, "src/deleted.ts"] };
+  writeFileSync(join(f.repo.dir, "src/deleted.ts"), "must be deleted again");
+  f.repo.git("add", "src/deleted.ts"); f.repo.git("commit", "-qm", "seed deletion base");
+  rmSync(join(f.repo.dir, "src/deleted.ts"));
   const bytes = Buffer.from([0, 1, 255, 10]);
   writeFileSync(join(f.repo.dir, path), bytes); chmodSync(join(f.repo.dir, path), 0o755);
   const saved = await saveScopeAmendmentWork(input);
@@ -214,6 +217,9 @@ test("scope recovery adopts a record created between its missing read and exclus
   assert.equal(winnerPublished, 1);
   assert.equal(readFileSync(saved, "utf8"), winner);
   assert.deepEqual(readdirSync(dirname(saved)).filter((name) => name.endsWith(".tmp")), []);
+  await assert.rejects(restoreScopeAmendmentWork(input), /conflicted on src\/lib\/rule-suites\.ts/);
+  assert.equal(readFileSync(join(f.repo.dir, path), "utf8"), "loser's work");
+  rmSync(join(f.repo.dir, path));
   assert.deepEqual(await restoreScopeAmendmentWork(input), [path]);
   assert.equal(readFileSync(join(f.repo.dir, path), "utf8"), "winner's work");
 });
@@ -272,10 +278,11 @@ os.${operation} = racing
 os.supports_dir_fd.add(racing)
 `;
   const io = { run(script: string, input: string): string {
-    const result = spawnSync("python3", ["-I", "-c", hook + script], { input, encoding: "utf8", timeout: 5000 });
+    const active = JSON.parse(input).restore === (action === "restore");
+    const result = spawnSync("python3", ["-I", "-c", (active ? hook : "") + script], { input, encoding: "utf8", timeout: 5000 });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stderr, "scope-race-fired\n", "the descriptor-path race must actually fire once");
-    fires++;
+    assert.equal(result.stderr, active ? "scope-race-fired\n" : "", "the descriptor-path race must actually fire once");
+    if (active) fires++;
     return result.stdout;
   } };
   return { io, sentinel, outside, outsideMode, fired: () => fires };
@@ -296,10 +303,13 @@ for (const component of ["leaf", "ancestor"] as const) {
   });
   test(`scope recovery pins its restore descriptors across a ${component} replacement`, async (t) => {
     const f = fixture(t);
+    writeFileSync(join(f.repo.dir, path), "base\n");
+    f.repo.git("add", path); f.repo.git("commit", "-qm", "seed restore base");
     writeFileSync(join(f.repo.dir, path), content);
     const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
       amendmentNumber: 99, paths: [path] };
     await saveScopeAmendmentWork(input);
+    writeFileSync(join(f.repo.dir, path), "base\n");
     const race = scopeRace(t, f, "restore", component);
     assert.deepEqual(await restoreScopeAmendmentWork(input, race.io), [path]);
     assert.equal(race.fired(), 1);
@@ -313,6 +323,8 @@ test("scope recovery deletes through a pinned parent after an ancestor replaceme
   const f = fixture(t);
   const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
     amendmentNumber: 99, paths: [path] };
+  writeFileSync(join(f.repo.dir, path), "delete this inside file");
+  f.repo.git("add", path); f.repo.git("commit", "-qm", "seed deletion base");
   rmSync(join(f.repo.dir, path), { force: true });
   await saveScopeAmendmentWork(input);
   writeFileSync(join(f.repo.dir, path), "delete this inside file");
@@ -335,7 +347,7 @@ test("scope recovery refuses a hard-linked save rather than reading an outside f
   assert.equal(readFileSync(outside, "utf8"), "OUTSIDE_SENTINEL");
 });
 
-test("scope recovery replaces restore targets without modifying their other hard links", async (t) => {
+test("scope recovery refuses hard-linked restore targets without modifying either link", async (t) => {
   const f = fixture(t);
   const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
     amendmentNumber: 99, paths: [path] };
@@ -345,10 +357,10 @@ test("scope recovery replaces restore targets without modifying their other hard
   writeFileSync(outside, "OUTSIDE_SENTINEL", { mode: 0o640 });
   const outsideMode = statSync(outside).mode & 0o777;
   rmSync(join(f.repo.dir, path)); linkSync(outside, join(f.repo.dir, path));
-  await restoreScopeAmendmentWork(input);
+  await assert.rejects(restoreScopeAmendmentWork(input), /regular path without hard links/);
   assert.equal(readFileSync(outside, "utf8"), "OUTSIDE_SENTINEL");
   assert.equal(statSync(outside).mode & 0o777, outsideMode);
-  assert.equal(readFileSync(join(f.repo.dir, path), "utf8"), content);
+  assert.equal(readFileSync(join(f.repo.dir, path), "utf8"), "OUTSIDE_SENTINEL");
 });
 
 test("scope recovery creates missing parents safely and refuses unavailable descriptor operations", async (t) => {

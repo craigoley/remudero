@@ -1,8 +1,10 @@
 import { observeCiRefreshDeferrals } from "../src/lib/ci-refresh-prevention.ts";
 /** Private daily operational review. No paid model calls, GitHub reads or routing writes. */
 import { execFileSync } from "node:child_process";
-import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
@@ -17,7 +19,16 @@ import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from ".
 const DAY = 86_400_000;
 const since = ROUTING_EXPERIMENTS.map((item) => item.startedOn).sort()[0];
 
-async function readSource(source, asOf, resolutions) {
+function reportReads(row, time, windowStart) {
+  const step = String(row.step);
+  return ["worker.assignment", "verdict.merged", "fix.dispatch"].includes(step)
+    || row.selection_assignment_id && (step === "worker.attempt" || step === "verdict" || step.endsWith(".done"))
+    || time >= windowStart && (REVIEW_FLOW_STEPS.includes(step) || step === "ci_learning_cadence.ran"
+      || step === "ci_learning_cadence.run_failed" || step === "sweep.update_branch.pending_guard"
+      || step.endsWith(".gardener_judged") || step.endsWith(".gardener_failed") || step.startsWith("goal."));
+}
+
+async function readSource(source, asOf, resolutions, openUnion) {
   let names;
   try { names = readdirSync(source.stateDir); }
   catch { return { ...source, state: "unavailable", reasons: ["ledger-source-unreadable"], rowsRead: 0, rows: [] }; }
@@ -34,45 +45,85 @@ async function readSource(source, asOf, resolutions) {
   const finding = (value) => { if (findings.length < 200) findings.push(value); else findingsOmitted++; };
   const windowStart = Date.parse(asOf) - DAY;
   let retainedRowsOmitted = 0;
+  const reportSeen = new Set();
+  const reportSteps = new Set();
   let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, invalidTimestampRows = 0, newestTs = null;
-  for await (const row of openLedgerUnion(source.stateDir, {
-    since: `${since}T00:00:00Z`,
-    onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
-    onMalformedRow: (item) => { malformedRows++; finding({ kind: item.kind, form: item.form, path: item.path, rowOrdinal: item.rowOrdinal, timestamp: item.timestamp }); },
-    onAcceptedRecord: (row, raw) => {
-      const timestamp = Date.parse(row.ts);
-      const resolution = resolveRoutingQuarantineRow(resolutions, source.label, row, raw, asOf);
-      if (resolution) resolvedRows.add(row);
-      if (!Number.isFinite(timestamp) || timestamp > Date.parse(asOf) + 5 * 60_000) finding({
-        kind: Number.isFinite(timestamp) ? "future-timestamp" : "invalid-timestamp", rowHash: createHash("sha256").update(raw).digest("hex"),
-        timestamp: typeof row.ts === "string" ? row.ts.slice(0, 80) : null, step: typeof row.step === "string" ? row.step.slice(0, 80) : null,
-        ...(resolution ? { resolutionScope: resolution.scope, resolvedAt: resolution.resolvedAt } : {}),
-      });
-    },
-  })) {
-    const time = Date.parse(row.ts);
-    if (!Number.isFinite(time)) { invalidTimestampRows++; continue; }
-    if (time > Date.parse(asOf) + 5 * 60_000) { futureRows++; if (resolvedRows.has(row)) routingResolvedFutureRows++; continue; }
-    // Normal writes arriving during the scan belong to the next snapshot, not a clock warning.
-    if (time > Date.parse(asOf)) continue;
-    rowsRead++;
-    if (newestTs === null || row.ts > newestTs) newestTs = row.ts;
-    if (["worker.assignment", "verdict.merged", "fix.dispatch"].includes(row.step) || row.selection_assignment_id
-      || time >= windowStart && (REVIEW_FLOW_STEPS.includes(row.step) || row.step === "ci_learning_cadence.ran"
-        || row.step === "ci_learning_cadence.run_failed" || row.step === "sweep.update_branch.pending_guard"
-        || String(row.step).endsWith(".gardener_judged")
-        || String(row.step).endsWith(".gardener_failed") || String(row.step).startsWith("goal."))) {
-      if (rows.length < 100_000) rows.push(row); else retainedRowsOmitted++;
+  // Audit fingerprints spill to a private disposable database, never a corpus-sized JS Set.
+  // A 2 MiB page-cache target and disabled mmap keep the fingerprint corpus out of RAM.
+  const auditDir = mkdtempSync(join(tmpdir(), "rmd-routing-quality-"));
+  let auditDb;
+  try {
+    auditDb = new DatabaseSync(join(auditDir, "seen.sqlite"));
+    auditDb.exec(`PRAGMA cache_size = -2048; PRAGMA mmap_size = 0;
+      PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;
+      CREATE TABLE seen (fingerprint BLOB PRIMARY KEY) WITHOUT ROWID; BEGIN`);
+    const acceptQualityRow = auditDb.prepare("INSERT OR IGNORE INTO seen VALUES (?)");
+    const qualityRows = new WeakSet();
+    for await (const row of openUnion(source.stateDir, {
+      since: `${since}T00:00:00Z`,
+      // Audit the corpus without keeping records; the separate report read is step-filtered.
+      dedupe: false,
+      onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
+      onMalformedRow: (item) => { malformedRows++; finding({ kind: item.kind, form: item.form, path: item.path, rowOrdinal: item.rowOrdinal, timestamp: item.timestamp }); },
+      onAcceptedRecord: (row, raw) => {
+        const fingerprint = createHash("sha256").update(raw).digest();
+        if (!acceptQualityRow.run(fingerprint).changes) return;
+        const timestamp = Date.parse(row.ts);
+        if (reportReads(row, timestamp, windowStart) && timestamp <= Date.parse(asOf)) {
+          if (reportSeen.size < 100_000) {
+            reportSeen.add(fingerprint.toString("hex"));
+            reportSteps.add(row.step);
+          } else retainedRowsOmitted++;
+        }
+        // Count each logical union row once, including unrelated and quarantined rows.
+        qualityRows.add(row);
+        const resolution = resolveRoutingQuarantineRow(resolutions, source.label, row, raw, asOf);
+        if (resolution) resolvedRows.add(row);
+        if (!Number.isFinite(timestamp) || timestamp > Date.parse(asOf) + 5 * 60_000) finding({
+          kind: Number.isFinite(timestamp) ? "future-timestamp" : "invalid-timestamp", rowHash: createHash("sha256").update(raw).digest("hex"),
+          timestamp: typeof row.ts === "string" ? row.ts.slice(0, 80) : null, step: typeof row.step === "string" ? row.step.slice(0, 80) : null,
+          ...(resolution ? { resolutionScope: resolution.scope, resolvedAt: resolution.resolvedAt } : {}),
+        });
+      },
+    })) {
+      if (!qualityRows.has(row)) continue;
+      const time = Date.parse(row.ts);
+      if (!Number.isFinite(time)) { invalidTimestampRows++; continue; }
+      if (time > Date.parse(asOf) + 5 * 60_000) { futureRows++; if (resolvedRows.has(row)) routingResolvedFutureRows++; continue; }
+      // Normal writes arriving during the scan belong to the next snapshot, not a clock warning.
+      if (time > Date.parse(asOf)) continue;
+      rowsRead++;
+      if (newestTs === null || row.ts > newestTs) newestTs = row.ts;
+    }
+    auditDb.exec("COMMIT");
+  } finally {
+    try { auditDb?.close(); }
+    finally { rmSync(auditDir, { recursive: true, force: true }); }
+  }
+  const dedupeRows = reportSeen.size;
+  if (reportSteps.size) {
+    // Only audited report steps reach the union parser. Consume fingerprints on delivery so
+    // replays, concurrent appends and unrelated rows cannot enlarge the retained population.
+    const admittedRows = new WeakSet();
+    for await (const row of openUnion(source.stateDir, {
+      since: `${since}T00:00:00Z`, step: [...reportSteps], dedupe: false,
+      onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
+      onAcceptedRecord: (row, raw) => {
+        if (reportSeen.delete(createHash("sha256").update(raw).digest("hex"))) admittedRows.add(row);
+      },
+    })) {
+      if (admittedRows.delete(row)) rows.push(row);
     }
   }
   const reasons = [];
+  if (reportSeen.size) reasons.push("ledger-source-changed-during-review");
   if (retainedRowsOmitted) reasons.push("ledger-retention-row-bound");
   if (unreadSources) reasons.push("ledger-source-unreadable");
   if (malformedRows) reasons.push("ledger-source-malformed");
   if (invalidTimestampRows) reasons.push("ledger-source-invalid-timestamp");
   if (futureRows) reasons.push("ledger-source-future-dated");
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
-    rowsRead, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
+    rowsRead, retainedRows: rows.length, dedupeRows, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
 }
 
 function privateWrite(path, value) {
@@ -81,7 +132,7 @@ function privateWrite(path, value) {
   renameSync(temp, path);
 }
 
-export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions }) {
+export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions, openUnion = openLedgerUnion }) {
   const resolutions = readRoutingQuarantineResolutions(quarantineResolutions, asOf, sources.map(source => source.label));
   const today = asOf.slice(0, 10);
   const yesterday = fixedClock(Date.parse(`${today}T00:00:00Z`) - DAY).iso().slice(0, 10);
@@ -103,7 +154,7 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
   }
   const results = [];
   for (const source of sources) {
-    const { rows, ...quality } = await readSource(source, asOf, resolutions);
+    const { rows, ...quality } = await readSource(source, asOf, resolutions, openUnion);
     const trialReasons = quality.reasons.filter(reason => reason !== "ledger-source-future-dated"
       || quality.futureRows !== quality.routingResolvedFutureRows);
     const trialSourceQuality = { scope: "routing-trials", rawSourceState: quality.state,

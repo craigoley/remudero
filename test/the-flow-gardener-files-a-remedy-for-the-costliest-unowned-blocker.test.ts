@@ -24,6 +24,9 @@ const iso = (hours: number) => fixedClock(NOW + hours * HOUR).iso();
 function row(pr: number, hours: number, blocker = "escalated", reason = "metadata-only body red", owner = "NONE"): LedgerRecord {
   return { step: "sweep.disposed", pr_number: pr, ts: iso(hours), blocker, reason, blocker_owner: owner };
 }
+/** W1-T9597: a NONE-owned cause escalates instead of drafting, so a filed cause is an owned one its owner failed to clear. */
+const owned = (pr: number, hours: number, reason = "metadata-only body red") => row(pr, hours, "own-red", reason, "fix-lane");
+const closedPrs = (...prs: number[]) => () => new Map(prs.map(pr => [pr, { state: "closed" as const, at: iso(0) }]));
 function fixture(root: string, records: LedgerRecord[], overrides: Partial<FlowGardenSources> = {}) {
   const logs: Array<{ step: string; fields?: Record<string, unknown> }> = [];
   const deps: GardenerDeps = {
@@ -96,9 +99,10 @@ test("W1-T5538: the costliest unowned or uncleared blocker ranks first", () => {
 test("W1-T5538: the top cause is filed once and a debited remedy reopens one rung up", (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}flow-filing-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const records = [row(1, -4), row(1, -2), row(2, -2), row(2, 0), row(3, -1, "escalated", "plan-only red"), row(3, 0, "escalated", "plan-only red")];
+  const records = [owned(1, -4), owned(1, -2), owned(2, -2), owned(2, 0), row(3, -1, "escalated", "plan-only red"), row(3, 0, "escalated", "plan-only red")];
+  const prOutcomes = closedPrs(1, 2);
   let minted = 0;
-  const f = fixture(root, records, { mintTaskId: branch => { assert.equal(branch, "flow-garden-123"); minted++; return "W1-T9001"; } });
+  const f = fixture(root, records, { prOutcomes, mintTaskId: branch => { assert.equal(branch, "flow-garden-123"); minted++; return "W1-T9001"; } });
   const inv = f.spec.inventory();
   const actions = f.spec.candidates(inv, () => 0);
   const plan = { actions: [...actions, ...actions], acting: ["draft" as const] };
@@ -108,22 +112,23 @@ test("W1-T5538: the top cause is filed once and a debited remedy reopens one run
   assert.equal(landing.paths.length, 1);
   const text = readFileSync(join(root, landing.paths[0]!), "utf8");
   assert.equal(ciFrictionRecordVerdict(text, "flow fixture").ok, true);
-  assert.match(text, /origin: "flow-blocker:escalated:metadata-only body red"/);
+  assert.match(text, /origin: "flow-blocker:own-red:metadata-only body red"/);
   assert.match(text, /PR-hours/);
   assert.match(text, /PR #1.*metadata-only body red/);
-  assert.match(text, /owner NONE/);
+  assert.match(text, /owner fix-lane/);
+  assert.match(text, /Source owner: fix-lane → src\/lib\/sweep\.ts\./);
   assert.equal(readdirSync(join(root, "plan", "tasks.d")).length, 1);
   assert.equal(scorecard.total_pr_hours, inv.priced.reduce((n, p) => n + p.hours, 0));
   const receipt = { step: `${f.spec.name}.scorecard`, pr_url: "https://github.com/acme/remudero/pull/900", next: scorecard.next };
-  const held = fixture(root, [...records, receipt]).spec.inventory();
+  const held = fixture(root, [...records, receipt], { prOutcomes }).spec.inventory();
   assert.equal(held.next!.price.key, "escalated:plan-only red", "a filing receipt holds the cause until main sees it");
   const remedy = { id: "W1-T9001", origin: actions[0]!.origin, files: ["src/lib/sweep.ts"], status: "queued", retired: false, mergedAt: iso(-2) };
-  const reopened = fixture(root, records, { planState: () => ({ tasks: [remedy] }) }).spec.inventory();
-  assert.equal(reopened.next!.origin, "flow-blocker:escalated:metadata-only body red#r2");
+  const reopened = fixture(root, records, { prOutcomes, planState: () => ({ tasks: [remedy] }) }).spec.inventory();
+  assert.equal(reopened.next!.origin, "flow-blocker:own-red:metadata-only body red#r2");
   assert.equal(reopened.next!.prior!.effect!.verdict, "debit");
   const malformedProof = text.replaceAll("W1-T9001", "W1-T9002").replace(/proof: .+/, 'proof: "grep: [ in src/lib/sweep.ts"');
   assert.equal(ciFrictionRecordVerdict(malformedProof, "malformed proof").ok, false);
-  const invalid = fixture(root, records, { mintTaskId: () => "W1-T9002", draftShard: () => malformedProof });
+  const invalid = fixture(root, records, { prOutcomes, mintTaskId: () => "W1-T9002", draftShard: () => malformedProof });
   assert.throws(() => invalid.spec.apply(workspace(root), { actions: invalid.spec.candidates(invalid.spec.inventory(), () => 0), acting: ["draft"] }, {}), /failed lint/);
   assert.equal(readdirSync(join(root, "plan", "tasks.d")).length, 1, "admission failure writes nothing");
 });
@@ -246,33 +251,35 @@ test("flow ownership calibrates the percentile per cause and ties by distinct PR
 test("flow refuses malformed proofs and unavailable owners before writing, and honours plan decisions", (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}flow-admission-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const records = [row(1, -2), row(1, 0)];
-  const f = fixture(root, records);
+  const records = [owned(1, -2), owned(1, 0)];
+  const prOutcomes = closedPrs(1, 2);
+  const f = fixture(root, records, { prOutcomes });
   const inv = f.spec.inventory();
   const plan = { actions: f.spec.candidates(inv, () => 0), acting: ["draft" as const] };
   assert.equal(f.spec.unfinished!(inv), true);
-  assert.match(f.spec.fingerprint(inv), /flow-blocker:escalated/);
+  assert.match(f.spec.fingerprint(inv), /flow-blocker:own-red/);
   assert.equal(f.spec.apply(workspace(root), { actions: [], acting: [] }, {}), undefined);
   assert.throws(() => f.spec.apply({ ...workspace(root), branch: undefined }, plan, {}), /reservation branch/);
-  const noOwner = fixture(root, records, { ownerSearch: { filesContaining: () => [], fileExists: () => false } });
-  assert.throws(() => noOwner.spec.apply(workspace(root), plan, {}), /no source owner/);
+  const noOwner = fixture(root, [row(1, -2), row(1, 0)]);
+  const unowned = { actions: noOwner.spec.candidates(noOwner.spec.inventory(), () => 0), acting: ["draft" as const] };
+  assert.throws(() => noOwner.spec.apply(workspace(root), unowned, {}), /no source owner found for escalated:metadata-only body red: declared owner NONE/);
   const first = f.spec.apply(workspace(root), plan, {})!;
   const valid = readFileSync(join(root, first.paths[0]!), "utf8");
   const broken = valid.replace(/proof: .+/, 'proof: "grep: [ in src/lib/sweep.ts"');
   assert.equal(ciFrictionRecordVerdict(broken, "invalid proof").ok, false);
-  const invalid = fixture(root, records, { mintTaskId: () => "W1-T9002", draftShard: () => broken.replaceAll("W1-T9001", "W1-T9002") });
+  const invalid = fixture(root, records, { prOutcomes, mintTaskId: () => "W1-T9002", draftShard: () => broken.replaceAll("W1-T9001", "W1-T9002") });
   assert.throws(() => invalid.spec.apply(workspace(root), plan, {}), /failed lint/);
   assert.equal(readdirSync(join(root, "plan", "tasks.d")).length, 1);
   const task = { id: "W1-T9001", origin: plan.actions[0]!.origin, status: "queued", retired: false, files: ["src/lib/sweep.ts"] };
   for (const update of [{}, { retired: true }, { mergedAt: "invalid" }, { status: "merged" }]) {
-    assert.equal(fixture(root, records, { planState: () => ({ tasks: [{ ...task, ...update }] }) }).spec.inventory().next, undefined);
+    assert.equal(fixture(root, records, { prOutcomes, planState: () => ({ tasks: [{ ...task, ...update }] }) }).spec.inventory().next, undefined);
   }
-  const degraded = fixture(root, records, { planState: () => ({ tasks: [], degraded: "fetch unavailable" }) });
+  const degraded = fixture(root, records, { prOutcomes, planState: () => ({ tasks: [], degraded: "fetch unavailable" }) });
   assert.ok(degraded.spec.inventory().next);
   assert.deepEqual(degraded.logs[0], { step: "flow.origins_degraded", fields: { reason: "fetch unavailable" } });
   const unreadable = fixture(root, records, { planState: () => ({ tasks: [], unreadable: ["shard.yaml: invalid"] }) });
   assert.throws(() => unreadable.spec.inventory(), /flow plan shards unreadable/);
-  const punctuation = fixture(root, [row(2, -1, "escalated", 'body red [check] "quoted"'), row(2, 0, "escalated", 'body red [check] "quoted"')]);
+  const punctuation = fixture(root, [owned(2, -1, 'body red [check] "quoted"'), owned(2, 0, 'body red [check] "quoted"')], { prOutcomes });
   const punctuated = punctuation.spec.apply(workspace(root), { actions: punctuation.spec.candidates(punctuation.spec.inventory(), () => 0), acting: ["draft"] }, {})!;
   assert.equal(ciFrictionRecordVerdict(readFileSync(join(root, punctuated.paths[0]!), "utf8"), "punctuated cause").ok, true);
   const pattern = punctuated.body.split("| grep: ")[1]!.split(" in ")[0]!;
