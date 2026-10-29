@@ -517,7 +517,8 @@ test("a pre-open inherited census refusal cannot buy another worker without a na
   const result = await harness.repairCensusRefusedPush({
     refusal: { text: "trusted census refused", censuses: ["census-suite"], offeredBaselines: [],
       inheritedMain: { state: "inherited", headSha: head, mainSha: main, mergeBase: base, baselinePath: "scripts/affected-reach-baseline.json" } },
-    task: { id: "W1-T10935TEST", title: "fixture", repo: "remudero", files: ["src/lib/unreached.ts"] },
+    task: { id: "W1-T10935TEST", title: "fixture", repo: "remudero", files: ["src/lib/unreached.ts"],
+      depends_on: [], type: "implement", verify: "auto", risk: "low", status: "queued", attempts: 0 },
     runId: "TEST-pre-open", worktreePath: repo.dir, branch: "inherited-fix", resumeSessionId: "fixture",
     mount: { model: "sonnet", effort: "medium", maxTurns: 2, contextBudget: 120000 }, settingsFile: join(root, "settings.json"),
     config: { root, workerProviders: { harnessCommitsFix: true } } as import("#src/lib/config.js").Config,
@@ -535,7 +536,8 @@ test("a pre-open census repair stops on newly witnessed inherited drift before i
   const root = join(repo.dir, "state", "pre-open-new"); mkdirSync(root, { recursive: true });
   const result = await harness.repairCensusRefusedPush({
     refusal: { text: "trusted census refused", censuses: ["census-suite"], offeredBaselines: [] },
-    task: { id: "W1-T10935TEST", title: "fixture", repo: "remudero", files: ["src/lib/unreached.ts"] },
+    task: { id: "W1-T10935TEST", title: "fixture", repo: "remudero", files: ["src/lib/unreached.ts"],
+      depends_on: [], type: "implement", verify: "auto", risk: "low", status: "queued", attempts: 0 },
     runId: "TEST-pre-open", worktreePath: repo.dir, branch: "inherited-fix", resumeSessionId: "fixture",
     mount: { model: "sonnet", effort: "medium", maxTurns: 2, contextBudget: 120000 }, settingsFile: join(root, "settings.json"),
     config: { root, workerProviders: { harnessCommitsFix: true } } as import("#src/lib/config.js").Config,
