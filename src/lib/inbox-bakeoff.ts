@@ -19,6 +19,10 @@ export interface BakeoffCandidate {
   billing: "cash" | "subscription";
   /** The deployment (cash) or Claude model (subscription) the spawn is pinned to. */
   model: string;
+  /** Optional reasoning effort pinned alongside the model for this trial. */
+  effort?: string;
+  /** Capability mount used when the deployment is outside the inbox's ordinary row. */
+  mountModel?: string;
   /** false ⇒ the candidate is spawned with an EMPTY tool surface (reasoning allowed, no tool forcing). */
   tools: boolean;
 }
@@ -28,6 +32,9 @@ export const BAKEOFF_CANDIDATES: readonly BakeoffCandidate[] = [
   { id: "cash-gpt-oss-120b", label: "cash gpt-oss-120b", billing: "cash", model: "gpt-oss-120b", tools: true },
   { id: "cash-gpt-6-luna-tools", label: "cash gpt-6-luna (tools)", billing: "cash", model: "gpt-6-luna", tools: true },
   { id: "cash-gpt-6-luna-notools", label: "cash gpt-6-luna (no tools)", billing: "cash", model: "gpt-6-luna", tools: false },
+  { id: "cash-gpt-6.1-terra-low", label: "cash gpt-6.1-terra (low)", billing: "cash", model: "gpt-6.1-terra", mountModel: "sonnet", effort: "low", tools: true },
+  { id: "cash-gpt-6.1-terra-medium", label: "cash gpt-6.1-terra (medium)", billing: "cash", model: "gpt-6.1-terra", mountModel: "sonnet", effort: "medium", tools: true },
+  { id: "cash-gpt-6.1-terra-high", label: "cash gpt-6.1-terra (high)", billing: "cash", model: "gpt-6.1-terra", mountModel: "sonnet", effort: "high", tools: true },
   { id: "subscription-claude-sonnet-5-5", label: "subscription claude-sonnet-5-5", billing: "subscription", model: "claude-sonnet-5-5", tools: true },
 ];
 
