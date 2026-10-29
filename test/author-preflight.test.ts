@@ -8,17 +8,6 @@ import { after, test } from 'node:test';
 import { ownedFixtureDir } from '#test/helpers/owned-fixture-dir.js';
 import { gitRepo } from './helpers/git-repo.js';
 
-// A retro can reach these fixtures without an admitted parent lease after its
-// outer slot wait bound. Keep fixture admission in owned scratch in BOTH shapes;
-// the enclosing author/runner retains its unchanged real host resource admission.
-const fixtureSlots = ownedFixtureDir({ after }, 'author-preflight-slots');
-const originalSlotDir = process.env.RMD_TEST_SLOT_DIR;
-process.env.RMD_TEST_SLOT_DIR = fixtureSlots.dir;
-after(() => {
-  if (originalSlotDir === undefined) delete process.env.RMD_TEST_SLOT_DIR;
-  else process.env.RMD_TEST_SLOT_DIR = originalSlotDir;
-});
-
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(ROOT, 'scripts/preflight-author.mjs');
 const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {}) as {
