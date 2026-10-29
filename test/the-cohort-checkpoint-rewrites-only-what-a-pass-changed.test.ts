@@ -33,12 +33,13 @@ function fixture(history = 4000): string {
 
 function legacyFromSegments(root: string): unknown {
   const index = indexAt(root);
-  const sources = index.sources.map((source: Reference) => {
+  const expand = (source: Reference) => {
     const { segment, segmentBytes, segmentSha256: _hash, rowCount: _count, ...metadata } = source;
     const encoded = readFileSync(join(root, segment)).subarray(0, segmentBytes).toString();
     return { ...metadata, rows: encoded.trim() ? encoded.trimEnd().split("\n").map((line) => JSON.parse(line)) : [] };
-  });
-  return { ...index, version: BENCHMARK_COHORT_VERSION, sources };
+  };
+  return { ...index, version: BENCHMARK_COHORT_VERSION, sources: index.sources.map(expand),
+    ...(index.baselineSources ? { baselineSources: index.baselineSources.map(expand) } : {}) };
 }
 
 test("W1-T9911: a tail-only pass rewrites no sealed segment", async (t) => {
@@ -165,24 +166,65 @@ test("W1-T9911: the segmented checkpoint yields the whole-file snapshot", async 
 });
 
 test("W1-T9911: a v1 checkpoint is migrated once without a rescan", async () => {
-  const root = fixture(5);
-  try {
-    await runBenchmarkCohortPass(root, { maxSources: 4, nowIso });
-    const v1 = legacyFromSegments(root);
-    for (const name of readdirSync(root).filter((s) => s.startsWith("benchmark-cohort-"))) unlinkSync(join(root, name));
-    writeFileSync(join(root, LEGACY), JSON.stringify(v1));
-    const migrated = await runBenchmarkCohortPass(root, { maxSources: 4, nowIso });
-    assert.equal(migrated.scannedSources, 0);
-    assert.equal(migrated.snapshot.sourceRows.assignments, 11);
-    assert.equal(indexAt(root).version, "benchmark-cohort-segments-v2");
-    assert.equal(existsSync(join(root, LEGACY)), false);
-    assert.ok(migrated.checkpointWrittenBytes! > 0);
-    const stamps = indexAt(root).sources.map((s: Reference) => statSync(join(root, s.segment)).mtimeMs);
-    const next = await runBenchmarkCohortPass(root, { nowIso });
-    assert.equal(next.scannedSources, 0);
-    assert.equal(next.checkpointWrittenBytes, 0);
-    assert.deepEqual(indexAt(root).sources.map((s: Reference) => statSync(join(root, s.segment)).mtimeMs), stamps);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  for (const pendingBaseline of [false, true]) {
+    const root = fixture(5);
+    try {
+      const first = await runBenchmarkCohortPass(root, { maxSources: 4, nowIso });
+      const live = join(root, "ledger.ndjson");
+      const held = join(root, "held-live.ndjson");
+      const interrupt = () => renameSync(live, held);
+      if (pendingBaseline) {
+        appendFileSync(live, assignment("live-next"));
+        const partial = await runBenchmarkCohortPass(root, { nowIso, onBeforeLivePrefixVerify: interrupt });
+        assert.equal(partial.state, "partial");
+        renameSync(held, live);
+        assert.equal(indexAt(root).baselineSources.length, 3, "positive control: production saved a pending baseline");
+      }
+      const v1 = legacyFromSegments(root);
+      for (const name of readdirSync(root).filter((s) => s.startsWith("benchmark-cohort-"))) unlinkSync(join(root, name));
+      writeFileSync(join(root, LEGACY), JSON.stringify(v1));
+      const migrated = await runBenchmarkCohortPass(root, { maxSources: 4, nowIso,
+        ...(pendingBaseline ? { onBeforeLivePrefixVerify: interrupt } : {}) });
+      assert.equal(migrated.scannedSources, 0);
+      const index = indexAt(root);
+      assert.equal(index.version, "benchmark-cohort-segments-v2");
+      assert.equal(existsSync(join(root, LEGACY)), false);
+      assert.ok(migrated.checkpointWrittenBytes! > 0);
+      if (pendingBaseline) {
+        assert.equal(migrated.state, "partial");
+        assert.equal(migrated.snapshot.lastGoodAt, first.snapshot.asOf);
+        assert.deepEqual(semantic(index.lastGood), semantic(first.snapshot));
+        for (const source of index.sources.filter((s: Reference) => s.form !== "live")) {
+          const baseline = index.baselineSources.find((s: Reference) => s.name === source.name);
+          assert.equal(baseline.segment, source.segment, "migration writes equivalent sealed history only once");
+        }
+        const baselineLive = index.baselineSources.find((s: Reference) => s.form === "live");
+        const currentLive = index.sources.find((s: Reference) => s.form === "live");
+        assert.notEqual(baselineLive.segment, currentLive.segment, "distinct live prefixes retain their own evidence");
+        assert.equal(baselineLive.rowCount, 1);
+        assert.equal(currentLive.rowCount, 2);
+        const segments = readdirSync(root).filter((name) => name.startsWith("benchmark-cohort-segment-"));
+        assert.equal(segments.length, 4, "two sealed sources and two distinct live prefixes");
+        assert.equal(migrated.checkpointWrittenBytes, segments.reduce((sum, name) => sum + statSync(join(root, name)).size, 0)
+          + statSync(join(root, INDEX)).size * 2, "migration and partial publication write each segment once");
+        renameSync(held, live);
+      } else assert.equal(migrated.snapshot.sourceRows.assignments, 11);
+      const stamps = index.sources.map((s: Reference) => {
+        const stat = statSync(join(root, s.segment));
+        return { ino: stat.ino, mtimeMs: stat.mtimeMs };
+      });
+      const next = await runBenchmarkCohortPass(root, { nowIso });
+      assert.equal(next.scannedSources, 0);
+      assert.equal(next.snapshot.sourceRows.assignments, pendingBaseline ? 12 : 11);
+      assert.equal(next.checkpointWrittenBytes, pendingBaseline ? statSync(join(root, INDEX)).size : 0);
+      assert.deepEqual(indexAt(root).sources.map((s: Reference) => {
+        const stat = statSync(join(root, s.segment));
+        return { ino: stat.ino, mtimeMs: stat.mtimeMs };
+      }), stamps);
+      assert.equal(indexAt(root).baselineSources, undefined);
+      assert.equal((await runBenchmarkCohortPass(root, { nowIso })).checkpointWrittenBytes, 0);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
 });
 
 test("W1-T9911: a corrupt segment rescans its source, never reads as empty", async () => {

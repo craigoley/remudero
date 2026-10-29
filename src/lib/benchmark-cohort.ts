@@ -290,8 +290,12 @@ function readCheckpoint(stateDir: string, io: CheckpointIO): Checkpoint {
 }
 
 function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: CheckpointIO): number {
+  const sealedSegments = new Map<string, SegmentState>();
   const save = (source: SourceRecord): SegmentReference => {
-    const prior = sourceSegments.get(source);
+    // V1 JSON gives the baseline and current copies of immutable evidence different identities.
+    const sealedKey = source.form === "live" ? undefined
+      : JSON.stringify([source.name, source.form, source.sha256, source.projection]);
+    const prior = sourceSegments.get(source) ?? (sealedKey ? sealedSegments.get(sealedKey) : undefined);
     const { rows, ...metadata } = source;
     const delta = rows.slice(prior?.reference.rowCount ?? 0).map((row) => JSON.stringify(row) + "\n").join("");
     const segment = prior?.reference.segment
@@ -317,7 +321,9 @@ function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: Checkpoin
     hash.update(delta);
     const reference = { ...metadata, segment, segmentBytes: (prior?.reference.segmentBytes ?? 0) + Buffer.byteLength(delta),
       segmentSha256: hash.copy().digest("hex"), rowCount: rows.length };
-    sourceSegments.set(source, { reference, hash });
+    const state = { reference, hash };
+    sourceSegments.set(source, state);
+    if (sealedKey) sealedSegments.set(sealedKey, state);
     return reference;
   };
   // Baselines can refer to an earlier prefix of the same live segment during partial replay.
