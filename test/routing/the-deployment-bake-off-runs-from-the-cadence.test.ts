@@ -4,7 +4,7 @@ import { gzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildMeasurementCadenceDaemonHooks, measurementBakeoffDeployments } from "#src/run-task.js";
+import { buildMeasurementCadenceDaemonHooks, measurementBakeoffDeployments } from "#test/helpers/run-task-test.js";
 import { runDeploymentBakeoff, readBakeoffTrialState, type DeployedModel } from "#src/lib/bakeoff-trigger.js";
 import { scoreCandidate } from "#src/lib/inbox-bakeoff.js";
 import { loadProposalRegistry } from "#src/lib/inbox.js";
