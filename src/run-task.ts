@@ -38606,7 +38606,8 @@ export async function dispatchAlertFixRun(
       maxTurns: fixMount.maxTurns,
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
-      prompt: alertFixPrompt(alert, taskId, repairHarnessOwnsGit({ provider: fixMount.provider, tools: toolBound }) ? { bodyFile } : undefined),
+      prompt: alertFixPrompt(alert, taskId),
+      promptFor: ({ harnessOwnsGit }) => alertFixPrompt(alert, taskId, harnessOwnsGit ? { bodyFile } : undefined),
     });
     log("alert-fix.dispatched_worker", {
       session_id: worker.sessionId,
@@ -38856,7 +38857,8 @@ export async function dispatchMainRepairFixRun(
       maxTurns: fixMount.maxTurns,
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
-      prompt: mainRepairFixPrompt(request, bodyFile, repairHarnessOwnsGit({ provider: fixMount.provider, tools: toolBound })),
+      prompt: mainRepairFixPrompt(request, bodyFile),
+      promptFor: ({ harnessOwnsGit }) => mainRepairFixPrompt(request, bodyFile, harnessOwnsGit),
     });
     log("main-repair.dispatched_worker", { session_id: worker.sessionId, subtype: worker.subtype, ...workerLedgerFields(worker) });
     let prUrl = parseReport(workerTranscript(worker))?.prUrl;
