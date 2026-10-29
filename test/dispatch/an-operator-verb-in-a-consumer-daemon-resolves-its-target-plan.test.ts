@@ -13,6 +13,7 @@ import {
 import { LIVE_WRITE_OVERRIDE_ENV } from "#src/lib/live-write-guard.js";
 import { SELF_SYNC_GUARD_ENV } from "#src/lib/self-sync.js";
 import { readLedgerLines } from "#src/lib/status.js";
+import { traceCommand } from "#src/lib/report-commands.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -209,6 +210,45 @@ test("W1-T10925: a miss names every plan searched and the repo-root to use", (t)
   assert.equal(noConfig.ok ? undefined : noConfig.error.endsWith("(record unreadable: instance config: bad config)"), true);
   const blocked = writeDaemonTargetRecord(join(f.ledgerPath, "nested"), consumerRecord(f));
   assert.equal(blocked.written, false);
+});
+
+test("W1-T10925: trace refuses an unknown task and feedback id with the searched plans", async (t) => {
+  const f = instance(t);
+  writeDaemonTargetRecord(f.stateDir, consumerRecord(f));
+  const id = "PORTAL-T000";
+  const enginePlan = join(f.engine.dir, "plan", "tasks.yaml");
+  const targetPlan = join(f.target, "plan", "tasks.yaml");
+  const errors: string[] = [];
+  const oldHome = process.env.HOME;
+  const oldError = console.error;
+  process.env.HOME = f.home;
+  console.error = (message: string) => errors.push(message);
+  try {
+    const context = { repoRoot: f.engine.dir, resolveOwnerRepo: () => ({ owner: "craigoley", repo: "remudero" }) };
+    const resolved = await traceCommand([id], {
+      ...context,
+      resolveTaskPlan: (taskId) => resolveVerbPlanRoot(taskId, {
+        argv: [], cwdRoot: f.engine.dir, stateDir: () => f.stateDir,
+      }),
+    });
+    assert.equal(resolved, 2);
+    assert.deepEqual(errors, [
+      `rmd trace: '${id}' is neither a known task id (not found in ${enginePlan}, ${targetPlan}; ` +
+      `this instance targets craigoley/remudero-site — read its plan with --repo-root ${f.target}) ` +
+      `nor a feedback entry (plan/feedback/${id}.yaml)`,
+    ]);
+
+    errors.length = 0;
+    const direct = await traceCommand([id], context);
+    assert.equal(direct, 2);
+    assert.deepEqual(errors, [
+      `rmd trace: '${id}' is neither a known task id (${enginePlan}) nor a feedback entry (plan/feedback/${id}.yaml)`,
+    ]);
+  } finally {
+    console.error = oldError;
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
 });
 
 test("W1-T10925: a consumer claim reserves on the target repo", (t) => {
