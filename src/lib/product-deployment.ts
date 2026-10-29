@@ -81,6 +81,44 @@ export interface ProductDeploymentProvider {
   config(): VercelConfig | undefined;
   read(config: VercelConfig, name: string): Promise<VercelRead>;
   create(config: VercelConfig, spec: { name: string; repository: { owner: string; name: string } }): Promise<void>;
+  deployments?(config: VercelConfig, project: string): Promise<VercelDeployment[]>;
+}
+const vercelDeploymentSchema = z.object({
+  id: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/), projectId, ownerId: teamId,
+  readyState: z.string().min(1).max(80), target: z.enum(["production", "preview"]).nullable(), createdAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  gitSource: z.object({ type: z.literal("github"), repoId: z.union([repositoryId, z.string().regex(/^\d{1,16}$/).transform(Number)]).pipe(repositoryId),
+    sha: z.string().regex(/^[a-f0-9]{40}$/) }),
+  url: z.string().min(1).max(253).refine(value => /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(value) && value.includes(".")),
+});
+export type VercelDeployment = z.infer<typeof vercelDeploymentSchema>;
+
+/** PRIMARY CONTROL: cap both provider JSON and served content, including streamed responses. */
+export async function deploymentResponseText(response: Response, limit: number, decode = true): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  let bytes = 0;
+  const chunks: Uint8Array[] = [];
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      bytes += part.value.byteLength;
+      if (bytes > limit) throw new Error("deployment response exceeds byte cap");
+      chunks.push(part.value);
+    }
+    return decode ? new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)) : "";
+  } finally { await reader.cancel(); reader.releaseLock(); }
+}
+
+export async function probeDeploymentUrl(url: string): Promise<{ outcome: "succeeded" | "failed" | "blocked" | "unknown"; servedStatus: number | null; reason: string }> {
+  try {
+    const response = await fetch(url, { method: "GET", redirect: "error", signal: AbortSignal.timeout(10_000) });
+    await deploymentResponseText(response, 64 * 1024, false);
+    const outcome = response.ok ? "succeeded" : [401, 403].includes(response.status) ? "blocked" : response.status >= 400 ? "failed" : "unknown";
+    return { outcome, servedStatus: response.status, reason: response.ok ? "served URL answered" : `served URL HTTP ${response.status}` };
+  } catch (error) {
+    return { outcome: "unknown", servedStatus: null, reason: `served URL unreadable: ${String(error).slice(0, 400)}` };
+  }
 }
 /** Thrown by a provider that was told, unambiguously, that creation is not permitted. */
 export class VercelDenied extends RmdError {
@@ -117,6 +155,24 @@ export function vercelDeploymentProvider(env: NodeJS.ProcessEnv = process.env, f
     });
   return {
     config: () => vercelConfigFromEnv(env),
+    async deployments(config, project) {
+      const json = async (path: string) => {
+        const response = await call(config, path, { method: "GET" });
+        if (!response.ok) throw new Error(`deployment read HTTP ${response.status}`);
+        return JSON.parse(await deploymentResponseText(response, 256 * 1024)) as unknown;
+      };
+      // Vercel SDK getDeployments / getDeploymentResponseBody2: uid in the list, gitSource in detail.
+      const list = z.object({ deployments: z.array(z.object({ uid: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/) })).max(20),
+        pagination: z.object({ next: z.number().nullable() }) }).parse(await json(`/v6/deployments?projectId=${encodeURIComponent(project)}&limit=20`));
+      if (list.pagination.next !== null) throw new Error("deployment list truncated");
+      const deployments: VercelDeployment[] = [];
+      for (const item of list.deployments) {
+        const deployment = vercelDeploymentSchema.parse(await json(`/v13/deployments/${encodeURIComponent(item.uid)}?withGitRepoInfo=true`));
+        if (deployment.id !== item.uid) throw new Error("deployment detail identity mismatch");
+        deployments.push(deployment);
+      }
+      return deployments;
+    },
     async read(config, name) {
       let response: Response;
       try { response = await call(config, `/v9/projects/${encodeURIComponent(name)}`, { method: "GET" }); }
@@ -187,6 +243,30 @@ export class ProductDeploymentService {
     this.intents = options.store ?? new ProductIntentStore({ root: options.root });
   }
 
+  /** Read the durable binding before consulting the provider; observation never adopts or creates. */
+  async observe(actor: string, productId: string, operationId: string): Promise<
+    | { ok: true; binding: ProductDeploymentReceipt; deployments: VercelDeployment[]; reason?: string }
+    | { ok: false; code: ProductDeploymentCode | "binding_not_found" }
+  > {
+    try {
+      const binding = Object.values(this.read(this.paths(actor)).operations).find(item => item.operationId === operationId)?.receipt;
+      if (!binding || binding.operationId !== operationId || binding.productId !== productId) return { ok: false, code: "binding_not_found" };
+      const product = this.intents.read(actor, productId);
+      if (!product.ok) return product;
+      this.assertBound({ repository: binding.project.repository }, product.value.repository);
+      if (binding.objectiveRevision !== product.value.objectiveRevision) throw new Fault("stale_revision");
+      const config = this.provider.config();
+      if (!config) return { ok: true, binding, deployments: [], reason: "deployment provider not configured" };
+      if (config.teamId !== binding.project.teamId) throw new Fault("team_mismatch");
+      try {
+        if (!this.provider.deployments) throw new Error("deployment reader unavailable");
+        return { ok: true, binding, deployments: await this.provider.deployments(config, binding.project.id) };
+      } catch (error) {
+        return { ok: true, binding, deployments: [], reason: `deployment provider unreadable: ${String(error).slice(0, 400)}` };
+      }
+    } catch (error) { return { ok: false, code: error instanceof Fault ? error.code : "unavailable" }; }
+  }
+
   async execute(actor: string, command: unknown): Promise<ProductDeploymentResult> {
     try {
       if (typeof actor !== "string" || !actor.trim() || actor.length > 512) throw new Fault("invalid_identity");
@@ -212,7 +292,7 @@ export class ProductDeploymentService {
   }
 
   /** The repository in the command must be the one the product is verified to be bound to. */
-  private assertBound(input: ProductDeploymentCommand, bound: { id: number; owner: string; name: string } | null): void {
+  private assertBound(input: Pick<ProductDeploymentCommand, "repository">, bound: { id: number; owner: string; name: string } | null): void {
     if (!bound) throw new Fault("repository_required");
     if (bound.id !== input.repository.id || !same(bound.owner, input.repository.owner) || !same(bound.name, input.repository.name)) {
       throw new Fault("repository_mismatch");
