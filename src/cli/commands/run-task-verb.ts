@@ -120,6 +120,7 @@ import { acquireDrainLock, defaultIsPidAlive, type DrainLockHandle } from "../..
 import { checkReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "../../lib/self-sync.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, type InflightLockHandle } from "../../lib/inflight-lock.js";
 import { runDiagnoseThenRetry, type DiagnoseThenRetryResult, type AttemptOutcome, type FailureSignal } from "../../lib/classify.js";
+import { captureLocalQualificationReceipt } from "../../lib/local-qualification-receipt.js";
 import { shouldRecordDecision, reversibilityFactor, type DiffFileChange } from "../../lib/risk-score.js";
 import { assertLiveWriteAllowed } from "../../lib/live-write-guard.js";
 import { runChildCredentialSocket } from "../../lib/secret-boundary.js";
@@ -3227,6 +3228,7 @@ function endThrownRun(
 async function deferOpenToSiblingPr(
   helperHost: Pick<RunTaskHelperHost, "terminalVerdictFields" | "scrubGitCredentialText">, ctx: RunTaskContext,
   run: { impl: WorkerResult; branch: string; worktreePath: string; repoDir: string; costUsd: number },
+  remove: typeof worktreeRemove = worktreeRemove,
 ): Promise<RunResult | undefined> {
   const { terminalVerdictFields } = helperHost;
   const { log, say, opts, owner, task, taskId, runId } = ctx;
@@ -3247,7 +3249,7 @@ async function deferOpenToSiblingPr(
     head_sha: headSha,
     cost_usd: costUsd,
   });
-  reclaimRunWorktree(repoDir, worktreePath, "pr_open.deferred_to_existing", log);
+  reclaimRunWorktree(repoDir, worktreePath, "pr_open.deferred_to_existing", log, remove);
   log("verdict", {
     verdict: "blocked_inflight",
     reason: `${taskId} already has open PR #${sibling.number} (${sibling.head_ref}); not opening a second`,
@@ -5548,7 +5550,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // W1-T8676: a worker error is not the checkpoint's fault.
     const keptCheckpoint = v.verdict === "failed" ? checkpointToKeep() : undefined;
     try {
-      worktreeRemove(repoDir, worktreePath);
+      retireQualifiedWorktree();
       log("worktree.remove", { on: `${stage}.error` });
     } catch (e) {
       log("worktree.remove.error", { on: `${stage}.error`, error: String((e as Error)?.message ?? e) });
@@ -5933,6 +5935,15 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
+  const captureQualification = (): void => {
+    if (!existsSync(worktreePath)) return;
+    captureLocalQualificationReceipt({ worktreeRoot: worktreePath, stateRoot: config.root,
+      repository: `${owner}/${task.repo}`, taskId, runId, log });
+  };
+  const retireQualifiedWorktree = (): void => {
+    captureQualification();
+    worktreeRemove(repoDir, worktreePath);
+  };
   // W1-T4356: nothing else fast-forwards repos/<repo>, so a lockfile change on main left every implement dispatch refused by
   // W1-T4193 below. A refusal here is that same deferral, raised before a worktree exists.
   let checkoutRefresh: ManagedCheckoutRefresh;
@@ -6000,7 +6011,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       endThrownRun(log, verdictWritten, "worktree.node_modules", e, costUsd);
       say(`REFUSED: ${e.message}`);
       try {
-        worktreeRemove(repoDir, worktreePath);
+        retireQualifiedWorktree();
         log("worktree.remove", { on: "node_modules_refused" });
       } catch (removeErr) {
         log("worktree.remove.error", { on: "node_modules_refused", error: String((removeErr as Error)?.message ?? removeErr) });
@@ -6700,7 +6711,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
     const transientVerdict = finishTransientRetry(driverResult, {
       taskId, runId, repoDir, worktreePath, costUsd, worker: impl, log, say,
-    });
+    }, retireQualifiedWorktree);
     if (transientVerdict) return transientVerdict;
     // ── The worker's OWN preflight verdict, surfaced before any verdict branch consumes the run.
     // `rmd preflight` writes `<repoRoot>/coverage/preflight-summary.json` in the worktree it ran
@@ -7112,7 +7123,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         companions: scopeNeeded.companions.map((c) => c.path), git: (args) => hostWorktreeGit(worktreePath, args) });
       log("implement.scope_needed", { recovery_path: recoveryPath, paths: scopeNeeded.companions.map((c) => c.path),
         head_sha: harnessCommitted!.sha, amendment_url: "amendmentUrl" in amendment ? amendment.amendmentUrl : "" });
-      reclaimRunWorktree(repoDir, worktreePath, "implement.scope_needed", log);
+      reclaimRunWorktree(repoDir, worktreePath, "implement.scope_needed", log, retireQualifiedWorktree);
       log("verdict", {
         verdict: "no_pr",
         reason: "scope_needed",
@@ -7166,7 +7177,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         const credit = persistRunTaskCredit(ctx, task, resolved, github.changedFiles?.(resolved.url));
         log("already_satisfied.credit_persisted", { pr_number: resolved.number, outcome: credit });
         try {
-          worktreeRemove(repoDir, worktreePath);
+          retireQualifiedWorktree();
           log("worktree.remove", { on: "already_satisfied" });
         } catch (e) {
           log("worktree.remove.error", { on: "already_satisfied", error: String((e as Error)?.message ?? e) });
@@ -7215,7 +7226,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         harnessCommitRefused ? "harness_commit_refused" : undefined,
       );
       try {
-        worktreeRemove(repoDir, worktreePath);
+        retireQualifiedWorktree();
         log("worktree.remove", { on: "no_pr" });
       } catch (e) {
         log("worktree.remove.error", { on: "no_pr", error: String((e as Error)?.message ?? e) });
@@ -7457,7 +7468,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
             runnerConfigDigest: err.runnerConfigDigest,
           });
         }
-        reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
+        reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log, retireQualifiedWorktree);
         log("verdict", {
           verdict: "failed",
           reason: boundedVerdictReason(err.message),
@@ -7480,7 +7491,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         return { taskId, runId, merged: false, costUsd, verdict: "failed" };
       }
       // After the local open checks: a refused open never reads GitHub, and a sibling still stops the create.
-      const deferred = await deferOpenToSiblingPr(ctx, { impl, branch, worktreePath, repoDir, costUsd });
+      const deferred = await deferOpenToSiblingPr(ctx, { impl, branch, worktreePath, repoDir, costUsd }, retireQualifiedWorktree);
       if (deferred) return deferred;
       prUrl = runGhPrCreate(prCreate, branch, log, say, opts.prCreateExec).prUrl;
       // A worker may have opened this exact PR without reporting its URL. The generic-422
@@ -8238,7 +8249,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
     if (outcome.merged) {
       log("pr.merged", { state: "MERGED" });
-      worktreeRemove(repoDir, worktreePath);
+      retireQualifiedWorktree();
       log("worktree.remove", {});
       log("verdict", {
         verdict: "merged",
@@ -8305,7 +8316,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           `(bound ${Math.round(evidence.boundMs / 1000)}s, last observed state: ${evidence.lastState ?? "unknown"})`,
       );
       try {
-        worktreeRemove(repoDir, worktreePath);
+        retireQualifiedWorktree();
         log("worktree.remove", { on: "worker.abandoned" });
       } catch (e) {
         log("worktree.remove.error", { on: "worker.abandoned", error: String((e as Error)?.message ?? e) });
@@ -8331,7 +8342,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           `(${err.observedBytes} observed)`,
       );
       try {
-        worktreeRemove(repoDir, worktreePath);
+        retireQualifiedWorktree();
         log("worktree.remove", { on: "worker.bounded_output" });
       } catch (e) {
         log("worktree.remove.error", { on: "worker.bounded_output", error: String((e as Error)?.message ?? e) });
@@ -8358,7 +8369,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // but clean up eagerly here too). Best-effort; the ledger already has the
     // error. The stale run-* branch is swept by the next run's pruneStaleRuns.
     try {
-      worktreeRemove(repoDir, worktreePath);
+      retireQualifiedWorktree();
       log("worktree.remove", { on: "run.error" });
     } catch (e) {
       log("worktree.remove.error", { on: "run.error", error: String((e as Error)?.message ?? e) });
@@ -8368,6 +8379,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // Terminal verdict (or throw) ⇒ this run no longer owns the worktree. Drop the
     // liveness token so a later prune may reclaim the worktree. Idempotent; the
     // sibling file also vanishes with the worktree on the paths that remove it.
+    captureQualification();
     removeRunLock(worktreePath);
     // W1-T1268: HOLDER ARM — drop the dispatch claim this run took, CAS'd on `claimAnchor` so
     // this can only ever delete the claim it still holds, never one that has since become

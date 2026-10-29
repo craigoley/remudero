@@ -6,15 +6,20 @@ import { systemClock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import {
   bootstrapConfirmed, ghProductBuildTarget, productBuildCommandSchema, ProductBuildService,
-  type ProductBuildCode, type ProductBuildOptions, type ProductBuildReceipt,
+  type ProductBuildCode, type ProductBuildOptions, type ProductBuildReceipt, type ProductBuildExecution,
 } from "./product-build.js";
 import {
   productCasePlanText, productPlanAssociationReferences, productPlanProposalSchema, ProductPlanOperationService, verifyProductPlanEvidence,
   type PlanHandoffPort, type PlanRepository, type ProductPlanObservation, type ProductPlanOperationCode,
 } from "./product-plan-operation.js";
 import { ProductIntentStore } from "./product-intent-store.js";
-import { productIdSchema, productRequestIdSchema, productTransitionSchema, productWriteSchema, type StoredProduct } from "./product-intent.js";
+import { productEvidenceOutcomeSchema, productIdSchema, productRequestIdSchema, productRunReceiptSchema, productTransitionSchema, productWriteSchema, type ProductRunReceipt, type StoredProduct } from "./product-intent.js";
 import { ghProductRepositoryProvider, productRepositoryCommandSchema, ProductRepositoryService, type ProductRepositoryCode } from "./product-repository.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { readLocalQualificationReceipt } from "./local-qualification-receipt.js";
+import { ghTextAsync } from "./github-transport.js";
+import { classifyChangesRequested } from "./open-prs-rest.js";
+import { readReviewStatusEntry, resolveReviewProvenance, REVIEWER_IDENTITY_ENV } from "./review.js";
 
 export const PRODUCT_CASE_VERSION = "product-case-v1" as const;
 /** PRIMARY CONTROL: the import includes a bounded brief; no command grants execution authority. */
@@ -36,7 +41,7 @@ export const productCaseCommandSchema = z.discriminatedUnion("action", [
   z.object({ version: z.literal(PRODUCT_CASE_VERSION), action: z.literal("propose"), command: productPlanProposalSchema }).strict(),
 ]);
 type PlanCommand = z.infer<typeof planCommandSchema>;
-type EvidenceReference = { id: string; reference: string };
+type EvidenceReference = { id: string; reference: string; outcome?: StoredProduct["stageEvidence"][number]["outcome"]; receipt?: ProductRunReceipt; current?: boolean };
 export interface ProductCaseReply {
   productId: string; revision: number; objectiveRevision: number; replayed: boolean;
   evidence: Record<"source" | "local" | "hosted" | "review" | "merge" | "deploy" | "mobile", EvidenceReference[]>;
@@ -103,6 +108,7 @@ export class ProductCaseService {
       let replayed: boolean;
       let build: ProductBuildReceipt | undefined;
       let planOperation: ProductPlanObservation | undefined;
+      let currentReceipts = new Set<string>();
       if (input.action === "import") {
         const saved = this.store.write(actor, input.command);
         if (!saved.ok) throw new CaseFault(saved.code);
@@ -127,14 +133,15 @@ export class ProductCaseService {
           const match = review && /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)$/.exec(review.url);
           if (!match) throw new CaseFault("plan_not_approved");
           // The build service applies the SAME shared plan rule to this plan record immediately before admitting the task.
-          const started = await this.builds.execute(actor, input.command);
+          const started = await this.builds.executeForCase(actor, input.command);
           if (!started.ok) throw new CaseFault(started.code);
           replayed = started.value.replayed; build = started.value.receipt;
+          if (started.value.execution) currentReceipts = await this.reconcile(actor, product, build, started.value.execution);
         }
       }
       const product = this.read(actor, id);
       return { ok: true, value: { productId: id, revision: product.revision, objectiveRevision: product.objectiveRevision,
-        replayed, evidence: this.evidence(product), ...(build ? { build } : {}), ...(planOperation ? { planOperation } : {}) } };
+        replayed, evidence: this.evidence(product, currentReceipts), ...(build ? { build } : {}), ...(planOperation ? { planOperation } : {}) } };
     } catch (error) {
       return { ok: false, code: error instanceof CaseFault ? error.code : "unavailable" };
     }
@@ -196,38 +203,165 @@ export class ProductCaseService {
     requestId: string; productId: string; expectedRevision: number; expectedObjectiveRevision: number;
     repositoryId: number; channel: "local" | "hosted" | "deploy" | "mobile";
     observedAt: string; references: StoredProduct["stageEvidence"][number]["references"];
+    outcome?: StoredProduct["stageEvidence"][number]["outcome"]; receipt?: ProductRunReceipt;
   }) {
     const parsed = z.object({ requestId: productRequestIdSchema, productId: productIdSchema,
       expectedRevision: revision, expectedObjectiveRevision: revision, repositoryId: revision,
       channel: z.enum(["local", "hosted", "deploy", "mobile"]), observedAt: z.string().datetime(),
       references: productTransitionSchema.shape.stageEvidence.unwrap().element.shape.references.min(1),
+      outcome: productEvidenceOutcomeSchema.optional(), receipt: productRunReceiptSchema.optional(),
     }).strict().safeParse(input);
     if (!parsed.success) return { ok: false as const, code: "invalid_input" as const };
     const read = this.store.read(actor, parsed.data.productId);
     if (!read.ok) return read;
     if (read.value.repository?.id !== parsed.data.repositoryId) return { ok: false as const, code: "repository_conflict" as const };
+    const receipt = parsed.data.receipt;
+    if (receipt && (receipt.actor !== actor || receipt.productId !== input.productId || receipt.repository.id !== input.repositoryId ||
+      receipt.channel !== input.channel || receipt.objectiveRevision !== input.expectedObjectiveRevision)) return { ok: false as const, code: "invalid_input" as const };
+    const identity = receipt ? digest([input.productId, input.expectedObjectiveRevision, input.channel, receipt.operationId, receipt.runId, receipt.head, input.outcome]) : digest(parsed.data);
     const stage = parsed.data.channel === "deploy" || parsed.data.channel === "mobile" ? "deploy" : "build";
+    if (read.value.stageEvidence.length >= 128 && !read.value.stageEvidence.some(item => item.id === `case-${input.channel}:${identity}`)) return { ok: false as const, code: "capacity" as const };
     return this.store.transition(actor, { version: "product-intent-v1", requestId: parsed.data.requestId, id: parsed.data.productId,
       expectedRevision: parsed.data.expectedRevision, expectedObjectiveRevision: parsed.data.expectedObjectiveRevision,
-      stageEvidence: [{ id: `case-${parsed.data.channel}:${digest(parsed.data)}`, stage, outcome: "succeeded",
-        objectiveRevision: parsed.data.expectedObjectiveRevision, observedAt: parsed.data.observedAt, references: parsed.data.references }],
+      stageEvidence: [{ id: `case-${parsed.data.channel}:${identity}`, stage, outcome: parsed.data.outcome ?? "succeeded",
+        objectiveRevision: parsed.data.expectedObjectiveRevision, observedAt: parsed.data.observedAt, references: parsed.data.references,
+        ...(receipt ? { receipt } : {}) }],
     });
   }
 
-  private evidence(product: StoredProduct): ProductCaseReply["evidence"] {
+  private async reconcile(actor: string, original: StoredProduct, build: ProductBuildReceipt, execution: ProductBuildExecution): Promise<Set<string>> {
+    const current = new Set<string>();
+    const native = execution.read;
+    if (!original.repository) return current;
+    const repository = { id: original.repository.id, owner: original.repository.owner, name: original.repository.name };
+    const slug = `${repository.owner}/${repository.name}`;
+    if (!("runId" in native)) {
+      const prior = original.stageEvidence.findLast(item => item.receipt?.operationId === build.operationId && item.objectiveRevision === build.objectiveRevision)?.receipt;
+      if (native.state !== "unknown" || !prior) return current;
+      const base = { actor, productId: original.id, objectiveRevision: build.objectiveRevision, repository,
+        operationId: build.operationId, runId: prior.runId, taskId: build.taskId, head: "unknown", execution: "unknown" as const };
+      const reference = `https://github.com/${slug}`;
+      const reason = "native ledger incomplete or unreadable; prior run identity retained without a current head";
+      current.add(this.persistRunEvidence(actor, base, { ...base, channel: "local", qualification: {
+        producer: "unavailable", verdict: "unknown", tests: 0, suites: 0, reason } }, "unknown", reason, reference));
+      current.add(this.persistRunEvidence(actor, base, { ...base, channel: "hosted", contexts: [], review: "unknown", reason }, "unknown", reason, reference));
+      return current;
+    }
+    const read = readLedgerUnionRecordsSync(join(execution.stateRoot, "state"), { sinceTs: execution.requestedAt, refuseIncomplete: true,
+      keep: line => line.includes(native.runId) });
+    const rows = read.ok && read.torn === 0 ? read.rows.filter(row => row.run_id === native.runId && (row.task_id === undefined || row.task_id === build.taskId))
+      .sort((a, b) => Date.parse(String(a.ts)) - Date.parse(String(b.ts))) : [];
+    const heads = rows.filter(row => typeof row.head_sha === "string" && /^[a-f0-9]{40}$/.test(row.head_sha));
+    const head = String(heads.at(-1)?.head_sha ?? "unknown");
+    const base = { actor, productId: original.id, objectiveRevision: build.objectiveRevision, repository,
+      operationId: build.operationId, runId: native.runId, taskId: build.taskId, head, execution: native.state };
+    const localRows = rows.filter(row => row.step === "local.qualification" && row.head_sha === head);
+    const qualifications = localRows.length ? localRows : [{}];
+    for (const row of qualifications) {
+      const local = readLocalQualificationReceipt({ stateRoot: execution.stateRoot, repository: slug, taskId: build.taskId, runId: native.runId, head, row });
+      const id = this.persistRunEvidence(actor, base, { ...base, channel: "local", qualification: local.qualification }, local.outcome,
+        `Local qualification: ${local.qualification.verdict}`, `https://github.com/${slug}/commit/${head}`);
+      if (row === qualifications.at(-1)) current.add(id);
+    }
+    const pr = rows.findLast(row => row.step === "pr.opened");
+    const hosted = await this.hosted(original, head, pr);
+    current.add(this.persistRunEvidence(actor, base, { ...base, channel: "hosted", contexts: hosted.contexts, review: hosted.review, reason: hosted.reason },
+      hosted.outcome, hosted.outcome === "unknown" ? "Hosted qualification: unknown" : hosted.reason, hosted.reference));
+    return current;
+  }
+
+  private persistRunEvidence(actor: string, base: { productId: string; objectiveRevision: number; repository: { id: number } }, receipt: ProductRunReceipt,
+    outcome: "succeeded" | "failed" | "running" | "unknown", label: string, reference: string): string {
+    const identity = digest([base.productId, base.objectiveRevision, receipt.channel, receipt.operationId, receipt.runId, receipt.head, outcome]);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const product = this.read(actor, base.productId);
+      if (product.objectiveRevision !== base.objectiveRevision) throw new CaseFault("stale_revision");
+      if (product.stageEvidence.some(item => item.id === `case-${receipt.channel}:${identity}`)) return `case-${receipt.channel}:${identity}`;
+      const saved = this.recordEvidence(actor, { requestId: `case_${identity}`, productId: product.id, expectedRevision: product.revision,
+        expectedObjectiveRevision: base.objectiveRevision, repositoryId: base.repository.id, channel: receipt.channel, outcome, receipt,
+        observedAt: (this.options.clock ?? systemClock).iso(), references: [{ label: label.slice(0, 120), url: reference }] });
+      if (saved.ok) return `case-${receipt.channel}:${identity}`;
+      if (saved.code === "idempotency_conflict") {
+        const concurrent = this.read(actor, base.productId);
+        if (concurrent.objectiveRevision !== base.objectiveRevision) throw new CaseFault("stale_revision");
+        if (concurrent.stageEvidence.some(item => item.id === `case-${receipt.channel}:${identity}`)) return `case-${receipt.channel}:${identity}`;
+      }
+      if (saved.code !== "stale_revision" || attempt === 1) throw new CaseFault(saved.code);
+    }
+    throw new CaseFault("stale_revision");
+  }
+
+  private async hosted(product: StoredProduct, head: string, row: Record<string, unknown> | undefined): Promise<{
+    outcome: "succeeded" | "failed" | "running" | "unknown"; contexts: { name: string; conclusion: string }[];
+    review: "success" | "failure" | "pending" | "absent" | "unknown"; reason: string; reference: string;
+  }> {
+    const repo = product.repository!;
+    const slug = `repos/${repo.owner}/${repo.name}`;
+    const reference = `https://github.com/${repo.owner}/${repo.name}/commit/${head}`;
+    const unavailable = (reason: string) => ({ outcome: "unknown" as const, contexts: [], review: "unknown" as const, reason: reason.slice(0, 500), reference });
+    try {
+      const match = typeof row?.pr_url === "string" ? /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/([1-9][0-9]*)$/.exec(row.pr_url) : undefined;
+      if (!match || `${match[1]}/${match[2]}`.toLowerCase() !== `${repo.owner}/${repo.name}`.toLowerCase() || head === "unknown") return unavailable("source PR unavailable for this run and head");
+      const text = this.options.planText ?? ghTextAsync;
+      const fetcher = async (args: string[]) => JSON.parse(await text(args, { timeout: 20_000, maxBuffer: 1024 * 1024 })) as unknown;
+      const api = (path: string) => fetcher(["api", path]);
+      const pull = z.object({ number: z.number(), head: z.object({ sha: z.string() }), base: z.object({ ref: z.string(), repo: z.object({ id: z.number() }) }) });
+      const live = pull.parse(await api(`${slug}/pulls/${match[3]}`));
+      if (live.number !== Number(match[3]) || live.base.repo.id !== repo.id || live.head.sha !== head) return unavailable("stale head or foreign repository");
+      const required = z.object({ contexts: z.array(z.string().min(1).max(255)).max(99),
+        checks: z.array(z.object({ context: z.string().min(1).max(255), app_id: z.number().nullable().optional() })).max(99).optional() })
+        .parse(await api(`${slug}/branches/${encodeURIComponent(live.base.ref)}/protection/required_status_checks`));
+      const names = [...new Set([...required.contexts, ...(required.checks ?? []).map(check => check.context)])];
+      if (!names.length || names.length >= 100) return unavailable("required contexts empty or truncated");
+      const runs = z.object({ total_count: z.number().optional(), check_runs: z.array(z.object({ id: z.number(), name: z.string(), head_sha: z.string(),
+        status: z.string(), conclusion: z.string().nullable(), app: z.object({ id: z.number() }).optional() })).max(99) })
+        .parse(await api(`${slug}/commits/${head}/check-runs?per_page=100`));
+      const statuses = z.object({ total_count: z.number().optional(), statuses: z.array(z.object({ context: z.string(), state: z.string(),
+        creator: z.object({ login: z.string(), type: z.string().optional() }).optional() }).passthrough()).max(99) })
+        .parse(await api(`${slug}/commits/${head}/status?per_page=100`));
+      if ((runs.total_count ?? runs.check_runs.length) >= 100 || (statuses.total_count ?? statuses.statuses.length) >= 100 || runs.check_runs.some(run => run.head_sha !== head)) return unavailable("check page incomplete or foreign head");
+      const reviews = z.array(z.object({ state: z.string(), commit_id: z.string(), user: z.object({ login: z.string(), type: z.string().optional() }).nullable() }).passthrough()).max(99)
+        .parse(await api(`${slug}/pulls/${match[3]}/reviews?per_page=100`));
+      const hold = classifyChangesRequested({ headSha: head }, reviews);
+      const trusted = this.options.planTrustedReviewer ?? process.env[REVIEWER_IDENTITY_ENV] ?? "";
+      const review = resolveReviewProvenance(await readReviewStatusEntry(repo.owner, repo.name, head, fetcher), trusted);
+      const contexts = names.map(name => {
+        const pin = required.checks?.find(check => check.context === name)?.app_id;
+        const run = runs.check_runs.filter(run => run.name === name && (pin === undefined || pin === null || pin < 0 || run.app?.id === pin)).sort((a, b) => b.id - a.id)[0];
+        const status = pin === undefined || pin === null || pin < 0 ? statuses.statuses.find(status => status.context === name) : undefined;
+        return { name, conclusion: run ? run.status === "completed" ? run.conclusion ?? "unknown" :
+          ["queued", "in_progress", "requested", "waiting", "pending"].includes(run.status) ? "pending" : "unknown" : status?.state ?? "pending" };
+      });
+      const failed = contexts.find(context => ["failure", "error", "cancelled", "timed_out", "action_required", "startup_failure", "stale"].includes(context.conclusion));
+      const pending = contexts.find(context => context.conclusion === "pending");
+      const unrecognized = contexts.find(context => !["success", "pending", "failure", "error", "cancelled", "timed_out", "action_required", "startup_failure", "stale"].includes(context.conclusion));
+      const outcome = hold?.kind === "changes-requested" || failed || review === "failure" ? "failed" :
+        unrecognized ? "unknown" : pending || review === "pending" ? "running" : review === "success" ? "succeeded" : "unknown";
+      const reason = hold?.kind === "changes-requested" ? "standing human changes-requested hold" : failed ? `${failed.name.slice(0, 75)}: ${failed.conclusion.slice(0, 40)}` :
+        unrecognized ? `${unrecognized.name}: ${unrecognized.conclusion}` : pending ? `${pending.name}: ${pending.conclusion}` : `native review: ${review}`;
+      const final = pull.parse(await api(`${slug}/pulls/${match[3]}`));
+      if (final.head.sha !== head || final.base.repo.id !== repo.id || final.base.ref !== live.base.ref) return unavailable("source head changed during hosted observation");
+      return { outcome, contexts, review, reason: reason.slice(0, 500), reference: row!.pr_url as string };
+    } catch (error) { return unavailable(`hosted evidence unreadable: ${String(error)}`); }
+  }
+
+  private evidence(product: StoredProduct, currentReceipts: Set<string>): ProductCaseReply["evidence"] {
     const plans = product.stageEvidence.filter((item) => item.stage === "plan" && item.objectiveRevision === product.objectiveRevision && item.outcome === "succeeded");
     return {
       source: (product.brief.decisions ?? []).map((item) => ({ id: item.key, reference: item.provenance.reference ?? item.provenance.kind })),
       review: plans.flatMap((item) => item.references.filter((ref) => ref.label.startsWith("Reviewed task ")).map((ref) => ({ id: item.id, reference: ref.url }))),
       merge: plans.flatMap((item) => item.references.filter((ref) => ref.label === "Plan merge").map((ref) => ({ id: item.id, reference: ref.url }))),
-      local: this.recordedEvidence(product, "local"), hosted: this.recordedEvidence(product, "hosted"),
+      local: this.recordedEvidence(product, "local", currentReceipts), hosted: this.recordedEvidence(product, "hosted", currentReceipts),
       deploy: this.recordedEvidence(product, "deploy"), mobile: this.recordedEvidence(product, "mobile"),
     };
   }
 
-  private recordedEvidence(product: StoredProduct, channel: "local" | "hosted" | "deploy" | "mobile"): EvidenceReference[] {
-    return product.stageEvidence.filter((item) => item.id.startsWith(`case-${channel}:`) && item.outcome === "succeeded" &&
-      item.objectiveRevision === product.objectiveRevision).flatMap((item) => item.references.map((ref) => ({ id: item.id, reference: ref.url }))).slice(-128);
+  private recordedEvidence(product: StoredProduct, channel: "local" | "hosted" | "deploy" | "mobile", currentReceipts = new Set<string>()): EvidenceReference[] {
+    const evidence = product.stageEvidence.filter(item => item.id.startsWith(`case-${channel}:`));
+    if (channel === "deploy" || channel === "mobile") return evidence.filter(item => item.outcome === "succeeded" && item.objectiveRevision === product.objectiveRevision)
+      .flatMap(item => item.references.map(ref => ({ id: item.id, reference: ref.url }))).slice(-128);
+    return evidence.flatMap(item => item.references.map(ref => ({ id: item.id, reference: ref.url, outcome: item.receipt ? item.outcome : "unknown" as const,
+      ...(item.receipt ? { receipt: item.receipt } : {}), current: Boolean(item.receipt && currentReceipts.has(item.id) && item.objectiveRevision === product.objectiveRevision) }))).slice(-128);
   }
 
 }
