@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import test from "node:test";
-import { countCommentLines } from "#scripts/comment-load-ratchet.mjs";
 import { stripComments } from "#src/lib/test-placement.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+const { countCommentLines } = createRequire(import.meta.url)("#scripts/comment-load-ratchet.mjs") as {
+  countCommentLines(source: string, path: string): { comments: number; code: number };
+};
 
 // @source-text-subject: this task changes source prose and must preserve every code line.
 // Captured before compression at dde8a92c463ea090413f985c5d7d8c6a67f6c5e3.
