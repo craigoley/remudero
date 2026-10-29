@@ -16,7 +16,7 @@ import { runsBundled } from "./lib/child-entry-argv.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { markRunChildProcessActor } from "./lib/ledger.js";
 import type { Plan, Task } from "./lib/plan.js";
-import { readWorkSpec, type DetachedWorkSpec } from "./lib/run-child.js";
+import { DETACHED_WORK_CAPABILITY, HOSTED_DETACHED_WORK_KINDS, readWorkSpec, type DetachedWorkKind, type DetachedWorkSpec } from "./lib/run-child.js";
 import { withRunChildReservation } from "./lib/run-child-reservation.js";
 import type { RunResult } from "./lib/run-result.js";
 import {
@@ -34,6 +34,7 @@ export interface ProbeStatusExtras {
   loadMs?: number;
   planTasks?: number;
   maxRssBytes?: number;
+  work?: DetachedWorkSpec;
 }
 
 /** The slice of `runTask` this entry drives; the real one is loaded from the run path, a test injects its own. */
@@ -68,6 +69,7 @@ export interface RunChildMainPorts {
   probe?: RunChildProbe;
   maxRssBytes?: () => number;
   stderr?: (text: string) => void;
+  stdout?: (text: string) => void;
   env?: NodeJS.ProcessEnv;
   tokenRefresh?: Omit<Parameters<typeof startInstallationTokenRefresh>[0], "env" | "log">;
   startCredentialSocket?: typeof startRunChildGitCredentialSocket;
@@ -122,6 +124,12 @@ export function planSnapshotHandOver(path: string): { planSnapshot: PlanSnapshot
 /** Runs the verb; resolves to the process exit code. NEVER rejects: every failure is written to the status first. */
 export async function runChildMain(argv: readonly string[], deps: RunChildMainPorts = {}): Promise<number> {
   const stderr = deps.stderr ?? ((text: string) => void process.stderr.write(text));
+  if (argv.includes("--detached-work-capability")) {
+    const kind = argValue(argv, "--detached-work-capability");
+    if (!HOSTED_DETACHED_WORK_KINDS.has(kind as DetachedWorkKind)) return 2;
+    (deps.stdout ?? ((text: string) => void process.stdout.write(text)))(`${DETACHED_WORK_CAPABILITY}:${kind}\n`);
+    return 0;
+  }
   const dir = argValue(argv, "--run-dir");
   if (dir === undefined) {
     stderr("run-child: --run-dir <dir> is required\n");
@@ -284,8 +292,19 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
     if (!probeMode) return await runTaskInChild();
     status("starting", "load", {});
     const loadStart = clock();
-    await (deps.loadRunPath ?? defaultLoadRunPath)();
+    const loaded = await (deps.loadRunPath ?? defaultLoadRunPath)() as { runDetachedWork?: RunChildDetachedWork } | undefined;
     const loadMs = clock() - loadStart;
+    const work = readWorkSpec(dir);
+    if (work === "malformed" || (work !== undefined && typeof (deps.runDetachedWork ?? loaded?.runDetachedWork) !== "function")) {
+      await cleanup();
+      status("failed", "spec", { loadMs }, contractMismatchFailure("probe cannot host its detached work envelope"));
+      return 1;
+    }
+    if (work !== undefined) {
+      await cleanup();
+      status("done", "done", { loadMs, work, maxRssBytes: (deps.maxRssBytes ?? (() => process.resourceUsage().maxRSS * 1024))() });
+      return 0;
+    }
     const snapshot = readPlanSnapshot(spec.value.planSnapshotPath);
     const maxRssBytes = (deps.maxRssBytes ?? (() => process.resourceUsage().maxRSS * 1024))();
     if ("error" in snapshot) {

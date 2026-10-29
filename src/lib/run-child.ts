@@ -5,10 +5,11 @@
 // reservation of the class `run-child-probe`, reads the plan snapshot the daemon admitted the task against, round-trips the
 // run-child contract, and the daemon ledgers `run_child.shadow`: what the child cost (load time, tree peak), which entry kind
 // it ran as and why. Nothing here touches the run. A probe that fails ledgers why, and `startRunChildProbe` never rejects.
-import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
 import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
@@ -40,6 +41,17 @@ export const RUN_CHILD_SHADOW_SKIPPED_STEP = "run_child.shadow_skipped";
 export const PLAN_SNAPSHOTS_DIR = "plan-snapshots";
 /** The entry the probe runs: `CHILD_ENTRIES` name and source (scripts/build-child-entries.mjs). */
 export const RUN_CHILD_ENTRY = { name: "run-child", source: "src/run-child-main.ts" } as const;
+export const DETACHED_WORK_CAPABILITY = "detached-work-v1";
+
+async function requireDetachedWorkEntry(launch: EngineChildLaunch, kind: DetachedWorkKind): Promise<void> {
+  // No --run-dir: an older entry must never mistake this capability query for permission to run a build.
+  const stdout = await new Promise<string>((resolve, reject) => {
+    execFile(process.execPath, [...launch.argv, "--detached-work-capability", kind], {
+      cwd: launch.cwd, timeout: PROBE_TIMEOUT_MS, maxBuffer: STDERR_TAIL_BYTES,
+    }, (error, output) => error ? reject(new Error(`detached-work capability unavailable: ${reasonOf(error)}`)) : resolve(output));
+  });
+  if (stdout.trim() !== `${DETACHED_WORK_CAPABILITY}:${kind}`) throw new Error(`detached-work capability mismatch for ${kind}`);
+}
 /** BACKSTOP on how long a probe may run before it is killed: the load is seconds, so only a wedged child reaches this. */
 export const PROBE_TIMEOUT_MS = 180_000;
 /** BACKSTOP on how long a probe waits for the run it shadows to read its plan: a run refused before that never will. */
@@ -172,6 +184,7 @@ export interface RunChildProbeInput {
   plan: Promise<AdmittedPlan | undefined>;
   /** The serializable `runTask` options the daemon passes the run. */
   options: RunChildSpecOptions;
+  work?: DetachedWorkSpec;
   log: Log;
 }
 
@@ -303,15 +316,15 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
     }
     const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...seams.engine });
     if (!engine) return skip("no current engine tree for main");
+    const entry = (seams.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(engine, [], log);
+    if (input.work) await requireDetachedWorkEntry(entry, input.work.kind);
     const admitted = await within(input.plan, seams.planWaitMs ?? PROBE_PLAN_WAIT_MS);
     if (!admitted) return skip("the run never read its plan");
     const snapshot = writePlanSnapshot(input.stateRoot, admitted.plan.tasks);
 
     const dir = runDir(input.stateRoot, runId);
     mkdirSync(dir, { recursive: true });
-    const launch = (seams.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(
-      engine, ["--run-dir", dir, "--probe"], log,
-    );
+    const launch = { ...entry, argv: [...entry.argv, "--run-dir", dir, "--probe"] };
     log(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow(RUN_CHILD_ENTRY.name, "--probe", launch));
     let peakMib: number | undefined;
     const base = seams.sampler ?? createTreePeakSampler();
@@ -324,7 +337,8 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
       engine: { sourceHash: engine.sourceHash, sha: engine.sha }, planSnapshotPath: snapshot.path,
       reservationId: reservation.id ?? "", options: input.options,
-    });
+      ...(input.work ? { work: input.work } : {}),
+    } as RunChildSpec);
     const child = (seams.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], { cwd: options.cwd, stdio: ["ignore", "ignore", "pipe"] })))(
       process.execPath, launch.argv, { cwd: launch.cwd },
     );
@@ -333,7 +347,7 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
     const estimateMib = reservation.estimateMib;
     reservation.releaseOccupancy();
     reservation = undefined;
-    const row = settleRow({ taskId: input.taskId, runId, dir, engine, launch, ended, peakMib, estimateMib, mode, effective });
+    const row = settleRow({ taskId: input.taskId, runId, dir, engine, launch, ended, peakMib, estimateMib, mode, effective, work: input.work });
     log(RUN_CHILD_SHADOW_STEP, row);
     try {
       prunePlanSnapshots(input.stateRoot);
@@ -357,9 +371,10 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
 function settleRow(a: {
   taskId: string; runId: string; dir: string; engine: EngineRef; launch: EngineChildLaunch; ended: ChildEnd;
   peakMib: number | undefined; estimateMib: number | undefined; mode: RunChildMode; effective: { mode: string; fellBack: boolean };
+  work?: DetachedWorkSpec;
 }): Record<string, unknown> {
   const status = readStatus(a.dir);
-  let raw: { loadMs?: unknown; maxRssBytes?: unknown; planTasks?: unknown } = {};
+  let raw: { loadMs?: unknown; maxRssBytes?: unknown; planTasks?: unknown; work?: unknown } = {};
   try {
     raw = JSON.parse(readFileSync(join(a.dir, "status.json"), "utf8")) as typeof raw;
   } catch (error) {
@@ -379,6 +394,9 @@ function settleRow(a: {
   } else if (status.value.state !== "done" || a.ended.code !== 0) {
     contract = "unknown";
     error = `probe ended in state ${status.value.state}, exit ${a.ended.code ?? a.ended.signal}`;
+  } else if (a.work && !isDeepStrictEqual(raw.work, JSON.parse(JSON.stringify(a.work)))) {
+    contract = "contract_mismatch";
+    error = "probe did not round-trip its detached work envelope";
   } else {
     contract = "ok";
   }
@@ -396,6 +414,7 @@ function settleRow(a: {
     class_estimate_bytes: typeof a.estimateMib === "number" && Number.isFinite(a.estimateMib) ? Math.round(a.estimateMib * 1024 * 1024) : null,
     child_max_rss_bytes: typeof raw.maxRssBytes === "number" ? raw.maxRssBytes : null,
     plan_tasks: typeof raw.planTasks === "number" ? raw.planTasks : null,
+    ...(a.work ? { work_kind: a.work.kind } : {}),
     exit_code: a.ended.code,
     contract,
     mode: a.mode,
@@ -667,11 +686,11 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...ports.engine });
     if (!engine) return unavailable("no current engine tree for main");
     engineSha = engine.sha;
+    const entry = (ports.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(engine, [], log);
+    if (input.work) await requireDetachedWorkEntry(entry, input.work.kind);
     const admitted = await input.plan();
     dir = runDir(input.stateRoot, runId);
-    launch = (ports.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(
-      engine, ["--run-dir", dir], log,
-    );
+    launch = { ...entry, argv: [...entry.argv, "--run-dir", dir] };
     log(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow(RUN_CHILD_ENTRY.name, "run", launch));
     const waited = await reserveWhilePending(input, ports, launch.kind, runId, clock, log);
     if (!("held" in waited)) return waited;
@@ -1230,12 +1249,17 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
     mode,
     async spawnReview({ pr, reviewKey, reviewAttemptId }) {
       const current = mode();
+      const work: DetachedWorkSpec = {
+        kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey,
+        inputs: { repo: input.repo, ...(reviewAttemptId !== undefined ? { reviewAttemptId } : {}),
+          ...(typeof pr.isPlanFiling === "boolean" ? { planOnlyFiling: pr.isPlanFiling } : {}) },
+      };
       if (current === "shadow") {
         if (!probing) {
           probing = true;
           void (input.probe ?? startRunChildProbe)({
             taskId: `review-PR${pr.prNumber}`, stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-            plan: Promise.resolve({ plan: { tasks: [] } }), options: {}, log: input.log,
+            plan: Promise.resolve({ plan: { tasks: [] } }), options: {}, log: input.log, work,
           }, { readMode: () => "shadow" }).finally(() => { probing = false; });
         }
         return undefined;
@@ -1245,10 +1269,6 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
         mode: current, hosted: HOSTED_DETACHED_WORK_KINDS, measured: measureDrainCosts(input.readLedger()),
       });
       if (placement.placement !== "child") return undefined;
-      const work: DetachedWorkSpec = {
-        kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey,
-        inputs: { repo: input.repo, reviewAttemptId, ...(typeof pr.isPlanFiling === "boolean" ? { planOnlyFiling: pr.isPlanFiling } : {}) },
-      };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "review", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
         plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,

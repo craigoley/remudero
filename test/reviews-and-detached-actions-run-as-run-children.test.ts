@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
@@ -14,11 +15,12 @@ import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { riskJudgePlanContextDigestFor } from "#src/lib/risk-judge.js";
 import { runDaemon, type DaemonFreshness } from "#src/lib/daemon.js";
 import { defaultInstance } from "#src/lib/host-memory-ledger.js";
+import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { loadPlan, type Plan } from "#src/lib/plan.js";
 import {
   adoptRunChildren, createDetachedWorkHost, DETACHED_WORK_INVENTORY, DETACHED_WORK_KINDS, detachedWorkModeNow, detachedWorkPlacement,
-  HOSTED_DETACHED_WORK_KINDS, measureDrainCosts, readWorkSpec,
-  type DetachedWorkEvidence, type DetachedWorkKind, type DetachedWorkSpec, type spawnRunChild, type startRunChildProbe,
+  HOSTED_DETACHED_WORK_KINDS, measureDrainCosts, readWorkSpec, spawnRunChild, startRunChildProbe,
+  type DetachedWorkEvidence, type DetachedWorkKind, type DetachedWorkSpec, type RunChildHandle, type SpawnRunChildPorts,
 } from "#src/lib/run-child.js";
 import { childIdentity, readStatus, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
 import { runChildMain } from "#src/run-child-main.js";
@@ -64,6 +66,86 @@ function fixture() {
 
 const review: DetachedWorkSpec = { kind: "review", prNumber: 7, headSha: "h".repeat(40), reviewKey: "review-key-7" };
 const fix: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: 8, headSha: "g".repeat(40), fixKey: "fix-key-8" };
+const childReservation = (): LearnedReservation => ({
+  id: "", workerClass: "review", estimateMib: 1, estimateSource: { kind: "default-unmeasured" }, bindRoot() {}, releaseOccupancy() {},
+});
+
+function detachedEngine(f: ReturnType<typeof fixture>) {
+  const sourceHash = "a".repeat(64);
+  const engineSha = "a".repeat(40);
+  const root = join(f.stateRoot, "engines", sourceHash);
+  const entry = join(root, "entry.mjs");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "engine.json"), JSON.stringify({ sourceHash, sha: engineSha, builtAt: 1 }));
+  const compatible = () => writeFileSync(entry, `
+    import { runChildMain } from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "src/run-child-main.ts")).href)};
+    process.exitCode = await runChildMain(process.argv.slice(2));
+  `);
+  const ports: SpawnRunChildPorts = {
+    mainSha: async () => "b".repeat(40), clock: () => 1234,
+    engine: { isCurrent: () => true, git: async (_repo, args) => {
+      assert.ok(args[0] === "merge-base" || args[0] === "rev-list");
+      return args[0] === "rev-list" ? "1" : "";
+    } },
+    launch: (engine, args) => ({ argv: ["--import", import.meta.resolve("tsx"), join(engine.root, "entry.mjs"), ...args],
+      kind: "tsx", reason: "fixture-entry", cwd: engine.root, engineRoot: engine.root }),
+  };
+  return { ports, entry, compatible };
+}
+
+async function proveDetachedEntryCompatibility() {
+  const f = fixture();
+  try {
+    const engine = detachedEngine(f);
+    const input = { taskId: "A", stateRoot: f.stateRoot, repoDir: f.root, root: f.root,
+      plan: async () => ({ plan: { tasks: [] } }), options: {}, log: f.log };
+    let reservations = 0;
+    let spawns = 0;
+    const ports: SpawnRunChildPorts = { ...engine.ports,
+      reserve: async () => { reservations++; throw new Error("must refuse before reservation"); },
+      spawn: () => { spawns++; throw new Error("must refuse before work spawn"); },
+    };
+    // A prior entry accepts the existing schema and would execute runTask on a work spec.
+    const accidentalBuild = join(f.root, "accidental-build");
+    writeFileSync(engine.entry, `
+      import { writeFileSync } from 'node:fs';
+      if (!process.argv.includes('--run-dir')) { console.error('--run-dir is required'); process.exit(2); }
+      writeFileSync(${JSON.stringify(accidentalBuild)}, 'runTask');
+    `);
+    for (const work of [review, fix, { kind: "retro", inputs: {} } as DetachedWorkSpec]) {
+      const launch = await spawnRunChild({ ...input, work }, ports);
+      assert.equal(launch.started, false, `${work.kind}: the ancestor entry cannot read detached work`);
+      assert.match(launch.started ? "" : launch.reason, /detached-work capability unavailable/);
+    }
+    assert.equal(existsSync(accidentalBuild), false, "the capability query carries no run directory an old entry could execute");
+    assert.equal(existsSync(join(f.stateRoot, "runs")), false, "an unsupported entry publishes no detached run");
+    const shadow = await startRunChildProbe({ ...input, plan: input.plan(), work: review }, {
+      ...engine.ports, readMode: () => "shadow",
+      reserve: () => { reservations++; throw new Error("must refuse before probe reservation"); },
+      spawn: () => { spawns++; throw new Error("must refuse before probe spawn"); },
+    });
+    assert.ok(shadow.started);
+    assert.equal(shadow.row.contract, "unknown", "an incompatible ancestor cannot supply promotion evidence");
+    assert.match(String(shadow.row.error), /detached-work capability unavailable/);
+    writeFileSync(engine.entry, "console.log('detached-work-v1:other-kind');");
+    const mismatch = await spawnRunChild({ ...input, work: fix }, ports);
+    assert.equal(mismatch.started, false);
+    assert.match(mismatch.started ? "" : mismatch.reason, /capability mismatch/);
+    assert.equal(reservations, 0);
+    assert.equal(spawns, 0);
+    assert.ok(f.rows.some(row => row.step === "engine.lag" && row.commits_behind === 1), "production selected an ancestor engine");
+
+    engine.compatible();
+    // The real entry's capability reply is accepted; admission is now reached for both kinds.
+    for (const work of [review, fix]) {
+      const launch = await spawnRunChild({ ...input, work }, ports);
+      assert.equal(launch.started, false);
+      assert.match(launch.started ? "" : launch.reason, /must refuse before reservation/);
+    }
+    assert.equal(reservations, 2, "a compatible selected entry reaches normal admission");
+    assert.equal(spawns, 0);
+  } finally { f.cleanup(); }
+}
 
 test("W1-T9114: the inventory moves a kind only on a measured drain cost", () => {
   const everyKind: Record<DetachedActionKind, true> = {
@@ -201,6 +283,59 @@ test("W1-T9114: the run child hosts detached work and maps every ending to a sta
   } finally { f.cleanup(); }
 });
 
+test("W1-T9114: a shadow review round-trips its work envelope through the supported entry", async () => {
+  const f = fixture();
+  try {
+    const engine = detachedEngine(f);
+    engine.compatible();
+    const work: DetachedWorkSpec = { ...review, inputs: { repo: "fixture", reviewAttemptId: "attempt-7", planOnlyFiling: true } };
+    let calls = 0;
+    let loaded = 0;
+    for (const ending of ["ok", "missing-host", "missing-echo"] as const) {
+      const outcome = await startRunChildProbe({ taskId: "review-PR7", stateRoot: f.stateRoot, repoDir: f.root, root: f.root,
+        plan: Promise.resolve({ plan: { tasks: [] } }), options: {}, work, log: f.log }, {
+        ...engine.ports, readMode: () => "shadow", reserve: childReservation,
+        sampler: { track() {}, finish: () => 1, sampleNow() {}, size: () => 0 },
+        spawn: (_command, args) => {
+          const child = Object.assign(new EventEmitter(), { pid: process.pid, kill: () => true });
+          const dir = args[args.indexOf("--run-dir") + 1]!;
+          assert.deepEqual(readWorkSpec(dir), work, "the producer wrote the serialized review, including its PR and head");
+          void runChildMain(["--run-dir", dir, "--probe"], { env: {}, stderr: () => {}, clock: () => 1234,
+            loadRunPath: async () => { loaded++; return ending === "missing-host" ? {} : {
+              runDetachedWork: async () => { calls++; throw new Error("shadow must never execute a review"); },
+            }; },
+          }).then(code => {
+            if (ending === "missing-echo") {
+              const path = join(dir, "status.json");
+              const status = JSON.parse(readFileSync(path, "utf8"));
+              delete status.work;
+              writeFileSync(path, JSON.stringify(status));
+            }
+            child.emit("exit", code, null);
+          });
+          return child as unknown as ReturnType<NonNullable<SpawnRunChildPorts["spawn"]>>;
+        },
+      });
+      assert.ok(outcome.started);
+      assert.equal(outcome.row.contract, ending === "ok" ? "ok" : "contract_mismatch");
+      assert.equal(outcome.row.work_kind, "review");
+      if (ending === "ok") assert.equal(typeof outcome.row.load_ms, "number");
+      else assert.match(String(outcome.row.error), ending === "missing-host" ? /cannot host/ : /did not round-trip/);
+    }
+    assert.equal(loaded, 3, "the probe loads the run path to verify the detached-work export");
+    assert.equal(calls, 0);
+    const malformed = f.add("probe-malformed", { kind: "unknown" } as unknown as DetachedWorkSpec);
+    assert.equal(await runChildMain(["--run-dir", malformed.dir, "--probe"], {
+      env: {}, stderr: () => {}, loadRunPath: async () => ({}),
+    }), 1);
+    const status = readStatus(malformed.dir);
+    assert.ok(status.ok);
+    assert.equal(status.value.failure?.class, "contract_mismatch");
+    assert.equal(await runChildMain(["--detached-work-capability", "unknown"], { stdout: () => assert.fail("unsupported kind") }), 2);
+    assert.equal(await runChildMain(["--detached-work-capability"], { stdout: () => assert.fail("missing kind") }), 2);
+  } finally { f.cleanup(); }
+});
+
 test("W1-T9114: a boot adopts a live review child", async () => {
   const f = fixture();
   try {
@@ -268,6 +403,7 @@ test("W1-T9114: a terminal review child settles once", async () => {
 // are adopted, and the restart returns while both still run. The title is the proof's verbatim grep target. The fix child is the one
 // the sweep's governed producer spawns; the final cases execute that producer's child across the restart too.
 test("W1-T9114: a restart does not drain child reviews or fix dispatches", async () => {
+  await proveDetachedEntryCompatibility();
   const f = fixture();
   try {
     const reviewDir = f.add("work-review-A-3", review);
@@ -455,7 +591,8 @@ test("W1-T9114: the production host starts a review as a child only where the le
     }) as unknown as typeof spawnRunChild;
     let probes = 0;
     let endProbe: () => void = () => {};
-    const probe = (() => { probes++; return new Promise((resolve) => { endProbe = () => resolve({ started: false, reason: "fixture" }); }); }) as unknown as typeof startRunChildProbe;
+    const probe = ((input) => { probes++; assert.deepEqual(input.work, spawned[0]!.work, "shadow serializes the same review envelope as production");
+      return new Promise((resolve) => { endProbe = () => resolve({ started: false, reason: "fixture" }); }); }) as typeof startRunChildProbe;
     const waited = [{ step: "daemon.freshness_drain.completed", duration_ms: 9_000, in_flight_reviews: 1, waited_on: [{ what: "review", kind: "review", settled_after_ms: 4_000 }] }];
     const host = (mode: "off" | "shadow" | "on", ledger: Array<Record<string, unknown>> = waited) => createDetachedWorkHost({
       stateRoot: f.stateRoot, repoDir: f.root, root: f.root, repo: "fixture", log: f.log, readLedger: () => ledger, readMode: () => mode, spawn, probe,
@@ -799,7 +936,8 @@ async function proveFreshFixAdmissionAcrossRestart() {
     const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
     const reviewDone = new Promise<RunResult>(resolve => { finishReview = resolve; });
     let childDone: Promise<number> | undefined;
-    const children: ReturnType<typeof f.add>[] = [];
+    const children: Array<{ dir: string; status: RunChildStatus }> = [];
+    const launches: RunChildHandle[] = [];
     try {
       const planPath = join(f.root, "tasks.yaml");
       const task = { id: FIX_TASK, title: "fresh child admission", repo: "remudero", type: "implement", verify: "auto",
@@ -837,29 +975,39 @@ async function proveFreshFixAdmissionAcrossRestart() {
           return { dispatchFix: () => { dispatches++; } };
         },
       };
-      const spawn = (async (input: { taskId: string; work: DetachedWorkSpec }) => {
-        const child = f.add(`restart-${admission}-${input.work.kind}`, input.work, {}, input.taskId);
-        children.push(child);
-        let settled: Promise<RunResult> = reviewDone;
-        if (input.work.kind === "fix-dispatch") {
-          childDone = runChildMain(["--run-dir", child.dir], {
-            env: {}, signals: { on() {}, off() {} }, clock: clock.now, stderr: () => {},
-            loadRunPath: async () => ({ runDetachedWork: (work: DetachedWorkSpec, ctx: Parameters<typeof runDetachedWork>[1]) => runDetachedWork(work, ctx, ports) }),
-          });
-          settled = childDone.then(code => {
-            const status = readStatus(child.dir);
-            assert.ok(status.ok);
-            if (code !== 0) throw new Error(status.value.failure?.message);
-            return status.value.result!;
-          });
-        }
-        return { started: true, runId: child.status.runId, dir: child.dir, pid: process.pid, settled, abort: async () => assert.fail("restart must leave the child running") };
-      }) as unknown as typeof spawnRunChild;
+      const engine = detachedEngine(f);
+      engine.compatible();
+      const spawn: typeof spawnRunChild = async (input) => {
+        const launched = await spawnRunChild(input, { ...engine.ports, clock: clock.now, pollMs: 5, watch: false,
+          reserve: async () => childReservation(), workerAdmissionHold: () => undefined,
+          spawn: (_command, args) => {
+            const dir = args[args.indexOf("--run-dir") + 1]!;
+            const work = readWorkSpec(dir);
+            assert.ok(work && work !== "malformed");
+            assert.deepEqual(work, input.work);
+            const status: RunChildStatus = { schema: RUN_CHILD_SCHEMA, runId: basename(dir), identity: childIdentity(process.pid)!,
+              engineSha: "a".repeat(40), entryKind: "tsx", phase: work.kind, heartbeatAt: clock.now(), state: "running" };
+            writeStatus(dir, status);
+            children.push({ dir, status });
+            const child = Object.assign(new EventEmitter(), { pid: process.pid, unref() {} });
+            if (work.kind === "fix-dispatch") {
+              childDone = runChildMain(["--run-dir", dir], {
+                env: {}, signals: { on() {}, off() {} }, clock: clock.now, stderr: () => {},
+                loadRunPath: async () => ({ runDetachedWork: (next: DetachedWorkSpec, ctx: Parameters<typeof runDetachedWork>[1]) => runDetachedWork(next, ctx, ports) }),
+              });
+              void childDone.then(code => child.emit("exit", code, null));
+            } else void reviewDone.then(value => writeStatus(dir, { ...status, state: "done", result: value }));
+            return child as unknown as ReturnType<NonNullable<SpawnRunChildPorts["spawn"]>>;
+          },
+        });
+        if (launched.started) launches.push(launched);
+        return launched;
+      };
       const host = createDetachedWorkHost({ stateRoot: f.stateRoot, root: f.root, repoDir: f.root, repo: "remudero",
         readMode: () => "on", readLedger: () => ledger, spawn, log: f.log });
       installDetachedWorkHost(host);
       const launchedReview = await host.spawnReview({ pr: { prNumber: 7, headSha: review.headSha! }, reviewKey: "restart-review", reviewAttemptId: undefined });
-      assert.ok(launchedReview);
+      assert.ok(launchedReview, JSON.stringify(f.rows.filter(row => row.step === "run_child.fallback")));
       void adoptChildWork({ ...launchedReview, taskId: FIX_TASK, work: review }, f.log);
       await runSweep([fixPr()], {
         arm: () => {}, close: () => {}, escalate: () => {}, log: f.log, runId: "restart-producer", now: clock.now,
@@ -905,7 +1053,7 @@ async function proveFreshFixAdmissionAcrossRestart() {
       await childDone;
       const reviewChild = children[0];
       if (reviewChild) writeStatus(reviewChild.dir, { ...reviewChild.status, state: "done", result: result(FIX_TASK) });
-      await flush();
+      await Promise.allSettled(launches.map(launch => launch.settled));
       installDetachedWorkHost(undefined);
       f.cleanup();
     }
