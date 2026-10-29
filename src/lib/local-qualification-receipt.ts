@@ -144,7 +144,7 @@ function authorQualification(root: string, head: string) {
     if (!step.ok || step.exitCode !== 0 || step.signal || step.error || diagnostic.mayBeIncomplete || !native.outputComplete || native.status !== 0 || native.signal || native.error ||
       Buffer.byteLength(stdout) !== diagnostic.stdoutBytes || Buffer.byteLength(stderr) !== diagnostic.stderrBytes ||
       native.parentTracking?.ownerLost || native.storedBytes !== native.observedBytes || native.storedBytes !== diagnostic.stdoutBytes + diagnostic.stderrBytes ||
-      !step.judge?.complete || step.judge.given !== summary.suites.length || step.judge.reported !== summary.suites.length ||
+      step.judge === undefined || !step.judge.complete || step.judge.given !== summary.suites.length || step.judge.reported !== summary.suites.length ||
       !counts || counts.tests <= 0 || counts.passed <= 0 || counts.failed || counts.skipped || !reported.success ||
       reported.data.tests !== counts.tests || reported.data.pass !== counts.passed || reported.data.fail + reported.data.cancelled !== counts.failed ||
       reported.data.skipped + reported.data.todo !== counts.skipped || reported.data.suites !== counts.suites) complete = false;
@@ -166,7 +166,10 @@ export function captureLocalQualificationReceipt(input: QualificationIdentity & 
     try {
       const read = input.repository === "craigoley/remudero" ? authorQualification(input.worktreeRoot, head) : consumerQualification(input.worktreeRoot, input.repository, head);
       qualification = localQualificationSchema.parse(read.qualification); producer = read.producer;
-    } catch (error) { qualification = unknown(String(error)); producer = null; }
+    } catch (error) {
+      const reason = String(error);
+      qualification = unknown(reason); producer = null;
+    }
     const after = hostWorktreeGit(input.worktreeRoot, ["rev-parse", "HEAD"]).trim();
     const status = hostWorktreeGit(input.worktreeRoot, ["status", "--porcelain", "--untracked-files=normal"]).trim();
     if (after !== head || status) qualification = unknown("source tree changed or dirty at capture");
@@ -190,7 +193,10 @@ export function captureLocalQualificationReceipt(input: QualificationIdentity & 
   } catch (error) {
     const result = unknown(String(error));
     try { input.log("local.qualification_unavailable", { task_id: input.taskId, run_id: input.runId, reason: result.reason }); }
-    catch (logError) { return unknown(`${result.reason}; qualification logging unavailable: ${String(logError)}`); }
+    catch (logError) {
+      const reason = `${result.reason}; qualification logging unavailable: ${String(logError)}`;
+      return unknown(reason);
+    }
     return result;
   }
 }
@@ -209,5 +215,8 @@ export function readLocalQualificationReceipt(input: QualificationIdentity & { h
     const qualification = { ...snapshot.qualification, digest: row.artifact_digest, reference: row.artifact_reference as string };
     const outcome = qualification.verdict === "passed" && qualification.tests > 0 ? "succeeded" : qualification.verdict === "failed" ? "failed" : "unknown";
     return { outcome, qualification };
-  } catch (error) { return { outcome: "unknown", qualification: unknown(String(error)) }; }
+  } catch (error) {
+    const reason = String(error);
+    return { outcome: "unknown", qualification: unknown(reason) };
+  }
 }
