@@ -32,7 +32,7 @@ function runRealGateCaller(): string {
       "an unexecutable npm cannot fall through to an installed npm");
     const title = "W1-T2791 (acceptance 1): running the fast gate's OWN source-size step leaves the tracked tree byte-identical";
     const pattern = "^W1-T2791 [(]acceptance 1[)]: ";
-    const child = spawnSync(process.execPath, ["--max-old-space-size=128", "--import", "tsx", "--test",
+    const child = spawnSync(process.execPath, ["--max-old-space-size=128", "--import", "tsx", "--test", "--test-reporter=tap",
       "--test-name-pattern=" + pattern, "test/a-gate-run-leaves-the-tracked-tree-clean.test.ts"], {
       cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 256 * 1024,
       env,
@@ -41,7 +41,8 @@ function runRealGateCaller(): string {
     assert.equal(child.signal, null);
     const summary = child.stdout.split(/\r?\n/).filter(line => /^# (tests|pass|fail|skipped) [0-9]+$/.test(line)).join("; ");
     assert.equal(child.status, 1, "the unexecutable npm probe must fail the actual gate fixture: " + summary);
-    assert.ok(child.stdout.includes("not ok 1 - " + title), "the named real caller must fail");
+    assert.match(child.stdout, /^not ok [0-9]+ - W1-T2791 [(]acceptance 1[)]: running the fast gate's OWN source-size step leaves the tracked tree byte-identical$/m,
+      "the named real caller must fail");
     assert.match(child.stdout, /^# fail 1$/m);
     callerOutput = child.stdout;
     return callerOutput;
