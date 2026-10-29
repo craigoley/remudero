@@ -50,7 +50,7 @@ import { resolveInstallRoot } from "../../lib/install-root.js";
 import { escalate, escalateAsync, ghIssueGateway, ghIssueGatewayAsync, tryEscalate, type Escalation, type EscalationJudgeVerdict, type AsyncIssueGateway, type IssueGateway } from "../../lib/escalate.js";
 import { mapRestPr, prStateFromRest, singlePrRestArgs, type ReviewReuseFacts, type GhApiFetcher, type RestPullRow, type RestRollupEntry } from "../../lib/open-prs-rest.js";
 import { probeMerge, type MergedTypecheckPorts } from "../../lib/merge-probe.js";
-import { recordDecision, recordDecisionAsync } from "../../lib/feedback-landing.js";
+import { recordDecision, recordDecisionAsync, type LandFeedbackAsyncOpts } from "../../lib/feedback-landing.js";
 import { preflightFailureNotice, preflightSummaryPath } from "../../lib/ci-parity.js";
 import { coverageNarrowSuites, type CoverageRun, type CoverageVerdict } from "../../lib/coverage-narrow.js";
 import { buildAffectedSuitesGraph, type AffectedSelection } from "../../lib/affected-suites.js";
@@ -4325,6 +4325,7 @@ export async function runTask(
      *  `plan/decisions.d/<taskId>-<runId>.md` and lands it via the shared decisions-landing
      *  bridge — the same mechanism W1-T243 proved for `plan/feedback/**`. */
     recordDecision?: typeof recordDecision | typeof recordDecisionAsync;
+    decisionLanding?: LandFeedbackAsyncOpts;
     /** W1-T1045: override the resolved clock bound (ms) — the SAME injection convention as
      *  every other opt-in seam above. Default: `policy.values.workerAbandon`, read below. */
     workerAbandonMs?: number;
@@ -4647,7 +4648,9 @@ export async function runTask(
   const rawSpawn = opts.spawn ?? spawnWorker;
   const runReviewFn = opts.runReview ?? runReview;
   const fetchPrBodyFn = opts.fetchPrBody ?? fetchPrBodyViaGh;
-  const recordDecisionFn = opts.recordDecision ?? recordDecisionAsync;
+  const recordDecisionFn = opts.recordDecision
+    ?? ((root: string, params: Parameters<typeof recordDecisionAsync>[1]) =>
+      recordDecisionAsync(root, params, opts.decisionLanding));
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
   const owner = opts.owner ?? resolveOwner();

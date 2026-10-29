@@ -1,7 +1,7 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { sweepFeedbackLandingAsync } from "./feedback-landing.js";
+import { sweepFeedbackLandingAsync, type SweepFeedbackLandingAsyncOpts } from "./feedback-landing.js";
 import { mutationVerdictArtifactZipRestArgs, zipTextMembers } from "./mutation-verdict-pull.js";
 
 // ── W1-T7853: fold debt a CI run files reaches the daemon's feedback inbox ───────────────────────
@@ -116,6 +116,7 @@ export interface FoldDebtPullInput {
   root: string;
   log: (step: string, fields: Record<string, unknown>) => void;
   land?: (root: string) => { landed: boolean; error?: string } | Promise<{ landed: boolean; error?: string }>;
+  landingOptions?: SweepFeedbackLandingAsyncOpts;
   write?: (path: string, text: string) => void;
 }
 
@@ -213,7 +214,7 @@ export async function landFoldDebt(outcomes: readonly FoldDebtOutcome[], deps: F
   if (filed.some(({ row }) => (row.written as string[]).length > 0)) {
     let landed: { landed: boolean; error?: string };
     try {
-      landed = await (deps.land ?? sweepFeedbackLandingAsync)(deps.root);
+      landed = await (deps.land ?? ((root) => sweepFeedbackLandingAsync(root, deps.landingOptions)))(deps.root);
     } catch (err) {
       landed = { landed: false, error: String((err as Error)?.message ?? err) };
     }
