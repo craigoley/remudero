@@ -125,6 +125,39 @@ function architectureScan(root: string, bounded: boolean) {
   });
 }
 
+/** Evidence only: native traversal with its SWC cache released before each real parse.
+ * This child never runs the repository traversal or installs a production preload.
+ * The SWC parser, source files, resolver, graph analysis and rules remain native.
+ */
+function nativeReferenceScan(root: string) {
+  return spawnSync(process.execPath, ["--max-old-space-size=512", "-e", `
+    (async () => {
+      const { createRequire, findPackageJSON } = require("node:module");
+      const { dirname, join } = require("node:path");
+      const { pathToFileURL } = require("node:url");
+      const [config, cli] = process.argv.slice(1);
+      const localRequire = createRequire(config);
+      const packageRoot = dirname(findPackageJSON("dependency-cruiser", pathToFileURL(config)));
+      const swc = localRequire("@swc/core");
+      const { clearCache } = await import(pathToFileURL(join(packageRoot,
+        "src/extract/swc/parse.mjs")).href);
+      const parse = swc.parseFileSync;
+      let releases = 0;
+      swc.parseFileSync = function (...args) {
+        clearCache();
+        releases++;
+        return Reflect.apply(parse, this, args);
+      };
+      process.on("exit", () => console.error("Native reference SWC cache releases: " + releases));
+      process.argv = [process.execPath, cli, "src", "--config", config, "--output-type", "json"];
+      await import(pathToFileURL(cli).href);
+    })().catch(error => { console.error(error); process.exitCode = 1; });
+  `, configPath, depcruiseBin], {
+    cwd: root, encoding: "utf8", timeout: 120_000, maxBuffer: 32 << 20,
+    env: { ...process.env, NODE_OPTIONS: "", NODE_V8_COVERAGE: "" },
+  });
+}
+
 function graphPopulation(output: string) {
   const graph = JSON.parse(output);
   return { modules: graph.modules, violations: graph.summary.violations,
@@ -142,16 +175,28 @@ test("W1-T10946: the default full-source architecture scan completes within its 
   assert.match(JSON.parse(scan.stdout).summary.environment.transpilersFound
     .find((parser: { name: string }) => parser.name === "swc").currentVersion, /^@swc\/core@/,
   "the configured SWC parser must actually load; package availability alone permits Acorn fallback");
-  const reference = architectureScan(REPO_ROOT, false);
-  assert.equal(reference.error, undefined);
-  if (reference.status === 0) {
-    assert.deepEqual(graphPopulation(scan.stdout), graphPopulation(reference.stdout));
+  const native = architectureScan(REPO_ROOT, false);
+  t.diagnostic(`512 MiB, unmodified native: ${native.status}/${native.signal}\n${native.stderr}`);
+  assert.equal(native.error, undefined);
+  if (native.status === 0) {
+    assert.deepEqual(graphPopulation(scan.stdout), graphPopulation(native.stdout));
   } else {
-    assert.equal(reference.signal, "SIGABRT", reference.stderr);
-    assert.match(reference.stderr, /heap out of memory|Reached heap limit/);
+    assert.equal(native.signal, "SIGABRT", native.stderr);
+    assert.match(native.stderr, /heap out of memory|Reached heap limit/);
   }
+  // An OOM has no complete graph. Always require a separate complete native
+  // reference, including on that path; accepting the bounded output alone is vacuous.
+  const reference = nativeReferenceScan(REPO_ROOT);
+  t.diagnostic(`512 MiB, native cache-release reference: ${reference.status}/${reference.signal}\n${reference.stderr}`);
+  assert.equal(reference.error, undefined);
+  assert.equal(reference.signal, null, reference.stderr);
+  assert.equal(reference.status, 0, reference.stderr);
+  const releases = /Native reference SWC cache releases: (\d+)/.exec(reference.stderr);
+  assert.ok(releases && Number(releases[1]) > 600, "the reference must really parse the full source with SWC");
+  assert.deepEqual(graphPopulation(scan.stdout), graphPopulation(reference.stdout),
+    "the complete full-source module/edge/rule population must match even when the unmodified native scan OOMs");
   assert.ok(JSON.parse(scan.stdout).modules.length > 600, "the full source graph was scanned");
-  t.diagnostic(`512 MiB: default=${scan.status}, native=${reference.status}/${reference.signal}`);
+  t.diagnostic(`512 MiB: default=${scan.status}, native=${native.status}/${native.signal}, reference=${reference.status}`);
 });
 
 test("W1-T10946: planted forbidden imports remain detected and removal of the memory fix restores the measured retention failure", (t) => {
@@ -170,6 +215,11 @@ test("W1-T10946: planted forbidden imports remain detected and removal of the me
     assert.equal(bounded.status, 0, bounded.stderr);
     assert.equal(reference.status, 0, reference.stderr);
     assert.deepEqual(graphPopulation(bounded.stdout), graphPopulation(reference.stdout));
+    const released = nativeReferenceScan(fixture);
+    assert.equal(released.error, undefined);
+    assert.equal(released.status, 0, released.stderr);
+    assert.deepEqual(graphPopulation(released.stdout), graphPopulation(reference.stdout),
+      "the evidence hook must preserve the native planted-rule population");
     const names = new Set(JSON.parse(bounded.stdout).summary.violations.map((v: { rule: { name: string } }) => v.rule.name));
     for (const name of ["lib-no-spike-or-cli", "cli-no-run-task", "drafter-never-sees-held-out-set", "no-circular"]) {
       assert.ok(names.has(name), `planted ${name} must be detected`);
