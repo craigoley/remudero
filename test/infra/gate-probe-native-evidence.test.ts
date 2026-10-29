@@ -39,7 +39,8 @@ function runRealGateCaller(): string {
     });
     assert.equal(child.error, undefined, "the actual gate fixture must start");
     assert.equal(child.signal, null);
-    assert.equal(child.status, 1, "the unexecutable npm probe must fail the actual gate fixture");
+    const summary = child.stdout.split(/\r?\n/).filter(line => /^# (tests|pass|fail|skipped) [0-9]+$/.test(line)).join("; ");
+    assert.equal(child.status, 1, "the unexecutable npm probe must fail the actual gate fixture: " + summary);
     assert.ok(child.stdout.includes("not ok 1 - " + title), "the named real caller must fail");
     assert.match(child.stdout, /^# fail 1$/m);
     callerOutput = child.stdout;
