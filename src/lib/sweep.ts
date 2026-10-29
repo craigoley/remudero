@@ -6974,6 +6974,8 @@ export interface OpenPrView {
    *  dead, which keep {@link reviewPendingIsStale}'s timeout behaviour. Only the real gateway sets
    *  this, from the durable pending ledger row. */
   reviewPendingOwnerDead?: boolean;
+  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete";
+  reviewPendingOwnerGoneReason?: string;
   /** W1-T2299 — when the current `reviewState` reading was posted, read off the same rollup entry
    *  already scanned. NOT A BODY-EDIT TIMESTAMP, and must never be documented as one: GitHub
    *  exposes no body-specific time field, so this detects ACTIVITY AFTER A VERDICT and a gaming
@@ -11703,6 +11705,12 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: (pr, policy, _ageDays, now) => {
       if (pr.reviewState === "pending") {
         if (pr.reviewPendingOwnerDead === true) {
+          if (pr.reviewPendingOwnerGone === "refused-after-pending") {
+            return `checks green, the pending review's post was refused after it began (${pr.reviewPendingOwnerGoneReason}) — re-running the review lane on #${pr.prNumber}`;
+          }
+          if (pr.reviewPendingOwnerGone === "promise-harvest-incomplete") {
+            return `checks green, its promise harvest did not complete — re-running the review lane on #${pr.prNumber}`;
+          }
           return `checks green, remudero-review owner proven dead — re-running the review lane on #${pr.prNumber}`;
         }
         const age = reviewPendingAgeMinutes(pr, now);
@@ -14588,18 +14596,25 @@ function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray
 
 function promiseHarvestRetryView(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): OpenPrView {
   // A completed harvest hold proves no review owns this pending status; reuse the unattended-review route.
-  return incompletePromiseHarvestFromLedger(pr, lines) ? { ...pr, reviewPendingOwnerDead: true } : pr;
+  return incompletePromiseHarvestFromLedger(pr, lines)
+    ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "promise-harvest-incomplete" }
+    : pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerGone === undefined
+      ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : pr;
 }
 
 function completedRefusalRetryView(pr: OpenPrView, prior: PriorActions): OpenPrView {
   const key = reviewOutcomeKeyForPr(pr);
-  const attemptedAt = prior.reviewFreshnessRefusals.get(key)?.attemptedAt ??
-    prior.reviewHostGapRefusals.get(key)?.attemptedAt ?? prior.reviewTimedOutReadRefusals.get(key);
+  const freshness = prior.reviewFreshnessRefusals.get(key);
+  const hostGap = prior.reviewHostGapRefusals.get(key);
+  const attemptedAt = freshness?.attemptedAt ?? hostGap?.attemptedAt ?? prior.reviewTimedOutReadRefusals.get(key);
+  const refusalReason = freshness?.attemptedAt !== undefined ? freshness.reason ?? `reviewer-code freshness ${freshness.freshness}`
+    : hostGap?.attemptedAt !== undefined ? `reviewer host gap: ${hostGap.hostGap} (${hostGapProblem(hostGap.hostGap)})` : "reservation read timed out";
   const pendingSince = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
   // Only a completed refusal on this exact input after this pending post proves its owner finished.
   return pr.reviewState === "pending" && attemptedAt !== undefined &&
     Number.isFinite(pendingSince) && attemptedAt >= pendingSince
-    ? { ...pr, reviewPendingOwnerDead: true } : pr;
+    ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "refused-after-pending",
+      reviewPendingOwnerGoneReason: refusalReason.replace(/[\r\n]+/g, " ").slice(0, 300) } : pr;
 }
 
 /** W1-T529 — WHAT EACH LANE'S STAND-DOWN COSTS, named so the cost is chosen rather than discovered,
@@ -14756,6 +14771,7 @@ function isRetryableReviewerCodeFreshnessRefusal(
 interface ReviewerCodeFreshnessRefusal {
   attemptedAt: number | undefined;
   freshness: "stale" | "unreadable";
+  reason?: string;
   /** Present only on a stale refusal emitted by postReviewStatusGuarded. A missing or malformed
    * value must never license recovery: an old ledger row cannot prove what source it required. */
   requiredOriginMainSha?: string;
@@ -15470,6 +15486,7 @@ function priorActionsFromLedger(
             reviewFreshnessRefusals.set(key, {
               attemptedAt: Number.isNaN(parsed) ? undefined : parsed,
               freshness: line.reviewer_code_freshness,
+              ...(typeof line.reason === "string" ? { reason: line.reason } : {}),
               ...(line.reviewer_code_freshness === "stale" && typeof line.origin_main_sha === "string"
                 ? { requiredOriginMainSha: line.origin_main_sha }
                 : {}),
@@ -19190,6 +19207,8 @@ export async function runSweep(
         acted,
         reason: shownReason,
         head_sha: pr.headSha,
+        ...(disposition === "post-review" && pr.reviewPendingOwnerGone !== undefined
+          ? { owner_gone_cause: pr.reviewPendingOwnerGone } : {}),
         ...(stuckStages.has(stageKey({ pr_number: pr.prNumber, ...blockerRow })) ? { stage_stuck: true } : {}),
         // W1-T4633 — the branch a reversible plan-resequence close must keep; the reaper reads it.
         ...(disposition === "stale" && acted && pr.headRefName && reason.includes(PLAN_RESEQUENCE_CLOSE_MARKER)
@@ -19357,8 +19376,9 @@ export async function runSweep(
       log("sweep.plan_resequence_close.held", { pr_number: pr.prNumber, task_id: pr.taskId, reason: pr.planResequenceHeld });
     }
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
-    const harvestIncomplete = incompletePromiseHarvestFromLedger(pr, ledgerLines);
     const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines);
+    pr = { ...pr, reviewPendingOwnerGone: dispositionView.reviewPendingOwnerGone,
+      reviewPendingOwnerGoneReason: dispositionView.reviewPendingOwnerGoneReason };
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
     const unknownWaits = mergeabilityUnknownWaits.get(pr.prNumber);
     const dispositionFacts: DispositionFacts = {
@@ -19403,9 +19423,6 @@ export async function runSweep(
         }
       }
     }
-    if (disposition === "post-review" && harvestIncomplete) {
-      reason = `checks green, prior cause promise-harvest-incomplete — re-running the review lane on #${pr.prNumber}`;
-    }
     // W1-T7850 — A VERDICT REFUSED BECAUSE ITS REVIEWER CHECKOUT VANISHED is a host gap: re-review the same head
     // and body (the ordinary freshness gate sends a stale daemon to a fresh-tree worktree), paced and escalated
     // through the W1-T7837 planner. Never the freshness backoff, which probes the daemon's own loaded code.
@@ -19436,7 +19453,8 @@ export async function runSweep(
         prior.reviewDelivered.delete(reviewKey);
         hostGapRefusal.requestedForRefusal = true;
         disposition = "post-review";
-        reason = `the verdict was computed but its post was refused (${checkout}) — a host gap, not an unproven source; ${hostGapPlan.reason}`;
+        reason = dispositionView.reviewPendingOwnerGone === "refused-after-pending" ? derived.reason
+          : `the verdict was computed but its post was refused (${checkout}) — a host gap, not an unproven source; ${hostGapPlan.reason}`;
       } else {
         disposition = hostGapPlan.kind === "escalate" ? "blocked-ambiguous" : "wait";
         reason = hostGapPlan.reason;
