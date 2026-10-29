@@ -148,6 +148,7 @@ const BASELINE_COMMAND_NAMES = [
   "peek", "plan", "plan-reconcile", "preflight", "procedures", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
   "pr-checks",
   "pr-owner",
+  "pr-state",
   "read-model",
   "reframe",
   "risk-judge-eval",
