@@ -397,8 +397,8 @@ export function scriptsTheSourceMapDescribes(result, sourceMapCache) {
     const lineLengths = sourceMapCache?.[script.url]?.lineLengths;
     if (seen.get(script.url) === 1 || !Array.isArray(lineLengths)) return true;
     const generated = lineLengths.reduce((sum, n) => sum + n, 0) + lineLengths.length - 1;
-    const extent = Math.max(...script.functions.flatMap((fn) => fn.ranges.filter((r) => r.startOffset === 0).map((r) => r.endOffset)));
-    return extent === generated;
+    const extent = generatedExtent(script);
+    return extent >= 0 && extent === generated;
   });
 }
 
