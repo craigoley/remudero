@@ -277,12 +277,18 @@ export class ProductCaseService {
     }
     if (!receipts.length) receipts.push({ ...base, deploymentId: null, target: null, providerCreatedAt: null, commit: null, url: null, readyState: null,
       servedStatus: null, outcome: "unknown", reason: observation.reason ?? "no provider deployment observed" });
-    if (product.revision !== input.expectedRevision && receipts.some(receipt => !product.stageEvidence.some(item => item.id === deploymentEvidenceId(product, receipt)))) {
+    // Bind resumption to this revision and the complete admitted set, never merely one overlapping deployment.
+    const receiptSetDigest = digest(receipts.map(deploymentIdentity).sort());
+    const resumed = receipts.some(receipt => product.stageEvidence.some(item => item.id === deploymentEvidenceId(product, receipt) &&
+      item.receipt?.channel === "deploy" && item.receipt.observation?.expectedRevision === input.expectedRevision &&
+      item.receipt.observation.receiptSetDigest === receiptSetDigest));
+    if (product.revision !== input.expectedRevision && !resumed && receipts.some(receipt => !product.stageEvidence.some(item => item.id === deploymentEvidenceId(product, receipt)))) {
       throw new CaseFault("stale_revision");
     }
     let replayed = true;
     const currentReceipts = new Map<ProductDeployReceipt["target"], string>();
     for (const receipt of receipts) {
+      receipt.observation = { expectedRevision: input.expectedRevision, receiptSetDigest };
       const identity = deploymentIdentity(receipt);
       for (let attempt = 0; attempt < 2; attempt++) {
         const current = this.read(actor, product.id);

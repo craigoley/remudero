@@ -1004,6 +1004,14 @@ components:
         servedStatus: { type: [integer, "null"], minimum: 100, maximum: 599 }
         outcome: { type: string, enum: [succeeded, failed, running, unknown, blocked] }
         reason: *caseReceiptReason
+        observation:
+          type: object
+          additionalProperties: false
+          description: Original admitted revision and digest of the sorted deployment receipt identities, for partial observation resumption.
+          required: [expectedRevision, receiptSetDigest]
+          properties:
+            expectedRevision: { $ref: "#/components/schemas/ProductRevision" }
+            receiptSetDigest: { type: string, pattern: '^[a-f0-9]{64}$' }
     ProductReceipt:
       type: object
       additionalProperties: false

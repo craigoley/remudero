@@ -87,6 +87,7 @@ export const productDeployReceiptSchema = z.object({
   url: httpUrl.refine(value => new URL(value).protocol === "https:").nullable(),
   readyState: text(80).nullable(), servedStatus: z.number().int().min(100).max(599).nullable(),
   outcome: z.enum(["succeeded", "failed", "running", "unknown", "blocked"]), reason: text(500),
+  observation: z.object({ expectedRevision: revision, receiptSetDigest: hash }).strict().optional(),
 }).strict();
 export const productEvidenceReceiptSchema = z.discriminatedUnion("channel", [...productRunReceiptSchema.options, productDeployReceiptSchema]);
 export type ProductDeployReceipt = z.infer<typeof productDeployReceiptSchema>;

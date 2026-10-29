@@ -380,6 +380,11 @@ export interface components {
       servedStatus: number | null;
       outcome: "succeeded" | "failed" | "running" | "unknown" | "blocked";
       reason: string;
+      /** Original admitted revision and digest of the sorted deployment receipt identities, for partial observation resumption. */
+      observation?: {
+        expectedRevision: ProductRevision;
+        receiptSetDigest: string;
+      };
     };
     ProductReceipt: {
       operationId: string;

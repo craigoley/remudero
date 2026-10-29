@@ -112,7 +112,9 @@ test("W1-T10866: deployment binds its tested source project and answering URL", 
   const evidence = reply.body.evidence.deploy;
   assert.equal(evidence.length, 1);
   assert.equal(evidence[0].outcome, "succeeded"); assert.equal(evidence[0].current, true);
-  assert.deepEqual(evidence[0].receipt, { channel: "deploy", actor, productId: f.productId, objectiveRevision: 1,
+  const { observation, ...receipt } = evidence[0].receipt;
+  assert.equal(observation.expectedRevision, 2); assert.match(observation.receiptSetDigest, /^[a-f0-9]{64}$/);
+  assert.deepEqual(receipt, { channel: "deploy", actor, productId: f.productId, objectiveRevision: 1,
     operationId: f.operationId, repository, projectId: "prj_fixture", teamId: team, deploymentId: "dpl_fixture",
     providerCreatedAt: Date.parse(now),
     target: "preview", commit: head, url: "https://fixture.vercel.app/", readyState: "READY", servedStatus: 200,
@@ -273,6 +275,73 @@ test("W1-T10866: replay restart and concurrent edits preserve deployment history
 });
 
 test("W1-T10866: replay restart and concurrent edits preserve deployment history — stale and ordered controls", async t => {
+  await t.test("interruption between durable deployment writes resumes only the admitted observation", async t => {
+    const f = await fixture(t);
+    f.deployment.readyState = "ERROR";
+    const failed = await f.request(); assert.equal(failed.status, 200);
+    const failedEvidence = failed.body.evidence.deploy[0];
+    f.deployment.readyState = "READY";
+    const production = { ...f.deployment, id: "dpl_production", target: "production", createdAt: f.deployment.createdAt + 1 };
+    f.others = [production];
+    const command = f.command(), interruptedStore = new ProductIntentStore({ root: f.root });
+    const transition = interruptedStore.transition.bind(interruptedStore);
+    let writes = 0;
+    interruptedStore.transition = (owner, input) => {
+      const result = transition(owner, input);
+      if (result.ok && ++writes === 1) throw new Error("worker interrupted after first durable deployment write");
+      return result;
+    };
+    const interrupted = await f.request(command, { store: interruptedStore });
+    assert.equal(interrupted.status, 503); assert.equal(interrupted.body.error, "unavailable");
+    assert.equal(writes, 1);
+    const partial = new ProductIntentStore({ root: f.root }).read(actor, f.productId);
+    assert.ok(partial.ok);
+    assert.deepEqual(partial.value.stageEvidence.filter(item => item.receipt?.channel === "deploy").map(item => item.outcome), ["failed", "succeeded"]);
+    const partialPreview = partial.value.stageEvidence.find(item => item.receipt?.channel === "deploy" && item.outcome === "succeeded")!;
+    assert.equal(partialPreview.receipt?.channel, "deploy");
+    if (partialPreview.receipt?.channel !== "deploy") throw new Error("missing durable preview receipt");
+    assert.equal(partialPreview.receipt.observation?.expectedRevision, command.command.expectedRevision);
+    assert.match(partialPreview.receipt.observation!.receiptSetDigest, /^[a-f0-9]{64}$/);
+    assert.equal(partial.value.stageEvidence.some(item => item.receipt?.channel === "deploy" && item.receipt.target === "production"), false);
+    const product = f.current();
+    assert.ok(f.store.transition(actor, { version: "product-intent-v1", requestId: "partial-concurrent-edit-001", id: f.productId,
+      expectedRevision: product.revision, expectedObjectiveRevision: 1,
+      stageEvidence: [{ id: "concurrent-research", stage: "research", outcome: "succeeded", objectiveRevision: 1, observedAt: now, references: [] }] }).ok);
+    const beforeResume = f.current();
+    for (const change of ["deployment", "source", "target", "outcome", "additional deployment"]) {
+      f.others = change === "additional deployment" ? [production, { ...production, id: "dpl_later" }] : [{ ...production,
+        ...(change === "deployment" ? { id: "dpl_replacement" } : {}),
+        ...(change === "source" ? { gitSource: { ...production.gitSource, sha: "f".repeat(40) } } : {}),
+        ...(change === "target" ? { target: "preview" } : {}),
+        ...(change === "outcome" ? { readyState: "ERROR" } : {}) }];
+      const refused = await f.request(command);
+      assert.equal(refused.status, 409, change); assert.equal(refused.body.error, "stale_revision", change);
+      assert.equal(f.current().revision, beforeResume.revision);
+    }
+    f.others = [production];
+    const unrelatedCommand = { ...command, command: { ...command.command, expectedRevision: command.command.expectedRevision - 1 } };
+    assert.equal((await f.request(unrelatedCommand)).body.error, "stale_revision");
+    f.status = 204;
+    const resumed = await Promise.all([f.request(command), f.request(command)]);
+    for (const reply of resumed) {
+      assert.equal(reply.status, 200, JSON.stringify(reply.body));
+      assert.deepEqual(reply.body.evidence.deploy.map((item: { outcome: string }) => item.outcome), ["failed", "succeeded", "succeeded"]);
+      assert.deepEqual(reply.body.evidence.deploy.map((item: { current: boolean }) => item.current), [false, true, true]);
+      assert.deepEqual(reply.body.evidence.deploy[0], { ...failedEvidence, current: false });
+      assert.equal(reply.body.evidence.deploy[1].id, partialPreview.id);
+      assert.deepEqual(reply.body.evidence.deploy[1].receipt, partialPreview.receipt);
+      assert.deepEqual(reply.body.evidence.deploy[2].receipt.observation, partialPreview.receipt.observation);
+      assert.deepEqual(reply.body.evidence.deploy.slice(1).map((item: { receipt: { deploymentId: string; target: string; commit: string; servedStatus: number } }) =>
+        [item.receipt.deploymentId, item.receipt.target, item.receipt.commit, item.receipt.servedStatus]),
+      [["dpl_fixture", "preview", head, 200], ["dpl_production", "production", head, 204]]);
+    }
+    assert.deepEqual(resumed[0]!.body.evidence.deploy, resumed[1]!.body.evidence.deploy);
+    assert.equal(f.current().revision, beforeResume.revision + 1);
+    const replay = await f.request(command);
+    assert.equal(replay.status, 200); assert.equal(replay.body.replayed, true);
+    assert.deepEqual(replay.body.evidence.deploy, resumed[0]!.body.evidence.deploy);
+    assert.equal(f.current().stageEvidence.filter(item => item.receipt?.channel === "deploy").length, 3);
+  });
   await t.test("a lost HTTP response replays the durable typed receipt after restart", async t => {
     const f = await fixture(t), command = f.command();
     f.loseResponse = true;
