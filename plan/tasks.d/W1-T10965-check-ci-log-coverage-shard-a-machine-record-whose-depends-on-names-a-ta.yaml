@@ -1,0 +1,56 @@
+- id: W1-T10965
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-shard:a-machine-record-whose-depends-on-names-a-task-in-another-sh cost 10.5 PR minute(s) across 1 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.33
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-shard:a-machine-record-whose-depends-on-names-a-task-in-another-sh"
+  files:
+    - src/lib/benchmark-run.ts
+    - test/routing/check-ci-log-coverage-shard-a-machine-record-whose-depends-on-names-a-ta.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:coverage-shard:a-machine-record-whose-depends-on-names-a-task-in-another-sh"
+      proof: "unit test: W1-T10965: CI friction 2dc293108b3136e5 is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-shard:a-machine-record-whose-depends-on-names-a-task-in-another-sh's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:coverage-shard:a-machine-record-whose-depends-on-names-a-task-in-another-sh cost 10.5 PR minute(s) (seven-day half-life) across 1 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/benchmark-run.ts: test/the-machine-filing-judge-releases-or-escalates.test.ts imports it
+    - test/the-machine-filing-judge-releases-or-escalates.test.ts: named by the failing check
+    - the rounds name a failing test: test/the-machine-filing-judge-releases-or-escalates.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13969 (https://github.com/craigoley/remudero/pull/13969) at 2026-10-24T15:57:48.653Z: ci-log round — coverage-shard (2/8): test/the-machine-filing-judge-releases-or-escalates.test.ts; coverage-shard (6/8): a machine record whose depends_on names a task in another shard is judged and la
+        failing tests: earned autonomy lowers the bar for a family that helps and raises it for one that fails; a machine record whose depends_on names a task in another shard is judged and lands
+        log excerpt:
+          | not ok 4002 - earned autonomy lowers the bar for a family that helps and raises it for one that fails
+          |   ---
+          |   duration_ms: 28.25348
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/the-machine-filing-judge-releases-or-escalates.test.ts:502:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     The input did not match the regular expression /2 merged/. Input:
+          | 
+          |     '0 merged, 0 operator-approved and 0 declined machine task(s) from this family (Beta mean 0.50); a family that keeps failing is judged more strictly.'
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 1 occurrence(s) across 7 day(s), last seen 2026-10-24T15:57:48.653Z, and the record declares no privileged path"
+    judged_at: "2026-10-29T02:26:39.384Z"
+    pin: "0327bdef8af84c6d3d58bc778c63e2192807bf4cc8bd68a45f1ee64230b29363"

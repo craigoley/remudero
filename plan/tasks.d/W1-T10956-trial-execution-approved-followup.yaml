@@ -1,0 +1,79 @@
+- id: W1-T10956
+  title: Private field trials join measured execution resources and costs to the actual attempt
+  repo: remudero
+  depends_on:
+    - W1-T10954
+    - W1-T10962
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12
+  risk: high
+  band_meaning: span
+  origin: operator-approved-followups:2026-10-28
+  plan_refs:
+    - W1-T10875
+    - W1-T6074
+    - W1-T5882
+  files:
+    - src/lib/worker-execution-evidence.ts
+    - src/lib/worker.ts
+    - src/lib/worker-provider.ts
+    - src/lib/routing-experiments.ts
+    - src/lib/model-canary-metrics.ts
+    - src/lib/model-canary-report.ts
+    - test/routing/worker-attribution-and-accounting-follow-actual-execution.test.ts
+    - test/model-canary-metrics.test.ts
+    - src/lib/benchmark-run.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/benchmark-nondispatch-attempts.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: "Reconcile the retained execution instrumentation proposal
+    0f701b6d46e665b82f55f9751e0ffa183019a5a3 with W1-T10875 actual outcome attribution. This is the
+    SDK integration previously discussed: attempt/provider invocation, retained stdout/stderr,
+    latency/first text, tokens/cache usage, peak resource and reservation receipts, not a new
+    product or agent runtime. Keep assignment vs routing propensity vs selected alias vs
+    provider-attested served model separate. Join billed cash/rated cost/held reserve/subscription
+    notional honestly; missing identity, invoice, start or completion is named unknown. Exclude
+    review/other non-dispatch activity from coding-attempt denominators. Drilldowns name source
+    receipt, sample population, exclusions and freshness; suppress unsupported small-sample p95.
+    Preserve existing native resource leases and Node22/24 behavior; do not create a new collector,
+    model policy, schedule or public release."
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+    Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
+    coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
+    requirements. Filing neither supplies a missing qualification route nor resets or transfers any
+    old head-bound allowance.
+  acceptance:
+    - claim: attempt metrics join actual execution and measured identity without substituting router
+        selection for provider evidence
+      proof: 'grep: test("W1-T10956: attempt metrics join actual execution and measured identity without
+        substituting router selection for provider evidence" in
+        test/routing/worker-attribution-and-accounting-follow-actual-execution.test.ts'
+    - claim: cost and resource drilldowns preserve missing evidence and keep non-dispatch reviews outside
+        coding cohorts
+      proof: 'grep: test("W1-T10956: cost and resource drilldowns preserve missing evidence and keep
+        non-dispatch reviews outside coding cohorts" in test/model-canary-metrics.test.ts'
+    - claim: The real default production path invokes sdkRequestedEffort; an unused export, declaration or
+        re-export is insufficient.
+      proof: "grep: sdkRequestedEffort( in src/lib/worker.ts"
+  falsifier: "Add the exact named real-path controls in the computed test folders using package
+    aliases and the shared root helper. Establish the failing current-main behavior, restore the
+    smallest fix, and require complete verified-file TAP. Delete each load-bearing guard and require
+    the named assertion to fail, then restore it. Preserve baseline failures, partial runs and
+    old-head evidence; never make unchanged failures green through repetition. "

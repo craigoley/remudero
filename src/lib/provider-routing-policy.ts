@@ -466,7 +466,7 @@ export function policyForCapability(
 }
 
 /**
- * Prefer one eligible provider, otherwise use the existing most-headroom selector unchanged.
+ * Prefer one eligible provider within the subscription lane before considering prepaid credits.
  * Readability/reserve are never bypassed and an all-ineligible set still throws its named error.
  */
 export function selectWorkerProviderForPolicy(
@@ -478,7 +478,11 @@ export function selectWorkerProviderForPolicy(
   const automatic = () => selectWorkerProvider(effective, policy.reservePercent, draw);
   if (policy.preference === "automatic") return { selection: automatic() };
   const preferred = effective.find((capacity) => capacity.provider === policy.preference);
-  if (preferred) {
+  const subscriptionHeadroom = effective.some((capacity) => {
+    const verdict = providerEligibility(capacity, policy.reservePercent);
+    return verdict.eligible && verdict.lane === undefined;
+  });
+  if (preferred && !(subscriptionHeadroom && providerEligibility(preferred, policy.reservePercent).lane === "codex-credits")) {
     try {
       return { selection: selectWorkerProvider([preferred], policy.reservePercent, draw) };
     } catch (error) {

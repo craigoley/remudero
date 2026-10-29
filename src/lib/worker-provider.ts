@@ -1,7 +1,7 @@
 import { setTimeout as abortableDelay } from "node:timers/promises";
 import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-request-effort.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
-import { CashResponsesConversation } from "./cash-responses.js";
+import { CASH_RESPONSES_DEPLOYMENTS, CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
@@ -197,10 +197,30 @@ export interface ProviderCapacity {
   modelDecision?: CodexModelDecision;
   /** Manual reset readiness — count and earliest expiry only, NEVER a credit id. */
   resetCredits?: { availableCount: number; earliestExpiresAt?: number };
+  /** W1-T10382: the Codex bucket's prepaid credits as read; see {@link codexCreditsSpendable}. */
+  credits?: CodexCredits;
   /** W1-T3718: `readable: false` because the provider ANSWERED and every candidate sat below the
    *  reserve, not because the probe failed. See {@link providerRefusalCondition}. */
   exhausted?: boolean;
   carriedForward?: { readAt: number; ageMs: number; failure: string };
+}
+
+/** W1-T10382: the lane a Codex account past its reserve is admitted on when its prepaid credits can carry it. */
+export type ProviderLane = "codex-credits";
+
+/** W1-T10382: prepaid Codex credits. `balance` is `null` when the app-server's decimal string is unreadable, never 0. */
+export interface CodexCredits {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: number | null;
+  /** Why these credits cannot carry the bucket: a reached spend control, or a reached type credits do not lift. */
+  blocked?: string;
+}
+
+/** Whether credits can carry a Codex bucket past its reserve: unlimited, or a positive balance, and nothing blocking. */
+export function codexCreditsSpendable(credits: CodexCredits | undefined): boolean {
+  if (!credits || credits.blocked !== undefined) return false;
+  return credits.unlimited || (credits.hasCredits && credits.balance !== null && credits.balance > 0);
 }
 
 export type CodexModelTier = "economy" | "balanced" | "frontier";
@@ -227,6 +247,8 @@ export interface CodexModelDecisionOption {
   selected: boolean;
   windows: ProviderCapacityWindow[];
   reason?: CodexModelIneligibleReason;
+  /** W1-T10382: eligible only because its credits carry it past the reserve. */
+  lane?: ProviderLane;
 }
 
 export interface CodexModelDecision {
@@ -266,6 +288,8 @@ export interface ProviderSelection {
   allocationSharePercent?: number;
   /** W1-T4617: the draw that picked this provider, and every drawn candidate's probability. */
   draw?: RoutingDraw;
+  /** W1-T10382: present when no subscription had headroom and Codex credits carry this spawn. */
+  lane?: ProviderLane;
 }
 
 export interface ProviderWindowConsumption {
@@ -462,6 +486,8 @@ function tightestRemaining(capacity: ProviderCapacity): number {
 export interface ProviderEligibility {
   eligible: boolean;
   reason?: "unreadable" | "below-reserve";
+  /** W1-T10382: admitted past the reserve on prepaid Codex credits, not on subscription headroom. */
+  lane?: ProviderLane;
   /** Tightest remaining window percentage; `null` when nothing readable was reported. */
   headroomPercent: number | null;
 }
@@ -480,7 +506,12 @@ export function providerEligibility(capacity: ProviderCapacity, reservePercent: 
   if (!capacity.readable || capacity.windows.length === 0) return { eligible: false, reason: "unreadable", headroomPercent };
   const ceiling = 100 - reservePercent;
   const admitted = capacity.windows.every((window) => validCapacityWindow(window) && window.usedPercent < ceiling);
-  return admitted ? { eligible: true, headroomPercent } : { eligible: false, reason: "below-reserve", headroomPercent };
+  if (admitted) return { eligible: true, headroomPercent };
+  // W1-T10382: past the reserve, Codex credits carry the work ahead of every cash fallback.
+  if (capacity.provider === "codex" && capacity.windows.every(validCapacityWindow) && codexCreditsSpendable(capacity.credits)) {
+    return { eligible: true, lane: "codex-credits", headroomPercent };
+  }
+  return { eligible: false, reason: "below-reserve", headroomPercent };
 }
 
 /**
@@ -571,15 +602,20 @@ export function selectWorkerProvider(
   draw: number | RoutingDrawSeed = 0,
   mixing?: ProviderMixing,
 ): ProviderSelection {
-  const eligible = capacities
-    .filter((capacity) => providerEligibility(capacity, reservePercent).eligible)
-    .map((capacity) => {
+  const admitted = capacities
+    .map((capacity) => ({ capacity, lane: providerEligibility(capacity, reservePercent) }))
+    .filter((entry) => entry.lane.eligible);
+  // W1-T10382: subscription headroom wins; a credits lane is drawn only when no subscription has any.
+  const headroom = admitted.filter((entry) => entry.lane.lane === undefined);
+  const eligible = (headroom.length > 0 ? headroom : admitted)
+    .map(({ capacity, lane: { lane } }) => {
       const tightestRemainingPercent = tightestRemaining(capacity);
       return {
         provider: capacity.provider,
         capacity,
         tightestRemainingPercent,
         allocationWeight: Math.max(1, tightestRemainingPercent - reservePercent) ** 2,
+        ...(lane ? { lane } : {}),
       };
     })
     .sort((a, b) => b.tightestRemainingPercent - a.tightestRemainingPercent);
@@ -753,6 +789,8 @@ interface CodexRateLimitBucket {
   secondary?: CodexRateLimitWindow | null;
   rateLimitReachedType?: unknown;
   spendControlReached?: unknown;
+  /** W1-T10382: prepaid credits, spelled as the app-server's `CreditsSnapshot`; `balance` is a decimal string. */
+  credits?: { hasCredits?: unknown; unlimited?: unknown; balance?: unknown } | null;
 }
 
 interface CodexRateLimitResult {
@@ -939,8 +977,8 @@ export function codexCandidatesForCapability(
 // judgement favours gpt-oss 2.40x, since nano spends ~5x the completion tokens on reasoning.
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna"],
-  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna", "gpt-6.1-sol"],
-  frontier: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra"],
+  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-6.1-sol"],
+  frontier: ["gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-5.6-terra"],
 };
 
 /** The provider-neutral Claude-model -> capability lookup is shared with Codex: both adapters
@@ -1010,6 +1048,9 @@ export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightConte
   // Azure's 922K input limit is lower than the combined window; reserve 8K for output.
   "gpt-6-luna": { totalTokens: 922_000, readAt: "2026-09-24" },
   "gpt-6.1-sol": { totalTokens: 922_000, readAt: "2026-10-02" },
+  // Terra metadata (2026-10-27): 922K input, conservatively leaving room for output as above.
+  // https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure#gpt-61
+  "gpt-6.1-terra": { totalTokens: 922_000, readAt: "2026-10-27" },
 };
 
 /**
@@ -1391,7 +1432,27 @@ function capacityFromBucket(bucket: CodexRateLimitBucket | undefined, accountLab
   }
   if (windows.length === 0) return { provider: "codex", readable: false, windows: [], detail: "no usable rate-limit windows" };
   if (bucket.rateLimitReachedType != null || bucket.spendControlReached === true) windows.push({ name: "reached", usedPercent: 100 });
-  return { provider: "codex", readable: true, windows, ...(accountLabel ? { accountLabel } : {}) };
+  const credits = parseCodexCredits(bucket);
+  return { provider: "codex", readable: true, windows, ...(accountLabel ? { accountLabel } : {}), ...(credits ? { credits } : {}) };
+}
+
+/** Only a plain rate-limit hit is what credits lift; a depleted-credits or workspace usage limit is not. */
+const CREDITS_CARRIED_REACHED_TYPE = "rate_limit_reached";
+const UNSIGNED_DECIMAL = /^\d+(?:\.\d+)?$/;
+
+/** W1-T10382: absent or malformed flags mean no credits reading at all; an unreadable balance reads `null`. */
+function parseCodexCredits(bucket: CodexRateLimitBucket): CodexCredits | undefined {
+  const block = bucket.credits;
+  if (!block || typeof block !== "object" || typeof block.hasCredits !== "boolean" || typeof block.unlimited !== "boolean") return undefined;
+  const parsed = typeof block.balance === "string" && UNSIGNED_DECIMAL.test(block.balance) ? Number(block.balance) : Number.NaN;
+  const reached = bucket.rateLimitReachedType;
+  const blocked = bucket.spendControlReached === true
+    ? "spend-control-reached"
+    : reached == null || reached === CREDITS_CARRIED_REACHED_TYPE
+      ? undefined
+      : typeof reached === "string" && /^[a-z_]{1,64}$/.test(reached) ? reached : "rate-limit-reached";
+  return { hasCredits: block.hasCredits, unlimited: block.unlimited, balance: Number.isFinite(parsed) ? parsed : null,
+    ...(blocked ? { blocked } : {}) };
 }
 
 function codexAllocationWindows(reading: CodexRateLimitResult, modelCapacity: ProviderCapacity): ProviderCapacityWindow[] {
@@ -1472,15 +1533,17 @@ export function selectCodexModel(
     const mapped = mappedIds.has(model.id) || (typeof model.model === "string" && mappedIds.has(model.model));
     const capacity = capacityFromBucket(codexBucketForModel(reading, model));
     const effortSupported = !requestedEffort || supportedEfforts.includes(requestedEffort);
-    const hasHeadroom = capacity.readable && capacity.windows.length > 0 && capacity.windows.every((window) =>
-      Number.isFinite(window.usedPercent) && window.usedPercent >= 0 && window.usedPercent <= 100 && window.usedPercent < 100 - reserve);
+    const measured = capacity.readable && capacity.windows.length > 0 && capacity.windows.every(validCapacityWindow);
+    const hasHeadroom = measured && capacity.windows.every((window) => window.usedPercent < 100 - reserve);
+    // W1-T10382: past the reserve, prepaid credits keep the model eligible as the credits lane.
+    const creditsLane = measured && !hasHeadroom && codexCreditsSpendable(capacity.credits);
     const reason: CodexModelIneligibleReason | undefined = !mapped
       ? "unmapped"
       : !effortSupported
         ? "unsupported-effort"
         : !capacity.readable
           ? "quota-unreadable"
-          : !hasHeadroom
+          : !hasHeadroom && !creditsLane
             ? "below-reserve"
             : undefined;
     return {
@@ -1493,6 +1556,7 @@ export function selectCodexModel(
       selected: false,
       windows: capacity.windows.map((window) => ({ ...window })),
       ...(reason ? { reason } : {}),
+      ...(reason === undefined && creditsLane ? { lane: "codex-credits" as const } : {}),
     };
   });
   const ranked = candidates.map((model, preference) => {
@@ -1500,7 +1564,10 @@ export function selectCodexModel(
     const capacity = capacityFromBucket(codexBucketForModel(reading, model));
     return { model, capacity, option, preference, remaining: tightestRemaining(capacity) };
   }).sort((a, b) => b.remaining - a.remaining || a.preference - b.preference);
-  const eligible = ranked.filter((candidate) => candidate.option?.eligible);
+  const admitted = ranked.filter((candidate) => candidate.option?.eligible);
+  // W1-T10382: a model with subscription headroom is always chosen over one its credits carry.
+  const headroom = admitted.filter((candidate) => candidate.option?.lane === undefined);
+  const eligible = headroom.length > 0 ? headroom : admitted;
   const scopedPreference = policy.preferredModel &&
     policy.preferredModel.capability === tier &&
     policy.preferredModel.effort === requestedEffortLabel
@@ -1512,7 +1579,7 @@ export function selectCodexModel(
     : undefined;
   if (scopedPreference && !selected) {
     const preferredOption = options.find((option) => option.id === scopedPreference.model);
-    preferenceBypass = preferredOption?.reason ?? "not-visible";
+    preferenceBypass = preferredOption?.reason ?? (preferredOption?.lane ? "below-reserve" : "not-visible");
   }
   const switchback = !forced && !scopedPreference && policy.switchback?.window.provider === "codex"
     ? switchbackArmFor(policy.switchback.window, policy.switchback.taskId, policy.switchback.at,
@@ -2145,7 +2212,8 @@ function storedCodexRuntime(value: CodexRuntimeReading): CodexRuntimeReading {
   const window = (w: CodexRateLimitWindow | null | undefined) => w == null ? w
     : { usedPercent: w.usedPercent, windowDurationMins: w.windowDurationMins, resetsAt: w.resetsAt };
   const bucket = (b: CodexRateLimitBucket | null | undefined) => b == null ? b : ({ limitId: b.limitId, limitName: b.limitName,
-    primary: window(b.primary), secondary: window(b.secondary), rateLimitReachedType: b.rateLimitReachedType, spendControlReached: b.spendControlReached });
+    primary: window(b.primary), secondary: window(b.secondary), rateLimitReachedType: b.rateLimitReachedType, spendControlReached: b.spendControlReached,
+    credits: b.credits == null ? b.credits : { hasCredits: b.credits.hasCredits, unlimited: b.credits.unlimited, balance: b.credits.balance } });
   return { rateLimits: { rateLimits: bucket(source.rateLimits), accountId: source.accountId,
     rateLimitsByLimitId: source.rateLimitsByLimitId && Object.fromEntries(Object.entries(source.rateLimitsByLimitId).map(([id, b]) => [id, bucket(b)])) },
     models: value.models.map(({id, model, displayName, hidden, isDefault, defaultReasoningEffort, supportedReasoningEfforts}) =>
@@ -3324,6 +3392,18 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
       cachedInputUsdPerMillion: 0.2, cacheWriteUsdPerMillion: 5, reservationInputUsdPerMillion: 5 },
     readAt: "2026-10-02",
   },
+  // Global Standard, read 2026-10-27:
+  // https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/gpt-6-1-terra-now-generally-available-in-microsoft-foundry-build-agents-that-see/4567769
+  // No Microsoft threshold verified at https://azure.microsoft.com/en-us/pricing/details/cognitive-services/openai-service/.
+  // -1 selects long-context rates for EVERY request (including zero-input output receipts).
+  "gpt-6.1-terra": {
+    unbilledAzureOpenAi429: true,
+    inputUsdPerMillion: 1, outputUsdPerMillion: 5, cachedInputUsdPerMillion: 0.05, cacheWriteUsdPerMillion: 1.25,
+    reservationInputUsdPerMillion: 1.25,
+    longContext: { thresholdInputTokens: -1, inputUsdPerMillion: 2, outputUsdPerMillion: 7.5,
+      cachedInputUsdPerMillion: 0.1, cacheWriteUsdPerMillion: 2.5, reservationInputUsdPerMillion: 2.5 },
+    readAt: "2026-10-27",
+  },
 };
 
 /** Codex analytics only; these rows never admit a cash deployment (W1-T5664). */
@@ -3447,6 +3527,9 @@ export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
   "gpt-5.6-terra": null,
   "gpt-6-luna": null,
   "gpt-6.1-sol": null,
+  // GA request shape, read 2026-10-27; omit temperature for Terra reasoning requests.
+  // https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/gpt-6-1-terra-now-generally-available-in-microsoft-foundry-build-agents-that-see/4567769
+  "gpt-6.1-terra": null,
 };
 
 /** Raised INSTEAD of guessing a request shape. Thrown before the transport, like its pricing
@@ -5035,7 +5118,7 @@ function openWeightEndpoint(config: Config, model: string): string {
   if (typeof raw !== "string" || raw.trim() === "") throw new Error("cash provider requires workerProviders.cashEndpoint");
   const endpoint = new URL(raw.endsWith("/") ? raw : `${raw}/`);
   if (endpoint.protocol !== "https:") throw new Error("cash endpoint must use https");
-  if (model === "gpt-6.1-sol") return new URL("openai/v1/responses", endpoint).toString();
+  if (CASH_RESPONSES_DEPLOYMENTS[model]) return new URL("openai/v1/responses", endpoint).toString();
   return new URL(`openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=2024-10-21`, endpoint).toString();
 }
 
@@ -5389,7 +5472,8 @@ export async function spawnOpenWeightWorker(
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
   if (isFoundryClaudeDeployment(selection.model)) return spawnFoundryClaudeWorker(args, config, selection);
-  const toolLineage = createWorkerToolLineage({ provider: selection.model === "gpt-6.1-sol" ? "cash-responses" : "cash-chat",
+  const usesResponses = CASH_RESPONSES_DEPLOYMENTS[selection.model] !== undefined;
+  const toolLineage = createWorkerToolLineage({ provider: usesResponses ? "cash-responses" : "cash-chat",
     root: config.root, runId: args.runId, taskId: args.taskId });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const clock = args.clock ?? systemClock;
@@ -5398,7 +5482,6 @@ export async function spawnOpenWeightWorker(
   let completionTokens = 0;
   let cacheReadTokens = 0;
   let cacheCreationTokens = 0;
-  const usesResponses = selection.model === "gpt-6.1-sol";
   let turns = 0;
   let sessionId = "";
   let text = "";
@@ -5630,7 +5713,7 @@ export async function spawnOpenWeightWorker(
         } catch (error) {
           toolFailed = true;
           observeWorkerToolLineage(toolLineage, { type: "tool_result", turnId: requestId, tool_use_id: id, is_error: true });
-          if (usesResponses) throw new Error(`cash Sol 6.1 tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
+          if (usesResponses) throw new Error(`cash ${selection.model} tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
           content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
         }
         if (!toolFailed) observeWorkerToolLineage(toolLineage, { type: "tool_result", turnId: requestId, tool_use_id: id, is_error: false });
