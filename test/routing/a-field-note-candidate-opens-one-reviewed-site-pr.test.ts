@@ -26,9 +26,8 @@ import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const DAY = (day: number, hour = 0) => new Date(Date.UTC(2026, 8, day, hour)).toISOString();
 const BLOB = "b".repeat(40);
-// The site's collector-staged key set (remudero-site lib/model-field-note.ts collectorStagedKeys, read 2026-10-28).
-const SITE_STAGED_KEYS = ["schema", "releaseId", "status", "publicationScope", "evidence", "publishedAt", "windowStart",
-  "windowEnd", "asOf", "sourceDigest", "sourceRepos", "consentRegistryRevision", "rows", "stagedBy", "stagedAt"].sort();
+const EXPORT_KEYS = ["schema", "releaseId", "status", "publicationScope", "evidence", "windowStart",
+  "windowEnd", "asOf", "sourceDigest", "sourceRepos", "consentRegistryRevision", "rows"].sort();
 type SiteImportOptions = NonNullable<Parameters<typeof syncFieldNoteSiteImport>[1]>;
 type Mode = "staged" | "unchanged" | "refused" | "no-daily-stage" | "absent" | "outside-data" | "garbled" | "usage"
   | "staged-nothing" | "dir-script" | "git-hook" | "git-config-refused";
@@ -38,6 +37,7 @@ function stageFixture(scope: Pick<TestContext, "after">, root: string, mode: Mod
   const repo = gitRepo({ scope, seedCommit: false, kind: "site-origin" });
   const dir = repo.dir;
   const seen = join(root, "seen-candidates.ndjson");
+  const stagedNote = join(root, "site-staged-note.json");
   mkdirSync(join(dir, "data"), { recursive: true });
   mkdirSync(join(dir, "scripts"));
   writeFileSync(join(dir, "data", "model-field-note.json"), "null\n");
@@ -51,6 +51,7 @@ const [flag, candidatePath, summaryPath] = process.argv.slice(2);
 if (flag !== "--daily-stage") process.exit(2);
 const note = JSON.parse(readFileSync(candidatePath, "utf8"));
 appendFileSync(${JSON.stringify(seen)}, JSON.stringify(note) + "\\n");
+const staged = { ...note, stagedBy: "site-stage-mode", stagedAt: note.asOf, publishedAt: note.asOf };
 const mode = ${JSON.stringify(mode)};
 if (mode === "garbled") { console.log("not json"); process.exit(0); }
 if (mode === "usage") { console.error("usage: --daily-stage"); process.exit(2); }
@@ -62,9 +63,11 @@ if (mode === "refused") {
 }
 const history = JSON.parse(readFileSync("data/model-field-note-history.json", "utf8"));
 history.releases.push({ releaseId: note.releaseId, windowStart: note.windowStart, windowEnd: note.windowEnd,
-  sourceRepos: note.sourceRepos, lineageDigest: "fixture", publishedAt: note.publishedAt });
+  sourceRepos: note.sourceRepos, lineageDigest: "fixture", publishedAt: staged.publishedAt });
 writeFileSync("data/model-field-note-history.json", JSON.stringify(history, null, 2));
-writeFileSync("data/model-field-note.json", JSON.stringify(note, null, 2));
+const stagedJson = JSON.stringify(staged, null, 2);
+writeFileSync("data/model-field-note.json", stagedJson);
+writeFileSync(${JSON.stringify(stagedNote)}, stagedJson);
 if (mode === "git-hook") {
   writeFileSync(".git/fsmonitor-hook", "#!" + process.execPath + "\\nrequire('node:fs').writeFileSync("
     + ${JSON.stringify(JSON.stringify(join(root, "git-hook-ran")))} + ", 'ran');\\n", { mode: 0o700 });
@@ -78,7 +81,7 @@ console.log(JSON.stringify({ outcome: "staged", releaseId: note.releaseId }));
 `);
   repo.git("add", "-A");
   repo.git("commit", "-q", "-m", "site main");
-  return { url: pathToFileURL(dir).href, seen };
+  return { url: pathToFileURL(dir).href, seen, stagedNote };
 }
 
 /** In-memory GitHub REST for craigoley/remudero-site: git data, refs, and pulls. Records every call. */
@@ -155,6 +158,7 @@ async function dailyPass(root: string, nowIso: string, days: number[], siteImpor
     }, siteImport });
   const ledger = readFileSync(join(stateDir, "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   return { code, lines, outDir, row: ledger.filter((row) => row.step === "field-trials.site-import").at(-1),
+    refreshRow: ledger.filter((row) => row.step === "field-trials.refresh").at(-1),
     refreshRows: ledger.filter((row) => row.step === "field-trials.refresh").length };
 }
 
@@ -176,7 +180,8 @@ async function withheldPass(root: string, consent: string | null, offline: boole
     },
     siteImport: { spawn: () => { throw new Error("no site stage expected"); } } });
   const rows = readFileSync(join(stateDir, "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  return { code, row: rows.find((row) => row.step === "field-trials.site-import") };
+  return { code, row: rows.find((row) => row.step === "field-trials.site-import"),
+    refreshRow: rows.find((row) => row.step === "field-trials.refresh") };
 }
 
 const seenCandidates = (seen: string) => existsSync(seen)
@@ -198,6 +203,9 @@ test("W1-T10832: a field-note candidate keeps exactly one site import PR open", 
     assert.equal(first.row.state, "staged", JSON.stringify(first.row));
     assert.equal(first.row.pr, "opened");
     assert.equal(first.refreshRows, 1, "the pass still records its refresh row");
+    assert.deepEqual(first.refreshRow.siteImport, {
+      state: "staged", releaseId: first.row.releaseId, pr: "opened", prUrl: first.row.prUrl,
+      prNumber: first.row.prNumber, files: first.row.files }, "the refresh row records the opened PR");
     assert.equal(github.state.prs.length, 1);
     const [pr] = github.state.prs;
     assert.deepEqual([pr!.head, pr!.base, pr!.draft, pr!.open], [SITE_IMPORT_BRANCH, "main", false, true], "one READY PR from the import branch");
@@ -222,6 +230,7 @@ test("W1-T10832: a field-note candidate keeps exactly one site import PR open", 
     const second = await dailyPass(root, DAY(5, 7), [1, 2, 3, 4], { fetch: github.fetch, siteUrl: site.url });
     assert.equal(second.row.state, "staged", JSON.stringify(second.row));
     assert.equal(second.row.pr, "updated");
+    assert.equal(second.refreshRow.siteImport.pr, "updated", "the refresh row records the update");
     assert.equal(github.state.prs.length, 1, "exactly one site import PR exists");
     assert.equal(github.calls.filter((call) => call[2] === "POST" && call[3]!.endsWith("/pulls")).length, 1);
     const replaced = seenCandidates(site.seen).at(-1)!;
@@ -232,7 +241,7 @@ test("W1-T10832: a field-note candidate keeps exactly one site import PR open", 
     // The owner merged day two's release: the next candidate starts at its end and opens a fresh PR.
     github.state.prs[0]!.open = false;
     const merged = stageFixture(t, root, "staged", [{ releaseId: String(replaced.releaseId), windowStart: DAY(1), windowEnd: DAY(5),
-      sourceRepos: ["remudero"], lineageDigest: "fixture", publishedAt: String(replaced.publishedAt) }]);
+      sourceRepos: ["remudero"], lineageDigest: "fixture", publishedAt: DAY(5, 7) }]);
     const third = await dailyPass(root, DAY(6, 7), [1, 2, 3, 4, 5], { fetch: github.fetch, siteUrl: merged.url });
     assert.equal(third.row.pr, "opened", JSON.stringify(third.row));
     const next = seenCandidates(merged.seen).at(-1)!;
@@ -250,11 +259,11 @@ test("W1-T10832: core stamps no review fields and nothing merges the site PR", a
     const github = siteRest();
     const pass = await dailyPass(root, DAY(4, 7), [1, 2, 3], { fetch: github.fetch, siteUrl: site.url });
     assert.equal(pass.row.state, "staged", JSON.stringify(pass.row));
-    const [staged] = seenCandidates(site.seen);
-    assert.deepEqual(Object.keys(staged!).sort(), SITE_STAGED_KEYS, "exactly the site's collector-staged shape");
-    for (const field of ["reviewedBy", "reviewedAt"]) assert.equal(Object.hasOwn(staged!, field), false, `core never writes ${field}`);
-    assert.equal(staged!.stagedBy, "field-trials-collector");
-    assert.equal(staged!.stagedAt, DAY(4, 7));
+    const [siteInput] = seenCandidates(site.seen);
+    assert.deepEqual(Object.keys(siteInput!).sort(), EXPORT_KEYS, "core passes the exporter's unstamped note to the site");
+    for (const field of ["reviewedBy", "reviewedAt", "publishedAt", "stagedBy", "stagedAt"]) {
+      assert.equal(Object.hasOwn(siteInput!, field), false, `core never writes ${field} into the importer input`);
+    }
     const candidate = JSON.parse(readFileSync(join(pass.outDir, "field-note-candidate-latest.json"), "utf8"));
     assert.equal(candidate.state, "candidate-unreviewed", "core's own candidate stays unreviewed");
     for (const field of ["reviewedBy", "reviewedAt", "publishedAt", "stagedBy", "stagedAt"]) {
@@ -262,7 +271,13 @@ test("W1-T10832: core stamps no review fields and nothing merges the site PR", a
     }
     // What core pushes is byte-for-byte what the site's stage mode wrote: core never edits the staged note.
     const pushed = github.state.trees[0]!.tree.find((entry) => entry.path === "data/model-field-note.json")!;
-    assert.deepEqual(JSON.parse(pushed.content), staged);
+    const staged = JSON.parse(pushed.content);
+    assert.equal(pushed.content, readFileSync(site.stagedNote, "utf8"), "core sends exactly the site's staged note");
+    assert.equal(staged.publishedAt, DAY(4, 7), "the site stage mode owns the publication stamp");
+    assert.equal(staged.stagedBy, "site-stage-mode");
+    assert.equal(staged.stagedAt, DAY(4, 7));
+    assert.equal(Object.hasOwn(staged, "reviewedBy"), false);
+    assert.equal(Object.hasOwn(staged, "reviewedAt"), false);
     assert.ok(github.calls.length > 0);
     for (const call of github.calls) {
       const endpoint = `${call[1] === "--method" ? call[2] : "GET"} ${call.find((arg) => arg.startsWith("repos/"))}`;
@@ -307,6 +322,9 @@ test("W1-T10832: a refused or unchanged stage opens no PR", async (t) => {
       { state: "refused", by: "site", reason: "model field note refused: cross-release differencing risk; overlaps fn-prior" },
       "the site validator's own reason is in the pass's ledger outcome");
     assert.equal(refused.row.scriptBlob, BLOB);
+    assert.deepEqual(refused.refreshRow.siteImport, { state: "refused", by: "site", releaseId: refused.row.releaseId,
+      reason: "model field note refused: cross-release differencing risk; overlaps fn-prior" },
+    "the field-trials.refresh row carries the site's refusal reason");
     assert.equal(seenCandidates(refusedSite.seen).length, 1, "the site, not core, decided");
     assert.deepEqual(github.calls, [], "a refusal opens no PR and writes nothing to the site");
     assert.match(refused.lines.join("\n"), /site import: refused \(model field note refused/);
@@ -314,6 +332,8 @@ test("W1-T10832: a refused or unchanged stage opens no PR", async (t) => {
     const unchangedSite = stageFixture(t, root, "unchanged");
     const unchanged = await dailyPass(root, DAY(5, 7), [1, 2, 3, 4], { fetch: github.fetch, siteUrl: unchangedSite.url });
     assert.equal(unchanged.row.state, "unchanged", JSON.stringify(unchanged.row));
+    assert.deepEqual(unchanged.refreshRow.siteImport, { state: "unchanged", releaseId: unchanged.row.releaseId },
+      "the field-trials.refresh row records unchanged without a PR");
     assert.deepEqual(github.calls, [], "unchanged is never treated as staged: no branch, no PR");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -354,6 +374,8 @@ test("W1-T10832: every unhealthy site-import arm is a recorded outcome, never a 
       [valid, true, "offline-pass"]] as const) {
       const pass = await withheldPass(root, consent, offline);
       assert.deepEqual([pass.code, pass.row?.state, pass.row?.reason], [0, "withheld", reason], `${reason}: withheld before any site read`);
+      assert.deepEqual(pass.refreshRow?.siteImport, { state: "withheld", reason },
+        `${reason}: the refresh row records the withheld reason`);
     }
     const missing = sync(null, { siteUrl: pathToFileURL(join(root, "no-such-site")).href });
     assert.equal(missing.outcome.state, "site-checkout-failed");

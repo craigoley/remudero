@@ -1407,7 +1407,7 @@ function fieldNoteMode(args: { outDir: string; out: string; nowIso: string; json
 /**
  * W1-T10832: after a good daily refresh, the field-note candidate and its ONE open site import PR. No
  * consent file, an invalid one or an offline pass withholds without touching the site; otherwise
- * {@link syncFieldNoteSiteImport} lets the site's stage mode decide. The outcome is ledgered beside
+ * {@link syncFieldNoteSiteImport} lets the site's stage mode decide. The outcome is included in
  * the pass's field-trials.refresh row; it never changes the refresh's exit code.
  */
 function siteImportPass(args: { outDir: string; nowIso: string; consent: FieldTrialsConsent | string | null; offline: boolean;
@@ -1649,7 +1649,7 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
       scriptBlob: scriptBlob as string, deps: input.siteImport });
     if (values.json !== true) print(`  site import: ${siteImport.state}${"reason" in siteImport ? ` (${siteImport.reason})` : ""}`
       + `${"prUrl" in siteImport ? ` ${siteImport.pr} ${siteImport.prUrl}` : ""}`);
-    recordFieldTrialsRefresh({ ...refreshInput, steps: refreshSteps, snapshotAsOf: snapshot.asOf });
+    recordFieldTrialsRefresh({ ...refreshInput, steps: refreshSteps, snapshotAsOf: snapshot.asOf, siteImport });
     return 0;
   }
   return failure === null && controlled?.state !== "refused" ? 0 : 1;

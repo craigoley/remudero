@@ -9,16 +9,15 @@
  *                 with createPlanPrRest or, when probeExistingPlanPr finds it open, updated in place;
  *   3 unchanged → no PR, nothing written;
  *   1 refused   → the site's reason is recorded, no PR, no workaround.
- * The staged note carries only the collector stamps the site's parser requires (stagedBy, stagedAt and
- * the publishedAt it orders after stagedAt). Core never writes reviewedBy or reviewedAt: the owner's
- * merge is the review. Nothing here arms, enqueues, approves or merges; the branch is outside every
+ * Core passes the exporter's unstamped note to the site's stage mode. The site owns publication and
+ * review fields; the owner's merge is the review. Nothing here arms, enqueues, approves or merges;
+ * the branch is outside every
  * fleet shape and the PR carries no Remudero-Task trailer, so no sweep can credit or arm it.
  * Falsifier: test/routing/a-field-note-candidate-opens-one-reviewed-site-pr.test.ts.
  */
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fixedClock } from "./clock.js";
 import type { PreflightFastDeps } from "./ci-parity.js";
 import { hostGitClone, hostWorktreeGit } from "./worktree-git.js";
 import { ghJson } from "./github-transport.js";
@@ -167,11 +166,9 @@ export function syncFieldNoteSiteImport(input: SiteImportInput,
         : { state: "stage-failed", releaseId, reason: `stage-script-unreadable: ${reason}` };
     }
     if (!script.includes("--daily-stage")) return { state: "site-stage-mode-unavailable", releaseId };
-    // The site's collector-staged shape: the note plus the staging stamps. No review field, ever.
-    const stampedAt = fixedClock(Date.parse(input.nowIso)).iso();
+    // The site stage mode owns every publication and review stamp.
     const candidatePath = join(workDir, "candidate.json"), summaryPath = join(workDir, "summary.md");
-    writeFileSync(candidatePath, JSON.stringify({ ...exported.note, publishedAt: stampedAt,
-      stagedBy: "field-trials-collector", stagedAt: stampedAt }), { mode: 0o600 });
+    writeFileSync(candidatePath, JSON.stringify(exported.note), { mode: 0o600 });
     const stage = spawn(process.execPath, ["--experimental-strip-types", SITE_STAGE_SCRIPT, "--daily-stage", candidatePath, summaryPath], { cwd: siteDir });
     const line = stage.stdout.trim().split("\n").at(-1) ?? "";
     let reported: { outcome?: string; reason?: string } = {};

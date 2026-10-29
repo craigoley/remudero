@@ -3,6 +3,7 @@ import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendLedger } from "./ledger.js";
 import { ghIssueGateway, tryEscalate, type IssueGateway } from "./escalate.js";
+import type { SiteImportOutcome } from "./field-trials-site-import.js";
 
 export const REFRESH_STEPS = ["routing-review", "case-files", "snapshot"] as const;
 export interface RefreshStep {
@@ -19,6 +20,7 @@ export interface FieldTrialsRefresh {
   caseFilesFallback: "previous" | "none";
   alerts: Partial<Record<RefreshStep["name"], string>>;
   alertErrors: string[];
+  siteImport?: SiteImportOutcome;
 }
 
 export function parseRefreshSteps(values: readonly string[], recordOnly: boolean): RefreshStep[] {
@@ -62,11 +64,12 @@ export function refreshSection(steps: readonly RefreshStep[], scriptBlob: string
 /** One collector outcome, including failed snapshots; alert delivery never erases the outcome. */
 export function recordFieldTrialsRefresh(input: { outDir: string; ledgerPath: string; asOf: string; scriptBlob: string;
   steps: readonly RefreshStep[]; snapshotAsOf: string | null; priorSnapshotAsOf?: string | null; issues?: IssueGateway;
-  caseFilesFallback?: "previous" | "none"; repo?: string }): FieldTrialsRefresh {
+  caseFilesFallback?: "previous" | "none"; repo?: string; siteImport?: SiteImportOutcome }): FieldTrialsRefresh {
   const path = join(input.outDir, "field-trials-refresh-v1.json");
   const { prior, error } = previousRefresh(path);
   const lastGood = prior.lastGoodSnapshotAsOf === undefined ? input.priorSnapshotAsOf ?? null : prior.lastGoodSnapshotAsOf;
   const result = refreshSection(input.steps, input.scriptBlob, input.snapshotAsOf, lastGood);
+  if (input.siteImport) result.siteImport = input.siteImport;
   if (error) result.alertErrors.push(error);
   if (result.caseFilesFallback === "previous" && input.caseFilesFallback !== undefined) result.caseFilesFallback = input.caseFilesFallback;
   if (result.state === "ok" && input.snapshotAsOf !== null) result.lastGoodSnapshotAsOf = input.snapshotAsOf;
