@@ -18,9 +18,13 @@ import { ensureWorktreeConfigEnabledAsync } from "./worktree-config.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -4429,9 +4433,14 @@ function createPrivateRegistryWorkerPolicy(input: unknown, selected: string, wor
 }
 function retirePrivateRegistryWorkerPolicy(artifact: PrivateRegistryWorkerPolicyArtifact, cause: unknown): void {
   try {
-    const current = lstatSync(artifact.path);
-    if (!current.isFile() || current.nlink !== 1 || current.dev !== artifact.dev || current.ino !== artifact.ino
-      || readFileSync(artifact.path, "utf8") !== artifact.text) throw new Error("invocation policy identity changed");
+    const fd = openSync(artifact.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    try {
+      const current = fstatSync(fd);
+      if (!current.isFile() || current.nlink !== 1 || current.dev !== artifact.dev || current.ino !== artifact.ino
+        || current.size !== Buffer.byteLength(artifact.text) || readFileSync(fd, "utf8") !== artifact.text) {
+        throw new Error("invocation policy identity changed");
+      }
+    } finally { closeSync(fd); }
     rmSync(artifact.path);
   } catch {
     // An absent/replaced/unreadable policy is not falsely certified as cleaned up. Preserve the original failure.

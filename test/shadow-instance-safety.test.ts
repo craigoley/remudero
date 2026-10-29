@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -662,6 +664,65 @@ function privateClaudeArgs(fixture: ReturnType<typeof runtimeRegistryFixture>, s
       return (async function* () { yield { type: "result", subtype: "success", is_error: false,
         result: "done", session_id: "selected-fixture", total_cost_usd: 0, num_turns: 1 }; })();
     }) as SpawnWorkerArgs["queryFn"] };
+}
+
+for (const provider of ["codex", "claude"] as const) {
+  test(`selected ${provider} artifact cleanup refuses a symlink substituted at access`, async (t) => {
+    const fixture = runtimeRegistryFixture(), original = new Error("contained artifact race");
+    const realLstat = fs.lstatSync, realOpen = fs.openSync;
+    let artifact = "", armed = false, substitutions = 0;
+    const substitute = (target: unknown): void => {
+      if (!armed || target !== artifact) return;
+      armed = false; substitutions++;
+      renameSync(artifact, artifact + ".original");
+      symlinkSync(artifact + ".original", artifact);
+    };
+    // Reproduce the old stat/read window, or substitute immediately before the atomic open.
+    const statMock = t.mock.method(fs, "lstatSync", ((...args: Parameters<typeof fs.lstatSync>) => {
+      const result = realLstat(...args); substitute(args[0]); return result;
+    }) as typeof fs.lstatSync);
+    const openMock = t.mock.method(fs, "openSync", ((...args: Parameters<typeof fs.openSync>) => {
+      substitute(args[0]); return realOpen(...args);
+    }) as typeof fs.openSync);
+    syncBuiltinESMExports();
+    try {
+      let invoke: () => Promise<unknown>;
+      if (provider === "claude") {
+        const args = privateClaudeArgs(fixture, { calls: 0 });
+        args.queryFn = params => {
+          artifact = params.options!.settings as string; armed = true; throw original;
+        };
+        invoke = () => spawnWorker(args);
+      } else {
+        const codexHome = join(fixture.root, "codex-home"), cwd = join(fixture.root, "checkout");
+        mkdirSync(codexHome); mkdirSync(cwd);
+        invoke = () => spawnCodexWorker({ cwd, workerHome: fixture.root, prompt: "contained cleanup probe",
+          settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: ["Read", "Bash"],
+          containment: { spawn: options => {
+            const index = options.args.indexOf("--profile"); assert.ok(index >= 0);
+            artifact = join(codexHome, options.args[index + 1]! + ".config.toml");
+            armed = true; throw original;
+          }, teardown: () => {} },
+        }, { root: fixture.root, claudeBin: "/unused", workerProviders: {
+          enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome,
+        } });
+      }
+      await assert.rejects(runtimeRegistryRunner()(invoke, { envPath: fixture.selected }), error => {
+        assert.ok(error instanceof runtimeRegistry.InstanceRegistryRuntimeError);
+        assert.match(error.message, provider === "codex" ? /worker_profile_cleanup_unknown/ : /worker_policy_cleanup_unknown/);
+        assert.equal(error.cause, original);
+        assert.equal(error.message.includes(fixture.root), false);
+        return true;
+      });
+      assert.equal(substitutions, 1, "the real cleanup must encounter the substituted symlink");
+      if (provider === "codex") {
+        assert.ok(realLstat(artifact).isSymbolicLink(), "unknown cleanup preserves the substituted entry");
+        assert.ok(readFileSync(artifact + ".original", "utf8").includes("default_permissions="));
+      }
+    } finally {
+      statMock.mock.restore(); openMock.mock.restore(); syncBuiltinESMExports(); fixture.cleanup();
+    }
+  });
 }
 
 for (const permissionMode of ["bypassPermissions", "plan", "dontAsk"] as const) {

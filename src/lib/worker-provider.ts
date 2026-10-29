@@ -3242,10 +3242,14 @@ async function withPrivateRegistryCodexProfile<T>(
   catch (error) { operationFailed = true; originalError = error; throw error; }
   finally {
     try {
-      const current = lstatSync(path);
-      if (!current.isFile() || current.nlink !== 1 || current.dev !== identity.dev || current.ino !== identity.ino || readFileSync(path, "utf8") !== text) {
-        throw new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
-      }
+      const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      try {
+        const current = fstatSync(fd);
+        if (!current.isFile() || current.nlink !== 1 || current.dev !== identity.dev || current.ino !== identity.ino
+          || current.size !== Buffer.byteLength(text) || readFileSync(fd, "utf8") !== text) {
+          throw new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
+        }
+      } finally { closeSync(fd); }
       rmSync(path);
     } catch {
       // Missing/replaced/unreadable evidence is not certified cleanup. Retain any original failure as cause.
