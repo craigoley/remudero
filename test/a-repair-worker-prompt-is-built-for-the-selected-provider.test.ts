@@ -5,13 +5,12 @@ import { test, type TestContext } from "node:test";
 import type { Config, WorkerProviderId } from "#src/lib/config.js";
 import type { AlertLaneAlert } from "#src/lib/alert-lane.js";
 import type { MainRepairFixRequest } from "#src/lib/main-health-rung.js";
-import { alertTaskId } from "#src/lib/ops.js";
 import { openWeightAllowancePath, OpenWeightRequestTooLargeError } from "#src/lib/worker-provider.js";
 import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs,
   type WorkerResult, type WorkerSelectionAssignment } from "#src/lib/worker.js";
 import { withWorkspaceCleanup } from "#src/lib/workspace-cleanup-contract.js";
-import { alertFixPrompt, dispatchAlertFixRun, dispatchMainRepairFixRun,
-  mainRepairFixPrompt, type AlertFixDispatchDeps } from "#src/run-task.js";
+import { dispatchRepairPromptFixtures, expectedClaudeRepairPrompts,
+  type RepairPromptDispatchDeps } from "#test/helpers/repair-worker-prompt-fixture.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -69,7 +68,7 @@ function fixture(t: TestContext, selected: "claude" | "codex" | "cash") {
     }) as SpawnWorkerArgs["queryFn"],
   };
   const spawnArgs: SpawnWorkerArgs[] = [];
-  const deps: AlertFixDispatchDeps = {
+  const deps: RepairPromptDispatchDeps = {
     worktreeAdd: (_repo, path) => { mkdirSync(path, { recursive: true }); }, worktreeRemove: () => {},
     renderWorkerSettings: () => args.settingsFile, loadMounts: () => ({}) as never,
     resolveMount: () => ({ model: "haiku", effort: "low", maxTurns: 5, contextBudget: 1000 }),
@@ -88,8 +87,7 @@ function fixture(t: TestContext, selected: "claude" | "codex" | "cash") {
 async function repairLanes(t: TestContext, provider: "claude" | "codex") {
   const f = fixture(t, provider);
   const ledger = join(f.root, "ledger.ndjson");
-  await dispatchMainRepairFixRun("fixture", "repair", f.config, request, ledger, "main-fixture", f.deps);
-  await dispatchAlertFixRun("fixture", "repair", f.config, alert, ledger, "alert-fixture", f.deps);
+  await dispatchRepairPromptFixtures(f.config, request, alert, ledger, f.deps);
   assert.equal(f.captured.length, 2, "both dispatchers reached the selected adapter");
   assert.deepEqual(f.captured.map(c => c.provider), [provider, provider]);
   return f;
@@ -109,8 +107,7 @@ test("W1-T9705: a codex-selected repair worker is prompted that the harness owns
 test("W1-T9705: a claude-selected repair worker keeps the push-and-open prompt", async t => {
   const f = await repairLanes(t, "claude");
   const bodyFile = /THE PR BODY IS ALREADY WRITTEN, by the dispatcher, at: (\S+)/.exec(f.captured[0].prompt)![1];
-  assert.equal(f.captured[0].prompt, withWorkspaceCleanup(mainRepairFixPrompt(request, bodyFile)));
-  assert.equal(f.captured[1].prompt, withWorkspaceCleanup(alertFixPrompt(alert, alertTaskId(alert))));
+  assert.deepEqual(f.captured.map(c => c.prompt), expectedClaudeRepairPrompts(request, alert, bodyFile));
   for (const [i, c] of f.captured.entries()) {
     assert.match(c.prompt, /git push/);
     assert.match(c.prompt, /gh pr create/);
