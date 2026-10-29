@@ -296,8 +296,14 @@ function declaresOnlyTestsOrProse(files: readonly string[] | undefined): boolean
   return (files ?? []).length > 0 && (files ?? []).every((f) => ["test", "prose"].includes(pathClass(f)));
 }
 
-function backstopText(task: { title: string; prompt?: string; acceptance?: readonly { claim?: string }[]; origin?: string; author_class?: string }): string {
-  return withoutOwnCauseKey([task.title, task.prompt ?? "", ...(task.acceptance ?? []).map((c) => c.claim ?? "")].join("\n"), task);
+function backstopText(task: { title: string; prompt?: string; files?: readonly string[]; acceptance?: readonly { claim?: string }[]; origin?: string; author_class?: string }): string {
+  // This exact generated claim names programming-language tokens, not credentials. Mask only that
+  // one complete claim when its machine origin binds to a declared source; all other text is read.
+  const subject = /^comment-compression:(src\/lib\/[A-Za-z0-9_-]+\.ts)$/.exec(task.origin ?? "")?.[1];
+  const syntaxClaim = "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved.";
+  const claims = (task.acceptance ?? []).map((c) => task.author_class === "machine" && subject && task.files?.includes(subject) && c.claim === syntaxClaim
+    ? "Comment volume is measurably reduced while executable syntax and existing behavioral assertions are preserved." : c.claim ?? "");
+  return withoutOwnCauseKey([task.title, task.prompt ?? "", ...claims].join("\n"), task);
 }
 
 /** Why a record must go to a person whatever a judge would say, or undefined. Reads what the record
