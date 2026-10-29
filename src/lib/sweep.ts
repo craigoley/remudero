@@ -4618,7 +4618,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             readMergeFacts: (n: number) => fixRebaseMergeFactsFromRest(owner, repo, n),
             // W1-T2671: same ci-log-only base-gap reader as the run-loop call site above.
             readRedBaseRefreshFacts: (n: number) => redBaseRefreshFactsFromRest(owner, repo, n),
+            reproduceFailingTestsOnMerge: deps.reproduceFailingTestsOnMergeImpl,
+
             updateBranch: (n: number) => ghUpdateBranch(owner, repo, n),
+            updateBranchAtHead: (n: number, head: string) => ghUpdateBranch(owner, repo, n, undefined, undefined, undefined, head),
             // W1-T1044: THIS is the call site the measured incident actually hit — a fix-rung
             // worker spawned from a `dispatchFix` disposition ran 8,970s as a direct child of
             // the daemon, parking `await deps.sweep()` (daemon.ts) for the whole of it. The
@@ -4654,7 +4657,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             branchClaim,
           },
         });
-        keepWorktree = rung?.superseded !== undefined;
+        keepWorktree = rung?.superseded !== undefined || rung?.retainWorktree !== undefined;
       } catch (e) {
         // W1-T2402: a signal-terminated spawn (this fleet's own `killProcessGroup`/forced-deploy/
         // wall-clock-reclaim paths, or a genuine host OOM — indistinguishable by signal alone, see
@@ -4673,7 +4676,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // it does today.
         if (outcome.rethrow) throw e;
       } finally {
-        // W1-T4105: a superseded worker's worktree is kept for diagnosis.
+        // Superseded workers and held census recovery keep their original checkout.
         if (worktreePath && !keepWorktree) {
           try {
             worktreeRemoveForBuild(repoDir, worktreePath);
@@ -12969,15 +12972,41 @@ export interface FixRoundBranchClaim {
   /** `undefined` once held; a string is the stand-down reason. */
   reacquire(): string | undefined;
   last(): InflightLockHandle;
+  /** Positive current lock identity; absent on an older adapter means UNKNOWN. */
+  verify?(): string | undefined;
 }
 
 export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => InflightLockHandle | string): FixRoundBranchClaim {
   let held: InflightLockHandle | undefined = first;
   let last = first;
+  let verificationRequired = false;
+  const verify = () => {
+    verificationRequired = true;
+    if (!held) return "branch claim is not held";
+    try {
+      const fd = fs.openSync(held.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      let raw: string;
+      try {
+        if (!fs.fstatSync(fd).isFile()) return "branch claim identity is unreadable";
+        const bytes = Buffer.alloc(4097);
+        const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
+        if (length > 4096) return "branch claim identity is unreadable";
+        raw = bytes.subarray(0, length).toString("utf8");
+      } finally { fs.closeSync(fd); }
+      const info = parseInflightLockInfo(raw);
+      if (!info || !info.host || !info.startedAt || info.run_id !== held.info.run_id || info.pid !== held.info.pid ||
+          info.host !== held.info.host || info.startedAt !== held.info.startedAt) return "branch claim belongs to another owner";
+      return undefined;
+    } catch {
+      const reason = "branch claim identity is unavailable";
+      return reason;
+    }
+  };
   return {
     id: () => held?.info.run_id,
     release: () => {
-      held?.release();
+      // A refresh that verified ownership must not later unlink an unknown or replacement holder.
+      if (!verificationRequired || verify() === undefined) held?.release();
       held = undefined;
     },
     reacquire: () => {
@@ -12988,6 +13017,7 @@ export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => Inf
       return undefined;
     },
     last: () => last,
+    verify,
   };
 }
 
