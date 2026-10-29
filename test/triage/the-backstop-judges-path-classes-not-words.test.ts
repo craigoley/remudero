@@ -44,6 +44,22 @@ test("W1-T10350: a policy word in a prose-only record goes to the judge, not the
   assert.equal(backstopConcern(rec(["docs/x.md"], "tidy", "tidy")), undefined);
 });
 
+test("a generated comment-compression assertion distinguishes syntax tokens from credentials", () => {
+  const claim = "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved.";
+  const task = { ...rec(["src/lib/drain.ts", "test/dispatch/compress-src-lib-drain-ts.test.ts"], "Compress comments without changing executable code", claim),
+    author_class: "machine", origin: "comment-compression:src/lib/drain.ts" };
+  assert.equal(deterministicEscalation(task), undefined);
+  for (const risky of [
+    { ...task, title: "Read access tokens while compressing comments" },
+    { ...task, prompt: "rotate credentials" },
+    { ...task, acceptance: [...task.acceptance, { claim: "the access tokens are read" }] },
+    { ...task, files: ["src/lib/github-token.ts"] },
+    { ...task, author_class: "operator" },
+    { ...task, origin: "comment-compression:src/lib/other.ts" },
+    { ...task, acceptance: [{ claim: `${claim} Also access tokens.` }] },
+  ]) assert.match(deterministicEscalation(risky) ?? "", /secrets, auth|privileged/, JSON.stringify(risky));
+});
+
 function filed(files: string[], title: string, claim: string): Task {
   const { text, refused } = renderMachineShard({
     taskId: "W1-T9902", title, origin: "ci-friction:W1-T9902", files,
@@ -52,6 +68,20 @@ function filed(files: string[], title: string, claim: string): Task {
   assert.equal(refused, undefined, `the fixture record lints clean: ${refused}`);
   return loadPlanFromYaml(text, "plan/tasks.d/W1-T9902-x.yaml").tasks[0]!;
 }
+
+test("comment compression still obeys a risk judge that requests escalation", async () => {
+  const task = { ...filed(["src/lib/drain.ts", "test/dispatch/compress-src-lib-drain-ts.test.ts"],
+    "Compress comments without changing executable code",
+    "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."),
+    author_class: "machine" as const, origin: "comment-compression:src/lib/drain.ts" };
+  let asked = false;
+  const result = await judgeMachineShard(task, { family: "comment-compression", merged: 0, declined: 0, alpha: 1, beta: 1, mean: 0.5 }, {
+    riskJudge: async () => { asked = true; return { verdict: "high", confidence: 1, reasons: ["independent risk"] }; },
+    policy: { confidenceThreshold: 0.7, verifyHumanReleaseEnabled: true }, clock: fixedClock(Date.parse("2026-10-29T00:00:00Z")),
+  });
+  assert.equal(asked, true);
+  assert.equal(result.kind === "ruled" && result.ruling.action, "escalate");
+});
 
 test("W1-T10350: the judge's input carries the concern for a prose-only record, and the judge is asked", async () => {
   const policy = filed(["docs/investigation.md"], "investigate the bypass of lint-plan gate", "the investigation names the bypass of the lint-plan gate");
