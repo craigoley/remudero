@@ -35237,15 +35237,10 @@ function createInboxBakeoffReplay(
           const prior = refusals.get(candidate.id);
           if (prior) throw new Error(`bake-off candidate ${candidate.id} stopped: ${prior}`);
           const cash = candidate.billing === "cash";
-          // Pin cash trials to one deployment and subscription trials to their concrete Claude model.
-          const capability = Object.entries(mounts.capabilities?.cash ?? {}).find(([, rows]) =>
-            (rows[candidate.effort ?? baseMount.effort] ?? []).includes(candidate.model))?.[0];
-          const modelAlias = candidates && capability
-            ? Object.keys(mounts.capabilities!.claude).find((model) => mounts.capabilities!.claude[model] === capability)
-            : undefined;
+          // The trial pins its deployment separately from the inbox mount's routing capability.
           const args = buildInboxDraftSpawnArgs({
             cwd: worktreePath, settingsFile, prompt, config,
-            mount: cash ? { ...baseMount, provider: "cash", model: candidate.mountModel ?? modelAlias ?? baseMount.model }
+            mount: cash ? { ...baseMount, provider: "cash", model: candidate.mountModel ?? baseMount.model }
               : { ...baseMount, model: candidate.model, provider: "claude" },
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
           });
