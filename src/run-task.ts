@@ -1067,6 +1067,10 @@ import {
 } from "./lib/inbox.js";
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
 import { renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
+import type { DeployedModel, DeploymentBakeoffCandidate } from "./lib/bakeoff-trigger.js";
+import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
+import { runSweepBakeoff } from "./lib/sweep.js";
+import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError } from "./lib/worker-provider.js";
 import { createDraftStatsSession, type DraftStats } from "./lib/draft-routing.js";
 import {
   buildFeedbackDocket,
@@ -21468,6 +21472,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   /** The adoption fixture does not run the independent proof-debt audit. */
   proofDebtInput?: () => MeasurementCadenceReportOpts["proofDebt"];
   successorWatch?: (opts: SuccessorWatchOptions) => Promise<SuccessorWatchReading>;
+  bakeoff?: { rawSpawn?: typeof spawnWorker; repoClone?: (args: string[]) => void | Promise<void> };
   /** Keep the production escalation path injectable so cadence fixtures never create GitHub issues. */
   successorEscalate?: typeof tryEscalate;
   handRunCensus?: MeasurementCadenceReportOpts["handRunCensus"];
@@ -21536,6 +21541,19 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
               successorEscalate: deps.successorEscalate,
             })
           : undefined,
+      });
+      const bakeoffConfig = configFor();
+      const bakeoffMounts = loadMounts(mountsPath(repoRoot));
+      const baseMount = bakeoffMounts.synthesis.inbox_draft;
+      const replay = createInboxBakeoffReplay(bakeoffConfig, INBOX_BAKEOFF_DEFAULT_SAMPLE, deps.bakeoff?.rawSpawn,
+        runInboxBakeoff, deps.bakeoff?.repoClone);
+      await runSweepBakeoff({
+        stateDir: join(root, "state"),
+        deployed: measurementBakeoffDeployments(bakeoffMounts),
+        incumbent: { id: "incumbent", label: `incumbent ${baseMount.model} (${baseMount.effort})`,
+          model: baseMount.model, billing: baseMount.provider === "cash" ? "cash" : "subscription",
+          effort: baseMount.effort, tools: true },
+        replay,
       });
       // W1-T3970: the pure plan reconciler is only useful when this production hook supplies the
       // same shard bytes and credit projection as `rmd plan-reconcile`. Build the map once per
@@ -35124,15 +35142,15 @@ const INBOX_BAKEOFF_DEFAULT_SAMPLE = 8;
 /**
  * `rmd inbox-bakeoff [--sample <n>]` (W1-T4907) — replay a fixed sample of the real open inbox proposals (the first
  * `n` by id, so two runs see the same ones) through each candidate lane on the PRODUCTION draft path, then print the
- * ranking by lint-clean drafts per cash dollar. It spends real cash and subscription capacity, which is why it is a
- * verb the operator runs and never a rung the daemon does. It writes `inbox.bakeoff` rows only; the production
+ * ranking by lint-clean drafts per cash dollar. The deployment cadence shares this replay path.
+ * It writes `inbox.bakeoff` rows only; the production
  * `inbox.drafted` rows, the draft cache and routing are untouched, so the table cannot move the lead by itself.
  */
 export async function inboxBakeoffCommand(
   rest: string[],
   rawSpawn: typeof spawnWorker = spawnWorker,
   replay: typeof runInboxBakeoff = runInboxBakeoff,
-  repoClone: (args: string[]) => void = (args) => { ghExec(args, { stdio: "inherit" }); },
+  repoClone: (args: string[]) => void | Promise<void> = async (args) => { await ghTextAsync(args); },
 ): Promise<number> {
   const badArg = unknownArgError("inbox-bakeoff", rest, ["--sample"], []);
   if (badArg) {
@@ -35145,66 +35163,131 @@ export async function inboxBakeoffCommand(
     console.error(`inbox-bakeoff: --sample must be a positive integer, got ${sampleRaw}\n${USAGE}`);
     return 2;
   }
-  const config = loadConfig();
+  const replayCandidates = createInboxBakeoffReplay(loadConfig(), sample, rawSpawn, replay, repoClone);
+  if (!replayCandidates) {
+    console.error("inbox-bakeoff: no open inbox proposals to replay");
+    return 1;
+  }
+  console.log(renderBakeoff(await replayCandidates()));
+  return 0;
+}
+
+export function measurementBakeoffDeployments(mounts: Mounts): DeployedModel[] {
+  const efforts = ["low", "medium", "high"];
+  return [
+    ...Object.keys(OPENWEIGHT_PRICES).filter((model) => openWeightDeploymentReady(model)).map((model): DeployedModel => ({
+      model, billing: "cash", efforts: efforts.filter((effort) => !CASH_RESPONSES_DEPLOYMENTS[model] || CASH_RESPONSES_DEPLOYMENTS[model]!.includes(effort)),
+      readinessDigest: createHash("sha256").update(JSON.stringify([OPENWEIGHT_PRICES[model], OPENWEIGHT_CONTEXT_WINDOWS[model],
+        OPENWEIGHT_TEMPERATURE[model], CASH_RESPONSES_DEPLOYMENTS[model] ?? null])).digest("hex"),
+    })),
+    ...[...new Set(Object.values(mounts.capabilities?.claudeCandidates ?? {}).flat())].map((model): DeployedModel => ({
+      model, billing: "subscription", efforts,
+      readinessDigest: createHash("sha256").update(JSON.stringify([model, efforts])).digest("hex"),
+    })),
+  ];
+}
+
+function createInboxBakeoffReplay(
+  config: Config,
+  sample: number,
+  rawSpawn: typeof spawnWorker = spawnWorker,
+  replay: typeof runInboxBakeoff = runInboxBakeoff,
+  repoClone: (args: string[]) => void | Promise<void> = async (args) => { await ghTextAsync(args); },
+) {
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals = parseProposalRegistry(readFileIfExists(registryPath))
     .sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true }))
     .slice(0, sample);
-  if (proposals.length === 0) {
-    console.error("inbox-bakeoff: no open inbox proposals to replay");
-    return 1;
-  }
-  const { owner, repo } = resolveOwnerRepo();
-  const runId = `BAKEOFF-${Date.now()}`;
-  const ledgerPath = ledgerPathFor(config);
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "inbox-bakeoff", step, lane: "inbox-bakeoff", ...extra });
-
-  const settingsFile = renderWorkerSettings({
-    templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
-    hooksDir: join(resolveInstallRoot(config), "hooks"),
-    outPath: join(config.root, "tmp", `inbox-bakeoff-settings-${runId}.json`),
-  });
-  validateWorkerSettingsFile(settingsFile);
-  const repoDir = join(config.root, "repos", repo);
-  if (!existsSync(repoDir)) {
-    mkdirSync(dirname(repoDir), { recursive: true });
-    repoClone(["repo", "clone", `${owner}/${repo}`, repoDir]);
-  }
-  const baseMount = loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
-  const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
-  try {
-    // Match the production draft rung: a monolith-only sample silently omits shard dependencies.
-    const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
-    const spawnFor = (candidate: BakeoffCandidate) => async (_proposal: Proposal, prompt: string) => {
-      const cash = candidate.billing === "cash";
-      // A cash candidate is pinned by restricting the cash ladder to its one deployment; the subscription candidate
-      // by giving the spawn a Claude mount. Neither writes a selection assignment — this is a measurement, not a route.
-      const args = buildInboxDraftSpawnArgs({
-        cwd: worktreePath,
-        settingsFile,
-        prompt,
-        config,
-        mount: cash ? { ...baseMount, model: candidate.mountModel ?? baseMount.model }
-          : { ...baseMount, model: "sonnet", provider: "claude" },
-        disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
-      });
-      return await rawSpawn({
-        ...args,
-        ...(candidate.effort === undefined ? {} : { effort: candidate.effort }),
-        onSelectionAssignment: undefined,
-        ...(cash ? { routingTrial: { id: "inbox-bakeoff", arm: "cash", reason: `bake-off candidate ${candidate.id}`, models: [candidate.model] } } : {}),
-        ...(candidate.tools ? {} : { tools: [] }),
-      });
-    };
-    const rows = await replay({ proposals, planText, spawnFor, log, runId });
-    console.log(`inbox-bakeoff: ${proposals.length} proposals (${proposals.map((p) => p.id).join(", ")}) on branch ${branch}\n`);
-    console.log(renderBakeoff(rows));
-    return 0;
-  } finally {
-    worktreeRemove(repoDir, worktreePath);
-    removeRunLock(worktreePath);
-  }
+  if (proposals.length === 0) return undefined;
+  return async (candidates?: readonly DeploymentBakeoffCandidate[]) => {
+    const { owner, repo } = resolveOwnerRepo();
+    const runId = `BAKEOFF-${Date.now()}`;
+    const ledgerPath = ledgerPathFor(config);
+    const log = (step: string, extra: Record<string, unknown> = {}) =>
+      appendLedger(ledgerPath, { run_id: runId, task_id: "inbox-bakeoff", step, lane: "inbox-bakeoff", ...extra });
+    const settingsFile = renderWorkerSettings({
+      templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      outPath: join(config.root, "tmp", `inbox-bakeoff-settings-${runId}.json`),
+    });
+    validateWorkerSettingsFile(settingsFile);
+    const repoDir = join(config.root, "repos", repo);
+    if (!existsSync(repoDir)) {
+      mkdirSync(dirname(repoDir), { recursive: true });
+      await repoClone(["repo", "clone", `${owner}/${repo}`, repoDir]);
+    }
+    const mounts = loadMounts(mountsPath(repoRoot));
+    const baseMount = mounts.synthesis.inbox_draft;
+    const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
+    try {
+      // Match the production draft rung: a monolith-only sample silently omits shard dependencies.
+      const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
+      const refusals = new Map<string, string>();
+      const spawnFor = (candidate: BakeoffCandidate) => {
+        let queue: Promise<unknown> = Promise.resolve();
+        const spawn = async (_proposal: Proposal, prompt: string) => {
+          const prior = refusals.get(candidate.id);
+          if (prior) throw new Error(`bake-off candidate ${candidate.id} stopped: ${prior}`);
+          const cash = candidate.billing === "cash";
+          // Pin cash trials to one deployment and subscription trials to their concrete Claude model.
+          const capability = Object.entries(mounts.capabilities?.cash ?? {}).find(([, rows]) =>
+            (rows[candidate.effort ?? baseMount.effort] ?? []).includes(candidate.model))?.[0];
+          const modelAlias = candidates && capability
+            ? Object.keys(mounts.capabilities!.claude).find((model) => mounts.capabilities!.claude[model] === capability)
+            : undefined;
+          const args = buildInboxDraftSpawnArgs({
+            cwd: worktreePath, settingsFile, prompt, config,
+            mount: cash ? { ...baseMount, provider: "cash", model: candidate.mountModel ?? modelAlias ?? baseMount.model }
+              : { ...baseMount, model: candidate.model, provider: "claude" },
+            disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
+          });
+          let result: WorkerResult;
+          try {
+            result = await rawSpawn({
+              ...args,
+              ...(candidate.effort === undefined ? {} : { effort: candidate.effort }),
+              onSelectionAssignment: undefined,
+              ...(cash && candidate.id !== "incumbent" ? { routingTrial: {
+                id: "inbox-bakeoff", arm: "cash", reason: `bake-off candidate ${candidate.id}`, models: [candidate.model],
+              } } : {}),
+              ...(candidate.tools ? {} : { tools: [] }),
+            });
+          } catch (error) {
+            if (error instanceof OpenWeightAllowanceExhaustedError) refusals.set(candidate.id, error.limit);
+            throw error;
+          }
+          if (result.budgetRefused) {
+            const reason = result.cashAllowanceLimit ?? "fleet";
+            refusals.set(candidate.id, reason);
+            return { ...result, text: "", blocks: [], usageRefusal: { matched: reason } };
+          }
+          return result;
+        };
+        return (proposal: Proposal, prompt: string) => {
+          // Draft batches run concurrently; serialize paid calls so a refusal stops the candidate.
+          const next = queue.then(() => spawn(proposal, prompt), () => spawn(proposal, prompt));
+          queue = next;
+          return next;
+        };
+      };
+      const rows = await replay({ proposals, planText, spawnFor, candidates, log: (step, extra = {}) => {
+        const candidate = candidates?.find((candidate) => candidate.id === extra.candidate);
+        const refusal = refusals.get(String(extra.candidate));
+        log(step, { ...extra, ...(candidate ? { model: candidate.model } : {}),
+          ...(refusal ? { status: "partial", refusal } : {}) });
+      }, runId });
+      for (const row of rows) {
+        const refusal = refusals.get(row.candidate);
+        if (refusal) row.label += ` PARTIAL (${refusal})`;
+      }
+      console.log(`inbox-bakeoff: ${proposals.length} proposals (${proposals.map((p) => p.id).join(", ")}) on branch ${branch}\n`);
+      return rows;
+    } finally {
+      worktreeRemove(repoDir, worktreePath);
+      removeRunLock(worktreePath);
+      rmSync(settingsFile, { force: true });
+    }
+  };
 }
 
 /**

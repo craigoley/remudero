@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 import { HOST_GIT_CONFIG, hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError } from "./worktree-git.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
-import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
+import { runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
@@ -17253,8 +17253,6 @@ const strikeLadderMergeBases = new Map<string, Map<string, string>>();
 
 /** Deployment deltas alone admit this full-sweep rung; elapsed time never makes a model due. */
 export async function runSweepBakeoff(input: DeploymentBakeoffInput): Promise<void> {
-  const state = readBakeoffTrialState(input.stateDir);
-  if (!state.pending && findUntrialedModels(input.deployed, state.trialed).length === 0) return;
   await runDeploymentBakeoff(input);
 }
 
