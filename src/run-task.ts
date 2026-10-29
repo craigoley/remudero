@@ -42713,6 +42713,7 @@ type DetachedFixRuntimePorts = Partial<Pick<FixDispatchChildPorts, "hold" | "log
   github?: GitHub;
   readPr?: (args: string[]) => Promise<unknown>;
   runRetroSubprocess?: typeof runAutomatedRetroSubprocess;
+  reviewCommand?: typeof reviewCommand;
 };
 export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void }, ports: DetachedFixRuntimePorts = {}): Promise<RunResult> {
   if (work.kind === "fix-dispatch") return runFixDispatchWork(work, ctx, ports);
@@ -42729,11 +42730,16 @@ export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: stri
     throw new Error(`the run child hosts no detached work of kind ${work.kind}${work.kind === "review" ? " without a PR number" : ""}`);
   }
   const inputs = work.inputs ?? {};
-  await reviewCommand(String(work.prNumber), typeof inputs.repo === "string" ? ["--repo", inputs.repo] : [], {
+  const code = await (ports.reviewCommand ?? reviewCommand)(String(work.prNumber), typeof inputs.repo === "string" ? ["--repo", inputs.repo] : [], {
     executionMode: "semantic",
     ...(typeof inputs.planOnlyFiling === "boolean" ? { planOnlyFiling: inputs.planOnlyFiling } : {}),
     ...(typeof inputs.reviewAttemptId === "string" ? { reviewAttemptId: inputs.reviewAttemptId } : {}),
   });
+  if (code !== 0) {
+    throw Object.assign(new Error(`detached review of PR #${work.prNumber} exited with code ${code}`), {
+      code: String(code), reasonClass: code === 2 ? "review_withheld" : "review_failed",
+    });
+  }
   return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
 }
 

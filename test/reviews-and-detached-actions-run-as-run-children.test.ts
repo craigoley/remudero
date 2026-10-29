@@ -12,6 +12,8 @@ import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { configPath, type Config } from "#src/lib/config.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import { riskJudgePlanContextDigestFor } from "#src/lib/risk-judge.js";
 import { runDaemon, type DaemonFreshness } from "#src/lib/daemon.js";
 import { defaultInstance } from "#src/lib/host-memory-ledger.js";
@@ -371,32 +373,102 @@ test("W1-T9114: a boot adopts a live review child", async () => {
 });
 
 test("W1-T9114: a terminal review child settles once", async () => {
-  const f = fixture();
+  const argv = [...process.argv];
+  process.argv.push("--repo-root", REPO_ROOT);
   try {
-    f.add("work-review-A-2", review, { state: "done", result: result("A") });
-    const settledRows = () => f.rows.filter((r) => r.step === "daemon.child_work_settled");
-    const boot = async () => {
-      const adopted = f.adopt();
-      await Promise.all(adopted.map((child) => adoptChildWork({ ...child, work: child.work! }, f.log)));
-      return adopted;
-    };
-    const first = await boot();
-    assert.equal(first.length, 1);
-    assert.equal(first[0]!.work?.kind, "review");
-    assert.equal(settledRows().length, 1);
-    assert.deepEqual({ outcome: settledRows()[0]!.outcome, first: settledRows()[0]!.first_settlement, pr: settledRows()[0]!.pr },
-      { outcome: "terminal", first: true, pr: 7 });
-    assert.equal(f.rows.filter((r) => r.step === "run_child.settled").length, 1);
-    assert.deepEqual(childWorkLeftRunning(), {});
-
-    // The same process adopting the same child again claims, posts and acknowledges nothing.
-    await adoptChildWork({ ...first[0]!, work: first[0]!.work! }, f.log);
-    assert.equal(settledRows().length, 1);
-    // A second boot reads the receipt and adopts nothing: no second verdict.
-    assert.deepEqual(await boot(), []);
-    assert.equal(settledRows().length, 1);
-    assert.equal(f.rows.filter((r) => r.step === "run_child.settled").length, 1);
-  } finally { f.cleanup(); }
+    const { runDetachedWork, reviewCommand } = await import("#src/run-task.js");
+    for (const ending of [0, 1, 2, 17, "throw", "unknown"] as const) {
+      const f = fixture();
+      try {
+        const work = { ...review, inputs: { repo: "acme/remudero", planOnlyFiling: true, reviewAttemptId: "attempt-7" } };
+        const child = f.add(`work-review-${ending}`, work);
+        const posts: Array<{ pr: string; head: string; state: string }> = [];
+        let calls = 0;
+        const command: typeof reviewCommand = async (pr, rest, deps) => {
+          calls++;
+          assert.equal(pr, "7");
+          assert.deepEqual(rest, ["--repo", "acme/remudero"]);
+          assert.deepEqual(deps, { executionMode: "semantic", planOnlyFiling: true, reviewAttemptId: "attempt-7" });
+          if (ending === "throw") throw new Error("review transport unreadable");
+          if (ending === "unknown") throw { message: "unknown review failure", reasonClass: "future_failure" };
+          if (ending === 2) {
+            // The real command refuses a closed PR without judging or publishing anything.
+            return reviewCommand(pr, rest, {
+              ...deps, resolveOwnerRepo: () => ({ owner: "acme", repo: "remudero" }),
+              loadConfig: () => ({ root: f.root, claudeBin: "/bin/true" }) as Config,
+              fetchView: () => ({ state: "closed", number: 7, html_url: "https://github.com/acme/remudero/pull/7",
+                head: { ref: "fixture", sha: work.headSha }, merged_at: null }),
+              fetchHead: () => assert.fail("a closed PR must not be reviewed"),
+              postReviewPending: async () => assert.fail("a closed PR must not post pending"),
+              runReview: async () => assert.fail("a closed PR must not post a verdict"),
+            });
+          }
+          if (ending === 0 || ending === 1) posts.push({ pr, head: work.headSha!, state: ending === 0 ? "success" : "failure" });
+          return ending;
+        };
+        const exit = await runChildMain(["--run-dir", child.dir], {
+          env: {}, stderr: () => {}, clock: () => 1234, signals: { on() {}, off() {} },
+          loadRunPath: async () => ({ runDetachedWork: (wire: DetachedWorkSpec, ctx: Parameters<typeof runDetachedWork>[1]) =>
+            runDetachedWork(wire, ctx, { reviewCommand: command }) }),
+        });
+        assert.equal(exit, ending === 0 ? 0 : 1, `${ending}: the child reports the review's outcome`);
+        const status = readStatus(child.dir);
+        assert.ok(status.ok);
+        assert.equal(status.value.state, ending === 0 ? "done" : "failed");
+        assert.equal(status.value.heartbeatAt, 1234);
+        if (ending === 0) {
+          assert.deepEqual(status.value.result, { taskId: "A", runId: `work-review-${ending}`, merged: false, verdict: "no_pr", costUsd: 0 });
+        } else {
+          assert.equal(status.value.result, undefined, "no refusal or failure becomes a successful result");
+          assert.equal(status.value.failure?.class, ending === "unknown" ? "unknown" : "terminal_error");
+          if (typeof ending === "number") {
+            assert.equal(status.value.failure?.code, String(ending));
+            assert.equal(status.value.failure?.reasonClass, ending === 2 ? "review_withheld" : "review_failed");
+            assert.match(status.value.failure!.message, new RegExp(`exited with code ${ending}$`));
+          }
+        }
+        if (ending === 2) assert.match(readFileSync(ledgerPathFor({ root: f.root }), "utf8"), /review.skipped_closed_before_review/);
+        const expectedPosts = ending === 0 || ending === 1
+          ? [{ pr: "7", head: work.headSha!, state: ending === 0 ? "success" : "failure" }] : [];
+        assert.deepEqual(posts, expectedPosts);
+        const settledRows = () => f.rows.filter((r) => r.step === "daemon.child_work_settled");
+        const receipts = () => f.rows.filter((r) => r.step === "run_child.settled");
+        const bootLedger = join(f.root, "boot.ndjson");
+        const log = (step: string, extra?: Record<string, unknown>) => {
+          f.log(step, extra);
+          appendLedger(bootLedger, { run_id: `work-review-${ending}`, task_id: "A", step, ...extra });
+        };
+        const boot = async () => {
+          const settledRunIds = new Set(readLedgerLines(bootLedger).filter(r => r.step === "run_child.settled").map(r => String(r.run_id)));
+          const adopted = adoptRunChildren({ stateRoot: f.stateRoot, instance: "fixture", log, settledRunIds },
+            { pollMs: 5, watch: false, clock: () => 1234 });
+          await Promise.all(adopted.map((handle) => adoptChildWork({ ...handle, work: handle.work! }, log)));
+          return adopted;
+        };
+        const first = await boot();
+        assert.equal(first.length, 1);
+        assert.deepEqual(first[0]!.work, work, "the settlement keeps this PR's original head and run identity");
+        assert.equal(settledRows().length, 1);
+        assert.deepEqual({ outcome: settledRows()[0]!.outcome, first: settledRows()[0]!.first_settlement, pr: settledRows()[0]!.pr },
+          { outcome: ending === 0 ? "terminal" : "lost", first: true, pr: 7 });
+        assert.equal(receipts().length, 1);
+        assert.equal(receipts()[0]!.outcome, ending === 0 ? "fulfilled" : "rejected");
+        if (ending === "unknown") assert.equal(f.rows.filter((r) => r.step === "run_child.lost").length, 1);
+        assert.deepEqual(childWorkLeftRunning(), {});
+        assert.equal(childWorkHoldsReviewKey(work.reviewKey!), false, "a failed child releases the review key for re-admission");
+        assert.deepEqual(reviewAdmissionBound(1), { bound: 1, inFlight: 0 });
+        await adoptChildWork({ ...first[0]!, work: first[0]!.work! }, log);
+        assert.equal(settledRows().length, 1, "same-process re-adoption is idempotent");
+        resetChildWork();
+        assert.deepEqual(await boot(), [], "a fresh registry reads the durable settlement receipt on the second boot");
+        assert.equal(settledRows().length, 1);
+        assert.equal(receipts().length, 1);
+        assert.equal(readLedgerLines(bootLedger).filter(r => r.step === "run_child.settled").length, 1, "the receipt survives in the ledger once");
+        assert.equal(calls, 1, "neither boot executes the review command again");
+        assert.deepEqual(posts, expectedPosts, "neither boot publishes a second verdict");
+      } finally { f.cleanup(); }
+    }
+  } finally { process.argv.splice(0, process.argv.length, ...argv); }
 });
 
 // The drain half is proved for BOTH moved kinds through the production host factory: a live review child and a live fix-dispatch child
