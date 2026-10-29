@@ -1,0 +1,48 @@
+- id: W1-T10942
+  title: Frozen Workstreams comparisons retain eligible archive rows before applying the activity cap
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: console-followup:workstreams-frozen-archive-cutoff-20261028
+  files:
+    - src/lib/workstreams-view.ts
+    - test/workstreams-view.test.ts
+  acceptance:
+    - claim: A cold default archive read retains the frozen comparison population despite more than one cap of ordinary later appends
+      proof: "unit test: W1-T10942: cold archives retain the frozen eligible activity population"
+    - claim: A repeated warm archive comparison answers the same cutoff-qualified population with bounded retained candidates
+      proof: "unit test: W1-T10942: warm archive reuse retains the same frozen population"
+    - claim: Different frozen cutoffs or changed archive identities cannot reuse an incompatible reduced population
+      proof: "unit test: W1-T10942: a changed cutoff or archive identity requalifies its candidates"
+    - claim: The legacy side remains independent and still detects genuine applied-ring loss, late rows and rotation boundaries
+      proof: "unit test: W1-T10942: archive cutoff repair preserves independent real-loss controls"
+  rationale: |-
+    A separately accepted Workstreams investigation identified an archive cap/filter ordering candidate. The maintained createWorkstreamsView was then executed with its real SQLite ticker/store, default archive parser and memo, and a frozen nonempty materialized body. After 391 ordinary later appends and a real rotation, both cold and repeated warm legacy reads returned zero of the 193 eligible frozen activity rows. Both new assertions failed as intended; four unchanged existing tie, late-row, genuine applied-ring-loss and rotation controls passed, with six complete tests and no skips or cancellations. The maintained source blobs were workstreams-view81948b7 and ledger-union027ece7; this reproduction proves that source boundary, not full historical incident causality or a timing exemption. The complete synthetic probe/capture is retained by the Console follow-up owner.
+    At the inspected source, workstreams-view.ts constructs a rotation memo reduced with operatorActivityCandidates, whose top200 reduction occurs in the shared memo before the Workstreams caller filters to ringNewestMs. A discarded eligible row cannot be recovered by filtering the already capped union. Fresh complete25-open-head plus main9acbbe9 subject/source checks found no new equivalent task, Workstreams source diff or related dispatch; the existing own panel-graph Inbox source remains separate. Existing retirement/cutover and other native holds remain intact.
+  prompt: |-
+    Repair only the Workstreams legacy comparison boundary so its eligible frozen population is selected before an archive cap can discard it. Keep the legacy side derived independently from the raw ledger evidence and the projector-applied live prefix; never synthesize legacy from the materialized ring, classify every mismatch as timing, reset counters, change qualification, retire a view or enable cutover. Preserve the existing ranking, deduplication, activity IDs/cursor, unknown/malformed/torn/unreadable evidence and rotation/late-append semantics. Keep SHADOW mode, full-day readiness, source archives, service settings, permissions, provider/billing/budget policy, parent jobs and other owners unchanged.
+    Reuse existing archive parser/memo interfaces within the declared two files. Qualify any cached reduced result by both archive identity and the frozen cutoff; retain at most one active cutoff cache per instance and keep retained row/byte accounting truthful and bounded. A Workstreams-specific adapter may detect a crossing archive from its ordinary top candidates, reuse the supplied parse callback within one hook, and retain a bounded eligible result for repeated frozen comparisons. Do not lift the cap, cache entire archives, alter the generic ledger union or introduce repeated whole-corpus work as an unmeasured optimization. Measure cold and repeated/warm behavior; report unmeasured costs explicitly. Any needed wider scope must be reconciled before editing it.
+    Port the preserved synthetic maintained-module probe into the existing physical Workstreams suite using package aliases, its injected clock and isolated scratch. Project a known near-cap population, freeze data and applied-prefix identity, append more than one activity cap with timestamps strictly after frozen newest but before the comparison clock, rotate the actual inode and create a fresh live file without projecting later rows. Exercise cold and warm default paths, positive pre-cutoff IDs and exact comparison equality; cover changed cutoff, archive replacement and bounded reuse. Keep the four existing same-millisecond tie, late-row, genuine applied-ring-loss and rotated-live controls unchanged and positive. Removing only the ordering/cache correction must make the real cold/warm cases fail and exact restoration must pass; the genuine-loss control must keep detecting a real discrepancy. Close stores/tickers before deleting private fixtures.
+    Commit before measured coverage; positively instrument changed source, use the same-tree diff, and reject a targeted zero inside that source own SF block. Run physical whole-file tests, actual literal canonical proofs, joined census suites, full types, native author/resource admission, hosted checks, genuine governed review and protected merge. Preserve every failure/incomplete receipt and separate source tests, qualification, publication, merge, affected adoption and natural readiness. This is separate from W1-T10917/PR15224 and does not release its full fresh-day timer or any independent hold. No new source writer or service action is granted by filing.
+  context:
+    - claim: The maintained archive memo applies its configured reducer before the Workstreams legacy caller applies the frozen timestamp filter
+      src: https://github.com/craigoley/remudero/blob/9acbbe93f14c079ef9195df9d23371e5ebd94532/src/lib/workstreams-view.ts#L486
+    - claim: The existing memo returns reduced rows on both cold parse and matching-identity reuse, so the consumer must qualify its cutoff without weakening other readers
+      src: https://github.com/craigoley/remudero/blob/9acbbe93f14c079ef9195df9d23371e5ebd94532/src/lib/ledger-union.ts#L1547
+  note: Native operator allocator reserved this exact ID once for codex/file-workstreams-frozen-cutoff-20261028. Prepared unjudged two-existing-file scope only; verify human remains until a genuine normal native ruling or exact operator release. No new model call, source edit, commit, publication, service/deployment action or broader CI/Azure-memory takeover is included in this draft.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Direct operator Actual human asynchronous reply call_ed5ddf4efb894dc0baa30ff7b68c7358 item0: Approve this exact Workstreams scope. Exact two-existing-file Workstreams archive-cutoff repair, retaining independent legacy comparison, bounded caching, all history, SHADOW/full-day readiness, permissions and every normal test/review/CI gate. This is operator approval, not a model verdict."
+      - "The native deterministic filing backstop matched permissions in preservation text before any model call. No model call or retry is authorized or performed by this release. No source implementation, deployment, service/provider/budget/permissions/CI/memory-policy change or weakened real-loss guard is included in the plan filing."
+    judged_at: "2026-10-28T20:53:20.528Z"
+    pin: "421e742fac765993cb1dd92e95e4d7a46294743cf39d726a31bdedc361fd0f08"
+    operator_release_pin: "ec07281021b07ecf02ce086378d1d4e75269cac7ba0064891c17b96b829d5b4f"

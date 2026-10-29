@@ -16,7 +16,7 @@ import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { join, relative } from "node:path";
 import { step, type Steps } from "./git-push.js";
 import { singlePrRestArgs } from "./open-prs-rest.js";
-import { mergePlanBlobsQuarantiningDuplicates, readBlobsAtRef } from "./plan.js";
+import { mergePlanBlobsQuarantiningDuplicates, parseBlobBatch } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 
 /** BACKSTOP: plan_pr_behind refreshes one PR may take before it is escalated instead. The safe
@@ -368,7 +368,7 @@ function* mergedTreePlanSteps(
     if (batch.status !== 0) return gitStepUnreadable("git cat-file --batch", batch);
     let texts: string[];
     try {
-      texts = readBlobsAtRef(() => batch.stdout, tree, paths);
+      texts = parseBlobBatch(batch.stdout, tree, paths);
     } catch (e) {
       // exit 0 with too little stdout: the third case, told apart from a kill and a git failure.
       const message = String((e as Error)?.message ?? e);
