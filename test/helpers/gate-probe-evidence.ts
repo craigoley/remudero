@@ -14,5 +14,5 @@ export function assertGateProbeRan(label: string, result: ProbeResult): void {
   const signal = result.signal === null ? "none" : NATIVE_SIGNALS.has(result.signal) ? result.signal : "unclassified";
   const status = result.status === null ? "null" : String(result.status);
   assert.ok(result.status === 0 || result.status === 1,
-    `${label} ran (status ${status}; signal ${signal}; code ${code})`);
+    `${label} ran (status ${status})`);
 }
