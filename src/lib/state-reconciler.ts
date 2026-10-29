@@ -110,7 +110,10 @@ export async function mainWorkflowStateRows(
 }
 
 export interface DeployStateReader {
-  deploy: Pick<DeployDeps, "newestBakedSha" | "imagePublished" | "imageBuildInFlight" | "dispatchImageBuild" | "imageBakedCommitsBehind" | "imageRecycleManual">;
+  deploy: Pick<DeployDeps, "newestBakedSha" | "imagePublished" | "imageBuildInFlight" | "imageBakedCommitsBehind" | "imageRecycleManual"> & {
+    /** W1-T9552: an async dispatch is awaited by the repair that calls it. */
+    dispatchImageBuild?: () => void | Promise<void>;
+  };
   requestDeploy(): void;
   deployRequested(): boolean;
   failedAt(): number | undefined;
@@ -131,7 +134,7 @@ export function deployStateRows(
       inFlight: () => reader.deploy.imageBuildInFlight?.(),
       repair: () => {
         if (!reader.deploy.dispatchImageBuild) throw new Error("image build dispatch unavailable");
-        reader.deploy.dispatchImageBuild();
+        return reader.deploy.dispatchImageBuild();
       },
     }, {
       pipeline: "deploy", target: baked, desired: `healthy deployed image containing ${baked}`,
