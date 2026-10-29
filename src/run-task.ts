@@ -136,7 +136,7 @@ import {
 } from "./cli/commands/run-task-verb.js";
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
-import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, resolveVerbPlanRoot, type VerbPlanRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
+import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
 export { readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync };
 import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
@@ -2898,6 +2898,7 @@ import { automaticBranchReapStateFileName, branchCitationPattern, branchNamesFin
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
+import { resolveVerbPlanRoot, type VerbPlanRoot } from "./lib/repo-location.js";
 import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
@@ -35579,9 +35580,10 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   const dryRun = rest.includes("--dry-run");
 
   const config = deps.config ?? loadConfig();
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+  const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
-  const { owner, repo } = resolveOwnerRepo();
+  const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
 
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -36958,20 +36960,22 @@ export function readLedgerRawLines(path: string): readonly string[] {
 }
 
 export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps): Promise<number> {
-  const { owner, repo } = deps ? { owner: "", repo: "" } : resolveOwnerRepo();
+  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+  const { owner, repo } = deps ? { owner: "", repo: "" } : instancePlan.target ?? resolveOwnerRepo();
   const causalScope = deps?.inboxSourceIdentity ?? deps?.inboxAuditScope ?? reframeCausalScope(config, true);
   const actions = buildInboxVerbActions(deps ?? {
-    root: repoRoot, inboxRoot: config.root, planPath: join(repoRoot, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
+    root: instancePlan.root, inboxRoot: config.root, planPath: join(instancePlan.root, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
     github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
-    ratify: ratifyCliGateway(repoRoot, join(config.root, "logs")),
+    ratify: ratifyCliGateway(instancePlan.root, join(config.root, "logs")),
   }, causalScope);
   return inboxVerbCommand(name, rest, actions);
 }
 
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+  const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
-  const { owner, repo } = resolveOwnerRepo();
+  const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
   const summaries = new Map<string, string>();
   return proposalVerdictCommand(
     kind,
@@ -37082,7 +37086,8 @@ export async function approveCommand(
     console.error("rmd approve: review and file this improvement's exact completed draft through its saved conversation");
     return 1;
   }
-  const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
+  const proposalPlan = instanceVerbPlanRoot(() => join((deps.config ?? loadConfig()).root, "state"));
+  const planPath = deps.planPath ?? join(proposalPlan.root, "plan", "tasks.yaml");
   // W1-T3216: a TASK id takes the release path. Taken BEFORE the proposal registry is consulted,
   // so the proposal path below is byte-for-byte unchanged, and keyed on SHAPE so an unknown but
   // well-formed task id is refused as a task rather than as a missing proposal.
@@ -37093,6 +37098,10 @@ export async function approveCommand(
     const config = deps.config ?? loadConfig();
     // W1-T10925: a consumer task's id is found in the instance's target plan, not the engine's.
     const located = deps.planPath === undefined ? verbTaskPlan(proposalId, () => join(config.root, "state")) : undefined;
+    if (located && !located.ok) {
+      console.error(`rmd approve: unknown task '${proposalId}' (${located.error})`);
+      return 2;
+    }
     const outcome = approveParkedTask(proposalId, {
       plan: located?.ok ? located.plan : loadPlan(planPath),
       ledgerPath: ledgerPathFor(config),
@@ -37143,7 +37152,7 @@ export async function approveCommand(
   const inboxRoot = deps.inboxRoot ?? config.root;
   const ledgerPath = deps.inboxLedgerPath ?? ledgerPathFor(config);
   const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
-  const { owner, repo } = resolveOwnerRepo();
+  const { owner, repo } = proposalPlan.target ?? resolveOwnerRepo();
   const registryIntent = selectedRegistryIntentForConfig(config);
 
   const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config, inboxRoot);
@@ -37747,10 +37756,11 @@ async function approveBatchCommand(
   const proposalIds = rest;
   const config = deps.config ?? loadConfig();
   const registryIntent = selectedRegistryIntentForConfig(config);
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+  const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
-  const { owner, repo } = resolveOwnerRepo();
+  const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
 
   const { found, unknown } = loadProposalsForRatify(proposalIds, plan, ledgerPath, owner, repo, config);
   if (found.some(row => row.proposal.improvement !== undefined)) {
@@ -40426,12 +40436,17 @@ function verbTaskPlan(taskId: string, stateDir: () => string | undefined = insta
   return located.ok ? { ...located, plan: loaded!, planPath: join(located.root, "plan", "tasks.yaml") } : located;
 }
 
-/** W1-T10925: case-file/trace take a root, not a plan — the resolved one for a task id, else cwd's, so a
- *  feedback id or a batch flag still reaches the verb's own handling. */
-function verbPlanRootOrCwd(id: string | undefined): string {
-  if (id === undefined || id.startsWith("-")) return repoRoot;
+/** Proposal ids name state records rather than plan tasks; their instance still has one plan. */
+function instanceVerbPlanRoot(stateDir: () => string | undefined = instanceStateDirIfConfigured):
+  Extract<VerbPlanRoot, { ok: true }> {
+  return resolveVerbPlanRoot(undefined, { cwdRoot: repoRoot, stateDir }) as Extract<VerbPlanRoot, { ok: true }>;
+}
+
+function reportTaskPlan(id: string): { ok: true; root: string; owner?: string } | { ok: false; error: string } {
   const located = verbTaskPlan(id);
-  return located.ok ? located.root : repoRoot;
+  return located.ok
+    ? { ok: true, root: located.root, owner: located.target?.owner }
+    : { ok: false, error: located.error };
 }
 
 /** `before`/`after` line for `rmd correct` — the operator-facing flip. */
@@ -42308,7 +42323,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["doctor", async (rest) => await doctorCommand(rest, { repoRoot })],
   ["status", async (rest) => await statusCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
   ["mcp", async (rest) => await operatorMcpCommand(rest, loadConfig(), repoRoot, (deps) => createOperatorMcpServer(deps))],
-  ["case-file", async (rest) => await caseFileCommand(rest, { usage: USAGE, repoRoot: verbPlanRootOrCwd(rest[0]), resolveOwnerRepo })],
+  ["case-file", async (rest) => await caseFileCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo, resolveTaskPlan: reportTaskPlan })],
   ["sweep", async (rest) => await sweepCommand(rest)],
   [
     "fix",
@@ -42368,9 +42383,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   [
     "trace",
     async (rest) => {
-      // W1-T10925: shadows the module `repoRoot` with the plan root the id resolves in (cwd's when it misses).
-      const repoRoot = verbPlanRootOrCwd(rest[0]);
-      return await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot, resolveOwnerRepo });
+      return await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot,
+        resolveOwnerRepo, resolveTaskPlan: reportTaskPlan });
     },
   ],
   ["peek", async (rest) => await peekCommand(rest)],

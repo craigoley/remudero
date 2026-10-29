@@ -9,7 +9,7 @@ import {
   resolveVerbPlanRoot,
   writeDaemonTargetRecord,
   type DaemonTargetRecord,
-} from "#src/cli/commands/daemon.js";
+} from "#src/lib/repo-location.js";
 import { LIVE_WRITE_OVERRIDE_ENV } from "#src/lib/live-write-guard.js";
 import { SELF_SYNC_GUARD_ENV } from "#src/lib/self-sync.js";
 import { readLedgerLines } from "#src/lib/status.js";
