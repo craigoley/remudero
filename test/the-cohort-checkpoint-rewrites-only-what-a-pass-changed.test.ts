@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync,
-  truncateSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+  renameSync, truncateSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -231,6 +231,109 @@ test("cohort segments discard an uncommitted append and retain baseline prefixes
     assert.equal((await runBenchmarkCohortPass(root, { nowIso })).state, "complete");
     assert.equal(existsSync(path), false, "retired segments are removed after baseline reconciliation");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("cohort tail writes stay on the inspected segment when its path is replaced", async () => {
+  const root = fixture(5);
+  const fs = createRequire(import.meta.url)("node:fs");
+  const { openSync: open, fstatSync: fstat, statSync: stat } = fs;
+  try {
+    await runBenchmarkCohortPass(root, { maxSources: 4, nowIso });
+    const source = indexAt(root).sources.find((s: Reference) => s.form === "live");
+    const path = join(root, source.segment);
+    const moved = join(root, "opened-segment.ndjson");
+    const prefix = readFileSync(path);
+    const replacement = "replacement must stay untouched\n";
+    appendFileSync(path, "uncommitted tail");
+    appendFileSync(join(root, "ledger.ndjson"), assignment("live-next"));
+    let appendFd: number | undefined;
+    let replaced = false;
+    const replace = () => {
+      renameSync(path, moved);
+      writeFileSync(path, replacement);
+      replaced = true;
+    };
+    fs.openSync = (file: string, flags: string, ...rest: unknown[]) => {
+      const fd = open(file, flags, ...rest);
+      if (file === path && flags === "r+") appendFd = fd;
+      return fd;
+    };
+    fs.fstatSync = (fd: number, ...rest: unknown[]) => {
+      const result = fstat(fd, ...rest);
+      if (!replaced && fd === appendFd) replace();
+      return result;
+    };
+    fs.statSync = (file: string, ...rest: unknown[]) => {
+      const result = stat(file, ...rest);
+      if (!replaced && file === path) replace();
+      return result;
+    };
+    syncBuiltinESMExports();
+    const appended = await runBenchmarkCohortPass(root, { nowIso });
+    assert.equal(replaced, true, "positive control: the segment path changed after inspection");
+    assert.equal(appended.state, "complete");
+    assert.equal(readFileSync(path, "utf8"), replacement, "the replacement was never truncated or appended to");
+    const committed = readFileSync(moved);
+    assert.deepEqual(committed.subarray(0, prefix.length), prefix);
+    assert.equal(committed.includes("uncommitted tail"), false);
+    assert.equal(JSON.parse(committed.toString().trimEnd().split("\n").at(-1)!).row.worker_assignment.id, "live-next");
+    fs.openSync = open; fs.fstatSync = fstat; fs.statSync = stat;
+    syncBuiltinESMExports();
+    const recovered = await runBenchmarkCohortPass(root, { nowIso });
+    assert.equal(recovered.scannedSources, 1, "the replaced segment is recovered from its ledger source");
+    assert.deepEqual(semantic(recovered.snapshot), semantic(appended.snapshot));
+  } finally {
+    fs.openSync = open; fs.fstatSync = fstat; fs.statSync = stat;
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cohort append handles short writes and refuses lost prefixes or stalled writes", async () => {
+  const fs = createRequire(import.meta.url)("node:fs");
+  const { openSync: open, ftruncateSync: truncate, writeSync: write } = fs;
+  for (const failure of ["missing", "torn", "stalled", "short"] as const) {
+    const root = fixture(5);
+    try {
+      await runBenchmarkCohortPass(root, { maxSources: 4, nowIso });
+      const source = indexAt(root).sources.find((s: Reference) => s.form === "live");
+      const path = join(root, source.segment);
+      const saved = readFileSync(join(root, INDEX), "utf8");
+      appendFileSync(join(root, "ledger.ndjson"), assignment("live-next"));
+      let appendFd: number | undefined;
+      fs.openSync = (file: string, flags: string, ...rest: unknown[]) => {
+        if (file === path && flags === "r+") {
+          if (failure === "missing") unlinkSync(path);
+          appendFd = open(file, flags, ...rest);
+          if (failure === "torn") truncate(appendFd, source.segmentBytes - 1);
+          return appendFd;
+        }
+        return open(file, flags, ...rest);
+      };
+      fs.writeSync = (fd: number, buffer: Buffer, offset: number, length: number, position: number) =>
+        fd === appendFd ? failure === "stalled" ? 0 : write(fd, buffer, offset, Math.min(length, 7), position)
+          : write(fd, buffer, offset, length, position);
+      syncBuiltinESMExports();
+      if (failure === "short") {
+        const appended = await runBenchmarkCohortPass(root, { nowIso });
+        assert.equal(appended.snapshot.sourceRows.assignments, 12);
+        assert.equal(appended.state, "complete");
+      } else {
+        await assert.rejects(runBenchmarkCohortPass(root, { nowIso }),
+          failure === "missing" ? /ENOENT/ : failure === "torn" ? /checkpoint-segment-torn/ : /checkpoint-segment-write-stalled/);
+        assert.equal(readFileSync(join(root, INDEX), "utf8"), saved, "a failed append never publishes an index");
+      }
+      fs.openSync = open; fs.writeSync = write;
+      syncBuiltinESMExports();
+      const recovered = await runBenchmarkCohortPass(root, { nowIso });
+      assert.equal(recovered.state, "complete");
+      assert.equal(recovered.snapshot.sourceRows.assignments, 12);
+    } finally {
+      fs.openSync = open; fs.writeSync = write;
+      syncBuiltinESMExports();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 });
 
 test("cohort migration keeps v1 recoverable when index publication fails", async () => {

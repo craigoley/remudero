@@ -1,5 +1,5 @@
 import { createHash, randomUUID, type Hash } from "node:crypto";
-import { appendFileSync, closeSync, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, fstatSync, ftruncateSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMainThread, parentPort, SHARE_ENV, workerData, type Worker } from "node:worker_threads";
@@ -300,8 +300,18 @@ function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: Checkpoin
     const hash = prior?.hash.copy() ?? createHash("sha256");
     if (prior && delta.length > 0) {
       // An append interrupted before index publication is outside the committed prefix.
-      if (statSync(path).size > prior.reference.segmentBytes) truncateSync(path, prior.reference.segmentBytes);
-      appendFileSync(path, delta);
+      const fd = openSync(path, "r+");
+      try {
+        if (fstatSync(fd).size < prior.reference.segmentBytes) throw new Error("checkpoint-segment-torn");
+        ftruncateSync(fd, prior.reference.segmentBytes);
+        const bytes = Buffer.from(delta);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const written = writeSync(fd, bytes, offset, bytes.length - offset, prior.reference.segmentBytes + offset);
+          if (written === 0) throw new Error("checkpoint-segment-write-stalled");
+          offset += written;
+        }
+      } finally { closeSync(fd); }
     } else if (!prior) writeFileSync(path, delta, { flag: "wx" });
     io.checkpointWrittenBytes += Buffer.byteLength(delta);
     hash.update(delta);
