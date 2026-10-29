@@ -63,6 +63,9 @@ export type ProductBuildCode = ProductStoreCode
 export type ProductBuildResult =
   | { ok: true; value: { receipt: ProductBuildReceipt; replayed: boolean }; code?: never }
   | { ok: false; code: ProductBuildCode; value?: never };
+type ProductBuildExecutionResult =
+  | { ok: true; value: { receipt: ProductBuildReceipt; replayed: boolean; execution?: ProductBuildExecution }; code?: never }
+  | { ok: false; code: ProductBuildCode; value?: never };
 
 export interface BuildRepository { id: number; owner: string; name: string; defaultBranch: string }
 export interface TargetInspection { enrolled: boolean | undefined; head: string | undefined; readmeOnly: boolean | undefined }
@@ -101,6 +104,8 @@ export interface ExecutionQuery { taskId: string; origin: string; repo: string; 
  * terminal row; `silent`: it wrote none, and nothing inside the bound either. `unknown`: the ledger could not be read.
  */
 export type ExecutionRead = { state: "unknown" | "none" | "refused" | "dispatched" } | { state: "running" | "ended" | "silent"; runId: string };
+/** Internal handoff of the replay's own read; the case must not resolve a second daemon root. */
+export interface ProductBuildExecution { read: ExecutionRead; stateRoot: string; origin: string; requestedAt: string }
 
 /** The daemon's kick steps (daemon.ts runDaemon) and a task run's own steps (run-task-verb.ts) this reader trusts. */
 const KICK_DISPATCHED_STEP = "console.kick_dispatched";
@@ -118,7 +123,7 @@ const RUN_TERMINAL_STEPS: ReadonlySet<string> = new Set(["verdict", "run.error"]
 export function readTargetExecution(stateDir: string, query: ExecutionQuery, fsDeps: LedgerGrepFsDeps = realLedgerFs): ExecutionRead {
   const read = readLedgerUnionRecordsSync(stateDir, { sinceTs: query.requestedAt, refuseIncomplete: true, keep: (line) => line.includes(query.taskId) }, fsDeps);
   // An unlisted or unreadable file, or no ledger at all, is a daemon this process cannot see: never "nothing ran".
-  if (!read.ok || (!read.liveFileRead && read.archiveCount === 0)) return { state: "unknown" };
+  if (!read.ok || read.torn > 0 || (!read.liveFileRead && read.archiveCount === 0)) return { state: "unknown" };
   const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
   const rows = read.rows.filter((row) => Number.isFinite(at(row))).sort((a, b) => at(a) - at(b));
   const kick = rows.find((row) => (row.step === KICK_DISPATCHED_STEP || row.step === KICK_REFUSED_STEP) && row.task === query.taskId &&
@@ -342,13 +347,19 @@ export class ProductBuildService {
   }
 
   async execute(actor: string, command: unknown): Promise<ProductBuildResult> {
+    const result = await this.executeForCase(actor, command);
+    return result.ok ? { ok: true, value: { receipt: result.value.receipt, replayed: result.value.replayed } } : result;
+  }
+
+  /** Trusted case composition only; filesystem locations never enter a public build reply. */
+  async executeForCase(actor: string, command: unknown): Promise<ProductBuildExecutionResult> {
     // One in-process chain: two identical requests cannot both pass the replay check and double-record.
     const run = this.chain.then(() => this.run(actor, command));
     this.chain = run.then(() => undefined, () => undefined /* the caller awaits `run`; the tail only orders the chain */);
     return run;
   }
 
-  private async run(actor: string, command: unknown): Promise<ProductBuildResult> {
+  private async run(actor: string, command: unknown): Promise<ProductBuildExecutionResult> {
     try {
       if (typeof actor !== "string" || !actor.trim() || actor.length > 512) throw new Fault("invalid_identity");
       const parsed = productBuildCommandSchema.safeParse(command);
@@ -386,7 +397,7 @@ export class ProductBuildService {
     return read.value;
   }
 
-  private async start(actor: string, input: ProductBuildCommand): Promise<{ receipt: ProductBuildReceipt; replayed: boolean }> {
+  private async start(actor: string, input: ProductBuildCommand): Promise<{ receipt: ProductBuildReceipt; replayed: boolean; execution?: ProductBuildExecution }> {
     const payloadDigest = digest(JSON.stringify(input));
     const operationId = `pbuild_${payloadDigest}`;
     const requestKey = `pbuild_${digest(input.requestId).slice(0, 48)}`;
@@ -485,6 +496,7 @@ export class ProductBuildService {
     const furthest = evidence.some((item) => item.outcome === "running") ? "running" : evidence.some((item) => item.outcome === "admitted") ? "admitted" : "queued";
     return {
       replayed: prior !== undefined,
+      ...(daemon.state === "found" ? { execution: { read: execution, stateRoot: daemon.root, origin, requestedAt: queuedEvidence.observedAt } } : {}),
       receipt: { operationId, productId: product.id, taskId: input.taskId, planEvidenceId: input.planEvidenceId, outcome: furthest,
         repository: { id: subject.id, owner: subject.owner, name: subject.name },
         objectiveRevision: product.objectiveRevision, payloadDigest, queuedAt: queuedEvidence.observedAt, evidence },

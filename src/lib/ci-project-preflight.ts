@@ -4,9 +4,10 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { resolveOwnerRepoAt } from "./owner-repo.js";
 import { commitlintStep, defaultPreflightSpawn, emitterChecksStep, type PreflightDeps } from "./commit-message.js";
-import { boundedSuiteLeaf, LOCAL_FULL_SUITE_TIMEOUT_MS } from "./ci-parity.js";
+import { boundedSuiteLeaf, LOCAL_FULL_SUITE_TIMEOUT_MS, type CiParityStepResult } from "./ci-parity.js";
 import { acquireTestSlot, lowPriorityCommand, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 import { TYPECHECK_COLD_PEAK_BYTES } from "./typecheck-buildinfo.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 interface QualityCommand { name: string; file: string; args: string[] }
@@ -94,7 +95,17 @@ export function resolveProjectPreflight(root: string, options: ProjectPreflightO
 
 export interface ProjectPreflightResult {
   ok: boolean;
-  steps: { name: string; ok: boolean; detail: string }[];
+  steps: CiParityStepResult[];
+}
+
+/** A failed observation stays absent and does not change the existing preflight's verdict. */
+function qualificationSource(root: string): { head: string; clean: boolean; error?: string } {
+  try {
+    const head = hostWorktreeGit(root, ["rev-parse", "HEAD"]).trim();
+    const status = hostWorktreeGit(root, ["status", "--porcelain", "--untracked-files=normal"]).trim();
+    if (!/^[a-f0-9]{40}$/.test(head)) return { head: "unknown", clean: false, error: "source head unreadable" };
+    return { head, clean: status === "" };
+  } catch (error) { return { head: "unknown", clean: false, error: String(error).slice(0, 500) }; }
 }
 
 /** Shared commit policy runs against the target range using the installed harness's pinned tools. */
@@ -105,6 +116,7 @@ export function runProjectPreflight(
   const unavailable = (reason: string): ProjectPreflightResult => ({ ok: false, steps: [{ name: "project:unavailable", ok: false, detail: reason }] });
   if (project.kind !== "consumer") return unavailable(project.kind === "unavailable" ? project.reason : "Core requires its existing preflight engine");
   const spawn = deps.spawn ?? defaultPreflightSpawn;
+  const sourceBefore = spawn === defaultPreflightSpawn ? qualificationSource(project.root) : undefined;
   const steps: ProjectPreflightResult["steps"] = [
     commitlintStep(project.root, deps.range, (file, args, opts) => spawn(file, args.map(arg =>
       arg === join(project.root, "node_modules/.bin/commitlint") ? join(project.harnessRoot, "node_modules/.bin/commitlint") :
@@ -125,6 +137,8 @@ export function runProjectPreflight(
         const launch = lowPriorityCommand(command.file, command.args);
         const result = boundedSuiteLeaf(spawn, name, launch.file, launch.args,
           { cwd: project.root, env: slot.childEnvironment }, LOCAL_FULL_SUITE_TIMEOUT_MS);
+        if (result.qualification) result.qualification = { ...result.qualification, command: { file: command.file, args: [...command.args] },
+          profile: project.repository, sourceBefore, sourceAfter: qualificationSource(project.root) };
         steps.push({ name, ...result });
       } catch (error) {
         steps.push({ name, ok: false, detail: `${name}: unavailable — ${String(error)}` });

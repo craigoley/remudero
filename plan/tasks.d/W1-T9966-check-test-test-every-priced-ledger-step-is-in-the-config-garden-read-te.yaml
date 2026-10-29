@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.22
+  # refusal-amendment (W1-T9966, run DAEMON-1793261281327@77de72b0f78bdab3d3913573e517d066a23c6619, 2026-10-29T11:11:23.344Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: The recorded census failures do not establish a flaky test; the requested proof cannot show that a deterministic census failure is prevented.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
