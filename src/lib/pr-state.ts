@@ -87,7 +87,7 @@ function fold(answer: Answer, row: Row, ms: number): void {
   if (row.step === "pr.terminal" && (row.state === "merged" || row.state === "closed")) {
     put(answer, "terminal_state", row.state, row);
   } else if (row.step === "sweep.disposed") {
-    put(answer, "terminal_state", "open", row);
+    put(answer, "terminal_state", row.disposition === "stale" && row.acted === true ? "closed" : "open", row);
   }
   if (row.arm_outcome === "direct-merged" || row.step === "automerge.armed" && row.outcome === "direct-merged") {
     put(answer, "terminal_state", "merged", row);

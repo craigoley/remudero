@@ -67,6 +67,21 @@ describe("test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts", (
     assert.match(c.out[0], /terminal_state: "open"/);
     assert.deepEqual(snapshot(fixture.dir), before);
     assert.deepEqual(readLedgerUnionRecordsSync(fixture.dir, { refuseIncomplete: true }).rows, rows);
+
+    for (const [acted, terminal] of [[true, "closed"], [false, "open"]] as const) {
+      const rows = [...evidence(1), {
+        ts: stamp(0), step: "sweep.disposed", pr_number: 1, head_sha: "head-1",
+        disposition: "stale", acted,
+      }];
+      const fixture = writeLedger(rows, { scope: t });
+      const c = capture(fixture.dir);
+      assert.equal(await prStateCommand(["1", "--max-age", "2m"], c.deps), 0);
+      assert.deepEqual(c.calls, []);
+      assert.ok(c.out[0].split("\n").includes(
+        `  terminal_state: "${terminal}" as_of=${stamp(0)} source=sweep.disposed`,
+      ));
+      assert.deepEqual(readLedgerUnionRecordsSync(fixture.dir).rows, rows);
+    }
   });
 
   test("W1-T10370: stale PRs are revalidated by one batched broker query", async t => {
