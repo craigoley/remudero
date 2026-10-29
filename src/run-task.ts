@@ -35112,7 +35112,8 @@ export async function inboxBakeoffCommand(
         settingsFile,
         prompt,
         config,
-        mount: cash ? baseMount : { ...baseMount, model: "sonnet", provider: "claude" },
+        mount: cash ? { ...baseMount, model: candidate.mountModel ?? baseMount.model }
+          : { ...baseMount, model: "sonnet", provider: "claude" },
         disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
       });
       return await rawSpawn({

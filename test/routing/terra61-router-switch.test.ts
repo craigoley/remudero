@@ -6,7 +6,7 @@ import type { Config } from "#src/lib/config.js";
 import { systemClock } from "#src/lib/clock.js";
 import * as responses from "#src/lib/cash-responses.js";
 import { BAKEOFF_CANDIDATES } from "#src/lib/inbox-bakeoff.js";
-import { classifySuccessors } from "#src/lib/model-availability.js";
+import { classifySuccessors, readCashModelCatalog, routedModelIdsFromCheckout, watchSuccessorModels } from "#src/lib/model-availability.js";
 import { loadMounts, mountsPath } from "#src/lib/mounts.js";
 import * as worker from "#src/lib/worker.js";
 import {
@@ -14,7 +14,7 @@ import {
   OPENWEIGHT_RESPONSE_FORMATS, OPENWEIGHT_TEMPERATURE, clearOpenWeightAbsence,
   markOpenWeightDeploymentAbsent, openWeightCandidatesForCapability,
   openWeightDeploymentReady, openWeightReservationUsd, openWeightUsageUsd,
-  recordCashCapacity, resetLearnedCashCapacity, spawnOpenWeightWorker,
+  recordCashCapacity, resetLearnedCashCapacity, selectOpenWeightModel, spawnOpenWeightWorker,
 } from "#src/lib/worker-provider.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -152,11 +152,49 @@ test("W1-T10839: the inbox bake-off trials Terra at low, medium and high", () =>
   assert.deepEqual(terra.map((candidate) => candidate.effort), ["low", "medium", "high"]);
   assert.equal(new Set(terra.map((candidate) => candidate.id)).size, 3);
   assert.ok(terra.every((candidate) => candidate.tools && candidate.billing === "cash"));
+  const baseMount = loadMounts(mountsPath(REPO_ROOT)).synthesis.inbox_draft;
+  assert.equal(baseMount.model, "haiku");
+  for (const candidate of terra) {
+    const selection = selectOpenWeightModel(table, candidate.mountModel ?? baseMount.model,
+      candidate.effort ?? baseMount.effort, Buffer.byteLength("fixture prompt"), { only: [candidate.model] });
+    assert.equal(selection.model, TERRA);
+    assert.equal(selection.effort, candidate.effort);
+    assert.equal(selection.capability, "balanced");
+  }
+  assert.equal(selectOpenWeightModel(table, baseMount.model, baseMount.effort).capability, "economy");
 });
 
-test("W1-T10839: the successor watcher reads a deployed Terra 6.1 as ready", () => {
-  const [successor] = classifySuccessors(["gpt-5.6-terra"], [{ source: "cash", models: [TERRA] }]);
+test("W1-T10839: the successor watcher reads a deployed Terra 6.1 as ready", async (t) => {
+  const { dir } = ownedFixtureDir(t, "terra61-successor");
+  const routedModels = routedModelIdsFromCheckout(REPO_ROOT);
+  assert.ok(routedModels.includes(TERRA), "the production routing producer already includes Terra 6.1");
+  const config = { root: REPO_ROOT, claudeBin: "/unused", workerProviders: {
+    enabled: ["cash"], cashEndpoint: "https://default.openai.azure.com/",
+    cashDeploymentEndpoints: { [TERRA]: {
+      endpoint: "https://synthwatch-foundry-eus.cognitiveservices.azure.com/", keyEnv: "RMD_CASH_EASTUS_API_KEY",
+    } },
+  } } as Config;
+  const catalogCalls: string[] = [];
+  const reading = await watchSuccessorModels({ config, statePath: join(dir, "successors.json"),
+    readCash: () => readCashModelCatalog(config, async (url, init) => {
+      const endpoint = new URL(String(url));
+      const eastus = endpoint.hostname === "synthwatch-foundry-eus.cognitiveservices.azure.com";
+      catalogCalls.push(endpoint.hostname);
+      assert.equal((init?.headers as Record<string, string>)["api-key"], eastus ? "eastus-fixture" : "default-fixture");
+      assert.equal(endpoint.pathname, "/openai/models");
+      return Response.json({ data: eastus ? [{ id: TERRA }] : [] });
+    }, { RMD_OPENWEIGHT_API_KEY: "default-fixture", RMD_CASH_EASTUS_API_KEY: "eastus-fixture" }),
+  });
+  assert.deepEqual(catalogCalls.sort(), ["default.openai.azure.com", "synthwatch-foundry-eus.cognitiveservices.azure.com"]);
+  assert.equal(reading.status, "measured");
+  const [successor] = reading.successors;
+  assert.equal(reading.successors.length, 1);
   assert.equal(successor?.model, TERRA);
   assert.equal(successor.state, "ready");
   assert.equal(successor.actionable, false);
+  assert.deepEqual(successor.sources, ["cash"]);
+  assert.deepEqual(classifySuccessors(routedModels, [{ source: "codex", models: [TERRA] }]), []);
+  assert.deepEqual(classifySuccessors(routedModels, [{ source: "cash", models: ["gpt-5.6-terra"] }]), []);
+  assert.deepEqual(classifySuccessors(["gpt-7-terra"], [{ source: "cash", models: ["gpt-7-terra"] }]), []);
+  assert.equal(classifySuccessors(routedModels, [{ source: "cash", models: ["gpt-7-terra"] }])[0]?.state, "deployed-unpriced");
 });
