@@ -41,7 +41,7 @@ import { appendLedger } from "./ledger.js";
 import { systemClock } from "./clock.js";
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
-import { loadPlan, DEFAULT_RISK, PlanBlobCache, mergePlanBlobsQuarantiningDuplicates, readBlobsAtRef, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { loadPlan, DEFAULT_RISK, PlanBlobCache, mergePlanBlobsQuarantiningDuplicates, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { DEFAULT_SWEEP_POLICY, RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, type BaseChangedFiles } from "./sweep.js";
@@ -312,6 +312,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   const { owner, repo, config, ledgerPath, checkoutRoot } = options;
   const log = io.log ?? (() => {});
   const pacer = io.pacer ?? createGhCallPacer();
+  const nextDistanceProbe = createDistanceProbeSequence();
   const snapshotCache = createBoardSnapshotCache(config.root, owner, repo, { log });
   const fileOptions = { log, ...(io.changedFilesFetch ? { fetch: io.changedFilesFetch } : {}) };
   const files = createChangedFilesCache(config.root, owner, repo, fileOptions);
@@ -438,7 +439,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     }) : [];
     const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, openPrViews);
     const baseChangedFilesByPr = new Map<number, BaseChangedFiles>();
-    const behindMainByPr = await buildBehindMainByPrAsync(owner, repo, openPrViews, fetchAsync, undefined, baseChangedFilesByPr);
+    const behindMainByPr = await buildBehindMainByPrAsync(owner, repo, openPrViews, fetchAsync, nextDistanceProbe(), baseChangedFilesByPr);
     const mergedFixPrNumbers = [...new Set(DEFAULT_FIX_CLASSES.map((entry) => entry.fixPrNumber))]
       .filter((number) => github.prByRef(number)?.state === "MERGED");
     const rawByNumber = new Map(openPrRows?.map((pr) => [pr.number, pr]));
@@ -546,6 +547,13 @@ export function buildStaleGateWorkflowsByPr(
 export const DISTANCE_REFRESH_PROBE_LIMIT = 3;
 
 export const DISTANCE_REFRESH_ROTATION_MS = 5 * 60_000;
+
+/** Advance once per producer pass so wall-clock cadence cannot repeatedly select the same slice.
+ * Each scheduler starts with the oldest eligible heads and keeps its own bounded rotation. */
+export function createDistanceProbeSequence(): () => number {
+  let window = 0;
+  return () => window++ * DISTANCE_REFRESH_ROTATION_MS;
+}
 
 /** W1-T3277 — choose a small, fair rotating slice of PRs for direct graph comparison. A draft or
  * conflicted PR cannot reach `update-branch`, so probing it would spend GitHub capacity without
@@ -3520,7 +3528,7 @@ export function shardReadFailure(ref: string, shardRelDir: string, repoDir: stri
 
 /**
  * {@link readOriginShardsAtRef} through an awaited runner: the same listing, the same one `cat-file --batch` and
- * framing (`readBlobsAtRef` parses the bytes the awaited call returned). ONE DIFFERENCE, on purpose: a listing
+ * framing (`readBlobsAtRefAsync` lists the blob ids and parses the batch). ONE DIFFERENCE, on purpose: a listing
  * killed at its bound throws {@link GitFetchError} naming it, where the sync read's catch would call it no shards
  * and silently drop every shard task from the dispatched plan.
  */
@@ -3543,10 +3551,7 @@ export async function readOriginShardsAtRefAsync(
   if (shardRelPaths.length === 0) return [];
   let texts: string[];
   try {
-    const request = shardRelPaths.map((p) => `${ref}:${p}`).join("\n") + "\n";
-    const raw = await runGit(["cat-file", "--batch"], request);
-    // readBlobsAtRef builds this same request; any drift hands it no bytes, and it fails loud naming the first path.
-    texts = readBlobsAtRef((_args, stdin) => (stdin === request ? raw : ""), ref, shardRelPaths);
+    texts = await readBlobsAtRefAsync(runGit, ref, shardRelPaths);
   } catch (err) {
     throw shardReadFailure(ref, shardRelDir, repoDir, err);
   }

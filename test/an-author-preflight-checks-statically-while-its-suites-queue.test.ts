@@ -155,7 +155,11 @@ test("W1-T9951: static-preflight runs while the suite ticket waits", async (t) =
   for (let i = 0; i < 1500 && !existsSync(ready); i += 1) await new Promise(resolve => setTimeout(resolve, 10));
   assert.ok(existsSync(ready), "the holder never took the slot and its ticket");
 
-  assert.equal(main([], { root: f.root, select: suites, testSlot: { pollMs: 50, log: () => {} } }), 0);
+  let fixtureMemoryReads = 0;
+  assert.equal(main([], { root: f.root, select: suites, testSlot: {
+    pollMs: 50, log: () => {}, memoryHeadroom: () => { fixtureMemoryReads++; return 64 * GiB; },
+  } }), 0);
+  assert.ok(fixtureMemoryReads > 0, "queue-order fixture consumes its controlled memory reading");
   const receipt = f.receipt();
   const seen = f.observed();
   assert.equal(seen.slotLabel, "suite-holder", "static-preflight ran while another run still held every suite slot");
@@ -307,6 +311,21 @@ test("a nested static stage is covered by its ancestor's static record", (t) => 
   assert.equal(nested.executionAllowed, true);
   assert.ok(nested.note.includes(`inherited from ancestor static-`) && nested.note.includes(`(author-static, pid ${process.ppid})`), nested.note);
   assert.equal(readdirSync(slots).filter(name => name.startsWith("static-")).length, 1, "only the ancestor's record remains");
+});
+
+test("static admission reads the Darwin memory report beside a live holder", (t) => {
+  const { slots } = scratch(t, "w1-t9951-darwin-static-");
+  const holder = acquireTestSlot("suite", { dir: slots, slots: 1, memoryBytes: 8 * GiB, memoryHeadroom: () => 64 * GiB, log: () => {} });
+  t.after(() => holder.release());
+  assert.equal(holder.outcome, "acquired");
+  let reads = 0;
+  const admission = admitStaticWork("static", { dir: slots, platform: "darwin", memoryBytes: GiB, waitBoundMs: 0, log: () => {},
+    vmStat: () => { reads++; return "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 65536.\n"; } });
+  t.after(() => admission.release());
+  assert.equal(reads, 1);
+  assert.equal(admission.outcome, "wait_bound_exceeded");
+  assert.equal(admission.executionAllowed, true, "the existing bounded wait policy remains unchanged");
+  assert.match(admission.note, /headroom \d+ MiB < 9216 MiB/);
 });
 
 test("a static stage past its wait bound runs anyway and names the holders it ran beside", (t) => {
