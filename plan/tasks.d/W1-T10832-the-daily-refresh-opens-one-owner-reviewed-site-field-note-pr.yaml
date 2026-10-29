@@ -21,6 +21,7 @@
     - test/routing/a-field-note-candidate-opens-one-reviewed-site-pr.test.ts
     - test/deploy/the-field-trials-refresh-passes-the-host-consent-file.test.ts
     - "src/lib/field-trials-refresh.ts"
+    - "src/lib/sweep.ts"
   rationale: |
     READ 2026-10-27: core origin/main 07dbdcc77, remudero-site main b80fbbb, the host read-only.
 
