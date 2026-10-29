@@ -1,7 +1,7 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { landFeedback } from "./feedback-landing.js";
+import { sweepFeedbackLandingAsync } from "./feedback-landing.js";
 import { mutationVerdictArtifactZipRestArgs, zipTextMembers } from "./mutation-verdict-pull.js";
 
 // ── W1-T7853: fold debt a CI run files reaches the daemon's feedback inbox ───────────────────────
@@ -115,7 +115,7 @@ export interface FoldDebtPullInput {
   /** The checkout whose `plan/feedback` {@link landFoldDebt} writes the entries into and lands from. */
   root: string;
   log: (step: string, fields: Record<string, unknown>) => void;
-  land?: (root: string) => { landed: boolean; error?: string };
+  land?: (root: string) => { landed: boolean; error?: string } | Promise<{ landed: boolean; error?: string }>;
   write?: (path: string, text: string) => void;
 }
 
@@ -178,7 +178,7 @@ export function pullFoldDebtEntries(deps: FoldDebtPullInput): FoldDebtOutcome[] 
 /** Write each accepted entry with exclusive create, land them once, and return the terminal rows. An
  *  entry already on disk is already filed, the idempotence `fileFoldDebt` keeps. A failed write is
  *  logged and left un-ingested, so the next pass reads that artifact again. */
-export function landFoldDebt(outcomes: readonly FoldDebtOutcome[], deps: FoldDebtPullInput): Record<string, unknown>[] {
+export async function landFoldDebt(outcomes: readonly FoldDebtOutcome[], deps: FoldDebtPullInput): Promise<Record<string, unknown>[]> {
   const write = deps.write ?? ((path: string, text: string) => writeFileSync(path, text, { flag: "wx" }));
   const dir = join(deps.root, "plan", "feedback");
   const rows: Record<string, unknown>[] = [];
@@ -213,7 +213,7 @@ export function landFoldDebt(outcomes: readonly FoldDebtOutcome[], deps: FoldDeb
   if (filed.some(({ row }) => (row.written as string[]).length > 0)) {
     let landed: { landed: boolean; error?: string };
     try {
-      landed = (deps.land ?? landFeedback)(deps.root);
+      landed = await (deps.land ?? sweepFeedbackLandingAsync)(deps.root);
     } catch (err) {
       landed = { landed: false, error: String((err as Error)?.message ?? err) };
     }

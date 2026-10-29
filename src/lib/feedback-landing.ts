@@ -1885,6 +1885,16 @@ export function recordDecision(
   });
 }
 
+export function recordDecisionAsync(
+  root: string,
+  params: DecisionRecordParams,
+  opts: LandFeedbackAsyncOpts = {},
+): Promise<LandFeedbackResult> {
+  const { planPrPreflight: _preflight, ...kindOpts } = opts;
+  return landContentAsync(root, (net) => landingKindSteps(DECISIONS_LANDING_KIND, root, kindOpts, net),
+    [{ relPath: decisionRecordRelPath(params.taskId, params.runId), content: decisionRecordContent(params) }], opts);
+}
+
 /** Land one agent-authored RULING record (W1-T3212) via {@link landContent} — the governance
  *  sibling of {@link recordDecision}, on the SAME branch, PR and landing kind so no second audit
  *  trail exists. Separate from it only because the CONTENT differs (rulingRecordContent,

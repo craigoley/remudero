@@ -1588,7 +1588,7 @@ export interface BuildSweepEffectsDeps {
   headRehomeImpl?: HeadRehomePorts;
   reproduceFailingTestsOnMainImpl?: SweepDeps["reproduceFailingTestsOnMain"];
   /** W1-T7853: lands the fold debt the pull wrote; unset means the real `landFeedback`. */
-  landFeedbackImpl?: (root: string) => { landed: boolean; error?: string };
+  landFeedbackImpl?: (root: string) => { landed: boolean; error?: string } | Promise<{ landed: boolean; error?: string }>;
   /** W1-T8396: the failing tests' import closure and the trial-merge probe a refresh arm decides from. */
   readTestImportClosureImpl?: SweepDeps["readTestImportClosure"];
   reproduceFailingTestsOnMergeImpl?: SweepDeps["reproduceFailingTestsOnMerge"];
@@ -5091,7 +5091,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           log,
           land: deps.landFeedbackImpl,
         };
-        return landFoldDebt(pullFoldDebtEntries(input), input);
+        return await landFoldDebt(pullFoldDebtEntries(input), input);
       } catch (e) {
         log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];
