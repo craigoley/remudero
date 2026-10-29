@@ -3075,6 +3075,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         config, runId: args.runId, taskId: args.taskId,
         cashSqueezed: args.cashSqueezed === true,
         modelApprovals: config.modelApprovals,
+        ...(args.routingTrial?.id === "inbox-bakeoff" && args.routingTrial.arm === "cash" && args.routingTrial.models?.length === 1
+          ? { bakeoffDeployment: args.routingTrial.models[0] } : {}),
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
     );
