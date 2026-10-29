@@ -14,7 +14,7 @@ import { diffCoverageTargets, renderDiffCoverageTargets } from "./diff-coverage-
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, neutralizeFenceMarkers } from "./fix-fence.js";
 import { renderDoctrinePreamble } from "./learnings.js";
 import { isInPlanScope, outOfPlanScopeFiles } from "./plan-architect.js";
-import type { Task } from "./plan.js";
+import { visibleCriteria, type Task } from "./plan.js";
 import { taskSemanticRevision } from "./escalate.js";
 import { citation } from "./provenance.js";
 import { REFUSAL_REASON_CLASSES, workerProofTitles, type CriterionVerdict } from "./review.js";
@@ -1280,6 +1280,7 @@ export function renderImplementPromptWithParts(
     capabilityContextPart,
   );
   const partValue = (name: string) => parts.find((p) => p.name === name)!.value;
+  const acceptance = visibleCriteria(task.acceptance ?? []);
 
   const prompt = [
     // THE ROLE, FIRST — mirroring `renderReconPrompt`, whose own first sentence is "You are a RECON
@@ -1310,6 +1311,15 @@ export function renderImplementPromptWithParts(
     partValue("task_body"),
     "",
     ONE_TEST_SUITE_AT_A_TIME_LINE,
+    ...(acceptance.length > 0 ? [
+      "",
+      "# ACCEPTANCE REPORT",
+      "Use the following scaffold in your final REPORT and PR body. For each criterion, add actual evidence " +
+        "and mark its proof OBSERVED or NOT OBSERVED. Quoting a proof is not evidence that it passed; " +
+        "never claim success for an unrun or failing proof.",
+      "Acceptance:",
+      ...acceptance.map((c) => `- ${c.claim} | ${c.proof}`),
+    ] : []),
     // Shared verbatim with the post-compaction ANCHOR (compaction.ts,
     // MASTER-PLAN §8B / W1-T36) — ONE source of literal text so the anchor
     // re-injected after a compaction is provably byte-identical to what the
