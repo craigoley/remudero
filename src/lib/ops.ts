@@ -650,7 +650,11 @@ export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps)
     for (const feedbackId of staleAlertFeedbackIds(deps.root, owner, repo, open, reconciledPrior)) {
       // THROUGH THE BRIDGE, never a raw local write: a raw `writeFileSync` here would dirty the
       // daemon's own checkout on every poll, which is what has been aborting deploys.
-      setFeedbackStatus(deps.root, feedbackId, "rejected", { land: deps.land ?? (deps.landingStateRoot === undefined ? {} : { stateRoot: deps.landingStateRoot }) });
+      setFeedbackStatus(deps.root, feedbackId, "rejected", {
+        land: deps.landingStateRoot === undefined
+          ? (deps.land ?? {})
+          : { ...deps.land, stateRoot: deps.landingStateRoot },
+      });
       reconciled.push(feedbackId);
       appendLedger(deps.ledgerPath, {
         run_id: deps.runId,
