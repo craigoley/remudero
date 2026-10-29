@@ -20,7 +20,7 @@ function writeConsent(path: string, mode: number) {
 }
 
 /** One full refresh pass through the real script with a fake docker that runs the real command. */
-function pass(placement: Placement) {
+function pass(placement: Placement, credentialsUnavailable = false) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-consent-refresh-"));
   const stateDir = join(dir, "core", "state"), outDir = join(stateDir, "field-trials"), bin = join(dir, "bin");
   mkdirSync(outDir, { recursive: true }); mkdirSync(bin);
@@ -50,7 +50,10 @@ process.exitCode = await fieldTrialsCommand(['--offline', '--source', 'core=o/r'
 `);
   writeFileSync(join(bin, "docker"), `#!/bin/bash
 if [[ "$1" == inspect ]]; then echo test-image; exit 0; fi
-if [[ "$1" == exec && "$*" == *printenv* ]]; then echo test-credential; exit 0; fi
+if [[ "$1" == exec && "$*" == *printenv* ]]; then
+  if [[ "$TEST_NO_CREDENTIALS" == 1 ]]; then exit 1; fi
+  echo test-credential; exit 0
+fi
 printf '%s\\n' "$*" >> "$TEST_CALLS"
 case "$*" in *private-routing-daily-review.mjs*|*private-field-trials-case-files.mjs*) exit 0;; esac
 for arg in "$@"; do
@@ -64,7 +67,7 @@ exec "$TEST_NODE" --import tsx "$TEST_DRIVER" "$@"
     env: { ...process.env, NODE_V8_COVERAGE: "", PATH: `${bin}:${process.env.PATH}`, RMD_INSTANCE_REGISTRY: registry,
       RMD_FIELD_TRIALS_CASE_FILES: "", RMD_FIELD_TRIALS_CONSENT: placement === "override" ? elsewhere : "",
       TEST_NODE: process.execPath, TEST_DRIVER: driver, TEST_ROOT: dir, TEST_STATE: stateDir, TEST_OUT: outDir,
-      TEST_CALLS: join(dir, "calls") } });
+      TEST_CALLS: join(dir, "calls"), TEST_NO_CREDENTIALS: credentialsUnavailable ? "1" : "0" } });
   const calls = readFileSync(join(dir, "calls"), "utf8").trim().split("\n");
   const rows = readFileSync(join(stateDir, "ledger.ndjson"), "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
   const mode = placement === "group-readable" ? statSync(target).mode & 0o777 : null;
@@ -93,4 +96,17 @@ test("W1-T10832: the refresh passes the private consent file only when it is own
     if (!passed && placement !== "absent") assert.match(run.result.stderr, /consent file is not an owner-only regular file/);
     if (placement === "group-readable") assert.equal(run.mode, 0o640, "the hardening sweep never rewrites the owner's grant");
   }
+});
+
+test("W1-T10832: an owner-only consent override reaches the offline fallback refresh", () => {
+  const run = pass("override", true);
+  assert.equal(run.result.status, 1, "missing App credentials fail the overall pass after recording the snapshot");
+  const snapshot = run.calls.find(call => call.includes(" field-trials ") && call.includes("--offline"));
+  assert.ok(snapshot, "the offline snapshot still runs");
+  assert.ok(snapshot.includes("--consent /field-trials/consent.json"), "the valid override is passed as --consent");
+  assert.ok(snapshot.includes(`src=${run.elsewhere},dst=/field-trials/consent.json,readonly`),
+    "the override is available at the path passed to the command");
+  assert.equal(run.rows.filter(row => row.step === "field-trials.refresh").length, 1);
+  const outcome = run.rows.find(row => row.step === "field-trials.site-import");
+  assert.deepEqual({ state: outcome.state, reason: outcome.reason }, { state: "withheld", reason: "offline-pass" });
 });

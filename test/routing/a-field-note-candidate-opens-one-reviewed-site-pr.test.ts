@@ -82,7 +82,7 @@ console.log(JSON.stringify({ outcome: "staged", releaseId: note.releaseId }));
 }
 
 /** In-memory GitHub REST for craigoley/remudero-site: git data, refs, and pulls. Records every call. */
-function siteRest(opts: { failWrites?: boolean } = {}) {
+function siteRest(opts: { failWrites?: boolean; failRefCreation?: boolean } = {}) {
   const state = { branch: false, head: "", trees: [] as { base_tree: string; tree: { path: string; content: string }[] }[],
     commits: [] as { parents: string[]; tree: string }[],
     prs: [] as { number: number; html_url: string; title: string; body: string; head: string; base: string; open: boolean; draft: boolean }[] };
@@ -100,7 +100,10 @@ function siteRest(opts: { failWrites?: boolean } = {}) {
       if (!state.branch) throw new Error("gh: Reference does not exist (HTTP 422)");
       state.head = field(args, "sha")!; return {};
     }
-    if (method === "POST" && path.endsWith("/git/refs")) { state.branch = true; state.head = field(args, "sha")!; return {}; }
+    if (method === "POST" && path.endsWith("/git/refs")) {
+      if (opts.failRefCreation) throw new Error("gh: Cannot create site branch (HTTP 403)");
+      state.branch = true; state.head = field(args, "sha")!; return {};
+    }
     if (method === "GET" && path.includes("/pulls?head=craigoley:")) {
       return state.prs.filter((pr) => pr.open && `craigoley:${pr.head}` === /head=([^&]+)/.exec(path)![1]);
     }
@@ -273,6 +276,26 @@ test("W1-T10832: core stamps no review fields and nothing merges the site PR", a
   }
 });
 
+test("W1-T10832: a site release unknown to the private window record bounds the next candidate", async (t) => {
+  const root = tempRoot("site-only-release");
+  try {
+    const released = { releaseId: "fn-site-only", windowStart: DAY(1), windowEnd: DAY(3),
+      sourceRepos: ["remudero"], lineageDigest: "fixture", publishedAt: DAY(3) };
+    const site = stageFixture(t, root, "staged", [released]);
+    const github = siteRest();
+    const pass = await dailyPass(root, DAY(5, 7), [1, 2, 3, 4], { fetch: github.fetch, siteUrl: site.url });
+    assert.equal(pass.row.state, "staged", JSON.stringify(pass.row));
+    const [staged] = seenCandidates(site.seen);
+    assert.deepEqual([staged!.windowStart, staged!.windowEnd], [DAY(3), DAY(5)],
+      "the released site history wins when the private window record has no matching release");
+    assert.equal(github.state.prs.length, 1);
+    assert.equal(JSON.parse(github.state.trees[0]!.tree.find((entry) => entry.path === "data/model-field-note.json")!.content).windowStart,
+      DAY(3), "the staged note carries that same bounded window");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T10832: a refused or unchanged stage opens no PR", async (t) => {
   const root = tempRoot("refused");
   try {
@@ -357,6 +380,15 @@ test("W1-T10832: every unhealthy site-import arm is a recorded outcome, never a 
     assert.equal((denied as { grant: string }).grant, SITE_IMPORT_GRANT, "the outcome names the exact grant the operator must add");
     assert.match((denied as { reason: string }).reason, /Resource not accessible by integration/);
     assert.ok(grantless.state.prs.length === 0, "no PR without the grant");
+    const blockedRef = siteRest({ failRefCreation: true });
+    const deniedRef = syncFieldNoteSiteImport({ workRoot: join(root, "work"), nowIso: DAY(4, 7), exportCandidate: candidate },
+      { fetch: blockedRef.fetch, siteUrl: stageFixture(t, root, "staged").url });
+    assert.equal(deniedRef.state, "publish-failed");
+    assert.match((deniedRef as { reason: string }).reason,
+      /ref-update-failed:.*Reference does not exist.*ref-create-failed:.*Cannot create site branch/,
+      "both branch-write failures are visible in the outcome");
+    assert.equal((deniedRef as { grant: string }).grant, SITE_IMPORT_GRANT);
+    assert.equal(blockedRef.state.prs.length, 0, "a branch write failure never opens a PR");
     const unreadable = stageFixture(t, root, "staged");
     const historyless = gitRepo({ scope: t, cloneFrom: unreadable.url });
     rmSync(join(historyless.dir, "data", "model-field-note-history.json"));

@@ -41,16 +41,13 @@ mkdir -p "$PRIVATE_OUT"
 # hardening sweep below never touches it, so the operator's own mode is what is judged.
 CONSENT_NAME="field-trials-consent-v1.json"
 CONSENT_HOST="${RMD_FIELD_TRIALS_CONSENT:-$PRIVATE_OUT/$CONSENT_NAME}"
-CONSENT_MOUNT=(); CONSENT_ARG=(); CONSENT_EXEC_ARG=()
+CONSENT_MOUNT=(); CONSENT_ARG=()
 if [[ -e "$CONSENT_HOST" || -L "$CONSENT_HOST" ]]; then
   CONSENT_MODE="$(stat -c '%a' "$CONSENT_HOST" 2>/dev/null || echo 777)"
   if [[ -f "$CONSENT_HOST" && ! -L "$CONSENT_HOST" && -O "$CONSENT_HOST" && -r "$CONSENT_HOST" ]] \
     && (( (8#$CONSENT_MODE & 8#077) == 0 )); then
     CONSENT_MOUNT=(--mount "type=bind,src=$CONSENT_HOST,dst=/field-trials/consent.json,readonly")
     CONSENT_ARG=(--consent /field-trials/consent.json)
-    if [[ "$CONSENT_HOST" == "$PRIVATE_OUT/$CONSENT_NAME" ]]; then
-      CONSENT_EXEC_ARG=(--consent "/home/node/Remudero/state/field-trials/$CONSENT_NAME")
-    fi
   else
     echo "field-trials-refresh: consent file is not an owner-only regular file; release withheld" >&2
   fi
@@ -127,10 +124,12 @@ SCRIPT_BLOB="$( { printf 'blob %s\0' "$(wc -c < "$0" | tr -d '[:space:]')"; cat 
 REFRESH_ARG=(--refresh-step "routing-review=$ROUTING_EXIT" --refresh-step "case-files=$CASE_EXIT" --refresh-script-blob "$SCRIPT_BLOB")
 collect_snapshot() {
 if (( CREDENTIAL_EXIT != 0 )); then
-  docker exec --workdir /home/node/Remudero/daemon-install remudero-daemon \
-    /bin/sh -c 'umask 077; exec "$@"' field-trials-refresh /home/node/Remudero/daemon-install/bin/rmd field-trials \
+  docker run --rm --network none --volumes-from remudero-daemon \
+    ${CASE_MOUNT[@]+"${CASE_MOUNT[@]}"} ${CONSENT_MOUNT[@]+"${CONSENT_MOUNT[@]}"} \
+    --workdir /home/node/Remudero/daemon-install --entrypoint /bin/sh "$IMAGE" \
+    -c 'umask 077; exec "$@"' field-trials-refresh /home/node/Remudero/daemon-install/bin/rmd field-trials \
     --offline --ledger core=/home/node/Remudero/state --out-dir /home/node/Remudero/state/field-trials \
-    "${CASE_ARG[@]}" ${CONSENT_EXEC_ARG[@]+"${CONSENT_EXEC_ARG[@]}"} "${REFRESH_ARG[@]}"
+    "${CASE_ARG[@]}" ${CONSENT_ARG[@]+"${CONSENT_ARG[@]}"} "${REFRESH_ARG[@]}"
   return $?
 fi
 docker run --rm --network host --volumes-from remudero-daemon \
