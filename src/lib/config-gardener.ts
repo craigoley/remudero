@@ -302,7 +302,7 @@ export function capDerivation(rows: Array<Record<string, unknown>>, weights: Rec
  *  still settle the run) `gatherRuns` takes a run's FIRST `pr_url` row of any step, so each step carrying one
  *  inside a run is listed, and (W1-T5526) prices it from its worker rows only; `aggregateCacheHitTotals`
  *  folds every tokened call row. */
-export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
+export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = Object.freeze([
   // gatherRuns, by name, and its pr_url fallback.
   ...GATHER_RUNS_LEDGER_STEPS,
   // capDerivation: the knowledge-budget pressure, and the cache-hit mix's call rows.
@@ -311,7 +311,7 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   // W1-T5668: the rest that can be a worker run's first pr_url row (0 live rows on 2026-10-04, listed so a first one is read).
   "acceptance.repair.unrepresentable", "changeset_claim.repaired", "retro.pr.recovered", "pr.body_normalize.error",
   "pr.body_normalize.raced",
-];
+]);
 
 /** W1-T5474: the 60-day union read bounded to {@link CONFIG_GARDEN_LEDGER_STEPS}. An incomplete union fails
  *  the pass rather than pricing budgets from a partial history. */
