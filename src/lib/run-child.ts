@@ -5,7 +5,7 @@
 // reservation of the class `run-child-probe`, reads the plan snapshot the daemon admitted the task against, round-trips the
 // run-child contract, and the daemon ledgers `run_child.shadow`: what the child cost (load time, tree peak), which entry kind
 // it ran as and why. Nothing here touches the run. A probe that fails ledgers why, and `startRunChildProbe` never rejects.
-import { execFile, spawn as nodeSpawn, type ChildProcess } from "node:child_process";
+import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
@@ -35,20 +35,22 @@ import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservati
 import type { RunResult } from "./run-result.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { killProcessGroup } from "./worker-containment.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 
 export const RUN_CHILD_SHADOW_STEP = "run_child.shadow";
 export const RUN_CHILD_SHADOW_SKIPPED_STEP = "run_child.shadow_skipped";
 export const PLAN_SNAPSHOTS_DIR = "plan-snapshots";
 /** The entry the probe runs: `CHILD_ENTRIES` name and source (scripts/build-child-entries.mjs). */
 export const RUN_CHILD_ENTRY = { name: "run-child", source: "src/run-child-main.ts" } as const;
+/** PRIMARY CONTROL: the selected entry must return this protocol token and kind before detached work is admitted. */
 export const DETACHED_WORK_CAPABILITY = "detached-work-v1";
 
 async function requireDetachedWorkEntry(launch: EngineChildLaunch, kind: DetachedWorkKind): Promise<void> {
   // No --run-dir: an older entry must never mistake this capability query for permission to run a build.
-  const stdout = await new Promise<string>((resolve, reject) => {
-    execFile(process.execPath, [...launch.argv, "--detached-work-capability", kind], {
-      cwd: launch.cwd, timeout: PROBE_TIMEOUT_MS, maxBuffer: STDERR_TAIL_BYTES,
-    }, (error, output) => error ? reject(new Error(`detached-work capability unavailable: ${reasonOf(error)}`)) : resolve(output));
+  const { stdout } = await execFileLoopBounded(process.execPath, [...launch.argv, "--detached-work-capability", kind], {
+    cwd: launch.cwd, encoding: "utf8", timeout: PROBE_TIMEOUT_MS, maxBuffer: STDERR_TAIL_BYTES,
+  }).catch((error: unknown) => {
+    throw new Error(`detached-work capability unavailable: ${reasonOf(error)}`);
   });
   if (stdout.trim() !== `${DETACHED_WORK_CAPABILITY}:${kind}`) throw new Error(`detached-work capability mismatch for ${kind}`);
 }
