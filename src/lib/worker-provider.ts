@@ -1,7 +1,7 @@
 import { setTimeout as abortableDelay } from "node:timers/promises";
 import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-request-effort.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
-import { CashResponsesConversation } from "./cash-responses.js";
+import { CASH_RESPONSES_DEPLOYMENTS, CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
@@ -977,8 +977,8 @@ export function codexCandidatesForCapability(
 // judgement favours gpt-oss 2.40x, since nano spends ~5x the completion tokens on reasoning.
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna"],
-  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna", "gpt-6.1-sol"],
-  frontier: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra"],
+  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-6.1-sol"],
+  frontier: ["gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-5.6-terra"],
 };
 
 /** The provider-neutral Claude-model -> capability lookup is shared with Codex: both adapters
@@ -1048,6 +1048,9 @@ export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightConte
   // Azure's 922K input limit is lower than the combined window; reserve 8K for output.
   "gpt-6-luna": { totalTokens: 922_000, readAt: "2026-09-24" },
   "gpt-6.1-sol": { totalTokens: 922_000, readAt: "2026-10-02" },
+  // Terra metadata (2026-10-27): 922K input, conservatively leaving room for output as above.
+  // https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure#gpt-61
+  "gpt-6.1-terra": { totalTokens: 922_000, readAt: "2026-10-27" },
 };
 
 /**
@@ -1333,6 +1336,8 @@ export interface OpenWeightSelectionOptions {
   ready?: (deployment: string) => boolean;
   /** Restricts the row to these deployments, keeping row order (the cash trial's model list). */
   only?: readonly string[];
+  /** Inbox replay measures a ready deployment independently of its production routing row. */
+  bakeoffDeployment?: string;
 }
 
 /**
@@ -1366,7 +1371,14 @@ export function selectOpenWeightModel(
     options.config ? cashDeploymentEndpoint(options.config, deployment) : undefined);
   const capability = openWeightCapabilityForRequestedModel(capabilities, requestedModel);
   const rowCandidates = openWeightCandidatesForCapability(capabilities, capability, requestedEffort);
-  const configured = options.only ? rowCandidates.filter((candidate) => options.only!.includes(candidate)) : rowCandidates;
+  const ready = options.ready ?? ((deployment: string) => openWeightDeploymentReady(deployment));
+  const trial = options.bakeoffDeployment;
+  if (trial !== undefined && (!ready(trial) ||
+    (CASH_RESPONSES_DEPLOYMENTS[trial] && !CASH_RESPONSES_DEPLOYMENTS[trial]!.includes(requestedEffort ?? "medium")))) {
+    throw new Error(`inbox bake-off deployment '${trial}' is not ready at effort '${requestedEffort ?? "medium"}'`);
+  }
+  const configured = trial !== undefined ? [trial]
+    : options.only ? rowCandidates.filter((candidate) => options.only!.includes(candidate)) : rowCandidates;
   // Cash and subscription are separate billing lanes. A normal cash request keeps the measured
   // OSS/nano order, but a cash request reached only after a blocked subscription auction may use
   // Luna first. The context gate still wins: a squeeze never routes an oversized prompt to Luna.
@@ -1375,7 +1387,6 @@ export function selectOpenWeightModel(
   const candidates = options.cashSqueezed && luna.length > 0
     ? [...luna, ...configured.filter((candidate) => !luna.includes(candidate))]
     : configured;
-  const ready = options.ready ?? ((deployment: string) => openWeightDeploymentReady(deployment));
   const allowed = candidates.filter((candidate) =>
     SAFE_OPENWEIGHT_MODEL_ID.test(candidate) && modelAllowed(candidate, { modelApprovals: options.modelApprovals }));
   // PREFER READY, ELSE BEHAVE AS BEFORE: with no ready candidate every existing refusal still fires.
@@ -3389,6 +3400,18 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
       cachedInputUsdPerMillion: 0.2, cacheWriteUsdPerMillion: 5, reservationInputUsdPerMillion: 5 },
     readAt: "2026-10-02",
   },
+  // Global Standard, read 2026-10-27:
+  // https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/gpt-6-1-terra-now-generally-available-in-microsoft-foundry-build-agents-that-see/4567769
+  // No Microsoft threshold verified at https://azure.microsoft.com/en-us/pricing/details/cognitive-services/openai-service/.
+  // -1 selects long-context rates for EVERY request (including zero-input output receipts).
+  "gpt-6.1-terra": {
+    unbilledAzureOpenAi429: true,
+    inputUsdPerMillion: 1, outputUsdPerMillion: 5, cachedInputUsdPerMillion: 0.05, cacheWriteUsdPerMillion: 1.25,
+    reservationInputUsdPerMillion: 1.25,
+    longContext: { thresholdInputTokens: -1, inputUsdPerMillion: 2, outputUsdPerMillion: 7.5,
+      cachedInputUsdPerMillion: 0.1, cacheWriteUsdPerMillion: 2.5, reservationInputUsdPerMillion: 2.5 },
+    readAt: "2026-10-27",
+  },
 };
 
 /** Codex analytics only; these rows never admit a cash deployment (W1-T5664). */
@@ -3512,6 +3535,9 @@ export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
   "gpt-5.6-terra": null,
   "gpt-6-luna": null,
   "gpt-6.1-sol": null,
+  // GA request shape, read 2026-10-27; omit temperature for Terra reasoning requests.
+  // https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/gpt-6-1-terra-now-generally-available-in-microsoft-foundry-build-agents-that-see/4567769
+  "gpt-6.1-terra": null,
 };
 
 /** Raised INSTEAD of guessing a request shape. Thrown before the transport, like its pricing
@@ -5100,7 +5126,7 @@ function openWeightEndpoint(config: Config, model: string): string {
   if (typeof raw !== "string" || raw.trim() === "") throw new Error("cash provider requires workerProviders.cashEndpoint");
   const endpoint = new URL(raw.endsWith("/") ? raw : `${raw}/`);
   if (endpoint.protocol !== "https:") throw new Error("cash endpoint must use https");
-  if (model === "gpt-6.1-sol") return new URL("openai/v1/responses", endpoint).toString();
+  if (CASH_RESPONSES_DEPLOYMENTS[model]) return new URL("openai/v1/responses", endpoint).toString();
   return new URL(`openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=2024-10-21`, endpoint).toString();
 }
 
@@ -5454,7 +5480,8 @@ export async function spawnOpenWeightWorker(
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
   if (isFoundryClaudeDeployment(selection.model)) return spawnFoundryClaudeWorker(args, config, selection);
-  const toolLineage = createWorkerToolLineage({ provider: selection.model === "gpt-6.1-sol" ? "cash-responses" : "cash-chat",
+  const usesResponses = CASH_RESPONSES_DEPLOYMENTS[selection.model] !== undefined;
+  const toolLineage = createWorkerToolLineage({ provider: usesResponses ? "cash-responses" : "cash-chat",
     root: config.root, runId: args.runId, taskId: args.taskId });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const clock = args.clock ?? systemClock;
@@ -5463,7 +5490,6 @@ export async function spawnOpenWeightWorker(
   let completionTokens = 0;
   let cacheReadTokens = 0;
   let cacheCreationTokens = 0;
-  const usesResponses = selection.model === "gpt-6.1-sol";
   let turns = 0;
   let sessionId = "";
   let text = "";
@@ -5695,7 +5721,7 @@ export async function spawnOpenWeightWorker(
         } catch (error) {
           toolFailed = true;
           observeWorkerToolLineage(toolLineage, { type: "tool_result", turnId: requestId, tool_use_id: id, is_error: true });
-          if (usesResponses) throw new Error(`cash Sol 6.1 tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
+          if (usesResponses) throw new Error(`cash ${selection.model} tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
           content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
         }
         if (!toolFailed) observeWorkerToolLineage(toolLineage, { type: "tool_result", turnId: requestId, tool_use_id: id, is_error: false });

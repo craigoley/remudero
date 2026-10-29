@@ -226,7 +226,7 @@ test("the benchmark cohort pass carries the drift record, joined to verified out
     const noFiles = await runBenchmarkCohortPass(dir, { nowIso: cutoff, caseFiles: [] });
     assert.deepEqual(series(noFiles.snapshot.modelDrift, "verified-completion").excluded, { "case-file-missing": 61 });
 
-    const checkpointPath = join(dir, "benchmark-cohort-v1.json");
+    const checkpointPath = join(dir, "benchmark-cohort-index.json");
     const checkpoint = JSON.parse(readFileSync(checkpointPath, "utf8"));
     delete checkpoint.lastGood.modelDrift;
     writeFileSync(checkpointPath, JSON.stringify(checkpoint));

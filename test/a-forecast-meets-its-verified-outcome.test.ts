@@ -4,6 +4,7 @@
 // class: completed counts 1, closed-unmerged-unadjudicated counts 0, an open (censored) or unavailable
 // outcome is counted and never scored, and an absent or invalid forecast is counted, never imputed.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -160,7 +161,7 @@ test("an older checkpoint is recomputed, and a live source scanned without imple
     const ledger = join(dir, "ledger.ndjson");
     writeFileSync(ledger, ledgerLines().join("\n") + "\n");
     await runBenchmarkCohortPass(dir, { nowIso: cutoff });
-    const checkpointFile = join(dir, "benchmark-cohort-v1.json");
+    const checkpointFile = join(dir, "benchmark-cohort-index.json");
 
     const checkpoint = JSON.parse(readFileSync(checkpointFile, "utf8"));
     delete checkpoint.lastGood.selfForecastCalibration;
@@ -174,7 +175,14 @@ test("an older checkpoint is recomputed, and a live source scanned without imple
     const legacy = JSON.parse(readFileSync(checkpointFile, "utf8"));
     for (const source of legacy.sources) {
       delete source.projection;
-      source.rows = source.rows.filter((entry: { row: { step: string } }) => entry.row.step !== "implement.done");
+      const segment = join(dir, source.segment);
+      const rows = readFileSync(segment, "utf8").trimEnd().split("\n")
+        .map((line) => JSON.parse(line)).filter((entry: { row: { step: string } }) => entry.row.step !== "implement.done");
+      const encoded = rows.map((entry) => JSON.stringify(entry) + "\n").join("");
+      writeFileSync(segment, encoded);
+      source.segmentBytes = Buffer.byteLength(encoded);
+      source.segmentSha256 = createHash("sha256").update(encoded).digest("hex");
+      source.rowCount = rows.length;
     }
     delete legacy.lastGood.selfForecastCalibration;
     writeFileSync(checkpointFile, JSON.stringify(legacy));

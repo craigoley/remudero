@@ -88,9 +88,12 @@ test("resolveRepoRoot's install-path fallback still resolves to the checkout roo
 // ── Criterion 2: relocating repoRoot must not move argv evaluation into a module a test can
 //    import for an unrelated symbol ─────────────────────────────────────────────────────────
 
-test("repo-location.ts exports ONLY the repo-location cluster — nothing unrelated shares its argv-at-import-time cost", () => {
+test("repo-location.ts exports only repo location and target record helpers", () => {
   const exported = Object.keys(repoLocation).sort();
-  assert.deepEqual(exported, ["repoRoot", "resolveOwnerRepo", "resolveRepoRoot"], `repo-location.ts must export exactly the cluster, got: ${exported.join(", ")}`);
+  assert.deepEqual(exported, [
+    "daemonTargetRecordPath", "readDaemonTargetRecord", "repoRoot", "resolveOwnerRepo",
+    "resolveRepoRoot", "resolveVerbPlanRoot", "writeDaemonTargetRecord",
+  ], `repo-location.ts exports an unrelated symbol: ${exported.join(", ")}`);
 });
 
 test("no other src/lib module imports src/lib/repo-location.ts — only run-task.ts (the CLI entrypoint) pays the argv-at-import cost", () => {

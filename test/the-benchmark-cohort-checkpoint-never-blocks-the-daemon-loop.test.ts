@@ -8,7 +8,7 @@ import { Worker } from "node:worker_threads";
 import { benchmarkCohortDaemonPass, runBenchmarkCohortPass, runBenchmarkCohortPassOffLoop,
   type BenchmarkCohortSnapshot } from "../src/lib/benchmark-cohort.js";
 
-const CHECKPOINT = "benchmark-cohort-v1.json";
+const CHECKPOINT = "benchmark-cohort-index.json";
 
 function cohortRoot(): { root: string; stateDir: string } {
   const root = mkdtempSync(join(tmpdir(), "rmd-9845-"));
@@ -30,7 +30,7 @@ function recordCheckpointSyncCalls(): { calls: string[]; restore: () => void } {
     const original = fs[name] as (...args: unknown[]) => unknown;
     originals.set(name, original);
     fs[name] = (...args: unknown[]) => {
-      if (args.slice(0, 2).some((arg) => String(arg).includes(CHECKPOINT))) calls.push(name);
+      if (args.slice(0, 2).some((arg) => String(arg).includes("benchmark-cohort-"))) calls.push(name);
       return original(...args);
     };
   }
@@ -65,7 +65,9 @@ test("W1-T9845: the off-loop cohort pass returns the in-thread result", async ()
   try {
     const nowIso = "2026-10-16T07:00:00.000Z";
     const offLoop = await runBenchmarkCohortPassOffLoop(stateDir, { maxSources: 4, nowIso });
-    const written = statSync(join(stateDir, CHECKPOINT)).size;
+    const index = JSON.parse(readFileSync(join(stateDir, CHECKPOINT), "utf8"));
+    const written = statSync(join(stateDir, CHECKPOINT)).size
+      + index.sources.reduce((sum: number, source: { segment: string }) => sum + statSync(join(stateDir, source.segment)).size, 0);
     unlinkSync(join(stateDir, CHECKPOINT));
     const inThread = await runBenchmarkCohortPass(stateDir, { maxSources: 4, nowIso });
     assert.equal(offLoop.state, inThread.state);

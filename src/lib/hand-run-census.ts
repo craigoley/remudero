@@ -18,7 +18,7 @@
  */
 import { appendLedger, type LedgerLine } from "./ledger.js";
 import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionResult } from "./ledger-grep.js";
-import { captureFeedback, type CaptureFeedbackOptions, type FeedbackEntry } from "./feedback.js";
+import { captureFeedback, stageFeedbackCapture, type CaptureFeedbackOptions, type FeedbackEntry } from "./feedback.js";
 
 // ── Reading operator rows out of the union ──────────────────────────────────────────────────
 
@@ -329,6 +329,7 @@ export interface HandRunCensusCadenceOpts {
   root: string;
   /** State dir `resolveLedgerUnion` globs for `ledger.*.ndjson[.gz]` rotations + the live file. */
   stateDir: string;
+  landingStateRoot?: string;
   /** Ledger path this run's own `hand_run.census_proposed` marker is appended to. */
   ledgerPath: string;
   runId: string;
@@ -368,7 +369,8 @@ export function handRunCensus(deps: HandRunCensusCadenceOpts): HandRunCensusCade
   if (census.status === "refused") return census;
 
   const filedUnion = ledgerUnion(deps.stateDir, HAND_RUN_CENSUS_PROPOSED_LEDGER_PATTERN);
-  const capture = deps.capture ?? captureFeedback;
+  const capture = deps.capture ?? (deps.landingStateRoot === undefined ? captureFeedback
+    : (root: string, opts: CaptureFeedbackOptions) => stageFeedbackCapture(root, deps.landingStateRoot, opts).entry);
   const writeLine = deps.writeLedgerLine ?? appendLedger;
 
   const proposedSignatures: string[] = [];

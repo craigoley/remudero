@@ -6,7 +6,10 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=f0c420849e8aa3b1
+  # backlog gardener: placed=2026-10-29T03:25:42.567Z
   attempts: 0
   files:
     - test/stale-ci-gate-wiring.test.ts
