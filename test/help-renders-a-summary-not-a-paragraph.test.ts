@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { COMMANDS, SUMMARY_CHAR_CAP, USAGE, commandHelp, commandSpec, commandSyntax } from "../src/run-task.js";
+import { COMMANDS, SUMMARY_CHAR_CAP, USAGE, commandHelp, commandSpec, commandSyntax, main } from "#src/run-task.js";
 
 // W1-T2480: the help registry used to carry a syntax field and a description field wearing ONE
 // string (`usage`) -- `commandSyntax` recovered the syntax half at read time with
@@ -122,6 +122,35 @@ test("docs/cli-reference.md is not stale -- generate-cli-reference --check passe
 test("commandHelp(spec) contains that command's full detail verbatim, for every command", () => {
   for (const spec of COMMANDS) {
     assert.ok(commandHelp(spec).includes(spec.detail), `commandHelp for ${spec.name} is missing its full detail prose`);
+  }
+});
+
+test("pr-state help and argument validation dispatch before CLI housekeeping", async t => {
+  for (const args of [["--help"], ["-h"], ["123", "--max-age"]]) {
+    await t.test(args.join(" "), async t => {
+      const originalArgv = process.argv;
+      t.after(() => { process.argv = originalArgv; });
+      process.argv = [process.execPath, "rmd", "pr-state", ...args];
+      const exitSignal = new Error("captured CLI exit");
+      const exit = t.mock.method(process, "exit", (() => { throw exitSignal; }) as typeof process.exit);
+      const log = t.mock.method(console, "log", () => {});
+      const error = t.mock.method(console, "error", () => {});
+      const checkFreshness = t.mock.fn(() => { throw new Error("housekeeping must not run"); });
+      await assert.rejects(main({ checkFreshness }), caught => caught === exitSignal);
+      assert.equal(checkFreshness.mock.callCount(), 0);
+      assert.equal(exit.mock.callCount(), 1);
+      if (args.length === 1) {
+        assert.deepEqual(exit.mock.calls[0].arguments, [0]);
+        assert.deepEqual(log.mock.calls.map(call => call.arguments), [[commandHelp(commandSpec("pr-state"))]]);
+        assert.equal(error.mock.callCount(), 0);
+      } else {
+        assert.deepEqual(exit.mock.calls[0].arguments, [2]);
+        assert.equal(log.mock.callCount(), 0);
+        assert.deepEqual(error.mock.calls.map(call => call.arguments), [
+          ["usage: rmd pr-state <n...> [--max-age <dur>] (dur: <n>s|m|h|d)"],
+        ]);
+      }
+    });
   }
 });
 

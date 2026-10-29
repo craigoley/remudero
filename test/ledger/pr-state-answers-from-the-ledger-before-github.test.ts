@@ -101,6 +101,39 @@ describe("test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts", (
     assert.match(c.out[0], new RegExp(`review_state: "success" as_of=${stamp(2000)} source=review.posted`));
   });
 
+  test("merge-probe receipts update mergeability with their timestamp and source", async t => {
+    for (const [verdict, expected] of [["clean", "clean"], ["conflict", "dirty"]]) {
+      const rows = [...evidence(1), {
+        ts: stamp(0), step: "sweep.merge_probe", pr_number: 1, head_sha: "head-1", verdict,
+      }];
+      const fixture = writeLedger(rows, { scope: t });
+      const c = capture(fixture.dir);
+      assert.equal(await prStateCommand(["1", "--max-age", "2m"], c.deps), 0);
+      assert.deepEqual(c.calls, []);
+      assert.ok(c.out[0].split("\n").includes(
+        `  mergeability: "${expected}" as_of=${stamp(0)} source=sweep.merge_probe`,
+      ));
+      assert.deepEqual(readLedgerUnionRecordsSync(fixture.dir).rows, rows);
+    }
+  });
+
+  test("direct-merge receipts replace an open terminal state without a broker read", async t => {
+    for (const receipt of [
+      { step: "sweep.disposed", arm_outcome: "direct-merged" },
+      { step: "automerge.armed", outcome: "direct-merged" },
+    ]) {
+      const rows = [...evidence(1), { ts: stamp(0), pr_number: 1, head_sha: "head-1", ...receipt }];
+      const fixture = writeLedger(rows, { scope: t });
+      const c = capture(fixture.dir);
+      assert.equal(await prStateCommand(["1", "--max-age", "2m"], c.deps), 0);
+      assert.deepEqual(c.calls, []);
+      assert.ok(c.out[0].split("\n").includes(
+        `  terminal_state: "merged" as_of=${stamp(0)} source=${receipt.step}`,
+      ));
+      assert.deepEqual(readLedgerUnionRecordsSync(fixture.dir).rows, rows);
+    }
+  });
+
   test("a failed revalidation retains the stale ledger answer and its error without retry", async t => {
     const fixture = writeLedger(evidence(1, 300_000), { scope: t });
     let calls = 0;
