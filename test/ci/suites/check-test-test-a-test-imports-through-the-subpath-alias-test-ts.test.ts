@@ -54,10 +54,31 @@ function assertRegularForRawPreservation() {
   }
 }
 
+function assertOperatorFunctionTagRawPreservation() {
+  const raw = fixtureImport("./fixture.js");
+  for (const expression of [
+    `false || function named(parts) { return String.raw(parts); }\`${raw}\``,
+    `true && function named(parts) { return String.raw(parts); }\`${raw}\``,
+    `null ?? function named(parts) { return String.raw(parts); }\`${raw}\``,
+    `true ? function named(parts) { return String.raw(parts); }\`${raw}\` : 'unused'`,
+  ]) {
+    const source = `const value = ${expression}; value;`;
+    assert.equal(census(source).status, 0, "control: the census sees the fixture import");
+    assert.equal(runInNewContext(source), raw, "control: the tag observes the original raw text");
+    const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
+    assert.equal(result.text, source, "the named function tag keeps its raw fixture spelling");
+    assert.equal(result.rewritten, 0);
+    assert.equal(result.unresolved.length, 1);
+    assert.match(result.unresolved[0], /raw spelling/);
+    assert.equal(runInNewContext(result.text), raw);
+  }
+}
+
 test("regular for clauses preserve of-tagged template raw values", assertRegularForRawPreservation);
 
 test("W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.ts is prevented, not retried", () => {
   assertRegularForRawPreservation();
+  assertOperatorFunctionTagRawPreservation();
   const source = fixtures();
   assert.equal(census(source).status, 0, "control: the census sees the original fixture imports");
   const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");

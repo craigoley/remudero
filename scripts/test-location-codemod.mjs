@@ -139,7 +139,7 @@ export function stringLiteralMask(text) {
           i += point.length;
         }
         const word = text.slice(start, i);
-        if (word === "function") functionExpressionPending = ["=", "(", "[", ",", ":", "return", "=>"].includes(prev);
+        if (word === "function") functionExpressionPending = ["=", "(", "[", ",", ":", "return", "=>", "|", "&", "?"].includes(prev);
         // Once a for-in or for-of separator is consumed, a name on its right may be a template tag.
         const bindingEnd = IDENT_PART.test(Array.from(prev).at(-1) ?? "") || [")", "]", "}"].includes(prev);
         const loopOperator = (word === "of" || word === "in") && atLoopLevel
