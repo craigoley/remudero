@@ -33,6 +33,7 @@ import { renderAnchorBlock } from "../../lib/compaction.js";
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "../../lib/unfinished-checkpoint.js";
 import { hashInstallInputs } from "../../lib/install-hash.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "../../lib/preopen-gate.js";
+import { readPreopenGateRows } from "../../lib/preopen-gate-health.js";
 import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderReconPrompt, scopeGuardOutOfScopeFiles, type PriorPartialWork } from "../../lib/prompt-render.js";
 import type { RunResult } from "../../lib/run-result.js";
 import { dropTierRowsBeforePush, prePushGateRefusal } from "../../lib/pre-push-refusal.js";
@@ -6933,7 +6934,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     }
 
     // The harness runs the fast gate itself before opening the PR; a failing step goes back to the worker once.
-    const baseGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path));
+    const gateHistory = { stateDir: dirname(ledgerPath), readRows: () => readPreopenGateRows(dirname(ledgerPath)) };
+    const baseGate = opts.preopenGate ?? (spawnInjected ? undefined : (path: string) => runPreopenGate(path, { history: gateHistory }));
     // W1-T10752: while main's merge into the restored checkpoint is open, the gate also refuses a tree that still holds unmerged
     // index entries or conflict markers in a conflicted path, as an ordinary repair round naming each path.
     const reconcilePaths = restoredReconcile?.paths ?? [];
@@ -6947,11 +6949,12 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       if (workerYield) return workerYield;
       reprovisionInstallIfDrifted("preopen_gate");
       const gate = await preopenGate(worktreePath);
-      const { failed_detail: failedDetail, ...gateFields } = preopenGateLedgerFields(gate);
+      const { failed_detail: failedDetail, backstop_ms, backstop_basis, ...gateFields } = preopenGateLedgerFields(gate);
       log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
+        backstop_ms, backstop_basis,
         ...(failedDetail ? { failed_detail: failedDetail } : {}),
-        ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}), ...gateFields });
-      updatePreopenGateAlert({ stateDir: dirname(ledgerPath), readRows: () => readLedgerLines(ledgerPath), log });
+        ...(gate.kind === "unmeasured" || gate.kind === "skipped" ? { reason: gate.reason } : {}), ...gateFields });
+      updatePreopenGateAlert({ ...gateHistory, log });
       if (gate.kind === "fail") {
         const preopenYield = await yieldAtWorkerBoundary("preopen_gate", "implementing");
         if (preopenYield) return preopenYield;
@@ -6984,8 +6987,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         log(PREOPEN_GATE_STEP, { after_repair: true, result: repairedGate.kind,
           failed: repairedGate.kind === "fail" ? repairedGate.failedSteps : [], duration_ms: repairedGate.durationMs,
           ...(repairedFailedDetail ? { failed_detail: repairedFailedDetail } : {}),
-          ...(repairedGate.kind === "unmeasured" ? { reason: repairedGate.reason } : {}), ...repairedGateFields });
-        updatePreopenGateAlert({ stateDir: dirname(ledgerPath), readRows: () => readLedgerLines(ledgerPath), log });
+          ...(repairedGate.kind === "unmeasured" || repairedGate.kind === "skipped" ? { reason: repairedGate.reason } : {}), ...repairedGateFields });
+        updatePreopenGateAlert({ ...gateHistory, log });
         // W1-T10752: a run never opens a PR over an unresolved merge. The worktree stays as evidence and the restored head is kept.
         const stillConflicted = reconcilePaths.length === 0 ? [] : unresolvedMainConflicts(worktreePath, reconcilePaths);
         if (stillConflicted.length > 0) {
