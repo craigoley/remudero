@@ -2501,6 +2501,8 @@ export function* openPrViewSteps(
       reviewState,
       reviewPendingSince,
       reviewPendingOwnerDead,
+      reviewPendingOwnerGone: reviewPendingOwnerDead === true ? "owner-pid-dead" : undefined,
+      reviewPendingOwnerGoneReason: undefined,
       reviewVerdictPostedAt,
       checksState,
       // W1-T4054: the pending check's own start, so a push, comment or label never resets the age.

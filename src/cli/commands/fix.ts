@@ -4284,6 +4284,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       isHarnessPath: isCiHarnessPath, mainTip: () => deps.readMainTip ? deps.readMainTip() : host.mainTipViaGit(opts.worktreePath),
       changedPaths: async (main, head) => (await hostWorktreeGitAsync(opts.worktreePath, ["diff", "--name-only", "-z", `${main}...${head}`])).split("\0").filter(Boolean),
       closure: host.buildImportClosureRead(opts.worktreePath, deps.log),
+      readTestText: (head, file) => hostWorktreeGitAsync(opts.worktreePath, ["show", `${head}:${file}`]),
       namedInClosure: async (head, files, needles) => new Set((await hostWorktreeGitAsync(opts.worktreePath, ["grep", "-ohF", ...needles.flatMap((n) => ["-e", n]), head, "--", ...files])
         .catch((error: { code?: unknown }) => { if (error.code === 1) return ""; throw error; })).split("\n").filter(Boolean)),
     });

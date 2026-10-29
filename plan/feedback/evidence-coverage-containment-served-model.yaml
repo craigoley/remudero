@@ -4,7 +4,7 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `containment`, field `servedModel`.
 
-  Coverage: 49/61 joined worker calls (80.3%) in the trailing 7-day window;
+  Coverage: 215/843 joined worker calls (25.5%) in the trailing 7-day window;
   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
   First seen: 2026-09-28T05:55:37.084Z.
@@ -24,3 +24,61 @@ expansion: null
 submission_key: null
 thread_id: null
 answered_by: fb-1792030218433-dd1b77
+evidence_coverage_revision:
+  version: 1
+  mainSha: cfa32ee06fa43b109da3f8e49f5de664990a38c5
+  expectedRecord: >
+    id: evidence-coverage-containment-served-model
+
+    ts: 2026-09-28T05:55:41.183Z
+
+    raw: >-
+      Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+      `containment`, field `servedModel`.
+
+      Coverage: 49/61 joined worker calls (80.3%) in the trailing 7-day window;
+      below the field's 90.0% floor — a chronic gap no baseline excuses.
+
+      First seen: 2026-09-28T05:55:37.084Z.
+
+
+      This follow-up never gates a PR or blocks work. Restore the field at the
+      lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+      reads), or record why this lane legitimately lacks it. The evidence-coverage
+      gardener updates this entry in place while the gap persists.
+    attachments: []
+
+    origin: cli
+
+    status: answered
+
+    reply_to: null
+
+    proposal_pr: null
+
+    summary: null
+
+    expansion: null
+
+    submission_key: null
+
+    thread_id: null
+
+    answered_by: fb-1792030218433-dd1b77
+  expectedPlan:
+    plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+    plan/tasks.d: e3c8eaa6813cf0e890d1f94323ce0d0b87be8a05
+  measurement:
+    lane: containment
+    field: servedModel
+    observed: 215
+    denominator: 843
+    floor: 0.9
+    at: 2026-10-29T17:59:07.863Z
+    since: 2026-10-22T17:59:07.863Z
+    line: "Coverage: 215/843 joined worker calls (25.5%) in the trailing 7-day
+      window; below the field's 90.0% floor — a chronic gap no baseline
+      excuses."
+  closure:
+    eligible: false
+    reason: task W1-T4800 is unknown
