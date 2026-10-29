@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.34
   status: queued
@@ -46,3 +46,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 1 occurrence(s) across 7 day(s), last seen 2026-10-24T15:57:48.653Z, and the record declares no privileged path"
+    judged_at: "2026-10-29T01:23:57.355Z"
+    pin: "f1901b7d2697b58a423cfd51b0a7155157e1a1ea06b934d72a461086efc32f50"
