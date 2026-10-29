@@ -1,0 +1,35 @@
+- id: W1-T10987
+  repo: remudero
+  title: Verify merge-hold repair adoption and explain the PR14620 merge evidence
+  type: recon
+  verify: auto
+  author_class: machine
+  risk: low
+  priority: 2
+  budget_usd: 8
+  status: queued
+  attempts: 0
+  depends_on: []
+  plan_refs:
+    - W1-T1000002
+    - W1-T7721
+  files:
+    - docs/operator-guide.md
+  origin: cockpit-closeout:merge-hold-evidence:operator-authorized-2026-10-29
+  rationale: PR14620's confirmed scoped hold was engaged2026-10-27T16:07:27.884Z, its full-review arm refused16:20:23.647Z, and GitHub recorded a merge16:22:17Z before any release. The queue owner separately repaired four measured await interleavings in merged PR14942, merge38627e6dfe6b59a8ace5f00db0c8220d4ff6c16b fromcafaf19192136ad417c26a56e15319b69fd4674e at22:38:58Z. That repair must not be duplicated. The actual loaded effector adoption and historical final merger were not established. The operator-approved14620 release is now correctly saved2026-10-29T14:12:25.532Z and must not be repeated or reopened for this investigation.
+  design: Make a bounded read-only evidence reconciliation of the historical14620 engage/refusal/GitHub auto-merge/merge/release sequence and current native effector adoption of14942. Use the native rotated-plus-live ledger union with per-form corpus coverage and known engage/release positive controls; preserve chronological source clocks and anomalous timestamps. Use the GitHub read broker and its cadence, actual API audit/merge facts and bounded owned existing transcripts where authorized. Distinguish the actor that enabled auto-merge, the final merger, a sweep request, an asynchronous GitHub auto-merge and any direct effect; do not infer the final caller from temporal proximity or a bot-enabled flag. Verify the actual loaded daemon/effector source identity or a trustworthy runtime-bound receipt, not only current checkout HEAD, a Serve version or unrelated source ancestry. Separate what the four14942 private regression controls prove from live adoption and historical causation; no live hold toggling or merge is needed to observe them. Append a public-safe MERGE HOLD ADOPTION FINDING section to docs/operator-guide.md with an evidence table, provenance, retained UNKNOWNs, and a bounded recommendation only when supported. If GitHub audit or loaded-image evidence is not available, state that attribution/adoption remains unverified rather than repeatedly collecting the same evidence or inventing authority. Do not expose tokens, personal IDs, raw private paths or full transcripts. No product source, auth, actor classification, hold/arm/merge policy, budgets, capacity, ownership, services, schedules, review gates or live holds may change. Never re-engage14620, release another hold, trigger a merge, restart/deploy or exercise write credentials. Any newly demonstrated code repair requires a separate guarded task and ownership check.
+  acceptance:
+    - claim: The report separates the actual historical merge evidence, verified loaded repair adoption and remaining unknowns without duplicating or changing the hold mechanism
+      proof: "grep: MERGE HOLD ADOPTION FINDING in docs/operator-guide.md"
+  falsifier: If authoritative evidence identifies an independent merge path outside the repaired await interleavings, do not attribute14620 to those interleavings. If loaded effectors cannot be bound to14942 or an equivalent verified successor, source merge alone cannot establish runtime protection. An unrecoverable historical caller remainsUNKNOWN, not an endless retry.
+  note: Read-only attribution/adoption task with one bounded existing documentation update. Source race repair14942 and14620release are already completed work; this task grants no operational write or gate-change authority. Use existing owners and normal filing, author, hosted and native review gates.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed scope is read-only evidence reconciliation with one documentation update in docs/operator-guide.md; it explicitly excludes operational writes, credential use, policy changes, deployments and live hold actions."
+      - "The task requires provenance, corpus controls and retained UNKNOWNs when historical attribution or loaded repair adoption cannot be verified, rather than asserting unsupported findings."
+      - "The supplied filing state retains normal author, hosted and native review gates and identifies the existing repair as completed work that must not be duplicated."
+    judged_at: "2026-10-29T15:10:00.105Z"
+    pin: "179c706960c37efc5b43ff5795eaf777db7052bd5eec1ba82e8ad6c7a01c0102"

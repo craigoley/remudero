@@ -14,6 +14,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/a-re-run-review-names-why-its-pending-owner-is-gone.test.ts
+    - "src/lib/tick-read-worker.ts"
   status: queued
   priority: 2  # the cause decides the remedy: a dead pid is a restart, a post-time refusal is W1-T9727's freshness, a harvest is the promise corpus
   attempts: 0

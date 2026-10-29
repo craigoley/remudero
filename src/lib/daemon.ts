@@ -143,7 +143,7 @@ import type { RetroTriggerDecision } from "./retro.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
 import type { OrphanSweepReport } from "./worker-containment.js";
 // Type-only — shapes the feedback-landing injection points below (W1-T530).
-import type { LandFeedbackResult } from "./feedback-landing.js";
+import type { FeedbackRefusal, LandFeedbackResult } from "./feedback-landing.js";
 // Type-only — github-posture.ts owns this shape; the real read lives in run-task.ts (W1-T1040).
 import type { GithubPostureFinding } from "./github-posture.js";
 // The Clock port (W1-T2897): declared in "../lib/clock" so every reachable-through-lib import
@@ -1763,7 +1763,10 @@ export interface DaemonDeps {
    *  row. Every resulting task remains MARKED/PARKED (`author_class: machine`, `verify: human`);
    *  a throw is best-effort and the tick continues. */
   runCiLearningCadence?: () => Promise<
-    CiLearningCadenceRunResult & { filedCount: number; skippedCount: number; refusedCount: number }
+    CiLearningCadenceRunResult & {
+      filedCount: number; skippedCount: number; refusedCount: number;
+      carryRefusedCount?: number; carryRefused?: FeedbackRefusal[];
+    }
   >;
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
    * crosses first (policy data). An undefined return means there is nothing safe to evaluate — a corrupt marker, a
@@ -5291,6 +5294,8 @@ export async function runDaemon(
                 reason: result.snapshot.reason,
                 source_bytes: result.snapshot.pressure.sourceBytes,
                 checkpoint_bytes: result.checkpointBytes,
+                checkpoint_read_bytes: result.checkpointReadBytes,
+                checkpoint_written_bytes: result.checkpointWrittenBytes,
                 dimension_cardinality: result.snapshot.pressure.dimensionCardinality,
                 rebuilt_partitions: result.snapshot.pressure.rebuiltPartitions,
               });
@@ -5339,6 +5344,8 @@ export async function runDaemon(
                       filed: result.filedCount,
                       skipped: result.skippedCount,
                       refused: result.refusedCount,
+                      carry_refused: result.carryRefusedCount ?? 0,
+                      carry_refusals: result.carryRefused ?? [],
                       lesson_recurrences: result.lessonRecurrences,
                     });
                   })
