@@ -7,8 +7,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { transformSync } from "esbuild";
 import { stripComments } from "#src/lib/test-placement.js";
-import { countCommentLines } from "#scripts/comment-load-ratchet.mjs";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+// This executable script has no declaration file; load its real export with an explicit type.
+const { countCommentLines } = await import(import.meta.resolve("#scripts/comment-load-ratchet.mjs")) as {
+  countCommentLines: (text: string, path: string) => { comments: number; code: number };
+};
 
 // Pre-compression source: 8c654c1a3cf7265719d1162ac1862ffd77c41f91:src/lib/daemon.ts.
 // Keep code lines (including types and punctuation); only blank lines and trailing spaces are ignored.
