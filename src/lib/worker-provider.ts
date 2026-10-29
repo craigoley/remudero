@@ -3,6 +3,8 @@ import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-req
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
 import { CASH_RESPONSES_DEPLOYMENTS, CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
+import { codexExperimentArmForTask, routingDrawSeed, routingDrawValue, type RoutingDrawKey, type RoutingDrawSeed } from "./routing-experiments.js";
+export { routingDrawSeed, routingDrawValue, type RoutingDrawKey, type RoutingDrawSeed } from "./routing-experiments.js";
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { constants as fsConstants, accessSync, appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -36,7 +38,7 @@ import { RmdError } from "./errors.js";
 import { hostWorktreeGit, hostWorktreeGitAsync, recordedWorktreeGitDir } from "./worktree-git.js";
 import { aliasRewriteFields, rewriteAddedTestImports, type AddedTestAliasRewrite } from "./added-test-alias-rewrite.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { seededRandom, seedOf } from "./knowledge-value.js";
+import { seedOf } from "./knowledge-value.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
@@ -527,34 +529,10 @@ export function providerEligibility(capacity: ProviderCapacity, reservePercent: 
  */
 export const ROUTING_DRAW_METHOD = "fnv1a-mulberry32/v1";
 
-/** What a draw is keyed on. `unit: "task"` means every attempt of the task shares it (an experiment arm). */
-export interface RoutingDrawKey {
-  unit: "spawn" | "task";
-  taskId: string;
-  attempt: string;
-  point: string;
-}
-
-/** Hash a draw key into its 32-bit seed. The fields are NUL-joined so no two keys share a seed string. */
-export function routingDrawSeed(key: RoutingDrawKey): number {
-  return seedOf(["routing-draw/v1", key.unit, key.taskId, key.attempt, key.point].join("\u0000"));
-}
-
-/** A key's uniform draw in [0, 1) and the seed it came from, rendered as eight hex digits. */
-export function routingDrawValue(key: RoutingDrawKey): { value: number; seed: string } {
-  const seed = routingDrawSeed(key);
-  return { value: seededRandom(seed)(), seed: seed.toString(16).padStart(8, "0") };
-}
-
 /** The decision point of one spawn: a digest of what it asks for, so a fix rung and a reviewer draw apart. */
 export function spawnDecisionPoint(request: { model?: string; effort?: string; sandboxIntent?: string; prompt: string }): string {
   const text = [request.model ?? "", request.effort ?? "", request.sandboxIntent ?? "", request.prompt].join("\u0000");
   return `spawn:${seedOf(text).toString(16).padStart(8, "0")}`;
-}
-
-/** A keyed draw, plus the order the cumulative walk takes (absent: most headroom first). */
-export interface RoutingDrawSeed extends RoutingDrawKey {
-  order?: readonly WorkerProviderId[];
 }
 
 /** One recorded draw: its method, value, seed and each drawn candidate's selection probability. */
@@ -3160,17 +3138,54 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
 export async function spawnCodexWorker(
   args: CodexSpawnArgs,
   config: Config,
-  selection?: Pick<ProviderCapacity, "model" | "effort">,
+  selection?: Pick<ProviderCapacity, "model" | "effort"> & Partial<Pick<ProviderCapacity, "modelDecision">>,
 ): Promise<CodexWorkerResult> {
-  return withTempDir("codex-worker", async (privateTmpDir) => {
-    // The native-cache namespace and its `--add-dir` write grant exist only for a writer whose cwd the
-    // hardened Git adapter POSITIVELY verifies as a worktree. Anything else gets neither the setting,
-    // the grant, nor a created directory.
-    const nativeCacheRoot = process.platform !== "win32" && !codexReadOnly(args) && args.sandboxIntent !== "disposable-review" &&
-      await verifiedGitWorktree(args.cwd)
-      ? prepareWorkerNativeCache() : undefined;
-    return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, nativeCacheRoot);
-  });
+  const decision = selection?.modelDecision;
+  const trial = decision && args.taskId && !config.workerProviders?.codexModel && !decision.preferredModel && !decision.switchback
+    ? await codexExperimentArmForTask({ stateDir: join(config.root, "state"), taskId: args.taskId,
+      provider: "codex", capability: decision?.requestedCapability, effort: selection?.effort, model: selection?.model })
+    : undefined;
+  const assignment = trial?.state === "assigned" ? trial.assignment : undefined;
+  const assignmentId = assignment ? randomUUID() : undefined;
+  if (assignment && selection) {
+    const target = decision?.options.find(option => option.id === assignment.assignedModel);
+    const reserve = config.workerProviders?.reservePercent ?? 5;
+    const available = target && modelAllowed(target.id, config) && target.supportedEfforts.includes(selection.effort ?? "")
+      && target.windows.length > 0 && target.windows.every(window => validCapacityWindow(window) && window.usedPercent < 100 - reserve);
+    if (available) {
+      selection.model = assignment.assignedModel;
+      if (decision) {
+        decision.selectedModel = selection.model;
+        for (const option of decision.options) option.selected = option.id === selection.model;
+      }
+    }
+    appendLedger(ledgerPathFor(config), { run_id: args.runId ?? "unattributed", task_id: args.taskId!,
+      step: "codex_experiment.assignment", assignment_id: assignmentId, experiment: assignment,
+      requested_model: selection.model, crossover: selection.model !== assignment.assignedModel });
+  }
+  let result: CodexWorkerResult | undefined;
+  let failure: string | undefined;
+  try {
+    result = await withTempDir("codex-worker", async (privateTmpDir) => {
+      // Only positively verified writer worktrees receive the native-cache write grant.
+      const nativeCacheRoot = process.platform !== "win32" && !codexReadOnly(args) && args.sandboxIntent !== "disposable-review" &&
+        await verifiedGitWorktree(args.cwd)
+        ? prepareWorkerNativeCache() : undefined;
+      return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, nativeCacheRoot);
+    });
+    return result;
+  } catch (error) {
+    failure = (error as Error).message;
+    throw error;
+  } finally {
+    if (assignment) appendLedger(ledgerPathFor(config), { run_id: args.runId ?? "unattributed", task_id: args.taskId!,
+      step: "codex_experiment.receipt", assignment_id: assignmentId, experiment: assignment,
+      requested_model: selection?.model, served_model: result?.servedModel ?? null,
+      served_model_reason: result?.servedModelReason ?? failure ?? "worker produced no receipt",
+      billing_mode: "subscription", cost_usd: result?.costUsd ?? null, notional_cost_usd: result?.notionalCostUsd ?? null,
+      worker_duration_ms: result?.workerDurationMs, tokens: result?.tokens, success: result ? !result.isError : false,
+      crossover: result?.servedModel == null ? null : result.servedModel !== assignment.assignedModel });
+  }
 }
 
 /**
