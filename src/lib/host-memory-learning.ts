@@ -557,8 +557,9 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
     if (known !== undefined) return known;
     let facts: { runner: boolean; cli?: boolean; file?: string } = { runner: false };
     try {
-      const argv = ports.readFile(`/proc/${pid}/cmdline`).split("\0").filter(Boolean);
-      facts = { runner: isTestRunnerArgv(argv), cli: basename(argv[0] ?? "") === "claude" };
+      const rawArgv = ports.readFile(`/proc/${pid}/cmdline`).split("\0");
+      const argv = rawArgv.filter(Boolean);
+      facts = { runner: isTestRunnerArgv(argv), cli: basename(rawArgv[0] ?? "") === "claude" };
       if (!facts.runner && /^node(js)?$/.test(basename(argv[0] ?? ""))) {
         const file = argv.at(-1);
         if (file && /\.[cm]?[jt]sx?$/.test(file) && !file.startsWith("-")) facts.file = testFileKey(file);

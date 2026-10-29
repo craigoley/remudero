@@ -43,6 +43,7 @@ test("W1-T9646: a worker tree peak records the peak of its agent CLI process bes
     [11, { parent: 10, start: 11, argv: ["/opt/bin/claude", "-p"], rss: 100, hwm: 300 }],
     [12, { parent: 11, start: 12, argv: ["node", "tsc", "claude"], rss: 400, hwm: 600 }],
     [13, { parent: 11, start: 13, argv: ["claude", "-p"], rss: 20, hwm: 40 }],
+    [14, { parent: 10, start: 14, argv: ["", "claude"], rss: 30, hwm: 700 }],
   ]);
   const { sampler, store, reads } = fixture(procs);
   sampler.track("worker", 10, { onTestRunner: () => undefined });
@@ -52,12 +53,12 @@ test("W1-T9646: a worker tree peak records the peak of its agent CLI process bes
   procs.delete(12);
   procs.delete(13);
   const measured = sampler.finishMeasurement!("worker");
-  assert.equal(measured.peakMib, 570);
-  assert.equal(measured.legacyPeakMib, 1070);
+  assert.equal(measured.peakMib, 600);
+  assert.equal(measured.legacyPeakMib, 1770);
   assert.equal(recordPeak("implement", measured.peakMib!, { ...store, ...measured }), true);
   const [sample] = readPeakSamples("implement", store);
   assert.equal(sample?.cliPeakMib, 390);
-  assert.deepEqual([...reads.values()], [1, 1, 1, 1]);
+  assert.deepEqual([...reads.values()], [1, 1, 1, 1, 1]);
   recordPeak("implement", 570, { ...store, ...measured, size: () => 2 ** 21 });
   assert.deepEqual(readPeakSamples("implement", store).map(s => s.cliPeakMib), [390, 390]);
 });
@@ -66,6 +67,7 @@ test("W1-T9646: a tree with no CLI member records no CLI peak, never zero", () =
   const procs = new Map<number, Proc>([
     [10, { parent: 1, start: 10, argv: ["node", "claude"], rss: 50, hwm: 80 }],
     [11, { parent: 10, start: 11, argv: ["claude-helper"], rss: 100, hwm: 300 }],
+    [12, { parent: 10, start: 12, argv: ["", "claude"], rss: 20, hwm: 90 }],
   ]);
   const { sampler, store } = fixture(procs);
   sampler.track("worker", 10);
