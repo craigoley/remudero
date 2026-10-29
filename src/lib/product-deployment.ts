@@ -167,7 +167,7 @@ export function vercelDeploymentProvider(env: NodeJS.ProcessEnv = process.env, f
       if (list.pagination.next !== null) throw new Error("deployment list truncated");
       const deployments: VercelDeployment[] = [];
       for (const item of list.deployments) {
-        const deployment = vercelDeploymentSchema.parse(await json(`/v13/deployments/${encodeURIComponent(item.uid)}`));
+        const deployment = vercelDeploymentSchema.parse(await json(`/v13/deployments/${encodeURIComponent(item.uid)}?withGitRepoInfo=true`));
         if (deployment.id !== item.uid) throw new Error("deployment detail identity mismatch");
         deployments.push(deployment);
       }

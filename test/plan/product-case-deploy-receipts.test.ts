@@ -72,7 +72,7 @@ async function fixture(t: TestContext, hostedChange?: string) {
     }
     const found = [deployment, ...others].find(item => url.pathname === `/v13/deployments/${item.id}`);
     assert.ok(found, url.pathname);
-    return Response.json(found);
+    return Response.json({ ...found, gitSource: url.searchParams.get("withGitRepoInfo") === "true" ? found.gitSource : undefined });
   };
   const binding = await new ProductDeploymentService({ root }).execute(actor, { version: "product-deployment-v1", requestId: "deploy-adopt-000001",
     productId, action: "adopt", teamId: team, projectId: "prj_fixture", projectName: "fixture", repository,
@@ -118,6 +118,7 @@ test("W1-T10866: deployment binds its tested source project and answering URL", 
     target: "preview", commit: head, url: "https://fixture.vercel.app/", readyState: "READY", servedStatus: 200,
     outcome: "succeeded", reason: "served URL answered" });
   assert.equal(f.probes, 1);
+  assert.equal(f.calls.find(call => call.url.pathname === "/v13/deployments/dpl_fixture")?.url.searchParams.get("withGitRepoInfo"), "true");
   const input = f.command();
   for (const injection of [{ url: "https://evil.invalid" }, { commit: head }, { outcome: "succeeded" }]) {
     assert.equal((await f.request({ ...input, command: { ...input.command, ...injection } })).status, 400);
@@ -262,6 +263,7 @@ test("W1-T10866: replay restart and concurrent edits preserve deployment history
   };
   const replies = await Promise.all([f.request(input), f.request(input)]);
   for (const reply of replies) assert.equal(reply.status, 200, JSON.stringify(reply.body));
+  f.status = 204;
   const replay = await f.request(input);
   assert.equal(replay.status, 200); assert.equal(replay.body.replayed, true);
   assert.equal(replay.body.evidence.deploy.length, 2);
@@ -277,12 +279,65 @@ test("W1-T10866: replay restart and concurrent edits preserve deployment history
     await assert.rejects(f.request(command), /response lost after durable commit/);
     const durable = f.current(), stored = durable.stageEvidence.find(item => item.receipt?.channel === "deploy");
     assert.ok(stored);
+    f.status = 204;
     const recovered = await f.request(command);
     assert.equal(recovered.status, 200); assert.equal(recovered.body.replayed, true);
     assert.equal(recovered.body.revision, durable.revision);
     assert.deepEqual(recovered.body.evidence.deploy[0].receipt, stored.receipt);
     assert.equal(recovered.body.evidence.deploy[0].current, true);
     assert.equal(f.current().stageEvidence.filter(item => item.receipt?.channel === "deploy").length, 1);
+  });
+  await t.test("receipts saved with the earlier metadata hash retain their identity and typed data", async t => {
+    const f = await fixture(t), command = f.command(), product = f.current();
+    const receipt = { channel: "deploy" as const, actor, productId: f.productId, objectiveRevision: 1,
+      operationId: f.operationId, repository, projectId: "prj_fixture", teamId: team, deploymentId: "dpl_fixture",
+      providerCreatedAt: Date.parse(now), target: "preview" as const, commit: head, url: "https://fixture.vercel.app/",
+      readyState: "READY", servedStatus: 200, outcome: "succeeded" as const, reason: "served URL answered" };
+    const id = `case-deploy:${createHash("sha256").update(JSON.stringify(receipt)).digest("hex")}`;
+    assert.ok(f.store.transition(actor, { version: "product-intent-v1", requestId: "prior-deploy-receipt-001", id: f.productId,
+      expectedRevision: product.revision, expectedObjectiveRevision: 1, stageEvidence: [{ id, stage: "deploy", outcome: "succeeded",
+        objectiveRevision: 1, observedAt: now, references: [{ label: receipt.reason, url: receipt.url }], receipt }] }).ok);
+    const durable = f.current();
+    f.status = 204;
+    const replay = await f.request(command);
+    assert.equal(replay.status, 200, JSON.stringify(replay.body));
+    assert.equal(replay.body.replayed, true); assert.equal(replay.body.revision, durable.revision);
+    assert.deepEqual(replay.body.evidence.deploy, [{ id, reference: receipt.url, outcome: "succeeded", receipt, current: true }]);
+    assert.equal(f.current().stageEvidence.filter(item => item.receipt?.channel === "deploy").length, 1);
+  });
+  await t.test("equivalent 2xx probes replay the first durable receipt across instances and revisions", async t => {
+    const f = await fixture(t), command = f.command();
+    const first = await f.request(command);
+    assert.equal(first.status, 200);
+    assert.equal(first.body.evidence.deploy[0].outcome, "succeeded");
+    const durable = f.current(), stored = first.body.evidence.deploy[0];
+    f.status = 204;
+    const recovered = await f.request(command);
+    assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
+    assert.equal(recovered.body.replayed, true);
+    assert.equal(recovered.body.revision, durable.revision);
+    assert.deepEqual(recovered.body.evidence.deploy, [stored]);
+    f.status = 201;
+    const fresh = await f.request();
+    assert.equal(fresh.status, 200); assert.equal(fresh.body.replayed, true);
+    assert.deepEqual(fresh.body.evidence.deploy, [stored]);
+    assert.equal(f.current().stageEvidence.filter(item => item.receipt?.channel === "deploy").length, 1);
+  });
+  await t.test("concurrent equivalent 2xx probes converge while retaining an earlier failure", async t => {
+    const f = await fixture(t);
+    f.deployment.readyState = "ERROR";
+    assert.equal((await f.request()).body.evidence.deploy[0].outcome, "failed");
+    f.deployment.readyState = "READY";
+    const statuses = [200, 204];
+    f.beforeProbe = () => { f.status = statuses.shift()!; };
+    const command = f.command();
+    const replies = await Promise.all([f.request(command), f.request(command)]);
+    for (const reply of replies) {
+      assert.equal(reply.status, 200, JSON.stringify(reply.body));
+      assert.deepEqual(reply.body.evidence.deploy.map((item: { outcome: string }) => item.outcome), ["failed", "succeeded"]);
+    }
+    assert.deepEqual(replies[0]!.body.evidence.deploy, replies[1]!.body.evidence.deploy);
+    assert.equal(f.current().stageEvidence.filter(item => item.receipt?.channel === "deploy").length, 2);
   });
   await t.test("an unreadable observation never keeps an earlier success current", async t => {
     const f = await fixture(t);

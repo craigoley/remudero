@@ -70,6 +70,14 @@ class CaseFault extends RmdError {
   constructor(readonly code: ProductCaseCode) { super("usage", GENERIC_EXIT_CODE, `product case: ${code}`); }
 }
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const deploymentIdentity = (receipt: ProductDeployReceipt) => digest([
+  receipt.actor, receipt.productId, receipt.objectiveRevision, receipt.repository.id,
+  receipt.operationId, receipt.teamId, receipt.projectId, receipt.deploymentId,
+  receipt.target, receipt.commit, receipt.outcome,
+]);
+const deploymentEvidenceId = (product: StoredProduct, receipt: ProductDeployReceipt) =>
+  product.stageEvidence.find(item => item.receipt?.channel === "deploy" &&
+    deploymentIdentity(item.receipt) === deploymentIdentity(receipt))?.id ?? `case-deploy:${deploymentIdentity(receipt)}`;
 
 /** Resumable adoption case. Durable state and all external actions use the existing product mechanisms. */
 export class ProductCaseService {
@@ -228,7 +236,7 @@ export class ProductCaseService {
     if (receipt && (receipt.actor !== actor || receipt.productId !== input.productId || receipt.repository.id !== input.repositoryId ||
       receipt.channel !== input.channel || receipt.objectiveRevision !== input.expectedObjectiveRevision)) return { ok: false as const, code: "invalid_input" as const };
     if (receipt?.channel === "deploy" && receipt.outcome !== input.outcome) return { ok: false as const, code: "invalid_input" as const };
-    const identity = receipt?.channel === "deploy" ? digest(receipt) : receipt ? digest([input.productId, input.expectedObjectiveRevision, input.channel, receipt.operationId, receipt.runId, receipt.head, input.outcome]) : digest(parsed.data);
+    const identity = receipt?.channel === "deploy" ? deploymentIdentity(receipt) : receipt ? digest([input.productId, input.expectedObjectiveRevision, input.channel, receipt.operationId, receipt.runId, receipt.head, input.outcome]) : digest(parsed.data);
     const stage = parsed.data.channel === "deploy" || parsed.data.channel === "mobile" ? "deploy" : "build";
     if (read.value.stageEvidence.length >= 128 && !read.value.stageEvidence.some(item => item.id === `case-${input.channel}:${identity}`)) return { ok: false as const, code: "capacity" as const };
     return this.store.transition(actor, { version: "product-intent-v1", requestId: parsed.data.requestId, id: parsed.data.productId,
@@ -269,16 +277,17 @@ export class ProductCaseService {
     }
     if (!receipts.length) receipts.push({ ...base, deploymentId: null, target: null, providerCreatedAt: null, commit: null, url: null, readyState: null,
       servedStatus: null, outcome: "unknown", reason: observation.reason ?? "no provider deployment observed" });
-    if (product.revision !== input.expectedRevision && receipts.some(receipt => !product.stageEvidence.some(item => item.id === `case-deploy:${digest(receipt)}`))) {
+    if (product.revision !== input.expectedRevision && receipts.some(receipt => !product.stageEvidence.some(item => item.id === deploymentEvidenceId(product, receipt)))) {
       throw new CaseFault("stale_revision");
     }
     let replayed = true;
     const currentReceipts = new Map<ProductDeployReceipt["target"], string>();
     for (const receipt of receipts) {
-      const identity = digest(receipt), id = `case-deploy:${identity}`;
-      currentReceipts.set(receipt.target, id);
+      const identity = deploymentIdentity(receipt);
       for (let attempt = 0; attempt < 2; attempt++) {
         const current = this.read(actor, product.id);
+        const id = deploymentEvidenceId(current, receipt);
+        currentReceipts.set(receipt.target, id);
         if (current.objectiveRevision !== product.objectiveRevision || current.repository?.id !== base.repository.id) throw new CaseFault("stale_revision");
         if (current.revision !== product.revision && receipt.outcome === "succeeded" && receipt.commit &&
           !(await this.hostedSource(current, actor, receipt.commit)).accepted) throw new CaseFault("stale_revision");
