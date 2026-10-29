@@ -9,7 +9,7 @@ import { ProductCaseService, productCaseCommandSchema, productCasePlanText } fro
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { ProductBuildService, productBuildKickOrigin, productPlanOrigin, readTargetExecution } from "#src/lib/product-build.js";
 import { buildProductCaseRoutes } from "#src/lib/product-routes.js";
-import { captureLocalQualificationReceipt, readLocalQualificationReceipt } from "#src/lib/local-qualification-receipt.js";
+import { captureLocalQualificationReceipt, measuredTestSummary, readLocalQualificationReceipt } from "#src/lib/local-qualification-receipt.js";
 import { resolveProjectPreflight } from "#src/lib/ci-project-preflight.js";
 import { defaultPreflightSpawn } from "#src/lib/commit-message.js";
 import type { PreflightSummary } from "#src/lib/ci-parity.js";
@@ -210,6 +210,68 @@ test("W1-T10865: failed incomplete foreign and stale evidence cannot pass", asyn
   const redAgain = (await f.request()).body.evidence.hosted.filter((item: { current: boolean }) => item.current);
   assert.equal(redAgain.length, 1);
   assert.equal(redAgain[0].outcome, "failed", "reusing an earlier failed receipt must not leave a later success current");
+});
+
+test("W1-T10865: required check and status overlaps preserve failures and pending through the served collector", async t => {
+  const scenarios = [
+    ["success", "failure", "failed", "failure"],
+    ["success", "error", "failed", "error"],
+    ["success", "pending", "running", "pending"],
+    ["success", "unrecognized", "unknown", "unrecognized"],
+    ["failure", "success", "failed", "failure"],
+    ["pending", "success", "running", "pending"],
+    ["failure", "pending", "failed", "failure"],
+    ["pending", "failure", "failed", "failure"],
+    ["unrecognized", "failure", "failed", "failure"],
+    ["pending", "unrecognized", "unknown", "unrecognized"],
+    ["success", "success", "succeeded", "success"],
+  ] as const;
+  for (const [check, status, outcome, conclusion] of scenarios) await t.test(`${check} check with ${status} status`, async t => {
+    const f = await fixture(t);
+    f.configure(check);
+    f.shim.addRoute({ when: `commits/${f.head}/status`, stdout: JSON.stringify({ total_count: 2, statuses: [
+      { context: "test", state: status },
+      { context: "remudero-review", state: "success", creator: { login: trusted, type: "Bot" } },
+    ] }) });
+    const reply = await f.request();
+    assert.equal(reply.status, 200, JSON.stringify(reply.body));
+    const current = reply.body.evidence.hosted.filter((item: { current: boolean }) => item.current);
+    assert.equal(current.length, 1);
+    assert.equal(current[0].outcome, outcome);
+    assert.deepEqual(current[0].receipt.contexts.find((context: { name: string }) => context.name === "test"), { name: "test", conclusion });
+    assert.equal(current[0].receipt.head, f.head);
+    const stored = f.store.read(actor, f.productId); assert.ok(stored.ok);
+    const evidence = stored.value.stageEvidence.find(item => item.id === current[0].id); assert.ok(evidence);
+    assert.equal(evidence.outcome, outcome);
+    if (outcome === "failed" || outcome === "running") assert.equal(evidence.references[0]?.label, `test: ${conclusion}`);
+    assert.ok(f.shim.calls().some(call => call.includes(`commits/${f.head}/check-runs?per_page=100`)));
+    assert.ok(f.shim.calls().some(call => call.includes(`commits/${f.head}/status?per_page=100`)));
+  });
+});
+
+test("W1-T10865: measured Vitest summaries retain counts and reject incomplete or ambiguous totals", () => {
+  const summary = (files: string, tests: string) => `\n Test Files  ${files}\n      Tests  ${tests}\n`;
+  assert.deepEqual(measuredTestSummary(summary("2 passed (2)", "5 passed (5)")),
+    { tests: 5, suites: 2, passed: 5, failed: 0, skipped: 0 });
+  assert.deepEqual(measuredTestSummary(summary("1 passed | 1 failed (2)", "3 passed | 1 failed | 1 skipped | 1 todo (6)")),
+    { tests: 6, suites: 2, passed: 3, failed: 2, skipped: 2 });
+  assert.deepEqual(measuredTestSummary(summary("1 skipped (1)", "2 skipped (2)")),
+    { tests: 2, suites: 1, passed: 0, failed: 0, skipped: 2 });
+  assert.deepEqual(measuredTestSummary(summary("0 passed (0)", "0 passed (0)")),
+    { tests: 0, suites: 0, passed: 0, failed: 0, skipped: 0 });
+  assert.deepEqual(measuredTestSummary(summary("1 failed (1)", "2 failed (2)")),
+    { tests: 2, suites: 1, passed: 0, failed: 3, skipped: 0 });
+  for (const [files, tests] of [
+    ["1 passed", "2 passed (2)"],
+    ["1 passed (1)", "2 passed"],
+    ["1 passed (1)", "1 passed | 1 passed (2)"],
+    ["1 passed (1)", "2 pending (2)"],
+    ["1 passed (1)", "2 passed (3)"],
+    ["1 passed (2)", "2 passed (2)"],
+  ]) assert.equal(measuredTestSummary(summary(files!, tests!)), undefined, `${files}; ${tests}`);
+  const complete = summary("1 passed (1)", "2 passed (2)");
+  assert.equal(measuredTestSummary(complete + complete), undefined, "multiple summaries are ambiguous");
+  assert.equal(measuredTestSummary("Tests 2 passed (2)"), undefined, "a test count without a suite summary is incomplete");
 });
 
 test("W1-T10865: replay restart and concurrent edits retain one receipt", async t => {

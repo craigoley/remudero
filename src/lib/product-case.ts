@@ -325,14 +325,20 @@ export class ProductCaseService {
       const hold = classifyChangesRequested({ headSha: head }, reviews);
       const trusted = this.options.planTrustedReviewer ?? process.env[REVIEWER_IDENTITY_ENV] ?? "";
       const review = resolveReviewProvenance(await readReviewStatusEntry(repo.owner, repo.name, head, fetcher), trusted);
+      const failures = ["failure", "error", "cancelled", "timed_out", "action_required", "startup_failure", "stale"];
       const contexts = names.map(name => {
         const pin = required.checks?.find(check => check.context === name)?.app_id;
         const run = runs.check_runs.filter(run => run.name === name && (pin === undefined || pin === null || pin < 0 || run.app?.id === pin)).sort((a, b) => b.id - a.id)[0];
         const status = pin === undefined || pin === null || pin < 0 ? statuses.statuses.find(status => status.context === name) : undefined;
-        return { name, conclusion: run ? run.status === "completed" ? run.conclusion ?? "unknown" :
-          ["queued", "in_progress", "requested", "waiting", "pending"].includes(run.status) ? "pending" : "unknown" : status?.state ?? "pending" };
+        const conclusions = run ? [run.status === "completed" ? run.conclusion ?? "unknown" :
+          ["queued", "in_progress", "requested", "waiting", "pending"].includes(run.status) ? "pending" : "unknown"] : [];
+        if (status) conclusions.push(status.state);
+        const conclusion = conclusions.find(value => failures.includes(value)) ??
+          conclusions.find(value => !["success", "pending"].includes(value)) ??
+          conclusions.find(value => value === "pending") ?? (conclusions.length ? "success" : "pending");
+        return { name, conclusion };
       });
-      const failed = contexts.find(context => ["failure", "error", "cancelled", "timed_out", "action_required", "startup_failure", "stale"].includes(context.conclusion));
+      const failed = contexts.find(context => failures.includes(context.conclusion));
       const pending = contexts.find(context => context.conclusion === "pending");
       const unrecognized = contexts.find(context => !["success", "pending", "failure", "error", "cancelled", "timed_out", "action_required", "startup_failure", "stale"].includes(context.conclusion));
       const outcome = hold?.kind === "changes-requested" || failed || review === "failure" ? "failed" :
