@@ -614,11 +614,11 @@ test("census baseline refresh respects live owners and the exact head through pr
 });
 
 test("census baseline refresh respects live owners and the exact head through sweep cleanup", async t => {
-  for (const mode of ["overlap", "save-error", "foreign-owner", "head-changed", "ordinary-cleanup"] as const) {
+  for (const mode of ["overlap", "save-error", "staged-overlap", "staged-save-error", "foreign-owner", "head-changed", "ordinary-cleanup"] as const) {
     await t.test(mode, async t => {
       const { harness, repo, head, main, rows, log, baselinePath } = await inheritedContractFixture(t);
       const { DEFAULT_SWEEP_POLICY } = await import("#src/lib/sweep.js");
-      if (mode === "overlap") {
+      if (mode === "overlap" || mode === "staged-overlap") {
         repo.git("switch", "--detach", main);
         writeFileSync(join(repo.dir, "src/lib/unreached.ts"), "export const mainEdit = true;\n");
         repo.git("add", "src/lib/unreached.ts"); repo.git("commit", "-m", "fixture: main edits saved-work path");
@@ -636,13 +636,20 @@ test("census baseline refresh respects live owners and the exact head through sw
       const saveWork = (path: string) => {
         writeFileSync(join(path, "src/lib/unreached.ts"), "export const saved = 1;\n");
         repo.git("-C", path, "add", "src/lib/unreached.ts");
-        writeFileSync(join(path, "src/lib/unreached.ts"), "export const saved = 2;\n");
-        writeFileSync(join(path, "unpublished.txt"), "untracked fix\n");
+        const stagedOnly = mode === "staged-overlap" || mode === "staged-save-error";
+        writeFileSync(join(path, "src/lib/unreached.ts"), stagedOnly
+          ? repo.git("-C", path, "show", "HEAD:src/lib/unreached.ts") + "\n" : "export const saved = 2;\n");
+        if (!stagedOnly) writeFileSync(join(path, "unpublished.txt"), "untracked fix\n");
+        if (mode === "staged-save-error") repo.git("-C", path, "update-ref", "refs/rmd-recovery/fix-dirty", head);
         if (mode === "save-error") writeFileSync(join(root, "recovery"), "blocks preservation directory");
         status = repo.git("-C", path, "status", "--porcelain=v1");
         indexBlob = repo.git("-C", path, "rev-parse", ":src/lib/unreached.ts");
         worktreeBlob = repo.git("-C", path, "hash-object", "src/lib/unreached.ts");
         assert.notEqual(indexBlob, worktreeBlob, "the fixture contains distinct staged and unstaged edits");
+        if (stagedOnly) {
+          assert.equal(repo.git("-C", path, "diff", "HEAD"), "");
+          assert.equal(worktreeBlob, repo.git("-C", path, "rev-parse", "HEAD:src/lib/unreached.ts"));
+        }
       };
       const { worktreeRemove } = await import("#src/lib/worker.js");
       const effects = harness.buildSweepEffects({
@@ -702,11 +709,13 @@ test("census baseline refresh respects live owners and the exact head through sw
       assert.equal(repo.git("-C", worktree, "status", "--porcelain=v1"), status);
       assert.equal(repo.git("-C", worktree, "rev-parse", ":src/lib/unreached.ts"), indexBlob);
       assert.equal(repo.git("-C", worktree, "hash-object", "src/lib/unreached.ts"), worktreeBlob);
-      assert.equal(readFileSync(join(worktree, "unpublished.txt"), "utf8"), "untracked fix\n");
+      if (mode !== "staged-overlap" && mode !== "staged-save-error") {
+        assert.equal(readFileSync(join(worktree, "unpublished.txt"), "utf8"), "untracked fix\n");
+      }
       assert.equal(spawned, 0); assert.equal(updated, 0);
       const held = rows.find(row => row.step === "fix.census_refresh" && row.fields.outcome === "held");
       assert.ok(held, JSON.stringify(rows));
-      assert.match(String(held.fields.reason), mode === "overlap" ? /overlaps main/ : mode === "save-error" ? /unavailable/ : mode === "foreign-owner" ? /another owner/ : /head|branch changed/);
+      assert.match(String(held.fields.reason), mode.endsWith("overlap") ? /overlaps main/ : mode.endsWith("save-error") ? /unavailable/ : mode === "foreign-owner" ? /another owner/ : /head|branch changed/);
     });
   }
 });

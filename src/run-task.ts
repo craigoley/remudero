@@ -10707,7 +10707,8 @@ function* inheritedCensusContextSteps(
       throw new Error("census snapshot refs changed");
     }
     const branchEdits = yield* read(["diff", "--name-only", identity.mergeBase, identity.headSha, "--", baselinePath]);
-    if (branchEdits !== "" || (yield* read(["diff", "HEAD", "--", baselinePath])) !== "") {
+    if (branchEdits !== "" || (yield* read(["diff", "HEAD", "--", baselinePath])) !== "" ||
+        (yield* read(["diff", "--cached", "HEAD", "--", baselinePath])) !== "") {
       return { state: "not-inherited", reason: "branch or saved work edits the reach baseline" };
     }
     const base = yield* read(["show", `${identity.mergeBase}:${baselinePath}`]);
@@ -10848,12 +10849,15 @@ export async function preserveInheritedCensusWork(root: string, worktreePath: st
   const git = (args: string[]) => hostWorktreeGitAsync(worktreePath, args, { maxBuffer: 1 << 24 });
   if ((await git(["rev-parse", "HEAD"])).trim() !== context.headSha) throw new Error("saved work head changed");
   const tracked = (await git(["diff", "HEAD", "--name-only", "-z"])).split("\0").filter(Boolean);
+  const staged = (await git(["diff", "--cached", "HEAD", "--name-only", "-z"])).split("\0").filter(Boolean);
   const untracked = (await git(["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
   const mainChanged = new Set((await git(["diff", "--name-only", "-z", context.mergeBase, context.mainSha])).split("\0"));
-  if ([...tracked, ...untracked].some(path => mainChanged.has(path))) throw new Error("saved work overlaps main migration");
+  if ([...tracked, ...staged, ...untracked].some(path => mainChanged.has(path))) throw new Error("saved work overlaps main migration");
   if (untracked.length > 0) return { saved_path: preserveStaleDirtyFixOwner(root, worktreePath, worktreePath, branch, context.headSha) };
-  if (tracked.length > 0) return { recovery_ref: preserveTrackedDirtyFixOwner(worktreePath, worktreePath, branch, context.headSha) };
-  return {};
+  return {
+    ...(staged.length > 0 ? { index_recovery_ref: preserveStagedFixOwnerResidue(worktreePath, worktreePath, branch, context.headSha) } : {}),
+    ...(tracked.length > 0 ? { recovery_ref: preserveTrackedDirtyFixOwner(worktreePath, worktreePath, branch, context.headSha) } : {}),
+  };
 }
 
 /** W1-T4693: a fix round's push that did not land — `refusal` set when the pre-push census refused it. */

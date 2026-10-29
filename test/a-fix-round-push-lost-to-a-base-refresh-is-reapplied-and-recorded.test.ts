@@ -315,14 +315,61 @@ test("census baseline refresh respects live owners and the exact head", async t 
         return files.map(file => ({ file, outcome: "passes", duration_ms: 1, cached: false }));
       };
       if (mode === "update-refused") fx.deps.updateBranchAtHead = () => ({ ok: false, error: "expected_head_sha mismatch" });
+      writeFileSync(join(fx.repo.dir, "source.ts"), "export const saved = 1;\n");
+      fx.repo.git("add", "source.ts");
+      writeFileSync(join(fx.repo.dir, "source.ts"), "export const saved = 0;\n");
+      const index = fx.repo.git("rev-parse", ":source.ts");
+      const worktree = fx.repo.git("hash-object", "source.ts");
+      assert.notEqual(index, worktree);
+      assert.equal(fx.repo.git("diff", "HEAD"), "", "HEAD-to-disk diff cannot see the staged fix");
       const before = fx.repo.git("status", "--porcelain=v1");
       const result = await fx.run();
       assert.equal(result.outcome, "held", JSON.stringify(fx.rows)); assert.equal(fx.updates(), 0);
       assert.equal(fx.repo.git("status", "--porcelain=v1"), before, "refusal keeps unpublished work unchanged");
+      assert.equal(fx.repo.git("rev-parse", ":source.ts"), index);
+      assert.equal(fx.repo.git("hash-object", "source.ts"), worktree);
       if (mode === "foreign-owner") {
         fx.claim.release(); // the real outer finally must preserve a holder this refresh rejected
         assert.equal(JSON.parse(readFileSync(fx.lock.path, "utf8")).run_id, "FOREIGN-live");
       }
+    });
+  }
+});
+
+test("census baseline refresh respects live owners and the exact head while preserving both tracked edit layers", async t => {
+  for (const mode of ["staged-reverted", "staged-and-unstaged", "staged-overlap"] as const) {
+    await t.test(mode, async t => {
+      const fx = await censusRefreshOwner(t);
+      const path = mode === "staged-overlap" ? "scripts/affected-reach-baseline.json" : "source.ts";
+      const original = readFileSync(join(fx.repo.dir, path));
+      writeFileSync(join(fx.repo.dir, path), "staged fix\n"); fx.repo.git("add", path);
+      writeFileSync(join(fx.repo.dir, path), mode === "staged-and-unstaged" ? "unstaged fix\n" : original);
+      const index = fx.repo.git("rev-parse", `:${path}`);
+      const worktree = fx.repo.git("hash-object", path);
+      const before = fx.repo.git("status", "--porcelain=v1");
+      assert.notEqual(index, worktree);
+      if (mode !== "staged-and-unstaged") assert.equal(fx.repo.git("diff", "HEAD"), "");
+      const result = await fx.run();
+      assert.equal(result.outcome, mode === "staged-overlap" ? "held" : "requested", JSON.stringify(fx.rows));
+      assert.equal(fx.updates(), mode === "staged-overlap" ? 0 : 1);
+      assert.equal(fx.repo.git("status", "--porcelain=v1"), before);
+      assert.equal(fx.repo.git("rev-parse", `:${path}`), index);
+      assert.equal(fx.repo.git("hash-object", path), worktree);
+      assert.equal(fx.repo.git("rev-parse", "HEAD"), fx.base);
+      if (mode === "staged-overlap") {
+        await assert.rejects(fx.evidence.preserveInheritedCensusWork(fx.root, fx.repo.dir, "refresh", fx.context), /overlaps main/);
+        assert.match(result.reason, /context changed/);
+        assert.equal(fx.rows.some(row => row.outcome === "work-preserved"), false);
+        return;
+      }
+      const saved = fx.rows.find(row => row.outcome === "work-preserved")!;
+      assert.match(String(saved.index_recovery_ref), /^refs\/rmd-recovery\//);
+      assert.equal(fx.repo.git("rev-parse", `${saved.index_recovery_ref}:${path}`), index);
+      assert.equal(fx.repo.git("rev-parse", `${saved.index_recovery_ref}^`), fx.base);
+      if (mode === "staged-and-unstaged") {
+        assert.match(String(saved.recovery_ref), /^refs\/rmd-recovery\//);
+        assert.equal(fx.repo.git("rev-parse", `${saved.recovery_ref}:${path}`), worktree);
+      } else assert.equal(worktree, fx.repo.git("rev-parse", `HEAD:${path}`));
     });
   }
 });
