@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import type { Config } from "#src/lib/config.js";
@@ -16,8 +16,6 @@ import {
   openWeightDeploymentReady, openWeightReservationUsd, openWeightUsageUsd,
   recordCashCapacity, resetLearnedCashCapacity, spawnOpenWeightWorker,
 } from "#src/lib/worker-provider.js";
-import { inboxBakeoffCommand } from "#src/run-task.js";
-import { gitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -148,58 +146,12 @@ test("W1-T10839: the Sonnet fallback offers Terra 6.1 before Sol 6.1", (t) => {
   } finally { clearOpenWeightAbsence(); resetLearnedCashCapacity(); }
 });
 
-test("W1-T10839: the inbox bake-off trials Terra at low, medium and high", async (t) => {
+test("W1-T10839: the inbox bake-off trials Terra at low, medium and high", () => {
+  // test/inbox-bakeoff-command.test.ts checks effort pinning at the CLI's spawn seam.
   const terra = BAKEOFF_CANDIDATES.filter((candidate) => candidate.model === TERRA);
   assert.deepEqual(terra.map((candidate) => candidate.effort), ["low", "medium", "high"]);
   assert.equal(new Set(terra.map((candidate) => candidate.id)).size, 3);
   assert.ok(terra.every((candidate) => candidate.tools && candidate.billing === "cash"));
-  const origin = gitRepo({ bare: true, scope: t, kind: "terra61-bakeoff-origin" });
-  const seed = gitRepo({ scope: t, kind: "terra61-bakeoff-seed" });
-  mkdirSync(join(seed.dir, "plan"));
-  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "[]\n");
-  seed.git("add", "plan/tasks.yaml");
-  seed.git("commit", "-qm", "fixture");
-  seed.addRemote("origin", origin.dir);
-  seed.git("push", "-q", "origin", "main");
-  const { dir } = ownedFixtureDir(t, "terra61-bakeoff");
-  const home = join(dir, "home");
-  const root = join(dir, "state-root");
-  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
-  mkdirSync(join(root, "state"), { recursive: true });
-  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({
-    claudeBin: "/bin/true", root, installRoot: REPO_ROOT,
-  }));
-  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [{
-    id: "P1", summary: "fixture", evidenceAnchors: [{ description: "fixture", pattern: "landed" }],
-  }] }));
-  const previousHome = process.env.HOME;
-  const previousLog = console.log;
-  process.env.HOME = home;
-  console.log = () => {};
-  try {
-    const calls: worker.SpawnWorkerArgs[] = [];
-    const code = await inboxBakeoffCommand([], async (args) => {
-      calls.push(args); return {} as worker.WorkerResult;
-    }, async ({ proposals, spawnFor }) => {
-      for (const candidate of BAKEOFF_CANDIDATES) await spawnFor(candidate)(proposals[0]!, "fixture prompt");
-      return [];
-    }, (args) => {
-      mkdirSync(join(root, "repos"), { recursive: true });
-      seed.git("clone", "-q", origin.dir, args.at(-1)!);
-    });
-    assert.equal(code, 0);
-    assert.equal(calls.length, BAKEOFF_CANDIDATES.length);
-    for (const candidate of terra) {
-      const args = calls.find((call) => call.routingTrial?.reason === `bake-off candidate ${candidate.id}`);
-      assert.ok(args);
-      assert.deepEqual(args.routingTrial?.models, [TERRA]);
-      assert.equal(args.effort, candidate.effort);
-      assert.notDeepEqual(args.tools, []);
-    }
-  } finally {
-    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
-    console.log = previousLog;
-  }
 });
 
 test("W1-T10839: the successor watcher reads a deployed Terra 6.1 as ready", () => {

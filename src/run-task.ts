@@ -35117,8 +35117,8 @@ export async function inboxBakeoffCommand(
       });
       return await rawSpawn({
         ...args,
-        onSelectionAssignment: undefined,
         ...(candidate.effort === undefined ? {} : { effort: candidate.effort }),
+        onSelectionAssignment: undefined,
         ...(cash ? { routingTrial: { id: "inbox-bakeoff", arm: "cash", reason: `bake-off candidate ${candidate.id}`, models: [candidate.model] } } : {}),
         ...(candidate.tools ? {} : { tools: [] }),
       });
