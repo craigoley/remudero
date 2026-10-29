@@ -13266,6 +13266,11 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
   const taskId = reviewTaskIdFromBody(body);
   // W1-T10925: the trailer's task resolves in the instance's target plan when cwd's lacks it.
   const located = deps.planPath === undefined && taskId ? verbTaskPlan(taskId) : undefined;
+  if (located && !located.ok) {
+    // The body may still supply acceptance criteria, but an unresolved trailer must remain
+    // visible: the operator needs every searched plan and the target checkout's --repo-root.
+    console.error(`rmd check-acceptance: unknown task '${taskId}' (${located.error}); checking the body Acceptance: block`);
+  }
   const planPath = deps.planPath ?? (located?.ok ? located.planPath : join(repoRoot, "plan", "tasks.yaml"));
   let criteria: AcceptanceCriterion[] = [];
   let declaredFilesForTrailer: string[] = [];

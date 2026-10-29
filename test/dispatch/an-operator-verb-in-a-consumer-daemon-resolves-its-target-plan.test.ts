@@ -178,6 +178,17 @@ test("W1-T10925: a miss names every plan searched and the repo-root to use", (t)
   assert.ok(r.err.includes(`targets craigoley/remudero-site — read its plan with --repo-root ${f.target}`), r.err);
   assert.equal(r.released.length, 0);
 
+  // A PR-body preflight resolves the same trailer. It may use the body's criteria, but must
+  // expose the resolver miss so the operator can point it at the intended checkout.
+  const bodyPath = join(f.home, "unknown-task-body.md");
+  writeFileSync(bodyPath,
+    "## Acceptance\n\n- claim: body fallback\n  proof: unit test: body fallback\n\nRemudero-Task: PORTAL-T000\n");
+  const checked = rmd(f, ["check-acceptance", bodyPath]);
+  assert.equal(checked.code, 0, checked.err);
+  assert.ok(checked.err.includes(`unknown task 'PORTAL-T000' (not found in ${f.enginePlan}, ${targetPlan}`), checked.err);
+  assert.ok(checked.err.includes(`read its plan with --repo-root ${f.target}`), checked.err);
+  assert.match(checked.out, /criteria source:\s+the body Acceptance: block/);
+
   // No record, two consumer checkouts that both hold the id: refuse — never guess from repos/.
   rmSync(join(f.stateDir, "daemon-target.json"));
   const other = join(f.root, "repos", "remudero-docs");
