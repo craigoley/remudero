@@ -9,6 +9,9 @@ import { test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { BENCHMARK_COHORT_VERSION, runBenchmarkCohortPass,
   type BenchmarkCohortSnapshot } from "#src/lib/benchmark-cohort.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { drainDetachedSweepActions } from "#src/lib/sweep.js";
 
 const INDEX = "benchmark-cohort-index.json";
 const LEGACY = "benchmark-cohort-v1.json";
@@ -59,7 +62,38 @@ test("W1-T9911: a tail-only pass rewrites no sealed segment", async (t) => {
     const liveInode = statSync(join(root, liveBefore.segment)).ino;
     appendFileSync(join(root, "ledger.ndjson"), assignment("live-1"));
     const started = performance.now();
-    const second = await runBenchmarkCohortPass(root, { maxSources: 4, nowIso });
+    const planPath = join(root, "tasks.yaml");
+    const eventPath = join(root, "daemon-events.ndjson");
+    writeFileSync(planPath, "- id: A\n  title: a\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n");
+    let second: Awaited<ReturnType<typeof runBenchmarkCohortPass>> | undefined;
+    await runDaemon(loadPlan(planPath), {
+      refreshMerged: () => () => false,
+      runOne: async (id: string) => ({ taskId: id, runId: `${id}-run`, merged: true, costUsd: 0,
+        verdict: "merged" }),
+      sleep: async () => {}, sweep: async () => {},
+      checkBenchmarkCohort: () => true,
+      runBenchmarkCohortPass: async () => {
+        second = await runBenchmarkCohortPass(root, { maxSources: 4, nowIso });
+        return second;
+      },
+      log: (step: string, fields?: Record<string, unknown>) => {
+        if (step === "benchmark_cohort.ran")
+          appendFileSync(eventPath, JSON.stringify({ step, ...fields }) + "\n");
+      },
+    }, { max: 1 });
+    await drainDetachedSweepActions();
+    assert.ok(second, "the daemon completed the tail pass");
+    const ledgered = JSON.parse(readFileSync(eventPath, "utf8").trim());
+    assert.equal(ledgered.step, "benchmark_cohort.ran");
+    assert.deepEqual({ checkpoint_bytes: ledgered.checkpoint_bytes,
+      checkpoint_read_bytes: ledgered.checkpoint_read_bytes,
+      checkpoint_written_bytes: ledgered.checkpoint_written_bytes }, {
+      checkpoint_bytes: second.checkpointBytes,
+      checkpoint_read_bytes: second.checkpointReadBytes,
+      checkpoint_written_bytes: second.checkpointWrittenBytes,
+    }, "the persisted daemon event carries the pass's measured checkpoint I/O");
+    assert.ok(ledgered.checkpoint_written_bytes < sealedBytes,
+      "the host ledger records a tail write smaller than the sealed rows it kept");
     const elapsed = performance.now() - started;
     assert.equal(second.state, "complete");
     assert.equal(second.scannedSources, 1);
