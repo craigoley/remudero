@@ -199,9 +199,13 @@ test("scheduled local routing review completes before a GitHub credential failur
     writeFileSync(join(fakeBin, "flock"), "#!/bin/sh\nexit 0\n"); chmodSync(join(fakeBin, "flock"), 0o700);
     writeFileSync(join(fakeBin, "docker"), `#!/bin/sh
 if [ "$1" = inspect ]; then echo test-image; exit 0; fi
+printf '%s\\n' "$*" >> "$TEST_DOCKER_ARGS"
 if [ "$1" = run ]; then
-  echo "$*" > "$TEST_DOCKER_ARGS"
-  exec "$TEST_NODE" --import tsx "$TEST_REVIEW_SCRIPT" --source "core=$TEST_CORE/state" --source "site=$TEST_SITE/state" --source "console=$TEST_CONSOLE/state" --out-dir "$TEST_CORE/state/field-trials/routing-daily"
+  case "$*" in
+    *scripts/private-routing-daily-review.mjs*)
+      exec "$TEST_NODE" --import tsx "$TEST_REVIEW_SCRIPT" --source "core=$TEST_CORE/state" --source "site=$TEST_SITE/state" --source "console=$TEST_CONSOLE/state" --out-dir "$TEST_CORE/state/field-trials/routing-daily";;
+    *" field-trials --offline "*) exit 0;;
+  esac
 fi
 echo 'GitHub credentials unavailable' >&2
 exit 1
@@ -214,10 +218,15 @@ exit 1
     assert.notEqual(result.status, 0); assert.match(result.stderr, /GitHub credentials unavailable/);
     const snapshot = JSON.parse(readFileSync(join(f.sources[0]!.stateDir, "state/field-trials/routing-daily/latest.json"), "utf8"));
     assert.equal(snapshot.sources.length, 3); assert.equal(snapshot.cadence, "daily");
-    const args = readFileSync(argsPath, "utf8");
+    const calls = readFileSync(argsPath, "utf8").trim().split("\n");
+    assert.equal(calls.length, 3, JSON.stringify(calls));
+    const [args, credentials, offline] = calls as [string, string, string];
     assert.match(args, /--network none/); assert.match(args, /--workdir \/home\/node\/Remudero\/daemon-install/);
     assert.match(args, /scripts\/private-routing-daily-review.mjs/);
     assert.match(args, /dst=\/field-trials\/site,readonly/);
+    assert.equal(credentials, "exec remudero-daemon printenv GH_APP_ID");
+    assert.match(offline, / field-trials --offline /);
+    assert.match(offline, /--refresh-step routing-review=0/);
   } finally { f.close(); }
 });
 
