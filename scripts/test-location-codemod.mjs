@@ -116,12 +116,15 @@ export function stringLiteralMask(text) {
   }
   function code(untilBrace) {
     let depth = 0;
+    let brackets = 0;
     let prev = "";
     let beforePrev = "";
     const parens = [];
     while (i < n) {
       const c = text[i];
       const d = text[i + 1];
+      const loop = parens.at(-1);
+      const atLoopLevel = loop?.separator && loop.depth === depth && loop.brackets === brackets;
       if (c === "/" && d === "/") { while (i < n && text[i] !== "\n") i += 1; continue; }
       if (c === "/" && d === "*") { const end = text.indexOf("*/", i + 2); i = end < 0 ? n : end + 2; continue; }
       if (IDENT_START.test(String.fromCodePoint(text.codePointAt(i)))) {
@@ -133,9 +136,10 @@ export function stringLiteralMask(text) {
         }
         const word = text.slice(start, i);
         // Once a for-in or for-of separator is consumed, a name on its right may be a template tag.
-        const loopOperator = (word === "of" || word === "in") && parens.at(-1) === true
-          && !["(", "const", "let", "var", "."].includes(prev);
-        if (loopOperator) parens[parens.length - 1] = false;
+        const bindingEnd = IDENT_PART.test(Array.from(prev).at(-1) ?? "") || [")", "]", "}"].includes(prev);
+        const loopOperator = (word === "of" || word === "in") && atLoopLevel
+          && bindingEnd && !/^(const|let|var|void|typeof|delete|new|await|yield|instanceof|in)$/.test(prev);
+        if (loopOperator) loop.separator = false;
         beforePrev = prev;
         prev = loopOperator ? `<for-${word}>` : prev === "." ? `.${word}` : word;
         continue;
@@ -155,11 +159,15 @@ export function stringLiteralMask(text) {
         prev = "/";
         continue;
       }
-      if (untilBrace) {
-        if (c === "{") depth += 1;
-        else if (c === "}") { if (depth === 0) return; depth -= 1; }
-      }
-      if (c === "(") parens.push(prev === "for" || (prev === "await" && beforePrev === "for"));
+      // A top-level initializer or semicolon commits this header to a regular for loop.
+      // Defaults inside a destructured binding do not consume its eventual in/of separator.
+      if (atLoopLevel && (c === "=" || c === ";")) loop.separator = false;
+      if (c === "{") depth += 1;
+      else if (c === "}") { if (untilBrace && depth === 0) return; depth -= 1; }
+      if (c === "[") brackets += 1;
+      else if (c === "]") brackets -= 1;
+      if (c === "(") parens.push(prev === "for" || (prev === "await" && beforePrev === "for")
+        ? { separator: true, depth, brackets } : null);
       else if (c === ")") parens.pop();
       if (!/\s/.test(c)) prev = c;
       i += 1;

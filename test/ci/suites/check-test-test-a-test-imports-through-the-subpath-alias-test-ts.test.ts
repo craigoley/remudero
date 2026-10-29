@@ -29,7 +29,35 @@ const census = (source: string) => spawnSync("grep", ["-E", LOCATION_RELATIVE_ER
   input: source, encoding: "utf8",
 });
 
+function assertRegularForRawPreservation() {
+  const raw = fixtureImport("./fixture.js");
+  for (const header of [
+    "void of`DATA`; false;",
+    "true && of`DATA`; false;",
+    "0, of`DATA`; false;",
+    "let value = of`DATA`; false;",
+    "let value = 0, other = of`DATA`; false;",
+    "; of`DATA` && false;",
+    "let value = 0; value < 1; of`DATA`, value++",
+    "let value = { raw: of`DATA` }; false;",
+    "let value = [of`DATA`]; false;",
+  ]) {
+    const source = "let raw; const of = parts => (raw = String.raw(parts)); for ("
+      + header.replace("DATA", raw) + ") {} raw;";
+    assert.equal(runInNewContext(source), raw, "control: the tag observes the original raw text");
+    const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
+    assert.equal(runInNewContext(result.text), raw, header);
+    assert.equal(result.text, source);
+    assert.equal(result.rewritten, 0);
+    assert.equal(result.unresolved.length, 1);
+    assert.match(result.unresolved[0], /raw spelling/);
+  }
+}
+
+test("regular for clauses preserve of-tagged template raw values", assertRegularForRawPreservation);
+
 test("W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.ts is prevented, not retried", () => {
+  assertRegularForRawPreservation();
   const source = fixtures();
   assert.equal(census(source).status, 0, "control: the census sees the original fixture imports");
   const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
@@ -101,6 +129,18 @@ test("W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.t
   assert.deepEqual(forInOrdinaryResult.unresolved, []);
   assert.equal(census(forInOrdinaryResult.text).status, 1);
   assert.equal(runInNewContext(forInOrdinaryResult.text), runInNewContext(forInOrdinary));
+
+  for (const binding of ["{ value = 1 }", "[value = 1]"]) {
+    const iterable = binding.startsWith("{") ? "[{}]" : "[[]]";
+    const source = `const values = []; for (const ${binding} of ${iterable}) values.push(value); `
+      + `for (const ${binding} of \`` + fixtureImport("./fixture.js")
+      + "`) {} values.join(',');";
+    const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
+    assert.equal(result.rewritten, 1, "binding defaults still permit a for-of separator");
+    assert.deepEqual(result.unresolved, []);
+    assert.equal(census(result.text).status, 1);
+    assert.equal(runInNewContext(result.text), runInNewContext(source));
+  }
 });
 
 test("fixture-only files are written by the codemod CLI", (t) => {
