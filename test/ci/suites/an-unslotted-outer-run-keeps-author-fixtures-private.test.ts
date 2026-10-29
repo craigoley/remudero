@@ -18,7 +18,7 @@ test('author fixtures remain private when an outer run has no admitted parent sl
   });
   assert.equal(lease.outcome, 'acquired', lease.note);
   t.after(() => lease.release());
-  const holderPath = join(busyDir, '.slot-1.json');
+  const holderPath = join(busyDir, 'slot-1.json');
   assert.equal(JSON.parse(readFileSync(holderPath, 'utf8')).pid, process.pid);
 
   const env = { ...process.env, RMD_TEST_SLOT_DIR: busyDir, RMD_TEST_SLOTS: '1',
