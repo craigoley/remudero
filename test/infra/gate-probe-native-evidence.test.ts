@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { test } from "node:test";
 import { assertGateProbeRan } from "#test/helpers/gate-probe-evidence.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -20,12 +20,22 @@ function runRealGateCaller(): string {
     const absentInterpreter = "/rmd-absent-probe-" + randomUUID();
     assert.equal(existsSync(absentInterpreter), false);
     writeFileSync(join(bin, "npm"), "#!" + absentInterpreter + "\n", { mode: 0o755 });
+    const searchPath = (process.env.PATH ?? "").split(delimiter);
+    const gitBinary = searchPath.map(dir => resolve(REPO_ROOT, dir, "git")).find(path => existsSync(path));
+    assert.ok(gitBinary, "the fixture retains the real Git used by its checkout");
+    symlinkSync(gitBinary, join(bin, "git"));
+    symlinkSync(process.execPath, join(bin, "node"));
+    const withoutNpm = searchPath.filter(dir => !existsSync(resolve(REPO_ROOT, dir, "npm")));
+    const env = { ...process.env, PATH: [bin, ...withoutNpm].join(delimiter), NODE_V8_COVERAGE: "", NODE_TEST_CONTEXT: undefined };
+    const unavailable = spawnSync("npm", [], { stdio: "ignore", env });
+    assert.equal(unavailable.error && "code" in unavailable.error ? unavailable.error.code : undefined, "ENOENT",
+      "an unexecutable npm cannot fall through to an installed npm");
     const title = "W1-T2791 (acceptance 1): running the fast gate's OWN source-size step leaves the tracked tree byte-identical";
     const pattern = "^W1-T2791 [(]acceptance 1[)]: ";
     const child = spawnSync(process.execPath, ["--max-old-space-size=128", "--import", "tsx", "--test",
       "--test-name-pattern=" + pattern, "test/a-gate-run-leaves-the-tracked-tree-clean.test.ts"], {
       cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 256 * 1024,
-      env: { ...process.env, PATH: bin + delimiter + (process.env.PATH ?? ""), NODE_V8_COVERAGE: "", NODE_TEST_CONTEXT: undefined },
+      env,
     });
     assert.equal(child.error, undefined, "the actual gate fixture must start");
     assert.equal(child.signal, null);
