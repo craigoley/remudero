@@ -17786,7 +17786,9 @@ export async function runSweep(
       ? { verdict: "escalate", loop: "former fixed bound reached (no progress judge wired)", reason: "unwired caller keeps the pre-W1-T7096 bound" }
       : { verdict: "continue", reason: "unwired caller keeps the pre-W1-T7096 bound" };
   });
-  const judgeWithMemoryWait = async (pr: OpenPrView, judgeAndRecord: () => Promise<FixProgressResult>): Promise<FixProgressResult> => {
+  const progressMemoryWait = { verdict: "unavailable", reason: "progress judgment waiting for memory admission" } as const;
+  const hostGapMemoryWait: HostGapRereviewAction = { kind: "hold", reason: progressMemoryWait.reason, progress: progressMemoryWait };
+  const judgeWithMemoryWait = async <T>(pr: OpenPrView, judgeAndRecord: () => Promise<T>, waiting: T): Promise<T> => {
     if (lightPassActionScope.getStore() !== undefined) return judgeAndRecord();
     let onMemoryWait!: () => void;
     const memoryWait = new Promise<"memory-wait">((resolve) => { onMemoryWait = () => resolve("memory-wait"); });
@@ -17799,7 +17801,7 @@ export async function runSweep(
     detachSweepAction(settled.finally(() => {
       if (lightPassMemoryWaits.get(key) === hold) lightPassMemoryWaits.delete(key);
     }), { actionKind: "light-pass-action", taskId: escalationTaskIdFor(pr) });
-    return { verdict: "unavailable", reason: "progress judgment waiting for memory admission" };
+    return waiting;
   };
   {
     const judged = deps.fixProgressJudge !== undefined;
@@ -17855,7 +17857,7 @@ export async function runSweep(
           round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
         return result;
       };
-      const result = await judgeWithMemoryWait(pr, judgeAndRecord);
+      const result = await judgeWithMemoryWait(pr, judgeAndRecord, progressMemoryWait);
       if (result.verdict === "escalate") {
         next.push({ ...pr, progressEscalation: { loop: result.loop, reason: result.reason, judged } });
         continue;
@@ -19372,13 +19374,13 @@ export async function runSweep(
       const hostGapState = { history: facts.history, skips,
         ...(paced ? { lastReviewAtMs: Math.max(facts.lastReviewAtMs ?? Number.NEGATIVE_INFINITY, hostGapRefusal.attemptedAt ?? Number.NEGATIVE_INFINITY) } : {}),
         nowMs: now, observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
-      const hostGapPlan = await planHostGapRereview(hostGapState, {
+      const hostGapPlan = await judgeWithMemoryWait(pr, () => planHostGapRereview(hostGapState, {
         ...progressWitness(pr), ledger: ledgerLines,
         judge: deps.fixProgressJudge,
         input: hostGapProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha }, hostGapState),
         log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
           task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
-      });
+      }), hostGapMemoryWait);
       const checkout = hostGapProblem(hostGapRefusal.hostGap);
       if (hostGapPlan.kind === "rereview") {
         const reviewKey = reviewOutcomeKeyForPr(pr);
@@ -19396,7 +19398,10 @@ export async function runSweep(
       } else {
         disposition = hostGapPlan.kind === "escalate" ? "blocked-ambiguous" : "wait";
         reason = hostGapPlan.reason;
-        if (hostGapPlan.progress?.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, hostGapPlan.progress.reason);
+        if (hostGapPlan.progress?.verdict === "unavailable") {
+          judgedUnavailable.set(pr.prNumber, hostGapPlan.progress.reason);
+          pr.progressContinue = { reason: hostGapPlan.progress.reason, unavailable: true };
+        }
       }
     }
     if (hostGapRefusal !== undefined && disposition === "post-review")
@@ -19784,13 +19789,13 @@ export async function runSweep(
         const facts = hostGapRereviewFacts(pr, ledgerLines);
         const hostGapState = { history: facts.history, skips, lastReviewAtMs: facts.lastReviewAtMs, nowMs: now,
           observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
-        const hostGap = await planHostGapRereview(hostGapState, {
+        const hostGap = await judgeWithMemoryWait(pr, () => planHostGapRereview(hostGapState, {
           ...progressWitness(pr), ledger: ledgerLines,
           judge: deps.fixProgressJudge,
           input: hostGapProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha }, hostGapState),
           log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
             task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
-        });
+        }), hostGapMemoryWait);
         if (hostGap.kind === "rereview") {
           const reviewKey = reviewOutcomeKeyForPr(pr);
           if (!deps.dryRun) {
@@ -19806,7 +19811,10 @@ export async function runSweep(
         } else {
           disposition = hostGap.kind === "escalate" ? "blocked-ambiguous" : "wait";
           reason = hostGap.reason;
-          if (hostGap.progress?.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, hostGap.progress.reason);
+          if (hostGap.progress?.verdict === "unavailable") {
+            judgedUnavailable.set(pr.prNumber, hostGap.progress.reason);
+            pr.progressContinue = { reason: hostGap.progress.reason, unavailable: true };
+          }
         }
       } else {
         const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
@@ -20086,7 +20094,7 @@ export async function runSweep(
             formerCeiling: MAX_REARMS_AFTER_DISARM_PER_HEAD,
             parkedReason: `re-arm: ${rearms} merge queue ejections at this head`, operatorAnswer: pr.pendingAnswer?.constraint });
           input.remedyHistory = rearmRows;
-          const progress = await judgeWithMemoryWait(pr, async () => {
+          const progress = await judgeWithMemoryWait<FixProgressResult>(pr, async () => {
             const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
               { ...progressWitness(pr), judge: progressJudge });
             appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
@@ -20094,7 +20102,7 @@ export async function runSweep(
               former_ceiling: input.formerCeiling, parked_reason: input.parkedReason, red_class: input.redClass,
               round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...progress, ...receipt });
             return progress;
-          });
+          }, progressMemoryWait);
           rearmExhausted = progress.verdict === "escalate";
           rearmUnavailable = progress.verdict === "unavailable";
           if (rearmUnavailable) pr.progressContinue = { reason: progress.reason, unavailable: true };
@@ -20827,7 +20835,7 @@ export async function runSweep(
                   if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
-                const result = await judgeWithMemoryWait(pr, async () => {
+                const result = await judgeWithMemoryWait<FixProgressResult>(pr, async () => {
                   const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
                     { ...progressWitness(pr), judge: progressJudge, firstRound: true });
                   appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
@@ -20837,7 +20845,7 @@ export async function runSweep(
                     red_class: input.redClass, round_count: input.rounds.length, signals: input.signals,
                     ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
                   return result;
-                });
+                }, progressMemoryWait);
                 if (result.verdict === "unavailable") {
                   pr.progressContinue = { reason: result.reason, unavailable: true };
                   acted = false;

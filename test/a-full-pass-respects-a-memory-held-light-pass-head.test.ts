@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   detachedSweepActionCount, drainDetachedSweepActions, productionFixProgressJudge,
+  HOST_GAP_REREVIEW_STEP, REFUSED_POST_HOST_GAP_REREVIEW_STEP, hostGapRereviewFacts,
   MAX_REARMS_AFTER_DISARM_PER_HEAD, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps,
 } from "#src/lib/sweep.js";
 
@@ -13,7 +14,10 @@ function deferred() {
 
 const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-function fixture(waitForMemory = true, holdJudge = waitForMemory, priorStrikes: number | "re-arm" = 3) {
+type JudgmentSite = number | "re-arm" | "host-gap" | "host-gap-refusal";
+const judgmentSites = [1, 3, "re-arm", "host-gap", "host-gap-refusal"] as const;
+
+function fixture(waitForMemory = true, holdJudge = waitForMemory, priorStrikes: JudgmentSite = 3) {
   const now = Date.now();
   const rows: Record<string, unknown>[] = [];
   const admission = deferred();
@@ -37,6 +41,33 @@ function fixture(waitForMemory = true, holdJudge = waitForMemory, priorStrikes: 
     for (let i = 0; i < MAX_REARMS_AFTER_DISARM_PER_HEAD; i++) {
       rows.push({ step: "automerge.rearmed_after_disarm", pr_number: pr.prNumber,
         head_sha: pr.headSha, rearm_count: i + 1 });
+    }
+  }
+  const hostGap = priorStrikes === "host-gap" || priorStrikes === "host-gap-refusal";
+  const rereviewStep = priorStrikes === "host-gap-refusal" ? REFUSED_POST_HOST_GAP_REREVIEW_STEP : HOST_GAP_REREVIEW_STEP;
+  if (hostGap) {
+    Object.assign(pr, { checksState: "green", reviewState: priorStrikes === "host-gap" ? "success" : "pending",
+      reviewPendingSince: new Date(now - 200 * 60_000).toISOString(), redRequiredChecks: [], ciFailures: [] });
+    const identity = { task_id: pr.taskId, pr_number: pr.prNumber, pr_url: pr.prUrl,
+      head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest };
+    for (const attempt of [0, 1]) {
+      const at = (ago: number) => new Date(now - ago * 60_000).toISOString();
+      const attemptId = `review-PR9814-00000000-0000-4000-8000-${String(attempt).padStart(12, "0")}`;
+      if (attempt === 1) rows.push({ ...identity, ts: at(180), step: rereviewStep,
+        skips: ["cwd-missing"], host_gap: "cwd-missing", refusal_at: now - 190 * 60_000 });
+      rows.push({ ...identity, ts: at(200 - attempt * 20), step: "sweep.review_admitted",
+        review_attempt_id: attemptId, host_gap_rereview: attempt === 1, skips: ["cwd-missing"] });
+      rows.push({ ...identity, ts: at(190 - attempt * 20), review_attempt_id: attemptId,
+        run_id: `review-PR9814-${1000 + attempt}`,
+        ...(priorStrikes === "host-gap-refusal" ? {
+          step: "review.post_refused", attempted_state: "success", reviewer_code_freshness: "unreadable",
+          reviewer_code_host_gap: "cwd-missing", reviewer_code_reason: "fixture reviewer checkout vanished",
+        } : {
+          step: "review.posted", state: "success", capped: true, plan_only: false,
+          decision_verdict: { state: "success", capped: true, planOnly: false,
+            criteria: [{ claim: "fixture proof", proof: "unit test: fixture proof", met: true,
+              reason: "reviewer checkout vanished", proof_exec: "not_executable", proof_skip: "cwd-missing" }] },
+        }) });
     }
   }
   const deps: SweepDeps = {
@@ -70,7 +101,11 @@ function fixture(waitForMemory = true, holdJudge = waitForMemory, priorStrikes: 
         return { text: 'FIX_PROGRESS: {"verdict":"continue","reason":"fixture permits repair"}' } as never;
       } }),
   };
-  return { pr, deps, rows, admission, entered, dispatched, armed, reviewed, spawns: () => spawns };
+  const expectedDispatch = typeof priorStrikes === "number" ? [9814] : [];
+  const expectedArm = priorStrikes === "re-arm" ? [9814] : [];
+  const expectedReview = hostGap ? [9814] : [];
+  return { pr, deps, rows, admission, entered, dispatched, armed, reviewed, hostGap, rereviewStep,
+    expectedDispatch, expectedArm, expectedReview, spawns: () => spawns };
 }
 
 test("W1-T9814: a full pass stands down on a head held by a memory-waiting light-pass action", async (t) => {
@@ -110,9 +145,14 @@ test("W1-T9814: a full pass stands down on a head held by a memory-waiting light
 });
 
 test("W1-T9814: a full pass progress judgment waiting for memory leaves the pass", async (t) => {
-  for (const priorStrikes of [1, 3, "re-arm"] as const) {
+  for (const priorStrikes of judgmentSites) {
     await t.test(`priorStrikes=${priorStrikes}`, async () => {
       const f = fixture(true, true, priorStrikes);
+      if (f.hostGap) {
+        const facts = hostGapRereviewFacts(f.pr, f.rows);
+        assert.equal(facts.history.filter((attempt) => attempt.completed).length, 1);
+        assert.equal(facts.observedReviewMs, 10 * 60_000);
+      }
       const ready = { ...f.pr, prNumber: 9815, headSha: "ready-head", checksState: "green" as const,
         reviewState: "none" as const, priorStrikes: 0, redRequiredChecks: [], ciFailures: [] };
       let returned = false;
@@ -125,8 +165,15 @@ test("W1-T9814: a full pass progress judgment waiting for memory leaves the pass
         assert.deepEqual(f.dispatched, []);
         assert.deepEqual(f.armed, []);
         assert.equal(f.rows.some((row) => row.step === "fix.progress_judged"), false);
-        assert.match(String(f.rows.findLast((row) => row.pr_number === 9814 && row.step === "sweep.disposed")?.stand_down_reason),
+        const disposed = f.rows.findLast((row) => row.pr_number === 9814 && row.step === "sweep.disposed");
+        assert.match(String(f.hostGap ? disposed?.reason : disposed?.stand_down_reason),
           /progress judgment waiting for memory admission/);
+        if (f.hostGap) {
+          assert.equal(disposed?.disposition, "wait");
+          assert.equal(disposed?.acted, false);
+          assert.equal(f.rows.filter((row) => row.step === f.rereviewStep).length, 1,
+            "a waiting judgment must not request another re-review");
+        }
         assert.equal(detachedSweepActionCount(), 1);
         await runSweep([f.pr], f.deps);
         await runSweepLightPass([f.pr], f.deps);
@@ -147,13 +194,19 @@ test("W1-T9814: a full pass progress judgment waiting for memory leaves the pass
         assert.equal(judged?.verdict, "continue");
         assert.equal(judged?.reason, "fixture permits repair");
         if (priorStrikes === "re-arm") assert.equal(judged?.site, "re-arm");
+        if (f.hostGap) {
+          assert.equal(judged?.site, "host-gap-rereview", "the planner records the settled progress verdict");
+          assert.equal(judged?.round_count, 1);
+        }
         await runSweep([f.pr], f.deps);
         assert.equal(f.spawns(), 1, "the next pass consumes the settled judgment");
         const reused = f.rows.findLast((row) => row.step === "fix.progress_reused");
         assert.equal(reused?.input_key, judged?.input_key);
         assert.equal(reused?.judged_at, judged?.ts);
-        assert.deepEqual(f.dispatched, priorStrikes === "re-arm" ? [] : [9814]);
-        assert.deepEqual(f.armed, priorStrikes === "re-arm" ? [9814] : []);
+        assert.deepEqual(f.dispatched, f.expectedDispatch);
+        assert.deepEqual(f.armed, f.expectedArm);
+        assert.deepEqual(f.reviewed, [9815, ...f.expectedReview]);
+        if (f.hostGap) assert.equal(f.rows.filter((row) => row.step === f.rereviewStep).length, 2);
         await pass;
       } finally {
         f.admission.resolve();
@@ -165,14 +218,15 @@ test("W1-T9814: a full pass progress judgment waiting for memory leaves the pass
 });
 
 test("W1-T9814: an unheld head is judged by the full pass as today", async (t) => {
-  for (const priorStrikes of [1, 3, "re-arm"] as const) {
+  for (const priorStrikes of judgmentSites) {
     await t.test(`priorStrikes=${priorStrikes}`, async () => {
       const f = fixture(false, false, priorStrikes);
       await runSweep([f.pr], f.deps);
       assert.equal(f.spawns(), 1);
       assert.equal(f.rows.find((row) => row.step === "fix.progress_judged")?.verdict, "continue");
-      assert.deepEqual(f.dispatched, priorStrikes === "re-arm" ? [] : [9814]);
-      assert.deepEqual(f.armed, priorStrikes === "re-arm" ? [9814] : []);
+      assert.deepEqual(f.dispatched, f.expectedDispatch);
+      assert.deepEqual(f.armed, f.expectedArm);
+      assert.deepEqual(f.reviewed, f.expectedReview);
       assert.equal(detachedSweepActionCount(), 0);
       const slow = fixture(false, true, priorStrikes);
       let returned = false;
@@ -184,10 +238,12 @@ test("W1-T9814: an unheld head is judged by the full pass as today", async (t) =
         assert.equal(detachedSweepActionCount(), 0);
         assert.deepEqual(slow.dispatched, []);
         assert.deepEqual(slow.armed, []);
+        assert.deepEqual(slow.reviewed, []);
         slow.admission.resolve();
         await pass;
-        assert.deepEqual(slow.dispatched, priorStrikes === "re-arm" ? [] : [9814]);
-        assert.deepEqual(slow.armed, priorStrikes === "re-arm" ? [9814] : []);
+        assert.deepEqual(slow.dispatched, slow.expectedDispatch);
+        assert.deepEqual(slow.armed, slow.expectedArm);
+        assert.deepEqual(slow.reviewed, slow.expectedReview);
       } finally {
         slow.admission.resolve();
         await pass;
