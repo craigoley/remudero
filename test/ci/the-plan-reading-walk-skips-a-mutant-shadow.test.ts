@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+// @ts-expect-error -- plain .mjs script, no type declarations
 import { planReadingSuiteFiles } from "#scripts/diff-class.mjs";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
