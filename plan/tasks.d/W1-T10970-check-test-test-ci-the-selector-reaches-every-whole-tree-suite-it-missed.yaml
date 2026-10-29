@@ -4,21 +4,31 @@
   depends_on: []
   type: implement
   verify: human
-  risk: low
+  risk: high  # Shared selector changes affect census discovery across the repository.
+  band_meaning: span
   priority: 1.32
   status: queued
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts"
   files:
-    - src/lib/tmp.ts
-    - test/ci/check-test-test-ci-the-selector-reaches-every-whole-tree-suite-it-missed.test.ts
+    - scripts/diff-class.mjs
+    - test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts
+  design: |
+    Diagnose the recorded selector miss through its real failure path. Recognize repository-root clone helpers
+    imported through the declared #test/* package mapping, and retain controls for fixture remotes, invalid paths,
+    and unreadable or unsupported mappings. Preserve the other selector and CI gates and measure the original cause.
   acceptance:
     - claim: "the harness no longer spends a fix round on check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts"
-      proof: "unit test: W1-T10970: check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts is prevented, not retried"
+      proof: "unit test: W1-T10970: repository clone helper aliases enter the census"
   note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
   rationale: |
     MEASURED by the ci-friction gardener: check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts cost 10.9 PR minute(s) (seven-day half-life) across 3 fix round(s) on 1 pull request(s).
+
+    CORRECTION (reproduced on PR #15046 head 7fd1ed0d): the failing selector case calls censusSuiteFiles from
+    scripts/diff-class.mjs; the PR migrated its repository-clone helper to #test/helpers/, which the relative-only
+    helper reader does not recognize. src/lib/tmp.ts supplies a prefix to a different fixture, not this failure.
+    The original machine attribution below is retained as historical evidence, not the approved owner.
 
     WHERE IT COMES FROM:
     - src/lib/tmp.ts: test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts imports it
