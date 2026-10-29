@@ -31,6 +31,26 @@
     - PR #11949: 14.50 PR-hours — a FIXED push 678ffb270 is still red on the next sweep — worker saw: state/runs/DAEMON-1792042718195-fix1-1792048627631.tail
     Previous remedy W1-T10520: src/lib/fix-lane-gardener.ts, test/gardeners/fix-lane-fixed-still-red.test.ts; did not fall: share of PR-hours 1.9% (9.410033888888892/483.90462611111116) before, 2.5% (12.19897388888889/492.2841458333331) after, over 1 day(s) each side. Take a structurally different remedy.
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+
+    FIXED-STILL-RED RECOVERY FINDING (W1-T10940, 2026-10-29): recovery failure unconfirmed; all five cited worker tails could not be obtained in this run.
+    Unavailable incident transcripts, preserving the original PR-to-tail mapping:
+    - PR #11487, FIXED head d6db5b929: state/runs/DAEMON-1791934437639-fix1-1791934849764.tail
+    - PR #13895, FIXED head 1bf7f813f: state/runs/DAEMON-1792854315056-fix1-1792857971239.tail
+    - PR #14326, FIXED head 2f0998948: state/runs/DAEMON-1792985370632-fix1-1792988115359.tail
+    - PR #12582, FIXED head b0f219bfb: state/runs/DAEMON-1792248785143-fix1-1792250606365.tail
+    - PR #11949, FIXED head 678ffb270: state/runs/DAEMON-1792042718195-fix1-1792048627631.tail
+    Availability evidence: ls -ld state returned ENOENT in the dispatched checkout;
+    the permission profile explicitly denies /home/node/Remudero/state, so no host-state read was attempted.
+    The cited paths above remain source references, not transcripts read or evidence of permanent loss.
+    Authorized supplementary source: PR #15065's body and both conversation comments were read via GitHub.
+    https://github.com/craigoley/remudero/pull/15065#issuecomment-6485792113 reports historical-head check failures;
+    https://github.com/craigoley/remudero/pull/15065#issuecomment-6485805783 reports distinct job symptoms:
+    #11487 temp-ledger ENOENT, #14326 semantic review, #12582 location-relative imports,
+    and #11949 missing LCOV after zero test failures. Neither comment supplies worker tails;
+    these are attributed observations, not independently replayed job evidence or a common recovery cause.
+    No corresponding transcript or job diagnosis for #13895 was supplied by these comments.
+    The fixed-still-red label and PR-hour totals establish recurrence, not why recovery failed.
+    This finding does not establish operator-free recovery or resolve the existing design hold.
   risk_ruling:
     verdict: "low"
     action: proceed

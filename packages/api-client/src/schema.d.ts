@@ -291,8 +291,65 @@ export interface components {
       outcome: "proposed" | "queued" | "admitted" | "running" | "succeeded" | "failed" | "unknown" | "blocked";
       objectiveRevision: ProductRevision;
       observedAt: string;
+      receipt?: ProductRunReceipt;
       references: (ProductResearchLink)[];
     };
+    ProductRunReceipt: (ProductLocalRunReceipt) | (ProductHostedRunReceipt);
+    ProductLocalRunReceipt: {
+      channel: "local";
+      actor: string;
+      productId: ProductId;
+      objectiveRevision: ProductRevision;
+      operationId: string;
+      runId: string;
+      taskId: string;
+      repository: {
+        id: ProductRevision;
+        owner: string;
+        name: string;
+      };
+      head: string;
+      execution: "running" | "ended" | "silent" | "unknown";
+      qualification: {
+        producer: "core-author" | "consumer" | "unavailable";
+        verdict: "passed" | "failed" | "partial" | "unknown";
+        tests: number;
+        suites: number;
+        reason: string;
+        originalVerdict?: string;
+        reference?: string;
+        digest?: string;
+      };
+    };
+    ProductHostedRunReceipt: {
+      channel: "hosted";
+      actor: string;
+      productId: ProductId;
+      objectiveRevision: ProductRevision;
+      operationId: string;
+      runId: string;
+      taskId: string;
+      repository: {
+        id: ProductRevision;
+        owner: string;
+        name: string;
+      };
+      head: string;
+      execution: "running" | "ended" | "silent" | "unknown";
+      contexts: ({
+        name: string;
+        conclusion: string;
+      })[];
+      review: "success" | "failure" | "pending" | "absent" | "unknown";
+      reason: string;
+    };
+    ProductCaseRunEvidence: ({
+      id: string;
+      reference: string;
+      outcome: "proposed" | "queued" | "admitted" | "running" | "succeeded" | "failed" | "unknown" | "blocked";
+      current: boolean;
+      receipt?: ProductRunReceipt;
+    })[];
     ProductReceipt: {
       operationId: string;
       productId: ProductId;
@@ -696,14 +753,8 @@ export interface components {
           id: string;
           reference: string;
         })[];
-        local: ({
-          id: string;
-          reference: string;
-        })[];
-        hosted: ({
-          id: string;
-          reference: string;
-        })[];
+        local: ProductCaseRunEvidence;
+        hosted: ProductCaseRunEvidence;
         review: ({
           id: string;
           reference: string;
