@@ -447,11 +447,15 @@ test("BEHAVIORAL: a NON-degraded implement prompt ALSO names the task's own reco
   assert.match(prompt, /YOUR TASK'S OWN RECORD IS AT/, "with the same READ IT FIRST instruction");
   assert.match(prompt, /the repo has a README\.md/, "and recon's OBSERVED lines are still relayed");
 
-  // CRITERIA DO NOT TRAVEL HERE. The pointer costs one line; the criteria cost N, recon may
-  // already have relayed them, and the record itself carries the design that criteria alone
-  // would not give. This is the one asymmetry between the two arms that IS deliberate.
+  // The healthy recon relay keeps the record pointer; the implement renderer separately
+  // supplies visible criteria in the acceptance-report scaffold (W1-T10661).
   assert.doesNotMatch(prompt, /Acceptance criteria, verbatim from that record/, "no criteria block");
-  assert.doesNotMatch(prompt, /the widget is load-bearing/, "the criteria themselves stay out");
+  const report = prompt.split("# ACCEPTANCE REPORT\n")[1]?.split("\n# OUTPUT CONTRACT")[0];
+  assert.ok(report, "the healthy path supplies the acceptance-report scaffold");
+  assert.match(report, /the widget is load-bearing/, "the scaffold carries the criterion");
+  assert.ok(report.includes("unit test: the widget bears load"), "the scaffold carries its proof");
+  assert.ok(report.includes("the second criterion is also carried | grep: WIDGET in src/lib/daemon.ts"),
+    "the scaffold carries every visible criterion and exact proof");
 });
 
 test("BEHAVIORAL: the healthy path names the record even when recon's OBSERVED section is EMPTY", async (t) => {
