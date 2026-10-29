@@ -20396,6 +20396,7 @@ export async function runSweep(
     if (gardenRecordRefusal !== undefined) extraDisposedFields = { ...extraDisposedFields, garden_record_refusal: gardenRecordRefusal };
     if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_hold: true, stand_down_site: standDownHold.site };
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true, needs_design_round_id: terminalDesignHold.roundId,
+      design_hold_main_adoption_decision: terminalDesignHold.mainAdoptionDecision,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
       ...(terminalDesignHold.semantic === undefined ? {} : { progress_task_semantic_revision: terminalDesignHold.semantic.standingOn }) };
     const selectedContractRefresh = async (
