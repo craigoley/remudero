@@ -177,7 +177,7 @@ export type EngineBuildResult =
   | { kind: "present"; root: string }
   | { kind: "failed"; reason: string };
 /** What buildEngine hands ensureEngineTree: a build also names its link target, for the ledger row only. */
-type BuildOutcome = Exclude<EngineBuildResult, { kind: "built" }> | { kind: "built"; root: string; ms: number; nodeModulesTarget: string };
+type BuildOutcome = Exclude<EngineBuildResult, { kind: "built" }> | { kind: "built"; root: string; ms: number; nodeModulesTarget: string; replacedUnsafeReason?: string };
 
 /** Removes an engine tree and its worktree registration. The default asks git first, then clears what is left. */
 async function removeEngineDir(path: string, repoDir: string, git: EngineGit): Promise<void> {
@@ -200,8 +200,9 @@ const inFlight = new Map<string, Promise<EngineBuildResult>>();
  * Build `<state>/engines/<sourceHash>/` for `sha`: a detached worktree cut into a temporary sibling, its node_modules
  * linked to the install, the stored bundle for `sourceHash` materialized and re-judged, then moved into place and
  * recorded. The record is written last, so a half-built engine is never an engine. An engine already published is
- * `present`. Never rejects: every failure is a typed `failed`, ledgered as `engine.build_failed`, and the previous
- * engine stays the newest. A concurrent call for the same engine joins the one in flight.
+ * `present` while its modules are safe; an unsafe engine is rebuilt unless a live run may name it.
+ * Never rejects: every failure is a typed `failed`, ledgered as `engine.build_failed`.
+ * A concurrent call for the same engine joins the one in flight.
  */
 export function ensureEngineTree(stateRoot: string, sha: string, sourceHash: string, deps: EngineBuildOptions): Promise<EngineBuildResult> {
   const key = `${stateRoot}\0${sourceHash}`;
@@ -212,8 +213,9 @@ export function ensureEngineTree(stateRoot: string, sha: string, sourceHash: str
     .catch((err: unknown): BuildOutcome => ({ kind: "failed", reason: reasonOf(err) }))
     .then((outcome): EngineBuildResult => {
       if (outcome.kind === "built") {
-        const { nodeModulesTarget, ...built } = outcome;
-        log("engine.built", { sha, source_hash: sourceHash, ms: built.ms, node_modules_target: nodeModulesTarget });
+        const { nodeModulesTarget, replacedUnsafeReason, ...built } = outcome;
+        log("engine.built", { sha, source_hash: sourceHash, ms: built.ms, node_modules_target: nodeModulesTarget,
+          ...(replacedUnsafeReason ? { replaced_unsafe_reason: replacedUnsafeReason } : {}) });
         return built;
       }
       if (outcome.kind === "failed") log("engine.build_failed", { sha, source_hash: sourceHash, reason: outcome.reason });
@@ -230,11 +232,30 @@ async function buildEngine(stateRoot: string, sha: string, sourceHash: string, d
   const clock = deps.clock ?? systemClock;
   const git = deps.git ?? hardenedEngineGit;
   const final = enginePath(stateRoot, sourceHash);
-  if (readRecord(final)?.sourceHash === sourceHash) return { kind: "present", root: final };
+  const roots = deps.worktreeRoots ?? workerWritableRoots(stateRoot);
+  const present = readRecord(final);
+  let replacedUnsafeReason: string | undefined;
+  if (present?.sourceHash === sourceHash) {
+    const existing = engineModules(final, present.nodeModulesTarget, roots);
+    if (!modulesUnsafe(existing)) return { kind: "present", root: final };
+    const reason = `node-modules-${existing.kind}: ${existing.detail}`;
+    let named: ReturnType<typeof namedByLiveRuns>;
+    try {
+      named = namedByLiveRuns(stateRoot, realRunChildProbe);
+    } catch (err) {
+      return { kind: "failed", reason: `node-modules-${existing.kind}: held; live runs unreadable: ${reasonOf(err)}` };
+    }
+    if ("undecidable" in named) return { kind: "failed", reason: `node-modules-${existing.kind}: held; ${named.undecidable}` };
+    if (named.hashes.has(sourceHash) || named.shas.has(present.sha)) {
+      return { kind: "failed", reason: `node-modules-${existing.kind}: held; named by a live run` };
+    }
+    await removeEngineDir(final, deps.repoDir, git);
+    replacedUnsafeReason = reason;
+  }
   // Resolved before anything is cut: an install under a worker's worktree, or none, publishes nothing.
   const modules = resolveTrustedModules(
     (deps.resolveModulesSource ?? resolveNodeModulesSource)(deps.nodeModulesFrom ?? deps.repoDir),
-    deps.worktreeRoots ?? workerWritableRoots(stateRoot),
+    roots,
   );
   if (!modules.ok) return { kind: "failed", reason: `${modules.reason}: ${modules.detail}` };
   const started = clock.now();
@@ -250,13 +271,13 @@ async function buildEngine(stateRoot: string, sha: string, sourceHash: string, d
     // The stored key is the tree's own source hash: a checkout that moved between the build and this cut keys elsewhere.
     if (lookup.hash !== sourceHash) return { kind: "failed", reason: `source-moved: tree hashes to ${lookup.hash}` };
     if (existsSync(final)) {
-      // Unrecorded (a record would have returned `present`): a leftover of a build that died after its move.
+      // Unrecorded: a leftover of a build that died after its move.
       await removeEngineDir(final, deps.repoDir, git);
     }
     await git(deps.repoDir, ["worktree", "move", temp, final]);
     const record: EngineRecord = { sha, sourceHash, builtAt: clock.now(), nodeModulesTarget: modules.target };
     writeAtomic(join(final, ENGINE_RECORD), `${JSON.stringify(record)}\n`);
-    return { kind: "built", root: final, ms: clock.now() - started, nodeModulesTarget: modules.target };
+    return { kind: "built", root: final, ms: clock.now() - started, nodeModulesTarget: modules.target, replacedUnsafeReason };
   } catch (err) {
     return { kind: "failed", reason: reasonOf(err) };
   } finally {
