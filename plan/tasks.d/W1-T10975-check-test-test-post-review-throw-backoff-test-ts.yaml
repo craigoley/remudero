@@ -1,0 +1,57 @@
+- id: W1-T10975
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/post-review-throw-backoff.test.ts cost 18.7 PR minute(s) across 1 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.2
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/post-review-throw-backoff.test.ts"
+  files:
+    - src/lib/ledger.ts
+    - test/ledger/check-test-test-post-review-throw-backoff-test-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/post-review-throw-backoff.test.ts"
+      proof: "unit test: W1-T10975: check:test:test/post-review-throw-backoff.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/post-review-throw-backoff.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/post-review-throw-backoff.test.ts cost 18.7 PR minute(s) (seven-day half-life) across 1 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ledger.ts: test/post-review-throw-backoff.test.ts imports it
+    - test/post-review-throw-backoff.test.ts: named by the failing check
+    - the rounds name a failing test: test/post-review-throw-backoff.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #15368 (https://github.com/craigoley/remudero/pull/15368) at 2026-10-29T06:28:22.325Z: ci-log round — ci-shard (1/8): test/post-review-throw-backoff.test.ts; remudero-review
+        failing tests: a second throw advances the retry clock instead of licensing per-sweep retries; W1-T10961: normal exit cancellation and pressure refusal preserve terminal failure evidence and prove owned child closure before release
+        log excerpt:
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-1.log" || : > "$FLAKE_RETRY_DIR/shard-1.log"
+          | not ok 1481 - a second throw advances the retry clock instead of licensing per-sweep retries
+          |   ---
+          |   duration_ms: 12.355719
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/post-review-throw-backoff.test.ts:1:3386'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     Expected values to be strictly deep-equal:
+          |     + actual - expected
+          | 
+          |     + []
+          |     - [
+          |     -   2753
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 1 occurrence(s) across 7 day(s), last seen 2026-10-29T06:28:22.325Z, and the record declares no privileged path"
+    judged_at: "2026-10-29T10:57:35.617Z"
+    pin: "fd633eba079cc16ca0b49a9fa4b561dfa43be2bcccdfdcf39d170262af9b2145"

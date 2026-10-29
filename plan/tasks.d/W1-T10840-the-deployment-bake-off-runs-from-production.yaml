@@ -16,6 +16,8 @@
     - src/lib/sweep.ts
     - src/lib/bakeoff-trigger.ts
     - test/routing/the-deployment-bake-off-runs-from-the-cadence.test.ts
+    - "src/lib/worker-provider.ts"
+    - "src/lib/worker.ts"
   status: queued
   attempts: 0
   rationale: |

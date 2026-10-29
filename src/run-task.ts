@@ -2643,7 +2643,7 @@ export function buildSweepEffects(
 
   export function fixRungTaskFor(
   */
-  return buildSweepEffectsFromModule(sweepCommandHost({ freshTreeGit: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString() }), deps);
+  return buildSweepEffectsFromModule(sweepCommandHost({ freshTreeGit: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString() }), { ...deps, feedbackLandingStateRoot: deps.feedbackLandingStateRoot ?? deps.config.root });
 }
 
 /**
@@ -2898,6 +2898,7 @@ import { automaticBranchReapStateFileName, branchCitationPattern, branchNamesFin
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
+import { resolveVerbPlanRoot, type VerbPlanRoot } from "./lib/repo-location.js";
 import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
@@ -12155,7 +12156,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "dep-review", ...extra });
   const proposalRoot = deps.root ?? repoRoot;
-  const captureProposal = deps.captureMigrationFeedback ?? depReviewProposalCapture(deps.landingStateRoot);
+  const captureProposal = deps.captureMigrationFeedback ?? depReviewProposalCapture(
+    deps.landingStateRoot ?? (deps.root === undefined ? undefined : config.root));
   const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
   const dependabot = isDependabotAuthor({ login: view.author?.login ?? "" });
   const actions = deps.actions ?? (deps.gh === undefined ? defaultDepReviewActions(owner, repo) : undefined);
@@ -13334,8 +13336,15 @@ export function checkAcceptanceCommand(rest: string[], deps: CheckAcceptanceDeps
 
   // design (i): trailer → that task's shard, exactly as `reviewCommand` resolves it — falling
   // through to the body block only when the trailer is absent or resolves zero criteria.
-  const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const taskId = reviewTaskIdFromBody(body);
+  // W1-T10925: the trailer's task resolves in the instance's target plan when cwd's lacks it.
+  const located = deps.planPath === undefined && taskId ? verbTaskPlan(taskId) : undefined;
+  if (located && !located.ok) {
+    // The body may still supply acceptance criteria, but an unresolved trailer must remain
+    // visible: the operator needs every searched plan and the target checkout's --repo-root.
+    console.error(`rmd check-acceptance: unknown task '${taskId}' (${located.error}); checking the body Acceptance: block`);
+  }
+  const planPath = deps.planPath ?? (located?.ok ? located.planPath : join(repoRoot, "plan", "tasks.yaml"));
   let criteria: AcceptanceCriterion[] = [];
   let declaredFilesForTrailer: string[] = [];
   if (taskId) {
@@ -21554,6 +21563,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         planReconcile === undefined ? {} : { planReconcile: { ...planReconcile } };
       const report = await (deps.measurementReport ?? runMeasurementCadenceReportAsync)({
         stateDir: join(root, "state"),
+        landingStateRoot: root,
         cwd: repoRoot,
         escalate: policyFor().values.measurementCadence.escalate,
         // W1-T2266: the adoption report's shape-1/2/3 static scans read THIS process's own
@@ -31420,8 +31430,7 @@ export function captureRepairFeedbackWithPriorVerdict(
     return;
   }
   const capture = { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin };
-  if (landingStateRoot === undefined) captureFeedback(root, capture);
-  else stageFeedbackCapture(root, landingStateRoot, capture);
+  stageFeedbackCapture(root, landingStateRoot, capture);
 }
 
 /** The one-shot boundary owns and drains its judgment pool before returning a summary. */
@@ -35651,9 +35660,10 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   const dryRun = rest.includes("--dry-run");
 
   const config = deps.config ?? loadConfig();
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+  const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
-  const { owner, repo } = resolveOwnerRepo();
+  const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
 
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -37030,20 +37040,22 @@ export function readLedgerRawLines(path: string): readonly string[] {
 }
 
 export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps): Promise<number> {
-  const { owner, repo } = deps ? { owner: "", repo: "" } : resolveOwnerRepo();
+  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+  const { owner, repo } = deps ? { owner: "", repo: "" } : instancePlan.target ?? resolveOwnerRepo();
   const causalScope = deps?.inboxSourceIdentity ?? deps?.inboxAuditScope ?? reframeCausalScope(config, true);
   const actions = buildInboxVerbActions(deps ?? {
-    root: repoRoot, inboxRoot: config.root, planPath: join(repoRoot, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
+    root: instancePlan.root, inboxRoot: config.root, planPath: join(instancePlan.root, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
     github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
-    ratify: ratifyCliGateway(repoRoot, join(config.root, "logs")),
+    ratify: ratifyCliGateway(instancePlan.root, join(config.root, "logs")),
   }, causalScope);
   return inboxVerbCommand(name, rest, actions);
 }
 
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+  const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
-  const { owner, repo } = resolveOwnerRepo();
+  const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
   const summaries = new Map<string, string>();
   return proposalVerdictCommand(
     kind,
@@ -37154,7 +37166,8 @@ export async function approveCommand(
     console.error("rmd approve: review and file this improvement's exact completed draft through its saved conversation");
     return 1;
   }
-  const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
+  const proposalPlan = instanceVerbPlanRoot(() => join((deps.config ?? loadConfig()).root, "state"));
+  const planPath = deps.planPath ?? join(proposalPlan.root, "plan", "tasks.yaml");
   // W1-T3216: a TASK id takes the release path. Taken BEFORE the proposal registry is consulted,
   // so the proposal path below is byte-for-byte unchanged, and keyed on SHAPE so an unknown but
   // well-formed task id is refused as a task rather than as a missing proposal.
@@ -37163,8 +37176,14 @@ export async function approveCommand(
   const bareTokens = rest.filter((t, i) => !t.startsWith("--") && !(i > 0 && rest[i - 1] === "--note"));
   if (proposalId && bareTokens.length === 1 && namesATask(proposalId)) {
     const config = deps.config ?? loadConfig();
+    // W1-T10925: a consumer task's id is found in the instance's target plan, not the engine's.
+    const located = deps.planPath === undefined ? verbTaskPlan(proposalId, () => join(config.root, "state")) : undefined;
+    if (located && !located.ok) {
+      console.error(`rmd approve: unknown task '${proposalId}' (${located.error})`);
+      return 2;
+    }
     const outcome = approveParkedTask(proposalId, {
-      plan: loadPlan(planPath),
+      plan: located?.ok ? located.plan : loadPlan(planPath),
       ledgerPath: ledgerPathFor(config),
       // Clock-free BY CONSTRUCTION — and the comment may not NAME the shape it avoids, because
       // clock-signature-census.test.ts counts by SOURCE TEXT, comments included. The row is already
@@ -37213,7 +37232,7 @@ export async function approveCommand(
   const inboxRoot = deps.inboxRoot ?? config.root;
   const ledgerPath = deps.inboxLedgerPath ?? ledgerPathFor(config);
   const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
-  const { owner, repo } = resolveOwnerRepo();
+  const { owner, repo } = proposalPlan.target ?? resolveOwnerRepo();
   const registryIntent = selectedRegistryIntentForConfig(config);
 
   const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config, inboxRoot);
@@ -37817,10 +37836,11 @@ async function approveBatchCommand(
   const proposalIds = rest;
   const config = deps.config ?? loadConfig();
   const registryIntent = selectedRegistryIntentForConfig(config);
-  const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+  const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
-  const { owner, repo } = resolveOwnerRepo();
+  const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
 
   const { found, unknown } = loadProposalsForRatify(proposalIds, plan, ledgerPath, owner, repo, config);
   if (found.some(row => row.proposal.improvement !== undefined)) {
@@ -40477,6 +40497,38 @@ export function bundleExportCommand(
   return 0;
 }
 
+/** W1-T10925: `<config.root>/state` for the target-record lookup — `undefined` when this host has no
+ *  instance config at all, so a read-only verb never creates one just to find a target. */
+function instanceStateDirIfConfigured(): string | undefined {
+  return existsSync(instanceConfigPath()) ? join(loadConfig().root, "state") : undefined;
+}
+
+/** W1-T10925: the plan root (and its loaded plan) a per-task verb acts on — cwd's, or the instance's
+ *  target checkout's when cwd's plan lacks the id. A miss names every plan searched. */
+function verbTaskPlan(taskId: string, stateDir: () => string | undefined = instanceStateDirIfConfigured):
+  (Extract<VerbPlanRoot, { ok: true }> & { plan: Plan; planPath: string }) | Extract<VerbPlanRoot, { ok: false }> {
+  let loaded: Plan | undefined;
+  const located = resolveVerbPlanRoot(taskId, {
+    cwdRoot: repoRoot,
+    stateDir,
+    holds: (root, id) => (loaded = loadPlan(join(root, "plan", "tasks.yaml"))).byId.has(id),
+  });
+  return located.ok ? { ...located, plan: loaded!, planPath: join(located.root, "plan", "tasks.yaml") } : located;
+}
+
+/** Proposal ids name state records rather than plan tasks; their instance still has one plan. */
+function instanceVerbPlanRoot(stateDir: () => string | undefined = instanceStateDirIfConfigured):
+  Extract<VerbPlanRoot, { ok: true }> {
+  return resolveVerbPlanRoot(undefined, { cwdRoot: repoRoot, stateDir }) as Extract<VerbPlanRoot, { ok: true }>;
+}
+
+function reportTaskPlan(id: string): { ok: true; root: string; owner?: string } | { ok: false; error: string } {
+  const located = verbTaskPlan(id);
+  return located.ok
+    ? { ok: true, root: located.root, owner: located.target?.owner }
+    : { ok: false, error: located.error };
+}
+
 /** `before`/`after` line for `rmd correct` — the operator-facing flip. */
 function describeProjection(label: string, proj: StatusProjection): string {
   const pr = proj.prUrl ? `${proj.prUrl}${proj.prState ? ` (${proj.prState})` : ""}` : "none";
@@ -40503,16 +40555,15 @@ async function correctCommand(rest: string[]): Promise<number> {
     return 2;
   }
 
-  const planPath = join(repoRoot, "plan", "tasks.yaml");
-  const plan = loadPlan(planPath);
-  const task = plan.byId.get(taskId);
-  if (!task) {
-    console.error(`rmd correct: unknown task '${taskId}' (not found in ${planPath})`);
+  const located = verbTaskPlan(taskId);
+  if (!located.ok) {
+    console.error(`rmd correct: unknown task '${taskId}' (${located.error})`);
     return 2;
   }
+  const task = located.plan.byId.get(taskId)!;
 
   const config = loadConfig();
-  const { owner } = resolveOwnerRepo();
+  const owner = located.target?.owner ?? resolveOwnerRepo().owner;
   const github = ghGateway(owner, task.repo);
   const ledgerPath = ledgerPathFor(config);
   const result = applyCorrection(task, prFlag, { ledgerPath, github }, { reason: flagValue(rest, "--reason") });
@@ -40558,13 +40609,13 @@ async function releaseCommand(rest: string[]): Promise<number> {
     return 2;
   }
 
-  const planPath = join(repoRoot, "plan", "tasks.yaml");
-  const plan = loadPlan(planPath);
-  const task = plan.byId.get(taskId);
-  if (!task) {
-    console.error(`rmd release: unknown task '${taskId}' (not found in ${planPath})`);
+  // W1-T10925: in a consumer instance cwd is the ENGINE checkout, whose plan never holds the target's ids.
+  const located = verbTaskPlan(taskId);
+  if (!located.ok) {
+    console.error(`rmd release: unknown task '${taskId}' (${located.error})`);
     return 2;
   }
+  const task = located.plan.byId.get(taskId)!;
 
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
@@ -40577,7 +40628,7 @@ async function releaseCommand(rest: string[]): Promise<number> {
     actor: process.env.USER ?? "operator",
     releasedBy: `operator (\`rmd release ${taskId}\`)`,
     closeIssue: (url, comment) => {
-      const { owner } = resolveOwnerRepo();
+      const owner = located.target?.owner ?? resolveOwnerRepo().owner;
       ghIssueGateway(owner, task.repo).closeWithComment?.(url, comment);
     },
   });
@@ -40684,8 +40735,26 @@ export function progressWatchdogCommand(
 
 export interface ClaimVerbOpts {
   reserver?: DispatchClaimReserver;
-  isPlanned?: (taskId: string) => boolean;
+  /** W1-T10925: builds the reserver for the resolved plan root (default {@link dispatchClaimReserverFor}). */
+  reserverFor?: (repoDir: string) => DispatchClaimReserver;
+  isPlanned?: (taskId: string, repoDir?: string) => boolean;
   localHost?: string;
+  /** W1-T10925: `<config.root>/state` holding the daemon's target record. */
+  stateDir?: string;
+}
+
+/** W1-T10925: the checkout whose origin/main plans the id — cwd's, else the instance's target — so the
+ *  claim ref is reserved on the repository whose daemon reads it. */
+function claimPlanRoot(taskId: string, opts: ClaimVerbOpts): string | undefined {
+  const isPlanned = opts.isPlanned ?? plannedOnOriginMain;
+  const located = resolveVerbPlanRoot(taskId, {
+    cwdRoot: repoRoot,
+    stateDir: opts.stateDir === undefined ? instanceStateDirIfConfigured : () => opts.stateDir,
+    holds: (root, id) => isPlanned(id, root),
+  });
+  if (located.ok) return located.root;
+  console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id (${located.error})`);
+  return undefined;
 }
 
 export function plannedOnOriginMain(taskId: string, dir: string = repoRoot): boolean {
@@ -40711,11 +40780,9 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
     console.error(`rmd claim: '${taskId}' is not a task id`);
     return 2;
   }
-  if (!(opts.isPlanned ?? plannedOnOriginMain)(taskId)) {
-    console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id`);
-    return 1;
-  }
-  const reserver = opts.reserver ?? dispatchClaimReserverFor(repoRoot);
+  const planRoot = claimPlanRoot(taskId, opts);
+  if (planRoot === undefined) return 1;
+  const reserver = opts.reserver ?? (opts.reserverFor ?? dispatchClaimReserverFor)(planRoot);
   const ref = dispatchClaimRef(taskId);
   if (rest.includes("--drop")) {
     const sha = reserver.holder(taskId);
@@ -40796,11 +40863,9 @@ export async function claimHoldCommand(rest: string[], opts: ClaimHoldOpts = {})
     console.error(`rmd claim: '${taskId}' is not a task id, or --interval-ms is not a positive integer`);
     return 2;
   }
-  if (!(opts.isPlanned ?? plannedOnOriginMain)(taskId)) {
-    console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id`);
-    return 1;
-  }
-  const reserver = opts.reserver ?? dispatchClaimReserverFor(repoRoot);
+  const planRoot = claimPlanRoot(taskId, opts);
+  if (planRoot === undefined) return 1;
+  const reserver = opts.reserver ?? (opts.reserverFor ?? dispatchClaimReserverFor)(planRoot);
   const held = takeOrAdoptClaim(taskId, reserver, opts.localHost ?? hostname());
   if (held === undefined) return 1;
   console.log(`holding ${dispatchClaimRef(taskId)} ${held}`);
@@ -42338,7 +42403,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["doctor", async (rest) => await doctorCommand(rest, { repoRoot })],
   ["status", async (rest) => await statusCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
   ["mcp", async (rest) => await operatorMcpCommand(rest, loadConfig(), repoRoot, (deps) => createOperatorMcpServer(deps))],
-  ["case-file", async (rest) => await caseFileCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
+  ["case-file", async (rest) => await caseFileCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo, resolveTaskPlan: reportTaskPlan })],
   ["sweep", async (rest) => await sweepCommand(rest)],
   [
     "fix",
@@ -42397,8 +42462,10 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["knowledge", (rest) => knowledgeCommand(rest)],
   [
     "trace",
-    async (rest) =>
-      await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot, resolveOwnerRepo }),
+    async (rest) => {
+      return await traceCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("trace"), repoRoot,
+        resolveOwnerRepo, resolveTaskPlan: reportTaskPlan });
+    },
   ],
   ["peek", async (rest) => await peekCommand(rest)],
   ["pr-owner", (rest) => prOwnerCommand(rest)],
