@@ -127,6 +127,8 @@ import type { Task } from "./plan.js";
 export interface ReportRepoContext {
   repoRoot?: string;
   resolveOwnerRepo?: () => { owner: string; repo: string };
+  /** CLI-owned task selection. Direct library callers may keep their supplied root. */
+  resolveTaskPlan?: (id: string) => { ok: true; root: string; owner?: string } | { ok: false; error: string };
 }
 
 function reportRepoRoot(context: ReportRepoContext): string {
@@ -1182,12 +1184,16 @@ export async function caseFileCommand(rest: string[], deps: CaseFileCommandInput
   }
   const root = reportRepoRoot(deps);
   const asOf = (deps.nowIso ?? (() => systemClock.iso()))();
-  let plan: Plan | undefined;
   const tasks: Task[] = [];
+  const roots: string[] = [];
   for (const taskId of taskIds) {
-    const task = deps.readTask ? deps.readTask(taskId) : (plan ??= loadPlan(resolveRepoLayout(root).planMonolith)).byId.get(taskId);
-    if (!task) { err(`rmd case-file: ${taskId} is not in the plan`); return 2; }
+    const located = deps.readTask ? undefined : deps.resolveTaskPlan?.(taskId);
+    if (located && !located.ok) { err(`rmd case-file: ${taskId} is not in the plan (${located.error})`); return 2; }
+    const taskRoot = located?.ok ? located.root : root;
+    const task = deps.readTask ? deps.readTask(taskId) : loadPlan(resolveRepoLayout(taskRoot).planMonolith).byId.get(taskId);
+    if (!task) { err(`rmd case-file: ${taskId} is not in the plan (${resolveRepoLayout(taskRoot).planMonolith})`); return 2; }
     tasks.push(task);
+    roots.push(taskRoot);
   }
   const stateDir = deps.stateDir ?? join((deps.loadConfig ?? loadConfig)().root, "state");
   const ledgers = batch ? await (deps.readLedgers ?? readTaskCaseLedgers)(stateDir, taskIds, asOf)
@@ -1197,7 +1203,7 @@ export async function caseFileCommand(rest: string[], deps: CaseFileCommandInput
   // older task read as indeterminate. The daemon's persisted snapshot turns it into a delta read.
   const github = (owner: string, repo: string) => gateway ??= (deps.buildGithub ?? buildBatchedGithub)(owner, repo,
     { snapshotCache: createBoardSnapshotCache(dirname(stateDir), owner, repo) });
-  const files = tasks.map((task) => assembleCaseFile(task, ledgers.get(task.id)!, asOf, root, deps, github));
+  const files = tasks.map((task, index) => assembleCaseFile(task, ledgers.get(task.id)!, asOf, roots[index]!, deps, github));
   // JSON is also the default so every evidence state, source, and as-of remains machine-readable.
   out(JSON.stringify(batch ? files : files[0], null, 2));
   return 0;
@@ -1734,11 +1740,22 @@ export async function traceCommand(
     return 2;
   }
 
-  const repoDir = reportRepoRoot(opts);
+  const located = opts.resolveTaskPlan?.(id);
+  const repoDir = located?.ok ? located.root : reportRepoRoot(opts);
   const planPath = join(repoDir, "plan", "tasks.yaml");
-  const plan = loadPlan(planPath);
+  let plan: Plan;
+  try {
+    plan = loadPlan(planPath);
+  } catch (e) {
+    if (!located || located.ok) throw e;
+    console.error(`rmd trace: '${id}' (${located.error}); cannot load plan for feedback tracing: ${String((e as Error)?.message ?? e)}`);
+    return 2;
+  }
   const config = loadConfig();
-  const { owner, repo: defaultRepo } = reportOwnerRepo(opts, repoDir);
+  const ownerRepo = reportOwnerRepo(opts, repoDir);
+  const { owner, repo: defaultRepo } = located?.ok && located.owner
+    ? { ...ownerRepo, owner: located.owner }
+    : ownerRepo;
   const ledgerPath = ledgerPathFor(config);
   const ledgerLines = readLedgerLines(ledgerPath);
 
@@ -1765,7 +1782,7 @@ export async function traceCommand(
     entry = readFeedbackEntry(repoDir, id);
   } catch {
     console.error(
-      `rmd trace: '${id}' is neither a known task id (${planPath}) nor a feedback entry (plan/feedback/${id}.yaml)`,
+      `rmd trace: '${id}' is neither a known task id (${located && !located.ok ? located.error : planPath}) nor a feedback entry (plan/feedback/${id}.yaml)`,
     );
     return 2;
   }

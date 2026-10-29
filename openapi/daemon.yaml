@@ -880,10 +880,90 @@ components:
         outcome: { type: string, enum: [proposed, queued, admitted, running, succeeded, failed, unknown, blocked] }
         objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
         observedAt: { type: string, format: date-time }
+        receipt: { $ref: "#/components/schemas/ProductRunReceipt" }
         references:
           type: array
           maxItems: 16
           items: { $ref: "#/components/schemas/ProductResearchLink" }
+    ProductRunReceipt:
+      oneOf:
+        - $ref: "#/components/schemas/ProductLocalRunReceipt"
+        - $ref: "#/components/schemas/ProductHostedRunReceipt"
+    ProductLocalRunReceipt:
+      type: object
+      additionalProperties: false
+      required: [channel, actor, productId, objectiveRevision, operationId, runId, taskId, repository, head, execution, qualification]
+      properties:
+        channel: { type: string, enum: [local] }
+        actor: &caseReceiptActor { type: string, minLength: 1, maxLength: 512 }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        operationId: &caseReceiptOperation { type: string, pattern: '^pbuild_[a-f0-9]{64}$' }
+        runId: &caseReceiptRun { type: string, minLength: 1, maxLength: 160 }
+        taskId: &caseReceiptTask { type: string, minLength: 1, maxLength: 120 }
+        repository: &caseReceiptRepository
+          type: object
+          additionalProperties: false
+          required: [id, owner, name]
+          properties:
+            id: { $ref: "#/components/schemas/ProductRevision" }
+            owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+            name: { type: string, minLength: 1, maxLength: 100, pattern: '^[A-Za-z0-9_.-]+$' }
+        head: &caseReceiptHead { type: string, pattern: '^(?:[a-f0-9]{40}|unknown)$' }
+        execution: &caseReceiptExecution { type: string, enum: [running, ended, silent, unknown] }
+        qualification:
+          type: object
+          additionalProperties: false
+          required: [producer, verdict, tests, suites, reason]
+          properties:
+            producer: { type: string, enum: [core-author, consumer, unavailable] }
+            verdict: { type: string, enum: [passed, failed, partial, unknown] }
+            tests: { type: integer, minimum: 0 }
+            suites: { type: integer, minimum: 0 }
+            reason: &caseReceiptReason { type: string, minLength: 1, maxLength: 500 }
+            originalVerdict: { type: string, minLength: 1, maxLength: 80 }
+            reference: { type: string, minLength: 1, maxLength: 160 }
+            digest: { type: string, pattern: '^[a-f0-9]{64}$' }
+    ProductHostedRunReceipt:
+      type: object
+      additionalProperties: false
+      required: [channel, actor, productId, objectiveRevision, operationId, runId, taskId, repository, head, execution, contexts, review, reason]
+      properties:
+        channel: { type: string, enum: [hosted] }
+        actor: *caseReceiptActor
+        productId: { $ref: "#/components/schemas/ProductId" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        operationId: *caseReceiptOperation
+        runId: *caseReceiptRun
+        taskId: *caseReceiptTask
+        repository: *caseReceiptRepository
+        head: *caseReceiptHead
+        execution: *caseReceiptExecution
+        contexts:
+          type: array
+          maxItems: 99
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, conclusion]
+            properties:
+              name: { type: string, minLength: 1, maxLength: 255 }
+              conclusion: { type: string, minLength: 1, maxLength: 80 }
+        review: { type: string, enum: [success, failure, pending, absent, unknown] }
+        reason: *caseReceiptReason
+    ProductCaseRunEvidence:
+      type: array
+      maxItems: 128
+      items:
+        type: object
+        additionalProperties: false
+        required: [id, reference, outcome, current]
+        properties:
+          id: { type: string, minLength: 1, maxLength: 128 }
+          reference: { type: string, minLength: 1, maxLength: 2048 }
+          outcome: { type: string, enum: [proposed, queued, admitted, running, succeeded, failed, unknown, blocked] }
+          current: { type: boolean }
+          receipt: { $ref: "#/components/schemas/ProductRunReceipt" }
     ProductReceipt:
       type: object
       additionalProperties: false
@@ -1709,8 +1789,8 @@ components:
                     type: string
                     minLength: 1
                     maxLength: 2048
-            local: *a2
-            hosted: *a2
+            local: { $ref: "#/components/schemas/ProductCaseRunEvidence" }
+            hosted: { $ref: "#/components/schemas/ProductCaseRunEvidence" }
             review: *a2
             merge: *a2
             deploy: *a2
