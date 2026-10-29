@@ -63,6 +63,7 @@
     "plan-reconcile",
     "pr-checks",
     "pr-owner",
+    "pr-state",
     "preflight",
     "procedures",
     "progress-watchdog",
