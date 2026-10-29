@@ -4,7 +4,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
-import { countCommentLines } from "#scripts/comment-load-ratchet.mjs";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // @source-text-subject: this task preserves status.ts tokens while compressing its comments.
@@ -45,6 +44,7 @@ test("W1-T10884: comment compression preserves executable code", () => {
   assert.notEqual(executableDigest(control), executableDigest(control.replace("text", "changed")));
   assert.notEqual(executableDigest(control), executableDigest(control.replace("https?", "http")));
   assert.equal(executableDigest(source), BEFORE.tokens, "all executable token kinds and spellings must survive");
-  const { comments } = countCommentLines(source, "src/lib/status.ts");
+  // For a .ts file, the comment-load measure counts lines starting with //, /*, or *.
+  const comments = source.split("\n").filter((line) => /^(?:\/\/|\/\*|\*)/.test(line.trim())).length;
   assert.ok(comments < BEFORE.comments, `comments must decrease from ${BEFORE.comments}, found ${comments}`);
 });
