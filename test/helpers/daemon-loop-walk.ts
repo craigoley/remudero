@@ -198,7 +198,37 @@ export function topLevelFunctions(opts: { objectLiterals?: boolean } = {}): Fn[]
   return out;
 }
 
-/** Name-based fixed point: a function is reachable when its identifier appears in a reachable body. */
+const valueNameCache = new WeakMap<Fn, { body: string; names: readonly string[] }>();
+const TYPE_QUERY_CONTEXT = [
+  /\btype\s+[A-Za-z_$][\w$]*(?:\s*<[^;={}]*>)?\s*=\s*(?:\{[^{}]*|[^;={}]*)$/,
+  /\binterface\s+[A-Za-z_$][\w$]*[^;={}]*\{[^{}]*$/,
+  /\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*:[^;={}]*$/,
+  /\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s*)?\(\s*(?:[A-Za-z_$][\w$]*\s*,\s*)*[A-Za-z_$][\w$]*\??\s*:[^;={}]*$/,
+  /\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s*)?\([^();={}]*\)\s*:[^;={}]*$/,
+  /\bfunction\s*[A-Za-z_$]*\s*\([^;={}]*:[^;={}]*$/,
+  /\b(?:as|satisfies)\s+typeof$/,
+];
+
+/** W1-T9736: property names and type queries do not hand over a same-named function. */
+function valueNames(fn: Fn): readonly string[] {
+  const cached = valueNameCache.get(fn);
+  if (cached?.body === fn.body) return cached.names;
+  const { body } = fn;
+  const out: string[] = [];
+  for (const m of body.matchAll(/[A-Za-z_$][\w$]*/g)) {
+    const before = body.slice(0, m.index).trimEnd();
+    const after = body.slice(m.index + m[0].length);
+    if (before.endsWith(".") && !before.endsWith("...")) continue;
+    const memberStart = before.replace(/\breadonly$/, "").trimEnd();
+    if ((memberStart === "" || /[{(,;]/.test(memberStart.at(-1)!)) && /^\s*\??\s*:/.test(after)) continue;
+    if (before.endsWith("typeof") && /\btypeof$/.test(before.slice(-7)) && TYPE_QUERY_CONTEXT.some((context) => context.test(before))) continue;
+    out.push(m[0]);
+  }
+  valueNameCache.set(fn, { body, names: out });
+  return out;
+}
+
+/** Name-based fixed point over value identifiers in reachable bodies. */
 export function loopReachable(fns: Fn[], seed: string): Set<string> {
   const byName = new Map<string, Fn[]>();
   for (const f of fns) byName.set(f.name, [...(byName.get(f.name) ?? []), f]);
@@ -207,7 +237,7 @@ export function loopReachable(fns: Fn[], seed: string): Set<string> {
   while (queue.length) {
     const name = queue.pop()!;
     for (const f of byName.get(name) ?? []) {
-      for (const id of f.body.match(/[A-Za-z_$][\w$]*/g) ?? []) {
+      for (const id of valueNames(f)) {
         if (byName.has(id) && !reached.has(id)) {
           reached.add(id);
           queue.push(id);

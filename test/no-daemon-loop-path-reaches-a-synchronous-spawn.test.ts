@@ -20,7 +20,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { factoryNames, loopReachable, MODULE_LOAD, splitObjectLiteral, topLevelFunctions, type Fn } from "./helpers/daemon-loop-walk.js";
+import { factoryNames, loopReachable, MODULE_LOAD, splitObjectLiteral, topLevelFunctions, type Fn } from "#test/helpers/daemon-loop-walk.js";
 
 /** Loop-reachable functions that still call a synchronous spawn primitive or hand one over as a value,
  *  with the count recorded at build time (2026-10-10, f49ee17d3; re-recorded the same day on e91d490f1
@@ -133,7 +133,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   fixCommand: 1,
   fixRebaseMergeFactsFromRest: 2,
   fixRungCiFailures: 1,
-  gardenCheckout: 3,
   ghAlertGateway: 1,
   ghEscalationAnswerGateway: 1,
   ghExec: 4,
@@ -246,7 +245,9 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   run: 1,
   runCoverageImprovementCadence: 1,
   runGhPrCreate: 1,
-  runInTree: 1, // W1-T9660: via defaultPreflightChecks; W1-T9695/W1-T9696/W1-T9734/W1-T9735 moved the boot sweep, daemon landContent, CI-learning, daemon feedback captures, decision records, alert status flips, fold debt and knowledge garden off it; by name only, the planPrPreflight option and the sweepFeedbackLanding dep
+  // W1-T9736: daemonCommand -> runTask -> recordDecisionAsync -> landContentAsync's bare planPrPreflight
+  // fallback -> planPrPreflight -> defaultPreflightChecks -> runInTree. Bare value names remain reach.
+  runInTree: 1,
   runMachineFilingJudge: 1,
   runNpmScriptViaSpawn: 1,
   runPrewarmChannelsSync: 1,
@@ -342,6 +343,78 @@ function refusals(fns: Fn[], baseline: Readonly<Record<string, number>>): string
   }
   return out;
 }
+
+test("W1-T9736: a property sharing a sync function name is not loop reach", () => {
+  for (const body of [
+    "await deps.syncThing();",
+    "await deps?.syncThing?.();",
+    "const opts = { syncThing: asyncReplacement };",
+    "interface Deps { syncThing?: () => void; }",
+    "interface Deps { readonly syncThing?: () => void; }",
+    "interface Deps { run: typeof syncThing; }",
+    "type Deps = { syncThing: () => void };",
+    "type Deps = { run: typeof syncThing };",
+    "type Callback = typeof syncThing;",
+    "const opts: Parameters<typeof syncThing>[0] = {};",
+    "const deps = (run: Parameters<typeof syncThing>[0]) => run;",
+    "function nested(run: typeof syncThing) {}",
+    "const value = other as typeof syncThing;",
+    "const value = other satisfies typeof syncThing;",
+  ]) {
+    const fns: Fn[] = [
+      { name: "caller", file: "fixture.ts", body },
+      { name: "syncThing", file: "fixture.ts", body: "function syncThing() { spawnSync(cmd); }" },
+    ];
+    assert.ok(!loopReachable(fns, "caller").has("syncThing"), body);
+    assert.deepEqual(refusals([{ name: "daemonCommand", file: "fixture.ts", body: "caller();" }, ...fns], {}), [], body);
+  }
+});
+
+test("W1-T9736: a value-position name and a bare call still reach", () => {
+  for (const body of [
+    "const opts = { fallback: syncThing };",
+    "syncThing();",
+    "const run = deps.run ?? syncThing;",
+    "const opts = { syncThing };",
+    "const opts = { ...syncThing };",
+    "const args = [...syncThing];",
+    "const run = ready ? syncThing : alternative;",
+    "const opts = { probe: typeof syncThing };",
+    "const opts = { first: 1, probe: typeof syncThing };",
+    "const { syncThing, ...opts } = deps; const run = syncThing ?? asyncReplacement;",
+    "if (typeof syncThing === expected) useIt();",
+    "const less = value < typeof syncThing;",
+    "const compared = value < typeof syncThing > other;",
+    "const probe = ready ? other() : typeof syncThing;",
+    "const probe = (value as unknown) && typeof syncThing;",
+    "const probe = value as unknown && typeof syncThing;",
+    "const probe = (ready ? other() : typeof syncThing);",
+  ]) {
+    const fns: Fn[] = [
+      { name: "daemonCommand", file: "fixture.ts", body },
+      { name: "syncThing", file: "fixture.ts", body: "function syncThing() { spawnSync(cmd); }" },
+    ];
+    assert.ok(loopReachable(fns, "daemonCommand").has("syncThing"), body);
+    assert.deepEqual(refusals(fns, {}), [
+      "syncThing makes 1 synchronous spawn call(s) and is reachable from the daemon loop (daemonCommand), but is not in SYNC_SPAWN_LOOP_BASELINE — await an async seam instead",
+    ], body);
+  }
+});
+
+test("W1-T9736: a type query loses gardenCheckout but a bare async option still reaches runInTree", () => {
+  const fns = censusFunctions();
+  const reach = loopReachable(fns, "daemonCommand");
+  assert.ok(reach.has("daemonCommand") && reach.has("defaultGit"), "the loop still reaches a real sync default");
+  assert.equal(population(fns).get("gardenCheckout"), 3, "the sync checkout still exists");
+  assert.ok(!reach.has("gardenCheckout"), "buildRegisteredGarden names it only in Parameters<typeof gardenCheckout>");
+  assert.ok(!Object.hasOwn(SYNC_SPAWN_LOOP_BASELINE, "gardenCheckout"));
+  assert.equal(population(fns).get("runInTree"), 1, "the sync spawner still exists");
+  assert.ok(reach.has("landContentAsync") && reach.has("runInTree"));
+  assert.equal(SYNC_SPAWN_LOOP_BASELINE.runInTree, 1, "the bare async option retains the sync preflight's row");
+  const caller = fns.find((f) => f.name === "landContentAsync");
+  assert.ok(caller);
+  assert.ok(loopReachable([caller, { name: "planPrPreflight", file: "fixture.ts", body: "" }], caller.name).has("planPrPreflight"));
+});
 
 test("census: the seed and the population are real, so the walk cannot pass vacuously", () => {
   const fns = censusFunctions();
@@ -571,25 +644,24 @@ test("W1-T9696: the staged daemon-loop captures reach no inline captureFeedback"
   }
 });
 
-/** Reached only through a column-0 object-literal const, so the function-only walk never saw them (W1-T9660). */
-const OBJECT_LITERAL_SPAWNERS = ["runInTree"] as const;
-
 test("W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const", () => {
-  const fns = censusFunctions();
+  const source = "const fixture = { run: () => onlyInLiteral() };";
+  const { reach: body } = splitObjectLiteral(source, source.indexOf("{"));
+  const fns: Fn[] = [
+    { name: "daemonCommand", file: "fixture.ts", body: "fixture.run();" },
+    { name: "fixture", file: "fixture.ts", body },
+    { name: "onlyInLiteral", file: "fixture.ts", body: "function onlyInLiteral() { spawnSync(cmd); }" },
+  ];
   const reach = loopReachable(fns, "daemonCommand");
   const pop = population(fns);
-  assert.ok(reach.has("defaultPreflightChecks"), "the census walk reads plan-pr-emitter's defaultPreflightChecks object literal");
-  for (const name of OBJECT_LITERAL_SPAWNERS) {
-    assert.ok(reach.has(name) && (pop.get(name) ?? 0) > 0, `${name} is a reached sync spawner`);
-    assert.equal(SYNC_SPAWN_LOOP_BASELINE[name], pop.get(name), `${name} holds an exact row`);
-  }
-  // Every path to runInTree passes through an object literal: the function-only walk, strings stripped alike, is blind to it.
-  const functionsOnly = topLevelFunctions().map((f) => ({ ...f, body: codeOnly(f.body) }));
-  assert.ok(!loopReachable(functionsOnly, "daemonCommand").has("runInTree"), "the function-only walk does not reach runInTree");
+  assert.ok(reach.has("fixture") && reach.has("onlyInLiteral"));
+  assert.equal(pop.get("onlyInLiteral"), 1, "the literal's arrow reaches a counted sync spawner");
+  assert.deepEqual(refusals(fns, { onlyInLiteral: 1 }), []);
+  const functionsOnly = fns.filter((f) => f.name !== "fixture");
+  assert.ok(!loopReachable(functionsOnly, "daemonCommand").has("onlyInLiteral"), "omitting the literal hides its spawn");
   assert.ok(loopReachable(functionsOnly, "daemonCommand").size < reach.size, "the object-literal walk reaches more");
-  const { runInTree: _dropped, ...withoutRow } = SYNC_SPAWN_LOOP_BASELINE;
-  assert.deepEqual(refusals(fns, withoutRow), [
-    "runInTree makes 1 synchronous spawn call(s) and is reachable from the daemon loop (daemonCommand), but is not in SYNC_SPAWN_LOOP_BASELINE — await an async seam instead",
+  assert.deepEqual(refusals(fns, {}), [
+    "onlyInLiteral makes 1 synchronous spawn call(s) and is reachable from the daemon loop (daemonCommand), but is not in SYNC_SPAWN_LOOP_BASELINE — await an async seam instead",
   ]);
 });
 
