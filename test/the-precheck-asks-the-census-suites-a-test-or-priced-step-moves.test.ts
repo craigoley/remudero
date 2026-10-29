@@ -12,6 +12,7 @@ import * as precheck from "../scripts/census-precheck.mjs";
 const SKILL = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 const PRICED = "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts";
 const HOST = "test/host-capability-fixtures.test.ts";
+const REACH = "test/the-affected-suite-reach-ratchet.test.ts";
 const SOURCE = "src/lib/example.ts";
 const FIXTURE = "test/nested/example.test.ts";
 const permissionSite = "chmodSync" + "(path, 0o555);";
@@ -63,7 +64,9 @@ test("the priced prefilter reads literal logs, constant logs and step objects, i
     assert.ok(evaluate(SOURCE, text).started.includes(PRICED), text);
     assert.deepEqual(evaluate(SOURCE, text + "\nconst unrelated = 2;", text).runs, []);
     assert.ok(evaluate(SOURCE, text + "\n" + text, text).started.includes(PRICED));
-    assert.deepEqual(evaluate(SOURCE, null, text).runs, []);
+    assert.deepEqual(evaluate(SOURCE, "", text).runs, [], "removing the write keeps the source in the graph");
+    assert.deepEqual(evaluate(SOURCE, null, text).runs, [[REACH]],
+      "deleting the source runs only reach, not the priced census");
     assert.ok(!evaluate(FIXTURE, text).started.includes(PRICED));
   }
   const base = 'log(PRICED_STEP, {\n  reason: "x",\n});';
@@ -82,7 +85,9 @@ test("the host prefilter asks on each added token line and on duplicate sites, e
     assert.deepEqual(evaluate(FIXTURE, text).runs, [[HOST]], text);
     assert.deepEqual(evaluate(FIXTURE, text + "\nconst value = 2;", text).runs, []);
     assert.deepEqual(evaluate(FIXTURE, text + "\n" + text, text).runs, [[HOST]]);
-    assert.deepEqual(evaluate(FIXTURE, null, text).runs, []);
+    assert.deepEqual(evaluate(FIXTURE, "", text).runs, [], "removing the token keeps the suite in the graph");
+    assert.deepEqual(evaluate(FIXTURE, null, text).runs, [[REACH]],
+      "deleting the suite runs only reach, not the host census");
     assert.ok(!evaluate(SOURCE, text).started.includes(HOST));
   }
   assert.deepEqual(evaluate("docs/example.md", permissionSite).runs, []);
@@ -149,7 +154,9 @@ test("pre-push asks the real child-coverage guard for a newly unblanked nested t
   assert.deepEqual(evaluate(path, bad, corrected).runs, [[suite]], "removing effective blanking is a new defect");
   assert.deepEqual(evaluate(path, `function first() { ${bad} }\nfunction second() { ${bad} }`, `function first() { ${bad} }`).runs, [[suite]], "a second site on the same identifier is not deduplicated away");
   for (const unchanged of [bad, bad + "\nconst unrelated = 1;"]) assert.deepEqual(evaluate(path, unchanged, bad).runs, []);
-  assert.deepEqual(evaluate(path, null, bad).runs, [], "removing a site does not introduce it");
+  assert.deepEqual(evaluate(path, "", bad).runs, [], "removing a site does not introduce it");
+  assert.deepEqual(evaluate(path, null, bad).runs, [[REACH]],
+    "deleting the file runs only reach, without introducing a child-coverage defect");
   assert.deepEqual(evaluate(path, "// " + bad.replaceAll("\n", "\n// ")).runs, []);
   assert.deepEqual(evaluate(path, JSON.stringify(bad)).runs, []);
   assert.deepEqual(evaluate("docs/example.md", bad).runs, []);

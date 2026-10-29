@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -7,8 +7,10 @@ import { test, type TestContext } from "node:test";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { stringify } from "yaml";
 import { productCasePlanText } from "#src/lib/product-case.js";
+import { REVIEWER_IDENTITY_ENV } from "#src/lib/review.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { buildProductRoutes } from "#src/lib/product-routes.js";
+import { ratifyCliGateway } from "#src/lib/panel-graph.js";
 import { realProductResearchProvider } from "#src/lib/product-research.js";
 import type { Config } from "#src/lib/config.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
@@ -701,10 +703,11 @@ test("W1-T10615: the served product build operation matches the authenticated AP
     assert.equal((await send("bob", build)).status, 404);
     assert.equal((await send("alice", { ...build, planEvidenceId: "unapproved" })).status, 409);
     assert.equal(shim.calls().length, 1, "only the unapproved plan reached the transport, and only for the repository identity read");
-    // No live daemon instance drives the target yet: there is nowhere the kick could be delivered.
+    // No live daemon instance drives the target (W1-T10799): the core daemon owns the job, so the request reaches the
+    // same task checks a driven target does, and the claim another lane holds refuses it explicitly.
     const undriven = await send("alice", build);
     assert.equal(undriven.status, 409);
-    assert.equal(undriven.body.error, "target_daemon_missing");
+    assert.equal(undriven.body.error, "task_claimed");
     writeFileSync(registry, "instances:\n  core:\n    github_repo: craigoley/remudero\n  wreckterra:\n    github_repo: craigoley/wreckterra\n");
     // The task is already claimed by another lane, so the assembled operation refuses it explicitly.
     const claimed = await send("alice", build);
@@ -815,12 +818,16 @@ test("W1-T10616: the served product deployment operation matches the authenticat
 
 test("W1-T10618: the served product case operation matches the authenticated API contract", async (t) => {
   const head = "d".repeat(40);
+  const trusted = "remudero-reviewer[bot]", previousTrusted = process.env[REVIEWER_IDENTITY_ENV];
+  process.env[REVIEWER_IDENTITY_ENV] = trusted;
+  t.after(() => { if (previousTrusted === undefined) delete process.env[REVIEWER_IDENTITY_ENV]; else process.env[REVIEWER_IDENTITY_ENV] = previousTrusted; });
   const shim = ghShim([
     { when: "commits/main", stdout: JSON.stringify({ sha: head }) },
     { when: `contents?ref=${head}`, stdout: JSON.stringify([{ name: "src" }]) },
     { when: "contents/plan/tasks.d?", stdout: JSON.stringify([{ name: "W9-T1-prototype.yaml" }]) },
     { when: "matching-refs/", stdout: "[]" },
     { when: "search/issues", stdout: '{"total_count":0}' },
+    { when: `commits/${head}/status`, stdout: JSON.stringify({ statuses: [{ context: "remudero-review", state: "success", creator: { login: trusted, type: "Bot" } }] }) },
     { when: "pulls/7/reviews", stdout: JSON.stringify([{ state: "APPROVED", commit_id: head, user: { login: "reviewer" } }]) },
     { when: "pulls/7/files", stdout: JSON.stringify([{ filename: "plan/tasks.d/W9-T1-prototype.yaml" }]) },
     { when: "pulls/7", stdout: JSON.stringify({ number: 7, merged_at: "2026-10-26T00:00:00Z", merge_commit_sha: head, head: { sha: head },
@@ -890,6 +897,113 @@ test("W1-T10618: the served product case operation matches the authenticated API
   assert.deepEqual(started.body.evidence.mobile, []);
   assert.equal((await send("alice", build)).body.replayed, true);
   assert.ok(existsSync(join(stateBase, "wreckterra/state/KICK_REQUESTED-wreckterra:W9-T1")));
+  assert.ok(!shim.calls().some((call) => call.includes("-X POST")));
+});
+
+test("W1-T10823: the served plan proposal reaches the maintained native handoff", async (t) => {
+  const head = "d".repeat(40);
+  const shim = ghShim([
+    { when: "commits/main", stdout: JSON.stringify({ sha: head }) },
+    { when: `contents?ref=${head}`, stdout: JSON.stringify([{ name: "src" }]) },
+    { when: "contents/plan/tasks.d?", stdout: JSON.stringify([{ name: "WRECK-T1-first.yaml" }]) },
+    { when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra",
+      owner: { login: "craigoley" }, private: false, default_branch: "main" }) },
+  ]);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${originalPath}`;
+  t.after(() => { process.env.PATH = originalPath; rmSync(shim.dir, { recursive: true, force: true }); });
+  const root = ownedFixtureDir(t, "product-plan-http").dir;
+  const repoRoot = join(root, "repos", "remudero");
+  const checkout = join(root, "repos", "wreckterra");
+  mkdirSync(join(checkout, ".git"), { recursive: true });
+  mkdirSync(join(repoRoot, ".remudero"), { recursive: true });
+  writeFileSync(join(repoRoot, ".remudero/managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
+  // The real gateway spawns this controlled planner at its argv/ledger boundary. Its native-shaped rows retain the
+  // complete brief and mode; process identity alone is not the production correlation rule.
+  const tree = join(root, "fresh-tree");
+  mkdirSync(join(tree, "bin"), { recursive: true });
+  const ledgerPath = join(root, "state/ledger.ndjson");
+  const argsFile = join(root, "child-args.txt");
+  const countFile = join(root, "child-count.txt");
+  writeFileSync(join(tree, "bin", "rmd"), String.raw`#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(countFile)}, "invoked\n");
+fs.writeFileSync(${JSON.stringify(argsFile)}, args.join("\n") + "\n");
+setTimeout(() => {
+  const mode = args[1].slice("--mode=".length), run_id = "PLAN-" + mode + "-fixture", task_id = "PLAN-" + mode;
+  const rows = [
+    { ts: new Date().toISOString(), run_id, task_id, step: "plan.start", lane: "plan", actor_pid: process.pid, mode, brief: args[2] },
+    { ts: new Date().toISOString(), run_id, task_id, step: "pr.opened", lane: "plan", pr_url: "https://github.com/craigoley/wreckterra/pull/42" }
+  ];
+  fs.appendFileSync(${JSON.stringify(ledgerPath)}, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+}, 1000);
+`);
+  chmodSync(join(tree, "bin", "rmd"), 0o755);
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(ledgerPath, "");
+  const gateway = ratifyCliGateway(repoRoot, join(root, "logs"), { ledgerPath, freshTree: (action) => action({ path: tree, sha: "f".repeat(40) }) });
+  const panelGraph = { root: repoRoot, planPath: join(root, "plan/tasks.yaml"), ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: gateway };
+  const products = assembled(root);
+  const mounted = assembled(root, "/v1/products/case", { panelGraph });
+  const app = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...mounted] });
+  await new Promise<void>((resolve) => app.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve())));
+  const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
+  type Operation = { operationId: string; state: string; mode: string; proposal?: string; targetHead: string; repository: { name: string } };
+  const send = async (session: "alice" | "bob" | undefined, body: unknown) => {
+    const response = await fetch(`${base}/v1/products/case`, { method: "POST", headers: { authorization: "Bearer fixture-write",
+      "content-type": "application/json", ...(session ? { "x-test-session": session } : {}) }, body: JSON.stringify(body) });
+    const reply = await response.json() as { error?: string; productId: string; replayed: boolean; planOperation?: Operation };
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/case", "POST", response.status)), []);
+    assert.match(response.headers.get("cache-control") ?? "", /no-store/);
+    return { status: response.status, body: reply };
+  };
+  const childRows = () => readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+  const saved = await send("alice", { version: "product-case-v1", action: "import", command });
+  const productId = saved.body.productId;
+  assert.equal((await send("alice", { version: "product-case-v1", action: "adopt", command: adopt(productId) })).status, 200);
+  const propose = (over: Record<string, unknown> = {}) => ({ version: "product-case-v1", action: "propose", command: { requestId: "case-propose-0001", productId,
+    expectedRevision: 2, expectedObjectiveRevision: 1, ...over } });
+  assert.deepEqual(violations(propose(), SPEC.components.schemas.ProductCaseCommand!), []);
+  assert.equal((await send(undefined, propose())).status, 403, "a shared bearer is not a verified operator");
+  assert.equal((await send("bob", propose())).status, 404, "another operator's product does not exist");
+  assert.equal((await send("alice", propose({ pullRequest: 7 }))).status, 400, "a caller-supplied pull request is refused");
+  assert.equal((await send("alice", propose({ brief: { idea: "x" } }))).status, 400, "caller brief text is refused");
+  assert.equal((await send("alice", propose({ budgetUsd: 1 }))).status, 400, "a caller budget is refused");
+  assert.equal((await send("alice", propose({ expectedRevision: 1 }))).body.error, "stale_revision");
+  assert.equal(readFileSync(ledgerPath, "utf8"), "", "no refusal reached the gateway");
+
+  const pending = await send("alice", propose());
+  assert.equal(pending.status, 200);
+  assert.equal(pending.body.planOperation?.state, "pending", "the response is a truthful pending observation, not a wait for the child");
+  assert.equal(pending.body.planOperation?.mode, "clarify");
+  assert.equal(pending.body.planOperation?.targetHead, head);
+  assert.equal(pending.body.replayed, false);
+  const operationId = pending.body.planOperation!.operationId;
+  // The maintained gateway starts the real child and records its own rows; wait for its exit row.
+  const deadline = Date.now() + 20_000;
+  while (!childRows().some((row) => row.step === "ratify.cli_exited") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+  const rows = childRows();
+  const started = rows.find((row) => row.step === "ratify.cli_started");
+  assert.equal(started?.task_id, `product-plan:${operationId}`, "the gateway's rows carry the durable operation identity");
+  assert.equal(typeof started?.pid, "number");
+  const nativeStart = rows.find((row) => row.step === "plan.start");
+  assert.equal(typeof nativeStart?.actor_pid, "number", "the controlled writer records its actual runtime PID");
+  assert.equal(nativeStart?.mode, "clarify");
+  assert.ok(String(nativeStart?.brief).includes(productCasePlanText(command.brief)), "native protocol retains the complete frozen brief");
+  assert.deepEqual(rows.find((row) => row.step === "ratify.cli_exited")?.code, 0);
+
+  const proposed = await send("alice", propose());
+  assert.equal(proposed.body.replayed, true);
+  assert.equal(proposed.body.planOperation?.operationId, operationId);
+  assert.equal(proposed.body.planOperation?.state, "proposed");
+  assert.equal(proposed.body.planOperation?.proposal, "https://github.com/craigoley/wreckterra/pull/42");
+  const lines = readFileSync(argsFile, "utf8").split("\n");
+  assert.deepEqual([lines[0], lines[1]], ["plan", "--mode=clarify"], "exactly the existing rmd plan verb, reconciling the target's plan");
+  assert.deepEqual(lines.slice(-3, -1), ["--repo-root", checkout], "against the verified managed target checkout");
+  assert.ok(readFileSync(argsFile, "utf8").includes(productCasePlanText(command.brief)));
+  assert.equal(readFileSync(countFile, "utf8").trim().split("\n").length, 1, "repeated requests spent exactly one native plan child");
   assert.ok(!shim.calls().some((call) => call.includes("-X POST")));
 });
 

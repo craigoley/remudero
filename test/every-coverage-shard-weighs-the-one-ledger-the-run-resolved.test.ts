@@ -505,8 +505,9 @@ test("the actual consumer rejects malformed content, identities and bytes before
 test("both emitted shells preserve non-source, push and merge-group no-collection lanes", () => {
   for (const event of ["push", "merge_group", "workflow_dispatch"]) {
     shellFixture(h => {
-      assert.equal(h.shell("coverage-ledger", "Resolve one immutable", { GITHUB_EVENT_NAME: event }).status, 0);
-      assert.equal(h.shell("coverage-ratchet", "Require the run's resolved", { GITHUB_EVENT_NAME: event }).status, 0);
+      const env = { GITHUB_EVENT_NAME: event, RMD_AFFECTED_SUITE_LIVE: "0" };
+      assert.equal(h.shell("coverage-ledger", "Resolve one immutable", env).status, 0);
+      assert.equal(h.shell("coverage-ratchet", "Require the run's resolved", env).status, 0);
       assert.deepEqual(h.gh.calls(), []);
     });
   }
@@ -526,6 +527,24 @@ test("both emitted shells preserve non-source, push and merge-group no-collectio
       assert.deepEqual(h.gh.calls(), []);
     });
   }
+});
+
+test("live merge-group coverage resolves and requires the same ledger as a source PR", () => {
+  const env = { GITHUB_EVENT_NAME: "merge_group", RMD_AFFECTED_SUITE_LIVE: "1" };
+  shellFixture(h => {
+    const resolved = h.shell("coverage-ledger", "Resolve one immutable", env);
+    assert.equal(resolved.status, 0, resolved.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(join(h.at, "runner/coverage-ledger-publish/ledger-choice.json"), "utf8")), choice);
+    const consumed = h.shell("coverage-ratchet", "Require the run's resolved", env);
+    assert.equal(consumed.status, 0, consumed.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(join(h.at, "coverage/ledger-choice.json"), "utf8")), choice);
+  }, [{ when: "actions/artifacts/88/zip", stdout: "selected ledger" }]);
+  shellFixture(h => {
+    const missing = h.shell("coverage-ratchet", "Require the run's resolved", { ...env, LEDGER_ARTIFACT_ID: "" });
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /run supplied no resolved artifact id/);
+    assert.deepEqual(h.gh.calls(), [], "refuse a missing identity before downloading any replacement");
+  });
 });
 
 

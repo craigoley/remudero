@@ -1,0 +1,77 @@
+- id: W1-T10921
+  title: "THE PRE-OPEN GATE BURNS UP TO 15 MINUTES A BUILD WHILE PROTECTING NOTHING, AND ITS ALERT NEVER SAW IT — a fixed PREOPEN_GATE_BACKSTOP_MS fires on 227 healthy-but-slow runs since 2026-10-19 (108 on 10-27 alone), and the unmeasured-streak alert is cleared by every measured FAIL, so a gate that failed every build for nine days never alerted; the gate learns its bound from its own measured durations, notices when it has stopped passing against its own history, stands down with `gate-unhealthy` while one canary keeps measuring, and raises the alert once"
+  repo: remudero
+  depends_on: [W1-T10920]  # both change src/lib/preopen-gate.ts; sequenced so two builds never conflict
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # standing the gate down wrongly lets a real fast-gate red reach a PR; a wrong bound kills healthy gates
+  band_meaning: blast-radius
+  origin: "operator ruling, Craig 2026-10-28: 'file and fix both' (the pre-open gate that never passes and backstops under load); evidence from a read-only host ledger census the same day"
+  plan_refs: [W1-T10920, W1-T9556, W1-T10252]
+  files:
+    - src/lib/preopen-gate.ts
+    - src/lib/preopen-gate-health.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/run-task.ts
+    - test/ci/gates/the-preopen-gate-learns-its-bound-and-stands-down-when-unhealthy.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-28, read-only, host ledger union (380 gz archives named >= 2026-10-15 plus the live file;
+    positive control: implement.preopen_gate rows on every day 10-14..10-28, 503 unique) at origin/main d03d7d3ef.
+    - Healthy passes (10-15..10-19, 46) took 4..13 min, most 6..10 min. Since 10-19 every measured run is a fail
+      at 7..14 min, and "fast gate exceeded its backstop" rows per day went 20, 16, 18, 10, 24, 15, 34, 54 (10-20..10-27).
+    - No pass since 2026-10-19T03:40:32Z (cause: W1-T10920).
+    READ at origin/main d03d7d3ef (symbols, not lines):
+    - src/lib/preopen-gate.ts `PREOPEN_GATE_BACKSTOP_MS = 15 * 60_000`, a constant chosen once; a run near the
+      host's loaded duration is killed as unmeasured, after spending the full 15 minutes.
+    - `detectUnmeasuredPreopenStreak` resets its streak on ANY `pass` or `fail` row, and `updatePreopenGateAlert`
+      withdraws the escalation when the streak is 0. A gate failing every build interleaves fails with unmeasured
+      rows, so the streak keeps resetting: nine days of zero passes produced no standing alert.
+    - An unmeasured or failing gate does not stop the PR opening, so each run paid up to 15 minutes of wall clock
+      (and a repair round for every false fail) for no protection.
+    This is the healthy-condition-bound doctrine: the bound separates "slow" from "hung" without the hung
+    population ever having been observed apart from load.
+  design: |
+    1. A learned bound (src/lib/preopen-gate-health.ts, exported as `preopenGateHealth(rows, now)` returning
+       the bound, its basis and the health state; `defaultRunGate`/`runPreopenGate` call it). From the recent measured gate rows (pass and fail, with
+       duration_ms) derive the backstop as a high quantile of their durations plus a margin from their own
+       spread, never below the slowest recent measured pass. Cold start (no measured rows in the window) uses the
+       last bound this function persisted, and only with no history at all the current constant. Record the bound
+       used on each gate row (`backstop_ms`, `backstop_basis`).
+    2. Health against its own history. The gate is UNHEALTHY when the current run of measured non-passes is
+       improbable under the gate's own historical pass rate (the window in which it last passed), not after a
+       fixed count: a gate that passed 46 of 99 times would need a long streak; a gate that never passed has no
+       basis and is judged only by item 4.
+    3. Stand down. While unhealthy, a gate run records `result: "skipped"` with reason `gate-unhealthy` and
+       spends no time, EXCEPT one canary at a time, which runs normally. A canary pass clears unhealthy at once.
+       The skip is visible on the row; the PR opens as it does today for an unmeasured gate.
+    4. Alert once, and correctly. Extend the existing `updatePreopenGateAlert` (same escalation spool, same
+       identity family) so a `gate-unhealthy` state raises one escalation naming the streak, the last pass, the
+       dominant failed steps and their recorded detail (W1-T10920's `failed_detail`), and withdraws it only on a
+       PASS. A measured fail no longer clears an unhealthy alert.
+  acceptance:
+    - claim: "the backstop is derived from the gate's own recent measured durations, never below its slowest recent pass"
+      proof: 'grep: test("W1-T10921: the backstop is learned from the gate s own measured runs" in test/ci/gates/the-preopen-gate-learns-its-bound-and-stands-down-when-unhealthy.test.ts'
+    - claim: "an improbable streak of non-passes against the gate's own pass history marks it unhealthy"
+      proof: 'grep: test("W1-T10921: a gate that stopped passing against its own history is unhealthy" in test/ci/gates/the-preopen-gate-learns-its-bound-and-stands-down-when-unhealthy.test.ts'
+    - claim: "an unhealthy gate skips with gate-unhealthy while exactly one canary runs, and a canary pass clears it"
+      proof: 'grep: test("W1-T10921: an unhealthy gate stands down behind one canary" in test/ci/gates/the-preopen-gate-learns-its-bound-and-stands-down-when-unhealthy.test.ts'
+    - claim: "a measured fail never withdraws an unhealthy gate's alert; only a pass does"
+      proof: 'grep: test("W1-T10921: only a pass clears the unhealthy gate alert" in test/ci/gates/the-preopen-gate-learns-its-bound-and-stands-down-when-unhealthy.test.ts'
+    - claim: "the gate row records the bound it used"
+      proof: 'grep: backstop_basis in src/cli/commands/run-task-verb.ts'
+    - claim: "the gate takes its bound and its health from the health module"
+      proof: 'grep: preopenGateHealth( in src/lib/preopen-gate.ts'
+  falsifier: |
+    At base the bound is the 15-minute constant and a fail resets the alert, so the learned-bound and only-a-pass
+    cases fail.
+    - Keep a fixed count of non-passes as the unhealthy rule: the case whose history passed often needs a longer
+      streak than one that rarely passed, and a fixed count fails one of them.
+    - Skip every run while unhealthy (no canary): the canary case fails and the gate could never recover.
+    - Clear unhealthy on a measured fail: the alert case fails.
+    GUARD that held at base and must still hold: test/three-unmeasured-preopen-gates-raise-a-host-alert.test.ts
+    still raises on three consecutive unmeasured gates.

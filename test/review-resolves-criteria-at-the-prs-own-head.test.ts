@@ -180,7 +180,8 @@ test("nothing added fetches twice or waits between resolving and judging", () =>
   };
 
   const result = resolvePlanCriteriaAtHead(TRAILERED_BODY("W1-T1"), dir, "plan/tasks.yaml", headSha, runGit);
-  // Exactly: one `git show` for the monolith, one `git ls-tree` for tasks.d/, ONE
+  // Exactly: one `git show` for the monolith, one `git ls-tree` for tasks.d/, one `git ls-tree`
+  // naming those shards' blob ids (PR-15230's by-id read), ONE
   // `git cat-file --batch` for every shard in it (one shard here, but the count no longer moves
   // with that number), plus (W1-T2623) the read-identity probes over the SAME objects — one
   // `git rev-parse` for the monolith's blob oid, one for tasks.d/'s tree oid — never a retry,
@@ -188,8 +189,8 @@ test("nothing added fetches twice or waits between resolving and judging", () =>
   // and the identity read touch it.
   assert.equal(
     calls,
-    5,
-    "the monolith, the shard listing, the ONE batch read of every shard, and the two read-identity rev-parse probes must each run exactly once",
+    6,
+    "the monolith, the shard listing, the blob-id listing, the ONE batch read of every shard, and the two read-identity rev-parse probes must each run exactly once",
   );
   assert.deepEqual(result.criteria.map((c) => c.claim), ["criterion one"]);
   assert.match(
