@@ -1,5 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
-import { closeSync, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID, type Hash } from "node:crypto";
+import { appendFileSync, closeSync, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMainThread, parentPort, SHARE_ENV, workerData, type Worker } from "node:worker_threads";
@@ -39,6 +39,12 @@ type Checkpoint = {
   baselineSources?: SourceRecord[];
   lastGood?: BenchmarkCohortSnapshot;
 };
+type SegmentReference = Omit<SourceRecord, "rows"> & {
+  segment: string; segmentBytes: number; segmentSha256: string; rowCount: number;
+};
+type SegmentState = { reference: SegmentReference; hash: Hash };
+type CheckpointIO = { checkpointReadBytes: number; checkpointWrittenBytes: number };
+const sourceSegments = new WeakMap<SourceRecord, SegmentState>();
 
 export interface BenchmarkCohort {
   dimensions: { day: string | null; taskClass: string | null; provider: string | null; model: string | null; harnessRevision: string | null };
@@ -124,6 +130,8 @@ export interface BenchmarkCohortPassResult {
   pendingSources: number;
   tailPendingBytes?: number;
   checkpointBytes?: number;
+  checkpointReadBytes?: number;
+  checkpointWrittenBytes?: number;
 }
 
 type ManifestEntry = { name: string; path: string; form: Form; size: number; mtimeMs: number };
@@ -186,33 +194,139 @@ function manifest(stateDir: string): ManifestEntry[] {
 }
 
 function checkpointPath(stateDir: string): string {
-  return join(stateDir, "benchmark-cohort-v1.json");
+  return join(stateDir, "benchmark-cohort-index.json");
 }
 
-function readCheckpoint(stateDir: string): Checkpoint {
+function readCheckpoint(stateDir: string, io: CheckpointIO): Checkpoint {
+  const legacy = join(stateDir, "benchmark-cohort-v1.json");
+  const destination = checkpointPath(stateDir);
+  const path = existsSync(destination) ? destination : legacy;
+  let parsed: { version?: string; sources?: unknown; baselineSources?: unknown; sourceFaults?: unknown; lastGood?: unknown };
   try {
-    const parsed = JSON.parse(readFileSync(checkpointPath(stateDir), "utf8")) as Partial<Checkpoint>;
+    const encoded = readFileSync(path);
+    io.checkpointReadBytes += encoded.length;
+    parsed = object(JSON.parse(encoded.toString())) ?? {};
+  } catch (error) {
+    // Missing or damaged metadata requires replay; no cached healthy snapshot survives it.
+    if (error instanceof SyntaxError || (error as NodeJS.ErrnoException | null)?.code)
+      return { version: BENCHMARK_COHORT_VERSION, sources: [] };
+    throw error;
+  }
+  if (path === legacy) {
     if (parsed.version === BENCHMARK_COHORT_VERSION && validSources(parsed.sources)
       && (parsed.baselineSources === undefined || validSources(parsed.baselineSources))
       && (parsed.sourceFaults === undefined || validFaults(parsed.sourceFaults))) {
       const lastGoodSources = parsed.baselineSources ?? parsed.sources;
-      return { version: BENCHMARK_COHORT_VERSION, sources: parsed.sources,
+      const checkpoint: Checkpoint = { version: BENCHMARK_COHORT_VERSION, sources: parsed.sources,
         ...(parsed.sourceFaults ? { sourceFaults: parsed.sourceFaults } : {}),
         ...(parsed.baselineSources ? { baselineSources: parsed.baselineSources } : {}),
         ...(validLastGood(parsed.lastGood, lastGoodSources, parsed.sourceFaults ?? [], parsed.baselineSources !== undefined)
           ? { lastGood: parsed.lastGood } : {}) };
+      writeCheckpoint(stateDir, checkpoint, io);
+      unlinkSync(legacy);
+      return checkpoint;
     }
-  } catch { /* A missing or damaged checkpoint is a full replay, never a healthy empty cohort. */ }
-  return { version: BENCHMARK_COHORT_VERSION, sources: [] };
+    return { version: BENCHMARK_COHORT_VERSION, sources: [] };
+  }
+  const validReferences = (value: unknown): value is SegmentReference[] => Array.isArray(value)
+    && value.every((ref) => ref && !Object.hasOwn(ref, "rows") && validSources([{ ...ref, rows: [] }])
+      && typeof ref.segment === "string" && /^benchmark-cohort-segment-[a-zA-Z0-9.-]+\.ndjson$/.test(ref.segment)
+      && Number.isSafeInteger(ref.segmentBytes) && ref.segmentBytes >= 0
+      && Number.isSafeInteger(ref.rowCount) && ref.rowCount >= 0
+      && typeof ref.segmentSha256 === "string" && /^[a-f0-9]{64}$/.test(ref.segmentSha256));
+  if (parsed.version !== "benchmark-cohort-segments-v2" || !validReferences(parsed.sources)
+    || parsed.baselineSources !== undefined && !validReferences(parsed.baselineSources)
+    || parsed.sourceFaults !== undefined && !validFaults(parsed.sourceFaults))
+    return { version: BENCHMARK_COHORT_VERSION, sources: [] };
+  const loaded = new Map<string, SourceRecord | null>();
+  const load = (ref: SegmentReference): SourceRecord | undefined => {
+    const key = JSON.stringify(ref);
+    if (loaded.has(key)) return loaded.get(key) ?? undefined;
+    try {
+      const fd = openSync(join(stateDir, ref.segment), "r");
+      let encoded: Buffer;
+      try {
+        const stat = fstatSync(fd);
+        if (!stat.isFile() || stat.size < ref.segmentBytes || ref.form !== "live" && stat.size !== ref.segmentBytes)
+          throw new Error("checkpoint-segment-invalid-length");
+        encoded = Buffer.alloc(ref.segmentBytes);
+        let offset = 0;
+        while (offset < encoded.length) {
+          const n = readSync(fd, encoded, offset, encoded.length - offset, offset);
+          io.checkpointReadBytes += n;
+          if (n === 0) throw new Error("checkpoint-segment-torn");
+          offset += n;
+        }
+      } finally { closeSync(fd); }
+      const hash = createHash("sha256").update(encoded);
+      if (hash.copy().digest("hex") !== ref.segmentSha256) throw new Error("checkpoint-segment-sha-mismatch");
+      const text = encoded.toString();
+      if (text.length > 0 && !text.endsWith("\n")) throw new Error("checkpoint-segment-torn");
+      const rows = text.length > 0 ? text.slice(0, -1).split("\n").map((line) => JSON.parse(line)) : [];
+      const { segment: _segment, segmentBytes: _bytes, segmentSha256: _hash, rowCount: _count, ...metadata } = ref;
+      const source = { ...metadata, rows };
+      if (rows.length !== ref.rowCount || !validSources([source])) throw new Error("checkpoint-segment-invalid-rows");
+      sourceSegments.set(source, { reference: ref, hash });
+      loaded.set(key, source);
+      return source;
+    } catch (error) {
+      // A failed segment is omitted from known sources, forcing its existing ledger rescan path.
+      if (!(error instanceof Error)) throw error;
+      loaded.set(key, null);
+      return undefined;
+    }
+  };
+  const sources = parsed.sources.flatMap((ref) => { const source = load(ref); return source ? [source] : []; });
+  const baselineSources = parsed.baselineSources?.flatMap((ref) => { const source = load(ref); return source ? [source] : []; });
+  if (baselineSources && baselineSources.length !== parsed.baselineSources!.length)
+    return { version: BENCHMARK_COHORT_VERSION, sources: [] };
+  const lineage = (parsed.baselineSources ?? parsed.sources).map((ref) => ({ ...ref, rows: [] }));
+  if (existsSync(legacy)) unlinkSync(legacy);
+  return { version: BENCHMARK_COHORT_VERSION, sources,
+    ...(parsed.sourceFaults ? { sourceFaults: parsed.sourceFaults } : {}),
+    ...(baselineSources ? { baselineSources } : {}),
+    ...(validLastGood(parsed.lastGood, lineage, parsed.sourceFaults ?? [], baselineSources !== undefined)
+      ? { lastGood: parsed.lastGood } : {}) };
 }
 
-function writeCheckpoint(stateDir: string, checkpoint: Checkpoint): number {
-  const encoded = JSON.stringify(checkpoint);
+function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: CheckpointIO): number {
+  const save = (source: SourceRecord): SegmentReference => {
+    const prior = sourceSegments.get(source);
+    const { rows, ...metadata } = source;
+    const delta = rows.slice(prior?.reference.rowCount ?? 0).map((row) => JSON.stringify(row) + "\n").join("");
+    const segment = prior?.reference.segment
+      ?? `benchmark-cohort-segment-${source.name}-${source.sha256}-${randomUUID()}.ndjson`;
+    const path = join(stateDir, segment);
+    const hash = prior?.hash.copy() ?? createHash("sha256");
+    if (prior && delta.length > 0) {
+      // An append interrupted before index publication is outside the committed prefix.
+      if (statSync(path).size > prior.reference.segmentBytes) truncateSync(path, prior.reference.segmentBytes);
+      appendFileSync(path, delta);
+    } else if (!prior) writeFileSync(path, delta, { flag: "wx" });
+    io.checkpointWrittenBytes += Buffer.byteLength(delta);
+    hash.update(delta);
+    const reference = { ...metadata, segment, segmentBytes: (prior?.reference.segmentBytes ?? 0) + Buffer.byteLength(delta),
+      segmentSha256: hash.copy().digest("hex"), rowCount: rows.length };
+    sourceSegments.set(source, { reference, hash });
+    return reference;
+  };
+  // Baselines can refer to an earlier prefix of the same live segment during partial replay.
+  const baselineSources = checkpoint.baselineSources?.map(save);
+  const sources = checkpoint.sources.map(save);
+  const encoded = JSON.stringify({ ...checkpoint, version: "benchmark-cohort-segments-v2", sources, baselineSources });
   const destination = checkpointPath(stateDir);
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, encoded);
-  renameSync(temporary, destination);
-  return Buffer.byteLength(encoded);
+  try {
+    writeFileSync(temporary, encoded);
+    io.checkpointWrittenBytes += Buffer.byteLength(encoded);
+    renameSync(temporary, destination);
+  } finally { if (existsSync(temporary)) unlinkSync(temporary); }
+  const retained = new Set([...sources, ...baselineSources ?? []].map((source) => source.segment));
+  for (const entry of readdirSync(stateDir, { withFileTypes: true })) {
+    if (entry.isFile() && /^benchmark-cohort-segment-[a-zA-Z0-9.-]+\.ndjson$/.test(entry.name) && !retained.has(entry.name))
+      unlinkSync(join(stateDir, entry.name));
+  }
+  return Buffer.byteLength(encoded) + [...retained].reduce((sum, segment) => sum + statSync(join(stateDir, segment)).size, 0);
 }
 
 async function sourceHashes(path: string, prefixBytes?: number, throughBytes?: number): Promise<{ full: string; prefix?: string }> {
@@ -360,8 +474,12 @@ async function scanSource(entry: ManifestEntry, precedingRotation: string | unde
       maxTimestamp: boundedFault && maxTimestamp ? maxTimestamp : null,
     });
   }
-  return { name: entry.name, form: entry.form, size: prefixBytes, mtimeMs: entry.mtimeMs, sha256: hashes.full, rows,
-    projection: SOURCE_PROJECTION };
+  const source: SourceRecord = { name: entry.name, form: entry.form, size: prefixBytes, mtimeMs: entry.mtimeMs,
+    sha256: hashes.full, rows, projection: SOURCE_PROJECTION };
+  const segment = appendOnly || entry.form !== "live" && prior?.sha256 === hashes.full
+    && prior.projection === SOURCE_PROJECTION ? sourceSegments.get(prior!) : undefined;
+  if (segment) sourceSegments.set(source, segment);
+  return source;
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -841,9 +959,16 @@ export async function runBenchmarkCohortPass(
   opts: { maxSources?: number; nowIso?: string; onLiveWatermark?: () => void;
     onBeforeLivePrefixVerify?: () => void; onBeforeLiveCacheVerify?: () => void; caseFiles?: TaskCaseFile[] } = {},
 ): Promise<BenchmarkCohortPassResult> {
+  const io: CheckpointIO = { checkpointReadBytes: 0, checkpointWrittenBytes: 0 };
+  const result = await cohortPass(stateDir, opts, io);
+  return { ...result, ...io };
+}
+
+async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof runBenchmarkCohortPass>[1]>,
+  io: CheckpointIO): Promise<BenchmarkCohortPassResult> {
   const maxSources = opts.maxSources ?? 1;
   if (!Number.isInteger(maxSources) || maxSources < 1) throw new TypeError("maxSources must be a positive integer");
-  const checkpoint = readCheckpoint(stateDir);
+  const checkpoint = readCheckpoint(stateDir, io);
   let current: ManifestEntry[];
   try { current = manifest(stateDir); }
   catch {
@@ -925,7 +1050,7 @@ export async function runBenchmarkCohortPass(
     return !fault || !fault.audited || fault.size !== entry.size || fault.mtimeMs !== entry.mtimeMs || fault.form !== entry.form;
   }).length;
   if (pendingSources > 0) {
-    const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
+    const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
     return { state: "partial", snapshot: emptySnapshot("scan-incomplete", checkpoint.lastGood), scannedSources, pendingSources, checkpointBytes };
   }
   const live = checkpoint.sources.find((source) => source.form === "live");
@@ -941,7 +1066,7 @@ export async function runBenchmarkCohortPass(
     } catch (error) {
       const reason = error instanceof Error && error.message === "ledger-live-changed-after-scan"
         ? "ledger-live-changed-after-scan" : "ledger-live-unreadable-after-scan";
-      const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
+      const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
       return { state: "partial", snapshot: emptySnapshot(reason, checkpoint.lastGood),
         scannedSources, pendingSources: 1, checkpointBytes };
     }
@@ -950,7 +1075,7 @@ export async function runBenchmarkCohortPass(
     const successorFingerprints = new Set(checkpoint.sources.flatMap((source) => source.rows.map((row) => row.fingerprint)));
     if (checkpoint.sourceFaults.length === 0
       && checkpoint.baselineSources.some((source) => source.rows.some((row) => !successorFingerprints.has(row.fingerprint)))) {
-      const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
+      const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
       return { state: "unavailable", snapshot: emptySnapshot("retired-source-evidence-not-reconciled", checkpoint.lastGood),
         scannedSources, pendingSources: 0, checkpointBytes };
     }
@@ -971,7 +1096,7 @@ export async function runBenchmarkCohortPass(
     if (checkpoint.lastGood?.asOf) snapshot.lastGoodAt = checkpoint.lastGood.asOf;
   }
   if (snapshot.sourceRows.conflictingAssignments > 0) {
-    const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
+    const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
     return { state: "unavailable", snapshot: emptySnapshot("conflicting-assignment-ids", checkpoint.lastGood),
       scannedSources, pendingSources: 0, checkpointBytes };
   }
@@ -979,7 +1104,7 @@ export async function runBenchmarkCohortPass(
     ? { ...snapshot } : snapshot;
   if (checkpoint.sourceFaults.length > 0 && snapshot.cohorts.length === 0) snapshot.state = "unavailable";
   delete checkpoint.baselineSources;
-  const checkpointBytes = writeCheckpoint(stateDir, checkpoint);
+  const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
   return { state: checkpoint.sourceFaults.length === 0 ? "complete"
     : snapshot.cohorts.length > 0 ? "quarantined" : "unavailable",
     snapshot, scannedSources, pendingSources: 0, tailPendingBytes, checkpointBytes };
@@ -1079,7 +1204,9 @@ export async function runBenchmarkCohortIdlePass(
     const result = await run(stateDir, { maxSources: 4 });
     console.log(JSON.stringify({ event: "benchmark_cohort.idle_pass", state: result.state,
       scanned_sources: result.scannedSources, pending_sources: result.pendingSources,
-      tail_pending_bytes: result.tailPendingBytes ?? 0, reason: result.snapshot.reason ?? null }));
+      tail_pending_bytes: result.tailPendingBytes ?? 0, checkpoint_bytes: result.checkpointBytes,
+      checkpoint_read_bytes: result.checkpointReadBytes, checkpoint_written_bytes: result.checkpointWrittenBytes,
+      reason: result.snapshot.reason ?? null }));
     return 0;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException | null)?.code;
