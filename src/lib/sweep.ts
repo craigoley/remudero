@@ -1030,8 +1030,12 @@ export function fixHeadAcceptable(head: string | undefined, taskId: string, synt
   // `run-<id>-<dispatch epoch>` head or the exact `run-<id>` head when its id already ends in the
   // lane's own epoch. Preserve that full id as the strike/review key; only the ownership
   // equivalence changes. A run branch claiming a DIFFERENT task remains refused.
-  return ownRunBranch || exactSyntheticLaneBranch || !isDispatchedRunBranch(head);
+  // `run-unfiled-<epochMs>` claims no task (UNFILED_RUN_SENTINEL), so it is task-less, not mis-trailered: its
+  // `Remudero-Task: PR-<n>` trailer made the fix lane refuse it as foreign on every pass (#15232, 2026-10-29).
+  return ownRunBranch || exactSyntheticLaneBranch || UNFILED_RUN_BRANCH.test(head) || !isDispatchedRunBranch(head);
 }
+
+const UNFILED_RUN_BRANCH = new RegExp(`^run-${UNFILED_RUN_SENTINEL}-\\d+$`);
 
 /**
  * WHY a fix dispatch just declined an uncreditable head, as ONE aggregatable token.
