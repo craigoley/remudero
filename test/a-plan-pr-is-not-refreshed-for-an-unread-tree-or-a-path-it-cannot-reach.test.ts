@@ -113,7 +113,7 @@ test("a cat-file --batch the runner cut short reads as unreadable and names its 
   // a killed child: no exit status, and a blob header whose body never arrived.
   const git = (args: readonly string[]) =>
     args[0] === "merge-tree" ? { status: 0, stdout: `${tree}\n` }
-      : args[0] === "ls-tree" ? { status: 0, stdout: "plan/tasks.d/W1-T1.yaml\n" }
+      : args[0] === "ls-tree" ? { status: 0, stdout: `100644 blob ${"1".repeat(40)}\tplan/tasks.d/W1-T1.yaml\n` }
       : args[0] === "cat-file" && args[1] === "--batch" ? { status: null, stdout: `${tree} blob 9000\n- id: W1-T1\n` }
       : { status: 0, stdout: "" };
   const read = runStepsSync(safety.readPlanMergeSafetySteps({ owner: "craigoley", repo: "remudero", prNumber: 11901 }, rest, git));

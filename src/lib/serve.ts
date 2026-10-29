@@ -176,8 +176,8 @@ import {
 } from "./incident-invariants.js";
 import { startLoopStallProfiler, type LoopStallProfiler, type LoopStallProfilerOptions, type LoopStallSteps } from "./loop-stall-profiler.js";
 import { monitorEventLoopDelay } from "node:perf_hooks";
-import { checkServiceFreshness } from "./self-sync.js";
-import { GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
+import { asyncGit, checkServiceFreshness } from "./self-sync.js";
+import { boundGitCall, GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
 import { reloadServePlan, touchesReloadablePlan, type PlanSourceHolder } from "./serve-plan-reload.js";
 import { publishThreadPlan } from "./thread-plan.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
@@ -1477,7 +1477,7 @@ export interface GatewayCheckoutAssessment {
 export interface GatewayCheckoutDeps {
   repoDir: string;
   env?: Record<string, string | undefined>;
-  git?: (args: string[]) => string;
+  git?: (args: string[]) => string | Promise<string>;
   /** The network half, run OFF the event loop. Defaults to an async `git fetch --quiet origin`. */
   fetch?: () => Promise<void>;
   clock?: Clock;
@@ -1506,28 +1506,38 @@ function porcelainPaths(raw: string | undefined): string[] {
  *  (managed-repos.json, behind the measured `[]`, is "immaterial"); unreadable is "unknown", never 0. */
 export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<GatewayCheckoutAssessment> {
   const env = deps.env ?? process.env;
-  const git = deps.git ?? ((args: string[]) => execFileSync("git", ["-C", deps.repoDir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  // Keep the existing child/output/abort bounds. Awaiting an execFileSync wrapper would still
+  // block the serving loop; the default must reach asyncGit's actual execFile boundary.
+  const localGit = asyncGit(deps.repoDir);
+  const git = deps.git ?? ((args: string[]) => boundGitCall(localGit, args, GATEWAY_FETCH_TIMEOUT_MS));
   const clock = deps.clock ?? systemClock;
-  const readOrUnknown = <T>(read: () => T): T | "unknown" => {
+  const readOrUnknown = async <T>(read: () => T | Promise<T>): Promise<T | "unknown"> => {
     try {
-      return read();
+      return await read();
     } catch {
       // Unreadable reads "unknown", never a healthy default; the caller shows it.
       return "unknown";
     }
   };
-  const localState = (detail: string): GatewayCheckoutState => ({
-    head: readOrUnknown(() => git(["rev-parse", "HEAD"]).trim()),
+  const unknown = (detail: string): GatewayCheckoutAssessment => ({ state: {
+    head: "unknown",
     behindBy: "unknown",
-    dirty: readOrUnknown(() => git(["status", "--porcelain", "-uno"]).trim().length > 0),
+    dirty: "unknown",
     checkedAt: clock.iso(),
     detail,
-  });
+  }, restartDue: false });
+  const localState = async (detail: string): Promise<GatewayCheckoutAssessment> => {
+    const head = await readOrUnknown(async () => (await git(["rev-parse", "HEAD"])).trim());
+    const dirty = await readOrUnknown(async () => (await git(["status", "--porcelain", "-uno"])).trim().length > 0);
+    const finalHead = await readOrUnknown(async () => (await git(["rev-parse", "HEAD"])).trim());
+    if (head !== finalHead) return unknown(`${detail}; checkout identity changed during local reads`);
+    return { state: { head: head || "unknown", behindBy: "unknown", dirty, checkedAt: clock.iso(), detail }, restartDue: false };
+  };
   const refuse = (): string => {
     throw new Error("guard probe");
   };
   if (checkServiceFreshness(deps.repoDir, env, { git: refuse, ignoreReentrancyGuard: deps.supervised === true }).status === "guarded") {
-    return { state: localState("guarded environment: freshness is not assessed here"), restartDue: false };
+    return localState("guarded environment: freshness is not assessed here");
   }
   let fetchError: string | undefined;
   try {
@@ -1536,33 +1546,70 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
     // Carried into the read below, which reports `degraded` rather than trusting a stale ref.
     fetchError = err instanceof Error ? err.message : String(err);
   }
-  const seen = new Map<string, string>();
+  if (fetchError !== undefined) return localState(`git fetch origin failed in ${deps.repoDir}: Error: ${fetchError}`);
+
+  // Capture only the reads the existing policy needs, then replay their outcomes into that
+  // policy. The replay never starts a child, and a failed read remains an error, not an empty
+  // result. Keeping this adapter local avoids changing the shared daemon freshness policy.
+  const seen = new Map<string, { output: string } | { error: unknown }>();
+  const capture = async (args: string[]): Promise<string | undefined> => {
+    try {
+      const output = await git(args);
+      seen.set(args.join(" "), { output });
+      return output;
+    } catch (error) {
+      seen.set(args.join(" "), { error: error });
+      return undefined;
+    }
+  };
+  const head = await capture(["rev-parse", "HEAD"]);
+  const origin = await capture(["rev-parse", "origin/main"]);
+  const status = await capture(["status", "--porcelain", "-uno"]);
+  if (head === undefined || origin === undefined || status === undefined || !head.trim() || !origin.trim()) {
+    const failures = [...seen].flatMap(([command, result]) => "error" in result ? [`${command}: ${String(result.error)}`] : []);
+    return unknown(`could not read a complete gateway checkout assessment${failures.length ? `; ${failures.join("; ")}` : "; empty checkout identity"}`);
+  }
+  const range = `${head.trim()}..${origin.trim()}`;
+  if (head.trim() !== origin.trim()) {
+    await capture(["diff", "--name-only", range]);
+    await capture(["log", "--format=%x1e%H%x1f%s", "--name-only", range]);
+  }
   const svc = checkServiceFreshness(deps.repoDir, env, {
     ignoreReentrancyGuard: deps.supervised === true,
     git: (args) => {
       if (args[0] === "fetch") {
-        if (fetchError !== undefined) throw new Error(fetchError);
         return "";
       }
-      const out = git(args);
-      seen.set(args.join(" "), out);
-      return out;
+      const result = seen.get(args.join(" "));
+      if (result === undefined) throw new Error(`gateway checkout read was not captured: ${args.join(" ")}`);
+      if ("error" in result) throw result.error;
+      return result.output;
     },
   });
   if (svc.status !== "assessed") {
-    return { state: localState(svc.status === "degraded" ? svc.reason : "guarded"), restartDue: false };
+    return unknown(svc.status === "degraded" ? svc.reason : "guarded");
   }
-  const dirtyPaths = porcelainPaths(seen.get("status --porcelain -uno"));
+  const dirtyPaths = porcelainPaths(status);
   const behindBy: number | "unknown" =
     svc.behind === null
       ? 0
-      : readOrUnknown(() => {
-          const n = Number(git(["rev-list", "--count", "HEAD..origin/main"]).trim());
-          if (!Number.isInteger(n) || n < 0) throw new Error(`unparseable rev-list count: ${n}`);
+      : await readOrUnknown(async () => {
+          const raw = (await git(["rev-list", "--count", range])).trim();
+          const n = Number(raw);
+          if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n)) throw new Error(`unparseable rev-list count: ${raw}`);
           return n;
         });
+  // A checkout or fetched ref can move across awaits. Never combine an old diff/count with a
+  // new identity or newly dirty tree when deciding a reload or handoff. A normal later pass
+  // can assess the new state; this pass must publish its uncertainty.
+  const finalHead = await readOrUnknown(() => git(["rev-parse", "HEAD"]));
+  const finalOrigin = await readOrUnknown(() => git(["rev-parse", "origin/main"]));
+  const finalStatus = await readOrUnknown(() => git(["status", "--porcelain", "-uno"]));
+  if (head !== finalHead || origin !== finalOrigin || status !== finalStatus) {
+    return unknown("gateway checkout changed or became unreadable during assessment");
+  }
   const state: GatewayCheckoutState = {
-    head: (seen.get("rev-parse HEAD") ?? "unknown").trim() || "unknown",
+    head: head.trim(),
     behindBy,
     dirty: svc.dirty,
     ...(svc.dirty ? { dirtyPaths } : {}),
@@ -2981,7 +3028,9 @@ function assembleServeRoutes(
     ...buildProductBuildRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root, instances: {
       registryPath: deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
       stateBase: deps.instances?.stateBase, coreInstance: deps.instances?.coreInstance, readText: deps.instances?.readText } }),
-    ...buildProductCaseRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root, instances: {
+    // W1-T10823: the plan proposal hands off through the SAME maintained gateway this serve's inbox actions use, and reads
+    // the SAME core ledger that gateway's `ratify.cli_*` rows land in.
+    ...buildProductCaseRoutes({ root: deps.fleetControlRoot, repoRoot: deps.panelGraph.root, planGateway: panelGraphDeps.ratify, planLedgerPath: deps.ledgerPath, instances: {
       registryPath: deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
       stateBase: deps.instances?.stateBase, coreInstance: deps.instances?.coreInstance, readText: deps.instances?.readText } }),
     withStatusNeedsYou(withFleetRuntimeHealth(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), readRuntimeHealth), needsYouGates),

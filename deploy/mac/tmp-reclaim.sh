@@ -79,6 +79,20 @@ BEFORE_AVAIL_KB=$(df -k "$ROOT" 2>/dev/null | awk 'NR==2 {print $4}')
 TSX_AGE_MIN=$AGE_MIN
 TSX_FIND="${RMD_RECLAIM_TSX_FIND:-find}"
 LSOF_CMD="${RMD_RECLAIM_LSOF:-$(command -v lsof 2>/dev/null || printf '/usr/sbin/lsof')}"
+# lsof's stderr is kept apart from its findings: a mount it cannot stat (another account's
+# CoreDevice DeviceFS, a session's private disk image) makes it warn on every call.
+LSOF_ERR=$(mktemp "${TMPDIR:-/tmp}/tmp-reclaim-lsof.XXXXXX") || { echo 'lsof stderr file unavailable' >&2; exit 2; }
+trap 'rm -f "$LSOF_ERR"' EXIT
+# Names that long-running host services own. Extend per account, one shell glob per line,
+# in ~/.config/remudero/tmp-reclaim-keep (or RMD_RECLAIM_KEEP_FILE).
+KEEP_NAMES=('openclaw*' 'ollama*')
+KEEP_FILE="${RMD_RECLAIM_KEEP_FILE:-$HOME/.config/remudero/tmp-reclaim-keep}"
+if [ -f "$KEEP_FILE" ]; then
+  while IFS= read -r keep_name || [ -n "$keep_name" ]; do
+    case "$keep_name" in ''|'#'*) continue ;; esac
+    KEEP_NAMES+=("$keep_name")
+  done < "$KEEP_FILE"
+fi
 if [ -n "${TMPDIR:-}" ]; then
   TSX_TMP_ROOT="${TMPDIR%/}"
 elif [ "$(uname)" = Darwin ]; then
@@ -124,6 +138,23 @@ scheduled_log_risk() {
   return 1
 }
 
+# Succeed when lsof's last stderr leaves `path` unverified. A "can't stat()" warning for a
+# mount outside `path` says nothing about it; one for a mount inside or above it does, and
+# any other message is unexplained.
+lsof_warning_covers() {
+  awk -v p="$1" '
+    /^lsof: WARNING: can.t stat\(\) [^ ]+ file system \// {
+      m = $0; sub(/^lsof: WARNING: can.t stat\(\) [^ ]+ file system /, "", m)
+      if (m == p || index(m, p "/") == 1 || index(p, m "/") == 1) bad = 1
+      next
+    }
+    /^[ \t]+Output information may be incomplete\.$/ { next }
+    /^[ \t]+assuming "dev=[0-9A-Fa-fx]+" from mount table$/ { next }
+    NF { bad = 1 }
+    END { exit !bad }
+  ' "$LSOF_ERR"
+}
+
 # Return success when activity is found or cannot be ruled out. Process args
 # catch explicit paths; CWD and descriptor scans catch relative/open use.
 path_is_live_or_unknown() {
@@ -153,8 +184,8 @@ path_is_live_or_unknown() {
     # The sweeper itself is cwd=$ROOT while scanning top-level files.
     cwd_target="$path"
   fi
-  cwd_text=$("$LSOF_CMD" -nP -a -d cwd -Fn 2>&1); status=$?
-  if [ "$status" -ne 0 ]; then
+  cwd_text=$("$LSOF_CMD" -nP -a -d cwd -Fn 2>"$LSOF_ERR"); status=$?
+  if [ "$status" -ne 0 ] || lsof_warning_covers "$cwd_target"; then
     echo 'cwd scan unavailable'; return 0
   fi
   if printf '%s\n' "$cwd_text" | awk -v p="$cwd_target" '/^n/ { x=substr($0,2); if (x==p || index(x,p "/")==1) found=1 } END { exit !found }'; then
@@ -164,11 +195,11 @@ path_is_live_or_unknown() {
     echo 'process working directory uses /tmp alias'; return 0
   fi
   if [ -d "$path" ]; then
-    open_text=$("$LSOF_CMD" -nP -Fn +D "$path" 2>&1); status=$?
+    open_text=$("$LSOF_CMD" -nP -Fn +D "$path" 2>"$LSOF_ERR"); status=$?
   else
-    open_text=$("$LSOF_CMD" -nP -Fn "$path" 2>&1); status=$?
+    open_text=$("$LSOF_CMD" -nP -Fn "$path" 2>"$LSOF_ERR"); status=$?
   fi
-  if [ -n "$open_text" ] || [ "$status" -gt 1 ]; then
+  if [ -n "$open_text" ] || [ "$status" -gt 1 ] || lsof_warning_covers "$path"; then
     echo 'open file or lsof scan uncertain'; return 0
   fi
   return 1
@@ -201,6 +232,8 @@ symlink_risk() {
       if [ "$cleanup_root" = /private/tmp ]; then
         case "$target_path" in /tmp/*) target_path="/private/tmp/${target_path#/tmp/}" ;; esac
       fi
+      # A dangling link into a part of this same tree that is already gone is removed with it.
+      case "$target_path" in "$candidate"/*) [ -e "$target_path" ] || [ -L "$target_path" ] || continue ;; esac
       target_parent=$(cd "$(dirname "$target_path")" 2>/dev/null && pwd -P) || { echo "symlink target parent unavailable: $link -> $target"; exit 1; }
       target_real="$target_parent/${target_path##*/}"
       [ ! -L "$target_path" ] || { echo "symlink chain is unverified: $link -> $target"; exit 1; }
@@ -224,6 +257,28 @@ symlink_risk() {
   return 1
 }
 
+# Keep rules protect a matching entry, its contents, and any tree removed with it.
+kept_name_risk() {
+  local path="$1" parent keep_name found status names=()
+  case "$path" in /*) ;; *) path="$ROOT_REAL/${path#./}" ;; esac
+  parent="$path"
+  while [ "$parent" != / ]; do
+    for keep_name in "${KEEP_NAMES[@]}"; do
+      # shellcheck disable=SC2254 # keep names are globs by design
+      case "${parent##*/}" in $keep_name) echo "kept host-service name ($keep_name)"; return 0 ;; esac
+    done
+    parent=${parent%/*}; [ -n "$parent" ] || parent=/
+  done
+  for keep_name in "${KEEP_NAMES[@]}"; do
+    [ "${#names[@]}" -eq 0 ] || names+=(-o)
+    names+=(-name "$keep_name")
+  done
+  found=$(find "$path" -xdev \( "${names[@]}" \) -print -quit 2>/dev/null); status=$?
+  [ "$status" -eq 0 ] || { echo 'keep-name scan unavailable'; return 0; }
+  [ -z "$found" ] || { echo "contains kept host-service name: $found"; return 0; }
+  return 1
+}
+
 # Print a reason and return success if a path must be retained.
 artifact_risk() {
   local path="$1" found status owner_name structure_only="${2:-0}"
@@ -231,6 +286,7 @@ artifact_risk() {
   [ ! -L "$path" ] || { echo 'symbolic link'; return 0; }
   owner_name=$(owner "$path" 2>/dev/null)
   [ "$owner_name" = "$ME" ] || { echo "owned by ${owner_name:-unknown}"; return 0; }
+  if found=$(kept_name_risk "$path"); then echo "$found"; return 0; fi
   found=$(find "$path" -xdev ! -user "$ME" -print -quit 2>/dev/null); status=$?
   [ "$status" -eq 0 ] || { echo 'ownership scan unavailable'; return 0; }
   [ -z "$found" ] || { echo "contains foreign-owned content: $found"; return 0; }
@@ -242,6 +298,8 @@ artifact_risk() {
   [ -z "$found" ] || { echo "Git checkout/worktree: $found"; return 0; }
   case "${path##*/}" in
     claude-*|com.apple.*|launchd*|powerlog|.X*|.font-unix|.ICE-unix) echo 'protected Claude/macOS temp name'; return 0 ;;
+  esac
+  case "${path##*/}" in
     .env|.env.*|*password*|*secret*|*token*|*credential*|*keychain*|*.pem|*.p12|*.pfx|*.keytab|id_rsa*|id_ed25519*) echo 'credential-like filename'; return 0 ;;
     *.log)
       [ -f "$path" ] || { echo 'log-like path is not a regular file'; return 0; }
@@ -312,6 +370,7 @@ prune_tsx_cache() {
   if [ "$owner_name" != "$ME" ]; then
     TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk "TSX cache owned by ${owner_name:-unknown}" "$dir"; return 0
   fi
+  if active=$(kept_name_risk "$dir"); then report_risk "$active" "$dir"; return 0; fi
   if [ "$strict" = 1 ]; then
     parent="$dir"
     while [ "$parent" != / ]; do
@@ -360,8 +419,9 @@ prune_tsx_cache() {
 }
 
 prune_node_compile_cache() {
-  local dir="$1" resolved mode
+  local dir="$1" resolved mode why
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  if why=$(kept_name_risk "$dir"); then report_risk "$why" "$dir"; return 0; fi
   if [ ! -f "$SEED_GUARD_DIR/cache-reclaim.py" ] || ! command -v python3 >/dev/null 2>&1; then
     report_risk 'Node compile-cache helper unavailable; no generic fallback' "$dir"; return 0
   fi

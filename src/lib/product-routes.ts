@@ -1,4 +1,4 @@
-import { PRODUCT_CASE_LIMITS, PRODUCT_CASE_VERSION, ProductCaseService } from "./product-case.js";
+import { PRODUCT_CASE_LIMITS, PRODUCT_CASE_VERSION, ProductCaseService, type ProductCaseOptions } from "./product-case.js";
 import { RawBodyTooLargeError, readBoundedRawBody, verifiedActor, type Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
 import { ProductIntentStore } from "./product-intent-store.js";
@@ -176,7 +176,7 @@ const buildStatus: Record<ProductBuildCode, number> = {
   repository_missing: 409, repository_not_found: 404, repository_conflict: 409, provider_unreadable: 503,
   plan_not_approved: 409, target_not_enrolled: 409, target_unreadable: 503, target_daemon_missing: 409, runner_missing: 409,
   bootstrap_unverified: 409, task_not_found: 404, task_unreadable: 503, task_stale: 409, task_claimed: 409,
-  task_merged: 409, budget_exceeded: 409, fleet_halted: 409, kick_failed: 503,
+  task_merged: 409, budget_exceeded: 409, concurrency_exceeded: 409, fleet_halted: 409, kick_failed: 503,
 };
 
 /** Start one approved product task through the existing guarded target-repo kick. HIGH tier: it spends. */
@@ -203,10 +203,10 @@ export function buildProductBuildRoutes(options: ProductBuildOptions): Route[] {
 }
 
 
-/** Resume an adopted product case; build actions retain the existing HIGH-tier spend guards. */
-export function buildProductCaseRoutes(options: ProductBuildOptions): Route[] {
+/** Resume an adopted product case; build and plan-proposal actions retain the HIGH-tier spend guards. */
+export function buildProductCaseRoutes(options: ProductCaseOptions): Route[] {
   const service = new ProductCaseService(options);
-  const codes = { ...repositoryStatus, ...buildStatus };
+  const codes = { ...repositoryStatus, ...buildStatus, ...deploymentStatus, binding_not_found: 409, envelope_missing: 409, handoff_unavailable: 503 };
   return [{ method: "POST", path: "/v1/products/case", scope: "write", tier: "high", async handler(req, res) {
     res.setHeader("Cache-Control", "private, no-store");
     const reply = (code: number, body: Record<string, unknown>) => sendJson(res, code, { version: PRODUCT_CASE_VERSION, ...body });

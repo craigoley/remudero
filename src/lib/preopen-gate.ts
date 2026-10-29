@@ -21,8 +21,8 @@
  */
 import { hostWorktreeGit } from "./worktree-git.js";
 import { accessSync, constants as fsConstants, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { delimiter, join, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CHILD_ENTRY_SPAWNED_STEP, childEntryArgv, childEntrySpawnedRow } from "./child-entry-argv.js";
@@ -33,10 +33,13 @@ import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { PROOF_ENV_ALLOWLIST, PROOF_SANDBOX_BINARY, proofChildEnv, proofLinkedModuleRoots, proofSandboxArgv } from "./review.js";
+import { redactProofOutput } from "./proofExecutor.js";
 import { TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { parseGateSandboxMeasurement, type GateSandboxMeasurement } from "./gate-sandbox-metrics.js";
 import { spoolEscalation, withdrawSpooledEscalation } from "./host-escalation-spool.js";
+import { preopenGateHealth, type PreopenGateHealth } from "./preopen-gate-health.js";
+import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 
 export const PREOPEN_GATE_STEP = "implement.preopen_gate";
 export const PREOPEN_UNMEASURED_ALERT_AT = 3;
@@ -74,24 +77,32 @@ export function updatePreopenGateAlert(opts: {
   try {
     const rows = opts.readRows();
     const streak = detectUnmeasuredPreopenStreak(rows);
+    const health = preopenGateHealth(rows, (opts.clock ?? systemClock).now());
     const prior = rows.findLast(row => row.step === `${PREOPEN_GATE_STEP}.alert` && (row.action === "raised" || row.action === "cleared"));
     const identity = { taskId: "HARNESS", summary: "fleet pre-open gates are unmeasured" };
     const meta = { source: PREOPEN_GATE_STEP, host: opts.host ?? "fleet", clock: opts.clock ?? systemClock };
-    if (streak.alert && (prior?.action !== "raised" || prior.streak_first_ts !== streak.firstTs)) {
+    const lastGate = rows.findLast(row => row.step === PREOPEN_GATE_STEP);
+    const unhealthy = health.state === "unhealthy";
+    if ((unhealthy || streak.alert) && (prior?.action !== "raised" || unhealthy && prior.health_state !== "unhealthy")) {
       spoolEscalation(opts.stateDir, {
         ...identity, class: "BLOCKED", runId: String(streak.firstRunId), headDedup: "independent",
-        detail: `${streak.consecutive} consecutive pre-open gates were unmeasured across the fleet. ` +
+        detail: unhealthy ? `${health.nonPassStreak} measured non-passes since last pass ${health.lastPass}; ` +
+          `historical pass rate ${health.passRate}, streak probability ${health.streakProbability}. Dominant failures: ` +
+          health.failedSteps.map(step => `${step.name} (${step.count}): ${step.detail ?? "no recorded detail"}`).join("; ")
+          : `${streak.consecutive} consecutive pre-open gates were unmeasured across the fleet. ` +
           `First: ${streak.firstTs} (run ${streak.firstRunId}); newest: ${streak.newestTs}. Reason: ${streak.reason}`,
         options: [
           { label: "repair gate execution", detail: "inspect the named containment or backstop failure on the host and restore measured gates" },
-          { label: "wait for recovery", detail: "builds continue; the next measured pass or fail clears this alert" },
+          { label: "wait for recovery", detail: "builds continue; a canary pass clears an unhealthy alert" },
         ],
         recommendation: "repair gate execution",
         consequence: "build pull requests continue opening without a measured local fast gate",
       }, meta);
-      opts.log(`${PREOPEN_GATE_STEP}.alert`, { consecutive: streak.consecutive, streak_first_ts: streak.firstTs, action: "raised" });
-    } else if (streak.consecutive === 0 && prior?.action === "raised") {
-      withdrawSpooledEscalation(opts.stateDir, identity, "A pre-open gate was measured again (pass or fail); the unmeasured streak has ended.", meta);
+      opts.log(`${PREOPEN_GATE_STEP}.alert`, { consecutive: streak.consecutive, streak_first_ts: streak.firstTs,
+        health_state: health.state, action: "raised" });
+    } else if (prior?.action === "raised" && (lastGate?.result === "pass" ||
+      (prior.health_state !== "unhealthy" && !unhealthy && streak.consecutive === 0))) {
+      withdrawSpooledEscalation(opts.stateDir, identity, "The pre-open gate recovered; its alert condition has ended.", meta);
       opts.log(`${PREOPEN_GATE_STEP}.alert`, { consecutive: 0, streak_first_ts: prior.streak_first_ts, action: "cleared" });
     }
   } catch (error) {
@@ -115,11 +126,15 @@ export interface PreopenPushGate {
   key?: { tree: string; head: string; base: string; recipe: string };
 }
 
+/** W1-T10920: why the summary's steps failed, and which of them the gate's sandbox broke. */
+export interface GateStepDetail { failedDetail?: Record<string, string>; environmentSteps?: string[] }
+
 export type PreopenGateResult = (
   | { kind: "pass"; durationMs: number; containment?: GateContainmentMode; pushGate?: PreopenPushGate }
-  | { kind: "fail"; failedSteps: string[]; durationMs: number; containment?: GateContainmentMode; pushGate?: PreopenPushGate }
-  | { kind: "unmeasured"; reason: string; durationMs: number; deadlineEnforcedBy?: GateDeadlineEnforcer; containment?: GateContainmentMode }
-) & { sandboxMetrics?: GateSandboxMeasurement };
+  | ({ kind: "fail"; failedSteps: string[]; durationMs: number; containment?: GateContainmentMode; pushGate?: PreopenPushGate } & GateStepDetail)
+  | ({ kind: "unmeasured"; reason: string; durationMs: number; deadlineEnforcedBy?: GateDeadlineEnforcer; containment?: GateContainmentMode } & GateStepDetail)
+  | { kind: "skipped"; reason: "gate-unhealthy"; durationMs: number }
+) & { sandboxMetrics?: GateSandboxMeasurement; containment?: GateContainmentMode; backstopMs?: number; backstopBasis?: PreopenGateHealth["backstopBasis"]; canary?: boolean };
 
 /**
  * W1-T9556 — who ended a gate at its backstop: coreutils `timeout` (needs no node loop), the deadline runner
@@ -140,9 +155,60 @@ export interface GateRun {
   sandboxMetrics?: GateSandboxMeasurement;
 }
 
-export type GateSummary = ({ failedSteps: string[] } | { unreadable: string }) & { sandboxMetrics?: GateSandboxMeasurement };
+/**
+ * W1-T10920: what a gate summary's failed steps said. `failedDetail` is each failed step's own `detail`, tail-bounded
+ * ({@link gateDetailTail}); `environmentSteps` are the failed steps the gate's own sandbox broke ({@link gateStepIsEnvironment}),
+ * judged on the FULL detail before it is cut.
+ */
+export type GateSummary = ({ failedSteps: string[]; failedDetail?: Record<string, string>; environmentSteps?: string[] } | { unreadable: string }) & { sandboxMetrics?: GateSandboxMeasurement };
+
+/** PRIMARY CONTROL: bound one step's retained detail on a gate row (W1-T10920) — its last lines, never its first. */
+export const GATE_DETAIL_MAX_BYTES = 2048;
+
+/** The last whole lines of `detail` that fit {@link GATE_DETAIL_MAX_BYTES}; one over-long line is cut from its end. */
+export function gateDetailTail(detail: string): string {
+  const lines = detail.trimEnd().split("\n");
+  const kept: string[] = [];
+  let bytes = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const cost = Buffer.byteLength(lines[i]) + (kept.length > 0 ? 1 : 0);
+    if (bytes + cost > GATE_DETAIL_MAX_BYTES) {
+      if (kept.length === 0) return Buffer.from(lines[i]).subarray(-GATE_DETAIL_MAX_BYTES).toString("utf8").replace(/^�+/, "");
+      break;
+    }
+    kept.unshift(lines[i]);
+    bytes += cost;
+  }
+  return kept.join("\n");
+}
+
+/** A tsc diagnostic: a compile error is always the build's, whatever words its message carries. */
+const TS_DIAGNOSTIC = /\berror TS\d+:/;
+/** The step producers' own did-not-run markers (commit-message.ts typecheckStep / spawnFailureDetail, ci-parity's NOT_RUN). */
+// runPreflightFast prefixes spawnFailureDetail with the step and command; script names can contain colons too.
+const DID_NOT_RUN = /^[^\n]+: (?:NOT_RUN\b|SPAWN FAILURE — [^\n]+; the check did NOT run, so this is not a result about the code(?:\n|$))/;
+const SANDBOX_START = /^bwrap: /m;
+const SANDBOX_ERRNO = /\b(?:EPERM|EACCES|EROFS|ENOENT)\b/;
+const SANDBOX_PATH = /(?:^|\/)(?:node_modules|\.cache|cache|\.swc|\.npm)(?:\/|$)/;
+
+/**
+ * W1-T10920 — a failed step its sandbox broke, not the build: a did-not-run marker on its first line, a bwrap error, or a
+ * path-qualified sandbox errno with no compiler diagnostic. The worker is never handed such a step to fix: it cannot, and since
+ * 2026-10-19 every gate's typecheck failed this way while the worker's own `tsc` and CI's passed.
+ */
+export function gateStepIsEnvironment(detail: string): boolean {
+  if (TS_DIAGNOSTIC.test(detail)) return false;
+  if (DID_NOT_RUN.test(detail) || SANDBOX_START.test(detail)) return true;
+  return detail.split("\n").some((line) => {
+    const paths = line.match(/(?:\/|(?:\.\/)?node_modules\/)[^\s'"`,;:)\]}]+/g) ?? [];
+    const sandboxPath = paths.some((path) => within(path, HARNESS_ROOT.replace(/\/$/, "")) || within(path, "/tmp") || SANDBOX_PATH.test(path));
+    const runtimeFailure = /(?:failed|failure|error|cannot|unable)/i.test(line) && /\b(?:swc|tsx)\b/i.test(line) && /\b(?:cache|ipc|listen|pipe)\b/i.test(line);
+    return sandboxPath && (SANDBOX_ERRNO.test(line) || runtimeFailure);
+  });
+}
 
 export interface PreopenGateOptions {
+  history?: { stateDir: string; readRows: () => readonly Record<string, unknown>[] };
   /** Runs the fast gate in `cwd`; resolves when the child exits, whatever its status. */
   runGate?: (cwd: string) => Promise<GateRun>;
   readFile?: (path: string) => string;
@@ -436,7 +502,7 @@ export const GATE_SUMMARY_NAME = "preflight-summary.json";
 export function defaultRunGate(
   cwd: string, harnessRmd?: string, log?: GateLog, deadline: RunGateDeadline = {}, containment: RunGateContainment = {},
 ): Promise<GateRun> {
-  const backstopMs = deadline.backstopMs ?? PREOPEN_GATE_BACKSTOP_MS;
+  const backstopMs = deadline.backstopMs ?? preopenGateHealth([], (deadline.clock ?? systemClock).now()).backstopMs;
   const timeoutBin = deadline.timeoutBin === undefined ? gateTimeoutBin() : deadline.timeoutBin;
   const startedAt = (deadline.clock ?? systemClock).now();
   const deadlineAt = startedAt + backstopMs;
@@ -496,9 +562,27 @@ export function readGateSummary(
   if (!parsed || typeof parsed !== "object") return { unreadable: "the preflight summary is not an object" };
   const finished = typeof parsed.finishedAt === "string" ? Date.parse(parsed.finishedAt) : NaN;
   if (!Number.isFinite(finished) || finished < startedAt) return { unreadable: "the preflight summary predates this gate run" };
-  const steps = Array.isArray(parsed.steps) ? (parsed.steps as Array<{ name?: unknown; ok?: unknown }>) : [];
+  const steps = Array.isArray(parsed.steps) ? (parsed.steps as Array<{ name?: unknown; ok?: unknown; detail?: unknown }>) : [];
+  const failed = steps.filter((s) => s && s.ok === false);
+  // W1-T10920: the summary sits in the gate's throwaway HOME; its path names nothing the row should keep.
+  const home = dirname(summaryFile);
+  const hostHome = homedir();
+  const failedDetail: Record<string, string> = {};
+  const environmentSteps: string[] = [];
+  const failedSteps = failed.map((s) => {
+    const name = typeof s.name === "string" && s.name ? s.name : "(unnamed step)";
+    if (typeof s.detail === "string" && s.detail.trim() !== "") {
+      if (gateStepIsEnvironment(s.detail)) environmentSteps.push(name);
+      let detail = redactProofOutput(s.detail).split(home).join("$GATE_HOME");
+      if (hostHome !== "/") detail = detail.split(hostHome).join("$HOME");
+      failedDetail[name] = gateDetailTail(detail);
+    }
+    return name;
+  });
   return {
-    failedSteps: steps.filter((s) => s && s.ok === false).map((s) => (typeof s.name === "string" && s.name ? s.name : "(unnamed step)")),
+    failedSteps,
+    ...(Object.keys(failedDetail).length > 0 ? { failedDetail } : {}),
+    ...(environmentSteps.length > 0 ? { environmentSteps } : {}),
     ...(parsed.sandboxMetrics === undefined ? {} : { sandboxMetrics: parseGateSandboxMeasurement(parsed.sandboxMetrics) }),
   };
 }
@@ -514,14 +598,44 @@ export async function runPreopenGate(worktreePath: string, deps: PreopenGateOpti
   const clock = deps.clock ?? systemClock;
   const now = () => clock.now();
   const startedAt = now();
-  const run = await (deps.runGate ?? ((cwd) => defaultRunGate(cwd, undefined, deps.log, {}, { contain: deps.contain, readFile: deps.readFile })))(worktreePath);
+  let health: PreopenGateHealth;
+  let lease: InflightLockHandle | undefined;
+  try {
+    const stateDir = deps.history?.stateDir;
+    const rows = deps.history?.readRows() ?? [];
+    health = preopenGateHealth(rows, startedAt);
+    if (health.state === "unhealthy" && stateDir) {
+      try {
+        lease = acquireInflightLock(join(stateDir, "preopen-canary"), "gate", { run_id: `preopen-${process.pid}-${startedAt}` });
+      } catch (error) {
+        if (!(error instanceof InflightLockError)) throw error;
+        return { kind: "skipped", reason: "gate-unhealthy", durationMs: 0,
+          backstopMs: health.backstopMs, backstopBasis: health.backstopBasis, canary: false };
+      }
+    }
+  } catch (error) {
+    return { kind: "unmeasured", reason: `pre-open gate admission failed: ${String(error)}`, durationMs: 0 };
+  }
+  try {
+    const result = await measurePreopenGate(worktreePath, deps, health.backstopMs, startedAt);
+    // An injected runner without history owns its deadline; do not claim a bound it did not use.
+    if (deps.runGate && !deps.history) return result;
+    return { ...result, backstopMs: health.backstopMs, backstopBasis: health.backstopBasis, canary: lease !== undefined };
+  } finally {
+    lease?.release();
+  }
+}
+
+async function measurePreopenGate(worktreePath: string, deps: PreopenGateOptions, backstopMs: number, startedAt: number): Promise<PreopenGateResult> {
+  const now = () => (deps.clock ?? systemClock).now();
+  const run = await (deps.runGate ?? ((cwd) => defaultRunGate(cwd, undefined, deps.log, { backstopMs, clock: deps.clock }, { contain: deps.contain, readFile: deps.readFile })))(worktreePath);
   const fast = classifyGateRun(run, now() - startedAt);
   if (fast.kind === "unmeasured") return fast;
   // W1-T10267: a procfs write in a changed test blocks until timeout-minutes in CI; refuse it here, before a PR opens.
   const procfs = (deps.scanProcfsWrites ?? changedProcfsWriteOffences)(worktreePath);
   if (procfs.length > 0) {
     const steps = [...(fast.kind === "fail" ? fast.failedSteps : []), `procfs-write: a test aims a write-shaped call at /proc (it blocks, use a FILE where a directory must be): ${procfs.join("; ")}`];
-    return { kind: "fail", failedSteps: steps, durationMs: fast.durationMs, ...(fast.containment ? { containment: fast.containment } : {}), ...(fast.sandboxMetrics ? { sandboxMetrics: fast.sandboxMetrics } : {}) };
+    return { kind: "fail", failedSteps: steps, durationMs: fast.durationMs, ...preopenGateStepDetail(fast), ...(fast.containment ? { containment: fast.containment } : {}), ...(fast.sandboxMetrics ? { sandboxMetrics: fast.sandboxMetrics } : {}) };
   }
   // W1-T9602: the same harness push gate the push leaf runs, asked now on the clean committed tree. A pass is
   // recorded and the push of that identical tree reuses it; a refusal joins the steps handed back, as push-gate.
@@ -535,14 +649,24 @@ export async function runPreopenGate(worktreePath: string, deps: PreopenGateOpti
   };
   if (asked.kind !== "refused") return { ...fast, pushGate };
   const failedSteps = [...(fast.kind === "fail" ? fast.failedSteps : []), `${PUSH_GATE_STEP_NAME}: ${asked.detail}`];
-  return { kind: "fail", failedSteps, durationMs: fast.durationMs, ...(fast.containment ? { containment: fast.containment } : {}), ...(fast.sandboxMetrics ? { sandboxMetrics: fast.sandboxMetrics } : {}), pushGate };
+  return { kind: "fail", failedSteps, durationMs: fast.durationMs, ...preopenGateStepDetail(fast), ...(fast.containment ? { containment: fast.containment } : {}), ...(fast.sandboxMetrics ? { sandboxMetrics: fast.sandboxMetrics } : {}), pushGate };
 }
+
+/**
+ * W1-T10920: a result's step detail — each failed step's tail-bounded detail and the steps the gate's own sandbox broke.
+ * Carried onto a result the procfs or push gate rebuilt, and recorded on the `implement.preopen_gate` row. Empty for a pass.
+ */
+export function preopenGateStepDetail(result: PreopenGateResult): GateStepDetail {
+  if (result.kind === "pass" || result.kind === "skipped") return {};
+  return { ...(result.failedDetail ? { failedDetail: result.failedDetail } : {}), ...(result.environmentSteps ? { environmentSteps: result.environmentSteps } : {}) };
+}
+
 
 /** The failing step a push-gate refusal is handed back under, with the hook's own words after it. */
 export const PUSH_GATE_STEP_NAME = "push-gate";
 
 /** Pass and fail are the child's exit status (0 and 1) as the harness observed it; anything else is unmeasured. */
-function classifyGateRun(run: GateRun, durationMs: number): PreopenGateResult {
+function classifyGateRun(run: GateRun, durationMs: number): Exclude<PreopenGateResult, { kind: "skipped" }> {
   const containment = { ...(run.containment ? { containment: run.containment } : {}), ...(run.sandboxMetrics ? { sandboxMetrics: run.sandboxMetrics } : {}) };
   if (run.error !== undefined) {
     return { kind: "unmeasured", reason: run.error, durationMs, ...(run.deadlineEnforcedBy ? { deadlineEnforcedBy: run.deadlineEnforcedBy } : {}), ...containment };
@@ -551,7 +675,13 @@ function classifyGateRun(run: GateRun, durationMs: number): PreopenGateResult {
   if (run.exitCode !== 1) return { kind: "unmeasured", reason: `the fast gate exited ${run.exitCode}`, durationMs, ...containment };
   const read = run.summary ?? { unreadable: "the gate runner returned no summary" };
   if ("unreadable" in read) return { kind: "unmeasured", reason: read.unreadable, durationMs, ...containment };
-  return { kind: "fail", failedSteps: read.failedSteps.length > 0 ? read.failedSteps : [GATE_FAILED_NO_STEP_NAMED], durationMs, ...containment };
+  // W1-T10920: a step the gate's own sandbox broke is never handed to the worker; if that is every failed step, the gate
+  // measured nothing about the build.
+  const environment = read.environmentSteps ?? [];
+  const detail = { ...(read.failedDetail ? { failedDetail: read.failedDetail } : {}), ...(environment.length > 0 ? { environmentSteps: environment } : {}) };
+  const own = read.failedSteps.filter((step) => !environment.includes(step));
+  if (read.failedSteps.length > 0 && own.length === 0) return { kind: "unmeasured", reason: `environment: ${environment.join(", ")}`, durationMs, ...detail, ...containment };
+  return { kind: "fail", failedSteps: own.length > 0 ? own : [GATE_FAILED_NO_STEP_NAMED], durationMs, ...detail, ...containment };
 }
 
 /**
@@ -560,9 +690,13 @@ function classifyGateRun(run: GateRun, durationMs: number): PreopenGateResult {
  * the reuse rate is read from the ledger.
  */
 export function preopenGateLedgerFields(result: PreopenGateResult): Record<string, unknown> {
+  const { failedDetail, environmentSteps } = preopenGateStepDetail(result);
   const containment = result.containment === undefined ? {} : { launcher: "harness", containment: result.containment, env_allowlist: PREOPEN_GATE_ENV_ALLOWLIST_NAME };
   const push = "pushGate" in result && result.pushGate ? result.pushGate : undefined;
   return {
+    ...(result.backstopMs === undefined ? {} : { backstop_ms: result.backstopMs, backstop_basis: result.backstopBasis, canary: result.canary }),
+    ...(failedDetail ? { failed_detail: failedDetail } : {}),
+    ...(environmentSteps ? { environment_steps: environmentSteps } : {}),
     ...containment,
     ...(result.sandboxMetrics ?? (result.containment === "sandboxed" ? { sandbox_unmeasured: "the child wrote no sandbox measurement" } : {})),
     ...(push ? {

@@ -6,7 +6,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { dailyDateAt, dailyWindow, DEFAULT_DAILY_PROGRESS_ZONE, nextDailyDue, shiftDailyDate } from "./daily-progress-calendar.js";
 import { validateRepositoryEvidenceInventory, type DailyProgressEvent, type DailyProgressReport, type SourceCoverage, type ExpectedDailySource } from "./daily-progress-contract.js";
 import { dailyProgressDayKey, prepareDailyProgressPublication, readDailyProgressManifest, readDailyProgressRevision, type DailyProgressJob, type DailyProgressRecord } from "./daily-progress-store.js";
-import { openLedgerUnion } from "./ledger-union.js";
+import { fingerprintLedgerLine, openLedgerUnion } from "./ledger-union.js";
 import type { BoardPrRest } from "./open-prs-rest.js";
 import { taskIdFromRunBranch } from "./status.js";
 import { HAND_WORKTREE_TASK_ID_RE } from "./hand-worktree.js";
@@ -95,26 +95,38 @@ async function activity(source: DailyProgressInstance, fleetStateDir: string, si
     // namespace is a gap; absence does not imply a complete native activity corpus.
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") gaps++;
   }
-  for (const root of roots) for await (const row of openLedgerUnion(root, { since, dedupe: true, ...(signal ? { signal } : {}),
-    onUnreadArchive: () => gaps++, onUnreadLive: () => gaps++, onUnreadDirectory: () => gaps++, onMalformedRow: () => gaps++ })) {
-    signal?.throwIfAborted();
-    rowsRead++;
-    const occurredAt = stamp(row.ts);
-    if (!occurredAt || Date.parse(occurredAt) > now) continue;
-    const improvement = improvementActivity(row, source.repository, occurredAt, now);
-    const label = improvement?.title ?? (typeof row.step === "string" ? activityLabel[row.step] : undefined);
-    if (!label) continue;
-    if (row.repository !== undefined && row.repository !== source.repository) continue;
-    const task = typeof row.task_id === "string" && TASK.test(row.task_id) ? row.task_id : undefined;
-    // Producer metadata differs between the native and projection ledgers. Bind duplicate
-    // observations to their source/effect identity instead of the append location or actor.
-    const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable) : value && typeof value === "object"
-      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, child]) => [key, stable(child)])) : value;
-    const identity = improvement ? [source.repository, occurredAt, row.proposal_id, row.improvement_source, row.effect] : [source.repository, row];
-    const id = createHash("sha256").update(JSON.stringify(stable(identity))).digest("hex");
-    if (events.length >= 100_000) throw new Error("Daily activity exceeds the bounded collection population; retained history is unchanged.");
-    events.push({ id: `activity:${source.repository}:${id}`, repository: source.repository, kind: "activity", sourceId: `${source.repository}:ledger:${source.name}`,
-      occurredAt, observedAt: fixedClock(now).iso(), fleetAttribution: "confirmed", taskIds: improvement?.taskIds ?? (task ? [task] : []), title: improvement ? label : task ? `${label} · ${task}` : label, url: improvement?.url ?? null });
+  for (const root of roots) {
+    const selectedReplay = new Set<string>();
+    let acceptedRaw = "";
+    for await (const row of openLedgerUnion(root, { since, dedupe: false, ...(signal ? { signal } : {}),
+      onAcceptedRecord: (_row, raw) => { acceptedRaw = raw; },
+      onUnreadArchive: () => gaps++, onUnreadLive: () => gaps++, onUnreadDirectory: () => gaps++, onMalformedRow: () => gaps++ })) {
+      const raw = acceptedRaw; acceptedRaw = "";
+      signal?.throwIfAborted();
+      rowsRead++;
+      const occurredAt = stamp(row.ts);
+      if (!occurredAt || Date.parse(occurredAt) > now) continue;
+      const improvement = improvementActivity(row, source.repository, occurredAt, now);
+      const label = improvement?.title ?? (typeof row.step === "string" ? activityLabel[row.step] : undefined);
+      if (!label) continue;
+      if (row.repository !== undefined && row.repository !== source.repository) continue;
+      // Keep exact raw replay accounting per root, before semantic reconciliation. Only displayed
+      // activity needs an identity inventory; unrelated payloads live for this iteration alone.
+      const fingerprint = fingerprintLedgerLine(raw);
+      if (selectedReplay.has(fingerprint)) continue;
+      selectedReplay.add(fingerprint);
+      // The reader catches callback exceptions as read gaps. Refuse here so no partial result can publish.
+      if (events.length >= 100_000) throw new Error("Daily activity exceeds the bounded collection population; retained history is unchanged.");
+      const task = typeof row.task_id === "string" && TASK.test(row.task_id) ? row.task_id : undefined;
+      // Producer metadata differs between the native and projection ledgers. Bind duplicate
+      // observations to their source/effect identity instead of the append location or actor.
+      const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable) : value && typeof value === "object"
+        ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, child]) => [key, stable(child)])) : value;
+      const identity = improvement ? [source.repository, occurredAt, row.proposal_id, row.improvement_source, row.effect] : [source.repository, row];
+      const id = createHash("sha256").update(JSON.stringify(stable(identity))).digest("hex");
+      events.push({ id: `activity:${source.repository}:${id}`, repository: source.repository, kind: "activity", sourceId: `${source.repository}:ledger:${source.name}`,
+        occurredAt, observedAt: fixedClock(now).iso(), fleetAttribution: "confirmed", taskIds: improvement?.taskIds ?? (task ? [task] : []), title: improvement ? label : task ? `${label} · ${task}` : label, url: improvement?.url ?? null });
+    }
   }
   return { events, gaps, available: gaps === 0 || rowsRead > 0 };
 }

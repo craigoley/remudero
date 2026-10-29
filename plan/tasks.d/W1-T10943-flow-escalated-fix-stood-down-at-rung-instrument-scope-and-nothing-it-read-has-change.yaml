@@ -1,0 +1,37 @@
+- id: W1-T10943
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — escalated:fix stood down at rung.instrument_scope and nothing it read has changed (head <sha>, task contract) cost 7.26 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.24
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:escalated:fix stood down at rung.instrument_scope and nothing it read has changed (head <sha>, task contract)"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/flow-escalated-fix-stood-down-at-rung-instrument-scope-and-nothing-it-read-has-change.test.ts
+  acceptance:
+    - claim: "escalated:fix stood down at rung.instrument_scope and nothing it read has changed (head <sha>, task contract) is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T10943: flow-escalated-fix-stood-down-at-rung-instrument-scope-and-nothing-it-read-has-change clears without a person\" in test/sweep/flow-escalated-fix-stood-down-at-rung-instrument-scope-and-nothing-it-read-has-change.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    escalated:fix stood down at rung.instrument_scope and nothing it read has changed (head <sha>, task contract) cost 7.26 PR-hours; owner NONE
+    Owner NONE is absent.
+    Source owner: src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #15046: 2.63 PR-hours — fix stood down at rung.instrument_scope and nothing it read has changed (head 96b7fd4, task contract) — no worker is dispatched until one does: instrument scope need escalated
+    - PR #14363: 1.99 PR-hours — fix stood down at rung.instrument_scope and nothing it read has changed (head 50627e4, task contract) — no worker is dispatched until one does: instrument scope need escalated
+    - PR #15133: 1.83 PR-hours — fix stood down at rung.instrument_scope and nothing it read has changed (head ec0ba00, task contract) — no worker is dispatched until one does: instrument scope need escalated
+    - PR #14326: 0.96 PR-hours — fix stood down at rung.instrument_scope and nothing it read has changed (head 4fc7a47, task contract) — no worker is dispatched until one does: instrument scope need escalated
+    - PR #14567: 0.66 PR-hours — fix stood down at rung.instrument_scope and nothing it read has changed (head 27886fc, task contract) — no worker is dispatched until one does: instrument scope need escalated
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.92
+    reasons:
+      - "high-risk verdict at confidence 0.92 — on the change's description/files alone, no diff was read — The record cites five blocked PRs but provides no diagnosis establishing why rung.instrument_scope escalated or what automatic remedy is appropriate; the finding cannot be verified from the supplied evidence.; on the change's description/files alone, no diff was read — Acceptance requires clearing the escalation without manual intervention, while the record names owner NONE and specifies no bounded remedy or conditions preserving the existing escalation decision."
+    judged_at: "2026-10-28T22:18:43.745Z"
+    pin: "3d1ecea97308654882588b2a95cd579cc85db24171ec061b7906c105becb8640"

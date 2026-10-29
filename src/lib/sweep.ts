@@ -14,13 +14,13 @@ import { execFileSync } from "node:child_process";
 import { HOST_GIT_CONFIG, hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError } from "./worktree-git.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
-import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
+import { runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, realDeploySensorsAsync, type AsyncDeploySensors } from "./deployer.js";
+import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, readDeployFactsAsync, realDeploySensorsAsync, type AsyncDeploySensors, type DeployFacts } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
 import { probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
 import {
@@ -627,7 +627,13 @@ function assessReviewReuse(
  *  episode opened a NEW issue: #11698 and #11720 for #11679, same head and contract, 85 minutes apart. The full
  *  reason, with its age and start, stays in the issue's detail. Any other reason is returned unchanged. */
 export function stalledStageEscalationSummary(reason: string): string {
-  return reason.replace(/^(PR stage stalled: .+?) for \d+ minutes \(BACKSTOP \d+\); since [^;]*;/, "$1;");
+  // An ownerless stall reads "(owner: none)" where an owned one reads "(BACKSTOP <n>)", and a held repair appends
+  // its withheld minutes: both kept the title moving, so #15368 got four issues for one head and cause (#15403,
+  // #15414, #15453, #15476), and 16 open issues on 2026-10-29 carried the unstripped "(owner: none); since".
+  if (!reason.startsWith("PR stage stalled: ")) return reason;
+  return reason
+    .replace(/^(PR stage stalled: .+?) for \d+ minutes \((?:BACKSTOP \d+|owner: none)\); since [^;]*;/, "$1;")
+    .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
 }
 
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
@@ -1549,39 +1555,34 @@ export type PlanScopedFixRoundInput = {
   };
 };
 
-/** Build the deploy rows with asynchronous sensors; latch reconciliation remains synchronous. */
+/**
+ * Build the deploy rows from one awaited snapshot (W1-T9552): `readDeployFactsAsync` runs every
+ * git, gh and docker read before any row exists, and the rows' getters answer from it — a getter
+ * that threw replays the same throw, so `reconcile.unreadable` outcomes are unchanged. The image
+ * build dispatch stays live and awaited; latch reconciliation remains synchronous.
+ */
 export async function deployStateRowsOffLoop(
   reader: Omit<DeployStateReader, "deploy"> & { deploy: DeployStateReader["deploy"] | AsyncDeploySensors },
   history: readonly Record<string, unknown>[],
   onUnreadableLatch?: (error: unknown) => void,
 ): Promise<FleetStateRow[]> {
-  const deploy = reader.deploy;
-  const rows: FleetStateRow[] = [];
-  const baked = await deploy.newestBakedSha?.();
-  if (baked) {
-    rows.push({
-      pipeline: "image", target: baked, desired: `published image containing ${baked}`,
-      observe: () => deploy.imagePublished?.(baked),
-      inFlight: () => deploy.imageBuildInFlight?.(),
-      repair: async () => {
-        if (!deploy.dispatchImageBuild) throw new Error("image build dispatch unavailable");
-        await deploy.dispatchImageBuild();
-      },
-    }, {
-      pipeline: "deploy", target: baked, desired: `healthy deployed image containing ${baked}`,
-      observe: async () => {
-        const behind = await deploy.imageBakedCommitsBehind?.();
-        return behind === undefined ? undefined : behind === 0;
-      },
-      inFlight: async () => {
-        if (deploy.imageRecycleManual?.() === true) return true;
-        const published = await deploy.imagePublished?.(baked);
-        return published === true ? false : published === false ? true : undefined;
-      },
-      repair: () => { if (!reader.deployRequested()) reader.requestDeploy(); },
-    });
-  }
-  return [...rows, ...deployStateRows({ ...reader, deploy: {} }, history, onUnreadableLatch)];
+  const facts = await readDeployFactsAsync(reader.deploy);
+  const replay = <K extends keyof DeployFacts["thrown"]>(name: K): DeployFacts[K] => {
+    if (name in facts.thrown) throw facts.thrown[name];
+    return facts[name];
+  };
+  return deployStateRows({
+    ...reader,
+    deploy: {
+      newestBakedSha: () => facts.newestBakedSha,
+      // The snapshot read publication for the baked sha, the only one `deployStateRows` asks about.
+      imagePublished: () => replay("imagePublished"),
+      imageBuildInFlight: () => replay("imageBuildInFlight"),
+      imageBakedCommitsBehind: () => replay("imageBakedCommitsBehind"),
+      imageRecycleManual: () => replay("imageRecycleManual") === true,
+      dispatchImageBuild: reader.deploy.dispatchImageBuild,
+    },
+  }, history, onUnreadableLatch);
 }
 
 export interface BuildSweepEffectsDeps {
@@ -1593,7 +1594,7 @@ export interface BuildSweepEffectsDeps {
   headRehomeImpl?: HeadRehomePorts;
   reproduceFailingTestsOnMainImpl?: SweepDeps["reproduceFailingTestsOnMain"];
   /** W1-T7853: lands the fold debt the pull wrote; unset means the real `landFeedback`. */
-  landFeedbackImpl?: (root: string) => { landed: boolean; error?: string };
+  landFeedbackImpl?: (root: string) => { landed: boolean; error?: string } | Promise<{ landed: boolean; error?: string }>;
   /** W1-T8396: the failing tests' import closure and the trial-merge probe a refresh arm decides from. */
   readTestImportClosureImpl?: SweepDeps["readTestImportClosure"];
   reproduceFailingTestsOnMergeImpl?: SweepDeps["reproduceFailingTestsOnMerge"];
@@ -4623,7 +4624,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             readMergeFacts: (n: number) => fixRebaseMergeFactsFromRest(owner, repo, n),
             // W1-T2671: same ci-log-only base-gap reader as the run-loop call site above.
             readRedBaseRefreshFacts: (n: number) => redBaseRefreshFactsFromRest(owner, repo, n),
+            reproduceFailingTestsOnMerge: deps.reproduceFailingTestsOnMergeImpl,
+
             updateBranch: (n: number) => ghUpdateBranch(owner, repo, n),
+            updateBranchAtHead: (n: number, head: string) => ghUpdateBranch(owner, repo, n, undefined, undefined, undefined, head),
             // W1-T1044: THIS is the call site the measured incident actually hit — a fix-rung
             // worker spawned from a `dispatchFix` disposition ran 8,970s as a direct child of
             // the daemon, parking `await deps.sweep()` (daemon.ts) for the whole of it. The
@@ -4659,7 +4663,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             branchClaim,
           },
         });
-        keepWorktree = rung?.superseded !== undefined;
+        keepWorktree = rung?.superseded !== undefined || rung?.retainWorktree !== undefined;
       } catch (e) {
         // W1-T2402: a signal-terminated spawn (this fleet's own `killProcessGroup`/forced-deploy/
         // wall-clock-reclaim paths, or a genuine host OOM — indistinguishable by signal alone, see
@@ -4678,7 +4682,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // it does today.
         if (outcome.rethrow) throw e;
       } finally {
-        // W1-T4105: a superseded worker's worktree is kept for diagnosis.
+        // Superseded workers and held census recovery keep their original checkout.
         if (worktreePath && !keepWorktree) {
           try {
             worktreeRemoveForBuild(repoDir, worktreePath);
@@ -5096,7 +5100,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           log,
           land: deps.landFeedbackImpl,
         };
-        return landFoldDebt(pullFoldDebtEntries(input), input);
+        return await landFoldDebt(pullFoldDebtEntries(input), input);
       } catch (e) {
         log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];
@@ -5336,8 +5340,14 @@ export async function refreshStaleRollupAfterRefusal(
   if (!staleRollupRefreshApplies(pr)) {
     return `no stale-rollup refresh: GitHub reports mergeable=${String(pr.mergeable)}, mergeableState=${pr.mergeableState ?? "unknown"}`;
   }
-  const priorRefresh = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber);
-  if (priorRefresh.length > 0) {
+  // updateBranchViaGh catches transport failures and returns bare "error". Neither that result
+  // nor a transient thrown exception confirms a new head; give either one later guarded retry.
+  // Two failures spend the allowance so a persistent transport problem cannot loop forever.
+  const refreshRows = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber);
+  const unconfirmed = (l: Record<string, unknown>) => l.outcome === "error" ||
+    (typeof l.outcome === "string" && l.outcome.startsWith("error:") && armFailureAction(l.outcome) === "transient");
+  const priorRefresh = refreshRows.filter((l) => !unconfirmed(l));
+  if (priorRefresh.length > 0 || refreshRows.length >= 2) {
     if (rowsAtHead(ledgerLines, STALE_ROLLUP_REFRESH_EXHAUSTED_STEP, pr).length > 0) {
       return "stale-rollup refresh already spent for this PR; escalated once at this head";
     }
@@ -6970,6 +6980,8 @@ export interface OpenPrView {
    *  dead, which keep {@link reviewPendingIsStale}'s timeout behaviour. Only the real gateway sets
    *  this, from the durable pending ledger row. */
   reviewPendingOwnerDead?: boolean;
+  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete";
+  reviewPendingOwnerGoneReason?: string;
   /** W1-T2299 — when the current `reviewState` reading was posted, read off the same rollup entry
    *  already scanned. NOT A BODY-EDIT TIMESTAMP, and must never be documented as one: GitHub
    *  exposes no body-specific time field, so this detects ACTIVITY AFTER A VERDICT and a gaming
@@ -11699,6 +11711,12 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: (pr, policy, _ageDays, now) => {
       if (pr.reviewState === "pending") {
         if (pr.reviewPendingOwnerDead === true) {
+          if (pr.reviewPendingOwnerGone === "refused-after-pending") {
+            return `checks green, the pending review's post was refused after it began (${pr.reviewPendingOwnerGoneReason}) — re-running the review lane on #${pr.prNumber}`;
+          }
+          if (pr.reviewPendingOwnerGone === "promise-harvest-incomplete") {
+            return `checks green, its promise harvest did not complete — re-running the review lane on #${pr.prNumber}`;
+          }
           return `checks green, remudero-review owner proven dead — re-running the review lane on #${pr.prNumber}`;
         }
         const age = reviewPendingAgeMinutes(pr, now);
@@ -12968,15 +12986,41 @@ export interface FixRoundBranchClaim {
   /** `undefined` once held; a string is the stand-down reason. */
   reacquire(): string | undefined;
   last(): InflightLockHandle;
+  /** Positive current lock identity; absent on an older adapter means UNKNOWN. */
+  verify?(): string | undefined;
 }
 
 export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => InflightLockHandle | string): FixRoundBranchClaim {
   let held: InflightLockHandle | undefined = first;
   let last = first;
+  let verificationRequired = false;
+  const verify = () => {
+    verificationRequired = true;
+    if (!held) return "branch claim is not held";
+    try {
+      const fd = fs.openSync(held.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      let raw: string;
+      try {
+        if (!fs.fstatSync(fd).isFile()) return "branch claim identity is unreadable";
+        const bytes = Buffer.alloc(4097);
+        const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
+        if (length > 4096) return "branch claim identity is unreadable";
+        raw = bytes.subarray(0, length).toString("utf8");
+      } finally { fs.closeSync(fd); }
+      const info = parseInflightLockInfo(raw);
+      if (!info || !info.host || !info.startedAt || info.run_id !== held.info.run_id || info.pid !== held.info.pid ||
+          info.host !== held.info.host || info.startedAt !== held.info.startedAt) return "branch claim belongs to another owner";
+      return undefined;
+    } catch {
+      const reason = "branch claim identity is unavailable";
+      return reason;
+    }
+  };
   return {
     id: () => held?.info.run_id,
     release: () => {
-      held?.release();
+      // A refresh that verified ownership must not later unlink an unknown or replacement holder.
+      if (!verificationRequired || verify() === undefined) held?.release();
       held = undefined;
     },
     reacquire: () => {
@@ -12987,6 +13031,7 @@ export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => Inf
       return undefined;
     },
     last: () => last,
+    verify,
   };
 }
 
@@ -14557,18 +14602,25 @@ function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray
 
 function promiseHarvestRetryView(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): OpenPrView {
   // A completed harvest hold proves no review owns this pending status; reuse the unattended-review route.
-  return incompletePromiseHarvestFromLedger(pr, lines) ? { ...pr, reviewPendingOwnerDead: true } : pr;
+  return incompletePromiseHarvestFromLedger(pr, lines)
+    ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "promise-harvest-incomplete" }
+    : pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerGone === undefined
+      ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : pr;
 }
 
 function completedRefusalRetryView(pr: OpenPrView, prior: PriorActions): OpenPrView {
   const key = reviewOutcomeKeyForPr(pr);
-  const attemptedAt = prior.reviewFreshnessRefusals.get(key)?.attemptedAt ??
-    prior.reviewHostGapRefusals.get(key)?.attemptedAt ?? prior.reviewTimedOutReadRefusals.get(key);
+  const freshness = prior.reviewFreshnessRefusals.get(key);
+  const hostGap = prior.reviewHostGapRefusals.get(key);
+  const attemptedAt = freshness?.attemptedAt ?? hostGap?.attemptedAt ?? prior.reviewTimedOutReadRefusals.get(key);
+  const refusalReason = freshness?.attemptedAt !== undefined ? freshness.reason ?? `reviewer-code freshness ${freshness.freshness}`
+    : hostGap?.attemptedAt !== undefined ? `reviewer host gap: ${hostGap.hostGap} (${hostGapProblem(hostGap.hostGap)})` : "reservation read timed out";
   const pendingSince = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
   // Only a completed refusal on this exact input after this pending post proves its owner finished.
   return pr.reviewState === "pending" && attemptedAt !== undefined &&
     Number.isFinite(pendingSince) && attemptedAt >= pendingSince
-    ? { ...pr, reviewPendingOwnerDead: true } : pr;
+    ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "refused-after-pending",
+      reviewPendingOwnerGoneReason: refusalReason.replace(/[\r\n]+/g, " ").slice(0, 300) } : pr;
 }
 
 /** W1-T529 — WHAT EACH LANE'S STAND-DOWN COSTS, named so the cost is chosen rather than discovered,
@@ -14725,6 +14777,7 @@ function isRetryableReviewerCodeFreshnessRefusal(
 interface ReviewerCodeFreshnessRefusal {
   attemptedAt: number | undefined;
   freshness: "stale" | "unreadable";
+  reason?: string;
   /** Present only on a stale refusal emitted by postReviewStatusGuarded. A missing or malformed
    * value must never license recovery: an old ledger row cannot prove what source it required. */
   requiredOriginMainSha?: string;
@@ -15439,6 +15492,7 @@ function priorActionsFromLedger(
             reviewFreshnessRefusals.set(key, {
               attemptedAt: Number.isNaN(parsed) ? undefined : parsed,
               freshness: line.reviewer_code_freshness,
+              ...(typeof line.reason === "string" ? { reason: line.reason } : {}),
               ...(line.reviewer_code_freshness === "stale" && typeof line.origin_main_sha === "string"
                 ? { requiredOriginMainSha: line.origin_main_sha }
                 : {}),
@@ -15574,19 +15628,33 @@ function priorActionsFromLedger(
 /** W1-T10608 — the disposed-line field naming the ONE main adoption a terminal design hold may spend per PR. */
 export const DESIGN_HOLD_MAIN_ADOPTION_FIELD = "design_hold_main_adoption";
 
+type DesignHoldMainAdoptionDecision = "due" | "updater-unavailable" | "main-tip-unavailable" |
+  "distance-unavailable" | "not-behind" | "already-attempted" | "contract-amended" | "pass-budget-spent";
+
 /**
  * W1-T10608 — A DESIGN HOLD ON A HEAD BEHIND MAIN TAKES MAIN ONCE BEFORE A PERSON IS ASKED. PR #13416 sat 39.6 h at
  * "fix needs design at this exact head" until an operator merged main into it: the hold keys on the head, which only
  * a person moved. Due while main holds commits the head lacks, and only if no earlier pass on this PR spent the
  * adoption — read back from `sweep.disposed`, which rotation retains — so a refused or futile refresh escalates as before.
  */
+function designHoldMainAdoptionDecision(
+  pr: Pick<OpenPrView, "prNumber">, lines: ReadonlyArray<Record<string, unknown>>,
+  behindMainBy: number | undefined, mainTipSha: string | undefined, canUpdateBranch: boolean,
+): DesignHoldMainAdoptionDecision {
+  if (!canUpdateBranch) return "updater-unavailable";
+  if (mainTipSha === undefined) return "main-tip-unavailable";
+  if (behindMainBy === undefined) return "distance-unavailable";
+  if (behindMainBy <= 0) return "not-behind";
+  return lines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
+    typeof row[DESIGN_HOLD_MAIN_ADOPTION_FIELD] === "string") ? "already-attempted" : "due";
+}
+
+/** Preserve the existing boolean API; the sweep retains the decision that produced it. */
 export function designHoldMainAdoptionDue(
   pr: Pick<OpenPrView, "prNumber">, lines: ReadonlyArray<Record<string, unknown>>,
   behindMainBy: number | undefined, mainTipSha: string | undefined, canUpdateBranch: boolean,
 ): boolean {
-  if (!canUpdateBranch || mainTipSha === undefined || behindMainBy === undefined || behindMainBy <= 0) return false;
-  return !lines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
-    typeof row[DESIGN_HOLD_MAIN_ADOPTION_FIELD] === "string");
+  return designHoldMainAdoptionDecision(pr, lines, behindMainBy, mainTipSha, canUpdateBranch) === "due";
 }
 
 export type TerminalFixDesignHandoff =
@@ -17222,8 +17290,6 @@ const strikeLadderMergeBases = new Map<string, Map<string, string>>();
 
 /** Deployment deltas alone admit this full-sweep rung; elapsed time never makes a model due. */
 export async function runSweepBakeoff(input: DeploymentBakeoffInput): Promise<void> {
-  const state = readBakeoffTrialState(input.stateDir);
-  if (!state.pending && findUntrialedModels(input.deployed, state.trialed).length === 0) return;
   await runDeploymentBakeoff(input);
 }
 
@@ -17374,6 +17440,10 @@ export async function runSweep(
   sweepDeps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary> {
+  const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
+  const memoryHeldSummaries = memoryHeld.map((pr) =>
+    lightPassMemoryWaitSummary(pr, sweepDeps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
+  openPrs = openPrs.filter((pr) => !memoryHeld.includes(pr));
   // W1-T7096: every round this pass dispatches is judged by the judge this pass was given.
   const deps: SweepDeps = {
     ...sweepDeps,
@@ -17781,6 +17851,23 @@ export async function runSweep(
       ? { verdict: "escalate", loop: "former fixed bound reached (no progress judge wired)", reason: "unwired caller keeps the pre-W1-T7096 bound" }
       : { verdict: "continue", reason: "unwired caller keeps the pre-W1-T7096 bound" };
   });
+  const progressMemoryWait = { verdict: "unavailable", reason: "progress judgment waiting for memory admission" } as const;
+  const hostGapMemoryWait: HostGapRereviewAction = { kind: "hold", reason: progressMemoryWait.reason, progress: progressMemoryWait };
+  const judgeWithMemoryWait = async <T>(pr: OpenPrView, judgeAndRecord: () => Promise<T>, waiting: T): Promise<T> => {
+    if (lightPassActionScope.getStore() !== undefined) return judgeAndRecord();
+    let onMemoryWait!: () => void;
+    const memoryWait = new Promise<"memory-wait">((resolve) => { onMemoryWait = () => resolve("memory-wait"); });
+    const settled = lightPassActionScope.run({ onMemoryWait }, judgeAndRecord);
+    const first = await Promise.race([settled, memoryWait]);
+    if (first !== "memory-wait") return first;
+    const key = lightPassHeadKey(pr);
+    const hold = { sinceMs: deps.now ? deps.now() : systemClock.now() };
+    lightPassMemoryWaits.set(key, hold);
+    detachSweepAction(settled.finally(() => {
+      if (lightPassMemoryWaits.get(key) === hold) lightPassMemoryWaits.delete(key);
+    }), { actionKind: "light-pass-action", taskId: escalationTaskIdFor(pr) });
+    return waiting;
+  };
   {
     const judged = deps.fixProgressJudge !== undefined;
     const next: OpenPrView[] = [];
@@ -17825,13 +17912,17 @@ export async function runSweep(
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
         formerCeiling: pr.repeatedFixRefusal !== undefined ? 2 : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason });
-      const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
-        { ...progressWitness(pr), judge: progressJudge, firstRound: true });
-      appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
-        pr_number: pr.prNumber, head_sha: pr.headSha,
-        site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
-        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
-        round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
+      const judgeAndRecord = async () => {
+        const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
+          { ...progressWitness(pr), judge: progressJudge, firstRound: true });
+        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
+          pr_number: pr.prNumber, head_sha: pr.headSha,
+          site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
+          parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
+          round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
+        return result;
+      };
+      const result = await judgeWithMemoryWait(pr, judgeAndRecord, progressMemoryWait);
       if (result.verdict === "escalate") {
         next.push({ ...pr, progressEscalation: { loop: result.loop, reason: result.reason, judged } });
         continue;
@@ -19122,6 +19213,8 @@ export async function runSweep(
         acted,
         reason: shownReason,
         head_sha: pr.headSha,
+        ...(disposition === "post-review" && pr.reviewPendingOwnerGone !== undefined
+          ? { owner_gone_cause: pr.reviewPendingOwnerGone } : {}),
         ...(stuckStages.has(stageKey({ pr_number: pr.prNumber, ...blockerRow })) ? { stage_stuck: true } : {}),
         // W1-T4633 — the branch a reversible plan-resequence close must keep; the reaper reads it.
         ...(disposition === "stale" && acted && pr.headRefName && reason.includes(PLAN_RESEQUENCE_CLOSE_MARKER)
@@ -19289,8 +19382,9 @@ export async function runSweep(
       log("sweep.plan_resequence_close.held", { pr_number: pr.prNumber, task_id: pr.taskId, reason: pr.planResequenceHeld });
     }
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
-    const harvestIncomplete = incompletePromiseHarvestFromLedger(pr, ledgerLines);
     const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines);
+    pr = { ...pr, reviewPendingOwnerGone: dispositionView.reviewPendingOwnerGone,
+      reviewPendingOwnerGoneReason: dispositionView.reviewPendingOwnerGoneReason };
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
     const unknownWaits = mergeabilityUnknownWaits.get(pr.prNumber);
     const dispositionFacts: DispositionFacts = {
@@ -19335,9 +19429,6 @@ export async function runSweep(
         }
       }
     }
-    if (disposition === "post-review" && harvestIncomplete) {
-      reason = `checks green, prior cause promise-harvest-incomplete — re-running the review lane on #${pr.prNumber}`;
-    }
     // W1-T7850 — A VERDICT REFUSED BECAUSE ITS REVIEWER CHECKOUT VANISHED is a host gap: re-review the same head
     // and body (the ordinary freshness gate sends a stale daemon to a fresh-tree worktree), paced and escalated
     // through the W1-T7837 planner. Never the freshness backoff, which probes the daemon's own loaded code.
@@ -19348,13 +19439,13 @@ export async function runSweep(
       const hostGapState = { history: facts.history, skips,
         ...(paced ? { lastReviewAtMs: Math.max(facts.lastReviewAtMs ?? Number.NEGATIVE_INFINITY, hostGapRefusal.attemptedAt ?? Number.NEGATIVE_INFINITY) } : {}),
         nowMs: now, observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
-      const hostGapPlan = await planHostGapRereview(hostGapState, {
+      const hostGapPlan = await judgeWithMemoryWait(pr, () => planHostGapRereview(hostGapState, {
         ...progressWitness(pr), ledger: ledgerLines,
         judge: deps.fixProgressJudge,
         input: hostGapProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha }, hostGapState),
         log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
           task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
-      });
+      }), hostGapMemoryWait);
       const checkout = hostGapProblem(hostGapRefusal.hostGap);
       if (hostGapPlan.kind === "rereview") {
         const reviewKey = reviewOutcomeKeyForPr(pr);
@@ -19368,11 +19459,15 @@ export async function runSweep(
         prior.reviewDelivered.delete(reviewKey);
         hostGapRefusal.requestedForRefusal = true;
         disposition = "post-review";
-        reason = `the verdict was computed but its post was refused (${checkout}) — a host gap, not an unproven source; ${hostGapPlan.reason}`;
+        reason = dispositionView.reviewPendingOwnerGone === "refused-after-pending" ? derived.reason
+          : `the verdict was computed but its post was refused (${checkout}) — a host gap, not an unproven source; ${hostGapPlan.reason}`;
       } else {
         disposition = hostGapPlan.kind === "escalate" ? "blocked-ambiguous" : "wait";
         reason = hostGapPlan.reason;
-        if (hostGapPlan.progress?.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, hostGapPlan.progress.reason);
+        if (hostGapPlan.progress?.verdict === "unavailable") {
+          judgedUnavailable.set(pr.prNumber, hostGapPlan.progress.reason);
+          pr.progressContinue = { reason: hostGapPlan.progress.reason, unavailable: true };
+        }
       }
     }
     if (hostGapRefusal !== undefined && disposition === "post-review")
@@ -19760,13 +19855,13 @@ export async function runSweep(
         const facts = hostGapRereviewFacts(pr, ledgerLines);
         const hostGapState = { history: facts.history, skips, lastReviewAtMs: facts.lastReviewAtMs, nowMs: now,
           observedReviewMs: facts.observedReviewMs ?? policy.pendingCeilingMinutes * 60_000 };
-        const hostGap = await planHostGapRereview(hostGapState, {
+        const hostGap = await judgeWithMemoryWait(pr, () => planHostGapRereview(hostGapState, {
           ...progressWitness(pr), ledger: ledgerLines,
           judge: deps.fixProgressJudge,
           input: hostGapProgressInput({ taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha }, hostGapState),
           log: (step, fields) => appendLine(deps.ledgerPath, { run_id: deps.runId,
             task_id: pr.taskId ?? `PR-${pr.prNumber}`, step, ...fields }),
-        });
+        }), hostGapMemoryWait);
         if (hostGap.kind === "rereview") {
           const reviewKey = reviewOutcomeKeyForPr(pr);
           if (!deps.dryRun) {
@@ -19782,7 +19877,10 @@ export async function runSweep(
         } else {
           disposition = hostGap.kind === "escalate" ? "blocked-ambiguous" : "wait";
           reason = hostGap.reason;
-          if (hostGap.progress?.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, hostGap.progress.reason);
+          if (hostGap.progress?.verdict === "unavailable") {
+            judgedUnavailable.set(pr.prNumber, hostGap.progress.reason);
+            pr.progressContinue = { reason: hostGap.progress.reason, unavailable: true };
+          }
         }
       } else {
         const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
@@ -19843,7 +19941,7 @@ export async function runSweep(
         `proof-repair rounds refused twice at this head (${pr.repeatedFixRefusal}) — no strike spent — ` +
         `the plan-shard flag is the next rung`;
     }
-    let terminalDesignHold: { amended: boolean; mainAdoption?: true; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string } | undefined;
+    let terminalDesignHold: { amended: boolean; mainAdoption?: true; mainAdoptionDecision: DesignHoldMainAdoptionDecision; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string } | undefined;
     // W1-T10339: a PR with no task trailer is judged on its BODY, so the body is an input a stand-down read.
     const standDownBodySha = carriesTaskTrailer(pr) ? undefined : prBodyDigest(pr.body);
     let designReleasedByBody = false;
@@ -19883,9 +19981,10 @@ export async function runSweep(
           const amended = current !== undefined && standingOn !== undefined &&
             (current !== standingOn || semantic !== undefined && semantic.standingOn !== semantic.observed);
           const behindBy = deps.behindMainByPr?.get(pr.prNumber);
-          const mainAdoption = !amended && !designMainAdoptionSpent &&
-            designHoldMainAdoptionDue(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
-          terminalDesignHold = { amended, ...(mainAdoption ? { mainAdoption: true as const } : {}),
+          const mainAdoptionDecision = amended ? "contract-amended" : designMainAdoptionSpent ? "pass-budget-spent" :
+            designHoldMainAdoptionDecision(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
+          const mainAdoption = mainAdoptionDecision === "due";
+          terminalDesignHold = { amended, mainAdoptionDecision, ...(mainAdoption ? { mainAdoption: true as const } : {}),
             revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
           disposition = amended || mainAdoption ? "blocked-fixable" : "refused-escalate";
           reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
@@ -19994,6 +20093,7 @@ export async function runSweep(
     let rearmAfterDisarm: number | undefined;
     let rearmIncidentFields: Record<string, unknown> = {};
     let queueMembership: MergeQueueMembership | undefined;
+    const hadIdleObservation = idleHeads.has(pr.prNumber);
     if (disposition !== "mergeable" || pr.autoMergeArmed !== true || idleHeads.get(pr.prNumber) !== pr.headSha) {
       clearIdle(pr);
     }
@@ -20061,14 +20161,18 @@ export async function runSweep(
             formerCeiling: MAX_REARMS_AFTER_DISARM_PER_HEAD,
             parkedReason: `re-arm: ${rearms} merge queue ejections at this head`, operatorAnswer: pr.pendingAnswer?.constraint });
           input.remedyHistory = rearmRows;
-          const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
-            { ...progressWitness(pr), judge: deps.fixProgressJudge });
-          appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
-            site: "re-arm", pr_number: pr.prNumber, head_sha: pr.headSha,
-            former_ceiling: input.formerCeiling, parked_reason: input.parkedReason, red_class: input.redClass,
-            round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...progress, ...receipt });
+          const progress = await judgeWithMemoryWait<FixProgressResult>(pr, async () => {
+            const { decision: progress, receipt } = await resolveFixProgress(input, ledgerLines,
+              { ...progressWitness(pr), judge: progressJudge });
+            appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+              site: "re-arm", pr_number: pr.prNumber, head_sha: pr.headSha,
+              former_ceiling: input.formerCeiling, parked_reason: input.parkedReason, red_class: input.redClass,
+              round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...progress, ...receipt });
+            return progress;
+          }, progressMemoryWait);
           rearmExhausted = progress.verdict === "escalate";
           rearmUnavailable = progress.verdict === "unavailable";
+          if (rearmUnavailable) pr.progressContinue = { reason: progress.reason, unavailable: true };
           rearmReason = progress.verdict === "escalate" ? `fix progress loop: ${progress.loop} — ${progress.reason}`
             : progress.reason;
           rearmIncidentFields = { ...rearmIncidentFields,
@@ -20314,6 +20418,7 @@ export async function runSweep(
     if (gardenRecordRefusal !== undefined) extraDisposedFields = { ...extraDisposedFields, garden_record_refusal: gardenRecordRefusal };
     if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_hold: true, stand_down_site: standDownHold.site };
     if (terminalDesignHold) extraDisposedFields = { ...extraDisposedFields, needs_design_hold: true, needs_design_round_id: terminalDesignHold.roundId,
+      design_hold_main_adoption_decision: terminalDesignHold.mainAdoptionDecision,
       ...(terminalDesignHold.revision === undefined ? {} : { progress_contract_revision: terminalDesignHold.revision }),
       ...(terminalDesignHold.semantic === undefined ? {} : { progress_task_semantic_revision: terminalDesignHold.semantic.standingOn }) };
     const selectedContractRefresh = async (
@@ -20640,6 +20745,11 @@ export async function runSweep(
               // W1-T1061: capture the concrete outcome whenever one came back. A `void` return is
               // the legacy "treat as armed" shape and names no real branch, so no field is written.
               if (armOutcomeName !== undefined) armOutcome = armOutcomeName;
+              if (!armedIdleDue && !hadIdleObservation && armOutcomeName === "armed" && deps.repairAdmissionSurface !== "light") {
+                recordIdle("automerge.armed_idle", pr, true, {
+                  reason: "first reviewed, green idle sighting after a successful full-pass arm",
+                });
+              }
               if (armedIdleDue) {
                 const step = armOutcomeName === "direct-merged" ? "automerge.armed_idle_merged"
                   : armOutcomeName === "armed" ? "automerge.armed_idle_enqueued" : "automerge.armed_idle_refused";
@@ -20793,15 +20903,19 @@ export async function runSweep(
                   if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
-                const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
-                  { ...progressWitness(pr), judge: progressJudge, firstRound: true });
-                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
-                  pr_number: pr.prNumber, head_sha: pr.headSha,
-                  site: progressParkedReason?.split(":")[0] ?? "fix-strike",
-                  parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
-                  red_class: input.redClass, round_count: input.rounds.length, signals: input.signals,
-                  ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
+                const result = await judgeWithMemoryWait<FixProgressResult>(pr, async () => {
+                  const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
+                    { ...progressWitness(pr), judge: progressJudge, firstRound: true });
+                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
+                    pr_number: pr.prNumber, head_sha: pr.headSha,
+                    site: progressParkedReason?.split(":")[0] ?? "fix-strike",
+                    parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
+                    red_class: input.redClass, round_count: input.rounds.length, signals: input.signals,
+                    ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
+                  return result;
+                }, progressMemoryWait);
                 if (result.verdict === "unavailable") {
+                  pr.progressContinue = { reason: result.reason, unavailable: true };
                   acted = false;
                   standDownReason = result.reason;
                   return false;
@@ -22562,13 +22676,17 @@ export async function runSweep(
   }
 
   const summary: SweepSummary = {
-    total: openPrs.length,
+    total: openPrs.length + memoryHeld.length,
     byDisposition,
     actionsTaken,
     actionsFailed,
     actions,
     noneCount,
   };
+  for (const held of memoryHeldSummaries) {
+    summary.byDisposition.wait += held.byDisposition.wait;
+    summary.actions.push(...held.actions);
+  }
   log("sweep.summary", {
     ...summary.byDisposition,
     total: summary.total,

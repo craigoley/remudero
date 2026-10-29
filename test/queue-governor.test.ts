@@ -581,8 +581,13 @@ test("W1-T321: daemonCommand's WIRED checkQueueGovernor reads the REAL open-PR c
     const planPath = planWithOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
     let captured: DaemonDeps | undefined;
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      // This board models Core alone; enrollment comes from the fixture, not the live checkout.
+      repoRoot: root,
       readQueuePressure: (floorMib) => ({ availableMib: 16_384, floorMib }),
-      githubFactory: () => OPEN_GITHUB,
+      githubFactory: (_owner, repo) => {
+        assert.equal(repo, "remudero", "the fixture board belongs only to Core");
+        return OPEN_GITHUB;
+      },
       runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
         deps.refreshMerged();
         captured = deps;
@@ -626,8 +631,12 @@ test("W1-T3144: daemon WIP admission counts every open board PR even when curren
     const github = boardWithUnplannedOpenPrs(DEFAULT_SWEEP_POLICY.wipLimit);
     let captured: DaemonDeps | undefined;
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      repoRoot: root,
       readQueuePressure: (floorMib) => ({ availableMib: 16_384, floorMib }),
-      githubFactory: () => github,
+      githubFactory: (_owner, repo) => {
+        assert.equal(repo, "remudero", "the fixture board belongs only to Core");
+        return github;
+      },
       runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
         deps.refreshMerged();
         captured = deps;

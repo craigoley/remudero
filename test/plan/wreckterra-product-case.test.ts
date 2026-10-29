@@ -13,6 +13,7 @@ const actor = "clerk:alice";
 const head = "c".repeat(40);
 const repository = { id: 1432832754, owner: "craigoley", name: "wreckterra", visibility: "public" };
 const planEvidenceId = "wreckterra-plan-v1";
+const TRUSTED_REVIEWER = "remudero-reviewer[bot]";
 const brief = {
   name: "Wreckterra", portfolio: "OleyArcade", idea: "Original IP vehicle combat in Central Park",
   objective: "A mobile-first solo Central Park prototype",
@@ -45,7 +46,7 @@ function fixture(t: TestContext) {
   const stateBase = join(root, "instances");
   const daemonState = join(stateBase, "wreckterra/state");
   mkdirSync(daemonState, { recursive: true });
-  const options = { root, repoRoot: root, instances: { stateBase } };
+  const options = { root, repoRoot: root, instances: { stateBase }, planTrustedReviewer: TRUSTED_REVIEWER };
   const service = () => new ProductCaseService(options);
   const store = () => new ProductIntentStore({ root });
   const imported = () => service().execute(actor, { version: "product-case-v1", action: "import",
@@ -67,7 +68,10 @@ function fixture(t: TestContext) {
     shim.addRoute({ when: "pulls/7", stdout: JSON.stringify({ number: 7, merged_at: "2026-10-26T00:00:00Z",
       merge_commit_sha: head, head: { sha: head }, base: { ref: "main", repo: { id: repository.id } } }) });
     shim.addRoute({ when: "pulls/7/files", stdout: JSON.stringify([{ filename: "plan/tasks.d/W9-T1-prototype.yaml" }]) });
-    shim.addRoute({ when: "pulls/7/reviews", stdout: JSON.stringify([{ state: "APPROVED", commit_id: head, user: { login: "reviewer" } }]) });
+    // Native plan review is COMMENTED plus a trusted exact-head status; manual approval alone is not its protocol.
+    shim.addRoute({ when: "pulls/7/reviews", stdout: JSON.stringify([{ state: "COMMENTED", commit_id: head, user: { login: TRUSTED_REVIEWER } }]) });
+    shim.addRoute({ when: `commits/${head}/status`, stdout: JSON.stringify({ statuses: [{ context: "remudero-review", state: "success",
+      creator: { login: TRUSTED_REVIEWER, type: "Bot" } }] }) });
   };
   return { root, daemonState, shim, service, store, imported, adopt, plan, build, configurePlan };
 }
@@ -145,7 +149,7 @@ test("W1-T10618: metadata alone cannot satisfy the Wreckterra end to end case", 
   f.configurePlan(id, { design: "metadata only" });
   assert.equal((await f.service().execute(actor, f.plan(id))).code, "plan_not_approved");
   f.configurePlan(id);
-  f.shim.addRoute({ when: "pulls/7/reviews", stdout: "[]" });
+  f.shim.addRoute({ when: `commits/${head}/status`, stdout: JSON.stringify({ statuses: [] }) });
   assert.equal((await f.service().execute(actor, f.plan(id))).code, "plan_not_approved");
   f.configurePlan(id);
   f.shim.addRoute({ when: "pulls/7", stdout: "not-json" });
@@ -191,6 +195,10 @@ test("case planning refuses independent repository, onboarding and review failur
     { state: "APPROVED", commit_id: head, user: { login: "reviewer" } }, { state: "CHANGES_REQUESTED", commit_id: head, user: { login: "reviewer" } }]) });
   assert.equal((await attempt()).code, "plan_not_approved");
   f.configurePlan(id);
+  // A native success at another head, even beside manual approval, cannot approve this plan.
+  f.shim.addRoute({ when: `commits/${head}/status`, stdout: JSON.stringify({ statuses: [] }) });
+  f.shim.addRoute({ when: `commits/${"e".repeat(40)}/status`, stdout: JSON.stringify({ statuses: [{ context: "remudero-review", state: "success",
+    creator: { login: TRUSTED_REVIEWER, type: "Bot" } }] }) });
   f.shim.addRoute({ when: "pulls/7/reviews", stdout: JSON.stringify([{ state: "APPROVED", commit_id: "e".repeat(40), user: { login: "reviewer" } }]) });
   assert.equal((await attempt()).code, "plan_not_approved");
   f.configurePlan(id);

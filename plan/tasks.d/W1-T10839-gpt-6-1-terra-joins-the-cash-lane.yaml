@@ -27,6 +27,7 @@
     - test/a-cash-deployment-is-priced-shaped-and-bounded.test.ts
     - test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
     - test/the-top-tier-is-not-claude-only.test.ts
+    - "src/lib/model-availability.ts"
   status: queued
   attempts: 0
   rationale: |
