@@ -9,8 +9,8 @@ import {
   MAX_RETAINED_LINES_PER_STEP,
   ledgerExceedsRotationCeiling,
   rotateLedger,
-} from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 test("W1-T7814: the decision-relevant step set registers dispatch_memory_observed", () => {
   assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has("dispatch_memory_observed"));

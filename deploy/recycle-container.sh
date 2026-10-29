@@ -118,7 +118,7 @@ set -euo pipefail
 # purpose, to drive a single script in isolation); test/recycle-container.test.ts asserts this
 # fallback, host-update.sh's own fallback, and deploy/runtime-env-vars.sh's real array never
 # disagree, so the fallback cannot silently go stale either.
-RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)
+RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_CASH_EASTUS_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)
 RMD_DERIVED_RUNTIME_ENV_VARS=(RMD_READ_MODEL_DB_DIR RMD_WORKER_HOME_DIR RMD_TEST_SLOT_DIR)
 RUNTIME_ENV_VARS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/runtime-env-vars.sh" || true
 if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; then
@@ -128,6 +128,7 @@ fi
 # The isolated-script fixtures intentionally have no sibling runtime-env-vars.sh. Keep
 # their host-only key path deterministic without making it a container runtime name.
 : "${RMD_OPENWEIGHT_API_KEY_PATH:=${HOME:-/root}/.local/share/remudero/secrets/openweight-api-key}"
+: "${RMD_CASH_EASTUS_API_KEY_PATH:=${HOME:-/root}/.local/share/remudero/secrets/cash-eastus-api-key}"
 
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
@@ -140,8 +141,91 @@ for ((i = 1; i <= $#; i++)); do
     INSTANCE_FLAG_COUNT=$((INSTANCE_FLAG_COUNT + 1))
     j=$((i + 1))
     [ -n "${INSTANCE_NAME}" ] || INSTANCE_NAME="${!j:-}"
+  elif [ "${!i}" = "--container" ]; then
+    j=$((i + 1))
+    CONTAINER_NAME="${!j:-$CONTAINER_NAME}"
   fi
 done
+
+# W1-T9515: process facts match gatherActorEvidence; session ids remain claims.
+recycle_json_escape() {
+  local value="$1" code char escaped
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  for ((code=1; code<32; code++)); do
+    printf -v escaped '\\u%04x' "$code"
+    printf -v char '\\%03o' "$code"
+    printf -v char '%b' "$char"
+    value="${value//"$char"/"$escaped"}"
+  done
+  printf '%s' "$value"
+}
+recycle_json_string() { printf '"%s"' "$(recycle_json_escape "$1")"; }
+recycle_actor_evidence() {
+  local markers="" name session client pty=false input="$RECYCLE_STDIN_TTY" output="$RECYCLE_STDOUT_TTY" container="" cgroup="" kind=human class
+  local parents="" parent="$PPID" depth comm stat rest next
+  [ "$input" = false ] && [ -z "${SSH_TTY:-}" ] || pty=true
+  while IFS= read -r name; do
+    case "$name" in
+      CLAUDECODE|REMUDERO_RUN_ID|REMUDERO_WORKER_SCOPE|AI_AGENT|CLAUDE_CODE_*)
+        [ -z "${!name:-}" ] || markers="${markers:+${markers},}$(recycle_json_string "$name")" ;;
+    esac
+  done < <(compgen -e | LC_ALL=C sort)
+  if [ -r /proc/self/cgroup ]; then cgroup="$(cat /proc/self/cgroup)"; fi
+  container="$(printf '%s' "$cgroup" | grep -aoE '[0-9a-f]{64}' | head -n 1 | cut -c1-12 || true)"
+  if [ -z "$container" ] && { [ -f /.dockerenv ] || printf '%s' "$cgroup" | grep -qE 'docker|kubepods|containerd'; }; then
+    container="$(hostname)"
+  fi
+  session="${CLAUDE_CODE_SESSION_ID:-${REMUDERO_RUN_ID:-}}"
+  client="$(printf '%s' "${SSH_CONNECTION:-${SSH_CLIENT:-}}" | awk '{print $1; exit}')"
+  if [ -n "$markers" ]; then class="agent session"
+  elif [ -n "$client" ] && [ "$pty" = false ]; then class="remote non-interactive"
+  elif [ -n "$container" ]; then class="agent session"
+  elif [ "$pty" = true ]; then class="human at a terminal"
+  else class="host automation"; fi
+  [ -z "$markers" ] && [ -z "$container" ] || kind=agent
+  for ((depth=0; depth<8 && parent>1; depth++)); do
+    [ -r "/proc/$parent/stat" ] || break
+    stat="$(cat "/proc/$parent/stat" 2>/dev/null)" || break
+    case "$stat" in *'('*')'*) : ;; *) break ;; esac
+    comm="${stat#*(}"; comm="${comm%)*}"
+    parents="${parents:+${parents},}$(recycle_json_string "$comm")"
+    rest="${stat##*) }"; rest="${rest#* }"; next="${rest%% *}"
+    case "$next" in ''|*[!0-9]*) break ;; esac
+    parent="$next"
+  done
+  printf '{"kind":"%s","os_user":%s,"host":%s,"agent_markers":[%s],"tty":{"stdin":%s,"stdout":%s},"parents":[%s],"caller_class":%s' \
+    "$kind" "$(recycle_json_string "$(id -un)")" "$(recycle_json_string "$(hostname)")" "$markers" "$input" "$output" "$parents" "$(recycle_json_string "$class")"
+  [ -z "$container" ] || printf ',"container_id":%s' "$(recycle_json_string "$container")"
+  [ -z "$session" ] || printf ',"session":%s' "$(recycle_json_string "$session")"
+  [ -z "$client" ] || printf ',"ssh":{"client_address":%s,"pty":%s}' "$(recycle_json_string "$client")" "$pty"
+  session="$(printf '%s' "${REMUDERO_SESSION_ID:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [ -z "$session" ] || printf ',"claimed_session_id":%s' "$(recycle_json_string "$session")"
+  printf '}'
+}
+RECYCLE_CALLER="${RMD_RECYCLE_CALLER:-unattributed}"
+RECYCLE_STDIN_TTY=false
+RECYCLE_STDOUT_TTY=false
+[ ! -t 0 ] || RECYCLE_STDIN_TTY=true
+[ ! -t 1 ] || RECYCLE_STDOUT_TTY=true
+RECYCLE_ACTOR_EVIDENCE="$(recycle_actor_evidence)"
+RECYCLE_WRITER_START="$(LC_ALL=C TZ=UTC ps -o lstart= -p $$ 2>/dev/null | tr -s ' \t' '  ' | sed 's/^ *//; s/ *$//' | tr -d '"\\' || true)"
+RECYCLE_INVOCATION_RECORDED=0
+record_recycle_invocation() {
+  [ "$RECYCLE_INVOCATION_RECORDED" = 0 ] || return 0
+  local ledger="${RMD_STATE_DIR:-${HOME:-/root}/rmd-state}/state/ledger.ndjson"
+  # Do not manufacture a checkout marker before the state-directory safety check.
+  [ -d "$(dirname "$ledger")" ] || [ -n "${1:-}" ] || return 0
+  mkdir -p "$(dirname "$ledger")" || { echo "recycle-container: cannot record invocation in $ledger" >&2; return 0; }
+  if printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.invoked","lane":"deploy","caller":%s,"actor_evidence":%s,"pid":%s,"writer_start":%s,"container":%s,"instance":%s,"verdict":%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "$(recycle_json_string "$RECYCLE_CALLER")" "$RECYCLE_ACTOR_EVIDENCE" "$$" \
+    "$(recycle_json_string "$RECYCLE_WRITER_START")" "$(recycle_json_string "$CONTAINER_NAME")" \
+    "$(recycle_json_string "$INSTANCE_NAME")" "$(recycle_json_string "${RMD_RECYCLE_VERDICT:-}")" >> "$ledger"; then
+    RECYCLE_INVOCATION_RECORDED=1
+  else
+    echo "recycle-container: could not record invocation in $ledger" >&2
+  fi
+}
 
 # ── W1-T6160: EXPLICIT GIT AUTHOR COMMISSIONING — ONE NAMED TARGET, VERIFIED, WITH A RECEIPT ──────
 # An ordinary recycle keeps a non-empty outgoing RMD_GIT_AUTHOR_* over a shell export (W1-T3454), so
@@ -186,7 +270,7 @@ commission_on_exit() {
     *) commission_receipt failed ;;
   esac
 }
-trap 'commission_on_exit' EXIT
+trap 'record_recycle_invocation exit; commission_on_exit' EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 DEFAULT_INSTANCE_REGISTRY="${SCRIPT_DIR%/deploy}/.remudero/daemon-instances.yaml"
@@ -336,6 +420,8 @@ else
     fi
   fi
 fi
+
+record_recycle_invocation
 
 # The HOST side of the state bind mount — same derivation and same default as deploy/host-update.sh,
 # so the two scripts agree on where the fleet's locks and control flags actually live.
@@ -639,6 +725,8 @@ if [ "${FIRST_BOOT}" != "1" ]; then
     exit 1
   fi
 fi
+
+record_recycle_invocation ready
 
 # ── 1.55. GIT AUTHOR COMMISSIONING PREFLIGHT (W1-T6160) — READ-ONLY, BEFORE ANYTHING IS TOUCHED ──
 # Everything below can pause, pull, stop, remove or start, so a wrong target (missing, repeated,
@@ -1093,6 +1181,30 @@ if [ "${CASH_KEY_REQUIRED}" -eq 1 ]; then
   CAPTURED_SOURCE_set RMD_OPENWEIGHT_API_KEY "durable-host-secret"
 fi
 
+# The second account is optional. Keep a captured value; otherwise recover its host-only key
+# through the same regular-file, mode-0600 and one-nonempty-line checks used at boot.
+read_eastus_cash_secret() {
+  local path="$1" mode value
+  [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
+  if mode="$(stat -c '%a' "$path" 2>/dev/null)"; then :
+  elif mode="$(stat -f '%Lp' "$path" 2>/dev/null)"; then :
+  else mode=""; fi
+  [ "$mode" = 600 ] || return 1
+  value="$(awk 'NF { count++; last=$0 } END { if (count == 1) print last; else exit 1 }' "$path" 2>/dev/null)" || return 1
+  value="${value%$'\r'}"
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+if [ -z "$(CAPTURED_get RMD_CASH_EASTUS_API_KEY)" ]; then
+  if EASTUS_CASH_KEY="$(read_eastus_cash_secret "$RMD_CASH_EASTUS_API_KEY_PATH")"; then
+    CAPTURED_set RMD_CASH_EASTUS_API_KEY "$EASTUS_CASH_KEY"
+    CAPTURED_SOURCE_set RMD_CASH_EASTUS_API_KEY durable-host-secret
+  else
+    echo "recycle-container: RMD_CASH_EASTUS_API_KEY: eastus cash key unavailable; that deployment stays unavailable" >&2
+  fi
+fi
+echo "recycle-container: RMD_CASH_EASTUS_API_KEY captured from $(CAPTURED_SOURCE_get RMD_CASH_EASTUS_API_KEY) (name only)"
+
 # ── APP AUTH IS A DURABLE CREDENTIAL, SO THE GH_TOKEN REFUSAL DOES NOT APPLY TO IT ──────────────
 # The refusal below exists for exactly ONE reason, stated in its own text: GH_TOKEN lives only in
 # the outgoing container's environment and is never written to disk, so removing that container
@@ -1233,6 +1345,9 @@ RUN_ENV_ARGS=()
 for name in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
   if [ "${name}" = "GH_TOKEN" ]; then
     RUN_ENV_ARGS+=(-e "GH_TOKEN=")
+  elif [ "${name}" = "RMD_CASH_EASTUS_API_KEY" ]; then
+    export RMD_CASH_EASTUS_API_KEY="$(CAPTURED_get "${name}")"
+    RUN_ENV_ARGS+=(-e "${name}")
   else
     RUN_ENV_ARGS+=(-e "${name}=$(CAPTURED_get "${name}")")
   fi
@@ -1463,8 +1578,7 @@ else
   # stopped nothing — the one case no trap covers (SIGKILL). `reason` is unchanged: W1-T5127 and
   # W1-T5804 key on it. The start time is C-locale UTC, the exact form the release check re-reads.
   RECYCLE_PAUSE_CONTAINER_ID="$(docker inspect --format '{{.Id}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 | tr -d '"\\' || true)"
-  RECYCLE_WRITER_START="$(LC_ALL=C TZ=UTC ps -o lstart= -p $$ 2>/dev/null | tr -s ' \t' '  ' | sed 's/^ *//; s/ *$//' | tr -d '"\\' || true)"
-  RECYCLE_PAUSE_BODY="{\"reason\":\"${RECYCLE_PAUSE_REASON}\",\"requestedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"pid\":$$,\"host\":\"$(hostname)\",\"container\":\"${RECYCLE_PAUSE_CONTAINER_ID}\",\"containerName\":\"${CONTAINER_NAME}\",\"writerStart\":\"${RECYCLE_WRITER_START}\",\"phase\":\"waiting\"}"
+  RECYCLE_PAUSE_BODY="{\"reason\":\"${RECYCLE_PAUSE_REASON}\",\"requestedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"pid\":$$,\"host\":\"$(hostname)\",\"container\":\"${RECYCLE_PAUSE_CONTAINER_ID}\",\"containerName\":\"${CONTAINER_NAME}\",\"writerStart\":\"${RECYCLE_WRITER_START}\",\"caller\":$(recycle_json_string "$RECYCLE_CALLER"),\"actor_evidence\":${RECYCLE_ACTOR_EVIDENCE},\"phase\":\"waiting\"}"
   printf '%s\n' "${RECYCLE_PAUSE_BODY}" > "${PAUSE_FILE}"
   echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
 fi

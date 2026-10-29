@@ -13,9 +13,9 @@ import {
   selectLedgerCompactionSources,
   type LedgerCompactCommandDeps,
   type LedgerCompactFs,
-} from "../src/lib/ledger-compact.js";
-import { compactRotations, compactedArchiveName } from "../src/lib/ledger.js";
-import { fixedClock } from "../src/lib/clock.js";
+} from "#src/lib/ledger-compact.js";
+import { compactRotations, compactedArchiveName } from "#src/lib/ledger.js";
+import { fixedClock } from "#src/lib/clock.js";
 
 const STATE_DIR = "/state";
 const NOW = new Date("2026-09-10T00:00:00.000Z");

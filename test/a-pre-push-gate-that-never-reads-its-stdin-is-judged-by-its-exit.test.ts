@@ -17,11 +17,11 @@ import { after, before, test } from "node:test";
 
 // A NAMESPACE import: at the merge base `gateHookRefused` does not exist, and a named import would fail
 // the whole file at load rather than the subtests that need it.
-import * as gitPush from "../src/lib/git-push.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { worktreeAdd } from "../src/lib/worker.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import * as gitPush from "#src/lib/git-push.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { worktreeAdd } from "#src/lib/worker.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 let root: string;
 let harnessHooks: string;

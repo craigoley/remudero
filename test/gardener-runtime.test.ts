@@ -3,11 +3,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { createGardenerRuntimeWriter, GARDENER_RUNTIME_FILE, GARDENER_RUNTIME_MAX_BYTES, parseGardenerRuntime,
-  readGardenerRuntime, type GardenerRuntimeEvent } from "../src/lib/gardener-runtime.js";
-import { buildGardenersRoute } from "../src/lib/gardeners-route.js";
-import type { Route } from "../src/lib/service.js";
+  readGardenerRuntime, type GardenerRuntimeEvent } from "#src/lib/gardener-runtime.js";
+import { buildGardenersRoute } from "#src/lib/gardeners-route.js";
+import type { Route } from "#src/lib/service.js";
 import { declaredBody, SPEC, violations, type Schema } from "#test/helpers/openapi-strict.js";
 
 const stamp = "2026-10-07T12:00:00.000Z";

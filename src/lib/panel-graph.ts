@@ -3526,11 +3526,19 @@ export function buildInboxThreadReadRoute(deps: PanelGraphDeps): Route {
 export interface RatifyCliGateway {
   /** Available only with the owned fresh-source runner; never falls back to an unowned child. */
   improvement?(target: { operationId: string; stateDir: string; repoRoot: string }): Promise<RatifyCliHandoff>;
+  /** W1-T10823: ONE typed `rmd plan` run against a verified managed target checkout (`--repo-root`). Same owned runner. */
+  productPlan?(target: RatifyProductPlanTarget): Promise<RatifyCliHandoff>;
   approve(proposalId: string): void;
   reframe(proposalId: string, feedback: string, input?: InboxInputReference): void;
 }
 
 export type RatifyCliHandoff = { outcome: "queued" | "refused" | "unknown" };
+
+/** The ledger task id of a product plan hand-off: its `ratify.cli_*` rows carry exactly this, so the durable operation correlates. */
+export const ratifyProductPlanTaskId = (operationId: string) => `product-plan:${operationId}`;
+/** PRIMARY CONTROL: a transport quota on the one brief argument; it grants no spend or planning authority. */
+export const RATIFY_PRODUCT_PLAN_BRIEF_BYTES = 64 * 1024;
+export interface RatifyProductPlanTarget { operationId: string; mode: "create" | "clarify"; brief: string; repoRoot: string }
 
 /** The fleet lane's decision store for display. A store that cannot be read shows the ledger's rows
  *  alone rather than failing the whole inbox; the lane itself refuses to act on such a store. */
@@ -3619,6 +3627,12 @@ export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: Ratif
     ...(seams ? { improvement(target: { operationId: string; stateDir: string; repoRoot: string }) {
       if (!/^[a-f0-9]{64}$/.test(target.operationId) || !isAbsolute(target.stateDir) || !isAbsolute(target.repoRoot)) return Promise.resolve<RatifyCliHandoff>({ outcome: "refused" });
       return handOff(seams, `improvement-action:${target.operationId}`, ["improvement-action", target.operationId, "--state-dir", target.stateDir, "--repo-root", target.repoRoot], `improvement-${target.operationId}`);
+    } } : {}),
+    ...(seams ? { productPlan(target: RatifyProductPlanTarget) {
+      const refused = !/^[a-f0-9]{64}$/.test(target.operationId) || !isAbsolute(target.repoRoot) || (target.mode !== "create" && target.mode !== "clarify") ||
+        target.brief.trim().length === 0 || Buffer.byteLength(target.brief) > RATIFY_PRODUCT_PLAN_BRIEF_BYTES;
+      if (refused) return Promise.resolve<RatifyCliHandoff>({ outcome: "refused" });
+      return handOff(seams, ratifyProductPlanTaskId(target.operationId), ["plan", `--mode=${target.mode}`, target.brief, "--repo-root", target.repoRoot], `product-plan-${target.operationId}`);
     } } : {}),
     approve(proposalId) {
       if (seams) return handOff(seams, proposalId, ["approve", proposalId], `approve-${proposalId}`).then(() => undefined);

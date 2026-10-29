@@ -11,7 +11,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { readLedgerLines } from "../src/lib/status.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
   ratifiedBaselineRatchetRepairFor,
@@ -20,7 +20,7 @@ import {
   type CiFailure,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-10-05T00:00:00.000Z");
 

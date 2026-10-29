@@ -6,14 +6,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import { EVIDENCE_COVERAGE_PASS_INTERVAL_MS, evidenceCoveragePassDue, evidenceCoverageStatePath } from "../src/lib/evidence-coverage-gardener.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { EVIDENCE_COVERAGE_PASS_INTERVAL_MS, evidenceCoveragePassDue, evidenceCoverageStatePath } from "#src/lib/evidence-coverage-gardener.js";
 import {
   GARDEN_QUIET_BACKOFF_DIVISOR, gardenPacingDue, gardenPacingPath, readGardenPacing, recordGardenPacing, selectorShadowGardenPass,
-} from "../src/lib/garden-registry.js";
-import { machineJudgeFoundWork, machineJudgeInputs } from "../src/lib/machine-filing-judge.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/garden-registry.js";
+import { machineJudgeFoundWork, machineJudgeInputs } from "#src/lib/machine-filing-judge.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const MINUTE = 60_000;
 

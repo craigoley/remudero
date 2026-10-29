@@ -3,10 +3,10 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import type { RubricInput } from "../src/lib/review.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { runReview } from "../src/run-task.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import type { RubricInput } from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { runReview } from "#src/run-task.js";
 
 // ── W1-T2232 — behaviour, not source text ───────────────────────────────────────────
 //

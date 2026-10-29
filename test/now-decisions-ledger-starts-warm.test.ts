@@ -4,12 +4,12 @@ import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { gzipSync } from "node:zlib";
-import { fixedClock } from "../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { createNowView, NOW_REFRESH_MS, type NowViewContext, type NowViewOptions } from "../src/lib/now-view.js";
-import { acquireLease } from "../src/lib/read-model-db.js";
-import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { createNowView, NOW_REFRESH_MS, type NowViewContext, type NowViewOptions } from "#src/lib/now-view.js";
+import { acquireLease } from "#src/lib/read-model-db.js";
+import type { GitHub } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-10-09T08:00:00.000Z");
 const row = (step: string, extra: Record<string, unknown> = {}) => ({ ts: new Date(T0 - 60_000).toISOString(), step, ...extra });

@@ -9,11 +9,11 @@ import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { QuietWatchdogHandle, QuietWatchdogOptions } from "../src/lib/quiet-worker-watchdog.js";
-import { gitPushRunBranchAsync, type PushRunBranchAsyncOpts } from "../src/lib/git-push.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { commitAndPushRestartCheckpoint, watchDispatchSpawn } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import type { QuietWatchdogHandle, QuietWatchdogOptions } from "#src/lib/quiet-worker-watchdog.js";
+import { gitPushRunBranchAsync, type PushRunBranchAsyncOpts } from "#src/lib/git-push.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { commitAndPushRestartCheckpoint, watchDispatchSpawn } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const idle: QuietWatchdogHandle = { observer: () => {}, tick: async () => {}, start: () => () => {} };
 

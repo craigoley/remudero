@@ -11,11 +11,11 @@ import {
   createBoardSnapshotCache,
   createBoardSnapshotReader,
   type BoardSnapshotIo,
-} from "../src/lib/board-snapshot-cache.js";
-import { fixedClock, type Clock } from "../src/lib/clock.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
-import { BOARD_MAX_PAGES, type BoardIssueRest, type BoardPrRest } from "../src/lib/open-prs-rest.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/board-snapshot-cache.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
+import { BOARD_MAX_PAGES, type BoardIssueRest, type BoardPrRest } from "#src/lib/open-prs-rest.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 // @source-text-subject: this file pins WHERE the daemon verb's wiring lives in source; the verb moved from src/run-task.ts to src/cli/commands/daemon.ts (W1-T9333), so it reads both.
 
 function root(): string {
@@ -715,7 +715,7 @@ test("W1-T8912: failed partial and invalid PR observations preserve honest cover
     assert.equal(fs.existsSync(boardObservationPath(dir, owner, "r")), false);
 
     // Through the real repository-flow collector: unavailable observation is never a current zero; a real one may be.
-    const { captureRepositoryFlow } = await import("../src/lib/repository-flow.js");
+    const { captureRepositoryFlow } = await import("#src/lib/repository-flow.js");
     const empty = root();
     try {
       const state = join(empty, "state");

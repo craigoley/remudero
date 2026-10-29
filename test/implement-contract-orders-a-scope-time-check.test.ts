@@ -16,10 +16,10 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
-import { IMPLEMENT_REFUSAL_REPORT_CONTRACT, renderImplementPrompt } from "../src/run-task.js";
-import { IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS } from "../src/lib/worker.js";
-import type { Task } from "../src/lib/plan.js";
+import { outputContractLines, renderAnchorBlock } from "#src/lib/compaction.js";
+import { IMPLEMENT_REFUSAL_REPORT_CONTRACT, renderImplementPrompt } from "#src/run-task.js";
+import { IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS } from "#src/lib/worker.js";
+import type { Task } from "#src/lib/plan.js";
 
 const task: Task = {
   id: "W1-T9999",

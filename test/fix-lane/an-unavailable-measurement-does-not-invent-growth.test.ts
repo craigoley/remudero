@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { checkFixCensusSnapshot } from "#src/run-task.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
+// The judged reach run (W1-T8379) passes only on a tally: an exit-0 fake writes the one a finished run leaves.
+const finished = (args: string[], options: unknown, result: unknown) => {
+  if ((result as { status?: unknown }).status === 0) finishJudgedRun(args, options);
+  return result;
+};
 const passed = { status: 0, signal: null, stdout: "TAP version 13\n1..1\n# tests 1\n# pass 1\n# fail 0\n", stderr: "" };
 
 test("a signalled census child remains a refusal without inventing count growth", () => {
@@ -11,7 +17,7 @@ test("a signalled census child remains a refusal without inventing count growth"
     const events: Array<{ step: string; data: unknown }> = [];
     const outcome = checkFixCensusSnapshot("/unused-injected-root", "/unused-snapshot", (step, data) => events.push({ step, data }),
       ((file: string, args: string[], options: Parameters<typeof spawnSync>[2]) => args.includes("--snapshot-budget")
-        ? spawnSync(file, args, options) : results[calls++] ?? passed) as unknown as Parameters<typeof checkFixCensusSnapshot>[3]);
+        ? spawnSync(file, args, options) : finished(args, options, results[calls++] ?? passed)) as unknown as Parameters<typeof checkFixCensusSnapshot>[3]);
     return { outcome: outcome!, calls, events };
   };
   assert.equal(run([passed, passed]).outcome.refusal, undefined);

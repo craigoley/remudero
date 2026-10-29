@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildBoardReview, type BoardItem, type BoardReviewPolicy } from "../src/lib/board-review.js";
+import { buildBoardReview, type BoardItem, type BoardReviewPolicy } from "#src/lib/board-review.js";
 import {
   anchorFingerprint,
   classifyProposal,
@@ -11,8 +11,8 @@ import {
   type DraftedCandidate,
   type Proposal,
   type ReadinessContext,
-} from "../src/lib/inbox.js";
-import { loadPlanFromYaml, type MergedResolver, type Plan } from "../src/lib/plan.js";
+} from "#src/lib/inbox.js";
+import { loadPlanFromYaml, type MergedResolver, type Plan } from "#src/lib/plan.js";
 
 /**
  * test/board-review-proposal-lifecycle.test.ts — W1-T2451.

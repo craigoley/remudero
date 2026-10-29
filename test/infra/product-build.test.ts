@@ -1,19 +1,23 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
   BOOTSTRAP_CHECKS, bootstrapConfirmed, bootstrapEvidenceId, ghProductBuildTarget, productBuildKickOrigin, productPlanOrigin, ProductBuildService,
-  readTargetExecution, registryDaemonRoot, starterEvidenceId,
+  fileTargetJobStore, readTargetExecution, registryDaemonRoot, starterEvidenceId,
   type BootstrapRead, type BuildObservation, type BuildTask, type ExecutionQuery, type ProductBuildOptions, type ProductBuildTarget, type TargetInspection, type TaskRead,
 } from "#src/lib/product-build.js";
-import { daemonKickPort } from "#src/cli/commands/daemon.js";
+import { nativeTargetRepositoryResolver, createNativeTargetRepository, createNativeTargetJobRunner, daemonKickPort, daemonTargetJobPort } from "#src/cli/commands/daemon.js";
+import { runDrain, type DrainOpts, type TargetJobRecord } from "#src/lib/drain.js";
+import { persistRunTaskCredit } from "#src/cli/commands/run-task-verb.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
-import { runDaemon } from "#src/lib/daemon.js";
+import { runDaemon, type DaemonDeps, type DaemonOpts } from "#src/lib/daemon.js";
 import { requestKick } from "#src/lib/fleet-control.js";
 import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
 import { DEFAULT_LIVENESS_BOUND_MS } from "#src/lib/non-worker-verdict.js";
 import { loadPlan } from "#src/lib/plan.js";
+import { buildBatchedGithub, DEFAULT_MAX_TASK_DISPATCHES, defaultCreditStorePath, saveCreditStore, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, type StatusProjection } from "#src/lib/status.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -98,8 +102,8 @@ function targetDaemonRows(daemonRoot: string) {
   };
   return {
     path: join(dir, "ledger.ndjson"),
-    daemon: (atMs: number, step: string, extra: Record<string, unknown> = {}) => append(atMs, { run_id: "DAEMON-1", task_id: "DAEMON", step, lane: "daemon", ...extra }),
-    run: (atMs: number, runId: string, step: string, extra: Record<string, unknown> = {}) => append(atMs, { run_id: runId, task_id: "W9-T1", step, lane: "run-task", ...extra }),
+    daemon: (atMs: number, step: string, extra: Record<string, unknown> = {}) => append(atMs, { run_id: "DAEMON-1", task_id: "DAEMON", step, lane: "daemon", ...(step === "console.kick_dispatched" ? { native_run_id: RUN_ID } : {}), ...extra }),
+    run: (atMs: number, runId: string, step: string, extra: Record<string, unknown> = {}) => append(atMs, { run_id: runId, task_id: "W9-T1", step, lane: "run-task", repo: "wreckterra", ...extra }),
   };
 }
 const buildRows = async (f: ReturnType<typeof fixture>, operationId: string) => {
@@ -252,7 +256,12 @@ test("W1-T10615: a product build kick reaches only the target daemon's own admis
     const lines: { step: string; extra: Record<string, unknown> }[] = [];
     await runDaemon(plan, {
       refreshMerged: () => () => false,
-      runOne: async (id) => { spawned.push(id); return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }; },
+      runOne: async (id, hooks) => {
+        spawned.push(id);
+        const runId = `${id}-1`;
+        hooks?.onRunCreated?.(runId);
+        return { taskId: id, runId, merged: true, costUsd: 0, verdict: "merged" };
+      },
       ...port, sleep: async () => {}, log: (step, extra = {}) => { lines.push({ step, extra }); },
     }, { headroomEnabled: false, max: 1 });
     return { spawned, kicks: lines.filter((line) => line.step.startsWith("console.kick_")) };
@@ -271,15 +280,23 @@ test("W1-T10615: a product build kick reaches only the target daemon's own admis
   assert.deepEqual(own.pendingKicks().map((kick) => [kick.taskId, kick.repo, kick.origin]), [["W9-T1", "wreckterra", origin]]);
   const dispatched = await drive(own);
   assert.deepEqual(dispatched.spawned, ["W9-T1"], "the kicked task ran ahead of the plan's natural pick, W9-T0");
-  assert.deepEqual(dispatched.kicks, [{ step: "console.kick_dispatched", extra: { task: "W9-T1", origin, repo: "wreckterra" } }]);
+  assert.deepEqual(dispatched.kicks, [
+    { step: "console.kick_dispatched", extra: { task: "W9-T1", origin, repo: "wreckterra", native_run_id: "W9-T1-1" } },
+    { step: "console.kick_dispatched", extra: { task: "W9-T1", origin, repo: "wreckterra" } },
+  ]);
   assert.ok(!existsSync(marker), "the exact marker was consumed");
   assert.deepEqual((await drive(own)).kicks, [], "consumed once: the next pass finds no kick");
   // The daemon's own dispatch row, written as daemonCommand's `log` writes it, is what the execution reader correlates.
   const ledger = targetDaemonRows(f.daemonRoot);
   const state = join(f.daemonRoot, "state");
-  for (const line of dispatched.kicks) ledger.daemon(REQUESTED_MS, line.step, line.extra);
+  for (const line of dispatched.kicks) ledger.daemon(REQUESTED_MS, line.step, { ...line.extra, native_run_id: line.extra.native_run_id });
   const query = { taskId: "W9-T1", origin, repo: "wreckterra", requestedAt: started.value.receipt.queuedAt, nowMs: REQUESTED_MS };
   assert.deepEqual(readTargetExecution(state, query), { state: "dispatched" });
+  // The injected runOne completed above. Write its canonical native lifetime before the
+  // separate refusal case starts another build; a dispatch row alone still holds capacity.
+  ledger.run(REQUESTED_MS, "W9-T1-1", "run.start");
+  ledger.run(REQUESTED_MS, "W9-T1-1", "verdict", { verdict: "merged" });
+  assert.deepEqual(readTargetExecution(state, query), { state: "ended", runId: "W9-T1-1" });
   // A refused kick clears exactly its own marker; the unscoped and another repository's marker for the same id remain.
   const second = await service.execute(actor, f.command({ requestId: "build-request-0002", taskId: "W9-T2", expectedRevision: 3 }));
   assert.ok(second.ok);
@@ -302,8 +319,13 @@ test("W1-T10615: a product build kick reaches only the target daemon's own admis
 
 test("W1-T10615: a product build refuses a target no live daemon instance drives", async (t) => {
   const f = fixture(t);
-  writeFileSync(f.registryPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n  old:\n    github_repo: craigoley/wreckterra\n    retired: true\n");
-  assert.equal(await refused(f.service.execute(actor, f.command())), "target_daemon_missing", "a retired instance drives nothing");
+  // W1-T10799: a retired instance drives nothing, so the marker goes to the CORE daemon's root, which owns one bounded job.
+  const native = fixture(t);
+  writeFileSync(native.registryPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n  old:\n    github_repo: craigoley/wreckterra\n    retired: true\n");
+  const roots: string[] = [];
+  const routed = await new ProductBuildService({ ...native.options, kick: (kickRoot) => { roots.push(kickRoot); } }).execute(actor, native.command());
+  assert.ok(routed.ok);
+  assert.deepEqual(roots, [native.root], "a retired instance drives nothing: the core root is the marker's home");
   writeFileSync(f.registryPath, "instances:\n  core:\n  wreckterra:\n");
   assert.equal(await refused(f.service.execute(actor, f.command())), "target_unreadable", "a malformed registry is unknown, never no daemon");
   assert.equal(await refused(new ProductBuildService({ ...f.options, instances: undefined }).execute(actor, f.command())), "target_unreadable",
@@ -441,7 +463,7 @@ test("W1-T10615: only the target daemon's evidence of this request's own run rea
   const blind = await observedBuild(t, { state: "none", branches: [] });
   writeFileSync(join(blind.f.daemonRoot, "state", "ledger.2026-10-26T01-00-05-000Z.ndjson"), [
     { ts: "2026-10-26T01:00:01.000Z", run_id: "DAEMON-1", task_id: "DAEMON", step: "console.kick_dispatched", task: "W9-T1", origin: blind.origin, repo: "wreckterra" },
-    { ts: "2026-10-26T01:00:02.000Z", run_id: RUN_ID, task_id: "W9-T1", step: "run.start" },
+    { ts: "2026-10-26T01:00:02.000Z", run_id: RUN_ID, task_id: "W9-T1", step: "run.start", repo: "wreckterra" },
   ].map((row) => JSON.stringify(row)).join("\n") + "\n");
   mkdirSync(join(blind.f.daemonRoot, "state", "ledger.ndjson"));
   assert.equal(await blind.observe(REQUESTED_MS + 3_000), "queued", "an unreadable live file is never a complete corpus");
@@ -451,7 +473,7 @@ test("W1-T10615: only the target daemon's evidence of this request's own run rea
   remote.ledger.daemon(REQUESTED_MS + 1_000, "console.kick_dispatched", { task: "W9-T1", origin: remote.origin, repo: "wreckterra" });
   remote.ledger.run(REQUESTED_MS + 2_000, RUN_ID, "run.start", { type: "implement" });
   writeFileSync(remote.f.registryPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n  wreckterra:\n    github_repo: craigoley/wreckterra\n    retired: true\n");
-  assert.equal(await remote.observe(REQUESTED_MS + 3_000), "admitted", "an unreachable target daemon is not evidence");
+  assert.equal(await remote.observe(REQUESTED_MS + 3_000), "queued", "the native fallback requires its own correlated receipt");
   writeFileSync(remote.f.registryPath, REGISTRY);
   assert.equal(await remote.observe(REQUESTED_MS + 4_000), "running");
 });
@@ -467,7 +489,7 @@ test("W1-T10615: the target execution reader correlates this request, never fres
   const kick = { task: "W9-T1", origin: query.origin, repo: "wreckterra" };
   ledger.daemon(REQUESTED_MS - 1, "console.kick_dispatched", kick);
   ledger.daemon(REQUESTED_MS + 1, "console.kick_dispatched", { ...kick, task: "W9-T10" });
-  ledger.daemon(REQUESTED_MS + 1, "console.kick_dispatched", { ...kick, origin: "product:prd_x/pbuild_0" });
+  ledger.daemon(REQUESTED_MS + 1, "console.kick_dispatched", { ...kick, origin: "product:prd_x/pbuild_0", native_run_id: "W9-T1-1" });
   ledger.daemon(REQUESTED_MS + 1, "console.kick_dispatched", { ...kick, repo: "remudero-site" });
   ledger.daemon(REQUESTED_MS + 1, "console.kick_dispatched", { task: "W9-T1", origin: query.origin });
   writeFileSync(ledger.path, `${JSON.stringify({ ts: "garbled", step: "console.kick_refused", ...kick })}\n`, { flag: "a" });
@@ -480,7 +502,7 @@ test("W1-T10615: the target execution reader correlates this request, never fres
   assert.deepEqual(readTargetExecution(state, query), { state: "dispatched" }, "a sibling's run, a foreign run id, or a run before the dispatch");
   ledger.run(REQUESTED_MS + 4, RUN_ID, "run.start");
   ledger.run(REQUESTED_MS + 9, "W9-T1-2", "run.start");
-  assert.deepEqual(readTargetExecution(state, query), { state: "running", runId: RUN_ID }, "the first run at or after the dispatch is its run");
+  assert.deepEqual(readTargetExecution(state, query), { state: "running", runId: RUN_ID }, "only the exactly bound run is its run");
   assert.deepEqual(readTargetExecution(state, { ...query, nowMs: REQUESTED_MS + 4 + DEFAULT_LIVENESS_BOUND_MS }), { state: "running", runId: RUN_ID });
   assert.deepEqual(readTargetExecution(state, { ...query, nowMs: REQUESTED_MS + 5 + DEFAULT_LIVENESS_BOUND_MS }), { state: "silent", runId: RUN_ID });
   ledger.run(REQUESTED_MS + 10, RUN_ID, "worker.activity");
@@ -644,4 +666,682 @@ test("W1-T10615: the default target reads the real managed set, runner registry 
   assert.deepEqual(await down.task(repo, "W9-T1"), { state: "unreadable" });
   assert.deepEqual(await down.observe(repo, "W9-T1"), { state: "unknown" });
   assert.equal(productPlanOrigin("prd_x", "p"), "product-plan#prd_x/p");
+});
+
+/** Core drives remudero. Wreckterra is enrolled below and, here, has NO live instance of its own. */
+const CORE_ONLY = "instances:\n  core:\n    github_repo: craigoley/remudero\n";
+const WITH_OWN = `${CORE_ONLY}  wreckterra:\n    github_repo: craigoley/wreckterra\n    mode: shadow\n`;
+const nativeMarker = (root: string, repo: string, taskId: string) => join(root, "state", `KICK_REQUESTED-${repo}:${taskId}`);
+
+/** The target repository's own plan: the product task, and an ordinary one the job must never touch. */
+const nativeTargetPlan = (productId: string) => `
+- id: W9-T1
+  title: the product's first source task
+  repo: wreckterra
+  type: implement
+  depends_on: []
+  status: queued
+  origin: product-plan#${productId}/plan-approved-1
+  budget_usd: 10
+- id: W9-T3
+  title: an ordinary queued task of the same plan
+  repo: wreckterra
+  type: implement
+  depends_on: []
+  status: queued
+`;
+const nativeSelfPlan = `
+- id: C1-T1
+  title: a core task nothing here may dispatch
+  repo: remudero
+  type: implement
+  depends_on: []
+  status: queued
+`;
+
+/** Real files throughout: the product store, the registry, the managed set, the kick markers, the job record and the ledger. */
+function nativeFixture(t: TestContext, registry = CORE_ONLY) {
+  const root = ownedFixtureDir(t, "bounded-target-job").dir;
+  const core = join(root, "core");
+  const checkout = join(root, "checkout");
+  mkdirSync(join(core, "state"), { recursive: true });
+  mkdirSync(join(checkout, ".remudero"), { recursive: true });
+  writeFileSync(join(checkout, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
+  const registryPath = join(checkout, "daemon-instances.yaml");
+  writeFileSync(registryPath, registry);
+  const stateBase = join(root, "instances");
+  mkdirSync(join(stateBase, "wreckterra", "state"), { recursive: true });
+  const store = new ProductIntentStore({ root: core });
+  const brief = { idea: "private product", resourceEnvelope: { budgetUsd: 30, maxConcurrentBuilds: 1, existingSetupOnly: true } };
+  const saved = store.write(actor, { version: "product-intent-v1", requestId: "seed-product-00001", expectedRevision: 0, brief });
+  assert.ok(saved.ok);
+  const productId = saved.value.receipt.productId;
+  assert.ok(store.transition(actor, { version: "product-intent-v1", requestId: "seed-trusted-000001", id: productId,
+    expectedRevision: 1, expectedObjectiveRevision: 1, repository: identity, stageEvidence: [planEvidence] }).ok);
+  const inspection: TargetInspection = { enrolled: true, head: HEAD, readmeOnly: false };
+  const task: BuildTask = { id: "W9-T1", origin: productPlanOrigin(productId, planEvidence.id), status: "queued", budgetUsd: 10, claimed: false, merged: false };
+  const target: ProductBuildTarget = {
+    async inspect() { return inspection; }, runnerRegistered() { return true; },
+    async task() { return { state: "found" as const, task }; }, async observe() { return state.observation; },
+    async bootstrap() { return { state: "absent" as const }; },
+  };
+  const provider: Pick<ProductRepositoryProvider, "read"> = {
+    async read() { return { state: "found", repository: { id: ID, owner: "craigoley", name: "wreckterra", defaultBranch: "main", visibility: "public" } }; },
+  };
+  const options: ProductBuildOptions = { root: core, store, target, provider, clock: fixedClock(REQUESTED_MS), instances: { registryPath, stateBase } };
+  const command = () => ({ version: "product-build-v1", requestId: "build-request-0001", productId, planEvidenceId: planEvidence.id,
+    taskId: "W9-T1", expectedRevision: 2, expectedObjectiveRevision: 1 });
+  const planFile = join(root, "target-plan.yaml");
+  writeFileSync(planFile, nativeTargetPlan(productId));
+  const selfFile = join(root, "self-plan.yaml");
+  writeFileSync(selfFile, nativeSelfPlan);
+  const ledgerPath = join(core, "state", "ledger.ndjson");
+  const lines: { step: string; extra: Record<string, unknown> }[] = [];
+  const log = (step: string, extra: Record<string, unknown> = {}) => {
+    lines.push({ step, extra });
+    appendLedger(ledgerPath, { run_id: "DAEMON-1", task_id: "DAEMON", step, lane: "daemon", ...extra });
+  };
+  const calls = { runTask: [] as string[], drains: [] as DrainOpts[], claims: [] as string[], durable: [] as string[][] };
+  const state = { claimHeld: false as boolean | undefined, syncError: undefined as string | undefined, daemonDeps: {} as Partial<DaemonDeps>, daemonOpts: {} as DaemonOpts,
+    drainThrows: undefined as "before" | "after" | "during" | undefined, silentRun: false, elapsedMs: 0, held: false,
+    observation: { state: "none", branches: [] } as BuildObservation };
+  const repositoryFor = nativeTargetRepositoryResolver(core, (owner, repo) => buildBatchedGithub(owner, repo, { fetchAll: () => [], commitTrailerIndex: () => new Map() }));
+  const makeRunner = () => createNativeTargetJobRunner({
+    root: core, repoRoot: checkout, log, nowMs: () => Date.now() + state.elapsedMs, instances: { registryPath },
+    planPathFor: (_owner, repo) => (repo === "wreckterra" ? planFile : undefined),
+    syncPlan: async (path) => (state.syncError === undefined ? { plan: loadPlan(path) } : { error: state.syncError }),
+    project: () => new Map([["W9-T1", { independentFailureBlocked: state.held } as StatusProjection]]),
+    repositoryDeps: (owner, repo) => repositoryFor(owner, repo).governors,
+    runTask: async (taskId, target) => {
+      assert.equal(target.owner, "craigoley");
+      assert.equal(target.repo, "wreckterra");
+      assert.equal(target.plan.tasks.find((task) => task.id === taskId)?.repo, "wreckterra");
+      calls.runTask.push(taskId);
+      if (state.drainThrows === "during") throw new Error("native response lost");
+      const jobs = join(core, "state", "target-jobs");
+      calls.durable.push(existsSync(jobs) ? readdirSync(jobs).map((name) => String((JSON.parse(readFileSync(join(jobs, name), "utf8")) as TargetJobRecord).status)) : []);
+      const runId = `${taskId}-${Date.now()}`;
+      target.onRunCreated(runId);
+      appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step: "run.start", lane: "run-task", repo: "wreckterra" });
+      if (!state.silentRun) appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step: "verdict", lane: "run-task", verdict: "merged" });
+      return { taskId, runId, merged: true, costUsd: 5, verdict: "merged" };
+    },
+    claimHeld: async (taskId) => { calls.claims.push(taskId); return state.claimHeld; },
+    runDrain: async (plan, deps, opts) => {
+      calls.drains.push(opts ?? {});
+      if (state.drainThrows === "before") throw new Error("drain unavailable");
+      if (state.drainThrows === "after") { await deps.runOne("W9-T1"); throw new Error("drain crashed"); }
+      return runDrain(plan, deps, opts);
+    },
+  });
+  let runner = makeRunner();
+  const service = new ProductBuildService(options);
+  /** One real daemon pass over the CORE daemon's own bindings: its kick port, the target-job port and the runner. */
+  const drive = async (over: { checkQuietHours?: () => { deferred: true; detail: string } } = {}) => {
+    const from = lines.length;
+    const spawned: string[] = [];
+    const daemonKicks = daemonKickPort(core, { repo: "remudero", isSelf: true });
+    let ticks = 0;
+    const summary = await runDaemon(loadPlan(selfFile), {
+      refreshMerged: () => () => false,
+      runOne: async (id) => { spawned.push(id); return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }; },
+      ...daemonKicks, ...daemonTargetJobPort(core, { repo: "remudero" }),
+      runTargetJob: (kick, daemonDeps, onDispatch) => runner(kick, { ...daemonDeps, ...over }, onDispatch),
+      checkStop: () => (++ticks > 3 ? "enough ticks" : undefined),
+      sleep: async () => {}, log,
+      ...state.daemonDeps,
+    }, { headroomEnabled: false, max: 5, ...state.daemonOpts });
+    return { lines: lines.slice(from), spawned, summary };
+  };
+  const record = (origin: string) => fileTargetJobStore(core).read(origin);
+  return { root, core, checkout, registryPath, stateBase, store, productId, inspection, options, service, command, ledgerPath, calls, state, drive, record, log, targetPlanFile: planFile,
+    targetDrive: (origin: string) => runner({ taskId: "W9-T1", origin, repo: "wreckterra" }, state.daemonDeps as DaemonDeps),
+    restart: () => { runner = makeRunner(); } };
+}
+const nativeStarted = async (f: ReturnType<typeof nativeFixture>) => {
+  const result = await f.service.execute(actor, f.command());
+  assert.ok(result.ok, "the build request is accepted");
+  return { ...result.value, origin: productBuildKickOrigin(f.productId, result.value.receipt.operationId) };
+};
+
+test("W1-T10799: one managed target without a daemon reaches one bounded native job", async (t) => {
+  const f = nativeFixture(t);
+  const request = await nativeStarted(f);
+  assert.equal(request.receipt.outcome, "queued", "the request's own act records queued, never more");
+  assert.ok(existsSync(nativeMarker(f.core, "wreckterra", "W9-T1")), "the marker sits under the CORE daemon's root, where no target daemon exists");
+  assert.deepEqual(daemonKickPort(f.core, { repo: "remudero", isSelf: true }).pendingKicks(), [], "the core daemon's own kick port never offers a foreign repository's marker");
+  assert.deepEqual(daemonTargetJobPort(f.core, { repo: "remudero" }).pendingTargetJobs().map((job) => [job.taskId, job.repo, job.origin]), [["W9-T1", "wreckterra", request.origin]]);
+
+  const run = await f.drive();
+  assert.deepEqual(f.calls.runTask, ["W9-T1"], "exactly the one kicked task ran, and not the ordinary W9-T3 beside it");
+  assert.deepEqual(run.spawned, [], "the core plan's own task never dispatched");
+  assert.deepEqual(f.calls.durable, [["admitted"]], "the durable record was written before the spend, not after it");
+  assert.equal(f.calls.drains.length, 1, "one maintained drain");
+  assert.deepEqual([f.calls.drains[0]!.curated, f.calls.drains[0]!.max, f.calls.drains[0]!.laneCount], [["W9-T1"], 1, 1], "one task, depth one, one lane");
+  assert.ok(!existsSync(nativeMarker(f.core, "wreckterra", "W9-T1")), "the marker was cleared at the terminal verdict");
+  const job = f.record(request.origin);
+  assert.ok(job.state === "found" && job.record.status === "ended" && job.record.attempts === 1);
+  assert.equal(job.record.owner, "craigoley");
+  assert.match(job.record.planRevision ?? "", /^[a-f0-9]{64}$/, "the durable dispatch retains the selected target plan revision");
+  assert.match(job.record.runId ?? "", /^W9-T1-\d+$/, "completion retains the native runner's durable identity");
+  assert.deepEqual(run.lines.filter((line) => line.step === "console.kick_dispatched" && line.extra.native_run_id).map((line) => [line.extra.task, line.extra.origin, line.extra.repo]),
+    [["W9-T1", request.origin, "wreckterra"]], "the dispatch receipt names this request's origin, task and repository");
+  assert.ok(!run.lines.some((line) => line.step === "dispatch.pick_scored" && line.extra.task === "W9-T3"));
+  const again = await f.drive();
+  assert.deepEqual(f.calls.runTask, ["W9-T1"], "a further pass finds nothing left to run");
+  assert.deepEqual(again.lines.filter((line) => line.step.startsWith("target_job.")), []);
+
+  const foreign = nativeFixture(t);
+  await nativeStarted(foreign);
+  writeFileSync(foreign.targetPlanFile, nativeTargetPlan(foreign.productId).replaceAll("repo: wreckterra", "repo: gammaterra"));
+  const refused = await foreign.drive();
+  assert.deepEqual(foreign.calls.runTask, [], "a known id naming another repository cannot enter the target drain");
+  assert.equal(foreign.calls.drains.length, 0);
+  assert.ok(refused.lines.some((line) => line.step === "console.kick_refused" && String(line.extra.reason).includes("repository")));
+
+  const held = nativeFixture(t);
+  await nativeStarted(held);
+  held.state.held = true;
+  await held.drive();
+  assert.equal(held.calls.drains.length, 1, "the target hold is tested through maintained curated drain admission");
+  assert.deepEqual(held.calls.runTask, [], "the target projection's independent failure hold prevents dispatch");
+
+  const bounded = nativeFixture(t);
+  await nativeStarted(bounded);
+  requestKick(bounded.core, "W9-T3", "product:other/max", "wreckterra");
+  bounded.state.daemonOpts = { max: 1 };
+  const limited = await bounded.drive();
+  assert.deepEqual(bounded.calls.runTask, ["W9-T1"], "max=1 includes target dispatches before another admission");
+  assert.deepEqual(limited.summary.attempted, ["W9-T1"]);
+  assert.equal(limited.summary.stopReason, "max_reached");
+  assert.ok(existsSync(nativeMarker(bounded.core, "wreckterra", "W9-T3")), "the second request remains queued");
+});
+
+test("W1-T10799: bounded target jobs share the core WIP budget and reserve its last slot", async (t) => {
+  const f = nativeFixture(t);
+  const request = await nativeStarted(f);
+  const otherOrigin = "product:prd_other/op_2";
+  requestKick(f.core, "W9-T3", otherOrigin, "wreckterra");
+  f.state.daemonOpts = { laneCount: 3, wipLimit: 2 };
+  f.state.daemonDeps.openPrCount = () => 2;
+  const full = await f.drive();
+  assert.deepEqual(f.calls.runTask, [], "a free local lane cannot bypass full shared WIP");
+  assert.ok(full.lines.some((line) => line.step === "target_job.capacity_deferred" && line.extra.origin === request.origin));
+  assert.equal(f.record(request.origin).state, "absent");
+
+  // An adaptive admission is authoritative even if the static pair reports spare WIP.
+  f.state.daemonDeps.openPrCount = () => 0;
+  f.state.daemonDeps.readQueueAdmission = () => ({ wipLimit: 2, observedOpenCount: 2 });
+  await f.drive();
+  assert.deepEqual(f.calls.runTask, [], "the shared admission reading bounds the target job too");
+
+  f.state.daemonDeps.readQueueAdmission = () => ({ wipLimit: 2, observedOpenCount: 1 + f.calls.runTask.length });
+  const oneSlot = await f.drive();
+  assert.deepEqual(f.calls.runTask, ["W9-T1"], "only one of the simultaneous requests occupies the last slot");
+  assert.ok(oneSlot.lines.some((line) => line.step === "target_job.capacity_deferred" && line.extra.origin === otherOrigin));
+  assert.ok(existsSync(nativeMarker(f.core, "wreckterra", "W9-T3")), "the waiting request keeps its marker");
+  assert.equal(f.record(otherOrigin).state, "absent", "a waiting request never receives an admission record");
+});
+
+test("W1-T10799: unknown native receipts and an absent claim never respend an admitted job", async (t) => {
+  const f = nativeFixture(t);
+  const request = await nativeStarted(f);
+  const landed: TargetJobRecord = { origin: request.origin, taskId: "W9-T1", repo: "wreckterra", status: "admitted", attempts: 1, updatedAt: new Date().toISOString() };
+  fileTargetJobStore(f.core).write(landed);
+  f.state.claimHeld = false;
+  const archive = join(f.core, "state", `ledger.${new Date().toISOString().replaceAll(":", "-")}.ndjson.gz`);
+  writeFileSync(archive, "unreadable gzip receipt corpus");
+  const unknown = await f.drive();
+  assert.deepEqual(f.calls.runTask, [], "an absent claim cannot turn unknown receipts into permission to spend again");
+  assert.ok(unknown.lines.some((line) => line.step === "target_job.unknown"));
+  assert.deepEqual(f.record(request.origin), { state: "found", record: landed });
+  assert.ok(existsSync(nativeMarker(f.core, "wreckterra", "W9-T1")));
+
+  rmSync(archive);
+  await f.drive();
+  assert.deepEqual(f.calls.runTask, [], "a free claim with no receipts cannot disprove an earlier spend");
+  assert.deepEqual(f.record(request.origin), { state: "found", record: landed });
+});
+
+test("W1-T10799: a foreign repository's native run cannot satisfy this origin's receipt", async (t) => {
+  const f = nativeFixture(t);
+  const request = await nativeStarted(f);
+  f.log("console.kick_dispatched", { task: "W9-T1", origin: request.origin, repo: "wreckterra" });
+  const read = () => readTargetExecution(join(f.core, "state"), { taskId: "W9-T1", origin: request.origin, repo: "wreckterra", requestedAt: request.receipt.queuedAt, nowMs: Date.now() });
+  const foreignRun = `W9-T1-${Date.now()}`;
+  appendLedger(f.ledgerPath, { run_id: foreignRun, task_id: "W9-T1", step: "run.start", repo: "gammaterra" });
+  assert.deepEqual(read(), { state: "dispatched" }, "the same task id in another repository is not this run");
+  appendLedger(f.ledgerPath, { run_id: foreignRun, task_id: "W9-T1", step: "verdict", verdict: "merged" });
+  assert.deepEqual(read(), { state: "dispatched" }, "the other repository's verdict cannot end this job");
+  appendLedger(f.ledgerPath, { run_id: "W9-T1-unscoped", task_id: "W9-T1", step: "run.start" });
+  assert.deepEqual(read(), { state: "dispatched" }, "a start without repository identity is insufficient");
+  const ownRun = `W9-T1-${Date.now() + 1}`;
+  f.log("console.kick_dispatched", { task: "W9-T1", origin: request.origin, repo: "wreckterra", native_run_id: ownRun });
+  appendLedger(f.ledgerPath, { run_id: ownRun, task_id: "W9-T1", step: "run.start", repo: "Wreckterra" });
+  assert.deepEqual(read(), { state: "running", runId: ownRun });
+  appendLedger(f.ledgerPath, { run_id: ownRun, task_id: "W9-T1", step: "verdict", verdict: "merged" });
+  assert.deepEqual(read(), { state: "ended", runId: ownRun });
+});
+
+test("W1-T10799: replay after restart or lost response resumes the same native job", async (t) => {
+  const f = nativeFixture(t);
+  const request = await nativeStarted(f);
+  // A lost response: the same request again is the same operation, and writes no second marker.
+  const lost = await f.service.execute(actor, f.command());
+  assert.ok(lost.ok && lost.value.replayed && lost.value.receipt.operationId === request.receipt.operationId);
+  assert.equal(nativeKickMarkers(f.core).length, 1, "one marker for one request");
+
+  // A restart after the dispatch landed: the durable record and the held claim resume it. No second dispatch.
+  const store = fileTargetJobStore(f.core);
+  const landed: TargetJobRecord = { origin: request.origin, taskId: "W9-T1", repo: "wreckterra", status: "admitted", attempts: 1, updatedAt: new Date().toISOString() };
+  store.write(landed);
+  f.state.claimHeld = true;
+  const resumed = await f.drive();
+  assert.deepEqual(f.calls.runTask, [], "a landed dispatch is never dispatched twice");
+  assert.ok(resumed.lines.some((line) => line.step === "target_job.resumed"));
+  assert.ok(existsSync(nativeMarker(f.core, "wreckterra", "W9-T1")), "the job is not closed, so its marker stays");
+  const marked = f.record(request.origin);
+  assert.ok(marked.state === "found" && marked.record.reason === "resumed" && marked.record.updatedAt === landed.updatedAt, "the dispatch time that correlates the receipts is kept");
+  await f.drive();
+  assert.equal(resumed.lines.filter((line) => line.step === "target_job.resumed").length, 1, "resumption is reported once");
+
+  // An unknown claim (an unreadable remote) is never read as free either.
+  f.state.claimHeld = undefined;
+  await f.drive();
+  assert.deepEqual(f.calls.runTask, []);
+
+  // A free claim cannot disprove a spend: keep the original job unresolved.
+  f.state.claimHeld = false;
+  await f.drive();
+  assert.deepEqual(f.calls.runTask, []);
+
+  // Drive an actual charged run, lose its response, then restart after its native start goes silent.
+  const spent = nativeFixture(t);
+  const started = await nativeStarted(spent);
+  spent.state.silentRun = true;
+  spent.state.drainThrows = "after";
+  await spent.drive();
+  assert.deepEqual(spent.calls.runTask, ["W9-T1"], "the positive control really spent once");
+  const admitted = spent.record(started.origin);
+  assert.ok(admitted.state === "found" && admitted.record.status === "admitted" && admitted.record.attempts === 1);
+  spent.restart();
+  rmSync(nativeMarker(spent.core, "wreckterra", "W9-T1"));
+  assert.equal(daemonTargetJobPort(spent.core, { repo: "remudero" }).pendingTargetJobs().length, 1, "durable recovery does not depend on a marker");
+  spent.state.elapsedMs = DEFAULT_LIVENESS_BOUND_MS + 60_000;
+  spent.state.drainThrows = undefined;
+  await spent.drive();
+  assert.deepEqual(spent.calls.runTask, ["W9-T1"], "a silent spent run with a free claim never spends twice");
+  assert.deepEqual(spent.record(started.origin), admitted, "unresolved recovery preserves attempts and revision");
+
+  // The original native terminal receipt resolves the synthetic recovery fixture without redispatch.
+  f.log("console.kick_dispatched", { task: "W9-T1", repo: "wreckterra", origin: request.origin });
+  const runId = `W9-T1-${Date.now()}`;
+  f.log("console.kick_dispatched", { task: "W9-T1", origin: request.origin, repo: "wreckterra", native_run_id: runId });
+  appendLedger(f.ledgerPath, { run_id: runId, task_id: "W9-T1", repo: "wreckterra", step: "run.start" });
+  appendLedger(f.ledgerPath, { run_id: runId, task_id: "W9-T1", step: "verdict", verdict: "merged" });
+  await f.drive();
+  const done = f.record(request.origin);
+  assert.ok(done.state === "found" && done.record.status === "ended" && done.record.attempts === 1);
+
+  // The same origin delivered again after the job closed reports it and never spends twice.
+  const redelivered = await f.service.execute(actor, f.command());
+  assert.ok(redelivered.ok && redelivered.value.replayed);
+  writeFileSync(nativeMarker(f.core, "wreckterra", "W9-T1"), JSON.stringify({ taskId: "W9-T1", origin: request.origin, repo: "wreckterra", requestedAt: new Date().toISOString() }));
+  const closed = await f.drive();
+  assert.deepEqual(f.calls.runTask, [], "a closed job's origin never dispatches again");
+  assert.ok(closed.lines.some((line) => line.step === "target_job.replayed"));
+  assert.ok(!existsSync(nativeMarker(f.core, "wreckterra", "W9-T1")));
+
+  // A record this process cannot read is held, never read as "no job": that would respend.
+  const other = nativeFixture(t);
+  const second = await nativeStarted(other);
+  const recordFile = join(other.core, "state", "target-jobs");
+  mkdirSync(recordFile, { recursive: true });
+  fileTargetJobStore(other.core).write({ origin: second.origin, taskId: "W9-T1", repo: "wreckterra", status: "queued", attempts: 0, updatedAt: new Date().toISOString() });
+  for (const name of readdirSync(recordFile)) writeFileSync(join(recordFile, name), "{torn");
+  assert.equal(other.record(second.origin).state, "unreadable");
+  const torn = await other.drive();
+  assert.deepEqual(other.calls.runTask, []);
+  assert.ok(torn.lines.some((line) => line.step === "target_job.unknown"));
+  assert.ok(existsSync(nativeMarker(other.core, "wreckterra", "W9-T1")));
+
+  const crossed = nativeFixture(t);
+  const original = await nativeStarted(crossed);
+  const originalRun = "W9-T1-100";
+  const otherRun = "W9-T1-200";
+  fileTargetJobStore(crossed.core).write({ origin: original.origin, taskId: "W9-T1", repo: "wreckterra",
+    status: "admitted", attempts: 1, updatedAt: new Date().toISOString(), runId: originalRun });
+  crossed.log("console.kick_dispatched", { task: "W9-T1", origin: original.origin, repo: "wreckterra" });
+  crossed.log("console.kick_dispatched", { task: "W9-T1", origin: original.origin, repo: "wreckterra", native_run_id: originalRun });
+  crossed.log("console.kick_dispatched", { task: "W9-T1", origin: "product:other/restart", repo: "wreckterra", native_run_id: otherRun });
+  appendLedger(crossed.ledgerPath, { run_id: otherRun, task_id: "W9-T1", repo: "wreckterra", step: "run.start" });
+  appendLedger(crossed.ledgerPath, { run_id: otherRun, task_id: "W9-T1", step: "verdict", verdict: "merged" });
+  crossed.restart();
+  await crossed.drive();
+  const unresolvedOriginal = crossed.record(original.origin);
+  assert.ok(unresolvedOriginal.state === "found" && unresolvedOriginal.record.status === "admitted",
+    "another origin's later terminal run cannot close this durable job");
+  assert.deepEqual(crossed.calls.runTask, [], "unresolved recovery never spends again");
+  appendLedger(crossed.ledgerPath, { run_id: originalRun, task_id: "W9-T1", repo: "wreckterra", step: "run.start" });
+  appendLedger(crossed.ledgerPath, { run_id: originalRun, task_id: "W9-T1", step: "verdict", verdict: "merged" });
+  await crossed.drive();
+  const resolvedOriginal = crossed.record(original.origin);
+  assert.ok(resolvedOriginal.state === "found" && resolvedOriginal.record.status === "ended" &&
+    resolvedOriginal.record.runId === originalRun, "only the original native run closes recovery and retains its identity");
+});
+
+test("W1-T10799: native receipts distinguish queued admitted running and refused jobs", async (t) => {
+  const f = nativeFixture(t);
+  const request = await nativeStarted(f);
+  const stateDir = join(f.core, "state");
+  const read = (at = REQUESTED_MS) => readTargetExecution(stateDir, { taskId: "W9-T1", origin: request.origin, repo: "wreckterra", requestedAt: request.receipt.queuedAt, nowMs: at });
+  const outcome = async () => { const result = await f.service.execute(actor, f.command()); assert.ok(result.ok); return result.value.receipt.outcome; };
+  // The marker, a managed profile and free capacity are not receipts.
+  f.state.observation = { state: "admitted", branches: [`run-${RUN_ID}`] };
+  assert.deepEqual(read(), { state: "unknown" }, "no ledger at all is a daemon this process cannot see, never 'nothing ran'");
+  assert.equal(await outcome(), "queued");
+  // A governor that holds the drain is an explicit deferral: no dispatch row, no job record, the marker stays.
+  const held = await f.drive({ checkQuietHours: () => ({ deferred: true, detail: "QUIET_HOURS file present" }) });
+  assert.deepEqual(f.calls.runTask, []);
+  assert.ok(held.lines.some((line) => line.step === "target_job.capacity_deferred" && String(line.extra.reason).includes("quiet_hours_deferred")));
+  assert.equal(f.record(request.origin).state, "absent");
+  assert.ok(existsSync(nativeMarker(f.core, "wreckterra", "W9-T1")));
+  assert.equal(await outcome(), "queued", "capacity that could not start the job leaves it queued");
+  f.state.syncError = "origin unreachable";
+  const unsynced = await f.drive();
+  assert.ok(unsynced.lines.some((line) => line.step === "target_job.plan_unreadable"));
+  assert.equal(await outcome(), "queued", "an unreadable target plan is not an admission");
+  f.state.syncError = undefined;
+
+  // Receipts, one at a time, in the core ledger the job writes.
+  f.log("console.kick_dispatched", { task: "W9-T1", origin: request.origin, repo: "wreckterra" });
+  assert.deepEqual(read(Date.now()), { state: "dispatched" });
+  assert.equal(await outcome(), "admitted");
+  const runId = `W9-T1-${Date.now()}`;
+  f.log("console.kick_dispatched", { task: "W9-T1", origin: request.origin, repo: "wreckterra", native_run_id: runId });
+  appendLedger(join(stateDir, "ledger.ndjson"), { run_id: runId, task_id: "W9-T1", step: "run.start", lane: "run-task", repo: "wreckterra" });
+  assert.deepEqual(read(Date.now()), { state: "running", runId });
+  assert.equal(await outcome(), "running");
+
+  // A different origin's dispatch row is not this request's, and a refusal row outranks a held claim.
+  const refusedF = nativeFixture(t);
+  const second = await nativeStarted(refusedF);
+  refusedF.state.observation = { state: "admitted", branches: [`run-${RUN_ID}`] };
+  refusedF.log("console.kick_dispatched", { task: "W9-T1", origin: "product:other/op", repo: "wreckterra" });
+  assert.equal(await nativeOutcome(refusedF), "queued", "another origin's receipt is never this request's");
+  refusedF.log("console.kick_refused", { task: "W9-T1", origin: second.origin, repo: "wreckterra", reason: "unknown task id" });
+  assert.deepEqual(readTargetExecution(join(refusedF.core, "state"), { taskId: "W9-T1", origin: second.origin, repo: "wreckterra", requestedAt: second.receipt.queuedAt, nowMs: Date.now() }), { state: "refused" });
+  assert.equal(await nativeOutcome(refusedF), "queued");
+
+  // The job's own refusal: an unknown task id is refused, recorded, ledgered and its marker cleared.
+  const unknown = nativeFixture(t);
+  const third = await nativeStarted(unknown);
+  writeFileSync(unknown.targetPlanFile, nativeTargetPlan(unknown.productId).replace("W9-T1", "W9-T9"));
+  const refusal = await unknown.drive();
+  assert.deepEqual(unknown.calls.runTask, []);
+  assert.deepEqual(refusal.lines.filter((line) => line.step === "console.kick_refused").map((line) => [line.extra.origin, line.extra.reason]), [[third.origin, "unknown task id"]]);
+  const refusedJob = unknown.record(third.origin);
+  assert.ok(refusedJob.state === "found" && refusedJob.record.status === "refused");
+  assert.ok(!existsSync(nativeMarker(unknown.core, "wreckterra", "W9-T1")));
+
+  const crossed = nativeFixture(t);
+  const original = await nativeStarted(crossed);
+  const ownRun = "W9-T1-300";
+  const otherRun = "W9-T1-400";
+  const crossRead = () => readTargetExecution(join(crossed.core, "state"), { taskId: "W9-T1", origin: original.origin,
+    repo: "wreckterra", requestedAt: original.receipt.queuedAt, nowMs: Date.now() });
+  crossed.log("console.kick_dispatched", { task: "W9-T1", origin: original.origin, repo: "wreckterra", native_run_id: ownRun });
+  crossed.log("console.kick_dispatched", { task: "W9-T1", origin: "product:other/receipt", repo: "wreckterra", native_run_id: otherRun });
+  appendLedger(crossed.ledgerPath, { run_id: otherRun, task_id: "W9-T1", repo: "wreckterra", step: "run.start" });
+  assert.deepEqual(crossRead(), { state: "dispatched" }, "a later same-task/repo run of another origin cannot supply running");
+  appendLedger(crossed.ledgerPath, { run_id: otherRun, task_id: "W9-T1", step: "verdict", verdict: "merged" });
+  assert.deepEqual(crossRead(), { state: "dispatched" }, "that run's terminal receipt cannot supply ended either");
+  appendLedger(crossed.ledgerPath, { run_id: ownRun, task_id: "W9-T1", repo: "wreckterra", step: "run.start" });
+  assert.deepEqual(crossRead(), { state: "running", runId: ownRun }, "the exact bound start is the positive control");
+  assert.deepEqual(readTargetExecution(join(crossed.core, "state"), { taskId: "W9-T1", origin: original.origin,
+    repo: "wreckterra", requestedAt: original.receipt.queuedAt, nowMs: Date.now(), runId: otherRun }), { state: "unknown" },
+  "a durable run identity conflicting with its native receipt is unknown");
+  crossed.log("console.kick_dispatched", { task: "W9-T1", origin: original.origin, repo: "wreckterra", native_run_id: otherRun });
+  assert.deepEqual(crossRead(), { state: "unknown" }, "multiple native run bindings for one origin are ambiguous");
+
+  const reused = nativeFixture(t);
+  const reusedRequest = await nativeStarted(reused);
+  const reusedRead = () => readTargetExecution(join(reused.core, "state"), { taskId: "W9-T1", origin: reusedRequest.origin,
+    repo: "wreckterra", requestedAt: reusedRequest.receipt.queuedAt, nowMs: Date.now() });
+  reused.log("console.kick_dispatched", { task: "W9-T1", origin: reusedRequest.origin, repo: "wreckterra", native_run_id: ownRun });
+  appendLedger(reused.ledgerPath, { run_id: ownRun, task_id: "W9-T1", repo: "wreckterra", step: "run.start" });
+  assert.deepEqual(reusedRead(), { state: "running", runId: ownRun });
+  reused.log("console.kick_dispatched", { task: "W9-T1", origin: "product:other/reused-run", repo: "wreckterra", native_run_id: ownRun });
+  assert.deepEqual(reusedRead(), { state: "unknown" }, "one native run cannot be owned by two origins");
+});
+
+test("W1-T10799: a drain that throws holds the job open and keeps its marker", async (t) => {
+  const before = nativeFixture(t);
+  const request = await nativeStarted(before);
+  before.state.drainThrows = "before";
+  const failed = await before.drive();
+  const errored = failed.lines.find((line) => line.step === "target_job.error");
+  assert.equal(errored?.extra.reason, "drain failed: drain unavailable", "a drain that never started names its own failure");
+  assert.deepEqual(before.calls.runTask, [], "nothing was dispatched");
+  assert.equal(before.record(request.origin).state, "absent", "no dispatch, so no durable job record: the job is still only queued");
+  assert.ok(existsSync(nativeMarker(before.core, "wreckterra", "W9-T1")), "a failed read of the world is never a terminal verdict");
+  assert.equal(await nativeOutcome(before), "queued");
+
+  const after = nativeFixture(t);
+  const started = await nativeStarted(after);
+  after.state.drainThrows = "after";
+  const crashed = await after.drive();
+  assert.equal(crashed.lines.find((line) => line.step === "target_job.error")?.extra.reason, "drain failed after dispatch: drain crashed",
+    "a drain that threw after the dispatch landed says so");
+  const landed = after.record(started.origin);
+  assert.ok(landed.state === "found" && landed.record.status !== "refused" && landed.record.attempts >= 1, "the dispatch that did land is on the durable record");
+  assert.ok(after.calls.runTask.length >= 1, "the one kicked task did dispatch before the drain threw");
+
+  const during = nativeFixture(t);
+  const interrupted = await nativeStarted(during);
+  during.state.drainThrows = "during";
+  const unresolved = await during.drive();
+  assert.deepEqual(during.calls.runTask, ["W9-T1"], "a run error returned by the maintained drain never redispatches");
+  const record = during.record(interrupted.origin);
+  assert.ok(record.state === "found" && record.record.status === "admitted" && record.record.attempts === 1);
+  assert.ok(unresolved.lines.some((line) => line.step === "target_job.unknown"));
+  assert.ok(!unresolved.lines.some((line) => line.step === "target_job.ended"), "an unresolved response is not a terminal native receipt");
+});
+
+// The core daemon's own composition root (daemonCommand) is driven by the W1-T10799 wiring proof in
+// the-daemon-owns-the-worker-git-credential-socket.test.ts, a suite that already drives daemonCommand.
+const nativeOutcome = async (f: ReturnType<typeof nativeFixture>) => { const result = await f.service.execute(actor, f.command()); assert.ok(result.ok); return result.value.receipt.outcome; };
+const nativeKickMarkers = (core: string) => readdirSync(join(core, "state")).filter((name) => name.startsWith("KICK_REQUESTED-"));
+
+// The request side of routing: where a product build request's kick marker goes, and what it refuses. Every file here is
+// real: the product store, the registry, the managed set, the kick markers and the halt flags.
+test("W1-T10799: unreadable or halted routing refuses and live instances retain their own path", async (t) => {
+  // An unreadable registry is unknown, never "no daemon".
+  const broken = nativeFixture(t, "instances:\n  core:\n  wreckterra:\n");
+  assert.equal(await refused(broken.service.execute(actor, broken.command())), "target_unreadable");
+  assert.deepEqual(nativeKickMarkers(broken.core), [], "no marker anywhere");
+  assert.deepEqual(readdirSync(join(broken.stateBase, "wreckterra", "state")), [], "none under the target's root either");
+  // A halted core root refuses before any marker, whether paused or stopped.
+  for (const flag of ["PAUSE", "STOP"]) {
+    const halted = nativeFixture(t);
+    writeFileSync(join(halted.core, "state", flag), "{}");
+    assert.equal(await refused(halted.service.execute(actor, halted.command())), "fleet_halted", flag);
+    assert.deepEqual(nativeKickMarkers(halted.core), [], flag);
+  }
+  // A core root whose state directory this process cannot reach is unreadable.
+  const noState = nativeFixture(t);
+  const bare = join(noState.root, "bare-core");
+  mkdirSync(bare);
+  assert.equal(await refused(new ProductBuildService({ ...noState.options, root: bare }).execute(actor, noState.command())), "target_unreadable",
+    "a core root with no state directory is unreadable");
+  const denied = nativeFixture(t);
+  const realAccess = fs.accessSync;
+  const access = t.mock.method(fs, "accessSync", (path: Parameters<typeof realAccess>[0], mode?: number) => {
+    if (String(path) === join(denied.core, "state")) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+    return realAccess(path, mode);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.ok(existsSync(join(denied.core, "state")), "the unreadable Core directory exists");
+    assert.equal(await refused(denied.service.execute(actor, denied.command())), "target_unreadable");
+    assert.deepEqual(nativeKickMarkers(denied.core), [], "EACCES refuses before writing a kick");
+  } finally {
+    access.mock.restore();
+    syncBuiltinESMExports();
+  }
+  // An unenrolled target is refused by the request itself: no marker, and no job is born.
+  const unenrolled = nativeFixture(t);
+  unenrolled.inspection.enrolled = false;
+  assert.equal(await refused(unenrolled.service.execute(actor, unenrolled.command())), "target_not_enrolled");
+  assert.deepEqual(nativeKickMarkers(unenrolled.core), []);
+  // A target whose enrollment this process cannot read is unknown, never enrolled.
+  const unknownEnrollment = nativeFixture(t);
+  unknownEnrollment.inspection.enrolled = undefined;
+  assert.equal(await refused(unknownEnrollment.service.execute(actor, unknownEnrollment.command())), "target_unreadable");
+  assert.deepEqual(nativeKickMarkers(unknownEnrollment.core), []);
+
+  // With no live instance of its own, the marker goes to the CORE root, once, and the same request replays without a second one.
+  const native = nativeFixture(t);
+  const first = await native.service.execute(actor, native.command());
+  assert.ok(first.ok, "an enrolled target with no live instance is accepted, not refused as having no daemon");
+  assert.ok(existsSync(nativeMarker(native.core, "wreckterra", "W9-T1")), "the marker sits under the core daemon's root");
+  const replay = await native.service.execute(actor, native.command());
+  assert.ok(replay.ok && replay.value.replayed && replay.value.receipt.operationId === first.value.receipt.operationId);
+  assert.equal(nativeKickMarkers(native.core).length, 1, "one marker for one request");
+
+  // A live instance keeps its own kick path: the marker goes to ITS root and none to the core root.
+  const own = nativeFixture(t, WITH_OWN);
+  const started = await own.service.execute(actor, own.command());
+  assert.ok(started.ok);
+  const ownMarker = nativeMarker(join(own.stateBase, "wreckterra"), "wreckterra", "W9-T1");
+  assert.ok(existsSync(ownMarker), "the marker sits under the instance's own root");
+  assert.deepEqual(nativeKickMarkers(own.core), [], "none under the core root");
+  const carried = JSON.parse(readFileSync(ownMarker, "utf8")) as { origin?: string };
+  assert.equal(carried.origin, productBuildKickOrigin(own.productId, started.value.receipt.operationId), "the marker carries the origin this request minted");
+});
+
+// The daemon side: what the core daemon does with a marker it is offered.
+test("W1-T10799: the core daemon refuses a stray marker and holds one it cannot read", async (t) => {
+  // An unenrolled target is refused by the daemon when a marker arrives anyway.
+  const stray = nativeFixture(t);
+  writeFileSync(join(stray.checkout, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/something-else"] }));
+  const strayKick = { taskId: "W9-T1", origin: "product:p/op", repo: "wreckterra", requestedAt: new Date().toISOString() };
+  writeFileSync(nativeMarker(stray.core, "wreckterra", "W9-T1"), JSON.stringify(strayKick));
+  const strayRun = await stray.drive();
+  assert.deepEqual(stray.calls.runTask, []);
+  assert.deepEqual(strayRun.lines.filter((line) => line.step === "console.kick_refused").map((line) => line.extra.reason), ["target is not an enrolled managed repository"]);
+  assert.ok(!existsSync(nativeMarker(stray.core, "wreckterra", "W9-T1")));
+  // A malformed managed set or registry at the daemon is held, never refused and never dispatched.
+  const unreadable = nativeFixture(t);
+  writeFileSync(nativeMarker(unreadable.core, "wreckterra", "W9-T1"), JSON.stringify(strayKick));
+  writeFileSync(join(unreadable.checkout, ".remudero", "managed-repos.json"), "{not json");
+  const heldRun = await unreadable.drive();
+  assert.deepEqual(unreadable.calls.runTask, []);
+  assert.ok(heldRun.lines.some((line) => line.step === "target_job.unknown"));
+  assert.ok(existsSync(nativeMarker(unreadable.core, "wreckterra", "W9-T1")), "an unreadable source leaves the marker for a later tick");
+
+  // A live instance keeps its own kick path: the marker goes to ITS root, and the core daemon refuses a stray one.
+  const own = nativeFixture(t, WITH_OWN);
+  const request = await nativeStarted(own);
+  assert.ok(existsSync(nativeMarker(join(own.stateBase, "wreckterra"), "wreckterra", "W9-T1")), "the marker sits under the instance's own root");
+  assert.deepEqual(nativeKickMarkers(own.core), [], "none under the core root");
+  assert.deepEqual(daemonKickPort(join(own.stateBase, "wreckterra"), { repo: "wreckterra", isSelf: false }).pendingKicks().map((kick) => kick.origin), [request.origin]);
+  writeFileSync(nativeMarker(own.core, "wreckterra", "W9-T1"), JSON.stringify({ ...strayKick, origin: request.origin }));
+  const refusedStray = await own.drive();
+  assert.deepEqual(own.calls.runTask, [], "the core daemon never runs a target another instance drives");
+  assert.match(String(refusedStray.lines.find((line) => line.step === "console.kick_refused")?.extra.reason), /wreckterra drives this repository/);
+  assert.ok(existsSync(nativeMarker(join(own.stateBase, "wreckterra"), "wreckterra", "W9-T1")), "the instance's own marker is untouched");
+});
+
+test("W1-T10799: target admission never inherits Core credit or status for the same task", async (t) => {
+  const f = nativeFixture(t);
+  const target = buildBatchedGithub("craigoley", "wreckterra", { fetchAll: () => [], commitTrailerIndex: () => new Map() });
+  saveCreditStore(defaultCreditStorePath(f.ledgerPath), { "W9-T1": { trailer: {
+    source: "trailer", prNumber: 77, prUrl: "https://github.com/craigoley/remudero/pull/77", prState: "MERGED",
+  } } });
+  const coreControl = { ...loadPlan(f.targetPlanFile).tasks[0], id: "W8-T2", repo: "remudero", files: ["src/core.ts"] };
+  assert.equal(persistRunTaskCredit({ ledgerPath: f.ledgerPath }, coreControl,
+    { number: 78, url: "https://github.com/craigoley/remudero/pull/78" }, ["src/core.ts"]), "recorded",
+    "the unchanged default Core body writer remains usable");
+  const coreStore = readFileSync(defaultCreditStorePath(f.ledgerPath), "utf8");
+  const coreCache = JSON.stringify({ tasks: { "W9-T1": { taskId: "W9-T1", status: "merged", merged: true, source: "trailer" } } });
+  writeFileSync(join(f.core, "state", "status.json"), coreCache);
+  const scope = createNativeTargetRepository(f.core, "craigoley", "wreckterra", target);
+  const projected = scope.project(loadPlan(f.targetPlanFile));
+  assert.equal(projected.get("W9-T1")?.merged, false, "an unmerged target does not inherit Core's durable credit");
+  assert.equal(readFileSync(defaultCreditStorePath(f.ledgerPath), "utf8"), coreStore, "target projection preserves Core's credit store");
+  assert.equal(readFileSync(join(f.core, "state", "status.json"), "utf8"), coreCache, "target projection preserves Core's status cache");
+  const task = { ...loadPlan(f.targetPlanFile).tasks[0], files: ["src/game.ts"] };
+  const pr = { number: 9, url: "https://github.com/craigoley/wreckterra/pull/9" };
+  assert.equal(persistRunTaskCredit({ ledgerPath: f.ledgerPath, persistCredit: scope.persistCredit }, task, pr, undefined), "unreadable", "unreadable files grant no credit");
+  assert.equal(persistRunTaskCredit({ ledgerPath: f.ledgerPath, persistCredit: scope.persistCredit }, task, pr, []), "unreadable", "an empty file list grants no credit");
+  assert.equal(persistRunTaskCredit({ ledgerPath: f.ledgerPath, persistCredit: scope.persistCredit }, task, pr, ["plan/tasks.yaml"]), "plan-only", "a filing grants no implementation credit");
+  assert.equal(persistRunTaskCredit({ ledgerPath: f.ledgerPath, persistCredit: scope.persistCredit }, task, pr, ["src/game.ts"]), "recorded");
+  assert.equal(scope.project(loadPlan(f.targetPlanFile)).get("W9-T1")?.merged, true, "verified target credit remains usable");
+  assert.equal(readFileSync(defaultCreditStorePath(f.ledgerPath), "utf8"), coreStore, "target completion never persists credit into Core");
+});
+
+test("W1-T10799: a Core PR cannot clear the target repository's dispatch breaker", (t) => {
+  const f = nativeFixture(t);
+  for (let i = 0; i < DEFAULT_MAX_TASK_DISPATCHES; i++) appendLedger(f.ledgerPath, {
+    step: "run.start", run_id: `W9-T1-${Date.now() + i}`, task_id: "W9-T1", lane: "run-task", repo: "wreckterra",
+  });
+  let coreReads = 0, targetReads = 0;
+  const coreCache = createDispatchBreakerCache();
+  const core = {
+    isCircuitTripped: (id: string) => evaluateDispatchBreakerCorroboratedDetailed(f.ledgerPath, id, coreCache, () => {
+      coreReads++;
+      return [{ number: 77, url: "https://github.com/craigoley/remudero/pull/77", state: "OPEN", headRefName: "run-W9-T1-12345" }];
+    }).state === "tripped",
+  };
+  assert.equal(core.isCircuitTripped("W9-T1"), false, "the Core gateway corroborates its own same-ID PR");
+  coreReads = 0;
+  const target = buildBatchedGithub("craigoley", "wreckterra", { fetchAll: () => [], commitTrailerIndex: () => new Map() });
+  target.listOpenHeadBranches = () => { targetReads++; return []; };
+  const scope = createNativeTargetRepository(f.core, "craigoley", "wreckterra", target, core);
+  assert.equal(scope.governors.isCircuitTripped?.("W9-T1"), true, "only a target PR may corroborate the target's tripped breaker");
+  assert.equal(coreReads, 0, "target admission does not call Core's repository closure");
+  assert.equal(targetReads, 1, "the target gateway is queried for its own evidence");
+  assert.equal(scope.governors.breakerDetail?.("W9-T1").freshCount, DEFAULT_MAX_TASK_DISPATCHES, "the detail is the same target-only decision");
+  target.listOpenHeadBranches = () => null;
+  const unavailable = createNativeTargetRepository(f.core, "craigoley", "wreckterra", target);
+  assert.equal(unavailable.governors.isCircuitTripped?.("W9-T1"), true, "an unreadable target gateway keeps its breaker tripped");
+  target.listOpenHeadBranches = () => [{ number: 8, url: "https://github.com/craigoley/wreckterra/pull/8", state: "OPEN", headRefName: "run-W9-T1-12345" }];
+  const progressed = createNativeTargetRepository(f.core, "craigoley", "wreckterra", target);
+  assert.equal(progressed.governors.isCircuitTripped?.("W9-T1"), false, "a real target PR still corroborates its own progress");
+
+});
+
+test("W1-T10799: one managed target without a daemon reaches one bounded native job with target-local decisions and shared gates", async (t) => {
+  const f = nativeFixture(t);
+  let coreQueries = 0;
+  f.state.daemonDeps.isCircuitTripped = () => { coreQueries++; throw new Error("Core repository query leaked"); };
+  const request = await nativeStarted(f);
+  const outcome = await f.targetDrive(request.origin);
+  assert.equal(outcome.state, "ended");
+  assert.deepEqual(f.calls.runTask, ["W9-T1"], "the maintained target drain uses its own repository predicates");
+  assert.equal(coreQueries, 0);
+  const nativeRun = JSON.parse(readFileSync(f.ledgerPath, "utf8").trim().split("\n")
+    .find((line) => JSON.parse(line).step === "run.start")!);
+  const repositoryFor = nativeTargetRepositoryResolver(f.core, (owner, repo) => buildBatchedGithub(owner, repo, { fetchAll: () => [], commitTrailerIndex: () => new Map() }));
+  const own = repositoryFor("craigoley", "wreckterra");
+  assert.equal(repositoryFor("CraigOley", "Wreckterra"), own, "case aliases preserve the same target decision history");
+  assert.notEqual(repositoryFor("craigoley", "other-game"), own, "another target cannot share that history");
+  assert.equal(own.governors.isLifetimeCapExceeded?.("W9-T1"), false);
+  assert.equal(own.governors.breakerDetail?.("W9-T1").freshCount, 0, "the untagged native merged verdict resolves its own start");
+  appendLedger(f.ledgerPath, { step: "run.start", run_id: "W9-T1-1001", task_id: "W9-T1", lane: "run-task", repo: "wreckterra" });
+  own.governors.beginSelectionPass?.();
+  assert.equal(own.governors.breakerDetail?.("W9-T1").freshCount, 1, "positive control: an unresolved target run is counted");
+  appendLedger(f.ledgerPath, { step: "run.start", run_id: "W9-T1-999", task_id: "W9-T1", lane: "run-task", repo: "remudero" });
+  appendLedger(f.ledgerPath, { step: "pr.opened", run_id: "W9-T1-999", task_id: "W9-T1", lane: "run-task", pr_url: "https://github.com/craigoley/remudero/pull/99" });
+  own.governors.beginSelectionPass?.();
+  assert.equal(own.governors.breakerDetail?.("W9-T1").freshCount, 1, "Core's same-task native start and untagged PR cannot reset the target");
+  assert.equal(typeof nativeRun.run_id, "string");
+  const held = nativeFixture(t);
+  const heldRequest = await nativeStarted(held);
+  held.state.daemonDeps.checkQuietHours = () => ({ deferred: true, detail: "shared Core quiet-hours hold" });
+  const heldOutcome = await held.targetDrive(heldRequest.origin);
+  assert.equal(heldOutcome.state, "held");
+  assert.deepEqual(held.calls.runTask, [], "target-specific decisions still obey the shared host's admission");
+
 });

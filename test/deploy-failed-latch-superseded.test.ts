@@ -30,7 +30,7 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildStatusBoard, type StatusBoardDeps } from "../src/lib/status-board.js";
+import { buildStatusBoard, type StatusBoardDeps } from "#src/lib/status-board.js";
 
 const NOW_ISO = "2026-08-12T16:00:00.000Z";
 const NOW_MS = Date.parse(NOW_ISO);

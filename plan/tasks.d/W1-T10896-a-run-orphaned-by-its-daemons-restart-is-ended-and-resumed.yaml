@@ -1,0 +1,98 @@
+- id: W1-T10896
+  title: "A RUN ORPHANED BY ITS DAEMON'S IN-PLACE RESTART IS NEVER ENDED — it writes no verdict, the boot sweep keeps its provably dead same-host claim as an operator call, and its pushed branch blocks dispatch for 24 h before the task is rebuilt from scratch; the boot sweep releases a same-host claim that predates the PID namespace, writes one orphaned-by-restart verdict for the run, and resumes its exact pushed head as a checkpoint"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # Rule 19: releases dispatch locks at boot and re-pends a pushed head; spans dispatch-claim.ts, the daemon boot sweep and the checkpoint receipts in daemon.ts
+  band_meaning: blast-radius
+  origin: "wedge investigation for the operator session, 2026-10-28, after W1-T10838 (the P1 eastus cash key on the GPT-6.1 Terra path) sat with a finished commit and no PR for 10 h; read-only host ledger and git evidence"
+  plan_refs: [W1-T2784, W1-T3523, W1-T7747, W1-T9482, W1-T9819, W1-T10791, W1-T10838]
+  files:
+    - src/lib/dispatch-claim.ts
+    - src/cli/commands/daemon.ts
+    - src/lib/daemon.ts
+    - test/dispatch/a-run-orphaned-by-its-daemons-restart-is-ended-and-resumed.test.ts
+    - "src/cli/commands/run-task-verb.ts"
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-28 ~03:20Z, read-only, on the core host ledger (60 newest archives plus the live file;
+    positive control 191 run.start and 183 verdict rows read) and on origin, at origin/main b3eae3fcf.
+    - The remudero-daemon container (id 5a6a63c2ca53) restarted IN PLACE at 2026-10-27T18:06:35Z (docker
+      RestartCount 1, same hostname). Its PID namespace's init started 18:06:34.75Z (/proc/1/stat field 22 over
+      btime). No exit row precedes it; the cause is not determined here.
+    - Three runs were in flight and none has a terminal `verdict`: W1-T10823-1793118269707,
+      W1-T10838-1793121078700 and W1-T10856-1793123171010. They are the only no-verdict runs since
+      2026-10-26T12Z apart from three with live inflight locks.
+    - W1-T10838 had committed 4cefc7ba3 (implement.done 17:43:31Z), pushed run-W1-T10838-1793121078700
+      (scope_guard.overrun 17:58:35Z, pushed and flagged), and cleared its census strike at 18:06:32Z, 3 s before
+      the restart, so it was about to open its PR.
+    - Its claim refs/rmd-dispatch/W1-T10838 is anchored "rmd-dispatch claim 3161366@5a6a63c2ca53
+      2026-10-27T17:14:45.836Z". That is the SAME host, minted BEFORE the namespace booted, and /proc/3161366
+      is absent: exactly decideDispatchClaimRelease's dead-claimant arm (W1-T2784). Yet the boot sweep at
+      02:49:25Z wrote `dispatch.claim_released` with surface boot-sweep, arm operator, release false, "Cross-host
+      liveness is not decidable".
+    - WHY THE ARM NEVER RUNS. The boot sweep (src/cli/commands/daemon.ts) calls
+      releaseReplacedContainerClaims with only the replaced-container probe, which requires the anchor host to
+      DIFFER from the local host, so an in-place restart falls to the operator arm. The same-host liveness probe
+      (readNamespaceBootMs, pidIsPresent) is supplied only on runTask's `taken` arm in
+      src/cli/commands/run-task-verb.ts. Dispatch never reaches that arm for this task, because
+      stillBlockedByPushedRunBranch skips it first with `dispatch.skipped run-branch-already-pushed`.
+    - The pushed branch is released only by orphanRunBranchReleased (src/lib/drain.ts) once
+      ORPHAN_RUN_BRANCH_GRACE_MS (24 h) lapses, about 2026-10-28T17:11Z. The reaper's no-PR cache already holds
+      its sha (branch-reap-state.remudero.json). W1-T9819 (queued) replaces that grace with "the run's terminal
+      verdict exists", which this run will never have. The dispatch that follows starts a fresh run, so the
+      finished commit is rebuilt. W1-T10823 is held the same way by its claim alone. run.running_long reported
+      both (21:30Z, 22:03Z) as still running.
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d on origin/main and the plan changes of all 9 open PR heads at
+    03:20Z for boot-sweep, in-place restart, same-host claim, restart-orphan and orphaned-run-branch subjects.
+    W1-T10791 (queued) escalates HAND claims and rightly keeps the boot sweep's operator arm for cross-host
+    claims. W1-T3523 (merged) separates orphaned workers from worker strikes. W1-T9819 needs a verdict to exist.
+    None ends a run whose own daemon restarted under it.
+  design: |
+    1. SAME-HOST ARM AT BOOT. The boot sweep supplies the same-host liveness probe runTask already builds
+       (local hostname, the namespace init start time, pid presence) so decideDispatchClaimRelease's
+       dead-claimant arm can release a claim THIS host minted before its namespace booted whose pid is absent.
+       It keeps the arm's loud reason. A cross-host claim, an unparseable anchor or an unreadable /proc still
+       falls to the operator arm, unchanged; that is W1-T10791's posture.
+    2. ONE TERMINAL VERDICT. For each claim released by that arm whose run id (the `run-<taskId>-<epoch>`
+       naming, or the claim's mint row) has a run.start and no terminal verdict, write exactly one `verdict` row
+       for that run id with reason `orphaned-by-restart`, naming the anchor and the namespace boot it was judged
+       against. It is infrastructure in W1-T3523's sense: it is never a worker strike and never counts toward the
+       dispatch circuit breaker. A second boot never writes a second one.
+    3. RESUME THE EXACT HEAD. When the run's branch exists on origin with no PR, the verdict row carries its
+       branch and the ls-remote head sha, and `orphaned-by-restart` joins CHECKPOINT_HANDOFF_REASONS
+       (src/lib/daemon.ts), so pendingWorkerBoundaryHandoffs treats that exact head as resumable, as it does a
+       freshness yield. The next dispatch restores the branch and continues at the pre-open phase, where every
+       gate still runs, instead of skipping for a day and rebuilding. With no provable head, the verdict carries
+       no receipt and the existing release paths decide.
+    No new time constant: release is decided by namespace-boot and pid evidence alone.
+  acceptance:
+    - claim: "a same-host claim minted before an in-place restart, whose pid is absent, is released by the boot sweep"
+      proof: 'grep: test("W1-T10896: a same-host claim minted before an in-place restart is released at boot" in test/dispatch/a-run-orphaned-by-its-daemons-restart-is-ended-and-resumed.test.ts'
+    - claim: "a claim minted on another host is still left to the operator at boot, unreleased"
+      proof: 'grep: test("W1-T10896: a cross-host claim is still left to the operator at boot" in test/dispatch/a-run-orphaned-by-its-daemons-restart-is-ended-and-resumed.test.ts'
+    - claim: "the orphaned run gets exactly one orphaned-by-restart verdict, and a second boot writes none"
+      proof: 'grep: test("W1-T10896: a run orphaned by the restart gets one orphaned-by-restart verdict" in test/dispatch/a-run-orphaned-by-its-daemons-restart-is-ended-and-resumed.test.ts'
+    - claim: "the orphaned run's exact pushed head is a resumable checkpoint, so dispatch resumes it instead of skipping run-branch-already-pushed"
+      proof: 'grep: test("W1-T10896: the orphaned run pushed head resumes instead of blocking dispatch" in test/dispatch/a-run-orphaned-by-its-daemons-restart-is-ended-and-resumed.test.ts'
+    - claim: "an orphaned-by-restart verdict is never a worker strike"
+      proof: 'grep: test("W1-T10896: an orphaned-by-restart verdict is not a worker strike" in test/dispatch/a-run-orphaned-by-its-daemons-restart-is-ended-and-resumed.test.ts'
+    - claim: "orphaned-by-restart is a checkpoint handoff reason"
+      proof: 'grep: orphaned-by-restart in src/lib/daemon.ts'
+  falsifier: |
+    At base the boot sweep supplies only the replaced-container probe, so the same-host case returns the
+    operator arm and the first case fails; no verdict is written and the branch still blocks, so the third and
+    fourth cases fail.
+    - Release every same-host claim without the namespace-boot comparison: a claim minted AFTER the boot (a live
+      run of this namespace) is released and the first case's live-claim control fails.
+    - Release cross-host claims too: the second case fails.
+    - Write the verdict on every boot: the "second boot writes none" assertion fails.
+    - Count the verdict as a worker failure: the strike case fails.
+    - Write the verdict without the head receipt: the resume case still reads run-branch-already-pushed.
+    GUARD that held at base and must still hold: test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts
+    (the runTask taken-arm release) passes unchanged.

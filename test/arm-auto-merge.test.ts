@@ -19,9 +19,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import {
   armAutoMerge,
   armAutoMergeAtOpen,
@@ -33,7 +33,7 @@ import {
   readHeadShaRest,
   stackPrerequisiteFromRest,
   type ArmDeps,
-} from "../src/lib/arm-auto-merge.js";
+} from "#src/lib/arm-auto-merge.js";
 
 const HEAD = "5596ab04802a916c740858e75bc950774d38c504";
 const PR = "https://github.com/craigoley/remudero/pull/2887";

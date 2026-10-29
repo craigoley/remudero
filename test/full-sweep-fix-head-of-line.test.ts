@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { GhPaceFloorStandDownError } from "../src/lib/github-transport.js";
+import { GhPaceFloorStandDownError } from "#src/lib/github-transport.js";
 import {
   DEFAULT_SWEEP_POLICY,
   drainDetachedSweepActions,
@@ -16,8 +16,8 @@ import {
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 const NOW = Date.parse("2026-09-08T18:00:00Z");
 const RECENT = "2026-09-08T17:00:00Z";

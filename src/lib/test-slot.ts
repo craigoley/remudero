@@ -1831,7 +1831,9 @@ export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryB
   const waited = (): number => clock.now() - startedAt;
   const host = opts.hostname ?? hostname, bootId = opts.bootId ?? (() => readBootId());
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive, pidNamespace = opts.pidNamespace ?? (() => readPidNamespace());
-  const headroomOf = opts.memoryHeadroom ?? readMemoryHeadroom;
+  const headroomOf = opts.memoryHeadroom ?? (() => readMemoryHeadroom(undefined, {
+    platform: opts.platform, vmStat: opts.vmStat ?? readVmStat,
+  }));
   const waitBoundMs = opts.waitBoundMs ?? TEST_SLOT_WAIT_BOUND_MS, pollMs = opts.pollMs ?? TEST_SLOT_POLL_MS;
   const mib = (bytes: number): number => Math.round(bytes / 1024 ** 2);
   const viaSlot = (why: string): StaticAdmission => {

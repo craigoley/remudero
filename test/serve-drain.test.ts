@@ -9,9 +9,9 @@ import cluster, { type Worker } from "node:cluster";
 import { Agent, createServer, request, type IncomingHttpHeaders, type Server } from "node:http";
 import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
-import { createServeDrain, EXIT_WATCHDOG_SCRIPT, exitWithin } from "../src/lib/serve-drain.js";
-import { createService, type SseRoute, type SseSend } from "../src/lib/service.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { createServeDrain, EXIT_WATCHDOG_SCRIPT, exitWithin } from "#src/lib/serve-drain.js";
+import { createService, type SseRoute, type SseSend } from "#src/lib/service.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const TOKENS = { read: "read-token", write: "write-token" };

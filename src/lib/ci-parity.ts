@@ -583,6 +583,54 @@ export function shellOut(
   return { ok, detail: `FAIL — ${label}\n${body}` };
 }
 
+/** W1-T8379 — {@link shellOut} for ONE `node --test` run (`args` begins `--test`), JUDGED the way the CI runners
+ *  are (scripts/pure-test-pool.mjs): a child that exits 0 passes only when every file its argv names reached its
+ *  own summary. A file that calls `process.exit(0)` part-way leaves node exiting 0 with `# tests` still nonzero,
+ *  so exit status alone passed it. A nonzero exit keeps shellOut's own reading; the judge's line rides only on
+ *  the exit-0 path it overrules, naming the unreported file. */
+export function judgedTestShellOut(
+  spawn: PreflightSpawn,
+  label: string,
+  args: string[],
+  opts: { cwd: string; env?: NodeJS.ProcessEnv },
+): CiParityLeafResult {
+  const judged = prepareJudgedTestRun(args, opts.cwd, "node --test");
+  try {
+    const r = shellOut(spawn, label, process.execPath, judged.args, { ...opts, env: { ...opts.env, ...judged.env } });
+    if (!r.ok) return r;
+    const verdict = judged.judge(0);
+    return verdict.complete ? r : { ok: false, detail: `FAIL — ${label}\n${verdict.line}` };
+  } finally {
+    judged.cleanup();
+  }
+}
+
+/** One judged `node --test` run, set up: spawn `args` with `env` merged in, then `judge(status)` once it exits. */
+export interface JudgedTestRun {
+  args: string[];
+  env: Record<string, string>;
+  judge(status: number): { complete: boolean; line: string };
+  cleanup(): void;
+}
+
+/** W1-T8379 — `args` (a `node --test` argv run in `cwd`) with scripts/pure-test-pool.mjs's judge inserted. The
+ *  files it must hear finish are the ones the argv names; `judge` reads the tally they left (`complete` false, and
+ *  `line` naming each UNREPORTED FILE, for a run that stopped before a file's summary) and removes it. */
+export function prepareJudgedTestRun(args: readonly string[], cwd: string, role: string): JudgedTestRun {
+  const judge = loadTestJudge();
+  const files = judge.testFilesInArgv(args, cwd);
+  const judged = judge.prepareJudgedRun();
+  return {
+    args: judge.judgedNodeTestArgs(args, judged.args),
+    env: judged.env,
+    judge: (status) => {
+      const { verdict, line } = judge.closeJudgedRun(judged, files, { status, root: cwd, role, prefix: "test-judge", log: () => {} });
+      return { complete: verdict.complete, line };
+    },
+    cleanup: judged.cleanup,
+  };
+}
+
 /** The full-suite leaf. Production takes the contained, hard-bounded route; injected spawns are
  * deterministic test seams and retain their existing synchronous command/argv contract. */
 export function boundedSuiteLeaf(
@@ -959,11 +1007,22 @@ function coverageShardArgs(shardRoot: string, shard: number, testFiles: readonly
   ], judgedArgs), concurrency);
 }
 
-// The slice of scripts/pure-test-pool.mjs (the test judge) a coverage shard uses.
+/** The `containment-probe:test` leaf: test/containment.test.ts, judged (W1-T8379) — exit 0 alone never passes it. */
+export function containmentProbeTestLeaf(repoRoot: string, spawn: PreflightSpawn = defaultPreflightSpawn): CiParityLeafResult {
+  return judgedTestShellOut(
+    spawn,
+    "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/containment.test.ts",
+    ["--test", "--test-reporter=tap", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, join(repoRoot, "test", "containment.test.ts")],
+    { cwd: repoRoot },
+  );
+}
+
+// The slice of scripts/pure-test-pool.mjs (the test judge) a coverage shard and a judged leaf use.
 interface JudgedRun { args: string[]; env: Record<string, string>; cleanup: () => void }
 interface TestJudge {
-  prepareJudgedRun(opts: { makeDir: () => string }): JudgedRun;
+  prepareJudgedRun(opts?: { makeDir?: () => string }): JudgedRun;
   judgedNodeTestArgs(args: readonly string[], judgedArgs: readonly string[]): string[];
+  testFilesInArgv(args: readonly string[], cwd: string): string[];
   closeJudgedRun(judged: JudgedRun, files: readonly string[], opts: { status: number; root: string; role: string; prefix: string; log: (line: string) => void }):
     { verdict: { complete: boolean }; line: string };
 }
@@ -2028,15 +2087,7 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
         ["--import", "tsx", join(repoRoot, ".github", "scripts", "containment-diff-trigger.ts"), changedFilesListPath(repoRoot, spawn)],
         { cwd: repoRoot },
         () => [
-          runStep("containment-probe:test", () =>
-            shellOut(
-              spawn,
-              "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/containment.test.ts",
-              process.execPath,
-              ["--test", "--test-reporter=tap", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, join(repoRoot, "test", "containment.test.ts")],
-              { cwd: repoRoot },
-            ),
-          ),
+          runStep("containment-probe:test", () => containmentProbeTestLeaf(repoRoot, spawn)),
         ],
       ),
   },

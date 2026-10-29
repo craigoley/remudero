@@ -4,21 +4,21 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { DispatchClaimReserver } from "../src/lib/dispatch-claim.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { GitHub } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { DispatchClaimReserver } from "#src/lib/dispatch-claim.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { GitHub } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
 // A NAMESPACE import, read inside each test: at a base without this task's exports the file still
 // LOADS and every test fails on its own assertion, so the proof discriminates instead of erroring.
-import * as runTaskModule from "../src/run-task.js";
-import { ciGateState, daemonCommand, runTask, waitForCiGreen, type PollDeps } from "../src/run-task.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import * as runTaskModule from "#src/run-task.js";
+import { ciGateState, daemonCommand, runTask, waitForCiGreen, type PollDeps } from "#src/run-task.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 /**
  * W1-T5345 — A LANE IS FREE ONCE ITS PULL REQUEST IS OPEN.

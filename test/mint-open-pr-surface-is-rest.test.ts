@@ -28,10 +28,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { nextTaskIdCommand, openPrMintTexts } from "../src/run-task.js";
-import { openPrsRestArgs, type GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { type RemoteRefReserver, type RemoteReserveOutcome } from "../src/lib/task-id-reservation.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { nextTaskIdCommand, openPrMintTexts } from "#src/run-task.js";
+import { openPrsRestArgs, type GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { type RemoteRefReserver, type RemoteReserveOutcome } from "#src/lib/task-id-reservation.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T4473: every default-plan mint below reads THIS fixture's plan, never the checkout's — a
 // checkout whose plan is behind origin's would otherwise degrade the mint and flip its exit code.

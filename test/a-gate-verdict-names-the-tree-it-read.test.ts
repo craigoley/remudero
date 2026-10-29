@@ -15,6 +15,7 @@ import {
 } from "../src/lib/ci-parity.js";
 import { preflightCommand } from "../src/run-task.js";
 import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 const BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
 
@@ -48,7 +49,8 @@ function ciParitySpawn(behind: { kind: "count"; value: number } | { kind: "unkno
     }
     const coverage = coverageParitySpawnResult(file, args, opts);
     if (coverage) return coverage;
-    return { status: 0, stdout: "", stderr: "" };
+    // A judged `node --test` leaf (W1-T8379) passes only on a tally: this fake stands for a finished run.
+    return { ...finishJudgedRun(args, opts), stdout: "", stderr: "" };
   };
 }
 

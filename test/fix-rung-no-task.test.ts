@@ -29,8 +29,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { deriveDisposition, DEFAULT_SWEEP_POLICY, type LiveStateResult, type OpenPrView } from "../src/lib/sweep.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { deriveDisposition, DEFAULT_SWEEP_POLICY, type LiveStateResult, type OpenPrView } from "#src/lib/sweep.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 import {
   decideFixRebase,
   escalationTaskIdFor,
@@ -48,13 +48,13 @@ import {
   runFixRebase,
   runFixRung,
   type FixRungOutcome,
-} from "./helpers/run-task-test.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+} from "#test/helpers/run-task-test.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { CriterionVerdict, ReviewVerdict } from "#src/lib/review.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const NOW = Date.parse("2026-08-02T12:00:00.000Z");
 
@@ -249,8 +249,8 @@ test("a PLAN-TASK PR is still strict — the creditability gate is unchanged for
 test("the push itself can never force — the helper takes no force flag at all", async () => {
   // TRAP 1's other half, asserted on the real argv rather than on a comment: if the branch moved
   // under the rung, a plain push is REJECTED as non-fast-forward and the fix site swallows it.
-  const { gitPushRunBranch } = await import("../src/lib/git-push.js");
-  const { withLiveWritesAllowed } = await import("../src/lib/live-write-guard.js");
+  const { gitPushRunBranch } = await import("#src/lib/git-push.js");
+  const { withLiveWritesAllowed } = await import("#src/lib/live-write-guard.js");
   let argv: string[] = [];
   withLiveWritesAllowed(() => gitPushRunBranch("/tmp/nowhere", { exec: (_f, a) => void (argv = a) }));
   assert.deepEqual(argv, ["-C", "/tmp/nowhere", "push", "origin", "HEAD"]);
@@ -268,8 +268,8 @@ test("dispatchFix REFUSES a synthetic PR whose head claims another task, before 
   const { mkdtempSync, writeFileSync, rmSync, mkdirSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const { buildSweepEffects } = await import("../src/run-task.js");
-  const { DEFAULT_SWEEP_POLICY: POLICY } = await import("../src/lib/sweep.js");
+  const { buildSweepEffects } = await import("#src/run-task.js");
+  const { DEFAULT_SWEEP_POLICY: POLICY } = await import("#src/lib/sweep.js");
 
   const root = mkdtempSync(join(tmpdir(), "fy-refuse-"));
   const bin = mkdtempSync(join(tmpdir(), "fy-gh-"));
@@ -384,7 +384,7 @@ test("dispatchFix sends the production RETRO trailer/head shape to a worker unde
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   let spawnCalls = 0;
   try {
-    const effects = (await import("../src/run-task.js")).buildSweepEffects({
+    const effects = (await import("#src/run-task.js")).buildSweepEffects({
       // W1-T4073: the fake head is no real commit; an empty head contract leaves the task as resolved.
       resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
       owner: owner,

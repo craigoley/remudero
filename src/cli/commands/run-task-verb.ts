@@ -1081,6 +1081,8 @@ export interface RunTaskContext {
   github: GitHub;
   isMerged: (task: Task) => boolean;
   ledgerPath: string;
+  /** Resolved repository credit writer follows this same run into its separate body function. */
+  persistCredit?: (task: Task, pr: { number: number; url: string }, files: readonly string[] | undefined) => ReturnType<typeof persistVerifiedCredit>;
   log: (step: string, extra?: Record<string, unknown>) => void;
   openTaskIds: ReadonlySet<string>;
   opts: RunTaskBodyOptions;
@@ -1100,6 +1102,18 @@ export interface RunTaskContext {
   workerStateSensor: WorkerStateSensor;
   /** Swaps the whole plan for one of this run's task after the body's last plan read, before the first agent wait. */
   releasePlan?: () => void;
+}
+
+/** Persist a verified implementation credit in the repository state carried by this native run. */
+export function persistRunTaskCredit(
+  ctx: Pick<RunTaskContext, "ledgerPath" | "persistCredit">,
+  task: Task,
+  pr: { number: number; url: string },
+  files: readonly string[] | undefined,
+): ReturnType<typeof persistVerifiedCredit> {
+  return ctx.persistCredit === undefined
+    ? persistVerifiedCredit(ctx.ledgerPath, task, pr, files)
+    : ctx.persistCredit(task, pr, files);
 }
 
 export type ManagedCheckoutRefresh = { release: () => void } & (
@@ -4158,6 +4172,13 @@ export async function runTask(
   opts: ProbeAdmissionOptions & {
     planPath?: string;
     config?: Config;
+    /** Persist a caller's exact native run identity before any asynchronous work or spend. */
+    onRunCreated?: (runId: string) => void;
+    /** A bounded target keeps its repository projection and verified credit in the same namespace. */
+    repositoryState?: {
+      project: (plan: Plan) => Map<string, StatusProjection>;
+      persistCredit: (task: Task, pr: { number: number; url: string }, files: readonly string[] | undefined) => ReturnType<typeof persistVerifiedCredit>;
+    };
     /** W1-T7096: the drain and the CLI ask the production LLM progress judge in the fix rung. */
     productionProgressJudge?: boolean;
     preopenGate?: RunTaskBodyOptions["preopenGate"];
@@ -4618,6 +4639,7 @@ export async function runTask(
   // W1-T2528: not routed through `nextLaneEpochMs` — `taskId` is already the per-rung
   // component, and same-taskId reruns are refused earlier by the dispatch claim/inflight check.
   const runId = `${taskId}-${Date.now()}`;
+  opts.onRunCreated?.(runId);
   const log = benchmarkRunLedgerLogger((step, fields) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...fields }),
     opts.benchmarkStackEvidence ?? workerBoundaryStack);
@@ -4773,7 +4795,7 @@ export async function runTask(
   // owner/repo, so lanes 2..N hit a warm `knownBoardPrs` index (a `mode: "delta"` fetch)
   // instead of each paying `mode: "full"`. Absent it, this is byte-identical to before.
   const github = opts.github ?? opts.githubFor?.(owner, task.repo) ?? createDaemonGatewayFactory(config.root, log)(owner, task.repo);
-  const projection = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
+  const projection = opts.repositoryState?.project(plan) ?? projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
   // W1-T322/W1-T367: computed once per run off the SAME plan+projection already built above —
   // the SHIPS-UNWIRED marker verification set both `runReviewFn` and `runFixRung` below consult.
@@ -4995,6 +5017,7 @@ export async function runTask(
       github,
       isMerged,
       ledgerPath,
+      persistCredit: opts.repositoryState?.persistCredit,
       log: runLog,
       openTaskIds,
       opts,
@@ -6905,8 +6928,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       if (workerYield) return workerYield;
       reprovisionInstallIfDrifted("preopen_gate");
       const gate = await preopenGate(worktreePath);
+      const { failed_detail: failedDetail, ...gateFields } = preopenGateLedgerFields(gate);
       log(PREOPEN_GATE_STEP, { result: gate.kind, failed: gate.kind === "fail" ? gate.failedSteps : [], duration_ms: gate.durationMs,
-        ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}), ...preopenGateLedgerFields(gate) });
+        ...(failedDetail ? { failed_detail: failedDetail } : {}),
+        ...(gate.kind === "unmeasured" ? { reason: gate.reason } : {}), ...gateFields });
       updatePreopenGateAlert({ stateDir: dirname(ledgerPath), readRows: () => readLedgerLines(ledgerPath), log });
       if (gate.kind === "fail") {
         const preopenYield = await yieldAtWorkerBoundary("preopen_gate", "implementing");
@@ -6936,9 +6961,11 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         const gateFail = failOnWorkerError(impl, "implement.preopen_continued");
         if (gateFail) return gateFail;
         const repairedGate = await preopenGate(worktreePath);
+        const { failed_detail: repairedFailedDetail, ...repairedGateFields } = preopenGateLedgerFields(repairedGate);
         log(PREOPEN_GATE_STEP, { after_repair: true, result: repairedGate.kind,
           failed: repairedGate.kind === "fail" ? repairedGate.failedSteps : [], duration_ms: repairedGate.durationMs,
-          ...(repairedGate.kind === "unmeasured" ? { reason: repairedGate.reason } : {}), ...preopenGateLedgerFields(repairedGate) });
+          ...(repairedFailedDetail ? { failed_detail: repairedFailedDetail } : {}),
+          ...(repairedGate.kind === "unmeasured" ? { reason: repairedGate.reason } : {}), ...repairedGateFields });
         updatePreopenGateAlert({ stateDir: dirname(ledgerPath), readRows: () => readLedgerLines(ledgerPath), log });
         // W1-T10752: a run never opens a PR over an unresolved merge. The worktree stays as evidence and the restored head is kept.
         const stillConflicted = reconcilePaths.length === 0 ? [] : unresolvedMainConflicts(worktreePath, reconcilePaths);
@@ -7136,7 +7163,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       if (claim && resolved) {
         const v = alreadySatisfiedVerdict(impl, costUsd, "implement", resolved);
         // Make the credit the dispatcher's too, or its next projection re-dispatches the task.
-        const credit = persistVerifiedCredit(ledgerPath, task, resolved, github.changedFiles?.(resolved.url));
+        const credit = persistRunTaskCredit(ctx, task, resolved, github.changedFiles?.(resolved.url));
         log("already_satisfied.credit_persisted", { pr_number: resolved.number, outcome: credit });
         try {
           worktreeRemove(repoDir, worktreePath);
@@ -7419,6 +7446,17 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         const keptHead = keptHeadOfFailedRun();
         const changedFiles = refusedBranchChangedFiles(worktreePath);
         const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha, changedFiles, declaredFiles: task.files }, log, { issues, ledgerPath, runId });
+        // W1-T10919: the runner's scope refused this, so hold the task (W1-T3959's own record) until main moves that
+        // scope or the task is amended; a rebuild on the same tree would be refused identically.
+        if (err.refusalClass === "proof-collected-nothing" && err.runnerConfigDigest !== undefined) {
+          writePriorRefusal(join(config.root, "state"), taskId, {
+            verdict: `proof-collected-nothing: ${boundedVerdictReason(err.message)}`,
+            attempts: 1,
+            escalated: true,
+            preDispatchContractRevision: preDispatchContractRevision(task),
+            runnerConfigDigest: err.runnerConfigDigest,
+          });
+        }
         reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
         log("verdict", {
           verdict: "failed",
@@ -7430,6 +7468,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           refusal_class: err.refusalClass,
           // W1-T10742: the strike classifiers read this as the harness's outcome, never the worker's miss.
           ...(err.inconclusiveProof ? { proof_exec: "exec_error" } : {}),
+          ...(err.runnerConfigDigest !== undefined ? { runner_config_digest: err.runnerConfigDigest } : {}),
           ...(issueUrl ? { issue_url: issueUrl } : {}),
           cost_usd: costUsd,
           billing_mode: billingMode(impl.childEnvKeys),
@@ -8174,7 +8213,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       ? "shadow-instance-refused"
       : wipeTestArmDecision.armed
         ? await armAutoMergeAtOpenAsync(prUrl,
-          selectedModeQualification === undefined ? undefined : realArmDepsAsync(() => config, selectedModeQualification), irreversible)
+          realArmDepsAsync(() => config, selectedModeQualification), irreversible)
         : "no-merge-boundary-refused", prUrl);
     // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
     // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped

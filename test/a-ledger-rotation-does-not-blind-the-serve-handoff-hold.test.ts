@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { gzipSync } from "node:zlib";
-import { realLedgerFs, type LedgerGrepFsDeps } from "../src/lib/ledger-union.js";
+import { realLedgerFs, type LedgerGrepFsDeps } from "#src/lib/ledger-union.js";
 import {
   SERVE_HANDOFF_ROTATION_WINDOW_MS,
   realServePolicyDeps,
   runServePolicyCycle,
   serveHandoffInProgressFromLedger,
-} from "../src/lib/serve-policy-convergence.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/serve-policy-convergence.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // W1-T9509 — 2026-10-14: every serve-policy tick from 16:03Z held serve's replace on its handoff rows, until the ledger
 // rotated at 17:00:22Z; the tick at 17:02:56Z read the fresh live ledger.ndjson alone, found no handoff row, and replaced.

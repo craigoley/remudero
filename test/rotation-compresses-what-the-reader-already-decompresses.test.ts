@@ -15,8 +15,8 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { MAX_RETAINED_LINES_PER_STEP, appendLedger, rotateLedger } from "../src/lib/ledger.js";
-import { resolveLedgerUnion } from "../src/lib/ledger-grep.js";
+import { MAX_RETAINED_LINES_PER_STEP, appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { resolveLedgerUnion } from "#src/lib/ledger-grep.js";
 
 function tmpDir(): string {
   return mkdtempSync(join(tmpdir(), "rmd-ledger-rotation-compression-"));

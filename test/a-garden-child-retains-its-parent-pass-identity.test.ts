@@ -3,11 +3,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { boundedGardenPassSpawn, childGardenPassSpawn, startGardenOffLoop } from "../src/lib/garden-registry.js";
-import type { GardenerRuntimeEvent } from "../src/lib/gardener-runtime.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { LIVE_LEDGER_DENY_ROOT_ENV } from "../src/lib/live-write-guard.js";
-import * as origin from "../src/lib/worker-containment.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, startGardenOffLoop } from "#src/lib/garden-registry.js";
+import type { GardenerRuntimeEvent } from "#src/lib/gardener-runtime.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { LIVE_LEDGER_DENY_ROOT_ENV } from "#src/lib/live-write-guard.js";
+import * as origin from "#src/lib/worker-containment.js";
 
 const passId = "a5142db1-3dab-4f50-8f8f-a25cfb8e8db1";
 // Namespace import lets the canonical executor load this test on the old module:

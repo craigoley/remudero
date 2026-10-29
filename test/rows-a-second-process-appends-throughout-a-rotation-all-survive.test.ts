@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { rotateLedger } from "../src/lib/ledger.js";
+import { rotateLedger } from "#src/lib/ledger.js";
 
 // W1-T5514 — the concurrency half. A real second OS process appends numbered rows in a tight
 // loop through the real `appendLedger` (open by NAME with O_APPEND, one writeSync, close), while

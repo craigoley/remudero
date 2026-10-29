@@ -24,9 +24,9 @@ import {
   defaultCreditOverridePath,
   deriveStatus,
   loadCreditOverrides,
-} from "../src/lib/status.js";
-import type { CreditStore, GitHub } from "../src/lib/status.js";
-import type { Task } from "../src/lib/plan.js";
+} from "#src/lib/status.js";
+import type { CreditStore, GitHub } from "#src/lib/status.js";
+import type { Task } from "#src/lib/plan.js";
 
 const task = (id: string): Task =>
   ({ id, title: id, repo: "remudero", type: "implement", depends_on: [], status: "queued" }) as unknown as Task;

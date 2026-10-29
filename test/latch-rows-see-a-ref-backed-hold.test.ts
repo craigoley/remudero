@@ -26,8 +26,8 @@ import { test } from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildStatusBoard, type LatchesSection, type StatusBoardDeps } from "../src/lib/status-board.js";
-import { sharedPauseRef } from "../src/lib/fleet-control.js";
+import { buildStatusBoard, type LatchesSection, type StatusBoardDeps } from "#src/lib/status-board.js";
+import { sharedPauseRef } from "#src/lib/fleet-control.js";
 
 const NOW_ISO = "2026-08-25T12:00:00.000Z";
 const NOW_MS = Date.parse(NOW_ISO);

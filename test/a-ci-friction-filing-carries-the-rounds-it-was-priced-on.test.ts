@@ -11,8 +11,8 @@ import {
   remedyRoundsOf,
   testRunnerFailures,
   type CiFrictionDraft,
-} from "../src/lib/ci-friction-gardener.js";
-import type { LedgerRecord } from "../src/lib/retro.js";
+} from "#src/lib/ci-friction-gardener.js";
+import type { LedgerRecord } from "#src/lib/retro.js";
 
 const TS = "2026-10-13T00:00:00.000Z";
 const PR_URL = "https://github.com/craigoley/remudero/pull/4242";

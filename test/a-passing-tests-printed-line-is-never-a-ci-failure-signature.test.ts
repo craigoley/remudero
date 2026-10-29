@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import * as gardener from "../src/lib/ci-friction-gardener.js";
+import * as gardener from "#src/lib/ci-friction-gardener.js";
 
 // #10392 (2026-10-09): fix rounds were handed the fixture lines a PASSING test prints on purpose as
 // their failure signature, answered FLAKE, and spent a strike. A test runner's log names its failure

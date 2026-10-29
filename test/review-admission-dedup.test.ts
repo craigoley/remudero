@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweepLightPass,
@@ -11,8 +11,8 @@ import {
   type OpenPrView,
   type ReviewAdmissionOutcomes,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 const NOW = Date.parse("2026-09-01T20:00:00Z");
 const CLOSED_LIFECYCLE_REFUSAL_REASON =

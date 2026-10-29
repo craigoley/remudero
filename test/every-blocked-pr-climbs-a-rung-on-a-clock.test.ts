@@ -3,18 +3,18 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
-import type { Plan } from "../src/lib/plan.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { Plan } from "#src/lib/plan.js";
 import {
   BLOCKER_SLO_MS, blockerFields, decideSloRung, PR_BLOCKER_OWNERS, PR_BLOCKERS, priorBlockersFromLedger,
   SLO_CLIMBING_BLOCKERS, type PrBlocker, type SloRungInput, type SloRungTaken,
-} from "../src/lib/pr-blocker.js";
+} from "#src/lib/pr-blocker.js";
 import {
   buildSweepEffects, DEFAULT_SWEEP_POLICY, DISPOSITION_RULES, postReviewFailureHistoryDisposition,
   runSweep, type OpenPrView, type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#test/helpers/sweep-test.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const MIN = 60_000;
 const NOW = Date.parse("2026-10-04T12:00:00.000Z");

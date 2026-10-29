@@ -16,11 +16,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { planPrPreflight, planPrPreflightAsync } from "../src/lib/plan-pr-emitter.js";
-import { runSuiteShifted } from "../src/lib/gate-gardener.js";
-import { runOpenWeightCheck, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { planPrPreflight, planPrPreflightAsync } from "#src/lib/plan-pr-emitter.js";
+import { runSuiteShifted } from "#src/lib/gate-gardener.js";
+import { runOpenWeightCheck, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const UNREPORTED = "test-judge: UNREPORTED FILE ";

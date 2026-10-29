@@ -19,11 +19,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import * as gitPush from "../src/lib/git-push.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { worktreeAdd } from "../src/lib/worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import * as gitPush from "#src/lib/git-push.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { worktreeAdd } from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 const { gitPushRunBranch, gitPushRunBranchAsync, PushFailedError } = gitPush;
 const REPO_HOOK = join(dirname(fileURLToPath(import.meta.url)), "..", "hooks", "pre-push");

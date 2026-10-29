@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { evaluateHost, runHostResourcePass, sampleFromPayload, samplesPath } from "../src/lib/host-resource-gardener.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { evaluateHost, runHostResourcePass, sampleFromPayload, samplesPath } from "#src/lib/host-resource-gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const HOUR = 3_600_000;
 const NOW = Date.parse("2026-10-04T12:00:00Z");

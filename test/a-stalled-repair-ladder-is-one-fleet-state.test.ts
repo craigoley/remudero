@@ -10,13 +10,13 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
-import { boundConsoleReadRoute, buildServeServer, withRepairLadder, type ServeDeps } from "../src/lib/serve.js";
-import { RouteResponseBuffer } from "../src/lib/console-snapshot-cache.js";
-import type { Route } from "../src/lib/service.js";
-import { repairLadderCommand, trackRepairLadder } from "../src/lib/sweep.js";
-import type { SpawnWorkerArgs } from "../src/lib/worker.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import { boundConsoleReadRoute, buildServeServer, withRepairLadder, type ServeDeps } from "#src/lib/serve.js";
+import { RouteResponseBuffer } from "#src/lib/console-snapshot-cache.js";
+import type { Route } from "#src/lib/service.js";
+import { repairLadderCommand, trackRepairLadder } from "#src/lib/sweep.js";
+import type { SpawnWorkerArgs } from "#src/lib/worker.js";
 import {
   ProviderCapacityBlockedError,
   claudeCapacityFromUsage,
@@ -28,7 +28,7 @@ import {
   repairLadderStatePath,
   selectCodexModel,
   type ProviderCapacity,
-} from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
 
 const READ_TOKEN = "repair-ladder-read-token";
 
@@ -320,7 +320,7 @@ test("the ladder's unhealthy arms stay loud: an unreadable record, a failed clea
 
 test("rmd repair-ladder is registered and reads the host config it is run against", async () => {
   // The CONSUMING CLIENT is the CLI verb, so this goes through the real HANDLERS entry.
-  const { HANDLERS } = await import("../src/run-task.js");
+  const { HANDLERS } = await import("#src/run-task.js");
   const home = mkdtempSync(join(tmpdir(), "rmd-repair-ladder-home-"));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });

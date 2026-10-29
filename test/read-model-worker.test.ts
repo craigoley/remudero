@@ -7,10 +7,11 @@ import { join } from "node:path";
 import { test, mock } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
-import type { Clock } from "../src/lib/clock.js";
-import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
-import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "../src/lib/ledger-projector.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
+import { pathToFileURL } from "node:url";
+import type { Clock } from "#src/lib/clock.js";
+import { daemonInstanceRegistryPath } from "#src/lib/deployer.js";
+import { createLedgerProjector, openProjectorReadModel, readModelDigest } from "#src/lib/ledger-projector.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
 import {
   ORACLE_AGREE_INTERVAL_MS,
   ORACLE_DRIFT_INTERVAL_MS,
@@ -18,15 +19,15 @@ import {
   ORACLE_SEED_ROWS_PER_MS,
   READ_MODEL_CONSISTENCY_STEP,
   READ_MODEL_SELF_HEALED_STEP,
-} from "../src/lib/read-model-consistency.js";
-import { acquireLease, releaseLease, writeSourceSnapshot, SOURCE_SNAPSHOT_DDL } from "../src/lib/read-model-db.js";
-import { coldAnalyticsSnapshot } from "../src/lib/analytics-route.js";
-import { analyticsSourceBodies } from "../src/lib/analytics-view.js";
-import { AGENT_QUALIFICATION_GENERATION, agentViewKey, type AgentProposalsBody, type AgentViewData } from "../src/lib/agent-view.js";
-import { buildReadModelViewRoutes, shownReadiness, viewMode, type ViewBody } from "../src/lib/views.js";
-import { shadowReadiness, viewShadowPath, type ViewShadowState } from "../src/lib/view-shadow.js";
+} from "#src/lib/read-model-consistency.js";
+import { acquireLease, releaseLease, writeSourceSnapshot, SOURCE_SNAPSHOT_DDL } from "#src/lib/read-model-db.js";
+import { coldAnalyticsSnapshot } from "#src/lib/analytics-route.js";
+import { analyticsSourceBodies } from "#src/lib/analytics-view.js";
+import { AGENT_QUALIFICATION_GENERATION, agentViewKey, type AgentProposalsBody, type AgentViewData } from "#src/lib/agent-view.js";
+import { buildReadModelViewRoutes, shownReadiness, viewMode, type ViewBody } from "#src/lib/views.js";
+import { shadowReadiness, viewShadowPath, type ViewShadowState } from "#src/lib/view-shadow.js";
 import { readShadowCounters } from "#src/lib/view-shadow-store.js";
-import { createService } from "../src/lib/service.js";
+import { createService } from "#src/lib/service.js";
 import {
   READ_MODEL_CHECK_SHARE,
   READ_MODEL_LEASE_RENEW_MS,
@@ -42,13 +43,47 @@ import {
   readModelStatusView,
   type ReadModelView,
   type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import { buildServeServer, readModelInstances, resolveConsoleSha, stopServeReadModel, type ServeDeps } from "../src/lib/serve.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+} from "#src/lib/read-model-worker.js";
+import { buildServeServer, readModelInstances, resolveConsoleSha, stopServeReadModel, type ServeDeps } from "#src/lib/serve.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
+
+test("the live Inbox consumer holds mismatched population messages and recovers only on matching evidence", async t => {
+  const stateDir = makeTempDir("inbox-population-messages"), repository = "craigoley/remudero", snapshotKey = "b".repeat(64), generation = `inbox-current-pages-v1:${"a".repeat(64)}`;
+  let worker: ReturnType<typeof createReadModelWorker> | undefined;
+  t.after(() => { worker?.stop(); rmSync(stateDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); });
+  mkdirSync(join(stateDir, "read-model")); writeFileSync(join(stateDir, LIVE), "");
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { inbox: "auto" } }));
+  const file = join(stateDir, "population-worker.mjs"), scope = { instance: "core", repository };
+  const body = { view: "inbox", key: "section=needsYou", version: 1, generation: 1, etag: 'W/"population-body"', qualificationGeneration: generation,
+    body: { view: "inbox", version: 1, generatedAt: new Date().toISOString(), asOf: null, stale: false, sources: [], data: { snapshotKey, section: "needsYou", page: { index: 0, of: 1, total: 0 }, items: [] } } };
+  const status = { view: "read-model", key: "", version: 1, generation: 1, etag: 'W/"population-status"',
+    body: { view: "read-model", version: 1, generatedAt: new Date().toISOString(), asOf: null, stale: false, sources: [], data: { shadow: [{ view: "inbox", ready: true, reason: "controlled qualified consumer input", samples: 3000, lastRealMs: null, qualificationGeneration: generation }] } } };
+  writeFileSync(file, `import { parentPort } from "node:worker_threads";
+const scope=${JSON.stringify(scope)},generation=${JSON.stringify(generation)},snapshotKey=${JSON.stringify(snapshotKey)};
+parentPort.postMessage({type:"body",entry:${JSON.stringify(body)}});
+parentPort.postMessage({type:"body",entry:${JSON.stringify(status)}});
+parentPort.postMessage({type:"qualification",view:"inbox",generation,snapshotKey,scope});
+let phase=0;const timer=setInterval(()=>{},1000);
+parentPort.on("message",message=>{if(message.type==="stop"){clearInterval(timer);parentPort.close();return;}
+if(message.type==="shadow"){phase++;parentPort.postMessage({type:"qualification",view:"inbox",generation,snapshotKey,scope:phase===1?{...scope,repository:"craigoley/remudero-site"}:scope});}});
+`);
+  const logs: string[] = [];
+  worker = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir, repo: repository }], workerUrl: pathToFileURL(file), every: () => () => {}, log: step => { logs.push(step); } });
+  const until = async (done: () => boolean) => { const deadline = Date.now() + 15000; while (!done() && Date.now() < deadline) await sleep(10); assert.ok(done(), "the controlled worker message arrived"); };
+  worker.start(); await until(() => viewMode(worker, "inbox") === "serve");
+  assert.equal(viewMode(worker, "inbox"), "serve", "positive control: the consumer accepted the matching scope, body, snapshot and readiness row");
+  worker.shadow({ view: "inbox", key: body.key, requests: 0 });
+  await until(() => logs.includes("read_model.qualification_unknown"));
+  assert.equal(viewMode(worker, "inbox"), "shadow", "a still-present READY row cannot override mismatched source evidence");
+  assert.equal(worker.shadowIdentity?.("inbox", body.key)?.key, undefined);
+  worker.shadow({ view: "inbox", key: body.key, requests: 0 });
+  await until(() => viewMode(worker, "inbox") === "serve");
+  assert.ok(worker.shadowIdentity?.("inbox", body.key)?.key);
+});
 
 test("W1-T9244: default worker and HTTP serve complete cached proposals without side effects", async (t) => {
   const stateDir = scratch(t, "agent-record-worker");

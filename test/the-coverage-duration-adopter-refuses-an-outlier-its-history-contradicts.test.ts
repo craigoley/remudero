@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { loadTestManifestProbe, rawObservationWindow, testGardenInventory } from "../src/lib/test-gardener.js";
+import { loadTestManifestProbe, rawObservationWindow, testGardenInventory } from "#src/lib/test-gardener.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 

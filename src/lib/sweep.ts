@@ -20,7 +20,7 @@ import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, realDeploySensorsAsync, type AsyncDeploySensors } from "./deployer.js";
+import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, readDeployFactsAsync, realDeploySensorsAsync, type AsyncDeploySensors, type DeployFacts } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
 import { probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
 import {
@@ -1549,39 +1549,34 @@ export type PlanScopedFixRoundInput = {
   };
 };
 
-/** Build the deploy rows with asynchronous sensors; latch reconciliation remains synchronous. */
+/**
+ * Build the deploy rows from one awaited snapshot (W1-T9552): `readDeployFactsAsync` runs every
+ * git, gh and docker read before any row exists, and the rows' getters answer from it — a getter
+ * that threw replays the same throw, so `reconcile.unreadable` outcomes are unchanged. The image
+ * build dispatch stays live and awaited; latch reconciliation remains synchronous.
+ */
 export async function deployStateRowsOffLoop(
   reader: Omit<DeployStateReader, "deploy"> & { deploy: DeployStateReader["deploy"] | AsyncDeploySensors },
   history: readonly Record<string, unknown>[],
   onUnreadableLatch?: (error: unknown) => void,
 ): Promise<FleetStateRow[]> {
-  const deploy = reader.deploy;
-  const rows: FleetStateRow[] = [];
-  const baked = await deploy.newestBakedSha?.();
-  if (baked) {
-    rows.push({
-      pipeline: "image", target: baked, desired: `published image containing ${baked}`,
-      observe: () => deploy.imagePublished?.(baked),
-      inFlight: () => deploy.imageBuildInFlight?.(),
-      repair: async () => {
-        if (!deploy.dispatchImageBuild) throw new Error("image build dispatch unavailable");
-        await deploy.dispatchImageBuild();
-      },
-    }, {
-      pipeline: "deploy", target: baked, desired: `healthy deployed image containing ${baked}`,
-      observe: async () => {
-        const behind = await deploy.imageBakedCommitsBehind?.();
-        return behind === undefined ? undefined : behind === 0;
-      },
-      inFlight: async () => {
-        if (deploy.imageRecycleManual?.() === true) return true;
-        const published = await deploy.imagePublished?.(baked);
-        return published === true ? false : published === false ? true : undefined;
-      },
-      repair: () => { if (!reader.deployRequested()) reader.requestDeploy(); },
-    });
-  }
-  return [...rows, ...deployStateRows({ ...reader, deploy: {} }, history, onUnreadableLatch)];
+  const facts = await readDeployFactsAsync(reader.deploy);
+  const replay = <K extends keyof DeployFacts["thrown"]>(name: K): DeployFacts[K] => {
+    if (name in facts.thrown) throw facts.thrown[name];
+    return facts[name];
+  };
+  return deployStateRows({
+    ...reader,
+    deploy: {
+      newestBakedSha: () => facts.newestBakedSha,
+      // The snapshot read publication for the baked sha, the only one `deployStateRows` asks about.
+      imagePublished: () => replay("imagePublished"),
+      imageBuildInFlight: () => replay("imageBuildInFlight"),
+      imageBakedCommitsBehind: () => replay("imageBakedCommitsBehind"),
+      imageRecycleManual: () => replay("imageRecycleManual") === true,
+      dispatchImageBuild: reader.deploy.dispatchImageBuild,
+    },
+  }, history, onUnreadableLatch);
 }
 
 export interface BuildSweepEffectsDeps {
@@ -5336,8 +5331,14 @@ export async function refreshStaleRollupAfterRefusal(
   if (!staleRollupRefreshApplies(pr)) {
     return `no stale-rollup refresh: GitHub reports mergeable=${String(pr.mergeable)}, mergeableState=${pr.mergeableState ?? "unknown"}`;
   }
-  const priorRefresh = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber);
-  if (priorRefresh.length > 0) {
+  // updateBranchViaGh catches transport failures and returns bare "error". Neither that result
+  // nor a transient thrown exception confirms a new head; give either one later guarded retry.
+  // Two failures spend the allowance so a persistent transport problem cannot loop forever.
+  const refreshRows = ledgerLines.filter((l) => l.step === STALE_ROLLUP_REFRESHED_STEP && l.pr_number === pr.prNumber);
+  const unconfirmed = (l: Record<string, unknown>) => l.outcome === "error" ||
+    (typeof l.outcome === "string" && l.outcome.startsWith("error:") && armFailureAction(l.outcome) === "transient");
+  const priorRefresh = refreshRows.filter((l) => !unconfirmed(l));
+  if (priorRefresh.length > 0 || refreshRows.length >= 2) {
     if (rowsAtHead(ledgerLines, STALE_ROLLUP_REFRESH_EXHAUSTED_STEP, pr).length > 0) {
       return "stale-rollup refresh already spent for this PR; escalated once at this head";
     }
@@ -15910,9 +15911,9 @@ export function metadataOnlyRed(pr: OpenPrView): string[] | undefined {
   return checks.length > 0 && checks.every((name) => METADATA_RED_CHECKS.has(name)) ? checks : undefined;
 }
 
-/** Use the required-check rollup when available; ciFailures is the older producer's fallback. */
+/** Keep every currently observed red: an aggregate rollup does not replace a failed shard's evidence. */
 export function redCheckNames(pr: OpenPrView): string[] {
-  const names = pr.redRequiredChecks?.length ? [...pr.redRequiredChecks] : pr.ciFailures?.map((failure) => failure.name) ?? [];
+  const names = [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((failure) => failure.name)];
   if (pr.reviewState === "failure") {
     names.push(...pr.unmetCriteria.map((criterion) => `review:${criterion.claim}:${criterion.proof}`));
   }
@@ -19994,6 +19995,7 @@ export async function runSweep(
     let rearmAfterDisarm: number | undefined;
     let rearmIncidentFields: Record<string, unknown> = {};
     let queueMembership: MergeQueueMembership | undefined;
+    const hadIdleObservation = idleHeads.has(pr.prNumber);
     if (disposition !== "mergeable" || pr.autoMergeArmed !== true || idleHeads.get(pr.prNumber) !== pr.headSha) {
       clearIdle(pr);
     }
@@ -20640,6 +20642,11 @@ export async function runSweep(
               // W1-T1061: capture the concrete outcome whenever one came back. A `void` return is
               // the legacy "treat as armed" shape and names no real branch, so no field is written.
               if (armOutcomeName !== undefined) armOutcome = armOutcomeName;
+              if (!armedIdleDue && !hadIdleObservation && armOutcomeName === "armed" && deps.repairAdmissionSurface !== "light") {
+                recordIdle("automerge.armed_idle", pr, true, {
+                  reason: "first reviewed, green idle sighting after a successful full-pass arm",
+                });
+              }
               if (armedIdleDue) {
                 const step = armOutcomeName === "direct-merged" ? "automerge.armed_idle_merged"
                   : armOutcomeName === "armed" ? "automerge.armed_idle_enqueued" : "automerge.armed_idle_refused";

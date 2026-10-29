@@ -1,0 +1,57 @@
+- id: W1-T10946
+  title: The default architecture scan releases parsed syntax trees within its existing heap ceiling
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10
+  risk: high
+  band_meaning: blast-radius
+  origin: operator-approved-followups:2026-10-28
+  plan_refs: []
+  files:
+    - package.json
+    - package-lock.json
+    - .dependency-cruiser.cjs
+    - test/architecture-fitness.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: The operator requested durable plan custody of the remaining approved
+    smart-router/automation/resource follow-ups so the long-running chat can close without losing
+    implementation or readiness work. Previously prepared proposals are f6e362e5 (foundation),
+    ded7d76a (collector/accounting), 0f701b6d (private trials) and ad478451 (Janitor journal).
+    Reconcile the relevant proposal only; historical merged-main deltas are not this task's
+    implementation. Public source references are provenance, not provider-attested runtime adoption.
+    PR15262 is a completed fixture prerequisite, not any broader qualification.
+  design: "Use the retained real dependency-cruiser 18.6/SWC diagnosis: its module-level AST Map grows
+    across the entire scan; resolver-cache reduction did not fix the observed OOM. Choose a
+    maintained upstream/configuration or repository-owned integration that bounds retained ASTs
+    without editing installed package bytes, hiding source edges, disabling rules, changing parsers
+    or increasing the existing heap. The private process hook is evidence, not a production solution
+    or general preload permission. Exercise the actual default full-source scan and the planted
+    positive/negative graph-rule controls. Remove/restore the memory fix and preserve every terminal
+    outcome; compare the complete resolved module/edge/rule population, not only exit status."
+  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+    this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
+    grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
+    schedule, worker stop or live/public release. Before building, reconcile current
+    task/dispatch/open-PR/source ownership and reuse already-shipped work. Keep native checks serial
+    in genuine maintained slots and preserve every applicable limit and failed/refused receipt.
+  acceptance:
+    - claim: the default full-source architecture scan completes within its unchanged heap bound
+      proof: 'grep: test("W1-T10946: the default full-source architecture scan completes within its
+        unchanged heap bound" in test/architecture-fitness.test.ts'
+    - claim: planted forbidden imports remain detected and removal of the memory fix restores the measured
+        retention failure
+      proof: 'grep: test("W1-T10946: planted forbidden imports remain detected and removal of the memory
+        fix restores the measured retention failure" in test/architecture-fitness.test.ts'
+  falsifier: Add the exact named real-path controls in the computed test folders using package aliases
+    and the shared root helper. Establish the failing current-main behavior, restore the smallest
+    fix, and require complete verified-file TAP. Delete each load-bearing guard and require the
+    named assertion to fail, then restore it. Preserve baseline failures, partial runs and old-head
+    evidence; never make unchanged failures green through repetition. The retained complete
+    architecture control passed 7/7, failed 1/7 with the fix erased, and passed 7/7 restored at 512
+    MiB; this is a private diagnostic, not maintained-source assurance.

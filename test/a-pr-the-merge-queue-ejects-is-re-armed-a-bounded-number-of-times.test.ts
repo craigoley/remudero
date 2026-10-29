@@ -3,19 +3,19 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { Config } from "../src/lib/config.js";
-import { readMergeQueueMembership, type MergeQueueMembership } from "../src/lib/arm-auto-merge.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import { readMergeQueueMembership, type MergeQueueMembership } from "#src/lib/arm-auto-merge.js";
 import {
   buildSweepEffects,
   MAX_REARMS_AFTER_DISARM_PER_HEAD,
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#test/helpers/sweep-test.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // W1-T5909 — LIVE 2026-10-05, #9392: the sweep armed it, the merge queue ejected it (a cancelled
 // group run), GitHub disabled its auto-merge, and every later pass stood down "auto-merge already

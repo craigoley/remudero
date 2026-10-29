@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import type { Escalation } from "../src/lib/escalate.js";
-import { REGISTERED_GARDEN_NAMES } from "../src/lib/garden-registry.js";
-import { createGardenerRuntimeWriter } from "../src/lib/gardener-runtime.js";
-import { productionGardenerOverseerPorts, runGardenerOverseer, type GardenerOverseerPorts } from "../src/lib/gardener-overseer.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Escalation } from "#src/lib/escalate.js";
+import { REGISTERED_GARDEN_NAMES } from "#src/lib/garden-registry.js";
+import { createGardenerRuntimeWriter } from "#src/lib/gardener-runtime.js";
+import { productionGardenerOverseerPorts, runGardenerOverseer, type GardenerOverseerPorts } from "#src/lib/gardener-overseer.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const HOUR = 3_600_000;
 const NOW = Date.now();

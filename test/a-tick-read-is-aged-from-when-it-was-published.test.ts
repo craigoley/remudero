@@ -3,8 +3,8 @@ import test from "node:test";
 import {
   freshReadGeneration, freezeReadGeneration, onePassPerGeneration, startReadPlane, TICK_READ_MAX_AGE_MS,
   type ReadGeneration,
-} from "../src/lib/read-plane.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
+} from "#src/lib/read-plane.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 
 // W1-T9704: at 2026-10-15 17:02:18Z the full sweep refused generation 2 at age 454,974 ms, 4 ms after
 // the tick published it. Its read began at 16:54:43Z and took 7.6 min, so it was born past the

@@ -9,13 +9,13 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assessGatewayCheckout, buildServeServer, gateStaleCodeExit, resolveConsoleSha, serveGeneration, SERVE_HANDOFF_COALESCE_MS, type GatewayCheckoutAssessment, type ServeDeps } from "../src/lib/serve.js";
-import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
-import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { Plan } from "../src/lib/plan.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { assessGatewayCheckout, buildServeServer, gateStaleCodeExit, resolveConsoleSha, serveGeneration, SERVE_HANDOFF_COALESCE_MS, type GatewayCheckoutAssessment, type ServeDeps } from "#src/lib/serve.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
+import { SELF_SYNC_GUARD_ENV } from "#src/lib/self-sync.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Plan } from "#src/lib/plan.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const CLOCK = fixedClock(Date.parse("2026-10-01T12:00:00Z"));
 const BEHIND: GatewayCheckoutAssessment = {

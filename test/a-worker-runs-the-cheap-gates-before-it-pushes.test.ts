@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { outputContractLines, ratchetContractLines } from "../src/lib/compaction.js";
+import { outputContractLines, ratchetContractLines } from "#src/lib/compaction.js";
 
 // W1-T2997 — A WORKER RUNS THE CHEAP GATES BEFORE IT PUSHES.
 //

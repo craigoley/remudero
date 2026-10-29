@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync,
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { appendLedger, ledgerRotationLockPath, rotateLedger, type LedgerLine } from "../src/lib/ledger.js";
+import { appendLedger, ledgerRotationLockPath, rotateLedger, type LedgerLine } from "#src/lib/ledger.js";
 
 // ── R-1 (docs/audits/recon-2026-09-05.md, reproduced twice at f7ceb86 / origin/main 35b6683):
 // `appendLedger` calls `rotateLedger` with no cross-process exclusion (src/lib/ledger.ts

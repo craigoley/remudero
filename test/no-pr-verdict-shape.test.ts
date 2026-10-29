@@ -11,9 +11,9 @@
 //      against the real export, not re-asserted as a string literal.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { noPrVerdict } from "../src/run-task.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
+import { noPrVerdict } from "#src/run-task.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
 
 function result(over: Partial<WorkerResult>): WorkerResult {
   return {

@@ -17,13 +17,13 @@ import {
   type GithubPostureBaseline,
   type GithubPostureGateway,
   type GithubPostureSnapshot,
-} from "../src/lib/github-posture.js";
-import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
-import type { RunResult } from "../src/lib/run-result.js";
-import type { Config } from "../src/lib/config.js";
-import { githubPostureCheck, buildGithubPostureDaemonHooks } from "../src/run-task.js";
+} from "#src/lib/github-posture.js";
+import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { requestStop, stopDetail } from "#src/lib/fleet-control.js";
+import type { RunResult } from "#src/lib/run-result.js";
+import type { Config } from "#src/lib/config.js";
+import { githubPostureCheck, buildGithubPostureDaemonHooks } from "#src/run-task.js";
 
 // A single-task, always-runnable plan — the minimum daemon.ts's loop needs to keep dispatching
 // while the posture hook runs alongside it (same shape as test/daemon.test.ts's fixturePlan).

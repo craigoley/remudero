@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BOARD_MAX_PAGES, mapBoardPr, type RestPullRow } from "../src/lib/open-prs-rest.js";
-import { buildBatchedGithub, type BatchedPr, type PrRef } from "../src/lib/status.js";
+import { BOARD_MAX_PAGES, mapBoardPr, type RestPullRow } from "#src/lib/open-prs-rest.js";
+import { buildBatchedGithub, type BatchedPr, type PrRef } from "#src/lib/status.js";
 
 const HEAD_ONE = "1111111111111111111111111111111111111111";
 const HEAD_TWO = "2222222222222222222222222222222222222222";

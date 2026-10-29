@@ -3,14 +3,14 @@ import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, sym
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { EMPTY_TASK_FINGERPRINTS, foldTaskFingerprints, sameTaskProjectionStamp, taskProjectionStamp } from "../src/lib/board.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { flushReadModelTransactions, openReadModel } from "../src/lib/read-model-db.js";
-import { projectPlan, readLedgerLines, SERVE_KEEPS_CREDITS_IN_MEMORY, type StatusProjection } from "../src/lib/status.js";
-import { threadPlan } from "../src/lib/thread-plan.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { canonicalJson, replay, replayCli, type ReplayFactory, type ReplayOptions, type ReplayStep } from "../scripts/view-replay.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import { EMPTY_TASK_FINGERPRINTS, foldTaskFingerprints, sameTaskProjectionStamp, taskProjectionStamp } from "#src/lib/board.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { flushReadModelTransactions, openReadModel } from "#src/lib/read-model-db.js";
+import { projectPlan, readLedgerLines, SERVE_KEEPS_CREDITS_IN_MEMORY, type StatusProjection } from "#src/lib/status.js";
+import { threadPlan } from "#src/lib/thread-plan.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { canonicalJson, replay, replayCli, type ReplayFactory, type ReplayOptions, type ReplayStep } from "#scripts/view-replay.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const NOW = Date.parse("2026-10-07T12:00:00Z");
 const PLAN = "- id: W1-T1\n  title: fixture\n  repo: remudero\n  type: implement\n  status: queued\n  depends_on: []\n";

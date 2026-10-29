@@ -7,12 +7,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { GH_PR_EDIT_FALLBACK_LINES, outputContractLines } from "../src/lib/compaction.js";
+import { GH_PR_EDIT_FALLBACK_LINES, outputContractLines } from "#src/lib/compaction.js";
 
 const FALLBACK = GH_PR_EDIT_FALLBACK_LINES.join("\n");
 
 async function fixPrompt(): Promise<string> {
-  const { renderFixPrompt } = await import("../src/run-task.js");
+  const { renderFixPrompt } = await import("#src/run-task.js");
   return renderFixPrompt({
     task: { id: "W1-T1", title: "t", acceptance: [] } as never,
     branch: "run-W1-T1-1",
