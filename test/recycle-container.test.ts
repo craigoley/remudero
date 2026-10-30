@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -571,6 +572,96 @@ test("private registry selection defaults and falsifiers forbid live effects: fi
       assert.equal(result.calls.some(c => c.bin === "forbidden"), false);
       assert.equal((result.stdout + result.stderr).includes(fixture.root), false);
     } finally { fixture.cleanup(); }
+  }
+});
+
+// Delete actual production mechanisms in isolated copies, then run frozen behavioral proofs.
+test("private registry selection defaults and falsifiers forbid live effects: recorded independent production deletions", { timeout: 600000 }, t => {
+  const prefix = "private registry selection defaults and falsifiers forbid live effects";
+  const cases = [
+    { name: "default selection", source: "src/lib/instance-mode.ts", suite: "test/shadow-instance-safety.test.ts",
+      title: prefix, deletion: '  const selected = runtimeInstanceRegistryText();\n  if (selected !== undefined) return selected;\n',
+      failure: "the actual default reads selected bytes" },
+    { name: "daemon final binding", source: "src/lib/instance-mode.ts", suite: "test/shadow-instance-safety.test.ts",
+      title: "selected runtime changed binding is rechecked at the real final arm observer seam",
+      deletion: "  if (runtimeInstanceRegistryText() !== undefined) await assertInstanceRegistryRuntimeCurrent();\n",
+      failure: "Missing expected rejection" },
+    { name: "recycler launch forwarding", source: "deploy/recycle-container.sh", suite: "test/recycle-container.test.ts",
+      title: "private registry selection reaches real host and daemon readers: recorded readonly mount and image reader",
+      deletion: '  "${SELECTED_REGISTRY_LAUNCH_ARGS[@]+"${SELECTED_REGISTRY_LAUNCH_ARGS[@]}"}"\n',
+      failure: "launch.argv.includes" },
+    { name: "serve launch forwarding", source: "deploy/serve-container.sh", suite: "test/recycle-container.test.ts",
+      title: `${prefix}: real serve assembly`,
+      deletion: '  "${SELECTED_REGISTRY_LAUNCH_ARGS[@]+"${SELECTED_REGISTRY_LAUNCH_ARGS[@]}"}"\n',
+      failure: "launch.argv.includes" },
+    { name: "recycler final binding", source: "deploy/recycle-container.sh", suite: "test/recycle-container.test.ts",
+      title: `${prefix}: final launch binding survives the stop wait`,
+      deletion: 'selected_registry_recheck\nselected_registry_mounts "${DOCKER_RUN_ARGS[@]}"',
+      replacement: 'selected_registry_mounts "${DOCKER_RUN_ARGS[@]}"', failure: "ERR_ASSERTION" },
+    { name: "serve final binding", source: "deploy/serve-container.sh", suite: "test/recycle-container.test.ts",
+      title: `${prefix}: final launch binding survives the stop wait`,
+      deletion: 'if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then selected_registry_recheck; fi\n',
+      failure: "ERR_ASSERTION" },
+  ];
+  const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+  for (const control of cases) {
+    const sandbox = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}registry-deletion-`));
+    try {
+      for (const dir of ["src", "deploy", "test/helpers", "test/setup"]) {
+        cpSync(join(REPO_ROOT, dir), join(sandbox, dir), { recursive: true });
+      }
+      for (const file of ["package.json", "tsconfig.json", "test/shadow-instance-safety.test.ts", "test/recycle-container.test.ts"]) {
+        cpSync(join(REPO_ROOT, file), join(sandbox, file));
+      }
+      for (const dir of ["node_modules", "scripts", "packages", "plan", "settings"]) symlinkSync(join(REPO_ROOT, dir), join(sandbox, dir), "dir");
+      const scratch = join(sandbox, "scratch");
+      mkdirSync(scratch);
+      const sourcePath = join(sandbox, control.source), suitePath = join(sandbox, control.suite);
+      const original = readFileSync(sourcePath), frozenSuite = readFileSync(suitePath);
+      const originalDigest = digest(original), suiteDigest = digest(frozenSuite);
+      const text = original.toString("utf8");
+      assert.equal(text.split(control.deletion).length, 2, `${control.name}: exactly one production deletion target`);
+      const removed = Buffer.from(text.replace(control.deletion, control.replacement ?? ""));
+      assert.notEqual(digest(removed), originalDigest);
+      assert.equal(readFileSync(join(REPO_ROOT, control.source)).equals(original), true);
+      const invoke = (phase: "intact" | "deleted" | "restored") => {
+        assert.equal(readFileSync(suitePath).equals(frozenSuite), true, "assertions stay byte identical across all three phases");
+        const pattern = `^${control.title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+        const args = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
+          "--test-name-pattern", pattern, control.suite];
+        const result = spawnSync(process.execPath, args, { cwd: sandbox, encoding: "utf8", timeout: 60000,
+          maxBuffer: 4 * 1024 * 1024, env: { ...process.env, TMPDIR: scratch, NODE_TEST_CONTEXT: undefined } });
+        const tap = result.stdout + result.stderr;
+        t.diagnostic(JSON.stringify({ control: control.name, phase, source: control.source,
+          sourceDigest: digest(readFileSync(sourcePath)), suiteDigest, args, status: result.status,
+          signal: result.signal, error: result.error?.message, tap }));
+        assert.equal(result.error, undefined, `${control.name}/${phase}: setup or capacity is not a behavioral result`);
+        assert.equal(result.signal, null, tap);
+        assert.match(tap, /^# tests 1$/m, `${control.name}/${phase}: the frozen title must really execute`);
+        assert.ok(tap.includes(`- ${control.title}`), tap);
+        if (phase === "deleted") {
+          assert.equal(result.status, 1, tap);
+          assert.match(tap, /^# fail 1$/m);
+          assert.match(tap, /ERR_ASSERTION/, "a loader or missing fixture failure cannot kill a deletion");
+          assert.ok(tap.includes(control.failure), tap);
+        } else {
+          assert.equal(result.status, 0, tap);
+          assert.match(tap, /^# fail 0$/m);
+          assert.match(tap, /^# pass 1$/m);
+        }
+      };
+      invoke("intact");
+      try {
+        writeFileSync(sourcePath, removed);
+        invoke("deleted");
+      } finally {
+        writeFileSync(sourcePath, original);
+        assert.equal(readFileSync(sourcePath).equals(original), true, "restore the exact source bytes, including on failure");
+      }
+      invoke("restored");
+      assert.equal(digest(readFileSync(sourcePath)), originalDigest);
+      assert.equal(readFileSync(join(REPO_ROOT, control.source)).equals(original), true, "the current head is never mutated");
+    } finally { rmSync(sandbox, { recursive: true, force: true }); }
   }
 });
 

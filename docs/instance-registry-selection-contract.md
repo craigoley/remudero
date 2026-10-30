@@ -97,6 +97,20 @@ Isolated source and tests need no worker stop. Private installation, live select
 replacement and any affected-instance drain still require the human rollout
 decision below; no source merge implicitly approves them.
 
+The existing `test/recycle-container.test.ts` proof titled
+`private registry selection defaults and falsifiers forbid live effects: recorded independent production deletions`
+runs six independent controls in fresh disposable source copies: default reader
+selection, daemon final binding, and launch forwarding and final binding in each
+host launcher. Each control runs the same frozen behavioral test intact, with
+only its production mechanism deleted, and after restoring the exact source
+bytes. A deletion must produce a real assertion failure; setup errors, signals,
+timeouts and unmatched titles do not count. TAP diagnostics retain each phase's
+source and assertion digests, child arguments, exit status and complete child TAP.
+Children explicitly load tsx and the normal temporary-file/remote-effect guard;
+shell proofs retain their Docker/Azure recordings and forbidden host-effect traps.
+These controls qualify disposable behavior only; committed-head author checks,
+coverage, hosted gates and fresh semantic review remain required.
+
 ### Optional run and sweep mode observations
 
 W1-T9572 adds `selectedRegistryMode` to the public configuration schema. Only an
