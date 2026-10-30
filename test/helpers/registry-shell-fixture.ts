@@ -69,6 +69,9 @@ if (bin === "docker") {
       if (e.FIXTURE_MUTATE === "measurement") fs.appendFileSync(e.FIXTURE_SELECTED, "# revised at measurement\n");
       out("fixture-id remudero-daemon\nother-id " + (e.FIXTURE_SAME_NAME ? "remudero-daemon" : "remudero-other-daemon"));
     } else if (e.FIXTURE_RUNNING === "1") out("fixture-id");
+  } else if (args[0] === "image" && args[1] === "inspect") {
+    const fmt = args[args.indexOf("--format") + 1] ?? "";
+    out(fmt.includes("RepoDigests") ? "fixture.azurecr.io/remudero@sha256:fixture" : "sha256:fixture");
   } else if (args[0] === "inspect") {
     const fmt = args[args.indexOf("--format") + 1] ?? "";
     if (fmt.includes("MemoryHigh")) out("/remudero-daemon uint64 6442450944\n/remudero-other-daemon uint64 6442450944");
@@ -78,7 +81,22 @@ if (bin === "docker") {
     else if (fmt.includes(".State.Running")) out("true");
     else if (fmt.includes("NetworkSettings.Networks")) out("yes");
     else if (fmt.includes(".Image")) out("sha256:fixture");
-  } else if (args[0] === "run") out("fixture-started");
+  } else if (args[0] === "system" && args[1] === "df") {
+    if (e.FIXTURE_MUTATE === "snapshot") fs.appendFileSync(e.FIXTURE_SELECTED, "# revised before snapshot\n");
+    if (e.FIXTURE_MUTATE === "snapshot-delete") fs.unlinkSync(e.FIXTURE_SELECTED);
+  } else if (args[0] === "run") {
+    if (args.includes("--entrypoint") && args[args.indexOf("--entrypoint") + 1] === "node") {
+      const backupMount = args.find(a => a.endsWith(":/rmd-snapshot/backups"));
+      if (!backupMount) process.exit(96);
+      const archive = "state-backup.2026-10-30T00-00-00-000Z";
+      const dir = path.join(backupMount.slice(0, -":/rmd-snapshot/backups".length), archive);
+      fs.mkdirSync(dir, {recursive:true}); fs.writeFileSync(path.join(dir, "ledger.ndjson"), "fixture\n");
+      out("RMD_STATE_SNAPSHOT " + archive + " 1 0 0 0");
+    } else out("fixture-started");
+  } else if (args[0] === "pull") {
+    if (e.FIXTURE_MUTATE === "pull") fs.appendFileSync(e.FIXTURE_SELECTED, "# revised during pull\n");
+    if (e.FIXTURE_MUTATE === "pull-delete") fs.unlinkSync(e.FIXTURE_SELECTED);
+  }
   else if (args[0] === "logs") out("listening on http://0.0.0.0:4317");
   else if (args[0] === "network") out("fixture-tunnel");
   process.exit(0);

@@ -1107,6 +1107,9 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
       continue
     fi
     echo "host-update: state snapshot — ${snap_state} -> ${snap_backups} via ${STATE_SNAPSHOT_IMAGE}"
+    # The snapshot child is launched after earlier Docker and filesystem work. Its own
+    # boundary must recheck the startup pin, even if the selected file changed meanwhile.
+    registry_shadow_observe host-update "" "" host "$snap_root|$STATE_SNAPSHOT_IMAGE"
     snap_out="$(docker run --rm --pull never --network none --entrypoint node -w /app \
       -v "${snap_state}:${SNAP_IN_STATE}:ro" -v "${snap_backups}:${SNAP_IN_BACKUPS}" \
       "${STATE_SNAPSHOT_IMAGE}" --import tsx --input-type=module -e "${SNAP_JS}" 2>&1 </dev/null)" && snap_rc=0 || snap_rc=$?
@@ -1717,6 +1720,7 @@ fi
 # a deliberate security posture, not an oversight. `rmd` therefore cannot reclaim images from
 # inside; only the host can, so the schedule has to live here.
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
+  registry_shadow_observe host-update "" "" host "$STATE_DIR|$DAEMON_REPO"
   AFTER_AVAIL="$(df -Pk / | awk 'NR==2 {print $4}')"
   echo
   echo "host-update: reclaim-only — no pull, no restart. Free on / : ${AFTER_AVAIL} KiB"
@@ -1743,6 +1747,7 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
       echo "host-update: cannot prepare state snapshot receipt ${snapshot_receipt}" >&2
       exit 1
     fi
+    registry_shadow_observe host-update "" "" host "$STATE_DIR|$DAEMON_REPO"
     if ! printf 'result=%s\nts=%s\narchives=%s\noffhost=%s\nreason=%s\n' \
       "${snapshot_result}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${#STATE_SNAPSHOT_ARCHIVES[@]}" \
       "${state_snapshot_offhost}" "${snapshot_reason}" >"${snapshot_receipt_tmp}" \
@@ -1811,6 +1816,7 @@ if [ "${DRY_RUN}" -eq 0 ]; then
 fi
 
 # ── 6. MEASURE AFTER, AND SAY WHETHER ANYTHING ACTUALLY CHANGED ──────────────────────────────
+registry_shadow_observe host-update "" "" host "$STATE_DIR|$DAEMON_REPO"
 AFTER_DIGEST="$(digest_of "${REF}")"
 AFTER_ID="$(id_of "${REF}")"
 AFTER_FREE="$(free_kb "${DOCKER_ROOT}")"

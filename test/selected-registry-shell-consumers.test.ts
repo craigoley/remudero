@@ -160,6 +160,96 @@ test("selected shell revisions invalidate generated child and heartbeat observat
   assert.equal(createHash("sha256").update(readFileSync(f.session)).digest("hex"), pin, "later children cannot recapture");
 });
 
+test("selected shell revisions invalidate generated child and heartbeat observations: host update launch and measurement", t => {
+  const snapshot = registryShellFixture(t), snapshotPin = snapshot.capture();
+  const nightly = snapshot.run(join(REPO_ROOT, "deploy/host-update.sh"),
+    ["--reclaim-only", "--selected-registry-shadow", snapshot.session], { FIXTURE_MUTATE: "snapshot" });
+  assert.equal(nightly.status, 0, nightly.stdout + nightly.stderr);
+  assert.ok(snapshot.receipts().some(c => c.bin === "docker" && c.args[0] === "run"
+    && c.args.includes("--entrypoint") && c.args.includes("node")), "the real snapshot child launched");
+  assert.match(nightly.stdout, /state snapshot.*verified/);
+  const snapshotRows = snapshot.rows().filter(r => r.action === "host-update");
+  assert.ok(snapshotRows.length >= 3, "startup, child launch and closing measurement each observe");
+  assert.notEqual(snapshotRows[0]?.reason, "digest_mismatch", "startup saw the original selected bytes");
+  assert.ok(snapshotRows.slice(1).every(r => r.reason === "digest_mismatch"
+    && r.selected_outcome === "would-refuse"), "every later boundary sees the revision");
+  assert.equal(createHash("sha256").update(readFileSync(snapshot.session)).digest("hex"), snapshotPin);
+
+  const final = registryShellFixture(t), finalPin = final.capture();
+  const normal = final.run(join(REPO_ROOT, "deploy/host-update.sh"),
+    ["--selected-registry-shadow", final.session], { FIXTURE_MUTATE: "pull" });
+  assert.equal(normal.status, 0, normal.stdout + normal.stderr);
+  assert.ok(final.receipts().some(c => c.bin === "docker" && c.args[0] === "pull"), "legacy pull actually ran");
+  assert.match(normal.stdout, /host-update: AFTER/);
+  const finalRows = final.rows().filter(r => r.action === "host-update");
+  assert.equal(finalRows.length, 2, "normal run checks startup and final measurement");
+  assert.notEqual(finalRows[0]?.reason, "digest_mismatch");
+  assert.equal(finalRows[1]?.reason, "digest_mismatch");
+  assert.equal(finalRows[1]?.selected_outcome, "would-refuse");
+  assert.equal(createHash("sha256").update(readFileSync(final.session)).digest("hex"), finalPin);
+});
+
+test("selected shell revisions invalidate generated child and heartbeat observations: host update missing selection", t => {
+  for (const [args, mutation, effect] of [
+    [["--reclaim-only"], "snapshot-delete", "run"],
+    [[], "pull-delete", "pull"],
+  ] as const) {
+    const f = registryShellFixture(t); f.capture();
+    const run = f.run(join(REPO_ROOT, "deploy/host-update.sh"),
+      [...args, "--selected-registry-shadow", f.session], { FIXTURE_MUTATE: mutation });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.ok(f.receipts().some(c => c.bin === "docker" && c.args[0] === effect), effect);
+    const rows = f.rows().filter(r => r.action === "host-update");
+    assert.ok(rows.length >= 2);
+    assert.notEqual(rows[0]?.reason, "missing", "startup read the selected file");
+    assert.ok(rows.slice(1).every(r => r.reason === "missing"
+      && r.selected_state === "unknown" && r.selected_outcome === "would-refuse"),
+    `missing selection remains an explicit invalidation at later observations: ${JSON.stringify(rows)}`);
+  }
+});
+
+test("selected shell revisions invalidate generated child and heartbeat observations: host update recheck deletion falsifiers", t => {
+  const source = readFileSync(join(REPO_ROOT, "deploy/host-update.sh"), "utf8");
+  const mutantRoot = mkdtempSync(join(tmpdir(), "rmd-host-update-recheck-mutant-"));
+  t.after(() => rmSync(mutantRoot, { recursive: true, force: true }));
+  const mutantDeploy = join(mutantRoot, "deploy"), script = join(mutantDeploy, "host-update.sh");
+  mkdirSync(mutantDeploy);
+  for (const name of readdirSync(join(REPO_ROOT, "deploy"))) {
+    if (name !== "host-update.sh" && name !== "registry-shadow.sh")
+      symlinkSync(join(REPO_ROOT, "deploy", name), join(mutantDeploy, name));
+  }
+  const shadowSource = readFileSync(join(REPO_ROOT, "deploy/registry-shadow.sh"), "utf8");
+  const localShadow = shadowSource.replace(/^registry_shadow_root=.*$/m, `registry_shadow_root='${REPO_ROOT}'`);
+  assert.notEqual(localShadow, shadowSource);
+  writeFileSync(join(mutantDeploy, "registry-shadow.sh"), localShadow);
+  const launchArm = '    registry_shadow_observe host-update "" "" host "$snap_root|$STATE_SNAPSHOT_IMAGE"\n';
+  const measureArm = 'registry_shadow_observe host-update "" "" host "$STATE_DIR|$DAEMON_REPO"\nAFTER_DIGEST=';
+  for (const [arm, mutation, args, effect, expectedRows] of [
+    [launchArm, "snapshot", ["--reclaim-only"], "run", 4],
+    [measureArm, "pull", [], "pull", 2],
+  ] as const) {
+    const f = registryShellFixture(t); f.capture();
+    const removed = source.replace(arm, arm === measureArm ? "AFTER_DIGEST=" : "");
+    assert.notEqual(removed, source, "the mutant deletes an actual observation call");
+    writeFileSync(script, removed, { mode: 0o700 });
+    let offset = 0;
+    const without = f.run(script, [...args, "--selected-registry-shadow", f.session], { FIXTURE_MUTATE: mutation });
+    assert.equal(without.status, 0, without.stdout + without.stderr);
+    assert.ok(existsSync(f.session + ".observations"), without.stdout + without.stderr);
+    const missingRows = f.rows().slice(offset).filter(r => r.action === "host-update");
+    assert.equal(missingRows.length, expectedRows - 1, "deleted arm loses precisely its boundary observation");
+    assert.ok(f.receipts().some(c => c.bin === "docker" && c.args[0] === effect), "legacy effect still runs");
+    writeFileSync(f.selected, f.text);
+    writeFileSync(script, source, { mode: 0o700 });
+    offset = f.rows().length;
+    const restored = f.run(script, [...args, "--selected-registry-shadow", f.session], { FIXTURE_MUTATE: mutation });
+    assert.equal(restored.status, without.status, restored.stdout + restored.stderr);
+    const restoredRows = f.rows().slice(offset).filter(r => r.action === "host-update");
+    assert.equal(restoredRows.length, expectedRows, "exact restoration recovers the observation");
+    assert.ok(restoredRows.slice(1).every(r => r.reason === "digest_mismatch"));
+  }
+});
+
 test("selected shell revisions invalidate generated child and heartbeat observations: deleted forwarding and pin falsifiers", t => {
   const f = registryShellFixture(t); f.capture();
   assert.equal(f.install().status, 0);
