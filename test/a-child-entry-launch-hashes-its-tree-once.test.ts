@@ -75,6 +75,41 @@ test("W1-T9709: a source-changed launch hashes its tree once, on a store miss an
     assert.equal(f.rows[0]!.tree_reason, "source-changed");
     assert.equal(launch.hash.computed, 1);
   });
+  await t.test("a source edit during store publication refuses the stale bundle", async (sub) => {
+    const f = await fixture(sub);
+    const source = join(f.root, SOURCE);
+    writeFileSync(source, EDITED);
+    const hash = script.sourceHash(f.root);
+    const built = join(f.root, "dist/child-entries");
+    const old = join(f.root, "old-build");
+    cpSync(built, old, { recursive: true });
+    await script.buildChildEntries({ root: f.root, entries: [{ name: NAME, source: SOURCE }], workers: [] });
+    cpSync(built, join(f.store, hash), { recursive: true });
+    rmSync(built, { recursive: true });
+    cpSync(old, built, { recursive: true });
+    let changed = false;
+    const copy = fs.copyFileSync;
+    const copySpy = sub.mock.method(fs, "copyFileSync", (...args: unknown[]) => {
+      Reflect.apply(copy, fs, args);
+      if (!changed) {
+        changed = true;
+        writeFileSync(source, "console.log('during publication');\n");
+      }
+    });
+    syncBuiltinESMExports();
+    sub.after(() => { copySpy.mock.restore(); syncBuiltinESMExports(); });
+    const reads = countSourceReads(sub, f.root);
+    const launch = f.launch();
+    assert.equal(changed, true, "the source changed while the store copy was in progress");
+    assert.equal(f.calls(), 1);
+    assert.equal(reads(), 1, "the changed launch still reads source content once");
+    assert.equal(launch.hash.computed, 1);
+    assert.equal(launch.kind, "tsx");
+    assert.equal(launch.store?.outcome, "miss");
+    assert.equal(launch.store?.reason, "materialized-not-current: source-signature-changed");
+    assert.equal(f.launch().kind, "tsx", "the following launch re-hashes the changed source");
+    assert.equal(f.calls(), 2);
+  });
 });
 
 test("W1-T9709: a launch from an unchanged tree reuses its hash", async (t) => {
@@ -246,4 +281,27 @@ test("W1-T9709: a tree changing during hashing is refused and not memoized", asy
   assert.equal(stable.kind, "tsx");
   assert.equal(stable.reason, "source-changed");
   assert.equal(stable.hash.computed, 1);
+});
+
+test("W1-T9709: an unreadable signature after publication refuses the bundle", async (t) => {
+  const f = await fixture(t);
+  const hash = script.sourceHash(f.root);
+  cpSync(join(f.root, "dist/child-entries"), join(f.store, hash), { recursive: true });
+  rmSync(join(f.root, "dist"), { recursive: true });
+  const source = join(f.root, SOURCE);
+  const lstat = fs.lstatSync;
+  let checks = 0;
+  const spy = t.mock.method(fs, "lstatSync", (path: unknown, ...args: unknown[]) => {
+    if (path === source && ++checks === 3) throw new Error("stat refused after copy");
+    return Reflect.apply(lstat, fs, [path, ...args]);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { spy.mock.restore(); syncBuiltinESMExports(); });
+  const launch = f.launch();
+  assert.equal(checks, 3);
+  assert.equal(launch.kind, "tsx");
+  assert.equal(launch.hash.computed, 1);
+  assert.equal(f.calls(), 1);
+  assert.equal(launch.store?.outcome, "miss");
+  assert.match(launch.store?.reason ?? "", /source-signature-unavailable: stat refused after copy/);
 });

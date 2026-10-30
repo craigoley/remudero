@@ -367,8 +367,22 @@ export function childEntryArgv(
     lookup = materializeFromStore(resolve(root), storeRoot, verdict.now ?? treeHash, hashOf);
     // A published copy runs only if the tree's own judgement now holds: any doubt is tsx.
     const after = lookup.outcome === "hit" ? judge(lookup.hash) : undefined;
-    if (lookup.outcome === "hit" && !(after?.current && typeof after.bundle === "string")) {
-      lookup = { outcome: "miss", reason: `materialized-not-current: ${after?.reason}`, hash: lookup.hash };
+    let sourceStillCurrent = false;
+    let signatureFailure: string | undefined;
+    if (lookup.outcome === "hit" && after?.current && typeof after.bundle === "string") {
+      try {
+        const script = createRequire(import.meta.url)("../../scripts/build-child-entries.mjs") as {
+          sourceHashStillCurrent(root: string, hash: string): boolean;
+        };
+        sourceStillCurrent = script.sourceHashStillCurrent(root, lookup.hash);
+      } catch (err) {
+        const reason = `source-signature-unavailable: ${String((err as Error)?.message ?? err).slice(0, 80)}`;
+        signatureFailure = reason;
+      }
+    }
+    if (lookup.outcome === "hit" && !(after?.current && typeof after.bundle === "string" && sourceStillCurrent)) {
+      const reason = after?.current && typeof after.bundle === "string" ? signatureFailure ?? "source-signature-changed" : after?.reason;
+      lookup = { outcome: "miss", reason: `materialized-not-current: ${reason}`, hash: lookup.hash };
     }
     // W1-T9601: `daemon_tree_fill` on a miss counts the tsx launches a fill was asked for, joined, or already tried.
     const fill = fillOnMiss(resolve(root), lookup, storeRoot, store);

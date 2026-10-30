@@ -196,6 +196,13 @@ export function memoizedSourceHash(root, stats, hash = sourceHash) {
   }
 }
 
+/** Check that a previously hashed tree still has the same inputs, without reading their contents again. */
+export function sourceHashStillCurrent(root, hash) {
+  root = resolve(root);
+  const cached = sourceHashes.get(root);
+  return cached?.hash === hash && cached.signature === sourceSignature(root, loadEsbuild(root).version);
+}
+
 /**
  * An esbuild plugin that keeps every module's own `import.meta.url`. A bundle otherwise collapses
  * all of them to the bundle's URL, and 40-odd src modules derive repo-root, script and worker paths
