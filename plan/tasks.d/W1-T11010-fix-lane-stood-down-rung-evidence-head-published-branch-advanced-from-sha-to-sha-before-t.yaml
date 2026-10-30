@@ -27,3 +27,11 @@
     - PR #15041: 2.99 PR-hours — published branch advanced from f1523badb5cb3c4d642f57dc8fe59b713dab3509 to e7dd0d9c1a32b3601a57e817bf619fbfda3340d4 before the worker started; the ordinary sweep must read fresh exact-head failure evidence
     - PR #15312: 2.41 PR-hours — published branch advanced from b8656b67f26de4650a95960a2a1a9a33a73121e8 to 9e31d828c6ff96e7b826ca0b8cf94736214bdfb3 before the worker started; the ordinary sweep must read fresh exact-head failure evidence
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The task promises fresh exact-head failure evidence in the ordinary sweep, but declares only a test-placement table and a new test; the record does not explain how those files deliver that remedy.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for test text with grep, rather than demonstrating recovery after a published branch advances. The claimed remedy cannot be verified from the supplied evidence, meeting the explicit escalation condition."
+    judged_at: "2026-10-30T08:19:27.850Z"
+    pin: "444e09b7357c12fff45bf01607a99cf2303bc1430f532f20fbb8f31a15ed9ed9"
