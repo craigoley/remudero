@@ -1,0 +1,32 @@
+id: incident-4db07f694a512efa
+ts: 2026-10-30T01:27:18.043Z
+raw: >-
+  Incident 4db07f694a51: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  guaranteed prevention requires publication/dispatch changes outside declared
+  scope; branch left unchanged as instructed
+
+  First seen: 2026-10-29T10:21:10.545Z
+
+  Last seen: 2026-10-29T11:12:49.305Z
+
+  Count: 3, burn: 3.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15404 escalated: already escalated (reason unreadable: no escalation of this PR at head f4a25ce is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793261281327:1:1793268008902) — guaranteed prevention requires publication/dispatch changes outside declared scope; branch left unchanged as instructed
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#4db07f694a512efafc3c3dcffb5bc89db0694eab007b7dd09c5bb6490cddc37f
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

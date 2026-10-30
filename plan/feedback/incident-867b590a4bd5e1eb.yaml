@@ -1,0 +1,31 @@
+id: incident-867b590a4bd5e1eb
+ts: 2026-10-30T01:28:04.717Z
+raw: >-
+  Incident 867b590a4bd5: intervention
+  escalated:none:fix-needs-design-at-this-exact-head-the
+
+  First seen: 2026-10-30T01:27:55.702Z
+
+  Last seen: 2026-10-30T01:27:55.702Z
+
+  Count: 7, burn: 7.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#13313@b4dfebfde actor=cao825 cause=escalated:none:fix-needs-design-at-this-exact-head-the — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#13313@50c4f6b4f actor=cao825 cause=escalated:none:fix-needs-design-at-this-exact-head-the — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#13313@a604a7c1f actor=cao825 cause=escalated:none:fix-needs-design-at-this-exact-head-the — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#867b590a4bd5e1eb77eb1af3e6365fe8f50054be6b22683956222c1a26f4ec1d
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
