@@ -8,7 +8,7 @@ import { after, before, test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import * as consumers from "#src/lib/selected-registry-consumers.js";
 import { parseSpec, readSpec, readStatus, RUN_CHILD_SCHEMA, writeSpec, type RunChildSpec } from "#src/lib/run-child-contract.js";
-import { adoptRunChildren, spawnRunChild, startRunChildProbe, type SpawnRunChildInput, type SpawnRunChildPorts } from "#src/lib/run-child.js";
+import { adoptRunChildren, createDetachedWorkHost, spawnRunChild, startRunChildProbe, type DetachedWorkHostInput, type SpawnRunChildInput, type SpawnRunChildPorts } from "#src/lib/run-child.js";
 import { runChildMain, type RunChildMainPorts } from "#src/run-child-main.js";
 import { spawnWorker, createClaudeExecutableCache, CLAUDE_BIN_ENV_OVERRIDE } from "#src/lib/worker.js";
 import { spawnCodexWorker } from "#src/lib/worker-provider.js";
@@ -125,6 +125,68 @@ test("selected registry shadow intent survives actual trusted child transport - 
   const spec = readSpec(join(state, "runs", String(outcome.row.run_id))); assert.ok(spec.ok);
   const intent = spec.value.options.selectedRegistryIntent; assert.ok(intent?.kind === "shadow");
   assert.equal(intent.input.configuredPath, f.path); assert.ok(intent.input.expectedDigest);
+});
+
+test("selected registry shadow intent survives actual trusted child transport - production detached producers", { timeout: 90_000 }, async t => {
+  const f = fixture(t), state = join(f.root, "state"), engine = join(state, "engines", f.spec.engine.sourceHash);
+  mkdirSync(engine, { recursive: true });
+  symlinkSync(realpathSync(join(REPO_ROOT, "node_modules")), join(engine, "node_modules"), "dir");
+  writeFileSync(join(engine, "engine.json"), JSON.stringify({ ...f.spec.engine, builtAt: Date.now() }));
+  const entry = pathToFileURL(join(REPO_ROOT, "src/run-child-main.ts")).href;
+  const consumerEntry = pathToFileURL(join(REPO_ROOT, "src/lib/selected-registry-consumers.ts")).href;
+  const code = `import { runChildMain } from ${JSON.stringify(entry)};
+    import * as consumers from ${JSON.stringify(consumerEntry)};
+    import { writeFileSync } from 'node:fs';
+    process.exitCode = await runChildMain(process.argv.slice(1), { env: {}, loadRunPath: async () => ({}),
+      selectedRegistryRecord: (step, fields) => console.error(JSON.stringify({step,...fields})),
+      runDetachedWork: async (work, ctx) => {
+        const observer = consumers.selectedRegistryObserverInContext();
+        if (!observer || !consumers.hasQualifiedSelectedRegistryRunContext()) throw new Error('lost detached intent');
+        await observer.observe('run-task-resume', {}, () => work.kind);
+        await observer.settled();
+        writeFileSync(${JSON.stringify(f.path)}, ${JSON.stringify(text("replacement"))});
+        await observer.observe('run-task-resume', {}, () => work.kind);
+        return {taskId:ctx.taskId,runId:ctx.runId,verdict:'no_pr',merged:false,costUsd:0};
+      } });`;
+  const dirs: string[] = [];
+  const ports: SpawnRunChildPorts = { mainSha: async () => f.spec.engine.sha, engine: { isCurrent: () => true },
+    launch: (_engine, args) => ({ cwd: REPO_ROOT, engineRoot: engine, kind: "tsx", reason: "real detached entry",
+      argv: ["--import", "tsx", "--input-type=module", "-e", code, "--", ...args] }),
+    reserve: async () => ({ id: "fixture", bindRoot() {}, releaseOccupancy() {} }) as never,
+    workerAdmissionHold: () => undefined, pollMs: 5, watch: false };
+  for (const kind of ["review", "fix-dispatch", "retro"] as const) {
+    writeFileSync(f.path, text());
+    const mutable = structuredClone(f.intent)!;
+    const input: DetachedWorkHostInput = { stateRoot: state, repoDir: f.root, root: f.root, repo: "repo", log: () => {},
+      selectedRegistryIntent: mutable, readMode: () => "on", readLedger: () => {
+        if (mutable.kind === "shadow") (mutable.input as { configuredPath: string }).configuredPath = f.other;
+        input.selectedRegistryIntent = undefined;
+        return [{ step: "daemon.memory_drain.completed", duration_ms: 5000,
+          waited_on: [{ what: kind === "review" ? "review" : "detached", kind, settled_after_ms: 5000 }] }];
+      }, spawn: async args => {
+        const child = await spawnRunChild(args, ports);
+        if (child.started) dirs.push(child.dir);
+        return child;
+      } };
+    const host = createDetachedWorkHost(input);
+    const pr = { prNumber: 19, headSha: "b".repeat(40), taskId: f.spec.taskId };
+    const child = kind === "review" ? await host.spawnReview({ pr, reviewKey: "fixture-review", reviewAttemptId: undefined })
+      : kind === "fix-dispatch" ? await host.spawnFix!({ pr, fixKey: "fixture-fix", envelope: {} as never })
+      : await host.spawnRetro!({ decision: { fire: true, reason: "days", mergesSinceMarker: 0, daysSinceMarker: 1 } });
+    assert.ok(child && "settled" in child, `production ${kind} must launch`);
+    assert.equal((await child.settled as { verdict: string }).verdict, "no_pr");
+    const dir = dirs.at(-1)!;
+    const stored = readSpec(dir); assert.ok(stored.ok);
+    const intent = stored.value.options.selectedRegistryIntent; assert.ok(intent?.kind === "shadow");
+    assert.equal(intent.input.configuredPath, f.path); assert.ok(intent.input.expectedDigest);
+    const output = readFileSync(join(dir, "stderr.log"), "utf8");
+    const rows = output.trim().split("\n").map(line => JSON.parse(line) as Row);
+    assert.ok(rows.some(row => row.action === "run-task-resume" && row.selected_state === "ready"));
+    assert.ok(rows.some(row => row.action === "run-task-resume" && row.selected_state === "unknown" && row.reason === "revision_changed"));
+    assert.ok(rows.some(row => row.action === "run-child" && row.selected_state === "unknown"));
+    assert.ok(rows.every(row => row.publication_permission === "not-granted"));
+    assert.equal(output.includes(f.path) || output.includes("registry-material-sentinel"), false);
+  }
 });
 
 test("selected child observer retains its original source identity across restart", async t => {

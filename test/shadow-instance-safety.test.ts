@@ -9,7 +9,8 @@ import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, selectedRegistryObserverFromIntent,
-  type SelectedRegistryIntent } from "#src/lib/selected-registry-consumers.js";
+  withSelectedRegistryContext, type SelectedRegistryIntent } from "#src/lib/selected-registry-consumers.js";
+import { loadPlan } from "#src/lib/plan.js";
 import { runChildMain } from "#src/run-child-main.js";
 import { RUN_CHILD_SCHEMA, writeSpec } from "#src/lib/run-child-contract.js";
 import { applyOperatorMergeHold } from "#src/lib/operator-merge-hold.js";
@@ -108,9 +109,10 @@ test("the independent sweep path cannot arm a shadow instance", async () => {
   assert.equal(sweepArmCalls, 0);
 });
 
-for (const contract of ["qualified", "unsupported", "absent"] as const) {
-test(contract === "qualified"
-  ? "selected child admission and resume retain current original source identity"
+for (const contract of ["qualified", "unsupported", "absent", "cli"] as const) {
+const selectedContract = contract === "qualified" || contract === "cli";
+test(selectedContract
+  ? `selected child admission and resume retain current original source identity - ${contract}`
   : `selected child mixed version contracts never invent authority - actual ${contract} deferred arm`, { timeout: 60_000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-mode-run-`));
   const origin = gitRepo({ bare: true }), seed = gitRepo({ cloneFrom: origin.dir });
@@ -166,19 +168,26 @@ test(contract === "qualified"
     const specBefore = readFileSync(join(childDir, "spec.json"), "utf8");
     let hold: ReturnType<typeof applyOperatorMergeHold>["current"];
     let optionsSeen = false;
-    const exitCode = await runChildMain(["--run-dir", childDir], {
-      env: {}, selectedRegistryRecord: (step, fields) => { inheritedRows.push({ step, ...fields }); },
-      loadRunPath: async () => ({ runTask: async (taskId: string, options: Record<string, unknown>) => {
+    const executeRun = async (taskId: string, options: Record<string, unknown>) => {
       optionsSeen = true;
-      assert.ok(Object.hasOwn(options, "selectedRegistryIntent"));
-      assert.deepEqual(options.selectedRegistryIntent, contract === "qualified" ? intent
-        : contract === "unsupported" ? { version: 1, kind: "unknown" } : undefined);
+      if (contract !== "cli") {
+        assert.ok(Object.hasOwn(options, "selectedRegistryIntent"));
+        assert.deepEqual(options.selectedRegistryIntent, contract === "qualified" ? intent
+          : contract === "unsupported" ? { version: 1, kind: "unknown" } : undefined);
+      }
       const mutableIntent = options.selectedRegistryIntent === undefined ? undefined
         : structuredClone(options.selectedRegistryIntent) as SelectedRegistryIntent;
       const running = withLiveWritesAllowed(() => runTask(taskId, {
-      ...options, selectedRegistryIntent: mutableIntent,
-      owner: "owner", skipGitSync: true, planPath,
+      ...options, ...(contract === "cli" ? {} : { selectedRegistryIntent: mutableIntent }),
+      owner: "owner", skipGitSync: contract !== "cli", planPath,
       config: selectedConfig,
+      ...(contract === "cli" ? { planSnapshot: async () => {
+        await Promise.resolve();
+        writeFileSync(selected, selectedText("live"));
+        const replacement = join(root, "admission-replacement.yaml"); writeFileSync(replacement, selectedText("shadow"));
+        selectedConfig.selectedRegistryMode = { mode: "shadow", registryPath: replacement, instanceName: "fixture" };
+        return { plan: loadPlan(planPath), staleDispatch: false };
+      } } : {}),
       implementPush: async () => { attemptedPushes++; },
       github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
       spawn: async () => {
@@ -194,7 +203,7 @@ test(contract === "qualified"
       containmentExec: async token => ({ transcript: `touch ../${token}.txt: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
       isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
       runReview: async () => {
-        if (contract === "qualified") {
+        if (selectedContract) {
           writeFileSync(selected, selectedText("live"));
           const replacement = join(root, "replacement.yaml"); writeFileSync(replacement, selectedText("shadow"));
           selectedConfig.selectedRegistryMode = { mode: "shadow", registryPath: replacement, instanceName: "fixture" };
@@ -211,8 +220,13 @@ test(contract === "qualified"
       }
       runResult = await running;
       return runResult;
-      } }),
-    });
+    };
+    const exitCode = contract === "cli"
+      ? await withSelectedRegistryContext(inheritedObserver, async () => { await executeRun("T-SELECTED", {}); return 0; })
+      : await runChildMain(["--run-dir", childDir], {
+        env: {}, selectedRegistryRecord: (step, fields) => { inheritedRows.push({ step, ...fields }); },
+        loadRunPath: async () => ({ runTask: executeRun }),
+      });
     inheritedObserver.close();
     assert.equal(exitCode, 0); assert.equal(optionsSeen, true); assert.ok(runResult);
     assert.equal(attemptedPushes, 1, "the real run body attempted its push through the recording transport");
@@ -224,12 +238,19 @@ test(contract === "qualified"
     "the real runTask consumes the inherited observer and rechecks the source after the effect");
     const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
     const observed = rows.filter(row => row.step === "instance_mode.shadow_observed");
-    if (contract === "qualified") {
+    if (selectedContract) {
       assert.ok(observed.length > 0, "the REAL runTaskBody deferred arm must carry the original selected binding");
-      assert.ok(observed.some(row => row.reason === "revision_changed" && row.selected_outcome === "would-refuse"));
+      assert.ok(observed.some(row => row.reason === (contract === "cli" ? "digest_mismatch" : "revision_changed")
+        && row.selected_outcome === "would-refuse"));
       assert.ok(observed.every(row => row.publication_permission === "not-granted"));
       assert.ok(rows.some(row => row.step === "automerge.armed" && row.outcome === "hold-refused"));
       assert.deepEqual(automergeHoldFromLedger(readLedgerLines(join(root, "state/ledger.ndjson")), 1), hold);
+      if (contract === "cli") {
+        const consumerRows = rows.filter(row => row.step === "instance_registry.consumer_shadow_observed");
+        assert.ok(consumerRows.some(row => row.action === "run-task-resume" && row.selected_state === "unknown"));
+        assert.ok(consumerRows.every(row => row.selected_state !== "ready"), "admission cannot select the replacement global binding");
+        assert.deepEqual(inheritedRows, [], "the general CLI observer cannot stand in for a qualified run observer");
+      }
     } else {
       assert.deepEqual(observed, [], "unknown/absent child intent never qualifies using current global defaults");
       assert.ok(rows.some(row => row.step === "automerge.armed" && row.outcome === "armed"), "legacy effect remains exact");

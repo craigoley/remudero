@@ -26645,6 +26645,7 @@ const daemonDefaultBuildSweepHook: typeof buildSweepHook = (...args) => {
   installDetachedWorkHost(createDetachedWorkHost({
     stateRoot: join(config.root, "state"), repoDir: args[16] ?? repoRoot, root: config.root, repo, log: args[6],
     readLedger: () => readLedgerLines(ledgerPath),
+    selectedRegistryIntent: selectedRegistryIntentForConfig(config),
   }));
   return buildSweepHook(...args);
 };

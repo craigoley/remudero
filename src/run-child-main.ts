@@ -228,10 +228,15 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
         // Detached work has no safe point to stop at: a SIGTERM ends it as `aborted` at once, and the process exit takes the work with it.
         const stopped = new Promise<{ error: unknown }>((resolve) => { abort.signal.addEventListener("abort", () => resolve(aborted()), { once: true }); });
         outcome = await Promise.race([
-          withRunChildReservation(spec.value, () => detachedWork(work, { runId, taskId: spec.value.taskId, onPhase: (next) => {
-            phase = `${work.kind}:${next}`;
-            status("running", phase, {});
-          } })).then(
+          withSelectedRegistryContext(observer, async () => {
+            try {
+              return await observeSelectedRegistry(observer, "run-child", {}, () =>
+                withRunChildReservation(spec.value, () => detachedWork(work, { runId, taskId: spec.value.taskId, onPhase: (next) => {
+                  phase = `${work.kind}:${next}`;
+                  status("running", phase, {});
+                } })));
+            } finally { await observer?.settled(); }
+          }, { qualifiedRun: true }).then(
             (result): { result: RunResult } => ({ result }), (error: unknown): { error: unknown } => ({ error })),
           stopped,
         ]);
@@ -256,7 +261,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
             if (!abort.signal.aborted) await Promise.allSettled(background);
             await observer?.settled();
           }
-        }) };
+        }, { qualifiedRun: true }) };
     } catch (error) {
       outcome = { error }; // Carried, not erased: it is rethrown as the run's failure, or recorded as the abort that caused it, below.
     } finally {

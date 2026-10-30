@@ -33,7 +33,7 @@ const unavailableIntent = (): SelectedRegistryIntent => Object.freeze({ kind: "u
 const unknown = (reason: string, digest?: string): Evidence => ({ selected_state: "unknown", reason,
   ...(digest === undefined ? {} : { binding_digest: digest }) });
 const LIMIT = 32;
-interface ConsumerScope { observer: SelectedRegistryObserver | undefined; active: boolean }
+interface ConsumerScope { observer: SelectedRegistryObserver | undefined; active: boolean; qualifiedRun?: boolean }
 const consumerScope = new AsyncLocalStorage<ConsumerScope>();
 
 /** Invocation-owned diagnostics only. An absent nested invocation masks, rather than inherits, opt-in. */
@@ -42,9 +42,15 @@ export function selectedRegistryObserverInContext(): SelectedRegistryObserver | 
   return scope?.active ? scope.observer : undefined;
 }
 
+/** Only a run entry that pinned its transport before admission can reuse the inherited observer. */
+export function hasQualifiedSelectedRegistryRunContext(): boolean {
+  const scope = consumerScope.getStore();
+  return scope?.active === true && scope.qualifiedRun === true;
+}
+
 export async function withSelectedRegistryContext<T>(observer: SelectedRegistryObserver | undefined,
-  operation: () => Promise<T>): Promise<T> {
-  const scope: ConsumerScope = { observer, active: true };
+  operation: () => Promise<T>, qualification?: { qualifiedRun: true }): Promise<T> {
+  const scope: ConsumerScope = { observer, active: true, qualifiedRun: qualification?.qualifiedRun };
   try { return await consumerScope.run(scope, operation); }
   finally { scope.active = false; observer?.close(); }
 }

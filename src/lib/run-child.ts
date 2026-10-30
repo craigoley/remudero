@@ -1242,6 +1242,7 @@ export interface DetachedWorkHostInput {
   readMode?: () => RunChildMode;
   spawn?: typeof spawnRunChild;
   probe?: typeof startRunChildProbe;
+  selectedRegistryIntent?: RunChildSpecOptions["selectedRegistryIntent"];
 }
 
 /**
@@ -1251,6 +1252,8 @@ export interface DetachedWorkHostInput {
  * measured drain cost say so; a child that cannot start is `undefined`, and the review runs in process as before.
  */
 export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWorkChildHost {
+  const intent = copySelectedRegistryIntent(input.selectedRegistryIntent);
+  const options = (): RunChildSpecOptions => ({ selectedRegistryIntent: intent });
   const mode = (): DetachedWorkMode => detachedWorkModeNow(input.stateRoot, input.readMode);
   let probing = false;
   return {
@@ -1268,7 +1271,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
           probing = true;
           void (input.probe ?? startRunChildProbe)({
             taskId: `review-PR${pr.prNumber}`, stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-            plan: Promise.resolve({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+            plan: Promise.resolve({ plan: { tasks: [] } }), options: options(), log: input.log, work,
           }, { readMode: () => "shadow" }).finally(() => { probing = false; });
         }
         return undefined;
@@ -1280,7 +1283,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       if (placement.placement !== "child") return undefined;
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "review", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
       });
       if (!launch.started) return undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
@@ -1295,7 +1298,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey, inputs: { repo: input.repo, envelope } };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "sweep-fix", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
@@ -1309,7 +1312,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = { kind: "retro", inputs: { decision } };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: "DAEMON", lane: "retro", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };

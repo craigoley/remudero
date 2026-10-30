@@ -7,7 +7,7 @@ import { type BranchUpdateRecorder } from "../../lib/branch-update.js";
 import { retryWhileLockBusy } from "../../lib/lock-busy-retry.js";
 import { retryPollRead } from "../../lib/poll-read-retry.js";
 import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, selectedRegistryObserverFromIntent, withSelectedRegistryContext,
-  copySelectedRegistryIntent, observeSelectedRegistry, selectedRegistryObserverInContext,
+  copySelectedRegistryIntent, observeSelectedRegistry, selectedRegistryObserverInContext, hasQualifiedSelectedRegistryRunContext,
   type SelectedRegistryIntent } from "../../lib/selected-registry-consumers.js";
 import { recyclePauseDetail } from "../../lib/recycle-yield.js";
 import { execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
@@ -5078,7 +5078,7 @@ export async function runTask(
       () => runTaskBody(ctx, host));
   });
   };
-  if (selectedRegistryObserverInContext() !== undefined) {
+  if (hasQualifiedSelectedRegistryRunContext()) {
     return execute();
   }
   const config = opts.config ?? loadConfig();
@@ -5096,7 +5096,7 @@ export async function runTask(
       return await observeSelectedRegistry(observer, "run-task-resume", {}, () =>
         execute());
     } finally { await observer?.settled(); }
-  });
+  }, { qualifiedRun: true });
 }
 
 /** The initial run uses the same branch lease as the cold fix lane; unknown owners never get reclaimed. */
