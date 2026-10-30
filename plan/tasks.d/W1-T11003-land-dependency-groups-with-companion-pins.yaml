@@ -1,0 +1,64 @@
+- id: W1-T11003
+  title: Land the dependency moves from PRs 15180, 15177 and 15182 with their companion pins on an owned task branch
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  origin: feedback#fb-dep-review-69bc59bf88007e5e
+  plan_refs: ["§7B", W1-T10993]
+  files:
+    - package.json
+    - package-lock.json
+    - deploy/package.json
+    - deploy/package-lock.json
+    - .github/workflows/codeql.yml
+    - .github/workflows/scorecard.yml
+    - .github/workflows/semgrep.yml
+    - .github/workflows/semgrep-runtime-compatibility.yml
+    - src/lib/settings.ts
+    - test/settings.test.ts
+    - test/the-haiku55-image-pins-match-its-sdk.test.ts
+    - test/semgrep-native-install.test.ts
+    - test/review/dependency-groups-15180-companion-pins.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The checkout still pins image CLI versions 2.1.303 and 0.163.0, SDK
+    ^0.3.303, and the old action SHAs. W1-T10993 covers future fix-round admission,
+    not delivery of these version moves. Its operator evidence records companion
+    repairs on #15177 and #15182 on 2026-10-29; reuse those decisions rather than
+    interpreting the captured release notes as authority for a security change.
+    Current remote PR state was not verified during this checkout-only intake.
+  design: |
+    Before implementation, inspect current PR states, complete discussion and heads
+    for #15180, #15177 and #15182, and check merged work and active owned tasks.
+    Carry only still-missing hunks; do not downgrade newer versions already landed.
+    On the owned task branch, reproduce the proposed moves: claude-code 2.1.310,
+    codex 0.164.0, claude-agent-sdk 0.3.310, MCP SDK 1.32.2, SWC 1.16.20,
+    dependency-cruiser 18.7.0 and jscpd 5.4.2, with matching lockfiles.
+    Reproduce the sibling action moves to codeql-action 4.39.1 and setup-python
+    7.1.0 using their verified immutable SHAs at every existing workflow call site.
+    Update companion literal assertions while retaining SDK metadata equality,
+    native CLI execution and action SHA verification. Follow the recorded operator
+    repair for the new SDK sandbox key only after inspecting its complete policy
+    and tests; preserve fail-closed validation and escalate any unresolved security
+    decision. No gate weakening, scanner exclusion or advisory ignore is authorized.
+    Add a focused regression in the computed test folder covering all version moves
+    and action call sites. Use package aliases and the shared repository-root helper.
+    Do not push to, edit or close Dependabot PRs. Identify the carried PR hunks in
+    the owned PR body so existing supersession handling can reconcile them.
+  acceptance:
+    - claim: The root and image manifests and lockfiles carry all still-required proposed version moves, and every action call site uses the verified sibling SHA
+      proof: "unit test: test/review/dependency-groups-15180-companion-pins.test.ts"
+    - claim: The image CLI matches the installed locked SDK metadata and its native binary reports that version
+      proof: "unit test: test/the-haiku55-image-pins-match-its-sdk.test.ts"
+    - claim: SDK sandbox schema parity and fail-closed settings validation survive the upgrade, including the operator-reviewed new key policy
+      proof: "unit test: test/settings.test.ts"
+    - claim: Native Semgrep installation retains its pinned action and workflow controls after the action updates
+      proof: "unit test: test/semgrep-native-install.test.ts"
+  falsifier: |
+    Restore an old image version or action SHA while retaining the updated dependency
+    locks: the focused regression must fail. Restore the companion fix and it passes.
+    Report real test summaries; require the unchanged hosted coverage gates to pass.
