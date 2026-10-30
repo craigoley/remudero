@@ -34,6 +34,11 @@
   note: |
     Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-29 as an observation proposal at priority normal (2).
     Read-only: no change to sloLadderDue, strikeLadderDue, decideSloRung, BLOCKER_SLO_MS or any cap is authorized by this task. Any change is a separate filing.
+  design: |
+    Added 2026-10-30 from the operator recon of ten review-failed PRs, for the builder of this replay:
+    - Evaluation order: strikeLadderDue and sloLadderDue (src/lib/sweep.ts) are computed BEFORE the W1-T10608 terminal design hold and the W1-T10339 stand-down hold rewrite the disposition to refused-escalate or wait. The replay must judge eligibility on the disposition before those holds, not only the recorded one.
+    - Age reset: blocker_since restarts each time a PR flips between blocked-fixable and refused-escalate at one head (#15133 read blocker_since 2026-10-29T23:30:08Z though its review had failed since 17:47Z). Measure the hold's age at the head, not blocker_age_ms.
+    - Since filed: #15620 (2026-10-30T02:29Z) rebuilds an unanswered fix-lane escalation after HELD_ESCALATION_SLO_MS (6 h), and #15621 (14:45Z) added the redesign gardener. Replay their effect as the after window.
   risk_ruling:
     verdict: "low"
     action: escalate

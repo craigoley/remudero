@@ -184,6 +184,7 @@ function titleFixture(t: { after(fn: () => void): void }, title: string, body: s
   const view = { title };
   const retitles: Array<{ url: string; title: string }> = [];
   const statuses: string[] = [];
+  const opened: string[] = [];
   let captures = 0;
   const deps: DepReviewDeps = {
     config: { root, ledger: ledgerPath } as never,
@@ -197,6 +198,10 @@ function titleFixture(t: { after(fn: () => void): void }, title: string, body: s
     prDiff: () => "diff --git a/.github/workflows/scan.yml b/.github/workflows/scan.yml\n",
     postStatus: (async (args) => { statuses.push(args.state); return { posted: true }; }) as DepReviewDeps["postStatus"],
     arm: () => "armed",
+    issues: {
+      create: (_title, issueBody) => { opened.push(issueBody); return `https://github.com/craigoley/remudero/issues/${11968 + opened.length}`; },
+      listOpen: () => [], closeWithComment: () => undefined,
+    },
     nodePin: { readAtHead: () => undefined, commitAndPush: () => "c".repeat(40) },
     prMutations: {
       comment: () => undefined, close: () => undefined,
@@ -205,7 +210,7 @@ function titleFixture(t: { after(fn: () => void): void }, title: string, body: s
     captureMigrationFeedback: (args) => { captures += 1; return { id: args.id } as never; },
   };
   return {
-    retitles, statuses,
+    retitles, statuses, opened,
     get captures() { return captures; },
     run: () => depReviewCommand("11968", ["--repo", "remudero", "--dependabot-own-red", "main-passes"], { ...deps }),
     ledger: () => readFileSync(ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>),
@@ -238,6 +243,8 @@ test("W1-T9828: an unfittable title red is held without an own-red build, and a 
   assert.deepEqual(f.retitles, []);
   assert.equal(f.ledger().filter((r) => r.step === "dep-review.retitle_refused").length, 1);
   assert.equal(f.ledger().filter((r) => r.step === "dep-review.decided").length, 2, "the existing hold still runs");
+  assert.equal(f.opened.length, 1, "the unchanged title red asks on the second pass");
+  assert.match(f.opened[0], /fingerprint unchanged since/i);
   assert.equal(f.ledger().some((r) => String(r.step).startsWith("dep-review.own_red")), false, "a title red files no own-red build");
   assert.equal(f.captures, 0);
 
