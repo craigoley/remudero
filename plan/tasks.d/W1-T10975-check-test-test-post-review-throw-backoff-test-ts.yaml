@@ -3,11 +3,12 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: high  # Rule 19 span: widened to ledger, sweep by a scope amendment for #15756
   band_meaning: span
   priority: 1.2
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-10-30T18:42:44.550Z
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/post-review-throw-backoff.test.ts"
