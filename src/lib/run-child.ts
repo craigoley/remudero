@@ -9,6 +9,7 @@ import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
 import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
@@ -21,22 +22,38 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { loadRunChildMode, runChildEffectiveMode, type RunChildMode } from "./policy.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { pauseDetail, stopDetail } from "./fleet-control.js";
-import { classifyRunChildLoss, decideRunChildMode, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence } from "./run-child-mode.js";
+import {
+  classifyRunChildLoss, createRunChildModeTracker, decideRunChildMode, emptyRunChildModeEvidence, readRunChildModeUnion, readRunChildPolicy,
+  runChildModeFor, runChildModeWindow, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence,
+} from "./run-child-mode.js";
 import {
   RUN_CHILD_SCHEMA, classifyRunDir, fromRunChildFailure, isTerminalState, readSpec, readStatus, runDir, writeSpec,
-  type RunChildEntryKind, type RunChildFailureClass, type RunChildProbe, type RunChildSpecOptions, type RunChildStatus,
+  type RunChildEntryKind, type RunChildFailureClass, type RunChildProbe, type RunChildSpec, type RunChildSpecOptions, type RunChildStatus,
 } from "./run-child-contract.js";
 import { waitingStarts } from "./host-memory-admission.js";
 import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservation.js";
 import type { RunResult } from "./run-result.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { killProcessGroup } from "./worker-containment.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 
 export const RUN_CHILD_SHADOW_STEP = "run_child.shadow";
 export const RUN_CHILD_SHADOW_SKIPPED_STEP = "run_child.shadow_skipped";
 export const PLAN_SNAPSHOTS_DIR = "plan-snapshots";
 /** The entry the probe runs: `CHILD_ENTRIES` name and source (scripts/build-child-entries.mjs). */
 export const RUN_CHILD_ENTRY = { name: "run-child", source: "src/run-child-main.ts" } as const;
+/** PRIMARY CONTROL: the selected entry must return this protocol token and kind before detached work is admitted. */
+export const DETACHED_WORK_CAPABILITY = "detached-work-v1";
+
+async function requireDetachedWorkEntry(launch: EngineChildLaunch, kind: DetachedWorkKind): Promise<void> {
+  // No --run-dir: an older entry must never mistake this capability query for permission to run a build.
+  const { stdout } = await execFileLoopBounded(process.execPath, [...launch.argv, "--detached-work-capability", kind], {
+    cwd: launch.cwd, encoding: "utf8", timeout: PROBE_TIMEOUT_MS, maxBuffer: STDERR_TAIL_BYTES,
+  }).catch((error: unknown) => {
+    throw new Error(`detached-work capability unavailable: ${reasonOf(error)}`);
+  });
+  if (stdout.trim() !== `${DETACHED_WORK_CAPABILITY}:${kind}`) throw new Error(`detached-work capability mismatch for ${kind}`);
+}
 /** BACKSTOP on how long a probe may run before it is killed: the load is seconds, so only a wedged child reaches this. */
 export const PROBE_TIMEOUT_MS = 180_000;
 /** BACKSTOP on how long a probe waits for the run it shadows to read its plan: a run refused before that never will. */
@@ -169,6 +186,7 @@ export interface RunChildProbeInput {
   plan: Promise<AdmittedPlan | undefined>;
   /** The serializable `runTask` options the daemon passes the run. */
   options: RunChildSpecOptions;
+  work?: DetachedWorkSpec;
   log: Log;
 }
 
@@ -300,15 +318,15 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
     }
     const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...seams.engine });
     if (!engine) return skip("no current engine tree for main");
+    const entry = (seams.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(engine, [], log);
+    if (input.work) await requireDetachedWorkEntry(entry, input.work.kind);
     const admitted = await within(input.plan, seams.planWaitMs ?? PROBE_PLAN_WAIT_MS);
     if (!admitted) return skip("the run never read its plan");
     const snapshot = writePlanSnapshot(input.stateRoot, admitted.plan.tasks);
 
     const dir = runDir(input.stateRoot, runId);
     mkdirSync(dir, { recursive: true });
-    const launch = (seams.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(
-      engine, ["--run-dir", dir, "--probe"], log,
-    );
+    const launch = { ...entry, argv: [...entry.argv, "--run-dir", dir, "--probe"] };
     log(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow(RUN_CHILD_ENTRY.name, "--probe", launch));
     let peakMib: number | undefined;
     const base = seams.sampler ?? createTreePeakSampler();
@@ -321,7 +339,8 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
       engine: { sourceHash: engine.sourceHash, sha: engine.sha }, planSnapshotPath: snapshot.path,
       reservationId: reservation.id ?? "", options: input.options,
-    });
+      ...(input.work ? { work: input.work } : {}),
+    } as RunChildSpec);
     const child = (seams.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], { cwd: options.cwd, stdio: ["ignore", "ignore", "pipe"] })))(
       process.execPath, launch.argv, { cwd: launch.cwd },
     );
@@ -330,7 +349,7 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
     const estimateMib = reservation.estimateMib;
     reservation.releaseOccupancy();
     reservation = undefined;
-    const row = settleRow({ taskId: input.taskId, runId, dir, engine, launch, ended, peakMib, estimateMib, mode, effective });
+    const row = settleRow({ taskId: input.taskId, runId, dir, engine, launch, ended, peakMib, estimateMib, mode, effective, work: input.work });
     log(RUN_CHILD_SHADOW_STEP, row);
     try {
       prunePlanSnapshots(input.stateRoot);
@@ -354,9 +373,10 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
 function settleRow(a: {
   taskId: string; runId: string; dir: string; engine: EngineRef; launch: EngineChildLaunch; ended: ChildEnd;
   peakMib: number | undefined; estimateMib: number | undefined; mode: RunChildMode; effective: { mode: string; fellBack: boolean };
+  work?: DetachedWorkSpec;
 }): Record<string, unknown> {
   const status = readStatus(a.dir);
-  let raw: { loadMs?: unknown; maxRssBytes?: unknown; planTasks?: unknown } = {};
+  let raw: { loadMs?: unknown; maxRssBytes?: unknown; planTasks?: unknown; work?: unknown } = {};
   try {
     raw = JSON.parse(readFileSync(join(a.dir, "status.json"), "utf8")) as typeof raw;
   } catch (error) {
@@ -376,6 +396,9 @@ function settleRow(a: {
   } else if (status.value.state !== "done" || a.ended.code !== 0) {
     contract = "unknown";
     error = `probe ended in state ${status.value.state}, exit ${a.ended.code ?? a.ended.signal}`;
+  } else if (a.work && !isDeepStrictEqual(raw.work, JSON.parse(JSON.stringify(a.work)))) {
+    contract = "contract_mismatch";
+    error = "probe did not round-trip its detached work envelope";
   } else {
     contract = "ok";
   }
@@ -393,6 +416,7 @@ function settleRow(a: {
     class_estimate_bytes: typeof a.estimateMib === "number" && Number.isFinite(a.estimateMib) ? Math.round(a.estimateMib * 1024 * 1024) : null,
     child_max_rss_bytes: typeof raw.maxRssBytes === "number" ? raw.maxRssBytes : null,
     plan_tasks: typeof raw.planTasks === "number" ? raw.planTasks : null,
+    ...(a.work ? { work_kind: a.work.kind } : {}),
     exit_code: a.ended.code,
     contract,
     mode: a.mode,
@@ -493,6 +517,8 @@ export interface SpawnRunChildInput {
   signal?: AbortSignal;
   /** W1-T10000: told once the engine is chosen and the run waits for its reservation, before any child exists. */
   onPending?: (pending: RunChildPending) => void;
+  /** W1-T9114: set, the child hosts detached work (a review, a fix dispatch) and its spec names it for the boot's adoption. */
+  work?: DetachedWorkSpec;
 }
 
 /** A run waiting for its child's memory admission. `abort` abandons the wait; it resolves once the wait has ended. */
@@ -644,7 +670,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
       void error; // The ledger is the only place a child reports to; a failing one leaves nothing else to tell.
     }
   };
-  const runId = `run-${sanitiseId(input.taskId)}-${clock()}-${randomBytes(2).toString("hex")}`;
+  const runId = `${input.work ? `work-${sanitiseId(input.work.kind)}` : "run"}-${sanitiseId(input.taskId)}-${clock()}-${randomBytes(2).toString("hex")}`;
   const unavailable = (reason: string): RunChildLaunch => {
     log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, run_id: runId, reason });
     return { started: false, reason };
@@ -662,11 +688,11 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...ports.engine });
     if (!engine) return unavailable("no current engine tree for main");
     engineSha = engine.sha;
+    const entry = (ports.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(engine, [], log);
+    if (input.work) await requireDetachedWorkEntry(entry, input.work.kind);
     const admitted = await input.plan();
     dir = runDir(input.stateRoot, runId);
-    launch = (ports.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(
-      engine, ["--run-dir", dir], log,
-    );
+    launch = { ...entry, argv: [...entry.argv, "--run-dir", dir] };
     log(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow(RUN_CHILD_ENTRY.name, "run", launch));
     const waited = await reserveWhilePending(input, ports, launch.kind, runId, clock, log);
     if (!("held" in waited)) return waited;
@@ -695,7 +721,8 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
       engine: { sourceHash: engine.sourceHash, sha: engine.sha }, planSnapshotPath: snapshot.path,
       reservationId: reservation.id ?? "", options: input.options,
-    });
+      ...(input.work ? { work: input.work } : {}),
+    } as RunChildSpec);
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
     // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
     child = (ports.spawn ?? defaultRunChildSpawn)(process.execPath, [...nodeArgs, ...launch.argv], {
@@ -740,7 +767,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
       try {
         held.releaseOccupancy();
         prunePlanSnapshots(input.stateRoot);
-        pruneTerminalRunDirs(input.stateRoot, "run-", RUN_CHILD_RUN_DIRS_KEPT);
+        pruneTerminalRunDirs(input.stateRoot, input.work ? "work-" : "run-", RUN_CHILD_RUN_DIRS_KEPT);
       } catch (error) {
         log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, run_id: runId, reason: `settle cleanup failed: ${reasonOf(error)}` });
       }
@@ -896,6 +923,8 @@ export async function abortRunChild(dir: string, ports: AbortRunChildPorts = {})
 
 export interface AdoptedRunChild extends RunChildHandle {
   taskId: string;
+  /** W1-T9114: set for a child that hosts detached work, never for a build run; the daemon keeps it out of the lane pool. */
+  work?: DetachedWorkSpec;
 }
 
 function settlementReceipt(taskId: string, runId: string, log: Log): NonNullable<RunChildHandle["acknowledge"]> {
@@ -936,6 +965,13 @@ export function adoptRunChildren(input: {
     const classified = classifyRunDir(dir, ports.probe);
     const { taskId, runId } = spec.value;
     const pid = classified.status?.identity.pid ?? 0;
+    const work = readWorkSpec(dir);
+    if (work === "malformed") {
+      // A spec naming work this reader cannot read is never adopted as a build run: that would give a review a lane.
+      pass.unreadable += 1;
+      input.log("run_child.adoption_unreadable", { task_id: taskId, run_id: runId, reason: "work spec malformed or of an unknown kind" });
+      continue;
+    }
     if (classified.kind === "unreadable") {
       pass.unreadable += 1;
       input.log("run_child.adoption_unreadable", { task_id: taskId, run_id: runId, reason: classified.detail });
@@ -958,8 +994,318 @@ export function adoptRunChildren(input: {
     });
     // Boot does more work before the pool attaches its handlers; retain the rejection on the handle.
     void settled.catch((error: unknown) => { void error; /* The pool owns and classifies this rejection. */ });
-    adopted.push({ started: true, taskId, runId, dir, pid, settled, acknowledge: settlementReceipt(taskId, runId, input.log), detach: () => detach?.(), abort: () => abortRunChild(dir, { probe: ports.probe, log: input.log }) });
+    adopted.push({ started: true, taskId, runId, dir, pid, settled, ...(work ? { work } : {}), acknowledge: settlementReceipt(taskId, runId, input.log), detach: () => detach?.(), abort: () => abortRunChild(dir, { probe: ports.probe, log: input.log }) });
   }
   input.log(RUN_CHILD_ADOPTION_PASS_STEP, pass);
   return adopted;
+}
+
+// ── W1-T9114: reviews and detached sweep actions as run children ──────────────────────────────────
+// ADR 0007 A.6: the daemon "exits once its in-process work has drained (reviews and detached sweep actions)". A kind that runs as a
+// run child under the same contract is drained by nothing: a booting daemon adopts it. WHERE a kind runs is read from the table
+// below through `detachedWorkPlacement`, never from a list kept at the drain site.
+
+/**
+ * The detached-action kinds, restated here so this module takes no import edge to the sweep hub (the affected-suite reach census
+ * counts type-only edges). The sweep's own `DetachedActionKind` is checked against `DETACHED_WORK_KINDS` by the inventory test.
+ */
+type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort"
+  | "light-pass-action";
+
+/** Every in-process unit a restart drains today: the detached-action kinds, and the review registry. */
+export type DetachedWorkKind = DetachedActionKind | "review";
+
+/** Structural copy of the sweep's `DetachedWorkHost`: `installDetachedWorkHost` checks this value against the original. */
+export interface DetachedWorkChildHost {
+  hosts: ReadonlySet<string>;
+  mode: () => "off" | "shadow" | "on";
+  spawnReview: (input: {
+    pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean };
+    reviewKey: string;
+    reviewAttemptId: string | undefined;
+  }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | undefined>;
+  /** Starts a fix child, refuses abandoned admission, or returns `undefined` when it stays in process. */
+  spawnFix: (input: {
+    pr: { prNumber: number; headSha: string; taskId?: string };
+    fixKey: string;
+    /** The typed decision envelope (sweep.ts `FixDispatchEnvelope`); this module only carries it into `spec.json`, plain JSON. */
+    envelope: object;
+  }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
+  spawnRetro: (input: { decision: Record<string, unknown> }) => ReturnType<DetachedWorkChildHost["spawnFix"]>;
+}
+
+/** `off`: everything in process. `shadow`: a probe round-trips the contract, the work stays in process. `on`: moved kinds are children. */
+export type DetachedWorkMode = "off" | "shadow" | "on";
+
+export interface DetachedWorkRow {
+  kind: DetachedWorkKind;
+  /** What the unit holds in the daemon's memory while it runs. */
+  holds: string;
+  /** Can the unit resume from files alone, so a booting daemon can adopt it without redoing it? */
+  resumableFromFiles: boolean;
+}
+
+/** The inventory, as data. The drain cost of a kind is NOT stored here: it is measured from the ledger ({@link measureDrainCosts}). */
+export const DETACHED_WORK_INVENTORY: Readonly<Record<DetachedWorkKind, DetachedWorkRow>> = {
+  review: { kind: "review", holds: "the judgement's model call and the PR's diff, in the daemon heap", resumableFromFiles: true },
+  // A fix dispatch moves through the governed producer: the sweep spawns it BEFORE taking the fix-branch claim and carries a typed,
+  // serializable decision envelope (sweep.ts `FixDispatchEnvelope`: the PR view and the judged evidence, never the claim keeper, a
+  // dependency function or the phase callback). The child rebuilds live dependencies, rechecks, and takes its own claim.
+  "fix-dispatch": { kind: "fix-dispatch", holds: "the fix worker's handle and its admission or CI wait", resumableFromFiles: true },
+  retro: { kind: "retro", holds: "a settle await on runAutomatedRetroSubprocess (W1-T2870)", resumableFromFiles: true },
+  "auto-triage": { kind: "auto-triage", holds: "one triage run's await", resumableFromFiles: false },
+  "ci-learning": { kind: "ci-learning", holds: "one learning pass's await", resumableFromFiles: false },
+  "benchmark-cohort": { kind: "benchmark-cohort", holds: "one cohort's await", resumableFromFiles: false },
+  "measurement-cadence": { kind: "measurement-cadence", holds: "the settle poll of a cadence that already runs out of process", resumableFromFiles: false },
+  "light-pass-action": { kind: "light-pass-action", holds: "an action bound to the pass that started it", resumableFromFiles: false },
+};
+
+export const DETACHED_WORK_KINDS = Object.keys(DETACHED_WORK_INVENTORY) as DetachedWorkKind[];
+
+/** What a work child's `spec.json` carries beside the contract's own fields: the kind and the serializable inputs of the in-process call. */
+export interface DetachedWorkSpec {
+  kind: DetachedWorkKind;
+  prNumber?: number;
+  headSha?: string;
+  /** The review mutex key the child's review holds; adoption claims it again so the PR is not re-admitted. */
+  reviewKey?: string;
+  /** The fix-dispatch mutex key the child's fix holds. */
+  fixKey?: string;
+  inputs?: Record<string, unknown>;
+}
+
+/** The `work` of the spec in `dir`: `undefined` for a build run, `"malformed"` for a `work` this reader cannot read. */
+export function readWorkSpec(dir: string): DetachedWorkSpec | "malformed" | undefined {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(join(dir, "spec.json"), "utf8"));
+  } catch (error) {
+    void error; // The contract's own reader already read this file; a failure here is a torn rewrite, which adoption must not treat as a build run.
+    return "malformed";
+  }
+  const work = (raw as { work?: unknown } | null)?.work;
+  if (work === undefined) return undefined;
+  if (typeof work !== "object" || work === null || Array.isArray(work)) return "malformed";
+  const w = work as Record<string, unknown>;
+  const kind = DETACHED_WORK_KINDS.find((k) => k === w.kind);
+  if (kind === undefined) return "malformed";
+  const out: DetachedWorkSpec = { kind };
+  if (typeof w.prNumber === "number" && Number.isSafeInteger(w.prNumber)) out.prNumber = w.prNumber;
+  for (const key of ["headSha", "reviewKey", "fixKey"] as const) if (typeof w[key] === "string") out[key] = w[key] as string;
+  if (typeof w.inputs === "object" && w.inputs !== null && !Array.isArray(w.inputs)) out.inputs = w.inputs as Record<string, unknown>;
+  return out;
+}
+
+/** What restarts of one kind cost the drain over a window: how many drains waited on it, and for how long in all. */
+export interface DrainCost {
+  drains: number;
+  waitedMs: number;
+  abandoned: number;
+}
+export type MeasuredDrainCosts = Partial<Record<DetachedWorkKind, DrainCost>>;
+
+const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+
+/**
+ * The drain cost of each kind, read from the rows a drain already writes. A `*_drain.completed` row's `waited_on` names each unit
+ * the drain waited on with `settled_after_ms` (or `abandoned`); an older row without it is attributed through the
+ * `daemon.detached_action_abandoned` rows in its interval and, for reviews, through `in_flight_reviews`.
+ * An action's age bounds its overlap with that interval; its lifetime before the drain is never drain cost.
+ * A unit the drain RELEASED was not waited on and costs nothing. An unparseable line is skipped, and counted nowhere.
+ */
+export function measureDrainCosts(rows: ReadonlyArray<string | Record<string, unknown>>): MeasuredDrainCosts {
+  const costs: MeasuredDrainCosts = {};
+  const add = (kind: string, waitedMs: number, abandoned: boolean): void => {
+    const known = DETACHED_WORK_KINDS.find((k) => k === kind);
+    if (known === undefined) return;
+    const cost = costs[known] ??= { drains: 0, waitedMs: 0, abandoned: 0 };
+    cost.drains += 1;
+    cost.waitedMs += waitedMs;
+    if (abandoned) cost.abandoned += 1;
+  };
+  let abandonedSince: Array<{ kind: string; ageMs: number; at: number; runId: unknown }> = [];
+  for (const entry of rows) {
+    let row: Record<string, unknown>;
+    if (typeof entry === "string") {
+      try {
+        row = JSON.parse(entry) as Record<string, unknown>;
+      } catch (error) {
+        void error; // A torn ledger line carries no row; the next one is read.
+        continue;
+      }
+    } else row = entry;
+    if (row === null || typeof row !== "object") continue;
+    if (row.step === "daemon.freshness_drain.started" || row.step === "daemon.memory_drain.started") abandonedSince = [];
+    if (row.step === "daemon.detached_action_abandoned") {
+      abandonedSince.push({ kind: String(row.action_kind), ageMs: num(row.age_ms), at: Date.parse(String(row.ts)), runId: row.run_id });
+      continue;
+    }
+    if (row.step !== "daemon.freshness_drain.completed" && row.step !== "daemon.memory_drain.completed") continue;
+    const durationMs = num(row.duration_ms);
+    if (Array.isArray(row.waited_on)) {
+      for (const item of row.waited_on as Array<Record<string, unknown>>) {
+        if (item === null || typeof item !== "object" || item.released === true) continue;
+        const abandoned = item.abandoned === true;
+        add(item.what === "review" ? "review" : String(item.kind), Math.min(durationMs, num(item.settled_after_ms) || (abandoned ? durationMs : 0)), abandoned);
+      }
+    } else {
+      if (num(row.in_flight_reviews) > 0) add("review", durationMs, num(row.abandoned_in_flight_reviews) > 0);
+      const endedAt = Date.parse(String(row.ts));
+      const startedAt = endedAt - durationMs;
+      for (const item of abandonedSince) {
+        if (item.runId !== undefined && row.run_id !== undefined && item.runId !== row.run_id) continue;
+        const timed = Number.isFinite(endedAt) && Number.isFinite(item.at);
+        if (timed && (item.at < startedAt || item.at > endedAt)) continue;
+        add(item.kind, Math.min(item.ageMs, timed ? item.at - startedAt : durationMs), true);
+      }
+    }
+    abandonedSince = [];
+  }
+  return costs;
+}
+
+export interface DetachedWorkEvidence {
+  mode: DetachedWorkMode;
+  /** The kinds a run-child entry can host in this process: what the composition root wired, not what the design intends. */
+  hosted: ReadonlySet<DetachedWorkKind>;
+  measured: MeasuredDrainCosts;
+}
+
+export interface DetachedWorkPlacement {
+  kind: DetachedWorkKind | string;
+  placement: "process" | "child";
+  /** Why, in words a drain row can carry. */
+  reason: string;
+}
+
+/** A kind moves when the ledger measures a non-zero drain wait, the mode is on and an entry hosts it. */
+export function detachedWorkPlacement(
+  kind: DetachedWorkKind | string, evidence: DetachedWorkEvidence, inventory: Readonly<Record<string, DetachedWorkRow>> = DETACHED_WORK_INVENTORY,
+): DetachedWorkPlacement {
+  const stay = (reason: string): DetachedWorkPlacement => ({ kind, placement: "process", reason });
+  const row = inventory[kind];
+  // An unknown kind is work this process owns: the restart waits for it.
+  if (row === undefined) return stay("not in the inventory");
+  if (evidence.mode === "off") return stay("run-child mode is off");
+  if (evidence.mode === "shadow") return stay("run-child mode is shadow: a probe round-trips the contract and the work stays in process");
+  const known = DETACHED_WORK_KINDS.find((k) => k === kind);
+  const waitedMs = known === undefined ? 0 : evidence.measured[known]?.waitedMs ?? 0;
+  if (waitedMs <= 0) return stay("it never held a drain over the measured window");
+  if (known === undefined || !evidence.hosted.has(known)) return stay("no run-child entry hosts it yet");
+  return { kind, placement: "child", reason: `it held drains for ${waitedMs} ms over the measured window` };
+}
+
+/**
+ * The kinds this process has a run-child entry for. A review is hosted: `runDetachedWork` (src/run-task.ts) takes the PR number and
+ * the review's flags from the spec. A fix dispatch is hosted too: `runDetachedWork` takes the typed decision envelope from the spec,
+ * rebuilds the sweep's live dependencies, rechecks the PR and the task, and calls the same `dispatchFix` the sweep calls in process.
+ */
+export const HOSTED_DETACHED_WORK_KINDS: ReadonlySet<DetachedWorkKind> = new Set<DetachedWorkKind>(["review", "fix-dispatch", "retro"]);
+
+/** `sweep.runChild.mode` as detached work reads it: `auto` is decided from the ledger evidence the build runs use (W1-T9087). */
+export function detachedWorkModeNow(
+  stateRoot: string, read: () => RunChildMode = () => loadRunChildMode(), readUnion: typeof readRunChildModeUnion = readRunChildModeUnion,
+): DetachedWorkMode {
+  const policy = readRunChildPolicy(read);
+  if (policy.mode === undefined) return "off";
+  if (policy.mode !== "auto") return runChildModeFor(policy.mode, emptyRunChildModeEvidence()).mode;
+  try {
+    const union = readUnion(stateRoot);
+    const evidence = createRunChildModeTracker(runChildModeWindow(union.rows), undefined, union.unread).evidence();
+    const decision = runChildModeFor("auto", evidence);
+    // Build runs retain `on` after W1-T9089. Detached work still has an in-process path and must demote on contract loss.
+    if (decision.decision && (decision.decision.evidence.lost > 0 || decision.decision.evidence.misidentified > 0)) return "shadow";
+    return decision.mode;
+  } catch (error) {
+    void error; // An evidence read that throws decides nothing: the work stays in process, as under mode off.
+    return "off";
+  }
+}
+
+export interface DetachedWorkHostInput {
+  stateRoot: string;
+  /** The managed checkout the engine trees are cut from. */
+  repoDir: string;
+  root: string;
+  /** The repository name a review is run against (`--repo`). */
+  repo: string;
+  log: Log;
+  /** The ledger rows the measured drain cost is read from. */
+  readLedger: () => ReadonlyArray<Record<string, unknown>>;
+  readMode?: () => RunChildMode;
+  spawn?: typeof spawnRunChild;
+  probe?: typeof startRunChildProbe;
+}
+
+/**
+ * The production host the sweep's review path asks (src/lib/sweep.ts `installDetachedWorkHost`), and the drain reads through
+ * `detachedWorkPlacement`. Under `shadow` it starts one probe at a time that round-trips the contract and records its cost, and the
+ * review stays in process. Under `on` it starts the review as a run child on its own reservation, only where the inventory and the
+ * measured drain cost say so; a child that cannot start is `undefined`, and the review runs in process as before.
+ */
+export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWorkChildHost {
+  const mode = (): DetachedWorkMode => detachedWorkModeNow(input.stateRoot, input.readMode);
+  let probing = false;
+  return {
+    hosts: HOSTED_DETACHED_WORK_KINDS,
+    mode,
+    async spawnReview({ pr, reviewKey, reviewAttemptId }) {
+      const current = mode();
+      const work: DetachedWorkSpec = {
+        kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey,
+        inputs: { repo: input.repo, ...(reviewAttemptId !== undefined ? { reviewAttemptId } : {}),
+          ...(typeof pr.isPlanFiling === "boolean" ? { planOnlyFiling: pr.isPlanFiling } : {}) },
+      };
+      if (current === "shadow") {
+        if (!probing) {
+          probing = true;
+          void (input.probe ?? startRunChildProbe)({
+            taskId: `review-PR${pr.prNumber}`, stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
+            plan: Promise.resolve({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+          }, { readMode: () => "shadow" }).finally(() => { probing = false; });
+        }
+        return undefined;
+      }
+      if (current !== "on") return undefined;
+      const placement = detachedWorkPlacement("review", {
+        mode: current, hosted: HOSTED_DETACHED_WORK_KINDS, measured: measureDrainCosts(input.readLedger()),
+      });
+      if (placement.placement !== "child") return undefined;
+      const launch = await (input.spawn ?? spawnRunChild)({
+        taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "review", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
+        plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+      });
+      if (!launch.started) return undefined;
+      return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
+    },
+    async spawnFix({ pr, fixKey, envelope }) {
+      // A fix has no shadow probe of its own: the review's probe already round-trips the contract. Only `on` moves it.
+      if (mode() !== "on") return undefined;
+      const placement = detachedWorkPlacement("fix-dispatch", {
+        mode: "on", hosted: HOSTED_DETACHED_WORK_KINDS, measured: measureDrainCosts(input.readLedger()),
+      });
+      if (placement.placement !== "child") return undefined;
+      const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey, inputs: { repo: input.repo, envelope } };
+      const launch = await (input.spawn ?? spawnRunChild)({
+        taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "sweep-fix", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
+        plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+      });
+      if (!launch.started) return launch.abandoned ? launch : undefined;
+      return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
+    },
+    async spawnRetro({ decision }) {
+      if (mode() !== "on") return undefined;
+      const placement = detachedWorkPlacement("retro", {
+        mode: "on", hosted: HOSTED_DETACHED_WORK_KINDS, measured: measureDrainCosts(input.readLedger()),
+      });
+      if (placement.placement !== "child") return undefined;
+      const work: DetachedWorkSpec = { kind: "retro", inputs: { decision } };
+      const launch = await (input.spawn ?? spawnRunChild)({
+        taskId: "DAEMON", lane: "retro", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
+        plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+      });
+      if (!launch.started) return launch.abandoned ? launch : undefined;
+      return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
+    },
+  };
 }
