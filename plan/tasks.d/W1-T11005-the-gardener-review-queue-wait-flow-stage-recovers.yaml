@@ -22,3 +22,11 @@
     Last 24 h: n 39, p50 10, p90 99.9 min.
     Slowest PRs: #15487 (139.9 min), #15460 (111.2 min), #15333 (111 min).
     Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filing reports latency statistics and three PR references, but supplies no per-PR findings establishing a shared cause; its rationale explicitly leaves that investigation outstanding.; on the change's description/files alone, no diff was read — Acceptance uses a grep for a test declaration to establish recovery below 2x baseline; that proof establishes text presence, not measured stage recovery.; on the change's description/files alone, no diff was read — The supplied escalation rule requires HIGH when the finding cannot be verified from what is shown; the filing does not yet provide a verified finding or a bounded remedy."
+    judged_at: "2026-10-30T04:34:45.766Z"
+    pin: "f05be908b6382d5dbe173c54de942b078cb3a13f4703d5d0d525e82fb728ba86"

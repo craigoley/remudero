@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -23,3 +23,13 @@
     Add the named regression in test/daemon/compress-src-lib-measurement-cadence-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.95
+    reasons:
+      - "The filed scope limits work to comment compression in one source file and a named regression test, requiring executable-token preservation, measurable comment reduction, existing assertions, and caller verification."
+      - "The record explicitly preserves owners, stops, and deployment holds and prohibits a new hard comment ceiling or release override."
+      - "The supplied family history reports 13 merged tasks and no declines; the filing-time gates show no adverse result. Implementation verification remains pending because no diff exists yet."
+    judged_at: "2026-10-30T04:36:28.673Z"
+    pin: "43ca10d1ad8b8f696a484ea1f3daab70ea309d6609affcd56be38cdb6cc87e54"
