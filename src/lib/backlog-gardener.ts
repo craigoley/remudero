@@ -126,8 +126,10 @@ export async function readOpenBacklogState(root: string, ports: {
 }
 
 /**
- * The PRs a task's origin feedback names: `/pull/<n>` URLs of this repository and bare `#<n>` references in
- * `plan/feedback/<id>.yaml`, a bare one only on a line naming a PR. 2026-10-30: W1-T11003 (origin
+ * The PRs a task's origin feedback names: the `/pull/<n>` URLs of this repository in `plan/feedback/<id>.yaml`.
+ * A bare `#<n>` never counts: a feedback record quotes upstream text (a Dependabot body's release notes) whose
+ * issue numbers no line shape separates from this repository's. Every dep-review record carries its own PR's
+ * URL, which is all a band needs. 2026-10-30: W1-T11003 (origin
  * `feedback#fb-dep-review-69bc59bf88007e5e`) was banded 4, "no observed live symptom", while the three
  * Dependabot PRs its feedback named had sat open for two days waiting on it. A task with no feedback origin,
  * or no feedback record, names none.
@@ -140,8 +142,6 @@ export function originFeedbackPrs(repoRoot: string, task: Task, repo: string): n
   const text = readFileSync(path, "utf8");
   const named = new Set<number>();
   for (const m of text.matchAll(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)\b/g)) if (m[1]!.toLowerCase() === repo.toLowerCase()) named.add(Number(m[2]));
-  // A bare `#<n>` counts only on a line that says PR: quoted upstream release notes cite their own issues.
-  for (const line of text.split("\n").filter((l) => /\bPRs?\b/.test(l))) for (const m of line.matchAll(/(?<![\w/&])#(\d+)\b/g)) named.add(Number(m[1]));
   return [...named].sort((a, b) => a - b);
 }
 

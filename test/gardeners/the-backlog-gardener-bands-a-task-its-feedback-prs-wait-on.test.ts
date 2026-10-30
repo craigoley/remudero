@@ -14,8 +14,8 @@ const ID = "W1-T11003";
 const FEEDBACK = "fb-dep-review-69bc59bf88007e5e";
 const REPO = "craigoley/remudero";
 
-// The 2026-10-28 dep-review own-red feedback, cut down: its PR URL, its folded siblings, a quoted
-// release-note issue reference, and another repository's pull URL.
+// The 2026-10-28 dep-review own-red feedback, cut down: its PR URL, its folded siblings (bare references), quoted
+// release notes whose issue references sit on lines with and without "PR", and another repository's pull URL.
 const FEEDBACK_RAW = [
   `id: ${FEEDBACK}`,
   "raw: |-",
@@ -23,6 +23,7 @@ const FEEDBACK_RAW = [
   "  PR: https://github.com/craigoley/remudero/pull/15180",
   "  Sibling Dependabot PRs folded in: #15177 (@anthropic-ai/claude-agent-sdk 0.3.303 -> 0.3.310); #15182 (actions/setup-python 7.0.0 -> 7.1.0)",
   "  <li>Fixed the sandbox warning (#15190)</li>",
+  "  <li>Fixed the PR review warning (#15192)</li>",
   "  <a href=\"https://github.com/anthropics/claude-code/pull/15191\">upstream</a>",
   "",
 ].join("\n");
@@ -53,12 +54,12 @@ const open = (...numbers: number[]): OpenPrs => ({ repo: REPO, numbers: new Set(
 
 test("a task whose origin feedback names still-open PRs is band 2, naming them, not band 4", (t) => {
   const f = fixture(t);
-  const inv = backlogInventory(f.sources, () => true, open(15176, 15177, 15180, 15182, 15190, 15191, 15621));
+  const inv = backlogInventory(f.sources, () => true, open(15176, 15177, 15180, 15182, 15190, 15191, 15192, 15621));
   assert.equal(inv.candidates.length, 1);
   const [action] = inv.candidates;
   assert.deepEqual(action!.disposition, { kind: "band", band: 2 });
-  assert.deepEqual(action!.evidence.heldPrs, [15177, 15180, 15182]);
-  assert.match(action!.reason, /names 3 still-open PR\(s\) waiting on it: #15177, #15180, #15182/);
+  assert.deepEqual(action!.evidence.heldPrs, [15180]);
+  assert.match(action!.reason, /names 1 still-open PR\(s\) waiting on it: #15180/);
 });
 
 test("the named PRs once closed, or no open-PR read at all, leave the task at band 4 as before", (t) => {
@@ -72,8 +73,9 @@ test("the named PRs once closed, or no open-PR read at all, leave the task at ba
 
 test("only a feedback origin names PRs; a quoted upstream issue and another repository's pull URL do not", (t) => {
   const f = fixture(t);
-  assert.deepEqual(originFeedbackPrs(f.root, f.task, REPO), [15177, 15180, 15182]);
-  assert.deepEqual(originFeedbackPrs(f.root, f.task, "CraigOley/Remudero"), [15177, 15180, 15182], "the repository compares case-insensitively");
+  // Only this repository's pull URL: a bare #<n>, even on a quoted line that says "PR", is upstream's as easily as ours.
+  assert.deepEqual(originFeedbackPrs(f.root, f.task, REPO), [15180]);
+  assert.deepEqual(originFeedbackPrs(f.root, f.task, "CraigOley/Remudero"), [15180], "the repository compares case-insensitively");
   assert.deepEqual(originFeedbackPrs(f.root, { ...f.task, origin: "operator-session#slo-ladder-recon" }, REPO), []);
   assert.deepEqual(originFeedbackPrs(f.root, { ...f.task, origin: "feedback#fb-not-filed" }, REPO), [], "a missing feedback record names none");
 });
