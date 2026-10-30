@@ -95,9 +95,7 @@ import { assertLiveSpawnAllowed } from "./spawn-guard.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
-// W1-T2777: same primitive `ensureInstallFresh` (run-task.ts) uses, shared via the extracted `install-hash` module so both
-// freshness paths compare the same hash — never a parallel implementation that could drift silently. See lib/install-hash.ts
-// for the extraction reason.
+// W1-T2777: share ensureInstallFresh's hash primitive; parallel implementations drift. See lib/install-hash.ts.
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import { configuredDependencySeedRoot } from "./dependency-seeds.js";
 import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
@@ -166,6 +164,7 @@ import {
   spawnDecisionPoint,
   type RoutingDrawSeed,
   type RoutingPropensity,
+  type ProviderLane,
   selectOpenWeightModel,
   type CapacityShortfall,
   hydrateCashCapacity,
@@ -179,6 +178,7 @@ import {
   openWeightReservationUsd,
   readOpenWeightAllowance,
   spawnCodexWorker,
+  codexHarnessCommits,
   codexReadOnly,
   spawnOpenWeightWorker,
   FOUNDRY_CLAUDE_API_KEY_ENV,
@@ -226,8 +226,8 @@ import {
   type PinnedWorktreeGit,
 } from "./worktree-git.js";
 
-/** Aggregate token usage off the SDK result envelope's `usage` field (SDK 0.3.209 `sdk.d.ts`: `NonNullableUsage`, snake_case
- * Anthropic-API names, all fields non-nullable). Zeroed when no result envelope was ever seen — a genuine transport failure. */
+/** SDK result `usage`: NonNullableUsage, snake_case API fields (SDK 0.3.209 sdk.d.ts).
+ * Zeroed only when no result envelope arrived: transport failure. */
 export interface TokenUsage {
   input: number;
   output: number;
@@ -235,8 +235,7 @@ export interface TokenUsage {
   cacheCreation: number;
 }
 
-/** Per-model cost/token breakdown (SDK 0.3.209 `ModelUsage`) — the map KEYS are the model(s) actually used, which may differ
- * from the requested `model`. */
+/** SDK 0.3.209 ModelUsage: map keys name models actually used, possibly different from the requested model. */
 export interface ModelUsageEntry {
   inputTokens: number;
   outputTokens: number;
@@ -266,11 +265,9 @@ export interface WorkerResult {
   admissionSinceMs?: number;
   /** Opt-in policy configuration and bounded inventory; not effective permission or execution proof. */
   mcpIsolation?: WorkerMcpIsolationEvidence;
-  /** W1-T9489: set on every Claude spawn made under the strict MCP boundary, so a census tells post-fix rows from pre-fix
-   * ones without a date cutoff. Absent on Codex/cash calls and on hand-built fixtures. */
+  /** W1-T9489: strict Claude boundary marker distinguishes post-fix rows without dates; absent on Codex/cash and fixtures. */
   mcpBoundary?: typeof WORKER_MCP_STRICT;
-  /** W1-T9489: present when the init inventory showed a capability outside the boundary (`exposed`, the run then earns no
-   * success credit) or gave no complete inventory to judge (`unknown`). Absent means observed and clean. */
+  /** W1-T9489: `exposed` denies success credit; `unknown` means incomplete inventory. Absent means observed and clean. */
   mcpExposure?: WorkerMcpExposure;
   /** Bounded observational SDK init names; raw auth/configuration envelopes are never retained. */
   initSummary?: WorkerInitSummary;
@@ -278,18 +275,14 @@ export interface WorkerResult {
   provider?: WorkerProviderId;
   sessionId: string;
   costUsd: number;
-  /** W1-T5629: a codex session's NOTIONAL price (`codexNotionalCostUsd`), never billed and never in `costUsd`.
-   *  Absent on every other provider, and on a codex model with no price row. */
+  /** W1-T5629: Codex NOTIONAL price (`codexNotionalCostUsd`), never billed or in costUsd; absent without a Codex price row. */
   notionalCostUsd?: number;
-  /** Turns the worker actually took (SDK `num_turns`), recorded on BOTH the success and error paths, because turn count seeds
-   * mounts.yaml calibration (W1-T5), so a failed run is never `0`. TRAP: `num_turns` does not count the unit
-   * `Options.maxTurns` bounds — measured failures landed at cap+1 and one clean success at 17 under a cap of 8 — so never
-   * judge it against a cap unless {@link maxTurns} rides the same row (W1-T303; docs/forensics/worker.md). */
+  /** SDK num_turns on success AND error; feeds mounts.yaml calibration (W1-T5), never zeroed for failure.
+   * TRAP: Options.maxTurns uses different units (failures at cap+1, success at 17 with cap 8).
+   * Judge only with the same row's {@link maxTurns} (W1-T303; docs/forensics/worker.md). */
   numTurns: number;
-  /** The `maxTurns` THIS call was CONFIGURED with — an INPUT, never read back off the envelope. Ledgered BESIDE `numTurns`,
-   * never replacing it, so a row stays checkable against its own cap without consulting a `mounts.yaml` that moves;
-   * `RECON_MAX_TURNS` had already moved 8 -> 20 when this was diagnosed. `undefined`, never guessed, when no cap was
-   * configured (W1-T303). */
+  /** Configured maxTurns INPUT, beside numTurns, never replacing it or read from the envelope.
+   * Undefined without a cap; moving mounts.yaml cannot explain old rows (RECON_MAX_TURNS moved 8 -> 20; W1-T303). */
   maxTurns?: number;
   /** Final result text (the `result` field of the SDK result message). */
   text: string;
@@ -300,17 +293,13 @@ export interface WorkerResult {
   /** Result subtype: 'success' | 'error_max_turns' | 'error_max_budget_usd' | … */
   subtype: string;
   isError: boolean;
-  /** W1-T6027: HOW THE WORKER'S PROCESS ENDED, read off the process itself and never off `subtype`. See {@link WorkerExit}.
-   * Every runner sets it; it is optional only for the hand-built fixture literals across test/. */
+  /** W1-T6027: process end, never inferred from subtype. Every runner sets {@link WorkerExit}; optional for fixtures. */
   exit?: WorkerExit;
-  /** An Anthropic-side api error hit the stream — a `<synthetic>`/`isApiErrorMessage` message. TRAP: the result ENVELOPE may
-   * still report `subtype: "success"` (WS-0 envelope shape), so this field is the only place the signal survives. Transient
-   * for the classifier: retry, no strike, never a task failure. */
+  /** Anthropic `<synthetic>`/isApiErrorMessage signal. TRAP: WS-0 envelopes may still say subtype: "success".
+   * Transient classifier outcome: retry without a strike or task failure. */
   apiError: boolean;
-  /** The account refused this run for a session or usage limit — the same envelope lie as {@link apiError}, reported as
-   * `subtype: "success"`. TRAP: the SDK emits a success envelope and THEN throws, so the catch sets `isError` while nothing
-   * rewrites `subtype`. Do not derive a refusal from cost either: seven measured refusals carried a non-zero cost (W1-T2564;
-   * docs/forensics/worker.md). */
+  /** Account session/usage refusal. TRAP: SDK emits success THEN throws; catch sets isError but leaves subtype untouched.
+   * Cost is no proxy: seven refusals had non-zero cost (W1-T2564; docs/forensics/worker.md). See {@link apiError}. */
   usageRefusal?: { matched: string; resetsAtText?: string; resetsAtMs?: number };
   /** The model declined this run under a SAFEGUARD classifier (`stop_reason: "refusal"`), read off the SDK's own
    * `model_refusal_no_fallback` (`retried: false`) or `model_refusal_fallback` direction `retry` (`retried: true`,
@@ -328,28 +317,21 @@ export interface WorkerResult {
   permissionDenials: unknown[];
   /** The exact env the child was spawned with (billing-boundary proof). */
   childEnvKeys: string[];
-  /** The Anthropic account this call's spend is attributed to — the NAME {@link resolveActiveAccountId} returns, never a
-   * secret, resolved fresh per spawn on every platform so a ledger line carrying spend also carries the account it was drawn
-   * against. `undefined`, never guessed (W1-T265, W1-T268). */
+  /** Account NAME from {@link resolveActiveAccountId}, fresh per spawn on every platform, never a secret.
+   * Attributes spend; undefined when unresolved, never guessed (W1-T265, W1-T268). */
   accountLabel?: string;
   /** The model this call was CONFIGURED to run — the caller's `SpawnWorkerArgs.model`, an INPUT, never a read-back off the
    * envelope. `DEFAULT_MODEL_LABEL` when unspecified. */
   model: string;
   /** Concrete provider model selected after health/capability routing. */
   routedModel?: string;
-  /** W1-T3575 — CASH ATTRIBUTION FOR A CAPPED PROVIDER, declared here so a ledger consumer reads a
-   * typed field rather than an untyped passenger on the cash adapter's own result. Present
-   * only for `provider: "cash"` (W1-T3607 renamed the "openweight" id, which mis-sorted a proprietary
-   * candidate like gpt-5-nano — the category is how a deployment is billed, not its licence), the one
-   * backend billed per request against `dailyCapUsd`.
-   * `budgetReservedUsd` is what was committed BEFORE the requests were sent (conservative, derived
-   * from the adapter's price constants and its exact request ceiling); `budgetSettledUsd` is what
-   * the provider's own receipts settled it down to. They differ whenever a receipt came back, and
-   * a row where they are EQUAL on a failed run is the signal that spend could not be read back and
-   * was deliberately left charged. `budgetRefused` marks an allowance refusal before a request,
-   * possibly on a later turn after earlier requests were paid. It alone does not prove the model
-   * was never invoked; retain the accumulated reservation, settlement and usage evidence.
-   * Never a prompt, never a credential: these are dollars only. */
+  /** Cash budget attribution (W1-T3575): typed dollars only, never prompts or credentials.
+   * Only provider: "cash" bills per request against dailyCapUsd. W1-T3607 renamed "openweight":
+   * billing, not licence, defines the category (gpt-5-nano was mis-sorted).
+   * Reserve before sending, conservatively using adapter prices and its exact request ceiling;
+   * settle to provider receipts. Equal reservation/settlement on failure means unread spend stays charged.
+   * budgetRefused precedes a request, possibly after paid turns; it cannot prove no invocation.
+   * Retain accumulated reservation, settlement and usage evidence. */
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
   budgetRefused?: boolean;
@@ -367,8 +349,7 @@ export interface WorkerResult {
   modelHealthState?: ClaudeModelHealthState;
   /** Whether the health decision used a live/fresh read, bounded stale evidence, or no evidence. */
   modelHealthSource?: ClaudeModelHealthSource;
-  /** The reasoning effort this call was CONFIGURED to run. Same INPUT-not-output rule as `model`: effort is absent from the
-   * SDK result envelope, so this is the configured value (W1-T6). */
+  /** Configured effort INPUT, like model; absent from the SDK result envelope (W1-T6). */
   effort: string;
   /** Cash adapter request parameters; absent for providers without this observation. */
   requestEfforts?: readonly CashRequestEffortCount[];
@@ -378,10 +359,9 @@ export interface WorkerResult {
   tokenUsageState?: "observed" | "partial" | "unavailable";
   /** Per-model breakdown off the envelope's `modelUsage` map (`{}` if none seen). */
   modelUsage: Record<string, ModelUsageEntry>;
-  /** The concrete model id the PROVIDER reported serving this call — the served half of the pair whose request half is `model`
-   * above, read off the live stream's last real `msg.message.model`. TRAP: never take it from the `modelUsage` keys, a
-   * post-hoc cost breakdown rather than a live per-turn report. `null` when the provider named nothing, paired with {@link
-   * servedModelReason}; echoing the ask back is the guess this refuses (W1-T2572; docs/forensics/worker.md). */
+  /** Served model: last real msg.message.model, paired with requested model above.
+   * TRAP: modelUsage keys are post-hoc costs, not live reports. Never echo the request;
+   * null needs {@link servedModelReason} (W1-T2572; docs/forensics/worker.md). */
   servedModel?: string | null;
   /** Present only when {@link servedModel} could not be resolved, naming WHY, so a `null` row reads as "checked, unreportable"
    * rather than "forgot to check". Absent — never a blank string — whenever `servedModel` is a real id (W1-T2572). */
@@ -389,45 +369,35 @@ export interface WorkerResult {
   /** Compaction events observed in this call's stream (MASTER-PLAN 8B), detected live off `type:"system",
    * subtype:"compact_boundary"` messages by `detectCompactionEvents` (compaction.ts). `[]` when the call never compacted. */
   compactionEvents: CompactionEvent[];
-  /** Compaction ATTEMPTS that FAILED, read off the SDK's `compact_result: 'failed'` channel, which carries no
-   * `compact_boundary` message — so a failed attempt used to read identically to one that never happened. `[]` means checked,
-   * not absent. NOT folded into `qualitySuspect`, because a failed attempt compacted nothing (W1-T2245). */
+  /** SDK compact_result: 'failed' attempts lack compact_boundary and used to look unattempted.
+   * [] means checked. Excluded from qualitySuspect: nothing compacted (W1-T2245). */
   compactionFailures?: CompactionFailure[];
-  /** Whether THIS spawn's `Options` carried `autoCompactEnabled: true`, so a `quality_suspect: false` / `compactionEvents: []`
-   * pair reads as NEVER-NEEDED rather than DISABLED. Read by index check, because `Options` declares no such key — it lives
-   * on `Settings`, and `spawnWorker` always passes `settingSources: []`. So it reads `false` on every call today, and that IS
-   * the finding: the fleet has no live channel to turn auto-compaction on. Adds no key to `options` (W1-T2245). */
+  /** Options autoCompactEnabled index check distinguishes NEVER-NEEDED from DISABLED; adds no option.
+   * TRAP: the key belongs to Settings, not Options; settingSources: [] leaves every call false,
+   * with no live fleet channel enabling auto-compaction (W1-T2245). */
   compactionConfigured?: boolean;
   /** Worker-home grants LOST or HEALED for this spawn (see {@link lostWorkerHomeGrants}). Absent when every grant landed, so a
    * healthy run's verdict row grows nothing. */
   lostGrants?: WorkerHomeGrantOutcome[];
-  /** W1-T2699: why the per-worktree git credential-helper wiring did NOT apply, when it did not.
-   * Absent on every healthy spawn, so a working boundary grows no field. Present means this worker's
-   * git fell back to the AMBIENT credential path and the boundary was not in force — the one
-   * outcome on this boundary that used to leave no trace anywhere. */
+  /** W1-T2699: wiring failure reason; present means git used ambient credentials without the boundary.
+   * Previously untraced; absent on healthy spawns. */
   credentialHelperUnwired?: string;
   /** Egress refusal in observe mode or readiness stall/retry evidence. Absent on healthy readiness or when off. */
   egressUnenforced?: string;
   /** `true` the moment ONE compaction fired (`compactionEvents.length > 0`, MASTER-PLAN 8B). This call's acceptance proofs
    * must then be re-verified against repo state (W1-T3F), never trusted from a possibly-lossy REPORT. */
   qualitySuspect: boolean;
-  /** Wall-clock milliseconds spent inside the SDK query, measured around {@link collectWorkerResult}'s message loop — the
-   * pre-spawn setup above it is local and free. Optional, never guessed: a hand-built fixture omits it and
-   * `workerLedgerFields` renders it absent rather than 0 (W1-T477). */
+  /** SDK query milliseconds around {@link collectWorkerResult}'s loop, excluding local/free setup.
+   * Fixtures omit it; workerLedgerFields preserves absence rather than guessing 0 (W1-T477). */
   workerDurationMs?: number;
   /** Reset-stable subscription-window percentage points consumed while this worker exclusively owned its selected provider.
    * Present only on the opt-in multi-provider path; the default Claude-only path performs no extra capacity reads and omits
    * this field byte-for-byte. */
   windowConsumption?: ProviderWindowConsumption;
-  /**
-   * W1-T3097: present ONLY when this Codex spawn was served under the documented capability-table-unavailable fallback —
-   * `.remudero/mounts.yaml`'s capability data could not be loaded from ANY searched location, so
-   * `codexCapabilityForRequestedModel` (worker-provider.ts) collapsed the requested Claude model to the degenerate
-   * "balanced" default rather than a real table row. Absent on every spawn served by the table (including a genuinely
-   * unmapped model, which resolves to the SAME "balanced" default but is a documented, intended outcome, not this one) —
-   * the "absent on the healthy path" discipline `lostGrants`/`credentialHelperUnwired` already keep. The worker still
-   * spawns; this is the report, not a block (design point (ii)).
-   */
+  /** W1-T3097: reports, never blocks, the capability-table-unavailable Codex fallback (design (ii)).
+   * All .remudero/mounts.yaml locations failed; codexCapabilityForRequestedModel (worker-provider.ts)
+   * used degenerate "balanced". Absent for table-served spawns, including intentionally unmapped
+   * models also using "balanced"; same healthy-path absence as lostGrants/credentialHelperUnwired. */
   codexCapabilityFallback?: {
     reason: "capability-table-unavailable";
     requestedModel?: string;
@@ -449,6 +419,7 @@ export interface WorkerSelectionAssignment {
   version: 1;
   id: string;
   phase: "pre-execution";
+  harness_owns_git?: boolean;
   requested: {
     model: string;
     effort: string;
@@ -510,7 +481,9 @@ export type RoutingRule =
   | "cash-opus-fallback"
   | "cash-sonnet-fallback"
   | "overflow-fallback"
-  | "cash-trial";
+  | "cash-trial"
+  /** W1-T10382: no subscription had headroom, so prepaid Codex credits carried the spawn ahead of cash. */
+  | "codex-credits";
 
 export interface RoutingDecision {
   rule: RoutingRule;
@@ -530,20 +503,21 @@ export interface RoutingDecision {
     eligible: boolean;
     selected: boolean;
     reason?: string;
+    /** W1-T10382: admitted past its reserve on prepaid credits. */
+    lane?: ProviderLane;
+    /** W1-T10382: the Codex credit balance this read saw; `null` when the balance was unreadable. */
+    creditsBalance?: number | null;
   }>;
   /** Tightest remaining window per subscription read for this decision; `null` means unreadable. */
   headroomPercent: Partial<Record<WorkerProviderId, number | null>>;
 }
 
-/** The DEFAULT billing mode. Absent the opt-in overflow valve, `buildWorkerEnv` strips every `ANTHROPIC_*` var before a worker
- * spawns (W1-T1), so the run is metered against the subscription. With the valve engaged (W1-T258) the mode is DERIVED per
- * call from the child's actual key set, so a ledger line reads the env names the worker really spawned with rather than a
- * guess. */
+/** Subscription default: buildWorkerEnv strips ANTHROPIC_* (W1-T1). With overflow enabled (W1-T258),
+ * derive each call's billing mode from its actual child env keys, never guess. */
 export const BILLING_MODE: BillingMode = "subscription";
 
-/** Cache-token NAMED COLUMNS. Mirrors the nested camelCase `tokens.cacheRead`/`cacheCreation` as flat snake_case columns
- * matching the SDK envelope's own field names, so the cache-reuse signal MASTER-PLAN 8A asks for is grep- and jq-able off one
- * ledger line without reaching into a nested object (W1-T35). */
+/** Mirror tokens.cacheRead/cacheCreation as flat SDK snake_case columns for grep/jq cache-reuse queries
+ * on one ledger row (MASTER-PLAN 8A; W1-T35). */
 export function cacheTokenLedgerFields(tokens: TokenUsage): {
   cache_read_input_tokens: number;
   cache_creation_input_tokens: number;
@@ -554,11 +528,9 @@ export function cacheTokenLedgerFields(tokens: TokenUsage): {
   };
 }
 
-/** Persisted-stderr length ceiling. Bounds the PERSISTED copy so a runaway transcript cannot bloat the ledger; it never bounds
- * what stays in memory on {@link WorkerResult}.
- * Why: two "Not logged in" spawns died with their only diagnostic in memory (W1-T238; the
- * observed "Not logged in · Please run /login" text is docs/archive/FINDINGS.md's ground truth
- * for a credential-dead spawn with no usable OAuth token at all). */
+/** Cap persisted stderr, never {@link WorkerResult}'s in-memory copy, to prevent ledger bloat.
+ * Two credential-dead spawns lost their only diagnostic: "Not logged in · Please run /login"
+ * (W1-T238; docs/archive/FINDINGS.md). */
 export const STDERR_EXCERPT_CAP = 4000;
 
 /** Truncate `s` to {@link STDERR_EXCERPT_CAP} chars, noting how much was cut — never a silent drop. */
@@ -574,38 +546,31 @@ export function workerFailureExcerpt(r: Pick<WorkerResult, "isError" | "stderr" 
   return combined ? capStderrExcerpt(combined) : undefined;
 }
 
-/** Persisted-report length ceiling (W1-T407) — the same discipline as {@link STDERR_EXCERPT_CAP}, applied to a
- * terminal-SUCCESS worker's closing narrative rather than a failed spawn's stderr. run-task.ts's silent-no-op guard parses
- * that text three times and used to drop it when no PR came out of the run. */
+/** Cap terminal-success reports like {@link STDERR_EXCERPT_CAP}; run-task.ts's silent-no-op guard
+ * parses them three times and used to drop reports without a PR (W1-T407). */
 export const REPORT_EXCERPT_CAP = 4000;
 
-/** THE ONE JOIN, ONE PLACE. TRAP: the SDK's `result` echoes the last assistant block (measured on a real envelope), so a
- * hand-rolled `[r.text, r.blocks.join("\n")].join("\n")` carries the final message TWICE and every count-sensitive parse over
- * it over-counts. Same shape and ordering as that join, with the final message appearing exactly once and nothing dropped
- * when the last block is not a repeat, so "last marker line wins" parsing is unchanged (W1-T2205). */
+/** Join once. TRAP: SDK result echoes the last assistant block; hand-rolled joins double-count it.
+ * Remove only that duplicate; retain ordering, non-repeats and "last marker line wins" (W1-T2205). */
 export function workerTranscript(r: Pick<WorkerResult, "text" | "blocks">): string {
   const overlaps = r.blocks.length > 0 && r.blocks[r.blocks.length - 1] === r.text;
   const blocks = overlaps ? r.blocks.slice(0, -1) : r.blocks;
   return [r.text, ...blocks].join("\n");
 }
 
-/** The capped, ledger-safe excerpt of a worker's own report — `text` plus `blocks`, the shape run-task.ts's `fullText` closure
- * builds. Returns `undefined` for whitespace-only input, so a truly silent no-op carries no blank field: the "absent, never
- * empty" discipline {@link workerFailureExcerpt} keeps for stderr. */
+/** Capped text + blocks matching run-task.ts's fullText. Whitespace-only input is undefined,
+ * never a blank field, like {@link workerFailureExcerpt}. */
 export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): string | undefined {
   const combined = [r.text, r.blocks.join("\n")].filter((s) => s && s.trim().length > 0).join("\n");
   const trimmed = combined.trim();
   return trimmed ? capStderrExcerpt(trimmed, REPORT_EXCERPT_CAP) : undefined;
 }
 
-/** The standard per-call ledger telemetry. Every worker and brain-plane call spreads THIS shape rather than hand-rolling it,
- * so fields cannot drift between recon, implement, review and retro. `verdict` is this CALL's outcome, distinct from the
- * RUN-level verdict line. Every optional field rides this ONE line for one reason: a reader must not need a second query to
- * interpret a zero — `quality_suspect`/`compaction_events` say whether an outcome is trustworthy,
- * `compaction_configured`/`compaction_failures` separate DISABLED from NEVER-NEEDED from FAILED, `max_turns` makes a row
- * checkable against the cap it ran under, and `stderr_excerpt` appears only when `r.isError`. `served_model` is ALWAYS
- * present, defaulted to `null`, so a silent provider renders an honest unknown rather than a key that looks forgotten, and an
- * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
+/** Shared worker/brain-plane per-call telemetry prevents lane drift; verdict is CALL-, not RUN-level.
+ * Keep interpretation on one row: quality_suspect/compaction_events establish trust;
+ * compaction_configured/compaction_failures distinguish DISABLED, NEVER-NEEDED and FAILED;
+ * max_turns records the cap; stderr_excerpt requires r.isError. Always emit served_model,
+ * null when unknown; unreportable models never fail runs (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
   continuation?: WorkerContinuationReceipt;
   mcp_isolation?: WorkerMcpIsolationEvidence;
@@ -675,8 +640,7 @@ export function workerLedgerFields(r: WorkerResult): {
     ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
     ...(r.exit?.kind === "exit" ? { worker_exit_code: r.exit.code } : {}),
     ...(stderrExcerpt !== undefined ? { stderr_excerpt: stderrExcerpt } : {}),
-    // Omitted when every grant landed, so the common case adds no field. Present only when a grant was lost or healed, and
-    // then it names which slot and why.
+    // Lost/healed grants name their slot and reason; healthy spawns omit the field.
     ...(r.lostGrants?.length
       ? {
           lost_grants: r.lostGrants.map((g) =>
@@ -694,8 +658,7 @@ export function workerLedgerFields(r: WorkerResult): {
     ...(r.modelHealthState ? { model_health_state: r.modelHealthState } : {}),
     ...(r.modelHealthSource ? { model_health_source: r.modelHealthSource } : {}),
     ...(r.selectionAssignmentId ? { selection_assignment_id: r.selectionAssignmentId } : {}),
-    // Always present: `null` is the honest value for "unreportable", never an omitted key that reads as forgotten. See {@link
-    // WorkerResult.servedModel} for the contract (W1-T2572).
+    // Always present, null if unreportable. See WorkerResult.servedModel (W1-T2572).
     served_model: r.servedModel ?? null,
     ...(r.servedModel == null
       ? { served_model_reason: r.servedModelReason ?? "the provider reported no served model for this call" }
@@ -710,13 +673,10 @@ export function workerLedgerFields(r: WorkerResult): {
     ...(r.notionalCostUsd === undefined ? {} : { notional_cost_usd: r.notionalCostUsd }),
     billing_mode: r.provider === "cash" ? "api" : billingMode(r.childEnvKeys),
     max_turns: r.maxTurns,
-    // The account this spend is attributed to — a NAME, never a credential, carried verbatim off `WorkerResult.accountLabel`.
-    // `undefined`, never guessed, when none resolved (W1-T268).
+    // Verbatim WorkerResult.accountLabel NAME, never a credential; undefined if unresolved (W1-T268).
     account_label: r.accountLabel,
-    // A REFUSAL OUTRANKS THE ENVELOPE'S OWN SUBTYPE, and the ordering IS the fix: the subtype is exactly the field that lies
-    // here. The old ternary rendered both arms "success" on the swallow path, because a SUCCESS envelope wrote `subtype`
-    // before the SDK threw. Every other path is unchanged.
-    // Why: 793 refusals across five rungs were recorded as completed work (W1-T2564).
+    // Refusal outranks subtype: SDK writes success before throwing; the old ternary called both arms success.
+    // W1-T2564: 793 refusals across five rungs were misrecorded as completed work.
     verdict: r.usageRefusal ? "usage_refused" : r.isError ? r.subtype : "success",
     ...(r.usageRefusal
       ? {
@@ -730,8 +690,7 @@ export function workerLedgerFields(r: WorkerResult): {
       : {}),
     quality_suspect: r.qualitySuspect,
     compaction_events: r.compactionEvents,
-    // Defaults for the pre-existing fixture literals across test/; a real `collectWorkerResult` call always populates both
-    // explicitly (W1-T2245).
+    // Fixture defaults only; collectWorkerResult populates both explicitly (W1-T2245).
     compaction_configured: r.compactionConfigured ?? false,
     compaction_failures: r.compactionFailures ?? [],
     // Per-call wall-clock, mirrored verbatim off `WorkerResult.workerDurationMs`. `undefined`, never a guessed 0, on a
@@ -760,8 +719,7 @@ export function workerLedgerFields(r: WorkerResult): {
           },
         }
       : {}),
-    // Absent on every spawn served by the table — present only under the missing-table fallback, so THIS is the field that
-    // makes a fallback-served arm distinguishable from a table-served one after the fact (W1-T3097 design point (iv)).
+    // Missing-table fallback marker distinguishes it from table-served spawns (W1-T3097 design (iv)).
     ...(r.codexCapabilityFallback
       ? {
           codex_capability_fallback: {
@@ -776,10 +734,8 @@ export function workerLedgerFields(r: WorkerResult): {
   };
 }
 
-/** The fields a previously-discarded {@link WorkerHomeReapResult} becomes once observed: target, reason and spawn identity, so
- * a query can answer whether a reap ever raced a live sibling spawn. Pure, so a test drives every arm with no process
- * spawned. NOT a ledger row (this module writes none) and deliberately outside `DECISION_RELEVANT_LEDGER_STEPS`, since
- * nothing downstream reads it to decide (W1-T2441). */
+/** Pure WorkerHomeReapResult projection: target, reason and spawn identity expose live-sibling reap races.
+ * Not a ledger row; excluded from DECISION_RELEVANT_LEDGER_STEPS because no deciding reader uses it (W1-T2441). */
 export function workerHomeReapLogFields(
   result: WorkerHomeReapResult,
   spawn: { runId?: string; taskId?: string },
@@ -800,10 +756,9 @@ function defaultLogHomeReap(result: WorkerHomeReapResult, spawn: { runId?: strin
   console.error(JSON.stringify(workerHomeReapLogFields(result, spawn)));
 }
 
-/** The fields `ensureWorkerKeychain`'s {@link WorkerKeychainSummary} becomes once observed here. Logged on EVERY darwin
- * provisioning call, `expectedRunMs` supplied or not, so the rate the expiry margin is really exercised becomes answerable
- * off-host. Pure, for the same reason {@link workerHomeReapLogFields} is.
- * Why: `observedHeadroomMs` shipped in W1-T2398 with this call site discarding it (W1-T2518). */
+/** Pure keychain headroom projection, like {@link workerHomeReapLogFields}; logged on every darwin
+ * provisioning call, with/without expectedRunMs, so expiry-margin use is measurable off-host.
+ * W1-T2518: this site discarded observedHeadroomMs introduced in W1-T2398. */
 export function workerKeychainHeadroomLogFields(
   summary: WorkerKeychainSummary,
   expectedRunMs: number | undefined,
@@ -837,19 +792,13 @@ function logClaudeCredentialSeed(event: ClaudeCredentialSeedEvent): void {
 
 // ── Toolchain resolution ──────────────────────────────────────────────────
 //
-// TRAP: `config.claudeBin` is resolved once by `which claude` and then CACHED TO DISK, so an auto-update
-// can move the real binary out from under it mid-operation. Resolution below runs FRESH at spawn time —
-// operator override, live PATH lookup, then the install-location table — memoized per process and
-// preflight-checked, so a bad resolution fails loud before any worker-home or keychain work rather than
-// deep inside a spawn.
-// Why: the vanished-binary incident (W1-T113; MASTER-PLAN Field Finding 12).
+// TRAP: disk-cached config.claudeBin goes stale after auto-update (W1-T113; MASTER-PLAN Field Finding 12).
+// Resolve at spawn: override, live PATH, install table; memoize per process and preflight before home/keychain work.
 
 /** Operator escape hatch: an explicit path always wins over PATH/the table. */
 export const CLAUDE_BIN_ENV_OVERRIDE = "REMUDERO_CLAUDE_BIN";
 
-/** One row of the install-location table — DATA: adding a row resolves a newly seeded location with no resolution-code change.
- * `resolve` returns `undefined` when the row does not apply; a row that does apply is still existence- and
- * runnability-checked, never trusted blind (W1-T113). */
+/** Data-only install location: undefined means inapplicable; resolved paths must exist AND run (W1-T113). */
 export interface ClaudeExecutableCandidate {
   /** Short label carried into the refusal reason and the boot log. */
   label: string;
@@ -865,9 +814,8 @@ export const CLAUDE_EXECUTABLE_LOCATIONS: ClaudeExecutableCandidate[] = [
   { label: "native-installer (~/.local/bin)", resolve: (_env, home) => join(home, ".local", "bin", "claude") },
 ];
 
-/** The cause of a probed candidate's `--version` failure: an errno or exit `code` plus at most a truncated first line of
- * stderr. Deliberately narrow — never the child environment (the W1-T442 billing and credential boundary) and never an
- * unbounded stderr dump (W1-T901 design (iii)). */
+/** --version failure: errno/exit code and truncated first stderr line only. Never child env
+ * (W1-T442 billing/credential boundary) or unbounded stderr (W1-T901 design (iii)). */
 export interface CanExecuteFailure {
   code?: string;
   message?: string;
@@ -883,9 +831,8 @@ export interface SearchedClaudeCandidate {
   cause?: CanExecuteFailure;
 }
 
-/** `SearchedClaudeCandidate` -> its outcome, for the refusal message. A candidate that exists but did not run names its cause
- * when one was captured, so a non-executable husk is distinguishable from a binary that runs and crashes; with no cause it
- * falls back to the bare message unchanged (W1-T901, W1-T113). */
+/** Refusal detail distinguishes missing, non-executable and crashing candidates; retain bare failure
+ * text when no cause was captured (W1-T901, W1-T113). */
 function describeSearched(s: SearchedClaudeCandidate): string {
   if (!s.existed) return "missing";
   if (s.ran) return "ok";
@@ -910,8 +857,7 @@ export class ClaudeToolchainBlockedError extends Error {
   }
 }
 
-/** Per-process memo (see `createClaudeExecutableCache`) — resolution runs at most once per process; every later `spawnWorker`
- * call reuses the answer. */
+/** Per-process memo; later spawnWorker calls reuse createClaudeExecutableCache's resolved answer. */
 export interface ClaudeExecutableCache {
   resolved?: string;
 }
@@ -929,9 +875,8 @@ export interface ResolveClaudeExecutableDeps {
   /** A LIVE `which claude` lookup, never PATH resolved once and cached to disk — that staleness is config.ts's
    * `resolveClaudeBin`, which this routes around. `undefined` when `claude` is off PATH. */
   which?: () => string | undefined;
-  /** Does this path actually run (`--version`)? `true` on success. A failure may answer a bare `false` — every existing
-   * injection site does, and stays valid — or a `CanExecuteFailure` carrying the probe's cause for the refusal message to
-   * render (W1-T901 design (i)). */
+  /** --version probe: true on success; false remains valid for old fakes, or return CanExecuteFailure
+   * to include the cause in the refusal (W1-T901 design (i)). */
   canExecute?: (path: string) => boolean | CanExecuteFailure;
   /** The candidate table — DATA, defaults to `CLAUDE_EXECUTABLE_LOCATIONS`. */
   locations?: ClaudeExecutableCandidate[];
@@ -985,9 +930,7 @@ export function resolveClaudeExecutable(cache: ClaudeExecutableCache, deps: Reso
   const canExecute = deps.canExecute ?? defaultCanExecute;
   const locations = deps.locations ?? CLAUDE_EXECUTABLE_LOCATIONS;
 
-  // One ordered candidate list walked by a single loop. Every row is the same shape — a label plus a lazy `resolve` — so
-  // PATH's subprocess call and the table's plain path joins are short-circuited identically: a row resolves only once every
-  // earlier row has failed.
+  // Resolve each lazy candidate only after all earlier rows failed, including PATH's subprocess.
   const candidates: ClaudeExecutableCandidate[] = [
     { label: `env:${CLAUDE_BIN_ENV_OVERRIDE}`, resolve: (e) => e[CLAUDE_BIN_ENV_OVERRIDE] },
     { label: "PATH", resolve: () => which() },
@@ -999,8 +942,7 @@ export function resolveClaudeExecutable(cache: ClaudeExecutableCache, deps: Reso
     const path = candidate.resolve(env, home);
     if (!path) continue;
     const existed = exists(path);
-    // Only a probed (existing) candidate can carry a cause; a missing one is never probed at all, which is W1-T113's
-    // exists/missing distinction, unchanged by W1-T901.
+    // Probe existing candidates only; only they can carry a cause (W1-T113, W1-T901).
     const probe = existed ? canExecute(path) : false;
     const ran = probe === true;
     const cause = existed && !ran && typeof probe === "object" ? probe : undefined;
@@ -1014,13 +956,11 @@ export function resolveClaudeExecutable(cache: ClaudeExecutableCache, deps: Reso
   throw new ClaudeToolchainBlockedError(searched);
 }
 
-/** The shared, per-process cache every real `spawnWorker` call reuses. Exported so the daemon's boot routine logs the SAME
- * answer once at startup rather than resolving separately (W1-T113). */
+/** Shared spawnWorker cache; daemon boot logs the same answer without resolving separately (W1-T113). */
 export const claudeExecutableCache: ClaudeExecutableCache = createClaudeExecutableCache();
 
-/** Pure: the macOS keychain grant list — the FRESHLY resolved `claudeBin`, never `config.claudeBin`'s stale disk-cached value,
- * plus the fixed `/usr/bin/security` helper. Split out so this is unit-testable without a real keychain side effect or a
- * `process.platform` gate (W1-T113). */
+/** Pure macOS grants: fresh claudeBin, never stale config.claudeBin, plus /usr/bin/security.
+ * Testable without keychain side effects or platform gates (W1-T113). */
 export function workerKeychainGrantApps(claudeBin: string): string[] {
   return [claudeBin, "/usr/bin/security"];
 }
@@ -1049,13 +989,10 @@ export function resolveActiveAccountId(path: string = join(homedir(), ".claude.j
  * literals stay equal (W1-T2516). */
 export const WORKER_USAGE_PROJECTION_REL = join("state", "account-usage-projection.json");
 
-/** Capture the worker's usage cache before its home is reaped. Every worker's HOME is redirected, so the
- * `cachedUsageUtilization` its own Claude Code invocation refreshes lands in `<workerHome>/.claude.json`, which
- * `reapWorkerHome` deletes moments later — and nothing here ever wrote the panel's primary source, so on a headless host that
- * never refreshes. Called from `spawnWorker`'s `finally` BEFORE the reap, while the file still exists. Persists a narrower
- * cut than it reads — uuid, `fetchedAtMs`, the two usage windows, and DELIBERATELY never email, org or anything OAuth-shaped
- * — written temp-then-`renameSync` so a reader never sees a half-written file. Best-effort and silent; returns whether a
- * projection was written (W1-T2516). */
+/** Capture redirected HOME's cachedUsageUtilization before spawnWorker's finally reaps .claude.json.
+ * TRAP: otherwise headless hosts never refresh the panel's primary source. Persist only uuid,
+ * fetchedAtMs and two usage windows, never email/org/OAuth data; temp + renameSync prevents partial reads.
+ * Best-effort, silent; returns whether projection was written (W1-T2516). */
 export function captureWorkerUsageProjection(
   root: string,
   workerHome: string,
@@ -1146,6 +1083,8 @@ export interface SpawnWorkerArgs {
   /** Models whose drafts already failed this proposal's lint; context fit still applies first. */
   avoidModels?: readonly string[];
   prompt: string;
+  /** Render the lane contract after routing; absent preserves the supplied prompt. */
+  promptFor?: (route: { provider: WorkerProviderId; harnessOwnsGit: boolean }) => string;
   /** Resume an existing session (auto-choose round-trip, fix rounds). */
   resumeSessionId?: string;
   /** W1-T10164: identity comes from the prior result, not the requested mount. contextPrompt is
@@ -1386,101 +1325,45 @@ export const GENERIC_ROUTE_TOOL_BOUNDS = {
 
 export type GenericRouteLane = keyof typeof GENERIC_ROUTE_TOOL_BOUNDS;
 
-/**
- * W1-T3616, PRIMARY CONTROL (test/bound-kind-declared.test.ts): the declaration below IS what
- * stops recon/diagnose/retro/alert_fix from reaching the SDK unrestricted — the same shape
- * GENERIC_ROUTE_TOOL_BOUNDS above carries for review/manual. With no entry here a lane inherits
- * SpawnWorkerArgs' UNRESTRICTED default, which is the defect this closes; the container remains
- * the containment, this is the declared boundary a reviewer can read.
- *
- * Each list is DERIVED FROM THAT LANE'S OWN PROMPT, never narrowed to fit a cheaper provider (the
- * task forbids that):
- *
- *   recon      read-only inspect (`git remote -v`, `git log --oneline -5`, `ls`). No Write/Edit.
- *   diagnose   read-only investigation (`git diff`/`git status`, re-runs the failure). No Write/Edit.
- *   retro      retroPrompt edits ONE existing plan file, then commits. Edit (never Write) plus Bash.
- *   alert_fix  commits and pushes (`git push origin HEAD`); takes the fix lane's own list.
- *
- * EVERY ONE DECLARES `Bash`, which IS the measurement, not a concession: none of the four is
- * openweight-eligible today (`Bash` is not in OPENWEIGHT_FUNCTIONS) until W1-T3615's check-runner
- * replaces that use. Routing remains a separate decision (W1-T3616 design: "ROUTE NOTHING HERE").
- */
-/**
- * THE SAME LANE, THE EQUIVALENT CAPABILITY ON EACH PROVIDER (W1-T3656).
- *
- * WHY THIS IS A PAIR AND NOT A LIST. There is NO overlap between the two adapters for "run a
- * command": Claude implements `Bash` and no `RunCheck`; the open-weight adapter implements
- * `RunCheck` and REFUSES a declared `Bash` outright -- `openWeightTools` throws rather than
- * dropping it, deliberately, so a lane never silently loses a capability its prompt relies on.
- *
- * W1-T3616 gave every lane ONE FLAT LIST, and that pinned every command-running lane to the
- * subscription BY ITS OWN BOUND. recon declares Bash because its prompt names three shell
- * commands, and that declaration is honest -- but one list is one value, so the declaration that
- * is correct for Claude makes the open-weight spawn throw. MEASURED on origin/main before this:
- * `grep -rn '"RunCheck"' src/` outside the adapter returned ZERO. The check-runner W1-T3617 built
- * and W1-T3572's ruling asked for was shipped, merged, and dead.
- *
- * THIS IS NOT W1-T3616's NARROWING, AND THE DISTINCTION IS THE DESIGN. Nothing here shrinks a
- * lane to fit a cheaper provider; W1-T3616's guard stays and its test still reddens if recon loses
- * Bash on the Claude path. Each provider gets the EQUIVALENT surface: a shell where a shell
- * exists, the allowlisted check-runner where it does not.
- *
- * PRIMARY CONTROL (W1-T1266). This is what bounds each lane's tool surface on every spawn, not a
- * backstop that fires after another guard failed: with no entry a lane inherits SpawnWorkerArgs'
- * UNRESTRICTED default.
- */
+/** PRIMARY CONTROL (W1-T3616, W1-T1266; test/bound-kind-declared.test.ts): bound every spawn;
+ * missing entries inherit SpawnWorkerArgs' unrestricted default. Containers still provide containment.
+ * Like GENERIC_ROUTE_TOOL_BOUNDS, derive capabilities from lane prompts, never cheaper-provider fit:
+ * recon: read-only git remote/log/ls; diagnose: read-only git diff/status and rerun failures;
+ * retroPrompt: Edit one existing plan file (never Write), then commit; alert_fix: fix tools, commit/push.
+ * W1-T3616's Claude lists all require Bash, absent from OPENWEIGHT_FUNCTIONS. Routing stays separate
+ * ("ROUTE NOTHING HERE"); W1-T3615's check-runner supplies the shell-less equivalent.
+ * W1-T3656 pairs equivalent capabilities: Claude Bash/no RunCheck; openweight RunCheck/no Bash.
+ * TRAP: openWeightTools throws on Bash rather than silently dropping a required capability.
+ * The former flat list pinned command lanes to subscriptions; outside the adapter, RunCheck had
+ * zero src/ hits despite W1-T3617 shipping the runner requested by W1-T3572. Keep Claude Bash
+ * (its guard must still redden if removed), and use the allowlisted runner where no shell exists. */
 export const DISPATCH_LANE_TOOL_BOUNDS = {
   recon: { claude: ["Read", "Grep", "Glob", "Bash"], openweight: ["Read", "Grep", "Glob", "RunCheck"] },
   diagnose: { claude: ["Read", "Grep", "Glob", "Bash"], openweight: ["Read", "Grep", "Glob", "RunCheck"] },
   retro: { claude: ["Read", "Grep", "Glob", "Edit", "Bash"], openweight: ["Read", "Grep", "Glob", "Edit", "RunCheck"] },
-  // `review` — the acceptance reviewer (`runReview`'s spawn, run-task.ts). Same shape as
-  // `recon`/`diagnose` above; never added to this table until W1-T3726's successor. Its claude row
-  // is `SPECIALIST_TOOLS` verbatim, pinned by
-  // test/the-review-lane-diverts-to-cash-under-a-squeeze.test.ts, not by an import — specialist-
-  // panel.ts imports this module, so the reverse edge would close a cycle.
-  //
-  // Bash buys this lane only a read-only git query and the project's checks, both covered by
-  // `OPENWEIGHT_CHECKS`. Proof execution is the HARNESS's (`ProofExecContext.exec`, lib/review.ts),
-  // so a shell-less reviewer loses none of it, and the coherence rule has nothing to reconcile: a
-  // read-only lane commits nothing, so no prompt of its ever promised it would.
-  //
-  // MEASURED 2026-09-17, claude weekly exhausted: "not implementable by cash (Read, Grep, Glob,
-  // Bash)" -> spawn_error. `remudero-review` is REQUIRED, so this one refusal held the whole board
-  // unmergeable for the squeeze window.
+  // Acceptance reviewer (runReview, run-task.ts), added after W1-T3726. Claude mirrors SPECIALIST_TOOLS;
+  // test/the-review-lane-diverts-to-cash-under-a-squeeze.test.ts pins it without a cyclic specialist-panel.ts import.
+  // OPENWEIGHT_CHECKS covers read-only git/checks; harness ProofExecContext.exec (lib/review.ts) owns proofs.
+  // The read-only lane promises no commits. 2026-09-17 weekly exhaustion produced
+  // "not implementable by cash (Read, Grep, Glob, Bash)" -> spawn_error, blocking the required remudero-review board.
   review: { claude: ["Read", "Grep", "Glob", "Bash"], openweight: ["Read", "Grep", "Glob", "RunCheck"] },
   // alert_fix commits and pushes, which the check-runner deliberately cannot do (no git write, no
   // forge). It has no open-weight equivalent and stays Claude-only until one is ruled on.
   alert_fix: { claude: FIX_WORKER_TOOLS },
 } as const satisfies Record<string, { claude: readonly string[]; openweight?: readonly string[] }>;
 
-/**
- * W1-T3696 step (2)/(3), PER PROVIDER — the surface an implement worker gets when a NON-SUBSCRIPTION
- * provider runs it.
- *
- * SAME SHAPE AS EVERY ROW IN {@link DISPATCH_LANE_TOOL_BOUNDS}: a shell where a shell exists, the
- * check-runner where it does not. `RunCheck` is not a Claude tool and the cash adapter refuses
- * `Bash`, so the two cannot share one list. Not declared in that table yet because every entry
- * there names a `claude` list, and implement's Claude surface is UNRESTRICTED by deliberate choice
- * (W1-T2591/W1-T3573) — narrowing it is separate, evidence-led work.
- *
- * The forge verbs are absent and stay absent: the harness commits, pushes and opens the PR (see
- * {@link harnessOwnsGitFor}), which runs this lane without granting a cheap model the authority
- * W1-T3572 removed. */
+/** W1-T3696 (2)/(3): non-subscription implement surface, like {@link DISPATCH_LANE_TOOL_BOUNDS}.
+ * Claude lacks RunCheck; cash refuses Bash, so lists cannot be shared. Historically omitted from
+ * that table because Claude implement was deliberately unrestricted (W1-T2591/W1-T3573).
+ * Forge verbs stay absent: {@link harnessOwnsGitFor} assigns commit/push/PR to the harness,
+ * preserving W1-T3572's removal of cheap-model forge authority. */
 export const IMPLEMENT_CASH_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"];
 
-/**
- * W1-T3696 step (2) for the CLAUDE side: implement's declared surface, closing W1-T2591's
- * unrestricted default on the highest-risk lane. Shape-identical to `alert_fix`/`FIX_WORKER_TOOLS`.
- *
- * MEASURED, NOT GUESSED — the three readings are in this change's PR body: implement's rendered
- * prompt names npm/git/gh and zero web or subagent tools; every bounded BUILD lane already carries
- * no web access (only review/manual, a different task type, were granted it); and W1-T210 bounded
- * the fix rung for exactly this reason, so an untrusted prompt payload could not reach the network.
- * `Task` is dropped deliberately: a subagent multiplies a run's cost with no ceiling.
- *
- * THE FALSIFIER NEEDS NO NEW CODE: `WorkerResult.permissionDenials` names a tool a worker asked for
- * and was refused. Widen this list from a denial that actually happened, never from a worry.
- */
+/** W1-T3696 (2): Claude implement closes W1-T2591's unrestricted default; same shape as alert_fix/FIX_WORKER_TOOLS.
+ * Original PR evidence: prompt names npm/git/gh, no web/subagents; bounded BUILD lanes lack web
+ * (review/manual were separately granted it); W1-T210 bounded fix to stop untrusted network access.
+ * Omit Task: subagents multiply cost without a ceiling. FALSIFIER: WorkerResult.permissionDenials;
+ * widen only after an observed denial. */
 export const IMPLEMENT_CLAUDE_TOOLS: readonly string[] = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"];
 
 /** W1-T4094: the in-process rule tool, added to a declared bound only when a spawn carries `ruleLookup`. */
@@ -1543,24 +1426,12 @@ export function implementToolBound(
 
 export type DispatchLane = keyof typeof DISPATCH_LANE_TOOL_BOUNDS;
 
-/**
- * W1-T3726: the surface a dispatch lane would run on if a BLOCKED AUCTION diverted it to cash --
- * or `undefined` where the lane has no cash equivalent and must not be diverted at all.
- *
- * THE DIVERT WAS REACHABLE BY EXACTLY ONE LANE BEFORE THIS. `spawnWorker`'s fallback judges
- * eligibility on `args.cashTools ?? args.tools`, and only implement ever passed `cashTools`. Every
- * other lane therefore offered the auction its CLAUDE surface, which names `Bash` -- a tool
- * `cashCanServeToolSurface` refuses by construction -- so recon and diagnose could not divert even
- * though {@link DISPATCH_LANE_TOOL_BOUNDS} has declared their open-weight equivalents since
- * W1-T3656. The table was right; nothing read it on this path.
- *
- * DELIBERATELY `undefined` RATHER THAN A THROW for a lane with no cash row. This answers an
- * OFFER ("may this be diverted?"), not a dispatch ("run it on this provider") -- the question
- * {@link resolveDispatchLaneToolBound} answers, where a missing row is a routing error worth
- * refusing loudly. Here `undefined` means "keep the subscription-only behaviour this lane has
- * today", which is the correct answer for `alert_fix`: it commits and pushes, and the check-runner
- * deliberately cannot. An UNKNOWN lane still throws, so a typo cannot silently disable a divert.
- */
+/** W1-T3726: offer a blocked auction the lane's cash surface; undefined keeps it subscription-only.
+ * TRAP: fallback reads args.cashTools ?? args.tools. Only implement supplied cashTools; recon/diagnose
+ * offered Claude Bash, which cashCanServeToolSurface refuses, ignoring W1-T3656's valid table rows.
+ * This is an offer, unlike {@link resolveDispatchLaneToolBound}'s dispatch: a missing cash row is
+ * allowed (alert_fix commits/pushes; the check-runner cannot). Unknown lanes still throw to catch typos.
+ * Equivalent surfaces live in {@link DISPATCH_LANE_TOOL_BOUNDS}. */
 export function cashDivertToolsForLane(lane: string): readonly string[] | undefined {
   const byProvider = (DISPATCH_LANE_TOOL_BOUNDS as Record<string, Record<string, readonly string[] | undefined>>)[lane];
   if (byProvider === undefined) {
@@ -1571,58 +1442,34 @@ export function cashDivertToolsForLane(lane: string): readonly string[] | undefi
   return byProvider.openweight;
 }
 
-/**
- * The same answer as {@link cashDivertToolsForLane}, shaped for a spawn's argument object so the
- * CALL SITE carries no branch.
- *
- * WHY THE SHAPE MATTERS AND NOT JUST THE ANSWER: the recon and diagnose dispatches live in a region
- * of `run-task.ts` that no unit test evaluates, and `diff-coverage` flags ADDED lines -- so a
- * three-line conditional at each call site is three uncovered added lines, while the branch sitting
- * here is covered by this module's own tests. Same rule the repo already applies to
- * `harnessCommitForShellLessWorker`: put the decision where a test can reach it, and leave one
- * unconditional line behind.
- */
+/** Shape {@link cashDivertToolsForLane} for an unconditional spawn call, like harnessCommitForShellLessWorker.
+ * Keep the tested branch here: recon/diagnose call sites in run-task.ts lack unit coverage,
+ * and diff-coverage would flag each added conditional line. */
 export function cashDivertSpawnFields(lane: string): { cashTools?: readonly string[] } {
   const tools = cashDivertToolsForLane(lane);
   return tools === undefined ? {} : { cashTools: tools };
 }
 
-/**
- * W1-T3692: can the cash adapter actually RUN this spawn's tool surface?
- *
- * THE PREDICATE IS THE REAL CONSTRAINT, NOT A PROXY FOR IT. `openWeightTools` THROWS on a tool it
- * does not implement, so a fallback that guessed from the lane name would convert a clean capacity
- * block into an opaque tool-surface crash. This asks the question the adapter itself will ask.
- *
- * AN UNBOUNDED SPAWN IS NEVER ELIGIBLE. `SpawnWorkerArgs.tools` undefined means the worker inherits
- * the unrestricted surface, which includes Bash -- the one capability the check-runner deliberately
- * does not have (no git write, no forge). Absent bound => refuse, never "probably fine".
- */
-/**
- * W1-T3696: does the HARNESS own git for a spawn with this tool surface? True exactly when the
- * spawn declares a bound carrying no shell — the condition its output contract was built from, so
- * both read one value and a worker is never told one thing and judged by another.
- *
- * AN UNBOUNDED SPAWN IS FALSE, not "probably fine": undefined `tools` inherits the unrestricted
- * surface, which includes Bash. Such a worker could have committed and chose not to. */
+/** W1-T3692: cash eligibility must check actual tools, not lane names: openWeightTools throws
+ * on unsupported tools, turning a guessed fallback into a crash. Undefined inherits unrestricted
+ * Bash (git write/forge), which the check-runner lacks, so an absent bound is never eligible. */
+/** W1-T3696: harness owns git exactly for declared shell-less bounds, matching the output contract.
+ * Undefined tools inherits Bash, so false: that worker could have committed itself. */
 export function harnessOwnsGitFor(tools: readonly string[] | undefined): boolean {
   if (tools === undefined) return false;
   return !tools.includes("Bash");
 }
 
+function harnessOwnsGitForProvider(args: SpawnWorkerArgs, provider: WorkerProviderId): boolean {
+  if (provider === "codex") return codexHarnessCommits(args);
+  return harnessOwnsGitFor(provider === "cash" ? args.cashTools ?? args.tools : args.tools);
+}
+
 export function cashCanServeToolSurface(tools: readonly string[] | undefined): boolean {
-  // AN EMPTY BOUND IS NOT AN ABSENT ONE. `tools: []` is a DELIBERATE declaration carried by every
-  // pure-judge rung here — `RISK_JUDGE_TOOLS` (lib/risk-judge.ts) is literally `[]`, and both
-  // feedback judges say why inline: "everything it needs is in the prompt — no exploration". Such
-  // a spawn asks for NO capability, so there is nothing for the check-runner to be unable to
-  // implement, and `every(...)` over an empty list is vacuously true — the correct answer, never
-  // reached while this shared the `undefined` early return.
-  //
-  // MEASURED 2026-09-17, retro's promotion judge under a squeeze: cash_fallback_refused "not
-  // implementable by cash ()" — the empty parenthesis is the bug rendering itself.
-  //
-  // `undefined` STILL REFUSES for its own stated reason: it inherits the UNRESTRICTED surface,
-  // which includes Bash. Absent is not empty.
+  // Empty is declared, not absent: RISK_JUDGE_TOOLS (lib/risk-judge.ts) and both feedback judges
+  // need no exploration ("everything it needs is in the prompt — no exploration"); every([]) is true.
+  // Sharing undefined's early return caused retro's 2026-09-17 squeeze refusal:
+  // cash_fallback_refused "not implementable by cash ()". Undefined still inherits Bash and refuses.
   if (tools === undefined) return false;
   return tools.every((tool) => OPENWEIGHT_FUNCTIONS[tool] !== undefined);
 }
@@ -1669,17 +1516,18 @@ export function cashAllowanceFallbackRefusal(config: Config, prompt: string, dep
   }
 }
 
-function cashSonnetAlternatives(prompt: string, config: Config, ctx: { runId?: string; taskId?: string }): string[] {
+export function cashSonnetAlternatives(prompt: string, config: Config, ctx: { runId?: string; taskId?: string }): string[] {
   hydrateCashCapacity(config);
-  const deployment = "gpt-6.1-sol";
-  if (!openWeightDeploymentReady(deployment)) return [];
   const estimatedTokens = openWeightEstimatedTokens(Buffer.byteLength(prompt, "utf8"));
-  const limitTokens = learnedCashLimit(deployment, cashDeploymentEndpoint(config, deployment));
-  if (openWeightDeploymentHolds(deployment, estimatedTokens, limitTokens)) return [deployment];
-  if (limitTokens !== undefined && openWeightDeploymentHolds(deployment, estimatedTokens, Number.POSITIVE_INFINITY)) {
-    recordCashCapacityShortfall(config, { reason: "capacity_shortfall", deployment, estimatedTokens, limitTokens }, ctx);
-  }
-  return [];
+  return ["gpt-6.1-terra", "gpt-6.1-sol"].filter((deployment) => {
+    if (!openWeightDeploymentReady(deployment)) return false;
+    const limitTokens = learnedCashLimit(deployment, cashDeploymentEndpoint(config, deployment));
+    if (openWeightDeploymentHolds(deployment, estimatedTokens, limitTokens)) return true;
+    if (limitTokens !== undefined && openWeightDeploymentHolds(deployment, estimatedTokens, Number.POSITIVE_INFINITY)) {
+      recordCashCapacityShortfall(config, { reason: "capacity_shortfall", deployment, estimatedTokens, limitTokens }, ctx);
+    }
+    return false;
+  });
 }
 
 /** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
@@ -1821,10 +1669,16 @@ export function workerSelectionAssignment(
   };
 }
 
+/** W1-T10382: a credits-lane arm is never drawn beside subscription headroom, so it cannot enrol an experiment. */
+function experimentArms<T extends { eligible: boolean; lane?: ProviderLane }>(considered: readonly T[]): T[] {
+  return considered.map((entry) => (entry.lane ? { ...entry, eligible: false } : entry));
+}
+
 function routingRule(args: SpawnWorkerArgs, input: Parameters<typeof workerSelectionAssignment>[1]): RoutingRule {
   if (args.routingFallback) return args.routingFallback.rule;
   if (args.routingTrial?.arm === "cash" && input.provider === "cash") return "cash-trial";
   if (input.mode !== "multi-provider") return input.mode;
+  if (input.selection?.lane === "codex-credits") return "codex-credits";
   if (input.preferenceBypass) return "preference-bypassed";
   if (input.capabilityPreference) return "capability-preference";
   return input.policy.preference === "automatic" ? "headroom-auction" : "operator-preference";
@@ -1844,6 +1698,8 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
       eligible: verdict.eligible,
       selected: chosen,
       ...(verdict.reason ? { reason: verdict.reason } : {}),
+      ...(verdict.lane ? { lane: verdict.lane } : {}),
+      ...(capacity.credits ? { creditsBalance: capacity.credits.balance } : {}),
     };
   });
   if (!considered.some((entry) => entry.selected)) {
@@ -1855,7 +1711,7 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
   const rule = routingRule(args, input);
   const learner = input.selection?.draw?.learned ? FIX_ROUTING_LEARNER : undefined;
   const ab = rule === "headroom-auction" && learner === undefined && experimentTaskIdentity(args.taskId) !== undefined
-    ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered })
+    ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered: experimentArms(considered) })
     : undefined;
   return {
     rule,
@@ -1877,6 +1733,7 @@ function emitWorkerSelectionAssignment(
   input: Parameters<typeof workerSelectionAssignment>[1],
 ): string | undefined {
   const assignment = workerSelectionAssignment(args, input);
+  if (args.promptFor) assignment.harness_owns_git = harnessOwnsGitForProvider(args, input.provider);
   console.error(JSON.stringify({ event: "worker.selection.assigned", assignment }));
   // W1-T4614: before the provider call, so every commit this worker makes in its run worktree names this assignment.
   stampAssignmentIfRunWorktree(args.cwd, assignment.id);
@@ -1897,12 +1754,18 @@ export function auctionDrawSeed(
   capacities: readonly ProviderCapacity[],
   capability: CodexModelTier | undefined,
 ): RoutingDrawSeed {
-  const considered = capacities.map((capacity) => ({
-    provider: capacity.provider,
-    ...(capacity.model ? { model: capacity.model } : {}),
-    eligible: providerEligibility(capacity, policy.reservePercent).eligible,
-  }));
-  const id = policy.preference === "automatic" ? routingExperimentFor({ capability, effort: args.effort, considered }) : undefined;
+  const considered = capacities.map((capacity) => {
+    const verdict = providerEligibility(capacity, policy.reservePercent);
+    return {
+      provider: capacity.provider,
+      ...(capacity.model ? { model: capacity.model } : {}),
+      eligible: verdict.eligible,
+      ...(verdict.lane ? { lane: verdict.lane } : {}),
+    };
+  });
+  const id = policy.preference === "automatic"
+    ? routingExperimentFor({ capability, effort: args.effort, considered: experimentArms(considered) })
+    : undefined;
   const experiment = ROUTING_EXPERIMENTS.find((candidate) => candidate.id === id);
   const unit = experimentTaskIdentity(args.taskId);
   if (experiment && unit) return experimentDrawSeed(experiment, unit);
@@ -2492,11 +2355,22 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   validateWorkerMcpIsolation(args);
+  if (args.promptFor) {
+    const promptFor = args.promptFor;
+    const prompts = new Map<string, string>();
+    // Cash admission and its recursive retry must consume one rendering of the same contract.
+    args = { ...args, promptFor: route => {
+      const key = `${route.provider}:${route.harnessOwnsGit}`;
+      if (!prompts.has(key)) prompts.set(key, promptFor(route));
+      return prompts.get(key)!;
+    } };
+  }
   const executions = new Map<WorkerProviderId, ReturnType<typeof workerExecutionForProvider>>();
   const executionFor = (provider: WorkerProviderId) => {
     let execution = executions.get(provider);
     if (!execution) {
-      execution = workerExecutionForProvider(args, provider);
+      const prompt = args.promptFor?.({ provider, harnessOwnsGit: harnessOwnsGitForProvider(args, provider) }) ?? args.prompt;
+      execution = workerExecutionForProvider({ ...args, prompt }, provider);
       execution.prompt = withWorkspaceCleanup(execution.prompt);
       executions.set(provider, execution);
     }
@@ -3053,6 +2927,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         config, runId: args.runId, taskId: args.taskId,
         cashSqueezed: args.cashSqueezed === true,
         modelApprovals: config.modelApprovals,
+        ...(args.routingTrial?.id === "inbox-bakeoff" && args.routingTrial.arm === "cash" && args.routingTrial.models?.length === 1
+          ? { bakeoffDeployment: args.routingTrial.models[0] } : {}),
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
     );

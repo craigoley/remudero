@@ -255,7 +255,7 @@ export interface PaidPilotAaCitation {
 }
 
 /** A current, untampered A/A receipt with no integrity concern, or the named reason it is not one. */
-function citeAaReceipt(value: unknown, nowMs: number): { ok: true; citation: PaidPilotAaCitation } | { ok: false; reason: string } {
+export function citeAaReceipt(value: unknown, nowMs: number): { ok: true; citation: PaidPilotAaCitation } | { ok: false; reason: string } {
   const refuse = (reason: string) => ({ ok: false as const, reason });
   const report = record(value);
   if (report === undefined) return refuse("aa-receipt-missing");

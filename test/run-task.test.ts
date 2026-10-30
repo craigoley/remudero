@@ -110,7 +110,8 @@ import {
   type SynthesizeGitGateway,
 } from "../src/lib/onboard/synthesize.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
-import type { recordDecision } from "../src/lib/feedback-landing.js";
+import { readQueuedFeedbackRecords, type recordDecision } from "#src/lib/feedback-landing.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
@@ -7897,20 +7898,10 @@ if (args[0] === "label" && args[1] === "create") {
   }
 });
 
-// W1-T905: `buildSweepEffects`'s `captureRepairFeedbackImpl` default (unlike every other
-// injectable dep on this function) closes over the module-level `repoRoot` const directly —
-// there is no fixture-root seam for it, the SAME "UNREDIRECTABLE" shape
-// test/config-reader-seams.test.ts already documents for `repoRoot`/`loadDefaultPolicy()`
-// consumers. So, exactly like test/feedback-landing.test.ts's own "write a REAL entry into
-// THIS checkout's own plan/feedback/" precedent, this drives the DEFAULT wiring end to end
-// against the real checkout, with a fresh timestamped id so it can never collide, cleaned up
-// in `finally` regardless of outcome. `captureFeedback`'s own landing attempt is best-effort
-// and NEVER throws (feedback.ts's own doc); its force-push leg is refused outright by the
-// live-write guard under the test runner, so this never pushes or opens a PR against the
-// real repo — only the local `plan/feedback/<id>.yaml` write (feedback.ts's durable half)
-// is observable here, exactly what `readFeedbackEntry` below confirms.
-test("buildSweepEffects.captureRepairFeedback: the DEFAULT wiring (no override) runs the real existsSync dedup + real captureFeedback against repoRoot (W1-T905)", () => {
-  const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+// The default captures from repoRoot into the configured state queue; both copies are cleaned
+// even if an assertion fails. A queued id must deduplicate without recreating the checkout copy.
+test("buildSweepEffects.captureRepairFeedback: the DEFAULT wiring stages and deduplicates in config.root (W1-T905)", () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), "rmd-repair-capture-default-"));
   const id = `fb-repair-w1t905-coverage-${Date.now()}`;
   const entryPath = feedbackEntryPath(REPO_ROOT, id);
   assert.ok(!existsSync(entryPath), "sanity: this fresh, timestamped id must not already exist in this checkout");
@@ -7918,7 +7909,7 @@ test("buildSweepEffects.captureRepairFeedback: the DEFAULT wiring (no override) 
     const effects = buildSweepEffects({
       owner: "acme",
       repo: "remudero",
-      config: { root: REPO_ROOT } as never,
+      config: { root: stateRoot } as never,
       ledgerPath: join(REPO_ROOT, "ledger.ndjson"),
       runId: "SWEEP-COV-1",
       plan: { tasks: [] } as never,
@@ -7928,19 +7919,20 @@ test("buildSweepEffects.captureRepairFeedback: the DEFAULT wiring (no override) 
     const filing: RepairFilingCapture = { id, raw: "W1-T905 coverage fixture — repair#coverage-fixture", origin: "repair#coverage-fixture" };
 
     effects.captureRepairFeedback!(filing);
-    assert.ok(existsSync(entryPath), "the DEFAULT captureRepairFeedbackImpl really wrote a real entry under repoRoot");
-    const entry = readFeedbackEntry(REPO_ROOT, id);
+    assert.equal(existsSync(entryPath), false, "the checkout copy moves into the state queue");
+    const queued = readQueuedFeedbackRecords(stateRoot);
+    const entry = queued.get(`plan/feedback/${id}.yaml`);
+    assert.ok(entry, "the default capture queues under config.root without an explicit landing root");
     assert.equal(entry.status, "new");
     assert.equal(entry.origin, "repair#coverage-fixture");
     assert.equal(entry.raw, filing.raw);
 
-    // A SECOND call at the SAME id must hit the existsSync dedup and return without a second
-    // write — proving the guard line itself, not only the write beneath it.
-    const before = readFileSync(entryPath, "utf8");
     effects.captureRepairFeedback!({ ...filing, raw: "a second, different raw body that must never land" });
-    assert.equal(readFileSync(entryPath, "utf8"), before, "the existsSync dedup must have skipped a second write");
+    assert.deepEqual(readQueuedFeedbackRecords(stateRoot), queued, "the queued capture is untouched");
+    assert.equal(existsSync(entryPath), false, "dedup must not recreate the checkout copy");
   } finally {
     rmSync(entryPath, { force: true });
+    rmSync(stateRoot, { recursive: true, force: true });
   }
 });
 

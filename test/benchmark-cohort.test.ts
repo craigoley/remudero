@@ -318,9 +318,9 @@ test("benchmark cohorts replay an invalid checkpoint and resume a changed source
     assert.equal(complete.snapshot.cohorts.reduce((sum, cohort) => sum + cohort.joinedAttempts, 0), 2);
     assert.equal(complete.snapshot.pressure.rebuiltPartitions, 2);
 
-    const checkpoint = join(stateDir, "benchmark-cohort-v1.json");
+    const checkpoint = join(stateDir, "benchmark-cohort-index.json");
     const corrupt = JSON.parse(readFileSync(checkpoint, "utf8"));
-    corrupt.sources[0].rows[0].row = null;
+    corrupt.sources[0].segment = "../outside.ndjson";
     writeFileSync(checkpoint, JSON.stringify(corrupt));
     const replay = await runBenchmarkCohortPass(stateDir, { maxSources: 1 });
     assert.equal(replay.state, "partial", "a damaged checkpoint cannot return a cached observed snapshot");
@@ -483,7 +483,7 @@ test("benchmark cached live verification preserves evidence when its real source
     writeFileSync(live, assignment);
     const initial = await runBenchmarkCohortPass(stateDir);
     assert.equal(initial.state, "complete");
-    const checkpoint = join(stateDir, "benchmark-cohort-v1.json");
+    const checkpoint = join(stateDir, "benchmark-cohort-index.json");
     const saved = readFileSync(checkpoint, "utf8");
     const missing = await runBenchmarkCohortPass(stateDir, { onBeforeLiveCacheVerify: () => unlinkSync(live) });
     assert.equal(missing.state, "unavailable");
@@ -507,7 +507,7 @@ test("benchmark cached empty live evidence still requires an existing regular so
       const initial = await runBenchmarkCohortPass(stateDir);
       assert.equal(initial.state, "complete");
       assert.equal(initial.snapshot.sourceLineage.length, 1, "a real empty source was audited");
-      const checkpoint = join(stateDir, "benchmark-cohort-v1.json");
+      const checkpoint = join(stateDir, "benchmark-cohort-index.json");
       const saved = readFileSync(checkpoint, "utf8");
       const missing = await runBenchmarkCohortPass(stateDir, { onBeforeLiveCacheVerify: () => {
         unlinkSync(live);
@@ -539,7 +539,7 @@ test("benchmark cached live failures retain bounded missing denied invalid and u
       writeFileSync(join(stateDir, "ledger.ndjson"), source);
       const initial = await runBenchmarkCohortPass(stateDir);
       assert.equal(initial.state, "complete");
-      const checkpoint = join(stateDir, "benchmark-cohort-v1.json");
+      const checkpoint = join(stateDir, "benchmark-cohort-index.json");
       const saved = readFileSync(checkpoint, "utf8");
       const refused = await runBenchmarkCohortPass(stateDir, { onBeforeLiveCacheVerify: () => { throw failure.error; } });
       assert.equal(refused.state, "unavailable");
@@ -585,7 +585,7 @@ test("benchmark cohorts quarantine a malformed source while continuing to audit 
     assert.equal(audited.state, "unavailable");
     assert.equal(audited.snapshot.reason, "ledger-source-malformed");
     assert.equal(audited.scannedSources, 1, "a bad old archive does not starve later sources");
-    const checkpoint = JSON.parse(readFileSync(join(stateDir, "benchmark-cohort-v1.json"), "utf8"));
+    const checkpoint = JSON.parse(readFileSync(join(stateDir, "benchmark-cohort-index.json"), "utf8"));
     assert.equal(checkpoint.sources.length, 1);
     assert.equal(checkpoint.sources[0].name, "ledger.2026-09-26T12-00-00-000Z.ndjson");
     assert.equal(checkpoint.sourceFaults[0].name, "ledger.2026-09-25T12-00-00-000Z.ndjson.gz");

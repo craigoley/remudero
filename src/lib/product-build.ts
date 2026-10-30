@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import type { TargetJobAdmission, TargetJobRead, TargetJobRecord } from "./drain.js";
 import { systemClock, type Clock } from "./clock.js";
 import { daemonInstanceRegistryPath } from "./deployer.js";
 import { dispatchClaimRef } from "./dispatch-claim.js";
@@ -62,6 +63,9 @@ export type ProductBuildCode = ProductStoreCode
 export type ProductBuildResult =
   | { ok: true; value: { receipt: ProductBuildReceipt; replayed: boolean }; code?: never }
   | { ok: false; code: ProductBuildCode; value?: never };
+type ProductBuildExecutionResult =
+  | { ok: true; value: { receipt: ProductBuildReceipt; replayed: boolean; execution?: ProductBuildExecution }; code?: never }
+  | { ok: false; code: ProductBuildCode; value?: never };
 
 export interface BuildRepository { id: number; owner: string; name: string; defaultBranch: string }
 export interface TargetInspection { enrolled: boolean | undefined; head: string | undefined; readmeOnly: boolean | undefined }
@@ -93,13 +97,15 @@ export interface ProductBuildTarget {
 }
 
 /** One build request, as the target daemon's ledger must name it before its run can read as this build's. */
-export interface ExecutionQuery { taskId: string; origin: string; repo: string; requestedAt: string; nowMs: number }
+export interface ExecutionQuery { taskId: string; origin: string; repo: string; requestedAt: string; nowMs: number; runId?: string }
 /**
  * Native execution evidence for ONE build request. `dispatched`: the daemon's admission consumed this request's kick;
  * `running`: the run that dispatch started has no terminal row and wrote inside the liveness bound; `ended`: it wrote a
  * terminal row; `silent`: it wrote none, and nothing inside the bound either. `unknown`: the ledger could not be read.
  */
 export type ExecutionRead = { state: "unknown" | "none" | "refused" | "dispatched" } | { state: "running" | "ended" | "silent"; runId: string };
+/** Internal handoff of the replay's own read; the case must not resolve a second daemon root. */
+export interface ProductBuildExecution { read: ExecutionRead; stateRoot: string; origin: string; requestedAt: string }
 
 /** The daemon's kick steps (daemon.ts runDaemon) and a task run's own steps (run-task-verb.ts) this reader trusts. */
 const KICK_DISPATCHED_STEP = "console.kick_dispatched";
@@ -111,21 +117,31 @@ const RUN_TERMINAL_STEPS: ReadonlySet<string> = new Set(["verdict", "run.error"]
 /**
  * Reads the TARGET daemon's own ledger (`stateDir`, every rotation) for this request's execution. Correlation, never
  * freshness: the kick row must name this request's origin, task and repository at or after its recorded time; the
- * run is the first `run.start` of this task at or after that dispatch; it is live only with no terminal row and an
+ * run is bound by a native receipt to this exact origin; it is live only with no terminal row and an
  * own row inside the board's liveness bound (W1-T179), which only bounds a run that died without a verdict.
  */
 export function readTargetExecution(stateDir: string, query: ExecutionQuery, fsDeps: LedgerGrepFsDeps = realLedgerFs): ExecutionRead {
   const read = readLedgerUnionRecordsSync(stateDir, { sinceTs: query.requestedAt, refuseIncomplete: true, keep: (line) => line.includes(query.taskId) }, fsDeps);
   // An unlisted or unreadable file, or no ledger at all, is a daemon this process cannot see: never "nothing ran".
-  if (!read.ok || (!read.liveFileRead && read.archiveCount === 0)) return { state: "unknown" };
+  if (!read.ok || read.torn > 0 || (!read.liveFileRead && read.archiveCount === 0)) return { state: "unknown" };
   const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
   const rows = read.rows.filter((row) => Number.isFinite(at(row))).sort((a, b) => at(a) - at(b));
   const kick = rows.find((row) => (row.step === KICK_DISPATCHED_STEP || row.step === KICK_REFUSED_STEP) && row.task === query.taskId &&
     row.origin === query.origin && typeof row.repo === "string" && row.repo.toLowerCase() === query.repo.toLowerCase());
   if (!kick) return { state: "none" };
   if (kick.step === KICK_REFUSED_STEP) return { state: "refused" };
+  const bindings = rows.filter((row) => row.step === KICK_DISPATCHED_STEP &&
+    row.task === query.taskId && row.origin === query.origin && typeof row.repo === "string" &&
+    row.repo.toLowerCase() === query.repo.toLowerCase() && typeof row.native_run_id === "string");
+  const ids = new Set(bindings.map((row) => row.native_run_id as string));
+  if (ids.size > 1 || (query.runId !== undefined && ids.size === 1 && !ids.has(query.runId))) return { state: "unknown" };
+  const boundRun = [...ids][0];
+  if (boundRun === undefined) return { state: "dispatched" };
+  if (rows.some((row) => row.native_run_id === boundRun && typeof row.origin === "string" && row.origin !== query.origin &&
+    typeof row.repo === "string" && row.repo.toLowerCase() === query.repo.toLowerCase())) return { state: "unknown" };
   const start = rows.find((row) => row.step === RUN_START_STEP && row.task_id === query.taskId &&
-    ledgerRunBelongsToTask(query.taskId, row.run_id) && at(row) >= at(kick));
+    typeof row.repo === "string" && row.repo.toLowerCase() === query.repo.toLowerCase() &&
+    ledgerRunBelongsToTask(query.taskId, row.run_id) && row.run_id === boundRun);
   if (!start) return { state: "dispatched" };
   const runId = start.run_id as string;
   const own = rows.filter((row) => row.run_id === runId);
@@ -135,7 +151,7 @@ export function readTargetExecution(stateDir: string, query: ExecutionQuery, fsD
 }
 
 /** Which daemon drives the target: its config root, the root that daemon's own kick port reads. */
-export type DaemonRootRead = { state: "found"; root: string; instance: string } | { state: "absent" } | { state: "unreadable" };
+export type DaemonRootRead = { state: "found"; root: string; instance: string; native?: true } | { state: "absent" } | { state: "unreadable" };
 
 /** Where the daemon instances live, as serve's own instance gateway names them. */
 export interface ProductBuildInstances {
@@ -331,13 +347,19 @@ export class ProductBuildService {
   }
 
   async execute(actor: string, command: unknown): Promise<ProductBuildResult> {
+    const result = await this.executeForCase(actor, command);
+    return result.ok ? { ok: true, value: { receipt: result.value.receipt, replayed: result.value.replayed } } : result;
+  }
+
+  /** Trusted case composition only; filesystem locations never enter a public build reply. */
+  async executeForCase(actor: string, command: unknown): Promise<ProductBuildExecutionResult> {
     // One in-process chain: two identical requests cannot both pass the replay check and double-record.
     const run = this.chain.then(() => this.run(actor, command));
     this.chain = run.then(() => undefined, () => undefined /* the caller awaits `run`; the tail only orders the chain */);
     return run;
   }
 
-  private async run(actor: string, command: unknown): Promise<ProductBuildResult> {
+  private async run(actor: string, command: unknown): Promise<ProductBuildExecutionResult> {
     try {
       if (typeof actor !== "string" || !actor.trim() || actor.length > 512) throw new Fault("invalid_identity");
       const parsed = productBuildCommandSchema.safeParse(command);
@@ -348,13 +370,34 @@ export class ProductBuildService {
     }
   }
 
+  /**
+   * W1-T10799: where the request's marker goes. A live instance of the target keeps its own root unchanged. Only a
+   * READABLE registry that names no live instance (`absent`) routes to the CORE daemon's root, which owns one bounded
+   * native job; an unreadable registry stays unreadable, and a core root without a `state/` directory is unreadable
+   * too, because a marker written there would mint a directory no daemon reads.
+   */
+  private routeDaemon(subject: BuildRepository): Exclude<DaemonRootRead, { state: "absent" }> {
+    const read = this.daemonRoot(subject);
+    if (read.state !== "absent") return read;
+    const core = this.options.root;
+    if (core === undefined || !isAbsolute(core) || !existsSync(join(core, "state"))) return { state: "unreadable" };
+    try {
+      accessSync(join(core, "state"), constants.R_OK | constants.X_OK);
+      readdirSync(join(core, "state"));
+    } catch (error) {
+      // Failed Core access or listing is an unreadable route, never permission to create a kick marker.
+      void error; return { state: "unreadable" };
+    }
+    return { state: "found", root: core, instance: this.options.instances?.coreInstance ?? CORE_INSTANCE, native: true };
+  }
+
   private readProduct(actor: string, id: string): StoredProduct {
     const read = this.store.read(actor, id);
     if (!read.ok) throw new Fault(read.code);
     return read.value;
   }
 
-  private async start(actor: string, input: ProductBuildCommand): Promise<{ receipt: ProductBuildReceipt; replayed: boolean }> {
+  private async start(actor: string, input: ProductBuildCommand): Promise<{ receipt: ProductBuildReceipt; replayed: boolean; execution?: ProductBuildExecution }> {
     const payloadDigest = digest(JSON.stringify(input));
     const operationId = `pbuild_${payloadDigest}`;
     const requestKey = `pbuild_${digest(input.requestId).slice(0, 48)}`;
@@ -391,9 +434,8 @@ export class ProductBuildService {
       if (!inspected.enrolled) throw new Fault("target_not_enrolled");
       if (!this.target.runnerRegistered(subject)) throw new Fault("runner_missing");
       // The marker goes where the target's OWN daemon reads it, and that daemon must not be halted either.
-      daemon = this.daemonRoot(subject);
+      daemon = this.routeDaemon(subject);
       if (daemon.state === "unreadable") throw new Fault("target_unreadable");
-      if (daemon.state === "absent") throw new Fault("target_daemon_missing");
       if (!isAbsolute(daemon.root)) throw new Fault("unavailable");
       if (isStopped(daemon.root) || isPaused(daemon.root)) throw new Fault("fleet_halted");
       if (inspected.head === undefined || inspected.readmeOnly === undefined) throw new Fault("target_unreadable");
@@ -429,10 +471,10 @@ export class ProductBuildService {
     const queuedEvidence = product.stageEvidence.find((item) => item.id === operationId);
     if (!queuedEvidence) throw new Fault("recovery_required");
 
-    // Observation may add admitted/running evidence, each with its own record; absence adds nothing. Admission is a
-    // held claim or the daemon's dispatch of this request; running is ONLY the target daemon's native evidence.
+    // Native routes require this origin's dispatch receipt for admission. An instance's own route retains its
+    // claim observation; running always requires the daemon's correlated native execution evidence.
     const seen = await this.target.observe(subject, input.taskId);
-    daemon ??= this.daemonRoot(subject);
+    daemon ??= this.routeDaemon(subject);
     // A daemon whose state this process cannot reach (a remote or unmounted instance) has no readable evidence.
     const execution: ExecutionRead = daemon.state !== "found" || !isAbsolute(daemon.root) ? { state: "unknown" }
       : readTargetExecution(join(daemon.root, "state"), { taskId: input.taskId, origin, repo: subject.name, requestedAt: queuedEvidence.observedAt, nowMs: this.clock.now() });
@@ -441,7 +483,7 @@ export class ProductBuildService {
     const runUrl = branch !== undefined && seen.state !== "unknown" && seen.branches.includes(branch) ? `${repositoryUrl}/tree/${branch}` : repositoryUrl;
     // The daemon refusing THIS request's kick outranks a claim some other dispatch holds: that claim is not this admission.
     const wanted = {
-      admitted: execution.state !== "refused" && (seen.state === "admitted" || ["dispatched", "running", "ended", "silent"].includes(execution.state)),
+      admitted: execution.state !== "refused" && ((daemon.state === "found" && !daemon.native && seen.state === "admitted") || ["dispatched", "running", "ended", "silent"].includes(execution.state)),
       running: execution.state === "running",
     };
     for (const outcome of ["admitted", "running"] as const) {
@@ -454,6 +496,7 @@ export class ProductBuildService {
     const furthest = evidence.some((item) => item.outcome === "running") ? "running" : evidence.some((item) => item.outcome === "admitted") ? "admitted" : "queued";
     return {
       replayed: prior !== undefined,
+      ...(daemon.state === "found" ? { execution: { read: execution, stateRoot: daemon.root, origin, requestedAt: queuedEvidence.observedAt } } : {}),
       receipt: { operationId, productId: product.id, taskId: input.taskId, planEvidenceId: input.planEvidenceId, outcome: furthest,
         repository: { id: subject.id, owner: subject.owner, name: subject.name },
         objectiveRevision: product.objectiveRevision, payloadDigest, queuedAt: queuedEvidence.observedAt, evidence },
@@ -516,4 +559,68 @@ export function bootstrapConfirmed(product: Pick<StoredProduct, "stageEvidence">
   if (inspected.head === undefined || inspected.readmeOnly === undefined) return false;
   return !inspected.readmeOnly || BOOTSTRAP_CHECKS.every((check) => product.stageEvidence.some((item) =>
     item.id === bootstrapEvidenceId(inspected.head!, check) && item.outcome === "succeeded"));
+}
+
+/**
+ * W1-T10799: who may run an enrolled target's task when its kick marker sits under the CORE root. The same two
+ * reviewed sources the build request read: the managed set enrolls the repository, and the live instance registry
+ * says whether it has a daemon of its own. Either source unreadable is `unreadable`, never "no daemon" and never
+ * "not enrolled", so neither a malformed file nor an ambiguous owner can start a job.
+ */
+export function nativeTargetAdmission(repoName: string, options: ProductBuildInstances & { repoRoot: string }): TargetJobAdmission {
+  let registry: RegistryInstance[];
+  let managed: { owner: string; repo: string }[];
+  try {
+    const path = options.registryPath ?? daemonInstanceRegistryPath(options.repoRoot);
+    registry = parseInstanceRegistry((options.readText ?? ((file: string) => readFileSync(file, "utf8")))(path)).instances;
+    managed = loadManagedRepos(options.repoRoot);
+  } catch (error) {
+    // An unreadable registry or malformed managed set is an unknown route, never "no daemon" and never "not enrolled".
+    void error; return { state: "unreadable" };
+  }
+  const wanted = repoName.toLowerCase();
+  const enrolled = managed.filter((entry) => entry.repo.toLowerCase() === wanted);
+  if (enrolled.length === 0) return { state: "not_enrolled" };
+  if (enrolled.length > 1) return { state: "unreadable" };
+  const { owner, repo } = enrolled[0]!;
+  const live = registry.find((entry) => entry.live && entry.repo.toLowerCase() === `${owner}/${repo}`.toLowerCase());
+  return live ? { state: "own_instance", instance: live.name } : { state: "native", owner };
+}
+
+const targetJobRecordSchema = z.object({
+  origin: z.string().min(1), taskId: z.string().min(1), repo: z.string().min(1), status: z.enum(["queued", "admitted", "ended", "refused"]),
+  attempts: z.number().int().min(0), updatedAt: z.string(), reason: z.string().optional(), stopReason: z.string().optional(),
+  owner: z.string().optional(), planRevision: z.string().optional(), runId: z.string().optional(),
+}).strict();
+
+/** The durable job record: one file per kick origin under `<root>/state/target-jobs`, replaced atomically. */
+export function fileTargetJobStore(root: string): { read: (origin: string) => TargetJobRead; write: (record: TargetJobRecord) => void; readAll: () => TargetJobRecord[] } {
+  const dir = join(root, "state", "target-jobs");
+  const pathFor = (origin: string) => join(dir, `${digest(origin).slice(0, 48)}.json`);
+  return {
+    readAll() {
+      if (!existsSync(dir)) return [];
+      return readdirSync(dir).filter((name) => name.endsWith(".json"))
+        .map((name) => targetJobRecordSchema.parse(JSON.parse(readFileSync(join(dir, name), "utf8"))));
+    },
+    read(origin) {
+      const path = pathFor(origin);
+      if (!existsSync(path)) return { state: "absent" };
+      try {
+        const record = targetJobRecordSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+        // A record filed under this name for another origin is a corrupt store, never this job.
+        return record.origin === origin ? { state: "found", record } : { state: "unreadable" };
+      } catch (error) {
+        // A torn or foreign record is unknown, which the caller holds; it is never "no job", which would respend.
+        void error; return { state: "unreadable" };
+      }
+    },
+    write(record) {
+      mkdirSync(dir, { recursive: true });
+      const path = pathFor(record.origin);
+      const temp = `${path}.${process.pid}.tmp`;
+      writeFileSync(temp, JSON.stringify(targetJobRecordSchema.parse(record)), { mode: 0o600 });
+      renameSync(temp, path);
+    },
+  };
 }

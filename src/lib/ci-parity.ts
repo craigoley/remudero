@@ -344,6 +344,14 @@ export interface CiParityStepResult {
   staticTiming?: StaticCheckTiming;
   /** W1-T2862: bounded stdout, kept only where a fast step opts in; a truncated payload is never complete. */
   successOutput?: { text: string; truncated: boolean };
+  qualification?: {
+    command: { file: string; args: string[] };
+    output: string; complete: boolean; exitCode: number | null;
+    provenance: "default-subprocess";
+    profile?: string;
+    sourceBefore?: { head: string; clean: boolean; error?: string };
+    sourceAfter?: { head: string; clean: boolean; error?: string };
+  };
 }
 
 /** BACKSTOP: the durable summary must not grow with an unbounded child stdout stream. */
@@ -449,6 +457,7 @@ interface CiParityLeafResult {
   detail: string;
   matched?: boolean;
   successOutput?: CiParityStepResult["successOutput"];
+  qualification?: CiParityStepResult["qualification"];
 }
 
 /** One ci.yml job's parity entry. A `mirrored: false` entry MUST carry a `reason` — that is what records it. */
@@ -643,20 +652,27 @@ export function boundedSuiteLeaf(
 ): CiParityLeafResult {
   if (spawn !== defaultPreflightSpawn) return shellOut(spawn, label, file, args, opts);
   const res = runBoundedSuite(file, args, { label, timeoutMs, ...opts });
+  const output = `${res.stdout}\n${res.stderr}`;
+  const qualification: NonNullable<CiParityStepResult["qualification"]> = {
+    command: { file, args: [...args] }, output: output.slice(0, MAX_RETAINED_SUCCESS_OUTPUT_CHARS),
+    complete: !opts.stream && !res.timeout && !res.error && !res.signal && res.status !== null && output.length <= MAX_RETAINED_SUCCESS_OUTPUT_CHARS,
+    exitCode: res.status, provenance: "default-subprocess",
+  };
   if (res.timeout) {
     const lastOutput = res.timeout.lastOutput.trim();
     return {
       ok: false,
+      qualification,
       detail:
         `FAIL — ${res.timeout.label} exceeded its ${timeoutMs}ms wall-clock ceiling; its process group was killed with SIGKILL. ` +
         `The suite's failure set is UNVERIFIED.${lastOutput ? ` Last output before termination:\n${lastOutput}` : " No suite output arrived before termination."}`,
     };
   }
   const spawnFailed = spawnFailureDetail(label, res);
-  if (spawnFailed) return { ok: false, detail: spawnFailed };
-  if (res.status === 0) return { ok: true, detail: `PASS — ${label}` };
+  if (spawnFailed) return { ok: false, detail: spawnFailed, qualification };
+  if (res.status === 0) return { ok: true, detail: `PASS — ${label}`, qualification };
   const captured = (res.stdout + res.stderr).trim();
-  return { ok: false, detail: `FAIL — ${label}\n${opts.stream ? "(output streamed above as it ran — not re-captured here)" : captured}` };
+  return { ok: false, detail: `FAIL — ${label}\n${opts.stream ? "(output streamed above as it ran — not re-captured here)" : captured}`, qualification };
 }
 
 /** A trigger leaf: both trigger scripts exit 0 in EITHER verdict and say matched/skip only in

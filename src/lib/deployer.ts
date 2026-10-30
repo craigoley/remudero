@@ -2529,7 +2529,7 @@ export interface RealDeployOpts {
    *  trim, since `git status --porcelain`'s leading status column is significant). Throws on
    *  a non-zero exit, like execFileSync — callers catch where that is expected (e.g. `pgrep`
    *  with no matches). */
-  execFile?: (cmd: string, args: string[]) => string;
+  execFile?: (cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }) => string;
 }
 
 /** Resolve the deploy supervisor's ledger from the state root it is operating on.
@@ -2633,6 +2633,49 @@ export function realDeploySensorsAsync(o: RealDeployOpts, gh: (args: string[]) =
   });
 }
 
+type DeployFactName = "newestBakedSha" | "imagePublished" | "imageBuildInFlight" | "imageBakedCommitsBehind" | "imageRecycleManual";
+/** Sync deploy deps or their async sensors: every getter may answer now or later. */
+export type DeployFactSensors = {
+  [K in DeployFactName]?: (...args: Parameters<NonNullable<DeployDeps[K]>>) =>
+    ReturnType<NonNullable<DeployDeps[K]>> | Promise<ReturnType<NonNullable<DeployDeps[K]>>>;
+};
+/** W1-T9552: one pass's deploy facts; a getter that threw is kept by name so a reader can replay it. */
+export interface DeployFacts {
+  newestBakedSha?: string;
+  imagePublished?: boolean;
+  imageBuildInFlight?: boolean;
+  imageBakedCommitsBehind?: number;
+  imageRecycleManual?: boolean;
+  thrown: Partial<Record<Exclude<DeployFactName, "newestBakedSha">, unknown>>;
+}
+
+/**
+ * W1-T9552: the fleet-state reconciler's deploy facts, awaited once per pass. Each fact is
+ * `undefined` when its read fails, exactly as its getter answers. A throw from `newestBakedSha`
+ * propagates (no rows can be built); any other throw is kept in `thrown` for replay, so the
+ * reconciler still records that row's `reconcile.unreadable`. The reads are the ones the rows ask:
+ * `imageBuildInFlight` only for an image the registry says is unpublished.
+ */
+export async function readDeployFactsAsync(sensors: DeployFactSensors): Promise<DeployFacts> {
+  const facts: DeployFacts = { thrown: {} };
+  const baked = await sensors.newestBakedSha?.();
+  if (!baked) return facts;
+  facts.newestBakedSha = baked;
+  const read = async <K extends keyof DeployFacts["thrown"]>(name: K, get: () => unknown): Promise<void> => {
+    try {
+      (facts as unknown as Record<string, unknown>)[name] = await get();
+    } catch (error) {
+      // Kept, not erased: the snapshot reader rethrows it, so the row records `reconcile.unreadable`.
+      facts.thrown[name] = error;
+    }
+  };
+  await read("imagePublished", () => sensors.imagePublished?.(baked));
+  if (facts.imagePublished === false) await read("imageBuildInFlight", () => sensors.imageBuildInFlight?.());
+  await read("imageBakedCommitsBehind", () => sensors.imageBakedCommitsBehind?.());
+  await read("imageRecycleManual", () => sensors.imageRecycleManual?.());
+  return facts;
+}
+
 export function realDeployDeps(o: RealDeployOpts): DeployDeps;
 export function realDeployDeps(o: RealDeployOpts, sensorExec: DeploySensorExec): Omit<DeployDeps, DeploySensorName> & AsyncDeploySensors;
 export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec): Omit<DeployDeps, DeploySensorName> & {
@@ -2641,7 +2684,8 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
 } {
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const clock = (): number => Date.now();
-  const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
+  const exec = o.execFile ?? ((cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }) =>
+    execFileSync(cmd, args, { encoding: "utf8", ...options }).toString());
   const drive = <R>(steps: DeploySteps<R>): R | Promise<R> => driveDeploySteps(steps, sensorExec !== undefined);
   const execSensor = (cmd: string, args: string[]) => deployStep(() => sensorExec ? sensorExec(cmd, args) : exec(cmd, args));
   function git(args: readonly string[]): string;
@@ -2799,13 +2843,14 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
       // W1-T8138: the drain wait comes from the lanes in flight, not a constant. With no run history to read
       // (or an operator's own RMD_RECYCLE_WAIT_S) the script keeps its labelled fallback.
       const derived = deriveWaitFromState();
+      const options = { env: { ...process.env, RMD_RECYCLE_CALLER: "deploy-tick" } };
       if (derived && derived.source !== "no_history_fallback") {
         // The derived wait is a DEFAULT: a RMD_RECYCLE_WAIT_S already in the supervisor's environment (an
         // operator's explicit choice) wins, decided by the shell so this file reads no environment itself.
-        exec("bash", ["-c", 'export RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-$1}"; shift; exec bash "$@"', "recycle-wait", String(derived.waitS), ...script]);
+        exec("bash", ["-c", 'export RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-$1}"; shift; exec bash "$@"', "recycle-wait", String(derived.waitS), ...script], options);
         return;
       }
-      exec("bash", script);
+      exec("bash", script, options);
     },
   };
 

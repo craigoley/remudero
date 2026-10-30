@@ -1,0 +1,45 @@
+- id: W1-T10993
+  title: A Dependabot PR whose own red is a test asserting the versions the bump changed gets a fix round, not an escalation; anything else still escalates
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the dep-review lane's decision and the dispatch of a fix worker onto a Dependabot head
+  origin: operator-session#slo-ladder-recon-2026-10-29
+  plan_refs:
+    - W1-T9994
+    - W1-T6064
+  files:
+    - src/lib/dep-review.ts
+    - src/run-task.ts
+    - test/review/a-dependabot-pin-test-red-gets-a-fix-round.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When a Dependabot PR's own red (dep-review own_red, basis main-passes) is failing tests whose failing assertions compare a literal version, version range or action SHA that the bump itself changed, the dep-review lane admits one fix round for it and writes one ledger row naming the PR, head, failing tests and the literals. A red that is anything else still escalates as today: a runtime or major upgrade, a failing test with no changed literal in its failing assertion, or a change the new version adds that needs a decision (for example a new SDK settings or sandbox key). A Dependabot PR whose red is green on main and unrelated to the bump is not admitted"
+      proof: "unit test: test/review/a-dependabot-pin-test-red-gets-a-fix-round.test.ts"
+    - claim: The dep-review lane names the admission as its own ledger step
+      proof: "grep: own_red\\.fix_admitted in src/lib/dep-review.ts"
+  rationale: |
+    OBSERVED by the operator's 2026-10-29 recon (ledger read to 2026-10-29T19:28:34Z) and re-read on GitHub at about 21:20Z.
+    - #15177 (npm minor-and-patch group), #15180 (the image CLI group) and #15182 (the GitHub Actions group) each sat red with their own red for over 30 hours. dep-review.own_red.observed (basis main-passes) was first written at 2026-10-28T14:41:40Z (#15177), 14:41:03Z (#15180) and 14:42:20Z (#15182).
+    - No fix worker was dispatched for any of them, and no dep-review.refresh_* row exists in the whole ledger. reconcileDependabotRefresh acts only for the causes base-red-recovered and fixed-on-main, so an own red never qualifies.
+    - The lane's only own-red path is a feedback record: dep-review.own_red.feedback_captured wrote fb-dep-review-69bc59bf88007e5e at 2026-10-28T15:45:48Z for #15180, and #15177 and #15182 were folded into it. On origin/main that record still has status new.
+    - The failing tests assert the literals the bumps changed: test/the-haiku55-image-pins-match-its-sdk.test.ts pins the SDK at 0.3.303 and the CLI at 2.1.303; SANDBOX_KEYS in test/settings.test.ts pins the SDK's sandbox key set; test/semgrep-native-install.test.ts pins the actions/setup-python and codeql-action/upload-sarif SHAs.
+    OBSERVED: another operator session repaired #15177 and #15182 by hand between 21:12:14Z and 21:16:49Z on 2026-10-29, on the Dependabot branches.
+    - #15177: "build(deploy): move the image's Claude Code CLI to 2.1.310 with the SDK" (98d3ce459), and "fix(settings): accept SDK 0.3.310's allowNestedUserNamespaces key, refuse it as …" (284466c91).
+    - #15182: "test(semgrep): pin the setup-python v7.1.0 and upload-sarif v4.39.1 SHAs …" (21bc01bfb).
+    - Each then took a commit carrying the head-identity trailer.
+    INFERRED: the pin updates are mechanical and a fix round can make them. The new SDK sandbox key in #15177 is a security-setting decision a person made; it is the kind of red this task must keep escalating.
+  design: |
+    Decide in src/lib/dep-review.ts, as a pure function over the own-red facts (red checks, failing test files and assertion text, the bump's version moves): admit, or escalate with the reason. Wire the admission in the dep-review lane in src/run-task.ts.
+    The builder must settle where the round pushes and record the choice in the PR body. The 2026-10-29 hand repair pushed to the Dependabot branch with a head-identity trailer commit. fb-dep-review-69bc59bf88007e5e proposes an owned task branch, because dep-review refuses files outside the manifest allowlist. Either way, the repaired head must not be refused by dep-review's own allowlist check.
+    One round per head. A second red at the round's new head escalates, as today.
+  falsifier: |
+    Remove the admission: the fixture #15182 shape (an action SHA pin test red after an actions bump) escalates instead of admitting a round, and the test fails. Keep the sandbox-key fixture escalating either way.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-29 at priority 2.
+    No advisory ignore, allowlist widening for arbitrary files, or auto-merge change is authorized by this task.

@@ -82,6 +82,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd ledger-grep <pattern>` | The deduplicated union of ALL THREE corpus forms — every `state/ledger.*.ndjson.gz` archive, every UNCOMPRESSED `state/ledger.*.ndjson` rotation, and the live `state/ledger.ndjson`. Naming only two answers silently wrong: rotations exist in both forms, `ledgerRotationEntries` reads both, and a hand-written glob that omits the plain one under-reports with no error, matched against `<pattern>` — replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson \| sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count **before** any match, then exits non-zero, naming the globbed directory, when zero archive files were read — never falling back to a live-file-only count. Read-only: writes no ledger line, no state file, deletes/moves nothing. |
 | `rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...` | Checks a Claude Code auto-memory directory (its `MEMORY.md` index plus one file per memory): index lines whose file is gone, files the index does not list, files without a name/description block, the index size against Claude Code's load limit (200 lines / about 25 KB), and memories that repeat a doctrine rule or learning in this repo. `--fix` moves dangling index lines to `MEMORY.archive.md` and lists unlisted files; it never deletes a memory. `--merge <from-dir>` moves one store into the first directory named. Exits non-zero on findings when `--fix` is not given. |
 | `rmd pr-owner <pr-number>` | Whether the LOCAL ledger shows a fix lane owning one PR — a read of `fix.*` rows keyed by that pr number, printed with the owning lane and the row that proves it. READ-ONLY and host-local: it writes no ledger line, opens no PR, and touches no git state. It answers from the ledger this host holds, so a lane that claimed the PR on another host is invisible to it — an absent owner is 'this host has no record', never 'nobody owns it'. |
+| `rmd pr-state <n...> [--max-age <dur>]` | Read PR head sha, check rollup and failing names, mergeability, review state, auto-merge and terminal state from the host-local ledger union, with each field's timestamp and source step. Stale or incomplete PRs share one batched read-broker query; a failed read preserves the ledger answer marked stale with its error. Default freshness is two sweep periods, derived from recent pass rows or the policy's poll interval. Read-only: writes no ledger or GitHub state. |
 | `rmd claim <task-id> [--drop \| --renew \| --hold [--interval-ms <n>]]` | Takes the dispatch claim the fleet honours for a hand build (W1-T5859): pushes `refs/rmd-dispatch/<task-id>` through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so dispatch sees a hand-built task before its branch or PR exists. Refuses a task id that is not in the plan on `origin/main`. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when taken, and exits 1 without claiming when origin is unreachable. `--drop` removes the claim only when its anchor's host is this host (an abandoned hand build), never another host's. A claim holds only while its holder renews it (W1-T9432). `--hold` takes the claim (or adopts this host's existing one), stays in the foreground, renews it every 5 minutes (`--interval-ms` overrides the pace) printing one `renewed` line each time, and drops it on SIGINT, SIGTERM or SIGHUP; a `lost` renewal exits 1 naming the new holder. Run it in the background of the session doing the build, so the claim dies with that session. `--renew` renews once, and only a claim whose anchor's host is this host. A renewal is a child commit of the claim pushed with `--force-with-lease`, so it never recreates a claim that was reclaimed or dropped. The fleet's own runs renew their claims the same way while they live. A lane that meets a claim judges its holder's last sign of life (the newest renewal, the mint, or a commit on an origin `run-<id>-*` branch) against W, the p90 of this instance's measured claim-to-verdict durations over 7 days: silence of W or more writes `dispatch.claim_unrenewed` once and keeps the claim; silence of 2W or more drops it (`dispatch.claim_reclaimed`) and that lane takes the task. So a hand build that neither holds nor renews its claim is reclaimed after 2W of silence. With no measured durations, nothing is reclaimed and the claim waits for an operator, as before. |
 | `rmd progress-watchdog [--json] [--state-root <dir>]` | Names a stalled sweep by its **progress**, not its pulse (W1-T5687): reads the ledger union (every archive plus the live ledger) and prints one verdict — PROGRESSING; IDLE (no open PRs); STALLED (newest progress row over 15 min old: `capture-diagnostics`; over 30 min: `recycle`); CRASH_LOOP (3 or more `daemon.paths` boots in 15 min that never reached `daemon.boot`: `hold-revive`); or UNKNOWN (no rows, or no open-PR count — never a silent `none`). Progress is only a `sweep.pass`, `review.posted` or `verdict.merged` row; `daemon.*` and `runtime.*` rows are a pulse, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest `sweep.pass` row's `enumerated` field. On `capture-diagnostics` it writes one bundle (ledger tail, `docker ps`, the tenant's `docker logs --tail`, the verdict) under `<state>/diagnostics/progress-<ts>/`, at most one per 15 min — its only write. It recycles nothing; acting on `recycle` / `hold-revive` from the host launcher is W1-T5688. |
 | `rmd live-edits --tree <daemon-checkout\|install-checkout> --checkout <dir> --state-root <dir> [--json]` | One rung of the live-edit ladder (2026-10-11), run by the host watchdog for the daemon checkout and the install checkout. Tracked edits are written at once to a patch under `<state>/recovery/live-edits/<tree>/` and to `refs/rmd-recovery/live-edits/<host>/<ts>`, read back and re-applied before they count as a copy. At the daemon's own freshness restart pressure the daemon opens one needs-human issue; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout fast-forwards. The host has no GitHub credential, so this verb spools its escalation and restore notice under `<state>/escalation-spool/` and the daemon posts them. |
@@ -1967,6 +1968,29 @@ variable names to Docker, so key values do not enter its command arguments or un
 missing or unsafe file leaves that cash route unavailable while subscription work can boot; check
 the named launcher warning and repair the file before relying on squeeze fallback.
 
+For the second Azure account, boot also loads the optional
+`~/.local/share/remudero/secrets/cash-eastus-api-key` into `RMD_CASH_EASTUS_API_KEY`.
+A recycle preserves a captured container value (then a shell value), otherwise reads this durable
+mode-0600 secret; an absent or unsafe file leaves only that deployment unavailable.
+`RMD_CASH_EASTUS_API_KEY_PATH` overrides the host file path at boot or recycle. At boot the
+file defaults to `cash-eastus-api-key` under the rendered `RMD_CASH_SECRET_DIR`.
+
+From a machine where `az` is logged in to the subscription, create the host secrets directory if
+needed (`mkdir -p ~/.local/share/remudero/secrets` on the host), then write the EastUS key directly
+from Azure over SSH. This command rejects empty or multiple key lines before replacing an existing
+file and prints only its mode, byte size and path:
+
+```bash
+az cognitiveservices account keys list -g synthwatch-rg -n synthwatch-foundry-eus --query key1 -o tsv | ssh remudero 'set -e; umask 077; d="$HOME/.local/share/remudero/secrets"; t="$d/.cash-eastus-api-key.tmp"; cat > "$t"; [ "$(awk "NF{n++} END{print n+0}" "$t")" = 1 ] || { rm -f "$t"; echo "refused: expected exactly one key line" >&2; exit 1; }; chmod 600 "$t"; mv "$t" "$d/cash-eastus-api-key"; stat -c "%a %s %n" "$d/cash-eastus-api-key"'
+```
+
+The watchdog converges the generated launcher after this change ships. The next relaunch or
+recycle carries the key by name only, without printing its value. Verify presence in the container:
+
+```bash
+docker exec remudero-daemon sh -c 'test -n "$RMD_CASH_EASTUS_API_KEY" && echo set || echo unset'
+```
+
 Every Foundry Messages turn reserves against the same UTC-day `dailyCapUsd` as the inexpensive
 cash requests **within one daemon** unless `workerProviders.fleetCashAllowancePath` names one
 host-shared file for every cash instance. Opus has an additional $5 ordinary and $10 squeeze-day limit; automatic routing
@@ -2066,3 +2090,80 @@ restart or path check fails before any request reaches the shared file, restore 
 and local files together. Once any shared request has been made, do not point cash back at the
 old local files: they omit that spend. Hold cash dispatch until an operator reconciles the shared
 and local reservations; restart the daemons with cash disabled so subscription work can continue.
+
+### MERGE HOLD ADOPTION FINDING
+
+Evidence reconciliation for W1-T10987, observed 2026-10-29. PR #14620's merge is verified;
+its initiating process and direct-versus-asynchronous merge path remain **UNKNOWN**. The
+GitHub-recorded merger account is known. Loaded native effector adoption of repair #14942
+remains **UNVERIFIED**. A merged repair and passing private controls do not establish which
+code a running daemon loaded, or explain a historical merge.
+
+| Source clock (UTC) | Evidence and provenance | Supported finding / limit |
+| --- | --- | --- |
+| 2026-10-27T01:38:01Z | GitHub #14620 issue timeline, `auto_merge_disabled` event | An earlier disable event is recorded. This is not the later scoped hold, nor evidence that auto-merge stayed disabled. |
+| 2026-10-27T16:07:27.884Z | Filed W1-T10987 rationale, scoped hold engagement | Recorded task evidence; native ledger row not independently available in this worker. |
+| 2026-10-27T16:20:23.647Z | Filed W1-T10987 rationale, full-review arm refusal | A recorded refusal of that arm; it does not identify another request or GitHub's eventual merge path. |
+| 2026-10-27T16:22:17Z | GitHub #14620 REST pull response and timeline `merged` event | Merged as `91d2c8c292e7940c7d587279e79dc262f7e39ccd`; `merged_by` and the event actor both identify `remudero-fleet[bot]`. |
+| 2026-10-27T22:38:58Z | GitHub #14942 pull response | Repair merged as `38627e6dfe6b59a8ace5f00db0c8220d4ff6c16b`, from head `cafaf19192136ad417c26a56e15319b69fd4674e`, after #14620's merge. |
+| 2026-10-29T14:12:25.532Z | Filed W1-T10987 rationale, authorized #14620 release saved | Recorded completed release; not independently read back from the native ledger here. Do not repeat or reopen it. |
+| Observation on 2026-10-29; enabling time UNKNOWN | GitHub #14620 REST `auto_merge` object | `enabled_by.login` is `remudero-fleet[bot]`, method `squash`. This identifies an account, not the originating process, request time or final API route. |
+
+Public provenance: [#14620](https://github.com/craigoley/remudero/pull/14620), its
+[REST pull record](https://api.github.com/repos/craigoley/remudero/pulls/14620), its
+[timeline](https://api.github.com/repos/craigoley/remudero/issues/14620/timeline?per_page=100),
+and [#14942](https://github.com/craigoley/remudero/pull/14942). The bounded timeline response
+contained 45 entries, including the merge event as a positive control. It does not establish
+the missing enable time or an exhaustive audit history. The recorded early disable and later
+`auto_merge` object are retained separately rather than reconciled by inventing an enable event.
+The hold/refusal/release times above come from the
+[filed task record](../plan/tasks.d/W1-T10987-merge-hold-adoption-attribution.yaml).
+Source timestamps retain their original precision; no worker clock is substituted for them.
+
+The native ledger corpus is inaccessible under this worker's permission profile. Coverage of
+compressed rotations, plain rotations and the live file is **NOT MEASURED**, not zero files or
+zero matching events. The corpus's newest timestamp, deduplicated chronology, engage/release
+positive controls and any anomalous ledger timestamps therefore remain UNKNOWN. No native
+transcripts or runtime-bound adoption receipt were available to reconcile those gaps. This
+finding uses bounded GitHub connector reads; it does not claim a native GitHub broker receipt.
+
+The inspected source at `8c654c1a3cf7265719d1162ac1862ffd77c41f91` contains
+`assertOperatorMergeUnheld` in `src/lib/arm-auto-merge.ts`. It requires present, untorn live
+hold evidence and refuses a confirmed hold before the final write. This is source evidence,
+not loaded-image evidence. A checkout SHA, Serve version, unrelated process image or source
+ancestry cannot establish native daemon/effector adoption. No runtime-bound process/source
+identity connecting the active native effectors to #14942 or a verified successor was obtained.
+
+Private regression controls were inspected and exercised against that source revision:
+
+| Control | What it establishes | What it cannot establish |
+| --- | --- | --- |
+| `test/automerge-hold.test.ts`: `admission withholds the final merge effect` | Four controlled await interleavings (auto, direct, queue, plan) inject a hold during admission and assert no final effect plus `hold-refused`. | Which interleaving, if any, occurred for #14620. |
+| `test/security-merge-effectors.test.ts`: `refuses a hold arriving during security metadata` | Six sync/async arm, REST and enqueue cases run real adapters against a private executable shim; a metadata-time hold refuses every outward write. | Live adoption or the identity of a historical caller. |
+| Same suite: `final merge fences refuse unreadable configuration and torn hold evidence` and `a late real-effector hold remains a named refusal through the` | Unavailable/torn evidence refuses; six fallback routes retain named hold refusals. | Complete native ledger coverage or historical causation. |
+
+The focused run passed 20 tests with zero failures: the 17 controls above, the same suite's
+positive control reaching all seven real outward adapters through the offline executable,
+and two `test/rest-merge-fallback.test.ts` controls refusing unfenced sync/async REST ports.
+These are private fixtures; no live hold or merge was exercised.
+
+#14942's PR body separately reports an earlier private erasure control: 19 failures in 109
+cases with production changes removed, versus a passing repaired run. That is an attributed
+author report, not a new erasure experiment in this reconciliation. The four interleaving
+controls demonstrate a guard gap separately from #14620; they do not prove that gap caused it.
+The final fence also cannot cancel a merge HTTP request already sent before a hold.
+
+A sweep request, an auto-merge enable action, GitHub's asynchronous completion and a direct
+merge effect are distinct events. Neither timing near the refused arm nor the matching bot
+accounts identifies the originating request. No authoritative audit evidence here selects
+among those paths. If an independent path is established, do not attribute #14620 to the
+repaired interleavings.
+
+Bounded recommendation: retain historical path attribution as UNKNOWN and runtime protection
+as unverified until the existing owner can supply an authorized ledger-union receipt with
+per-form coverage, engage/release controls and window bounds, and a runtime-bound identity for
+the active effectors. Audit/request evidence must connect an initiating request to the merge
+before claiming causation. An unrecoverable caller stays UNKNOWN; do not repeatedly collect
+the same evidence. This finding requires no hold toggle, merge, restart, deployment or policy
+change, and grants no authority for those actions. Any newly demonstrated repair belongs in a
+separate guarded task with an ownership check.

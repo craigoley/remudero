@@ -57,7 +57,7 @@ test("run-task supplies its resolved repository context without report-commands 
   assert.match(cliSource, /doctorCommand\(rest, \{ repoRoot \}\)/);
   assert.match(cliSource, /statusCommand\(rest, \{ usage: USAGE, repoRoot, resolveOwnerRepo \}\)/);
   assert.match(cliSource, /learningsCommand\(rest, \{ usage: USAGE, repoRoot, resolveOwnerRepo \}\)/);
-  assert.match(cliSource, /traceCommand\(rest, \{ usage: USAGE, commandSyntax: commandSyntax\("trace"\), repoRoot, resolveOwnerRepo \}\)/);
+  assert.match(cliSource, /traceCommand\(rest, \{ usage: USAGE, commandSyntax: commandSyntax\("trace"\), repoRoot,\s+resolveOwnerRepo, resolveTaskPlan: reportTaskPlan \}\)/);
 });
 
 /** Points `$HOME` at a synthetic `~/.config/remudero/config.json` for the duration of `fn` —

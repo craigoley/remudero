@@ -1,37 +1,17 @@
 import { buildImprovementThreadRoutes } from "./improvement-thread.js";
 /**
- * lib/serve.ts — `rmd serve`'s assembler: the FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B).
+ * `rmd serve` assembler: route builders, GET / shell, port resolution and token persistence
+ * (W1-T139, MASTER-PLAN §7/§7B). Reuse service.ts, board.ts, panel-actions.ts and panel-graph.ts
+ * builders; do not duplicate their business logic.
  *
- * board.ts's own header named exactly this gap: "Real `rmd serve` CLI wiring (registering
- * these routes on a live createService(...) instance, with a real ghGateway) is a later
- * task's concern" — panel-actions.ts and panel-graph.ts's headers say the same. That later
- * task is this one. This module wires ZERO new business logic — it is a thin layer over the
- * FOUR already-proven modules (service.ts's mechanism, board.ts's read side, panel-actions.ts's
- * write side, panel-graph.ts's graph) plus one new thing this task actually owns: a minimal
- * HTML shell at `GET /` and the tiny bit of CLI glue (port resolution, token persistence) a
- * launchable command needs. Every route below is REUSED verbatim from its own module's
- * exported builder — never reimplemented (task design note).
- *
- * TWO ROOTS, ONE `PanelActionDeps` SHAPE (verified from source, not assumed): panel-actions.ts's
- * six routes all take a `PanelActionDeps` with a single `root` field, but that field backs TWO
- * genuinely different filesystem locations elsewhere in this codebase:
- *   - `requestPause`/`requestStop`/`resumeFleet` (fleet-control.ts) read/write
- *     `<root>/state/{STOP,PAUSE}` — and MUST agree with what `rmd daemon`/`rmd
- *     drain` check (`stopDetail(config.root)` etc., run-task.ts's daemonCommand) or a panel
- *     STOP would write a flag file the real daemon never looks at.
- *   - `appendQuestionAnswer` (worker.ts, only `buildAnswerQuestionRoute` calls it) writes
- *     `<root>/plan/questions.ndjson` — and MUST agree with where `appendQuestion` (the QUESTION
- *     side of the SAME contract, run-task.ts) writes, which is `repoRoot` (the git tree), not
- *     `config.root` — else "THE ANSWER FLOWS TO THE ARCHITECT" (panel-actions.ts's own header)
- *     would silently land in a file nothing reads.
- * `config.root` and `repoRoot` are NOT the same directory by default (config.root defaults to
- * `~/Remudero`, a workspace; repoRoot is the git checkout serve runs from) — one shared `root`
- * cannot satisfy both correctly. Since every `build*Route` function takes its own independent
- * `PanelActionDeps`, {@link buildServeRoutes} passes TWO differently-rooted instances: a
- * `fleetControlRoot`-rooted one for pause/resume/stop/quiet-hours/approve-manual, and a
- * `questionsRoot`-rooted one for answer-question alone — both share the SAME `ledgerPath`
- * (every module's `panel.*`/`daemon.*` ledger lines always live under config.root, unambiguous
- * everywhere else in this codebase).
+ * Two roots, one `PanelActionDeps` shape: {@link buildServeRoutes} must split them.
+ * - `fleetControlRoot` = config.root (default ~/Remudero): pause/resume/stop/quiet-hours/
+ *   approve-manual must agree with fleet-control.ts and run-task.ts's daemonCommand on
+ *   `<root>/state/{STOP,PAUSE}`, or the daemon never sees panel STOP flags.
+ * - `questionsRoot` = repoRoot (checkout): answer-question's `appendQuestionAnswer` (worker.ts)
+ *   must agree with run-task.ts's `appendQuestion` on `<root>/plan/questions.ndjson`, or answers
+ *   land where nothing reads them (panel-actions.ts: "THE ANSWER FLOWS TO THE ARCHITECT").
+ * Both instances share `ledgerPath` under config.root for all panel.* and daemon.* rows.
  */
 
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -176,8 +156,8 @@ import {
 } from "./incident-invariants.js";
 import { startLoopStallProfiler, type LoopStallProfiler, type LoopStallProfilerOptions, type LoopStallSteps } from "./loop-stall-profiler.js";
 import { monitorEventLoopDelay } from "node:perf_hooks";
-import { checkServiceFreshness } from "./self-sync.js";
-import { GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
+import { asyncGit, checkServiceFreshness } from "./self-sync.js";
+import { boundGitCall, GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
 import { reloadServePlan, touchesReloadablePlan, type PlanSourceHolder } from "./serve-plan-reload.js";
 import { publishThreadPlan } from "./thread-plan.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
@@ -282,20 +262,11 @@ import { setWorkerEntryLog } from "./child-entry-argv.js";
 import { createClaudeExecutableCache, resolveClaudeExecutable } from "./worker.js";
 
 /**
- * One escalation option's RENDER-READY affordance (W1-T2273) — what a console UI needs to draw
- * either a button (route + payload + the tier that gates it) or the "operator only, no button"
- * marker, for ONE {@link EscalationOption}.
- *
- * Resolved PURELY off `option.kind` (escalate.ts) — `option.label`/`option.detail` ride along
- * on the result UNCHANGED (note (xiv): the prose survives on every option, including the ones
- * that are operator-only) but are never CONSULTED to decide `executable`. This is note (iii)'s
- * "renderer stays dumb": the vocabulary an option's shape is drawn from lives in exactly ONE
- * place — the `kind` escalate.ts's emitter already validated via `validateEscalationOptionKind`
- * — never re-derived here by matching words in the prose against a route, which would put the
- * same vocabulary in two places and let them drift (the two-enumerator defect this repo has
- * already paid for elsewhere). An option with no `kind` (every producer this task did not
- * touch — run-task.ts, triage.ts — none is in this task's own file scope) resolves exactly like
- * one explicitly marked `operator-only`: today's behavior, unchanged.
+ * W1-T2273: render-ready {@link EscalationOption}: button route/payload/tier or operator-only.
+ * Resolve only `option.kind`, validated by escalate.ts's `validateEscalationOptionKind`.
+ * Never infer executability from label/detail: duplicating the vocabulary causes drift
+ * (design iii). Preserve both prose fields unchanged, including operator-only options (xiv).
+ * Missing kind (including run-task.ts/triage.ts producers) behaves as explicit operator-only.
  */
 export type EscalationOptionAffordance =
   | {
@@ -337,21 +308,15 @@ export interface ServeDeps {
    *  {@link resolveConsoleSha}, resolved once at server start. */
   consoleSha?: string;
   /**
-   * W1-T996 — the Cloudflare Access team domain and AUD tag. Defaulted from `loadConfig()` inside
-   * {@link buildServeServer} rather than threaded from `serveCommand`, so the ONE production call
-   * site stays this module's own and no caller changes. Injectable so a test states them without
-   * a config file on disk.
-   *
-   * ⚠ BOTH OR NEITHER — see {@link accessIdentityProviders}. Absent either, no provider is
-   * composed at all, and `createService`'s built-in order is byte-identical to before.
+   * W1-T996: Cloudflare Access team domain and AUD, defaulted by {@link buildServeServer} from
+   * `loadConfig()`; injectable for tests. BOTH OR NEITHER ({@link accessIdentityProviders}):
+   * absent either, compose no provider and preserve `createService`'s built-in auth order.
    */
   accessTeamDomain?: string;
   accessAudience?: string;
   /**
-   * W1-T4244 — the console operator's Clerk session identity (`serve.operatorIdentity`). Defaulted
-   * from `loadConfig()` inside {@link buildServeServer} exactly like the Access values above;
-   * injectable so a test states it without a config file. Absent: no operator provider, and
-   * every request is authorised exactly as before this task.
+   * W1-T4244: Clerk session identity (`serve.operatorIdentity`), defaulted from `loadConfig()`
+   * by {@link buildServeServer}; injectable for tests. Absent: preserve existing authorization.
    */
   operatorIdentity?: OperatorIdentityConfig;
   /** The key-set fetch and clock the operator provider uses — injectable so a test is hermetic. */
@@ -367,17 +332,10 @@ export interface ServeDeps {
   modelApprovalConfig?: HostModelApprovalConfig;
   /**
    * `plan/feedback/` + `plan/tasks.yaml` root and GitHub trace gateway (panel-graph.ts).
-   * Deliberately `Omit<..., "inboxRoot">` — {@link buildServeRoutes} supplies `inboxRoot`
-   * itself (= `fleetControlRoot`, config.root) the SAME way it already splits `fleetControlRoot`
-   * vs `questionsRoot` for panel-actions.ts, so a `ServeDeps` caller names each root exactly
-   * once, never a duplicate that could drift from `fleetControlRoot`.
-   *
-   * `ratify` is likewise OPTIONAL here (W1-T193): {@link buildServeRoutes} defaults it to a REAL
-   * {@link ratifyCliGateway} rooted at `panelGraph.root` + `<fleetControlRoot>/state/logs` when
-   * the caller doesn't supply one — the same "the assembler wires the real gateway, a test
-   * injects a fake" split `inboxRoot` above already follows, so `rmd serve`'s own CLI wiring
-   * (run-task.ts's `serveCommand`) never has to construct this gateway itself, and a test can
-   * still inject a fake by supplying `ratify` explicitly.
+   * {@link buildServeRoutes} owns `inboxRoot` (= fleetControlRoot/config.root); omitting it from
+   * this shape prevents callers from supplying a drifting duplicate.
+   * W1-T193: absent an injected `ratify`, build a real {@link ratifyCliGateway} rooted at
+   * `panelGraph.root` with logs in `<fleetControlRoot>/state/logs`; serveCommand need not build it.
    */
   panelGraph: Omit<PanelGraphDeps, "inboxRoot" | "ratify"> & { ratify?: PanelGraphDeps["ratify"] };
   /** `<root>/state/ledger.ndjson` — SAME path board.ts tails and every panel route ledgers into. */
@@ -399,43 +357,29 @@ export interface ServeDeps {
   /** Board SSE poll pace; defaults to board.ts's own `DEFAULT_POLL_MS` (250ms, the W3-T2 2s acceptance bar). */
   pollMs?: number;
   /**
-   * W1-T154: how often {@link prewarmBoardGithub}'s background timer re-warms `board.github`.
-   * Defaults to {@link DEFAULT_BOARD_PREWARM_MS} (matches `buildBatchedGithub`'s own default TTL
-   * in status.ts, so the background refresh lands right as the gateway's cache would otherwise
-   * go stale). Only meaningful for a gateway implementing {@link GitHub.warm}; a no-op otherwise.
+   * W1-T154: {@link prewarmBoardGithub} interval; {@link DEFAULT_BOARD_PREWARM_MS} matches
+   * status.ts's `buildBatchedGithub` TTL to refresh at expiry. No-op without {@link GitHub.warm}.
    */
   boardGithubRefreshMs?: number;
   /** Published off-thread board projection for the production status route; `pause`/`resume` shed its thread (W1-T9508). */
   boardSnapshotSource?: BoardSnapshotSource & { pause?(): Promise<boolean>; resume?(): void };
   /**
-   * W1-T183: per-phase elapsed-time ANOMALY thresholds (ms), keyed by {@link Phase} (plus a
-   * `default` fallback for a phase not listed) — DATA, not a constant baked into the row
-   * template, so an operator (or a test) can tune "how long is too long" without a source
-   * change. Defaults to {@link DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS} when omitted. Embedded
-   * verbatim into the shell's own script (see {@link renderShellHtml}) — the anomaly check
-   * itself runs client-side, over the SAME `elapsedMs`/`phase` fields NOW rows already render
-   * (W1-T155), never a new server-side derivation.
+   * W1-T183: tunable anomaly thresholds (ms), keyed by {@link Phase} with a `default` fallback;
+   * defaults to {@link DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS}. {@link renderShellHtml} embeds them
+   * verbatim for client-side checks over NOW's existing `elapsedMs`/`phase` fields (W1-T155).
    */
   phaseElapsedThresholdsMs?: Record<string, number>;
   /** Forwarded to `createService` — one ledger line per auth decision/SSE lifecycle/handler error. */
   log?: ServiceOptions["log"];
   /**
-   * W1-T163: the per-token "since you last checked" marker store (lib/last-seen.ts), shared with
-   * `rmd digest`'s own marker-aware send (lib/digest.ts's `sendMarkerAwareDigest`) so a pushed
-   * digest and the console's pulled recap read/advance the SAME per-token state — "push and pull
-   * tell one story." OPTIONAL here the same way `panelGraph.ratify` is (see that field's own
-   * doc): {@link buildServeRoutes} defaults it to a REAL store rooted at `<fleetControlRoot>/
-   * state/last-seen.json` when the caller doesn't supply one, so `rmd serve`'s CLI wiring never
-   * has to construct it itself, and a test can still inject a fake by supplying it explicitly.
+   * W1-T163: per-token recap markers (last-seen.ts), shared with digest.ts's
+   * `sendMarkerAwareDigest` so push and pull read/advance the same state. Injectable; otherwise
+   * {@link buildServeRoutes} opens `<fleetControlRoot>/state/last-seen.json`.
    */
   lastSeen?: LastSeenStore;
   /**
-   * W1-T159: the GLANCE layer's daemon-health widget deps (disk-free path + injectable
-   * statfs/gh-exec/clock — see daemon-health.ts's own doc for each field's real source).
-   * OPTIONAL and defaults to `diskPath: fleetControlRoot` with the real `fs.statfsSync`/real
-   * `gh api rate_limit` when the caller doesn't supply one — the SAME "the assembler wires the
-   * real gateway, a test injects a fake" split every other optional ServeDeps field already
-   * follows (see `panelGraph.ratify`/`lastSeen`'s own docs, above).
+   * W1-T159: GLANCE daemon-health deps (daemon-health.ts); injectable statfs/gh-exec/clock.
+   * Defaults to `diskPath: fleetControlRoot`, real `fs.statfsSync` and `gh api rate_limit`.
    */
   daemonHealth?: Omit<DaemonHealthDeps, "ledgerPath" | "diskPath"> & { diskPath?: string };
   /** W1-T4229: defaults to {@link assessGatewayCheckout} over {@link serveRepoDir}. */
@@ -443,19 +387,14 @@ export interface ServeDeps {
   staleExitSeams?: Pick<StaleCodeExitDeps, "scheduleRecheck" | "exit" | "drain">;
   generation?: { requestHandoff(detail: Record<string, unknown>): void };
   /**
-   * W1-T288: GET /v1/control/status's daemon-liveness verdict deps (injectable ledger reader /
-   * clock / liveness bound — see panel-actions.ts's `ControlStatusDeps` for each field's real
-   * source). OPTIONAL and defaults to the real `readLedgerLines`/`Date.now`/
-   * `DEFAULT_LIVENESS_BOUND_MS` when the caller doesn't supply one, the SAME "the assembler
-   * wires the real thing, a test injects a fake" split `daemonHealth` above already follows.
+   * W1-T288: GET /v1/control/status liveness deps (`ControlStatusDeps`, panel-actions.ts).
+   * Injectable; defaults to real `readLedgerLines`/`Date.now`/`DEFAULT_LIVENESS_BOUND_MS`.
    */
   controlStatus?: Omit<ControlStatusDeps, "root" | "ledgerPath">;
   /**
-   * The ACCOUNT strip's deps (see account-usage.ts's header). OPTIONAL and defaults to the real
-   * `~/.claude.json` + `Date.now`, exactly like `daemonHealth` above — the assembler wires the
-   * real reader, a test injects a captured one. The `ledgerPath` half is always the console's own,
-   * never a caller's, so the governor posture can never come from a different ledger than the
-   * rest of the page.
+   * ACCOUNT strip deps (account-usage.ts); defaults to real `~/.claude.json` + `Date.now`.
+   * Tests may inject readers; `ledgerPath` must remain the console's own so governor posture
+   * and the rest of the page cannot read different ledgers.
    */
   accountUsage?: Omit<AccountUsageDeps, "ledgerPath">;
   /**
@@ -479,9 +418,8 @@ export interface ServeDeps {
     env?: NodeJS.ProcessEnv;
   };
   /**
-   * W1-T3352: process-owned analytics refresh deps. OPTIONAL and defaults to the real streaming
-   * rotation-union reducer. The state directory and telemetry sink are always the console's own;
-   * callers can inject the reader/clock/timers but cannot point this cache at a second state root.
+   * W1-T3352: process-owned analytics; defaults to the streaming rotation-union reducer.
+   * Injectable reader/clock/timers; state directory and telemetry sink stay the console's own.
    */
   analytics?: Omit<AnalyticsSnapshotCacheDeps, "stateDir" | "log">;
   /** Process-owned filesystem snapshots for the live analytics fields; never request-time readers. */
@@ -489,59 +427,40 @@ export interface ServeDeps {
   /** Already-captured process-owned live signals for `/v1/analytics`; never a request-time reader. */
   liveMetrics?: () => LiveAnalyticsMetrics;
   /**
-   * W1-T371: additive tailnet-identity auth — forwarded verbatim to `createService`'s
-   * `identity` option (see service.ts's {@link IdentityAuth} for the two gates it enforces).
-   * OPTIONAL and omitted by default: an install that never sets `config.serve.identityCapability`
-   * (see serveCommand, run-task.ts) gets identity never consulted at all — byte-for-byte the
-   * pre-W1-T371 token-only behavior, so a Tailscale failure (or simply never opting in) degrades
-   * to the token rather than locking the operator out.
+   * W1-T371: additive tailnet auth, forwarded to `createService.identity` (service.ts's
+   * {@link IdentityAuth} enforces both gates). Without `config.serve.identityCapability`
+   * (serveCommand, run-task.ts), preserve token-only auth; Tailscale failure falls back to tokens.
    */
   identity?: ServiceOptions["identity"];
   /**
-   * W1-T500: the {@link ConfirmNonceStore} both `POST /v1/confirm` (mounted by
-   * {@link buildServeRoutes}) and `createService`'s own dispatch (`enforceWriteTiers`'s HIGH-tier
-   * check) must consult -- the SAME instance, or a route issuing into one store and a dispatch
-   * consuming from another would refuse every nonce it just issued. {@link buildServeServer}
-   * resolves this ONCE (a fresh {@link createConfirmNonceStore} when omitted) and threads that one
-   * instance to both. OPTIONAL here the same way `lastSeen` above is: a test can inject its own to
-   * assert on a known nonce; `rmd serve`'s own CLI wiring never has to construct one itself.
+   * W1-T500: POST /v1/confirm and `enforceWriteTiers`'s HIGH-tier check must share one
+   * {@link ConfirmNonceStore}, or dispatch refuses freshly issued nonces. {@link buildServeServer}
+   * resolves it once (injectable, otherwise {@link createConfirmNonceStore}) and threads it to both.
    */
   confirmNonces?: ConfirmNonceStore;
   /**
-   * W1-T945: `GET /v1/peek`'s read root + liveness predicate. `root` defaults to
-   * `fleetControlRoot` (config.root) — the SAME root W1-T942's tail writer resolves
-   * `state/runs/<runId>.tail` against (`buildWorkerStateSensor`, run-task.ts), never a second
-   * root. `isLive` defaults to a predicate that never claims LIVE, so a caller that omits it (a
-   * bare test) gets an honest FINISHED rather than a fabricated liveness signal. Real wiring
-   * (`serveCommand`, run-task.ts) always supplies `isLive` as a closure over the REAL
-   * `liveInflightRuns` — the SAME pid-checked read every other liveness decision in this
-   * codebase uses (design note ii), never a second definition of "in flight" declared here.
+   * W1-T945: GET /v1/peek root defaults to fleetControlRoot/config.root, matching W1-T942's
+   * `buildWorkerStateSensor` tail writer (`state/runs/<runId>.tail`, run-task.ts).
+   * Default `isLive` never claims LIVE. Production serveCommand supplies the shared pid-checked
+   * `liveInflightRuns` predicate (design ii), rather than inventing another definition of in flight.
    */
   peek?: { root?: string; isLive?: (runId: string) => boolean };
   /**
-   * W1-T2578: `GET /v1/replay`'s ledger-corpus read. `stateDir` defaults to
-   * `dirname(deps.ledgerPath)` — the SAME derivation `replayCommand`'s own CLI wiring uses
-   * (run-task.ts: `dirname(ledgerPathFor(loadConfig()))`), never a second root. Both fields are
-   * injectable so a test drives the resolved-lines and refused (`ok: false`) paths without a
-   * real state dir — the same seam `ReplayRouteDeps` (below) and `peek` (above) both use.
+   * W1-T2578: GET /v1/replay corpus; stateDir defaults to `dirname(deps.ledgerPath)`, matching
+   * replayCommand's `dirname(ledgerPathFor(loadConfig()))` (run-task.ts). Injectable fields let
+   * tests drive resolved and refused (`ok: false`) reads without a real state dir (ReplayRouteDeps).
    */
   replay?: { stateDir?: string; resolveReplayLedgerLines?: (stateDir: string) => ReplayLedgerRead };
   /**
-   * W1-T2660: `GET /v1/self-measurement`'s ledger-corpus read. `stateDir` defaults to
-   * `dirname(deps.ledgerPath)` — the SAME derivation `replay` (above) already uses, never a
-   * second root. `n` bounds how many of the newest `measurement_cadence.ran` rows the reader
-   * ({@link latestMeasurementRows}, measurement-cadence.ts) returns; the panel needs at least
-   * two per verb (latest + previous), so the default reads a handful more than
-   * `plan/policy.yaml`'s own `measurementCadence.maxPerDay: 4` rather than exactly two. Both
-   * fields are injectable so a test drives the "unreadable" (`ok: false`) union path without a
-   * real state dir — the same seam `replay`/`peek` above both use.
+   * W1-T2660: GET /v1/self-measurement corpus; stateDir defaults to `dirname(deps.ledgerPath)`.
+   * `n` bounds newest measurement_cadence.ran rows from {@link latestMeasurementRows}
+   * (measurement-cadence.ts). Latest + previous need two per verb, so the default exceeds
+   * plan/policy.yaml's `measurementCadence.maxPerDay: 4`. Injectable to test unreadable unions.
    */
   selfMeasurement?: { stateDir?: string; n?: number; ledgerUnion?: (stateDir: string, pattern: RegExp) => LedgerUnionResult };
   /**
-   * W1-T4387: `GET /v1/incidents`'s inputs. `stateDir` defaults to `dirname(deps.ledgerPath)` —
-   * the SAME derivation `replay`/`selfMeasurement` above already use, never a second root.
-   * `readStore` is injectable so a test drives the "unreadable" (`ok: false`) path without a real
-   * state dir — the same seam those two fields already use.
+   * W1-T4387: GET /v1/incidents; stateDir defaults to `dirname(deps.ledgerPath)`, as for replay
+   * and selfMeasurement. Injectable `readStore` lets tests drive unreadable (`ok: false`) reads.
    */
   incidents?: Omit<IncidentsRouteInput, "stateDir"> & { stateDir?: string };
   /** W1-T4227: `GET /v1/registry`'s inputs; the repo path defaults via `daemonInstanceRegistryPath`. */
@@ -572,39 +491,25 @@ export interface ServeDeps {
   onboardingGoLive?: GoLiveWiring;
   instances?: InstanceGatewayOptions;
   /**
-   * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
-   * `run-task.ts`'s `serveCommand` already arms for the daemon (`github-app.ts`'s
-   * `startInstallationTokenRefresh`), run here instead in the CONSOLE's own process against the
-   * console's own environment. It talks directly to GitHub's token-exchange endpoint and NEVER
-   * calls the daemon — design (ii) refuses any renewal path that would couple the console's
-   * `--restart=unless-stopped` lifetime to the daemon's. Gated on config presence exactly like
-   * the daemon's own call: a console with no `GH_APP_ID`/`GH_APP_INSTALLATION_ID`/
-   * `GH_APP_PRIVATE_KEY_PATH` in its environment (the console's default today — see
-   * `deploy/serve-container.sh`) is byte-identical to before this task, zero timers, zero ledger
-   * lines. OPTIONAL and defaults to the real `startInstallationTokenRefresh` against real
-   * `process.env`; a test injects a fake `start` (and/or a throwaway `env`) so it never mints a
-   * real token or opens a real timer.
+   * W1-T2269: console-owned `startInstallationTokenRefresh` (github-app.ts), as used by
+   * serveCommand in run-task.ts. Exchange directly with GitHub; never couple the console's
+   * `--restart=unless-stopped` lifetime to the daemon's (design ii).
+   * Without GH_APP_ID/GH_APP_INSTALLATION_ID/GH_APP_PRIVATE_KEY_PATH (deploy/serve-container.sh's
+   * default), create no timer or ledger row. Defaults to real refresh + process.env;
+   * tests inject `start`/`env` to avoid real tokens and timers.
    */
   githubAppRefresh?: {
     start?: typeof startInstallationTokenRefresh;
     env?: NodeJS.ProcessEnv;
   };
   /**
-   * W1-T2568: `POST /v1/hooks/github`'s config — the signed GitHub-event wake (see
-   * `lib/github-event-wake.ts`'s module header for the full design). OPTIONAL and SHIPS DARK
-   * (design vii) when omitted, or whenever `secret` resolves to `undefined` — the route still
-   * mounts (so a probe gets a named `webhook_not_configured` refusal rather than a 404 that
-   * reads like a routing typo) but writes no marker and accepts nothing. `secret` is normally
-   * resolved by `serveCommand` (run-task.ts) from an operator-mounted file
-   * (`RMD_GITHUB_WEBHOOK_SECRET_FILE`, see `resolveGithubWebhookSecretFilePath`/
-   * `readGithubWebhookSecret`) — this field never reads the file itself, so a test can inject a
-   * literal secret without touching disk. `repository` has no default here (deliberately — the
-   * assembler, never this library, decides what "this daemon's own repo" means); `serveCommand`
-   * always supplies `${self.owner}/${self.repo}`, the SAME `resolveOwnerRepo()` result the rest
-   * of that command already uses. `dedupCapacity` defaults to
-   * `DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY` (policy.ts) when omitted — `serveCommand` reads
-   * the real `plan/policy.yaml` row so the console never carries a second, drifting copy of that
-   * bound.
+   * W1-T2568: signed POST /v1/hooks/github wake (github-event-wake.ts). SHIPS DARK (design vii):
+   * absent config/secret, mount but refuse `webhook_not_configured`, accept nothing, write no marker.
+   * serveCommand (run-task.ts) resolves the operator-mounted RMD_GITHUB_WEBHOOK_SECRET_FILE via
+   * resolveGithubWebhookSecretFilePath/readGithubWebhookSecret; this field never reads disk.
+   * No repository default: serveCommand supplies `${self.owner}/${self.repo}` from resolveOwnerRepo().
+   * dedupCapacity defaults to DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY (policy.ts); serveCommand
+   * supplies plan/policy.yaml's value to avoid a second bound.
    */
   /** W1-T3956: the automation-trigger-v1 registry. Omitted, serve builds one journalled to
    *  `ledgerPath` with no flow or trigger registered, so every start is refused by name. */
@@ -646,19 +551,15 @@ export interface ServeDeps {
 }
 
 /**
- * What the console currently knows about its own GitHub credential's renewability — never the
- * credential itself (design iii: no secret reaches a log line, a ledger row, or disk, and that
- * includes this state, which carries only a reason string github-app.ts itself already ledgers).
+ * GitHub credential renewability, never the credential. Design iii forbids secrets in logs,
+ * ledger or disk; this state carries only github-app.ts's fixed ledger reason strings.
  */
 export interface GithubCredentialState {
-  /** Whether this process armed its own in-process refresh loop. `false` means the console's
-   *  `GH_TOKEN`, whatever value it holds, is fixed for this process's entire life — no App
-   *  config was present to renew it from (claim: "a credential that cannot be replaced is
-   *  reported by the console rather than presented as a working board"). */
+  /** In-process refresh armed; false means no App config and GH_TOKEN fixed for this process's
+   *  lifetime. Report unrenewable credentials rather than presenting a working board. */
   armed: boolean;
-  /** The reason string of the most recent FAILED refresh attempt, cleared the next time a
-   *  refresh succeeds. Absent when `armed` is false (no attempt was ever made) or no attempt has
-   *  failed yet. Only ever a fixed reason string — see {@link GithubCredentialState}'s own doc. */
+  /** Latest failed refresh's fixed reason; cleared on success. Absent if unarmed or never failed
+   *  (see {@link GithubCredentialState}'s no-secret contract). */
   lastFailureReason?: string;
 }
 
@@ -1181,42 +1082,16 @@ export function prewarmBoardGithub(
 }
 
 /**
- * GATE {@link prewarmBoardGithub} ON A CONNECTED CLIENT — the fix for the zero-viewer burn.
- *
- * WHAT WENT WRONG. W1-T154 wired the pre-warm timer UNCONDITIONALLY at `buildServeServer`, and
- * its own doc argued that was the point: "the gateway never goes cold again waiting on a request
- * to trigger its own refetch", client-independent by design. The cost of that design was never
- * bounded. `warm()` resolves to a `gh pr list --state all --limit 1000` — a GraphQL call — so a
- * `serve` process with NOBODY WATCHING still billed one every 15s, forever.
- *
- * MEASURED, 2026-07-28: a serve process left running unwatched for ~5.6 days issued 60 GraphQL
- * pr-list calls in the 17:26:08Z–17:46Z window against the daemon's 16 — 78.9% of ALL GraphQL
- * traffic on the account. At 4/min = 240/hr that projects to ~3,100 points/hour against a
- * 5,000/hour budget, roughly 62% of the entire allowance, spent rendering a board no human had
- * open. That exhaustion blinded the sweep for 22 consecutive minutes and delayed a PR review by
- * ~13 minutes.
- *
- * WHY THIS SEAM. `rmd serve` ALREADY has an exact notion of "a client is connected", and it is
- * not a heuristic: service.ts calls {@link SseRoute.subscribe} once per SSE connection and
- * invokes the unsubscribe it returns from that request's own `close` event. Refcounting those
- * two edges is therefore the connection count, not a proxy for it — no new tracking layer, no
- * heartbeat, no socket bookkeeping of our own.
- *
- * THE CONTRACT, precisely:
- *   - zero clients            -> no timer, and `warm()` is never called at all
- *   - 0 -> 1 clients          -> warm ONCE on the next tick (never on the subscriber's own
- *                                stack — see {@link prewarmBoardGithub}), then every `refreshMs`
- *   - 1 -> 2 clients          -> nothing changes; ONE timer serves every viewer
- *   - last client disconnects -> `clearInterval`, no dangling handle
- *   - reconnect after idle    -> warms again on the next tick, exactly like the first connect
- *
- * DELIBERATE BEHAVIOUR CHANGE, stated rather than hidden: the BOOT-time warm is gone. A
- * `GET /v1/status` that arrives before any SSE client has connected now pays its own fetch on
- * the request path, which is what W1-T154 originally set out to avoid. That is a first-request
- * latency cost, never a correctness one — `buildBatchedGithub` fetches lazily on demand and
- * `warm()` only forces that same `index()` early. Paying it on the rare
- * request-before-any-viewer is the entire point: the alternative is paying it 5,760 times a day
- * for nobody.
+ * Gate {@link prewarmBoardGithub} on connected clients (W1-T154 zero-viewer burn).
+ * Unconditional warming issued `gh pr list --state all --limit 1000` every 15s even unwatched;
+ * the 2026-07-28 incident exhausted GraphQL quota, blinding sweep and delaying review.
+ * Refcount service.ts's {@link SseRoute.subscribe}/request-close unsubscribe edges directly.
+ * - Zero clients: no timer or warm call.
+ * - First client/reconnect: warm next tick, never on the subscriber stack, then every refreshMs.
+ * - Additional clients: share that one timer; last disconnect clears it without dangling handles.
+ * No boot warm: GET /v1/status before a viewer pays the lazy `buildBatchedGithub.index()` fetch.
+ * That first-request latency preserves correctness while avoiding unobserved polling.
+ * Falsifier: test/serve-prewarm-clientgate.test.ts.
  */
 export function gatePrewarmOnClients(
   route: SseRoute,
@@ -1477,7 +1352,7 @@ export interface GatewayCheckoutAssessment {
 export interface GatewayCheckoutDeps {
   repoDir: string;
   env?: Record<string, string | undefined>;
-  git?: (args: string[]) => string;
+  git?: (args: string[]) => string | Promise<string>;
   /** The network half, run OFF the event loop. Defaults to an async `git fetch --quiet origin`. */
   fetch?: () => Promise<void>;
   clock?: Clock;
@@ -1506,28 +1381,38 @@ function porcelainPaths(raw: string | undefined): string[] {
  *  (managed-repos.json, behind the measured `[]`, is "immaterial"); unreadable is "unknown", never 0. */
 export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<GatewayCheckoutAssessment> {
   const env = deps.env ?? process.env;
-  const git = deps.git ?? ((args: string[]) => execFileSync("git", ["-C", deps.repoDir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  // Keep the existing child/output/abort bounds. Awaiting an execFileSync wrapper would still
+  // block the serving loop; the default must reach asyncGit's actual execFile boundary.
+  const localGit = asyncGit(deps.repoDir);
+  const git = deps.git ?? ((args: string[]) => boundGitCall(localGit, args, GATEWAY_FETCH_TIMEOUT_MS));
   const clock = deps.clock ?? systemClock;
-  const readOrUnknown = <T>(read: () => T): T | "unknown" => {
+  const readOrUnknown = async <T>(read: () => T | Promise<T>): Promise<T | "unknown"> => {
     try {
-      return read();
+      return await read();
     } catch {
       // Unreadable reads "unknown", never a healthy default; the caller shows it.
       return "unknown";
     }
   };
-  const localState = (detail: string): GatewayCheckoutState => ({
-    head: readOrUnknown(() => git(["rev-parse", "HEAD"]).trim()),
+  const unknown = (detail: string): GatewayCheckoutAssessment => ({ state: {
+    head: "unknown",
     behindBy: "unknown",
-    dirty: readOrUnknown(() => git(["status", "--porcelain", "-uno"]).trim().length > 0),
+    dirty: "unknown",
     checkedAt: clock.iso(),
     detail,
-  });
+  }, restartDue: false });
+  const localState = async (detail: string): Promise<GatewayCheckoutAssessment> => {
+    const head = await readOrUnknown(async () => (await git(["rev-parse", "HEAD"])).trim());
+    const dirty = await readOrUnknown(async () => (await git(["status", "--porcelain", "-uno"])).trim().length > 0);
+    const finalHead = await readOrUnknown(async () => (await git(["rev-parse", "HEAD"])).trim());
+    if (head !== finalHead) return unknown(`${detail}; checkout identity changed during local reads`);
+    return { state: { head: head || "unknown", behindBy: "unknown", dirty, checkedAt: clock.iso(), detail }, restartDue: false };
+  };
   const refuse = (): string => {
     throw new Error("guard probe");
   };
   if (checkServiceFreshness(deps.repoDir, env, { git: refuse, ignoreReentrancyGuard: deps.supervised === true }).status === "guarded") {
-    return { state: localState("guarded environment: freshness is not assessed here"), restartDue: false };
+    return localState("guarded environment: freshness is not assessed here");
   }
   let fetchError: string | undefined;
   try {
@@ -1536,33 +1421,70 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
     // Carried into the read below, which reports `degraded` rather than trusting a stale ref.
     fetchError = err instanceof Error ? err.message : String(err);
   }
-  const seen = new Map<string, string>();
+  if (fetchError !== undefined) return localState(`git fetch origin failed in ${deps.repoDir}: Error: ${fetchError}`);
+
+  // Capture only the reads the existing policy needs, then replay their outcomes into that
+  // policy. The replay never starts a child, and a failed read remains an error, not an empty
+  // result. Keeping this adapter local avoids changing the shared daemon freshness policy.
+  const seen = new Map<string, { output: string } | { error: unknown }>();
+  const capture = async (args: string[]): Promise<string | undefined> => {
+    try {
+      const output = await git(args);
+      seen.set(args.join(" "), { output });
+      return output;
+    } catch (error) {
+      seen.set(args.join(" "), { error: error });
+      return undefined;
+    }
+  };
+  const head = await capture(["rev-parse", "HEAD"]);
+  const origin = await capture(["rev-parse", "origin/main"]);
+  const status = await capture(["status", "--porcelain", "-uno"]);
+  if (head === undefined || origin === undefined || status === undefined || !head.trim() || !origin.trim()) {
+    const failures = [...seen].flatMap(([command, result]) => "error" in result ? [`${command}: ${String(result.error)}`] : []);
+    return unknown(`could not read a complete gateway checkout assessment${failures.length ? `; ${failures.join("; ")}` : "; empty checkout identity"}`);
+  }
+  const range = `${head.trim()}..${origin.trim()}`;
+  if (head.trim() !== origin.trim()) {
+    await capture(["diff", "--name-only", range]);
+    await capture(["log", "--format=%x1e%H%x1f%s", "--name-only", range]);
+  }
   const svc = checkServiceFreshness(deps.repoDir, env, {
     ignoreReentrancyGuard: deps.supervised === true,
     git: (args) => {
       if (args[0] === "fetch") {
-        if (fetchError !== undefined) throw new Error(fetchError);
         return "";
       }
-      const out = git(args);
-      seen.set(args.join(" "), out);
-      return out;
+      const result = seen.get(args.join(" "));
+      if (result === undefined) throw new Error(`gateway checkout read was not captured: ${args.join(" ")}`);
+      if ("error" in result) throw result.error;
+      return result.output;
     },
   });
   if (svc.status !== "assessed") {
-    return { state: localState(svc.status === "degraded" ? svc.reason : "guarded"), restartDue: false };
+    return unknown(svc.status === "degraded" ? svc.reason : "guarded");
   }
-  const dirtyPaths = porcelainPaths(seen.get("status --porcelain -uno"));
+  const dirtyPaths = porcelainPaths(status);
   const behindBy: number | "unknown" =
     svc.behind === null
       ? 0
-      : readOrUnknown(() => {
-          const n = Number(git(["rev-list", "--count", "HEAD..origin/main"]).trim());
-          if (!Number.isInteger(n) || n < 0) throw new Error(`unparseable rev-list count: ${n}`);
+      : await readOrUnknown(async () => {
+          const raw = (await git(["rev-list", "--count", range])).trim();
+          const n = Number(raw);
+          if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n)) throw new Error(`unparseable rev-list count: ${raw}`);
           return n;
         });
+  // A checkout or fetched ref can move across awaits. Never combine an old diff/count with a
+  // new identity or newly dirty tree when deciding a reload or handoff. A normal later pass
+  // can assess the new state; this pass must publish its uncertainty.
+  const finalHead = await readOrUnknown(() => git(["rev-parse", "HEAD"]));
+  const finalOrigin = await readOrUnknown(() => git(["rev-parse", "origin/main"]));
+  const finalStatus = await readOrUnknown(() => git(["status", "--porcelain", "-uno"]));
+  if (head !== finalHead || origin !== finalOrigin || status !== finalStatus) {
+    return unknown("gateway checkout changed or became unreadable during assessment");
+  }
   const state: GatewayCheckoutState = {
-    head: (seen.get("rev-parse HEAD") ?? "unknown").trim() || "unknown",
+    head: head.trim(),
     behindBy,
     dirty: svc.dirty,
     ...(svc.dirty ? { dirtyPaths } : {}),
@@ -3839,34 +3761,14 @@ export function resolveServeHost(rest: string[], env: NodeJS.ProcessEnv = proces
 export const ACCOUNT_FILE_PATH_ENV = "RMD_ACCOUNT_FILE_PATH";
 
 /**
- * W1-T997: resolve the path `GET /v1/account-usage` reads for the console's usage panel.
- *
- * THE DEFECT THIS CLOSES. `readAccountUsageFile` (account-usage.ts) defaults to
- * `join(homedir(), ".claude.json")`, and `AccountUsageDeps.accountFilePath` already exists to
- * override that default — but nothing upstream of {@link buildServeRoutes} ever supplied a
- * value, so every request resolved under the SERVE process's own home, which is where
- * `remudero-serve`'s container mounts `~/.claude/` (a directory) but not the sibling
- * `~/.claude.json` FILE that sits beside it outside every mount. The panel therefore always read
- * `unreadable`, even though the identical file exists, fresh, in `remudero-daemon`.
- *
- * SAME PRECEDENCE SHAPE {@link resolveServeHosts} already uses for `--host` — explicit override
- * first, then an env var, then the default — minus the CLI-flag and config-file tiers: argv
- * parsing and `config.json` reading both live in run-task.ts's `serveCommand`, which this task
- * (W1-T997) deliberately does not touch (raised to `risk: high` specifically so the reader and
- * this wiring stay one shard rather than splitting a supplier from nothing to supply). An
- * explicit caller override (`ServeDeps.accountUsage.accountFilePath` — the SAME "an assembler
- * wires the real thing, a test injects a fake" seam every other optional field on that type
- * already follows) stands in for the flag tier; {@link ACCOUNT_FILE_PATH_ENV} stands in for the
- * config tier: an operator sets it directly in the deployment environment, entirely outside this
- * file and the CLI parser. Neither set ⇒ `undefined`,
- * which is exactly what flowed through before this task — `readAccountUsageFile`'s OWN default
- * parameter resolves it, so an install that sets neither renders BYTE-IDENTICAL to today.
- *
- * CONTAINMENT (design note iv): this only ever WIDENS what the route may READ, never what it may
- * write — `readAccountUsageFile` opens the path with `readFileSync` and projects a handful of
- * scalar fields out of it (see that function's own doc); nothing here grants the console write
- * access to the operator's Claude Code state or serializes any key beyond the ones already
- * named there.
+ * W1-T997: GET /v1/account-usage path override. Mounting ~/.claude/ without sibling ~/.claude.json
+ * left the serve container's panel `unreadable` despite the daemon having a fresh file.
+ * Precedence: explicit ServeDeps.accountUsage.accountFilePath, then {@link ACCOUNT_FILE_PATH_ENV},
+ * then undefined to retain `readAccountUsageFile`'s own homedir default (account-usage.ts).
+ * Unlike {@link resolveServeHosts}, no CLI/config tier: serveCommand in run-task.ts owns parsing;
+ * the operator supplies the deployment env. Reader and wiring stayed one high-risk shard.
+ * Containment (iv): widen reads only. `readAccountUsageFile` projects its existing scalar fields;
+ * grant no write access to Claude Code state and serialize no additional keys.
  */
 export function resolveAccountFilePath(
   explicit: string | undefined,
@@ -3885,40 +3787,18 @@ export function resolveAccountFilePath(
 export const TRUSTED_PROXY_TAILSCALE = "tailscale";
 
 /**
- * W1-T371/W1-T398: resolve the additive tailnet-identity option, or `undefined` when the
- * operator hasn't opted in. `identityCapability` (config.json's `serve.identityCapability`) is
- * the ONLY source for the capability name — no `--flag`/env override, unlike port/host: the ACL
- * app-capability name is an install-level constant chosen once against the operator's own
- * Tailscale policy, not something a single invocation varies. Undefined input (the default,
- * unconfigured install) returns `undefined` REGARDLESS of `trustedProxy` — identity is never
- * consulted, byte-for-byte the pre-W1-T371 behavior, and the off-by-default path gains no new
- * required field.
- *
- * `trustedLocalAddress` is always {@link DEFAULT_SERVE_HOST} (loopback) — matching Tailscale's
- * own documented guidance that a backend trusting Serve's identity headers should listen ONLY
- * on localhost ("it's best practice to only have the service listen on localhost... [otherwise]
- * any user that can call your service directly... could trivially provide their own values for
- * these HTTP headers", https://tailscale.com/kb/1312/serve). This is independent of whatever
- * `rmd serve` itself binds via `RMD_SERVE_HOST`/`resolveServeHosts` — those are this Node
- * process's own direct-connection interfaces, not `tailscale serve`'s proxy target, which is
- * operator-machine deployment config (com.remudero.serve.plist) outside this repo.
- *
- * W1-T398: enabling `identityCapability` used to inherit that loopback-trust assumption
- * silently — nothing recorded WHICH proxy the operator meant to be listening there, so pointing
- * any OTHER reverse proxy (nginx, Caddy, a cloud load balancer's local target) at the same
- * address turns gate 1 (service.ts's interface check) into a no-op while gate 2's header check
- * loses the only thing that made it safe (Serve stripping client-supplied headers). Whether the
- * process on that address really is Serve is NOT OBSERVABLE from inside this one — shelling a
- * `tailscale` binary would prove a daemon is running, never that it's the listener in question
- * — so this cannot VERIFY the topology, only require the operator to STATE it:
- *   - `trustedProxy` absent while `identityCapability` is set: REFUSED at startup. A config that
- *     never declares which proxy it trusts no longer silently inherits one.
- *   - `trustedProxy === "tailscale"` ({@link TRUSTED_PROXY_TAILSCALE}): the declared, supported
- *     case — resolves exactly as it did before W1-T398.
- *   - any other `trustedProxy` value: a named opt-out, REFUSED for now, naming what would have
- *     to be true (a header-stripping guarantee equivalent to Serve's) for it to be safe.
- * An install that never sets `identityCapability` never reaches any of this: this function
- * still returns `undefined` for it without ever inspecting `trustedProxy`.
+ * W1-T371/W1-T398: additive tailnet identity. Only config.json's serve.identityCapability names
+ * the install-level ACL capability; no flag/env override. Absent capability returns undefined
+ * without inspecting trustedProxy, preserving token-only auth and requiring no new config.
+ * trustedLocalAddress stays {@link DEFAULT_SERVE_HOST} (loopback), per
+ * https://tailscale.com/kb/1312/serve: direct clients could forge identity headers otherwise.
+ * This differs from Node's RMD_SERVE_HOST/{@link resolveServeHosts} bind interfaces; the proxy
+ * target is operator deployment config (com.remudero.serve.plist), outside this repo.
+ * Trap (W1-T398): another loopback proxy satisfies service.ts's interface gate without Serve's
+ * header-stripping guarantee. Running a tailscale binary cannot prove who owns that listener.
+ * Require a declaration, not a claimed topology verification: with capability set, absent or
+ * unsupported trustedProxy refuses startup; only "tailscale" ({@link TRUSTED_PROXY_TAILSCALE})
+ * preserves the supported behavior. Other proxies need an equivalent header-stripping guarantee.
  */
 export function resolveServeIdentity(
   identityCapability: string | undefined,
@@ -4092,31 +3972,14 @@ export function serviceTokensPath(configRoot: string): string {
 }
 
 /**
- * Load `rmd serve`'s bearer tokens, generating + persisting them on first run. A bearer token
- * must stay STABLE across daemon restarts (a client — apps/dashboard's `?token=` param, a
- * saved curl command — would otherwise silently break every relaunch), so this is create-once,
- * read-thereafter, using the SAME exclusive-create discipline config.ts's `loadConfig` already
- * established for its own first-run file (`openSync(p, "wx")` folds the existence check and
- * the create into one atomic syscall — no TOCTOU window for a second `rmd serve` racing this
- * one's first launch to clobber the other's tokens).
- *
- * ROTATION (previously undocumented, which made it effectively absent — R-31). Because this is
- * create-once/read-thereafter, rotation is: stop `rmd serve`, delete the file, start it again.
- * The next start mints a fresh pair at 0600.
- *
- *     lsof -ti :4317 | xargs kill
- *     rm ~/Remudero/state/service-tokens.json
- *     rmd serve            # prints the new console URL
- *
- * Rotate whenever a token has been exposed — and note that MERELY RUNNING `rmd serve` used to
- * expose both, because it printed them to stdout, which under the operator's launch is
- * redirected to a world-readable `serve.log`. Any token that reached a log, a terminal
- * transcript, or a chat window is compromised and must be rotated, not merely un-shared.
- *
- * CodeQL js/file-system-race (alert #61) and the half-written read: `createOrReadPublished`
- * (fs-race-safe.ts, as config.ts's `loadConfig`) publishes the pair whole over the `wx` claim,
- * so no reader parses an empty file. A present file that is not JSON holding a 64-hex `read`
- * and `write` throws {@link InvalidSecretFileError} rather than serving on a broken pair.
+ * Create-once/read-thereafter bearer tokens, stable across restarts so saved clients keep working.
+ * Like config.ts's loadConfig, exclusive `wx` creation prevents racing launches clobbering tokens.
+ * CodeQL js/file-system-race #61: `createOrReadPublished` (fs-race-safe.ts) publishes the whole
+ * pair over that claim, preventing half-written reads. Invalid JSON or non-64-hex read/write
+ * fields throw {@link InvalidSecretFileError}; never serve a broken pair.
+ * Rotation (R-31): stop serve, remove ~/Remudero/state/service-tokens.json, restart to mint at 0600.
+ * Rotate any token exposed in logs, terminal transcripts or chat. Earlier launches printed both
+ * into world-readable serve.log; unsharing a compromised token is insufficient.
  */
 export function resolveServiceTokens(configRoot: string): ServiceTokens {
   const p = serviceTokensPath(configRoot);

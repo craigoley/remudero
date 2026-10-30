@@ -2,12 +2,50 @@
 
 ## Decision
 
+**2026-10-27 Terra 6.1 cash switch (W1-T10839).** `gpt-6.1-terra` uses the East US deployment
+configured by `workerProviders.cashDeploymentEndpoints`, including its own endpoint and key.
+Cash balanced low/medium/high now list nano, OSS, GPT-6 Luna, GPT-5.6 Luna, **Terra 6.1, Sol 6.1**.
+Cash frontier low/medium/high list GPT-6 Luna, GPT-5.6 Luna, **Terra 6.1, Terra 5.6**; the older
+Terra remains trailing. Cash economy and every Codex row retain their existing order. In particular,
+Codex frontier stays Sol 6.1. Built-in balanced/frontier cash fallbacks mirror these rows.
+
+`CASH_RESPONSES_DEPLOYMENTS` is the single declaration used by endpoint selection, the worker
+transport, tool lineage and request validation. Sol allows low/medium/high/xhigh/max; Terra also
+allows none. Both use `/openai/v1/responses` on their own deployment endpoint. Default effort
+normalizes to medium; unsupported efforts name the deployment and its allowed set. Terra omits
+temperature and has no declared `json_object` support pending measurement. The Sonnet cash fallback
+tries Sonnet 5.5 first, then Terra 6.1 and Sol 6.1, filtering each by readiness and prompt capacity.
+
+Terra's [Microsoft GA announcement](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/gpt-6-1-terra-now-generally-available-in-microsoft-foundry-build-agents-that-see/4567769)
+provides these Global Standard rates per million tokens (readAt 2026-10-27):
+
+| Context | Input | Cached input | Cache write | Output |
+| --- | ---: | ---: | ---: | ---: |
+| Short | $1.00 | $0.05 | $1.25 | $5.00 |
+| Long | $2.00 | $0.10 | $2.50 | $7.50 |
+
+The long-context threshold could not be verified from [Microsoft pricing](https://azure.microsoft.com/en-us/pricing/details/cognitive-services/openai-service/).
+The row therefore conservatively reserves and estimates **every** Terra request at long-context
+rates, using a threshold of -1 even for zero-input receipts. Reservations allow $2.50 per million
+input tokens for cache writes. These estimates can exceed an invoice; they cannot assume Sol's
+threshold. [Terra's own model metadata](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure#gpt-61)
+lists 922K input tokens; the local context row uses that ceiling and leaves room for output.
+Azure OpenAI's unbilled-429 policy is explicitly recorded on the price row.
+
+The live host allowance recorded 2026-10-27 is **dailyCapUsd 50, fleetCapUsd 50**: a shared $50
+UTC daily cap. The separate Foundry Claude $5 normal/$10 squeezed sublimit stays in force.
+The inbox bake-off now includes three tools-enabled Terra candidates at low, medium and high;
+each replay uses a balanced mount and pins both deployment and effort. The ordinary inbox mount
+and cash economy row stay unchanged. A catalog-listed Terra with the readiness rows is classified
+ready by the successor watcher even when the checkout already routes Terra 6.1. These trial entries
+do not promote an inbox-draft winner.
+
 **2026-10-07 Haiku 5.5 switch.** Claude subscription economy aliases resolve to
 `claude-haiku-5-5`, with Haiku 4.5 retained as the same-capability health fallback. Cash economy
 retains OSS 120B, nano and both Luna generations ahead of Haiku; balanced and frontier ordering
 stays unchanged. Foundry Haiku may run ordinary economy work; Opus/Sonnet still require an actual
 blocked-subscription squeeze. Every Foundry turn uses the existing atomic fleet cash allowance,
-the fixed $25 UTC daily ceiling and the unchanged shared Claude $5 normal/$10 squeezed sublimit.
+the fixed $50 UTC daily ceiling and the unchanged shared Claude $5 normal/$10 squeezed sublimit.
 
 The [Haiku release](https://www.anthropic.com/claude-haiku-5-5) prices input/output at
 $0.10/$0.50 per million through 100,000 prompt tokens and $0.50/$2.50 above it. The threshold
@@ -49,10 +87,10 @@ reads. A smaller override can defer those joins; incomplete history and unreadab
 permission remain explicit. This does not change the model cash allowance or publication consent.
 
 Azure Foundry offers `gpt-6.1-sol`, version `2026-09-29`, in our East US 2 account (GlobalStandard).
-Cash balanced rows retain nano/OSS/Luna ahead of Sol 6.1; economy does not offer Sol. A squeezed
-Sonnet 5.5 deployment returning 404 can walk once to a ready, context-fitting Sol 6.1. Frontier
+Cash balanced rows retain nano/OSS/Luna ahead of Terra 6.1 and Sol 6.1; economy does not offer either.
+A squeezed Sonnet 5.5 deployment returning 404 can walk to ready, context-fitting Terra 6.1, then Sol 6.1. Frontier
 cash remains the existing bounded Opus emergency. All paid Sol turns reserve against the same
-fleet allowance and $25/day operator cap, including retries; no cap is raised by this change.
+fleet allowance and $50/day operator cap, including retries; no cap is raised by this change.
 
 [Sol 6.1](https://developers.openai.com/api/docs/models/gpt-6.1-sol) uses Responses for tools and
 supports low/medium/high/xhigh/max API reasoning. The adapter preserves encrypted reasoning and
@@ -368,7 +406,7 @@ the migrated `workerProviders.fleetCashAllowancePath`. Each instance otherwise m
 local allowance. The shared path serializes reservation and settlement across processes and
 refuses missing or unreadable state. The read-only `--report` mode of
 `deploy/migrate-fleet-cash-allowance.sh` shows the combined UTC-day commitment and source mtime;
-it does not report an invoice or grant permission to raise the $25 ceiling.
+it does not report an invoice or grant permission to raise the $50 ceiling.
 
 ## Rollback
 
