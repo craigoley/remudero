@@ -124,9 +124,18 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     const at = Date.parse(String(row.ts));
     if (row.disposition !== "refused-escalate" || typeof row.reason !== "string" || !HOLD_REASON.test(row.reason) ||
         typeof row.task_id !== "string" || !Number.isFinite(at) || now - at > SWEPT_RECENTLY_MS) continue;
-    const since = rows.filter((r) => r.step === "sweep.disposed" && r.pr_number === row.pr_number && r.head_sha === row.head_sha &&
-      r.disposition === "refused-escalate").map((r) => Date.parse(String(r.ts))).filter(Number.isFinite);
-    if (since.length === 0 || now - Math.min(...since) < REDESIGN_AFTER_MS) continue;
+    // The hold is aged from the start of its unbroken run: walking back from the newest row, any other disposition, an
+    // unrelated refusal or another head ends it, so an interrupted hold restarts its hour.
+    const history = rows.filter((r) => r.step === "sweep.disposed" && r.pr_number === row.pr_number)
+      .sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
+    let heldSince = at;
+    for (const r of history) {
+      const ts = Date.parse(String(r.ts));
+      if (r.disposition !== "refused-escalate" || r.head_sha !== row.head_sha || typeof r.reason !== "string" ||
+          !HOLD_REASON.test(r.reason) || !Number.isFinite(ts)) break;
+      heldSince = Math.min(heldSince, ts);
+    }
+    if (now - heldSince < REDESIGN_AFTER_MS) continue;
     add(row.task_id, `PR #${row.pr_number} at head ${String(row.head_sha).slice(0, 7)} is held: ${row.reason.slice(0, 1500)}`);
   }
   // A verdict is never windowed: an unchanged pointer is the same evidence a week later, and is not asked again.

@@ -117,6 +117,16 @@ test("a hold younger than an hour, or one the sweep no longer disposes, is left 
   assert.equal(redesignCandidates(gone.sources as RedesignSources).length, 0, "no disposition in two hours: the PR left the sweep");
   const held = world(t, { pointer: false, rows: [heldRow(NOW - 2 * 60 * MIN), heldRow(NOW - MIN)] });
   assert.equal(redesignCandidates(held.sources as RedesignSources).length, 1);
+  // An interrupted hold restarts its hour, and an unrelated refusal before it does not age it.
+  const interrupted = world(t, { pointer: false, rows: [heldRow(NOW - 3 * 60 * MIN),
+    { ...heldRow(NOW - 50 * MIN), disposition: "blocked-fixable", reason: "fix round dispatched" }, heldRow(NOW - 40 * MIN), heldRow(NOW - MIN)] });
+  assert.equal(redesignCandidates(interrupted.sources as RedesignSources).length, 0, "a fix round between holds restarts the hour");
+  const unrelated = world(t, { pointer: false, rows: [{ ...heldRow(NOW - 3 * 60 * MIN), reason: "instrument edit only the operator can grant" },
+    heldRow(NOW - 30 * MIN), heldRow(NOW - MIN)] });
+  assert.equal(redesignCandidates(unrelated.sources as RedesignSources).length, 0, "an unrelated refusal does not age a design hold");
+  const otherHead = world(t, { pointer: false, rows: [{ ...heldRow(NOW - 3 * 60 * MIN), head_sha: "0".repeat(40) },
+    heldRow(NOW - 30 * MIN), heldRow(NOW - MIN)] });
+  assert.equal(redesignCandidates(otherHead.sources as RedesignSources).length, 0, "a hold on an older head does not age this one");
   // A refusal-amendment pointer is aged by its own stamp, and a pointer with no stamp to age is never the Architect's.
   const fresh = world(t, { stamp: iso(NOW - (REDESIGN_AFTER_MS - MIN)) });
   assert.equal(redesignCandidates(fresh.sources as RedesignSources).length, 0, "a pointer younger than an hour waits");
