@@ -10,7 +10,7 @@ import { decideDepReview, reconcileDepReviewHold } from "#src/lib/dep-review.js"
 import { escalationClasses, escalationDecisions } from "#src/lib/now-decisions.js";
 import type { BoardRow } from "#src/lib/board.js";
 
-const ageMs = 24 * 60 * 60 * 1000;
+const passMs = 10 * 60 * 1000;
 
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "rmd-dep-held-"));
@@ -80,13 +80,11 @@ function fixture(t: TestContext) {
   };
 }
 
-test("W1-T5022: aged dependency hold escalates once per head", async (t) => {
+test("W1-T5022: stalled dependency hold escalates once per head", async (t) => {
   const f = fixture(t);
   assert.equal(await f.run(), 1);
-  f.advance(ageMs - 1);
-  assert.equal(await f.run(), 1);
   assert.equal(f.opened.length, 0);
-  f.advance(1);
+  f.advance(passMs);
   assert.equal(await f.run(), 1);
   assert.equal(f.opened.length, 1);
   assert.match(f.opened[0].body, /ci-gate/);
@@ -104,7 +102,7 @@ test("W1-T5022: aged dependency hold escalates once per head", async (t) => {
   assert.equal(decisions[0].answer.path, "/v1/escalation/mark-handled");
   f.forgetLedger();
   await f.run();
-  f.advance(ageMs);
+  f.advance(passMs);
   await f.run();
   assert.equal(f.opened.length, 1);
   assert.deepEqual(f.closed, []);
@@ -116,7 +114,7 @@ test("W1-T5022: recovered dependency hold retires its escalation", async (t) => 
   for (const recovery of ["checks", "head"] as const) {
     const f = fixture(t);
     await f.run();
-    f.advance(ageMs);
+    f.advance(passMs);
     await f.run();
     assert.equal(f.opened.length, 1);
     if (recovery === "checks") f.recover();
@@ -125,19 +123,19 @@ test("W1-T5022: recovered dependency hold retires its escalation", async (t) => 
     assert.equal(f.closed.length, 1);
     assert.equal(f.closed[0].url, f.opened[0].url);
     assert.match(f.closed[0].comment, recovery === "checks" ? /recover/i : /head.*chang/i);
-    await f.run();
-    assert.equal(f.closed.length, 1);
     if (recovery === "checks") {
+      await f.run();
+      assert.equal(f.closed.length, 1);
       assert.deepEqual(f.statuses, ["success", "success"]);
       assert.equal(f.arms.length, 2);
       f.failChecks();
       await f.run();
-      f.advance(ageMs);
+      f.advance(passMs);
       await f.run();
       assert.equal(f.opened.length, 1, "a recovered head must never open a second ask");
     } else {
-      assert.equal(f.opened.length, 1, "a new head starts a fresh age window");
-      f.advance(ageMs);
+      assert.equal(f.opened.length, 1, "a new head starts a fresh progress observation");
+      f.advance(passMs);
       await f.run();
       assert.equal(f.opened.length, 2);
       assert.match(f.opened[1].body, /\*\*Head:\*\* b{40}/);
@@ -148,7 +146,7 @@ test("W1-T5022: recovered dependency hold retires its escalation", async (t) => 
 test("dependency hold retries failed delivery and retirement without approving red checks", async (t) => {
   const f = fixture(t);
   await f.run();
-  f.advance(ageMs);
+  f.advance(passMs);
   f.failList(true);
   assert.equal(await f.run(), 1);
   assert.equal(f.opened.length, 0);
@@ -193,18 +191,16 @@ test("dependency hold retries failed delivery and retirement without approving r
   }
 });
 
-test("short lived dependency hold recovery resets the age on the same head", async (t) => {
+test("short lived dependency hold recovery resets progress on the same head", async (t) => {
   const f = fixture(t);
   await f.run();
-  f.advance(ageMs - 1);
+  f.advance(passMs - 1);
   f.recover();
   assert.equal(await f.run(), 0);
   f.failChecks();
   await f.run();
-  f.advance(1);
-  await f.run();
   assert.equal(f.opened.length, 0);
-  f.advance(ageMs - 1);
+  f.advance(1);
   await f.run();
   assert.equal(f.opened.length, 1);
 });
@@ -212,7 +208,7 @@ test("short lived dependency hold recovery resets the age on the same head", asy
 test("dependency hold refuses a missing close transport and retires a no-longer-eligible proposal", async (t) => {
   const missing = fixture(t);
   await missing.run();
-  missing.advance(ageMs);
+  missing.advance(passMs);
   await missing.run();
   missing.recover();
   missing.removeClose();
@@ -222,7 +218,7 @@ test("dependency hold refuses a missing close transport and retires a no-longer-
 
   const refused = fixture(t);
   await refused.run();
-  refused.advance(ageMs);
+  refused.advance(passMs);
   await refused.run();
   refused.changeDiff();
   assert.equal(await refused.run(), 2);
@@ -232,7 +228,7 @@ test("dependency hold refuses a missing close transport and retires a no-longer-
   assert.deepEqual(refused.arms, []);
 });
 
-test("dependency hold corrupt state cannot erase the delivered-head history", (t) => {
+test("dependency hold corrupt state cannot erase the delivered-head history", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rmd-dep-held-corrupt-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const statePath = join(root, "hold.json");
@@ -259,8 +255,8 @@ test("dependency hold corrupt state cannot erase the delivered-head history", (t
     { headSha: "a", heldSinceMs: null, asks: [{ headSha: "a", issueUrl: "url", retired: "yes" }] },
   ]) {
     writeFileSync(statePath, JSON.stringify(state));
-    assert.throws(reconcile, /invalid dependency hold state/);
+    await assert.rejects(reconcile, /invalid dependency hold state/);
   }
   writeFileSync(statePath, "{");
-  assert.throws(reconcile, SyntaxError);
+  await assert.rejects(reconcile, SyntaxError);
 });

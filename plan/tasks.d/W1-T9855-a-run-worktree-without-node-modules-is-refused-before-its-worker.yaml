@@ -6,11 +6,11 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 6.00
-  risk: medium  # Rule 19: one concern, whether a run proceeds over a worktree its harness could not give an install
+  risk: high  # Rule 19 span: widened to run-task-verb, worker by a scope amendment for #15658
   band_meaning: span
   origin: "fan-out 2026-10-16 agent E1: the engine-store build failure behind W1-T8827 and W1-T9327 (investigator S1 lead)"
   plan_refs: [W1-T9738, W1-T4193, W1-T2777, W1-T9374, W1-T9077, W1-T137]
-  files: [src/lib/worker.ts, test/a-run-worktree-without-node-modules-is-refused-before-its-worker.test.ts]
+  files: [src/lib/worker.ts, test/a-run-worktree-without-node-modules-is-refused-before-its-worker.test.ts, "src/cli/commands/run-task-verb.ts"]
   status: queued
   priority: 2  # W1-T9738 removes today's trigger (a dangling engine link); this stops any other missing install from spending a worker
   attempts: 0

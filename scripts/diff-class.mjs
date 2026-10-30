@@ -282,10 +282,12 @@ export function readsChangedPlanOrDocs(content, changedFiles) {
   });
 }
 
+// A `mutants-*` directory is test/helpers/mutant-module.ts's shadow checkout: it holds copies, not suites, and a
+// concurrently-run suite removes it mid-walk (ENOENT on #15177, 2026-10-29), so the walk never enters one.
 function* suiteFiles(testDir, fixtures = join(testDir, "fixtures")) {
   for (const entry of readdirSync(testDir, { withFileTypes: true })) {
     const abs = join(testDir, entry.name);
-    if (abs === fixtures) continue;
+    if (abs === fixtures || (entry.isDirectory() && entry.name.startsWith("mutants-"))) continue;
     if (entry.isDirectory()) yield* suiteFiles(abs, fixtures);
     else if (entry.isFile() && entry.name.endsWith(".test.ts")) yield abs;
   }

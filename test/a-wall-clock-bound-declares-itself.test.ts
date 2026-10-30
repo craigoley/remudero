@@ -25,8 +25,9 @@ const HELPER_IMPORT = "helpers/wall-clock-bound.js";
 // W1-T6160 declares the hung Git author probe's bound: one declaring file and one site.
 // The janitor's bounded lock wait declares its give-up and no-queue bounds: one file, two sites.
 // Preserve-retire's home-wide discovery declares its synthetic-home timing bound: one file, one site.
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 40;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 61;
+// W1-T9954 declares the stuck named-pipe discovery child's kill bound: one file, one site.
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 41;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 62;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 

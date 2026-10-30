@@ -1,0 +1,93 @@
+id: automation-self-trust-paths-20261029
+ts: 2026-10-30T01:25:15.094Z
+raw: >-
+  Cross-repository automation finding from the operator's 2026-10-29 session on
+  craigoley/ClawApp. It is an agent technical finding, not an operator ruling or
+  a risk ruling.
+
+  OBSERVED in craigoley/ClawApp#1191 (open; its own review rated it red). A
+  host-side LLM judge merges workflow-file PRs with a token that has the
+  workflow scope. It ran judge code that it auto-pulled from main, and an
+  unprivileged automated reviewer can merge into main. So the merge authority ran
+  code that a lower-privileged path chose, which is an escalation path around the
+  platform's workflow-permission boundary. The remedy proposed there: (1) never
+  auto-merge a PR that touches the judge's or merger's own code; (2) run newer
+  judge or merger code only if a human merged it, otherwise keep running the last
+  trusted SHA and alert; (3) count an approval only when it is bound to the exact
+  head SHA (review commit_id equals the head), never by comparing commit
+  timestamps, which the commit author can forge.
+
+  WHAT REMUDERO ALREADY HAS (OBSERVED). Item (3) is covered: remudero-review is a
+  commit status on the head SHA; its publisher is identified by app identity in
+  src/lib/review.ts (reviewGatePinPrecondition and the required-context app_id
+  pin); a human hold carries the review's commitId, which src/lib/sweep.ts
+  compares with headSha. CODEOWNERS owns .github/workflows/, plan/policy.yaml and
+  the ratchet baselines. INSTRUMENT_SURFACE (src/lib/review.ts) names
+  src/lib/review.ts as "the PR judge itself". The deploy supervisor is
+  human-gated by default (src/lib/deployer.ts file-header invariant).
+
+  WHAT IT LACKS (OBSERVED unless marked). (a) Standing rule 25 (MASTER-PLAN §12)
+  was withdrawn as a refusal on 2026-09-10, so detectInstrumentEntanglement is
+  advisory, and nothing holds a PR that changes src/lib/review.ts for a person.
+  (b) CODEOWNERS owns no src/ path: the reviewer, sweep and merge-arming, deploy
+  and push code (src/lib/review.ts, src/lib/sweep.ts, src/lib/deployer.ts,
+  src/lib/self-sync.ts, src/lib/git-push.ts, src/lib/security-merge-admission.ts)
+  are unowned. W1-T3407 (path-scoped code-owner review) is status blocked,
+  retirement withdrawn. This session could not read whether
+  require_code_owner_reviews is on (branch-protection API 403); INFERRED off,
+  per W1-T3407's 2026-09-11 measurement. (c) Comments in src/lib/deployer.ts
+  record that the core fleet runs DEPLOY_AUTO and that mounted source goes live
+  through the daemon's own freshness restart. A fleet-merged change to the
+  reviewer or merger therefore runs in the privileged daemon. Nothing checks who
+  merged it, and there is no last-trusted-SHA fallback.
+
+  CREDENTIAL REACH OF THAT CODE (second finding from the same session, folded in
+  here). OBSERVED on the ClawApp Mac host: code merged without a human ran within
+  about 15 minutes as the operator user. That user can read a gh token with repo,
+  workflow and admin scope from the keychain, an SSH key with no passphrase, and
+  an ssh-agent key for a second account. sandbox-exec closed the gap for test runs
+  only; the remedy proposed there is a separate OS user that holds the privileged
+  token, plus fine-grained PATs for everything else. Remudero's WORKERS are
+  already scoped (OBSERVED): mintScopedToken (src/lib/github-app.ts, W1-T2699)
+  issues per-repository contents and pull_requests tokens through a per-worktree
+  credential-helper socket (src/lib/worker.ts). settings/worker.json denies reads
+  of ~/.ssh, ~/.aws, ~/.config/gh, ~/.config/remudero and the console's service
+  tokens, and denies writes to git config and hooks. Workers get a redirected
+  HOME and a dedicated worker keychain that holds only the Claude credential
+  (workerKeychainPaths, src/lib/worker-home.ts). Standing rule 24 covers secrets
+  at rest. The gap is the processes that run fleet-merged code with no human
+  merge. (d) The Azure daemon container holds the GitHub App private key
+  (deploy/app-private-key-mount.sh, GH_APP_PRIVATE_KEY_PATH), which can mint
+  installation-wide tokens, plus GH_TOKEN and provider API keys
+  (deploy/runtime-env-vars.sh). (e) On the Mac, deploy/mac/install-gh-read-broker.sh
+  installs a KeepAlive LaunchAgent in the operator's own account. It runs the
+  operator checkout's bin/rmd, and the CLI entry point fast-forwards that
+  checkout to origin/main before almost any command (docs/cli-reference.md
+  preamble). INFERRED: a broker restart, or any rmd command the operator runs,
+  executes fleet-merged code as the operator user, with that user's keychain and
+  SSH keys in reach. This session did not inspect the Mac host.
+
+  DESIRED CAPABILITY (general). A declared, tested set of self-trust paths: the
+  reviewer, merge and arm logic, deploy and self-sync, push, and the gates that
+  admit them. The fleet never auto-merges a PR that touches them; such a PR waits
+  for a human merge. The deploy supervisor and self-sync run newer code on those
+  paths only when a human merged it. Otherwise they stay on the last trusted SHA
+  and raise one alert. A test proves that a fleet-merged change to a self-trust
+  path does not reach the running daemon. Credentials are split by need. The
+  process that holds the App private key or a merge-capable token runs only
+  human-merged code, ideally as its own OS user. The operator account's
+  automation (the read broker, self-sync) never runs fleet-merged code with the
+  operator's own keychain, SSH keys or gh token in reach; it uses a fine-grained,
+  read-only credential instead. Ground against W1-T3407, W1-T2914,
+  W1-T990 and Standing rule 25 first. The operator previously refused a human on
+  every merge, so the scope must stay path-limited. This entry authorizes no gate
+  loosening, permission change, protection flip, deploy or restart.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: cross-repo-automation:self-trust-paths:20261029
+thread_id: null

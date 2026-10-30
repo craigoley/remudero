@@ -6,7 +6,7 @@
  * write to, and the daemon answers each reply in plain language.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,6 +39,9 @@ import { createService } from "../src/lib/service.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { inboxThreadDecider, type RunResult } from "../src/run-task.js";
 import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
+import { readPersistedInbox, persistedInboxPath, writePersistedInbox, type PersistedInboxContent } from "#src/lib/fleet-lane.js";
+import { refreshInboxClassification } from "#src/lib/inbox-view.js";
+import { classifyAllProposalsSliced, materializeInboxAttentionCensus, readInboxStores } from "#src/lib/panel-graph.js";
 
 const VH = "verify-human:W1-T235";
 const RULING = "ruling:operator-owned";
@@ -678,4 +681,178 @@ test("W1-T10347: an explicit edit command keeps action words in its payload as f
     assert.equal(await answerThread(inboxThreadId(RULING), unavailable), "approve");
     assert.deepEqual(f.approved, [], "approval remains a button suggestion, never execution");
   } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+
+// W1-T10880: private HTTP fixtures exercise read bookkeeping, never a live operator decision.
+async function maintainedReadMarkFixture(t: { after(fn: () => void): void }, source: "instance" | "core" = "instance"): Promise<Fixture> {
+  const f = fixture();
+  t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  writeFileSync(f.ledgerPath, "");
+  if (source === "instance") f.deps.inboxSourceIdentity = { instance: "console", repository: "fixture/console", root: f.root,
+    inboxRoot: f.root, planPath: f.deps.planPath, ledgerPath: f.ledgerPath };
+  f.deps.inboxAuditScope = { instance: source === "core" ? "core" : "console", repository: "fixture/console" };
+  const store = { threadStorePath: inboxThreadStorePath(f.root) };
+  appendThreadMessage(inboxThreadIdentity(RULING), "reply", "First private fixture message", store);
+  appendThreadMessage(inboxThreadIdentity(RULING), "reply", "Second private fixture message", store);
+  await refreshInboxClassification(f.deps, {});
+  const snapshot = readPersistedInbox(f.stateDir);
+  assert.ok(snapshot?.snapshotKey, "the real producer wrote a keyed maintained classification");
+  assert.equal(snapshot.snapshotScope?.instance, f.deps.inboxAuditScope.instance);
+  assert.equal(snapshot.snapshotScope?.repository, "fixture/console");
+  assert.equal(snapshot.snapshotScope?.root, f.root);
+  if (source === "core") assert.equal(snapshot.sourceIdentity, undefined, "core supplies audit scope without source identity");
+  assert.ok(snapshot.classifications.some(item => item.proposalId === RULING && item.state !== "retired"));
+  // The request has its own cold classifier memo; setup work cannot mask a hot-path call.
+  f.deps = { ...f.deps, inboxFromSlowLane: true };
+  return f;
+}
+
+async function rewriteReadMarkSnapshot(f: Fixture, edit: (content: PersistedInboxContent) => void, at = Date.now()): Promise<void> {
+  const before = readPersistedInbox(f.stateDir);
+  assert.ok(before?.snapshotKey);
+  const { identity: _identity, generatedAt: _at, whyMeFeedback: _feedback, ...content } = structuredClone(before);
+  edit(content);
+  const classified = await classifyAllProposalsSliced({ ...f.deps, inboxFromSlowLane: false });
+  const { snapshotKey: _oldKey, attentionCensus: _oldCensus, ...inputs } = content;
+  const census = materializeInboxAttentionCensus(f.deps,
+    { ...classified, proposals: content.proposals, classifications: content.classifications }, readInboxStores(f.root, content.proposals), inputs);
+  content.snapshotKey = census.snapshotKey;
+  content.attentionCensus = census;
+  writePersistedInbox(f.stateDir, content, at);
+  assert.ok(readPersistedInbox(f.stateDir)?.snapshotKey, "the edited private fixture remains valid, keyed source evidence");
+}
+
+function forbidReadMarkClassification(f: Fixture): { plan: number; github: number } {
+  const calls = { plan: 0, github: 0 };
+  Object.defineProperty(f.deps, "planPath", { configurable: true, get() {
+    calls.plan++;
+    throw new Error("controlled forbidden request-time classifier plan dependency");
+  } });
+  if (f.deps.statusGithub) f.deps.statusGithub = new Proxy(f.deps.statusGithub, { get(target, key, receiver) {
+    const value = Reflect.get(target, key, receiver);
+    return typeof value === "function" ? () => { calls.github++; throw new Error("controlled forbidden request-time GitHub dependency"); } : value;
+  } });
+  return calls;
+}
+
+async function withReadMarkHttp<T>(f: Fixture, fn: (post: (body: unknown, token?: string | null) => Promise<{ status: number; body: unknown }>) => Promise<T>): Promise<T> {
+  const server = createService({ tokens: { read: READ, write: WRITE }, routes: buildPanelGraphRoutes(f.deps) });
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/inbox/thread/read`;
+  try {
+    return await fn(async (body, token = WRITE) => {
+      const response = await fetch(url, { method: "POST", signal: AbortSignal.timeout(5000),
+        headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), "content-type": "application/json", "x-remudero-operator": "Craig" },
+        body: JSON.stringify(body) });
+      return { status: response.status, body: await response.json() };
+    });
+  } finally {
+    // Close this fixture's writers/connections before the test removes its private root.
+    const closed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    server.closeAllConnections();
+    await closed;
+  }
+}
+
+test("read marks use the configured maintained Inbox snapshot without classification", async (t) => {
+  for (const source of ["instance", "core"] as const) await t.test(source, async t => {
+    const f = await maintainedReadMarkFixture(t, source), id = inboxThreadId(RULING);
+    await withReadMarkHttp(f, async post => {
+      const calls = forbidReadMarkClassification(f);
+      assert.equal((await post({ threadId: id, seq: 1 })).status, 200);
+      assert.equal(readReadMarks(readMarksPath(f.stateDir))[id], 1);
+      assert.equal((await post({ threadId: id, seq: 2 })).status, 200);
+      const before = readFileSync(readMarksPath(f.stateDir), "utf8");
+      assert.equal((await post({ threadId: id, seq: 2 })).status, 200, "the current mark is idempotent");
+      assert.equal((await post({ threadId: id, seq: 1 })).status, 200, "an older mark cannot move it backwards");
+      assert.equal(readReadMarks(readMarksPath(f.stateDir))[id], 2);
+      assert.equal(readFileSync(readMarksPath(f.stateDir), "utf8"), before);
+      assert.deepEqual(calls, { plan: 0, github: 0 }, "the cold request invokes neither classifier-plan nor GitHub dependencies");
+    });
+  });
+});
+
+test("read marks refuse unavailable maintained evidence and preserve legacy safeguards", async (t) => {
+  const cases = ["missing", "malformed", "foreign", "foreign-core-repository", "foreign-core-instance", "foreign-core-root", "incomplete-core-scope", "stale", "future", "plan-stale", "plan-unavailable",
+    "retired", "unknown-thread", "fleet-item", "seq-ahead", "invalid-seq", "corrupt-thread-store", "read-credential", "no-credential",
+    "snapshot-changed", "snapshot-appeared"] as const;
+  for (const kind of cases) await t.test(kind, async t => {
+    const core = kind === "foreign-core-repository" || kind === "foreign-core-instance" || kind === "foreign-core-root" || kind === "incomplete-core-scope";
+    const f = await maintainedReadMarkFixture(t, core ? "core" : "instance"), path = persistedInboxPath(f.stateDir);
+    const body = { threadId: inboxThreadId(RULING), seq: 1 };
+    let status = 503, token: string | null = WRITE;
+    if (kind === "missing") unlinkSync(path);
+    if (kind === "malformed") writeFileSync(path, "{broken private fixture");
+    if (kind === "foreign") await rewriteReadMarkSnapshot(f, content => {
+      assert.ok(content.sourceIdentity); content.sourceIdentity.repository = "fixture/foreign";
+    });
+    if (kind === "foreign-core-repository") await rewriteReadMarkSnapshot(f, content => {
+      assert.equal(content.sourceIdentity, undefined); assert.ok(content.snapshotScope);
+      content.snapshotScope.repository = "fixture/foreign";
+    });
+    if (kind === "foreign-core-repository") {
+      const registryPath = join(f.stateDir, "inbox-proposals.json");
+      const registry = JSON.parse(readFileSync(registryPath, "utf8"));
+      registry.proposals = registry.proposals.filter((item: { id: string }) => item.id !== RULING);
+      writeFileSync(registryPath, JSON.stringify(registry));
+      assert.equal(registry.proposals.some((item: { id: string }) => item.id === RULING), false,
+        "the read mark targets a thread present only in the foreign maintained snapshot");
+    }
+    if (kind === "foreign-core-instance") await rewriteReadMarkSnapshot(f, content => {
+      assert.equal(content.sourceIdentity, undefined); assert.ok(content.snapshotScope);
+      content.snapshotScope.instance = "foreign";
+    });
+    if (kind === "foreign-core-root") await rewriteReadMarkSnapshot(f, content => {
+      assert.equal(content.sourceIdentity, undefined); assert.ok(content.snapshotScope);
+      content.snapshotScope.root = `${f.root}-foreign`;
+    });
+    if (kind === "incomplete-core-scope") await rewriteReadMarkSnapshot(f, content => {
+      assert.equal(content.sourceIdentity, undefined); content.snapshotScope = { root: f.root };
+    });
+    if (kind === "stale") await rewriteReadMarkSnapshot(f, () => {}, Date.now() - 11 * 60_000);
+    if (kind === "future") await rewriteReadMarkSnapshot(f, () => {}, Date.now() + 60_000);
+    if (kind === "plan-stale") f.deps.readPlanSource = () => ({ state: "stale", generation: 1, identity: "fixture-plan",
+      observedAt: new Date().toISOString(), failure: { reason: "controlled stale source", failedAt: new Date().toISOString() } });
+    if (kind === "plan-unavailable") f.deps.readPlanSource = () => ({ state: "unavailable", generation: 0,
+      failure: { reason: "controlled unavailable source", failedAt: new Date().toISOString() } });
+    if (kind === "retired") { await rewriteReadMarkSnapshot(f, content => {
+      const item = content.classifications.find(item => item.proposalId === RULING); assert.ok(item); item.state = "retired";
+    }); status = 404; }
+    if (kind === "unknown-thread") { body.threadId = inboxThreadId("ruling:missing-private-thread"); status = 404; }
+    if (kind === "fleet-item") { body.threadId = inboxThreadId(FLEET); status = 404; }
+    if (kind === "seq-ahead") { body.seq = 3; status = 409; }
+    if (kind === "invalid-seq") { body.seq = -1; status = 400; }
+    if (kind === "corrupt-thread-store") { writeFileSync(inboxThreadStorePath(f.root), "{broken private thread store\n"); status = 500; }
+    if (kind === "read-credential") { token = READ; status = 403; }
+    if (kind === "no-credential") { token = null; status = 401; }
+    let replacement: string | undefined;
+    if (kind === "snapshot-changed") {
+      const original = readFileSync(path, "utf8");
+      await rewriteReadMarkSnapshot(f, content => { content.proposals.find(item => item.id === RULING)!.summary += " refreshed"; });
+      replacement = readFileSync(path, "utf8"); writeFileSync(path, original);
+    }
+    if (kind === "snapshot-appeared") { replacement = readFileSync(path, "utf8"); unlinkSync(path); }
+    await withReadMarkHttp(f, async post => {
+      if (replacement !== undefined) f.deps.readPlanSource = () => {
+        writeFileSync(path, replacement!);
+        return { state: "loaded", generation: 1, identity: "fixture-plan", observedAt: new Date().toISOString() };
+      };
+      const calls = forbidReadMarkClassification(f);
+      assert.equal((await post(body, token)).status, status, kind);
+      assert.equal(existsSync(readMarksPath(f.stateDir)), false, "refusal never writes a read mark");
+      assert.deepEqual(calls, { plan: 0, github: 0 }, kind);
+    });
+  });
+  await t.test("legacy default still classifies and marks its owned thread", async t => {
+    const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+    appendThreadMessage(inboxThreadIdentity(RULING), "reply", "Private legacy message", { threadStorePath: inboxThreadStorePath(f.root) });
+    writeFileSync(persistedInboxPath(f.stateDir), "{irrelevant legacy snapshot");
+    await withReadMarkHttp(f, async post => {
+      const id = inboxThreadId(RULING);
+      assert.equal((await post({ threadId: id, seq: 1 })).status, 200);
+      assert.equal(readReadMarks(readMarksPath(f.stateDir))[id], 1);
+      assert.equal((await post({ threadId: id, seq: 2 })).status, 409);
+    });
+  });
 });

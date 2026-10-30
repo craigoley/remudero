@@ -5,13 +5,13 @@
   type: implement
   verify: auto
   risk: low
-  priority: 2
+  priority: 3
   # refusal-amendment (W1-T9697, run W1-T9697-1793248296708, 2026-10-29T05:21:32.229Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: The declared array already contains exactly one entry, leaving no duplicate to remove.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
-  # backlog gardener: band=2 evidence=884af82fe0a756ec
-  # backlog gardener: placed=2026-10-29T01:30:16.152Z
+  # backlog gardener: band=3 evidence=d3fd9c12ac610b81
+  # backlog gardener: placed=2026-10-30T01:39:47.365Z
   attempts: 0
   files:
     - src/lib/ledger.ts

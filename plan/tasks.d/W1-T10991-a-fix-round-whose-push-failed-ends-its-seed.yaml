@@ -1,0 +1,49 @@
+- id: W1-T10991
+  title: A fix round whose push failed ends its seed, so the sweep stops reading "fix already dispatched … awaiting its outcome" for a worker that has already exited
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium
+  origin: operator-session#slo-ladder-recon-2026-10-29
+  plan_refs:
+    - W1-T9999
+    - W1-T1110
+    - W1-T9618
+    - W1-T8833
+    - W1-T10339
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-fix-round-whose-push-failed-ends-its-seed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Replayed through fixSeedRead as a later run than the seed's, the recorded #15108 rows read as ended, not live. The rows are the seed sweep.disposed (acted, blocked-fixable, head 6416e8d, 2026-10-29T03:21:06.706Z); fix.dispatch at 03:31:31.971Z; fix.done at 03:32:34.559Z with subtype push_failed, worker_exit exit, worker_exit_code 0 and no pushed_head_sha; fix.strike_refunded (push-not-landed); and the later run's boot and adoption pass, which adopted 2 live children of other tasks. The same rows with the push landed (subtype success and a pushed_head_sha that differs from the head) keep their current reading, and a rung still in flight (a fix.dispatch with no fix.done) still reads live"
+      proof: "unit test: test/sweep/a-fix-round-whose-push-failed-ends-its-seed.test.ts"
+    - claim: The rung-end reader in src/lib/sweep.ts names the push_failed outcome
+      proof: "grep: push_failed in src/lib/sweep.ts"
+  rationale: |
+    OBSERVED by the operator's 2026-10-29 recon (newest ledger ts read 2026-10-29T19:54:45.365Z; 27 archives for 2026-10-29, 0 rotated plain files, and the live file). PR #15108 (W1-T10822, head 6416e8d, branch run-W1-T10822-1793172804676) read "fix already dispatched for this head (6416e8d) at 2026-10-29T03:21:06.706Z by DAEMON-1793240989095 — awaiting its outcome before spending another strike" on 88 sweep.disposed rows from 03:41:05Z to 19:53:17Z, about 16.2 hours, under five daemon runs.
+    OBSERVED, the seed and its rung:
+    - 03:21:06.706Z sweep.disposed, acted true, blocked-fixable, head 6416e8d, DAEMON-1793240989095 (the seed).
+    - 03:31:31.971Z fix.dispatch, round DAEMON-1793240989095:1:1793244545155, worker DAEMON-1793240989095-fix1-1793244545155, mode reviewer-unmet, head 6416e8d.
+    - 03:32:34.558Z fix.push_failed, cause git-push-failed: the leased push of f5ae787c8 to run-W1-T10822-1793172804676 got "remote: Internal Server Error" from GitHub.
+    - 03:32:34.559Z fix.done, subtype push_failed, worker_exit exit, worker_exit_code 0, no pushed_head_sha, push_outcome failed.
+    - 03:32:34.560Z fix.strike_refunded, reason push-not-landed.
+    The worker exited at 03:32:34Z. No run_child.adopted row for W1-T10822 follows, and no worktree named for W1-T10822 is registered in the daemon's repos or present under its worktrees mount.
+    OBSERVED by running fixSeedRead (origin/main, unchanged in this path at 811d6e2d1) over a copy of the live ledger the sweep reads, with run DAEMON-1793296924049: it returns kind live. The branch that returns it is the last one:
+    - The seed has rung rows, so the "no rung row" branch is not taken.
+    - readFixRungEnd over the window reads stalled false. Its last fix.dispatch resets stalled, and no clause matches a fix.done with subtype push_failed. The error-exit clause needs worker_exit_code not 0, and fix.push_failed and fix.strike_refunded have no clause.
+    - continuationEndedAtEmptyBoot is false. The newest daemon.boot (18:03:44.018Z) is this run's, but its run_child.adoption_pass at 18:03:43.781Z adopted 2 live children of other tasks (W1-T10852 and W1-T10871). The earlier boots at 05:10:25Z, 08:09:07Z and 12:20:17Z also adopted other tasks' children (1, 2 and 1). The 14:53:43Z adoption pass was empty, but that run (DAEMON-1793285564369) wrote no daemon.boot row.
+    - No fix.stood_down handed_off belongs to the seed, so the final return reads live.
+    INFERRED: W1-T9618 made a push that never landed write fix.done subtype push_failed, and fix-progress-judge.ts and fix-routing-learner.ts read it, but readFixRungEnd was not taught that it ends the rung. A worker that exited after a failed push is therefore read as still running until a boot happens to adopt no child at all, fleet-wide.
+    OBSERVED, fleet-wide over 2026-10-22T19:29Z to 2026-10-29T19:54Z, the same stand-down held over 2 hours at one head on five PRs: #15108 (16.2 h), #13920 (4.3 h), #14249 (3.1 h), #13851 (2.5 h) and #15186 (2.3 h). This task fixes the push_failed path only. The other four need their own reading before a class claim. #15186's seed rung ended in fix.done subtype scope_amendment_pending, and its later dispatch landed d03695b at 2026-10-28T19:21:55.599Z.
+  design: |
+    In readFixRungEnd, a fix.done whose subtype is push_failed and that moved no head (pushed_head_sha absent or equal to head_sha) ends the rung as stalled, like the error-exit clause beside it. A later fix.dispatch, fix.review or fix.resolved still supersedes it.
+    The test replays the recorded rows (trimmed to the fields fixSeedRead and readFixRungEnd read) through the exported fixSeedRead, and asserts ended for the recorded case, the prior reading for the landed-push variant, and live for a rung still in flight. Prove it load-bearing by deleting the new clause and seeing the recorded case fail.
+    Before relying on re-dispatch, check how W1-T9618's strike refund bounds repeated push_failed rounds at one head, and say in the PR body whether a GitHub outage could re-dispatch on every pass.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-29, after a recon named branch (b) of fixSeedRead (readFixRungEnd not stalled, continuationEndedAtEmptyBoot false) as the defect behind #15108's 16-hour hold.

@@ -16,7 +16,7 @@ import { boardClosedCollectionPath, boardClosedRowsDigest, createBoardSnapshotCa
 import { buildBatchedGithub } from "#src/lib/status.js";
 import { collectDailyProgress, type DailyProgressCollectionConfig } from "#src/lib/daily-progress-collector.js";
 import { improvementEffectNamespaceDir } from "#src/lib/gardener-opportunity-evidence.js";
-import { admitStaticWork, readMemoryHeadroom, resolveTestSlotDir, TEST_SLOT_DIR_ENV, type StaticAdmission } from "#src/lib/test-slot.js";
+import { admitStaticWork, readMemoryHeadroom, readVmStat, resolveTestSlotDir, TEST_SLOT_DIR_ENV, type StaticAdmission } from "#src/lib/test-slot.js";
 import { SLOW_LANE_HEAP_MB } from "#src/lib/read-model-slow-lane.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
@@ -454,6 +454,10 @@ test("Daily progress activity preserves replay deduplication and source gaps: ac
   });
 });
 
+function readHeapHeadroom(measure: typeof readMemoryHeadroom = readMemoryHeadroom): number | undefined {
+  return measure(undefined, { vmStat: readVmStat });
+}
+
 function assertHeapAdmission(admission: StaticAdmission, dir: string, memoryBytes: number, headroom: number | undefined): void {
   assert.equal(admission.outcome, "admitted", admission.note);
   assert.equal(admission.executionAllowed, true, admission.note);
@@ -462,11 +466,20 @@ function assertHeapAdmission(admission: StaticAdmission, dir: string, memoryByte
     `measured headroom ${headroom} must cover parent plus child reservation ${memoryBytes}: ${admission.note}`);
 }
 
-test("daily heap proof refuses unavailable or unrecorded capacity before spawning", () => {
+test("Daily heap proof supplies its Darwin reader and preserves admission refusals; daily heap proof refuses unavailable or unrecorded capacity before spawning", () => {
   const dir = "/unused-admission-control", memoryBytes = 2_048;
   const admitted: StaticAdmission = { outcome: "admitted", executionAllowed: true, waitedMs: 0,
     note: "admission control", childEnvironment: { [TEST_SLOT_DIR_ENV]: dir }, release() {} };
-  assert.doesNotThrow(() => assertHeapAdmission(admitted, dir, memoryBytes, memoryBytes));
+  let measurements = 0;
+  const headroom = readHeapHeadroom((read, darwin) => {
+    measurements++;
+    assert.equal(read, undefined, "Linux retains the maintained default filesystem reader");
+    assert.equal(darwin?.vmStat, readVmStat, "the heap fixture must supply the maintained Darwin reader");
+    return memoryBytes;
+  });
+  assert.equal(measurements, 1);
+  assert.equal(headroom, memoryBytes);
+  assert.doesNotThrow(() => assertHeapAdmission(admitted, dir, memoryBytes, headroom));
   for (const outcome of ["open", "wait_bound_exceeded", "inherited", "slot"] as const) {
     assert.throws(() => assertHeapAdmission({ ...admitted, outcome }, dir, memoryBytes, memoryBytes),
       assert.AssertionError, `${outcome} does not verify this workload's capacity`);
@@ -514,7 +527,7 @@ test("Daily progress activity keeps full counts without retaining unrelated ledg
     const memoryBytes = process.resourceUsage().maxRSS * 1024 + (SLOW_LANE_HEAP_MB + 256) * 1024 ** 2;
     let measuredHeadroom: number | undefined;
     const admission = admitStaticWork("daily-progress-heap-proof", {
-      dir, memoryBytes, memoryHeadroom: () => (measuredHeadroom = readMemoryHeadroom()),
+      dir, memoryBytes, memoryHeadroom: () => (measuredHeadroom = readHeapHeadroom()),
     });
     try {
       assertHeapAdmission(admission, dir, memoryBytes, measuredHeadroom);

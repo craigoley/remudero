@@ -6,8 +6,7 @@ import { hostWorktreeGit } from "./worktree-git.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
-// The DEFAULT export — a mutable object — so a test's `t.mock.method` can intercept the `fs` calls below. Named
-// bindings off `node:fs` are non-configurable, so mocking them throws.
+// Mock the mutable fs default export; named node:fs bindings are non-configurable.
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { hostname } from "node:os";
@@ -20,8 +19,7 @@ import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry 
 import type { GhFailureReason } from "./status.js";
 import { isGhRateLimitError } from "./status.js";
 
-/** A draft-lint finding: the linter's own `LintViolation`s plus this rung's `draft-parse` finding. Structurally typed
- *  so both flow through one path without widening the linter's closed union. */
+/** Structurally includes `LintViolation` and `draft-parse` without widening the linter's union. */
 export type DraftLintViolation = RelintViolation;
 import { callSiteCandidates, MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
@@ -48,13 +46,11 @@ import { mechanicalAskPurpose, inboxMechanicalTaskDigest, inboxMechanicalProposa
 import { inboxDismissalReceipt } from "./inbox-dismissal-audit.js";
 
 /**
- * `rmd inbox` — the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110).
- *
- * Approval controls fail by fatigue, so only READY proposals surface and readiness is computed, never asserted
- * [research: hitl-approval-fatigue-2026]. Drafting is an LLM's job ({@link runDraftRung}); everything after is
- * deterministic, so {@link classifyProposal} is pure. READY = deps merged AND anchors still grep-true on main AND the
- * fragment passes `rmd lint-plan` AND no open conflicts; an unfired trigger yields DEFERRED_WITH_TRIGGER, checked
- * first (P19/WS-2). Why: P25's requirement verbatim — docs/forensics/inbox.md.
+ * Deterministic ratification core (MASTER-PLAN P25(i), W1-T110; docs/forensics/inbox.md).
+ * Only READY surfaces to avoid approval fatigue [research: hitl-approval-fatigue-2026].
+ * {@link runDraftRung} uses an LLM; {@link classifyProposal} is pure. READY requires merged deps,
+ * grep-true main anchors, lint-clean fragments and no open conflicts. Unfired triggers take precedence:
+ * DEFERRED_WITH_TRIGGER (P19/WS-2).
  */
 
 // ── Evidence anchors + triggers (proposal-level facts, supplied by the registry) ──────────
@@ -135,23 +131,12 @@ export interface SkillEvalRecord {
 }
 
 // ── BUNDLE-SOURCED POLICY PROPOSALS (W1-T2702) ────────────────────────────────────────────────
-//
-// A BUNDLE CARRIES WHAT THE FLEET KNOWS AND NOT HOW IT IS ALLOWED TO ACT: `rmd bundle export`
-// (bundle.ts) now carries every operator-ratified `plan/policy.yaml` row as a `PolicyProposalRow`
-// alongside doctrine/learnings. `stageBundleProposals` below is the ONLY place that row becomes
-// something the receiving repo's operator can act on — it stages ONE {@link Proposal} per row
-// through {@link updateProposalRegistry} (the ONE sanctioned proposal writer every other minter,
-// board-review.ts/retro.ts/measurement-cadence.ts/rule-efficacy.ts, already goes through) and
-// touches NOTHING ELSE. `rmd inbox` tiers a staged proposal exactly like any other; `rmd approve`
-// is the ONLY path that can turn it into a committed `plan/policy.yaml` value, and that always
-// means a plan PR the receiving operator reviews and merges — Rule 15/Law 5, by construction.
+// Bundles transfer knowledge, never authority. Stage one Proposal per exported policy row through
+// updateProposalRegistry, the shared sanctioned writer. Only `rmd approve` may initiate the policy
+// plan PR; the receiving operator reviews and merges it (Rule 15/Law 5).
 
-/** One `bundle.ts` `PolicyProposalRow`, duplicated STRUCTURALLY rather than imported: inbox.ts is
- *  a foundational module several others already import FROM (board-review.ts, retro.ts,
- *  measurement-cadence.ts, rule-efficacy.ts, digest.ts) — importing UP into bundle.ts would be the
- *  one edge that runs the other way. TypeScript's structural typing means `bundle.ts`'s own
- *  `PolicyProposalRow` satisfies this shape with zero conversion at every call site (run-task.ts's
- *  `bundleImportCommand` passes bundle.ts's rows here directly). */
+/** Structural copy of bundle.ts's `PolicyProposalRow` avoids a reverse dependency from this foundational
+ *  module; `bundleImportCommand` passes those rows directly without conversion. */
 export interface BundlePolicyProposalRow {
   path: string;
   origin: string;
@@ -161,10 +146,8 @@ export interface BundlePolicyProposalRow {
   rowHash: string;
 }
 
-/** Where a staged policy proposal travelled from — the receiving operator's context for
- *  {@link Proposal.source}. `rowHash` is BOTH the provenance record and the dedup key: {@link
- *  bundlePolicyProposalId} derives the proposal's own id from it, so a re-import of the SAME
- *  (unedited) row can never mint a second proposal. */
+/** Provenance for {@link Proposal.source}; `rowHash` also keys {@link bundlePolicyProposalId},
+ *  so re-importing an unchanged row cannot mint a duplicate. */
 export interface BundleProposalSource {
   kind: "bundle";
   sourceRepo: string;
@@ -198,10 +181,7 @@ export function approvedSkillRelPath(name: string): string | null {
   return /^[a-z0-9][a-z0-9-]*$/.test(name) ? `.claude/skills/${name}/SKILL.md` : null;
 }
 
-/** Derive a staged policy proposal's id from its row hash — DERIVED, never random, mirroring
- *  {@link understoodRequestProposalId}'s own "re-classifying the same thing names the same
- *  proposal" discipline. Exported so a caller (or a test) can predict the id a given row stages
- *  under without re-deriving the truncation rule by hand. */
+/** Predictable row-hash identity, like {@link understoodRequestProposalId}; callers share the truncation rule. */
 export function bundlePolicyProposalId(rowHash: string): string {
   return `bundle-policy:${rowHash.slice(0, 16)}`;
 }
@@ -220,27 +200,18 @@ function renderBundlePolicyProposalSummary(row: BundlePolicyProposalRow, source:
   );
 }
 
-/** The outcome of one {@link stageBundleProposals} call: which rows minted a NEW proposal this call, and which were
- *  already staged (same row hash → same derived id → skipped, never duplicated). */
+/** Newly staged ids and unchanged row-hash ids skipped by {@link stageBundleProposals}. */
 export interface StageBundleProposalsResult {
   staged: string[];
   alreadyStaged: string[];
 }
 
 /**
- * `rmd bundle import`'s staging path (W1-T2702, design (ii)): mint one {@link Proposal} per
- * `rows` entry and write it through {@link updateProposalRegistry} — the grep target this task's
- * acceptance names (`stageBundleProposals(` in this file). NEVER writes `plan/policy.yaml` or any
- * other policy file; the registry write above is this function's entire footprint.
- *
- * IDEMPOTENT BY ROW HASH: {@link bundlePolicyProposalId} derives each proposal's id from
- * `row.rowHash`, so a row already present in the registry (an unedited re-import, or a second
- * bundle carrying the same ratified value) is skipped and reported in `alreadyStaged`, never
- * staged twice. A row whose value/bounds/origin/rationale changed since the last import hashes
- * differently and mints a NEW proposal id — the receiving operator has never seen or ratified
- * this EXACT row before, so it is new work for them, not an update to old work; any
- * still-open prior proposal for the same path is left exactly as it is, for the operator to
- * reconcile (reframe/conflict) the ordinary way, never silently retired by this function.
+ * W1-T2702(ii): `rmd bundle import` stages proposals through {@link updateProposalRegistry} only;
+ * NEVER writes `plan/policy.yaml` or any other policy file.
+ * Idempotent by {@link bundlePolicyProposalId}: existing row hashes enter `alreadyStaged`.
+ * Changed value/bounds/origin/rationale yields a new id requiring fresh operator ratification.
+ * Prior proposals for that path remain for explicit reframe/conflict reconciliation, never silent retirement.
  */
 export function stageBundleProposals(
   registryPath: string,
@@ -253,8 +224,7 @@ export function stageBundleProposals(
   updateProposalRegistry(
     registryPath,
     (current) => {
-      // Re-derived every call (updateProposalRegistry may retry the read under the lock): stale
-      // results from a prior attempt must never leak into what this call reports.
+      // Registry retries under the lock must not leak a prior attempt's results.
       staged.length = 0;
       alreadyStaged.length = 0;
       const currentIds = new Set(current.map((p) => p.id));
@@ -286,19 +256,15 @@ export function stageBundleProposals(
 // `interpretReply` (reply-interpreter.ts) reaches `status: "understood"` and stops there by design. This mints a
 // {@link Proposal} for the same tiering and does nothing else: no task filed, nothing auto-approved, nothing paced.
 
-/** The understood request a caller hands to {@link proposalFromUnderstoodRequest} — the thread it traces back to, and
- *  the request text that thread now understands in full (every clarification, if any were asked, answered). */
+/** A fully clarified request and its source thread for {@link proposalFromUnderstoodRequest}. */
 export interface UnderstoodRequest {
-  /** The thread this traces back to. NEVER {@link Proposal.originatingItemId}, board-review's own referent
-   *  vocabulary, which would wire this into retirement for an unresolvable referent. */
+  /** Source thread; NEVER {@link Proposal.originatingItemId}, which would miswire board-referent retirement. */
   threadId: string;
-  /** The request text, quoted VERBATIM into the minted proposal's summary — never paraphrased, mirroring
-   *  `synthesizeFeedbackDocketProposal`'s own "verbatim, cited" discipline (feedback-docket.ts). */
+  /** Quoted VERBATIM in the summary, like feedback-docket.ts's `synthesizeFeedbackDocketProposal`. */
   requestText: string;
 }
 
-/** The proposal id minted for one thread — derived, never random, so re-classifying the same understood thread names
- *  the same proposal instead of opening a duplicate. */
+/** Stable thread identity prevents duplicate proposals on reclassification. */
 export function understoodRequestProposalId(threadId: string): string {
   return `thread:${threadId}`;
 }
@@ -315,22 +281,16 @@ export function proposalFromUnderstoodRequest(request: UnderstoodRequest, interp
 }
 
 // ── Board-review referent retirement (W1-T2451) ────────────────────────────────────────────
-//
-// Such a proposal's `evidenceAnchors` is permanently `[]`, so evidence drift can never retire one. Its referent is
-// checked against the board item's own state instead, read in ONE BATCH per pass — never per proposal, which would
-// reintroduce the N-calls-per-tick shape.
+// Empty evidenceAnchors cannot drift: check board referents in ONE BATCH per pass, never N calls per tick.
 
-/** A board item's live state, in board-review.ts's own `BoardItem` vocabulary. Duplicated rather than imported,
- *  because board-review.ts imports from this module and the cycle would close. */
+/** Structural `BoardItem` state avoids a cycle with board-review.ts, which imports this module. */
 export interface BoardReferentState {
   status: "open" | "merged" | "dead";
   unhandledEscalations?: number;
 }
 
-/** The ONE batched read of every board-review referent's state this pass. A referent id absent from `states` is
- *  `"unreadable"` for that proposal alone: cannot-observe means WAIT (W1-T130), never a silent retirement.
- *  `"unreadable"` means the whole read failed, so each proposal keeps whatever classification it would otherwise have
- *  had, marked unverified. */
+/** One batched referent read. A missing id is individually unreadable; a failed read marks all unverified.
+ *  Neither retires a proposal: preserve its other classification (W1-T130, cannot-observe means WAIT). */
 export type BoardReferentRead = { kind: "ok"; states: ReadonlyMap<string, BoardReferentState> } | { kind: "unreadable" };
 
 /** True once a board-review finding's referent has left the state that produced it: no longer open, or escalations
@@ -350,21 +310,11 @@ function deriveLegacyReferent(proposalId: string): string | undefined {
 }
 
 /**
- * W1-T3385 — THE PLAN TASK A PROPOSAL WAS MINTED AGAINST, read out of its own id.
- *
- * `resolveBoardReferent` above retires a proposal whose BOARD item resolved (an escalation issue
- * that closed). A proposal minted against a PLAN TASK had no analogue, so it stayed READY forever
- * once that task merged: the producer's population already excludes merged tasks, so nothing
- * re-mints it and nothing retires it either — it simply outlives its own subject.
- *
- * MEASURED 2026-09-11: of 207 ready proposals, 36 named a task the live projection already
- * credited merged. Every one proposed repairing a proof on finished work, and each one cost an
- * operator decision to clear by hand.
- *
- * ONLY THE ID SHAPES THAT CARRY A TASK ID. `proof-debt:<taskId>:<criterionIndex>`,
- * `verify-human:<taskId>`, `verify-human-automate:<taskId>` and `machine-judge:<taskId>` name theirs
- * structurally. Other ids are keyed on a run, a symbol or a content hash, so there is nothing to
- * read and they are left alone rather than guessed at.
+ * W1-T3385: read task referents from `proof-debt:<taskId>[:<criterionIndex>]`, `verify-human:<taskId>`,
+ * `verify-human-automate:<taskId>` and `machine-judge:<taskId>` only; never guess from run/symbol/hash ids.
+ * Unlike board referents, merged tasks previously left their proposals READY indefinitely.
+ * Measured 2026-09-11: 36 of 207 ready proposals requested proof repairs on merged tasks,
+ * each requiring manual clearance despite the producer already excluding merged work.
  */
 export function deriveTaskReferent(proposalId: string): string | undefined {
   const match = /^(?:verify-human|verify-human-automate|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$|^proof-debt:([A-Za-z0-9][A-Za-z0-9-]*?)(?::\d+)?$/.exec(proposalId);
@@ -372,20 +322,11 @@ export function deriveTaskReferent(proposalId: string): string | undefined {
 }
 
 /**
- * W1-T3511 — THE CONSOLIDATED SUCCESSOR that supersedes a finer-grained predecessor, if one exists.
- *
- * W1-T3385b regrouped proof-debt from one proposal per CRITERION to one per TASK. That changed what
- * gets MINTED and nothing else: the predecessors it supersedes stayed in the registry, open, because
- * they carry different ids and nothing retires them. MEASURED 2026-09-13, two days after that rule
- * shipped: 22 per-criterion proposals still open against 1 per-task successor, and the operator
- * inbox had GROWN, 139 -> 143. A consolidation rule that only filters new mints cannot shrink an
- * existing backlog — it can only stop it growing faster.
- *
- * ID-SHAPE ONLY, and deliberately narrow: `proof-debt:<task>:<n>` is a strict refinement of
- * `proof-debt:<task>`, so the relationship is derivable with no similarity score and no guess. The
- * skill-draft consolidation (W1-T3385c) has no such relationship — its old ids hash a RUN SET and
- * its new ones a procedure, with no textual path between them — so it is deliberately not covered
- * here and its predecessors still need a separate disposition.
+ * W1-T3511: derive only the strict `proof-debt:<task>:<n>` → `proof-debt:<task>` successor.
+ * W1-T3385b consolidated new mints but left predecessors open: measured 2026-09-13, two days later,
+ * 22 per-criterion proposals remained against one per-task successor; the inbox grew 139 → 143.
+ * Mint filtering alone cannot shrink that backlog. W1-T3385c skill-draft run-set/procedure hashes
+ * have no derivable relationship, so those predecessors still require separate disposition.
  */
 export function supersedingProposalId(proposalId: string): string | undefined {
   return /^(proof-debt:[A-Za-z0-9][A-Za-z0-9-]*):\d+$/.exec(proposalId)?.[1];
@@ -434,8 +375,7 @@ export interface DraftedCandidate {
   anchorFingerprint: string;
 }
 
-/** Order-independent digest of an anchor set — the draft cache's invalidation key. Plain string composition, not
- *  crypto: it only needs to detect that the anchor SET changed. */
+/** Order-independent draft invalidation key; string composition detects anchor-set changes without crypto. */
 export function anchorFingerprint(anchors: EvidenceAnchor[]): string {
   return anchors
     .map((a) => `${a.pattern}::${a.path ?? ""}`)
@@ -552,10 +492,7 @@ export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache,
 }
 
 // ── Daemon-side idempotence (W1-T192) ──────────────────────────────────────────────────────
-//
-// One invalidation must produce ONE draft attempt, not one per unattended poll. {@link draftAttemptKey} is the stable
-// cause fingerprint; {@link DraftAttemptCache} records the key last attempted, win or lose, so a failed attempt is
-// not repeated either.
+// One attempt per invalidation: DraftAttemptCache records draftAttemptKey on success AND failure.
 
 /** The configured drafting lane whose attempts share one idempotence key. */
 export interface DraftLaneIdentity {
@@ -872,11 +809,9 @@ interface FragmentVerdict {
 }
 
 /**
- * W1-T4261 — a draft's fragment parse and its {@link blockingLintMessages} depend only on the fragment text, the
- * proposal id (the parse error names it) and the base plan, so a pass whose plan object is the previous pass's reuses
- * them. MEASURED on a 700-proposal fixture: the two were ~500 ms of a ~750 ms recompute, paid again whenever the
- * ledger or registry moved. A different plan object empties the memo; {@link beginFragmentPass} keeps only what the
- * previous pass used, so it holds at most two passes' drafts.
+ * W1-T4261: cache parse/lint by fragment, proposal id (used in errors) and plan object identity.
+ * Measured on 700 proposals: ~500 ms of ~750 ms recompute, repeated on ledger/registry changes.
+ * A new plan clears the memo; {@link beginFragmentPass} retains at most two passes' drafts.
  */
 export interface FragmentMemo {
   plan?: Plan;
@@ -920,20 +855,11 @@ export function isRatifiedInLedger(ledgerLines: { step?: unknown; task_id?: unkn
 }
 
 /**
- * W1-T2604: the ledger's answer to "has an operator declined this, and why?". `POST /v1/inbox/decline`
- * appends one line carrying the reason verbatim; the latest wins.
- *
- * W1-T3407 — AND ITS REVERSAL. A decline used to be IRREVERSIBLE: this read knew only one step, so any
- * `panel.proposal_declined` row meant declined forever, and a decline entered on reasoning that later
- * proved WRONG could not be taken back by any means short of editing an append-only ledger. MEASURED
- * 2026-09-11: 16 proposals were declined on a claim about `proofQueueAudit` that the source refuted,
- * and the only available remedy was to append a second decline whose REASON said the first was wrong —
- * leaving them declined.
- *
- * THE SHAPE IS `automergeHoldFromLedger`'s, deliberately (lib/review.ts): one pass over the same lines,
- * the engage row setting state and the release row clearing it, latest wins. Both steps are registered
- * in `DECISION_RELEVANT_LEDGER_STEPS` for the SAME reason — rotating either half away inverts the
- * answer, in one direction or the other.
+ * W1-T2604/W1-T3407: latest decline/restore wins; decline reasons remain verbatim.
+ * Measured 2026-09-11: 16 proposals declined on a source-refuted `proofQueueAudit` claim could
+ * only receive another decline explaining the mistake, leaving them declined. Restore makes it reversible.
+ * Like review.ts's `automergeHoldFromLedger`, engage sets and release clears state in one pass.
+ * Both steps must stay in `DECISION_RELEVANT_LEDGER_STEPS`: rotating either away inverts the answer.
  */
 export function declinedReasonInLedger(
   ledgerLines: { step?: unknown; task_id?: unknown; reason?: unknown }[],
@@ -946,18 +872,16 @@ export function declinedReasonInLedger(
       reason = typeof l.reason === "string" ? l.reason : "declined by an operator";
       continue;
     }
-    // A restore CLEARS the decline rather than recording a competing one, so a later decline can
-    // refuse the proposal again and the two can alternate as many times as an operator needs.
+    // Restore clears the decline; subsequent explicit declines remain possible.
     if (l.step === "panel.proposal_restored") reason = undefined;
   }
   return reason;
 }
 
 /**
- * W1-T4261 — {@link isRatifiedInLedger} and {@link declinedReasonInLedger} for EVERY proposal, from ONE pass over the
- * ledger. Each of those walks the whole ledger per call, and a classifier calls them once (or twice) per proposal, so
- * an inbox pass over N proposals walked it ~2N times. Same rows, same order, same latest-wins decline/restore rule —
- * a precomputed answer, never a different one; a non-string `task_id` matches no proposal in either form.
+ * W1-T4261: precompute {@link isRatifiedInLedger}/{@link declinedReasonInLedger} in one ledger pass
+ * instead of ~2N walks for N proposals. Preserve row order and latest-wins decline/restore;
+ * non-string `task_id` matches nothing in either form.
  */
 export function ledgerProposalVerdicts(ledgerLines: { step?: unknown; task_id?: unknown; reason?: unknown }[]): {
   isRatified: (proposalId: string) => boolean;
@@ -2057,20 +1981,15 @@ function fragmentJsonToYaml(raw: string): string {
 }
 
 // ── The draft rung's INJECTABLE orchestration core (W1-T192) ─────────────────────────────
-//
-// One Architect spawn per proposal stays the harness's job. WHICH proposals get attempted, and whether one failure
-// strands the batch, is the pure-core split this module's header describes. `deps.spawn` is the ONE injected side
-// effect, so the CLI and the daemon ride the SAME loop.
+// CLI and daemon share this loop; the harness supplies the Architect side effect through deps.spawn.
 
 /** One Architect worker call for one proposal's draft prompt; tests inject a fake. Returns the full {@link
  *  WorkerResult} so {@link runDraftRung} logs the same `workerLedgerFields` as every spawn. */
 export type DraftSpawn = (proposal: Proposal, prompt: string, ctx?: DraftSpawnContext) => Promise<WorkerResult>;
 
 /**
- * W1-T4864: what a redraft tells the spawn about the models that already failed THIS proposal's lint. A dirty
- * draft is evidence about the MODEL, not about the dice: 3,311 syntheses bought 200 terminal drafts on one model
- * because every relint re-rolled the same one. `avoidModels` names the ladder candidates whose draft came back dirty;
- * a spawn that resolves a ladder (run-task.ts) walks to the next candidate that is not in it. Empty on the first call.
+ * W1-T4864: dirty drafts exclude that model on the next ladder attempt (`avoidModels` starts empty).
+ * Re-rolling one model cost 3,311 syntheses for 200 terminal drafts; run-task.ts skips failed candidates.
  */
 export interface DraftSpawnContext {
   /** 1-based synthesis attempt within this proposal's bounded self-lint. */
@@ -2780,10 +2699,9 @@ export function gitGrepAnchorTrueAsync(
 }
 
 /**
- * W1-T4261 — answers {@link gitGrepAnchorTrue} once per (main commit, anchor). MEASURED 2026-09-23 on the fleet
- * gateway: one `git grep` spawn per proposal per inbox pass was 39% of the serve process's CPU (693 proposals). A
- * grep's answer is a pure function of the commit's tree and the anchor's pattern+path, so a cache keyed by the
- * commit sha is exact; a new sha drops every entry. `sha` undefined (unresolvable) caches nothing.
+ * W1-T4261: cache {@link gitGrepAnchorTrue} by commit sha and anchor pattern/path; a new sha clears it,
+ * an unresolved sha caches nothing. Per-proposal spawns cost 39% of serve CPU across 693 proposals
+ * on 2026-09-23; a fixed tree makes these cached answers exact.
  */
 export interface AnchorGrepCache {
   sha?: string;
@@ -3892,21 +3810,14 @@ export interface RatifyGateway {
    *  the skill-draft twin of {@link createRatificationBranch}. A gateway without it cannot approve a skill draft. */
   writeSkillFile?(proposalId: string, skillFile: SkillFilePayload): string;
 
-  /** OPTIONAL (W1-T4437 design i/ii). An OPEN plan PR from a DIFFERENT approve run of this SAME PASS,
-   *  not yet queued to merge — consulted ONLY when this proposal has no push of its OWN to resume
-   *  ({@link findPushedBranch} above answered `undefined`), so resuming a proposal's own prior push
-   *  always wins over joining someone else's. Six ratify PRs opening together and conflicting with each
-   *  other pairwise is the defect this exists to close: while one approve's PR is still open and not
-   *  already queued to merge, every OTHER approval in the same pass lands on it instead of starting its
-   *  own. Returning `undefined` (or omitting this method) is exactly today's behaviour — PROCEED to
-   *  {@link createRatificationBranch}. */
+  /** W1-T4437(i/ii): join another approve run's OPEN, not-yet-queued plan PR in this pass.
+   *  Consult only after {@link findPushedBranch} misses: own-push resumption always wins.
+   *  Avoids six simultaneous ratify PRs conflicting pairwise. Absent/undefined creates a new branch. */
   findJoinablePr?(): { branch: string; prUrl: string; prNumber?: number } | undefined;
 
-  /** OPTIONAL, called ONLY when {@link findJoinablePr} found a branch: add this ONE proposal's shard(s) plus its folded
-   *  stamp as ONE NEW COMMIT on that still-open branch, never squashing or amending a prior approval's (design iii).
-   *  Returns the branch it was given; W1-T9161: `undefined` when git refused the push as a non-fast-forward, and
-   *  {@link approveProposal} then opens this proposal's own PR, never retrying the join. `prUrl` is that open PR,
-   *  whose body W1-T4706 rebuilds over the whole branch. */
+  /** After {@link findJoinablePr} succeeds, add shards/stamp as ONE NEW COMMIT, never amend/squash (iii).
+   *  Returns that branch; W1-T9161 non-fast-forward returns undefined and opens an own PR, without retry.
+   *  W1-T4706 rebuilds `prUrl`'s body over the whole joined branch. */
   joinRatificationBranch?(branch: string, payload: RatificationPayload, prUrl: string): string | undefined;
 }
 
@@ -4150,10 +4061,7 @@ export function approveCommitMessage(payload: RatificationPayload): string {
 
 // ── Real-world ratification writers (plain text composition, harness-owned) ──────────────
 
-/** Append a drafted fragment's YAML entries to `plan/tasks.yaml`'s text. Pure string composition, never a YAML
- *  re-serialization that could reformat the rest of the file. The longest slug the shards on main carry, so a filed
- *  shard is never truncated shorter than the convention it joins. Measured over 696 shards: median 37, p95 57, max
- *  72. */
+/** Preserve main's shard slug convention: 696 shards measured median 37, p95 57, max 72. */
 const SHARD_SLUG_MAX_LEN = 72;
 
 /** One ratification shard: where it goes, and the exact YAML that goes there. */
@@ -4165,12 +4073,9 @@ export interface RatificationShardFile {
 }
 
 /**
- * Split a drafted fragment into ONE `plan/tasks.d/` shard per task. `applyFragmentToPlanYaml` appends to
- * `plan/tasks.yaml`, which `lint-plan`'s `monolith-filing` refuses for a NEW id; this was the last writer still
- * appending, and because no proposal had ever been ratified the write had never once met the gate. TEXT SPLITTING,
- * NEVER A YAML RE-SERIALIZATION: round-tripping authored, prose-heavy YAML would reformat what a human wrote, so
- * blocks are cut on a top-level `- ` at column zero. REFUSES RATHER THAN GUESSES — a block whose `- id:` cannot be
- * read yields no file, because a shard under a guessed name puts a task where `lint-plan` cannot match it.
+ * One `plan/tasks.d/` shard per task; the former monolith append first met `monolith-filing` at ratification.
+ * Split at column-zero `- `, NEVER reserialize authored YAML. An unreadable `- id:` refuses the fragment:
+ * guessing a filename would prevent lint-plan from matching the task.
  */
 export function ratificationShardFiles(
   fragmentYaml: string,
@@ -4202,8 +4107,7 @@ export function ratificationShardFiles(
   return { ok: true, files };
 }
 
-/** The filesystem surface {@link writeRatificationShards} needs — injected so the write is testable without a real
- *  worktree, the same seam discipline the rest of this module uses. */
+/** Injectable filesystem for {@link writeRatificationShards}, testable without a worktree. */
 export interface ShardWriteFs {
   mkdirSync: (dir: string, opts: { recursive: true }) => unknown;
   writeFileSync: (path: string, data: string, enc: "utf8") => void;

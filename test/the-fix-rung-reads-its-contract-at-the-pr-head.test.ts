@@ -69,6 +69,7 @@ function fakeGit(status: string) {
 async function dispatch(opts: {
   plan: Plan;
   resolve: NonNullable<BuildSweepEffectsDeps["resolveTaskContractAtHeadImpl"]> | undefined;
+  expectedRefusal?: RegExp;
 }) {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1t4073-"));
   const shim = ghShim(
@@ -139,7 +140,7 @@ async function dispatch(opts: {
           }
         : {}),
     } as unknown as BuildSweepEffectsDeps);
-    await effects.dispatchFix!(
+    const dispatched = effects.dispatchFix!(
       {
         prNumber: 6630,
         prUrl: PR_URL,
@@ -151,6 +152,8 @@ async function dispatch(opts: {
       } as never,
       { unmetCriteria: [], ciFailures: [{ name: "ci", logTail: "red" }] } as never,
     );
+    if (opts.expectedRefusal) await assert.rejects(Promise.resolve(dispatched), opts.expectedRefusal);
+    else await dispatched;
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
@@ -231,7 +234,7 @@ test("W1-T4073: an unreadable head contract stands the round down", async () => 
     },
     async (): Promise<PlanCriteriaAtHeadResult> => ({ criteria: [], taskId: ID, divergence: { taskId: ID, reason: "dup" } }),
   ]) {
-    const d = await dispatch({ plan: snapshotPlan(), resolve });
+    const d = await dispatch({ plan: snapshotPlan(), resolve, expectedRefusal: /PR-head task contract unreadable/ });
     assert.equal(d.rungCalls, 0, "no worker is spawned on a contract nobody could read");
     assert.equal(d.built.length, 0);
     const row = d.logs.find((l) => l.step === "sweep.fix.head_contract_unreadable");

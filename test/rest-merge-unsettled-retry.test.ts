@@ -10,14 +10,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+// The arm cluster's own module (run-task.ts only re-exports it), so this suite does not reach run-task.ts.
 import {
   attemptArm,
   mergeDirectRefusalMayBeUnsettled,
   realArmDeps,
   REST_MERGE_UNSETTLED_MAX_READS,
   REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS,
-  type FixRebaseMergeFacts,
-} from "#src/run-task.js";
+  type ArmDeps,
+} from "#src/lib/arm-auto-merge.js";
+
+/** The merge-facts reading `readMergeFacts` returns: arm-auto-merge's own shape for it. */
+type FixRebaseMergeFacts = ReturnType<NonNullable<ArmDeps["readMergeFacts"]>>;
 
 const PR = "https://github.com/craigoley/remudero/pull/2605";
 const RATE_LIMIT = "GraphQL: API rate limit already exceeded for user ID 4397075.";
