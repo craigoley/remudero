@@ -34,9 +34,14 @@ const BEFORE_EMITTED = "98c01bda5c0c4e6298572ffb633c6f0f1e3d722ffd23202f92d2bfbf
 
 test("W1-T10871: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/daemon.ts"), "utf8");
-  assert.equal(executableDigest(source), BEFORE_EXECUTABLE, "all non-comment code lines remain unchanged");
+  // W1-T9912 intentionally adds these two cohort ledger fields after the compression baseline.
+  // Remove only that exact addition when comparing the older executable code.
+  const cohortFields = "                due_because: result.dueBecause,\n                pass_ms: result.passMs,\n";
+  assert.equal(source.split(cohortFields).length, 2, "the cohort fields occur once in the daemon row");
+  const baselineSource = source.replace(cohortFields, "");
+  assert.equal(executableDigest(baselineSource), BEFORE_EXECUTABLE, "all other non-comment code lines remain unchanged");
   // Independently catch ASI changes and whitespace inside multiline string/template literals.
-  assert.equal(emittedDigest(source), BEFORE_EMITTED, "emitted JavaScript remains unchanged");
+  assert.equal(emittedDigest(baselineSource), BEFORE_EMITTED, "other emitted JavaScript remains unchanged");
   const { comments } = countCommentLines(source, "src/lib/daemon.ts");
   assert.ok(comments < BEFORE_COMMENTS, `comments must decrease from the measured ${BEFORE_COMMENTS}; got ${comments}`);
 });

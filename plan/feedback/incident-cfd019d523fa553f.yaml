@@ -1,0 +1,31 @@
+id: incident-cfd019d523fa553f
+ts: 2026-10-30T01:28:59.051Z
+raw: >-
+  Incident cfd019d523fa: intervention
+  escalated:none:fix-needs-design-at-this-exact-head-auth
+
+  First seen: 2026-10-30T01:27:55.702Z
+
+  Last seen: 2026-10-30T01:28:55.011Z
+
+  Count: 6, burn: 6.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#13416@bed8c1ca1 actor=cao825 cause=escalated:none:fix-needs-design-at-this-exact-head-auth — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#13416@3975fd0c1 actor=cao825 cause=escalated:none:fix-needs-design-at-this-exact-head-auth — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#13416@6b62f0802 actor=cao825 cause=escalated:none:fix-needs-design-at-this-exact-head-auth — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#cfd019d523fa553f47f800cf92412d061e762137f2daafd7d5b3fa1c2421d618
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { buildBenchmarkCohortDaemonHooks, daemonCommand } from "../src/run-task.js";
-import { runBenchmarkCohortIdlePass } from "../src/lib/benchmark-cohort.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
-import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
+import { buildBenchmarkCohortDaemonHooks, daemonCommand } from "#src/run-task.js";
+import { runBenchmarkCohortIdlePass } from "#src/lib/benchmark-cohort.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
 
 test("run task wires benchmark cohort state root", async () => {
   const home = mkdtempSync(join(tmpdir(), "rmd-benchmark-wiring-"));
@@ -49,15 +49,25 @@ test("run task wires benchmark cohort state root", async () => {
   }
 });
 
-test("benchmark cohort cadence does not scan again until its interval", () => {
+test("benchmark cohort wiring skips unchanged inputs and runs a new sealed source immediately", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-benchmark-cadence-wiring-"));
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir);
   let now = 1_000;
-  const hooks = buildBenchmarkCohortDaemonHooks({ clock: clockFromMillisFn(() => now), intervalMs: 30_000 });
-  assert.equal(hooks.checkBenchmarkCohort(), true);
-  assert.equal(hooks.checkBenchmarkCohort(), false);
-  now += 29_999;
-  assert.equal(hooks.checkBenchmarkCohort(), false);
-  now += 1;
-  assert.equal(hooks.checkBenchmarkCohort(), true);
+  const hooks = buildBenchmarkCohortDaemonHooks({
+    config: { root, claudeBin: "/bin/true" }, clock: clockFromMillisFn(() => now),
+  });
+  try {
+    assert.equal(hooks.checkBenchmarkCohort(), true);
+    assert.equal((await hooks.runBenchmarkCohortPass()).dueBecause, "boot");
+    assert.equal(hooks.checkBenchmarkCohort(), false);
+    now += 2 * 60 * 60 * 1_000;
+    assert.equal(hooks.checkBenchmarkCohort(), false);
+    writeFileSync(join(stateDir, "ledger.2026-09-26T12-00-00-000Z.ndjson"), "");
+    assert.equal(hooks.checkBenchmarkCohort(), true);
+    assert.equal((await hooks.runBenchmarkCohortPass()).dueBecause, "sealed_sources");
+    assert.equal(hooks.checkBenchmarkCohort(), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("benchmark cohort backlog progresses during supervised idle starvation", async () => {

@@ -81,16 +81,40 @@ function parseVersion(v: string): [number, number, number] | null {
   return [Number(m[1]), Number(m[2]), Number(m[3] ?? "0")];
 }
 
+/** A version suffix's variant, compared exactly and case-sensitively, as a registry compares tags: any change to it fails
+ *  closed (`bookworm-slim` → `trixie-slim`, `ubuntu.22.04` → `ubuntu.24.04`, `debian-11` → `debian-12`, `ltsc2022` →
+ *  `ltsc2025`, `bookworm-slim` → `Bookworm-slim`). Only a pre-release counter
+ *  on a known pre-release label is not variant (`4.0.0-beta.1` → `4.0.0-beta.2` reads `beta` both times): a closed
+ *  list, because every heuristic that guessed which digits were counters misread some base image's version. */
+function versionVariant(v: string): string | undefined {
+  const suffix = /^v?\d+(?:\.\d+){1,3}[-+](.*)$/.exec(v.trim())?.[1];
+  if (suffix === undefined) return undefined;
+  return PRE_RELEASE_COUNTER.exec(suffix)?.[1] ?? suffix;
+}
+
+const PRE_RELEASE_COUNTER = /^(alpha|beta|rc|pre|preview|next|canary|dev)[.-]?\d+$/i;
+
+/** A whole version token, as a registry tag is one string: numbers, then at most one suffix of tag characters. A token the
+ *  parse cannot read whole (`bookworm-slim--trixie` once lost its tail and read as a patch) is unknown, never a guess. */
+const WHOLE_VERSION_TOKEN = /^v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z][0-9A-Za-z._+-]*)?$/;
+
 function bumpLevel(from: string, to: string): SemverLevel {
+  if (!WHOLE_VERSION_TOKEN.test(from.trim()) || !WHOLE_VERSION_TOKEN.test(to.trim())) return "unknown";
   const a = parseVersion(from);
   const b = parseVersion(to);
   if (!a || !b) return "unknown";
+  // A variant change (bookworm → trixie, beta → rc) can hide behind equal numbers: fail closed, like a major.
+  const variants = [versionVariant(from), versionVariant(to)];
+  if (variants[0] !== undefined && variants[1] !== undefined && variants[0] !== variants[1]) return "major";
   if (b[0] !== a[0]) return "major";
   if (b[1] !== a[1]) return "minor";
   return "patch";
 }
 
-const FROM_TO_RE = /\bfrom\s+v?(\d+(?:\.\d+){1,3}(?:[-+][\w.]*)?)\s+to\s+v?(\d+(?:\.\d+){1,3}(?:[-+][\w.]*)?)/gi;
+// A version is the WHOLE whitespace-delimited token, so a Docker tag's suffix segments (`24.22.0-bookworm-slim`, #15176)
+// are never cut short; it never takes a sentence's closing punctuation. bumpLevel then refuses a token it cannot read whole.
+const VERSION_TOKEN = String.raw`v?(\d\S*?)(?=[.,;:)]*(?:\s|$))`;
+const FROM_TO_RE = new RegExp(String.raw`\bfrom\s+${VERSION_TOKEN}\s+to\s+${VERSION_TOKEN}`, "gi");
 
 /**
  * Parse every `from X to Y` version pair out of one text block. Dependabot emits
@@ -117,7 +141,7 @@ const DEPENDABOT_SUMMARY_LINE_RE = /^\s*(?:Updates|Bumps)\b/i;
  *  Not "structurally total": it legitimately does not match an unprefixed line, and that no-op is
  *  the arm the fixture exists to pin. */
 export const CONVENTIONAL_TITLE_PREFIX_RE = /^\s*[a-z][\w-]*(?:\([\w./-]+\))?!?:\s*/i;
-const DEPENDENCY_VERSION = String.raw`v?(\d+(?:\.\d+){1,3}(?:[-+][\w.]*)?)`;
+const DEPENDENCY_VERSION = VERSION_TOKEN;
 
 export interface DepReviewBumpFact {
   dependency: string;

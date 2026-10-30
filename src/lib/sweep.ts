@@ -1493,6 +1493,15 @@ export async function deployStateRowsOffLoop(
   }, history, onUnreadableLatch);
 }
 
+export interface FleetStateParts {
+  union_ms: number;
+  union_rotations: number;
+  commits_walked: number;
+  commit_reads: number;
+  commit_read_ms: number;
+  deploy_ms: number;
+}
+
 export interface BuildSweepEffectsDeps {
   selectedModeFileIO?: RegistryFileIO;
   contributorAdmissionImpl?: AdmissionObserver;
@@ -4836,6 +4845,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T4817 — every read rides `readJsonImpl`, the one write rides `ghRunImpl`; a failed read
     // degrades to "no gap found this pass", never a guessed dispatch.
     readFleetState: async (live) => {
+      const parts: FleetStateParts = {
+        union_ms: 0, union_rotations: 0, commits_walked: 0, commit_reads: 0, commit_read_ms: 0, deploy_ms: 0,
+      };
+      const unionStarted = nowMsImpl();
       readdirSync(dirname(ledgerPath));
       const freshLive = readFileSync(ledgerPath, "utf8");
       const union = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), {
@@ -4844,25 +4857,37 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       });
       if (!union.ok || union.unclassified.length > 0) throw new Error(`fleet reconciliation history unreadable: ${[...union.unread, ...union.unclassified].join(", ")}`);
       const history = [...parseLedger(union.rawLines.join("\n")), ...parseLedger(freshLive), ...live];
+      parts.union_ms = Math.max(0, nowMsImpl() - unionStarted);
+      parts.union_rotations = union.archiveCount;
       const rows: FleetStateRow[] = [];
+      // The same object survives deferred workflow observations during reconciliation.
+      const readCommit = async (args: string[]): Promise<unknown> => {
+        parts.commit_reads++;
+        const started = nowMsImpl();
+        try {
+          return await readJsonImpl(args);
+        } finally {
+          parts.commit_read_ms += Math.max(0, nowMsImpl() - started);
+        }
+      };
       const runCount = async (sha: string, workflow?: string): Promise<number | undefined> => {
         const endpoint = workflow ? `actions/workflows/${workflow}/runs` : "actions/runs";
-        const body = await readJsonImpl(["api", `repos/${owner}/${repo}/${endpoint}?head_sha=${sha}&per_page=1`]) as
+        const body = await readCommit(["api", `repos/${owner}/${repo}/${endpoint}?head_sha=${sha}&per_page=1`]) as
           { total_count?: unknown } | undefined;
         return typeof body?.total_count === "number" ? body.total_count : undefined;
       };
       try {
         rows.push(...await mainWorkflowStateRows({
           listMainCommits: async (limit) => {
-            const body = await readJsonImpl(["api", `repos/${owner}/${repo}/commits?sha=main&per_page=${limit * 2}`]) as
+            const body = await readCommit(["api", `repos/${owner}/${repo}/commits?sha=main&per_page=${limit * 2}`]) as
               Array<{ sha: string; parents: Array<{ sha: string }> }>;
             if (!Array.isArray(body)) throw new Error("main commit listing is not an array");
             return body.filter((c) => typeof c?.sha === "string").map((c) => ({ sha: c.sha, parents: (c.parents ?? []).map((p) => p.sha) }));
           },
-          countRunsForSha: (sha) => runCount(sha),
+          countRunsForSha: (sha) => { parts.commits_walked++; return runCount(sha); },
           countWorkflowRuns: runCount,
           changedFiles: async (sha) => {
-            const body = await readJsonImpl(["api", `repos/${owner}/${repo}/commits/${sha}`]) as
+            const body = await readCommit(["api", `repos/${owner}/${repo}/commits/${sha}`]) as
               { files?: Array<{ filename: string }> } | undefined;
             return body?.files?.map((f) => f.filename);
           },
@@ -4871,6 +4896,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       } catch (error) {
         log("reconcile.unreadable", { pipeline: "ci", reason: String((error as Error)?.message ?? error) });
       }
+      const deployStarted = nowMsImpl();
       try {
         const failedAt = (): number | undefined => {
           try {
@@ -4909,8 +4935,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }));
       } catch (error) {
         log("reconcile.unreadable", { pipeline: "deploy", reason: String((error as Error)?.message ?? error) });
+      } finally {
+        parts.deploy_ms = Math.max(0, nowMsImpl() - deployStarted);
       }
-      return { rows, history };
+      return { rows, history, parts };
     },
     reconcileMainRunGaps: async (history) => {
       let commits: MainCommitRef[] = [];
@@ -14198,7 +14226,7 @@ export interface SweepDeps {
    *  `publishedAtMs`). `sweep.disposed` rows record `snapshot_age_ms` against it at the moment a PR is
    *  acted on. Omitted, the age is measured from the pass's own start. */
   snapshotPublishedAtMs?: number;
-  markPrelude?: (stage: string, walkStarts?: boolean) => void;
+  markPrelude?: FullPreludeTimer["mark"];
   /** W1-T2752 — a SYNCHRONOUS, READ-ONLY admission read consulted immediately before
    *  `blocked-fixable` and `conflicted` invoke {@link dispatchFix}, never a replacement for either
    *  surface's own live-state/claim checks. `buildSweepEffects` supplies it from the SAME
@@ -14315,6 +14343,7 @@ export interface SweepDeps {
   reconcileMainRunGaps?: (history: MainRunGapHistory) => Promise<readonly MainRunGapDispatch[]>;
   readFleetState?: (live: readonly Record<string, unknown>[]) => Promise<{
     rows: readonly FleetStateRow[]; history: readonly Record<string, unknown>[];
+    parts?: FleetStateParts;
   }>;
   /** W1-T2927 — pulls CI's `mutation-verdict-ledger` artifact (see mutation-verdict-pull.ts). */
   pullMutationVerdicts?: (recorded: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
@@ -15719,6 +15748,9 @@ export function fixRungInputsUnchanged(row: Record<string, unknown>, current: Fi
     row.read_body_sha256 !== current.bodySha256);
 }
 
+/** Operator ruling 2026-10-30: how long a PR may wait on an unanswered fix-lane escalation before the ladder acts. */
+export const HELD_ESCALATION_SLO_MS = 6 * 60 * 60_000;
+
 /** W1-T9999 — the ledger row a pass writes when it settles an orphaned fix seed. */
 export const FIX_SEED_ORPHANED_STEP = "sweep.fix.seed_orphaned";
 
@@ -15726,7 +15758,7 @@ export interface FixSeed { ts?: string; runId?: string }
 /** `orphaned`: the earlier run no longer owns a continuation; ordinary checkout/worker claims still gate redispatch. */
 export type FixSeedRead = { kind: "live" | "ended" | "orphaned" | "held"; seed: FixSeed; orphanReason?: "owner-run-ended";
   /** W1-T10339: `held` only — the stand-down that ended the rung while every input it read still stands. */
-  hold?: { site: string; reason: string } };
+  hold?: { site: string; reason: string; at?: string } };
 
 function continuationEndedAtEmptyBoot(
   lines: ReadonlyArray<Record<string, unknown>>, from: number, ownerRunId: string, taskId: string, runId: string,
@@ -15787,7 +15819,8 @@ export function fixSeedRead(
     // W1-T10339: a stand-down whose recorded inputs all still stand is a hold, not an ended rung.
     if (current !== undefined && end.standDown !== undefined && fixRungInputsUnchanged(end.standDown, current)) {
       return { kind: "held", seed, hold: { site: String(end.standDown.site ?? "unknown"),
-        reason: typeof end.standDown.reason === "string" ? end.standDown.reason : "no reason recorded" } };
+        reason: typeof end.standDown.reason === "string" ? end.standDown.reason : "no reason recorded",
+        ...(typeof end.standDown.ts === "string" ? { at: end.standDown.ts } : {}) } };
     }
     return { kind: "ended", seed };
   }
@@ -17297,7 +17330,7 @@ export interface FullPreludeTimer {
   readonly startedAtMs: number;
   time<T>(stage: string, run: () => T | Promise<T>): Promise<T>;
   note(fields: Record<string, unknown>): void;
-  mark(stage: string, walkStarts?: boolean): void;
+  mark(stage: string, walkStarts?: boolean, fields?: Record<string, unknown>): void;
   write(walkReached: boolean): void;
 }
 
@@ -17324,7 +17357,8 @@ export function createFullPreludeTimer(
       }
     },
     note(extra) { Object.assign(fields, extra); },
-    mark(stage, walkStarts = false) {
+    mark(stage, walkStarts = false, extra) {
+      Object.assign(fields, extra);
       const at = clock();
       record(stage, at - cursorMs);
       cursorMs = at;
@@ -18397,9 +18431,11 @@ export async function runSweep(
   // Full passes only: a light pass fans this function out one PR at a time, and the reads below
   // are per-pass, not per-PR. The dedupe is the ledger fold handed to the effect, so a commit
   // already handled costs no read and is never dispatched a second time.
+  let fleetStateParts: FleetStateParts | undefined;
   if (deps.readFleetState && !deps.dryRun && deps.repairAdmissionSurface !== "light") {
     try {
-      const { rows, history } = await deps.readFleetState(ledgerLines);
+      const { rows, history, parts } = await deps.readFleetState(ledgerLines);
+      fleetStateParts = parts;
       await reconcileFleetState(rows, history, (event) => {
         appendLine(deps.ledgerPath, { ...event, run_id: deps.runId, task_id: "SWEEP" });
         log(event.step, event);
@@ -18448,7 +18484,7 @@ export async function runSweep(
     }
   }
 
-  deps.markPrelude?.("fleet_state");
+  deps.markPrelude?.("fleet_state", false, fleetStateParts && { fleet_state_parts: fleetStateParts });
   // Full passes only: one paced list per pass, deduped on the ledger's own run_ids.
   if (deps.pullMutationVerdicts && deps.repairAdmissionSurface !== "light") {
     try {
@@ -18528,7 +18564,8 @@ export async function runSweep(
   const ladderActedPrs = new Set<number>();
   // W1-T5690: the SLO clock's view of one PR — set only for a blocked-ambiguous PR whose blocker has
   // outlived BLOCKER_SLO_MS. `noOp` is the repeated-refusal hold, which enters the climb at rebuild.
-  interface SloContext { blocker: PrBlocker; owner: string; ageMs: number; noOp: boolean; strikeOwned: boolean }
+  // `held` (W1-T5690 extension, operator ruling 2026-10-30) names the escalation an unanswered refused-escalate PR waits on.
+  interface SloContext { blocker: PrBlocker; owner: string; ageMs: number; noOp: boolean; strikeOwned: boolean; held?: string }
   const applyStrikeLadder = async (pr: OpenPrView, slo?: SloContext): Promise<string> => {
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha };
     const record = (step: string, extra: Record<string, unknown>) => {
@@ -18622,7 +18659,7 @@ export async function runSweep(
           nowMs: now, rungHistory: history, unavailable: ["refresh"],
         }, buildFixProgressInput({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
           currentRed: redCheckNames(pr), ledger: strikeLadderRows, operatorAnswer: pr.pendingAnswer?.constraint }),
-        deps.fixProgressJudge, record);
+        deps.fixProgressJudge, record, slo?.held);
         if (progress.rung === "none") return hold(progress.reason);
         decision = { rung: progress.rung, reason: progress.reason };
       }
@@ -18635,7 +18672,8 @@ export async function runSweep(
         }
         const refusals = fixRoundTally(strikeLadderRows, fixLedgerTaskIdFor(pr), pr.headSha).refusals;
         const note = capStrikeLadderNote(
-          `${reason}\nClosed PR: ${pr.prUrl}; head: ${pr.headSha}\n` +
+          `${reason}\n${slo?.held === undefined ? "" : `Unanswered escalation it was held on: ${slo.held}\n`}` +
+          `Closed PR: ${pr.prUrl}; head: ${pr.headSha}\n` +
           `Failing checks/tests: ${(pr.ciFailures ?? []).map(f => `${f.name}: ${firstFailingTestTitle(f.logTail) ?? "no failing title"}`).join("; ")}\n` +
           `Unmet claims: ${pr.unmetCriteria.map(c => `${c.claim}: ${c.reason}`).join("; ")}\n` +
           `Strike history: ${JSON.stringify(pr.strikeHistory ?? [])}\nfix.commit_refused: ${JSON.stringify(refusals)}`,
@@ -19857,7 +19895,9 @@ export async function runSweep(
     // W1-T10339: a PR with no task trailer is judged on its BODY, so the body is an input a stand-down read.
     const standDownBodySha = carriesTaskTrailer(pr) ? undefined : prBodyDigest(pr.body);
     let designReleasedByBody = false;
-    let standDownHold: { site: string; reason: string } | undefined;
+    let standDownHold: { site: string; reason: string; at?: string } | undefined;
+    let heldEscalationAt: string | undefined;
+    let heldEscalationDedup: string | undefined;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
@@ -19904,7 +19944,10 @@ export async function runSweep(
               `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
             : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
           if (mainAdoption) designMainAdoptionSpent = true;
-          if (!amended && !mainAdoption) ruleBlockerByIndex.set(prIndex, "escalated");
+          if (!amended && !mainAdoption) {
+            ruleBlockerByIndex.set(prIndex, "escalated");
+            heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;
+          }
         }
       } else if (handoff.kind === "unavailable") {
         disposition = "wait";
@@ -19932,12 +19975,21 @@ export async function runSweep(
         held?.hold?.site === "rung.strike" && held.hold.reason === CONFLICT_REPAIR_HANDOFF_REASON;
       if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff) {
         standDownHold = held.hold;
+        heldEscalationAt = held.hold.at;
         disposition = "refused-escalate";
         reason = `fix stood down at ${held.hold.site} and nothing it read has changed (head ${pr.headSha.slice(0, 7)}, task contract` +
           `${standDownBodySha === undefined ? "" : ", PR body"}) — no worker is dispatched until one does: ${held.hold.reason}`;
         ruleBlockerByIndex.set(prIndex, "escalated");
       }
     }
+    // Operator ruling 2026-10-30: a fix lane that escalated to a person and got no answer for HELD_ESCALATION_SLO_MS takes the
+    // ladder's rebuild rung (the fix-progress judge, then close and requeue with the findings as a note, or a digest) instead
+    // of re-escalating. The age is read off the hold's own row, so neither blocker bookkeeping nor a re-escalation resets it.
+    const heldAgeMs = heldEscalationAt === undefined ? NaN : now - Date.parse(heldEscalationAt);
+    const heldEscalationSlo: SloContext | undefined = deps.strikeLadder !== undefined && disposition === "refused-escalate" &&
+      !deps.dryRun && pr.isPlanFiling !== true && !(pr.pendingAnswer && !pr.pendingAnswer.spent) &&
+      Number.isFinite(heldAgeMs) && heldAgeMs >= HELD_ESCALATION_SLO_MS
+      ? { blocker: "escalated", owner: "NONE", ageMs: heldAgeMs, noOp: true, strikeOwned: false, held: reason } : undefined;
     byDisposition[disposition]++;
     const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue && !sloLadderDue;
     const contradictionKey = isContradictory ? contradictoryKey(pr, ledgerLines) : undefined;
@@ -20220,6 +20272,12 @@ export async function runSweep(
             ? `stand-down hold: ${reason} — escalated once for this head (${pr.headSha.slice(0, 7)}), no worker dispatched and no capacity spent`
             : `an escalation was already filed for this head (${pr.headSha.slice(0, 7)}) — the ` +
             `escalation is deduped, not skipped, and a new head re-earns its own`;
+        }
+        // An unanswered escalation past its SLO reaches the ladder in the action arm; the dedup still forbids a second issue.
+        if (alreadyDone && heldEscalationSlo !== undefined) {
+          heldEscalationDedup = dedupStandDownReason;
+          alreadyDone = false;
+          dedupStandDownReason = undefined;
         }
         break;
       case "dep-review":
@@ -21860,6 +21918,20 @@ export async function runSweep(
               break;
             }
             case "refused-escalate":
+              if (heldEscalationSlo) {
+                const ladder = await applyStrikeLadder(pr, heldEscalationSlo);
+                if (ladderActedPrs.has(pr.prNumber)) {
+                  standDownReason = ladder;
+                  reason = ladder;
+                  break;
+                }
+                extraDisposedFields = { ...extraDisposedFields, held_escalation_ladder: ladder };
+                if (heldEscalationDedup !== undefined) {
+                  acted = false;
+                  standDownReason = `${heldEscalationDedup}; ladder: ${ladder}`;
+                  break;
+                }
+              }
               try {
                 await deps.escalate(pr, reason, question!);
                 if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_escalation_outcome: "delivered" };

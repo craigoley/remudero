@@ -1,0 +1,56 @@
+id: automation-external-payload-contracts-20261029
+ts: 2026-10-30T01:25:15.094Z
+raw: >-
+  Cross-repository automation finding from the operator's 2026-10-29 session. It
+  is an agent technical finding, not an operator ruling.
+
+  OBSERVED in craigoley/deals-watch#5, as reported by the session that fixed it
+  (this session could not read that repository). A store's product JSON endpoint
+  stopped returning the per-variant availability field. The reader coerced the
+  missing value to false ("sold out"), so a back-in-stock watcher saw nothing for
+  five days. Its tests stayed green because they mocked the fetch. The remedy
+  there: a field missing from an external payload is an error with a nonzero
+  exit, never a default value; and contract tests run against recorded real
+  payloads.
+
+  WHAT REMUDERO ALREADY HAS (OBSERVED). The principle is applied site by site.
+  src/lib/open-prs-rest.ts leaves draft undefaulted (W1-T528: "?? false" would
+  assert "not a draft"). mergeStateFromRest returns undefined for an absent
+  mergeable_state. src/lib/drain.ts documents (W1-T2675) that the MergedSet
+  spelling "projection.get(id)?.merged ?? false" collapses indeterminate credit
+  into false, and it adds isCreditIndeterminate. learnings/architecture.yaml
+  records "A check that is ABSENT is not a check that passed". Doctrine
+  catch-is-a-claim and cover-the-real-default name the same family. The review
+  replay sample (src/lib/review-replay-sample.ts, rmd review-replay refresh)
+  already refreshes recorded inputs, which is a precedent.
+
+  WHAT IT LACKS. (a) There is no systematic contract for external payloads
+  (OBSERVED). test/fixtures holds one recorded GitHub REST payload
+  (test/fixtures/rest-pulls-list/pulls-state-closed.json). Most GitHub REST,
+  GraphQL, gh JSON and model-provider reads are tested only through injected
+  fakes whose shape the test author wrote. INFERRED: an upstream rename or
+  removal of a field would pass CI. (b) No census or lint classifies
+  default-on-missing reads of external fields (OBSERVED: src/ has 74 "?? false"
+  sites; many are internal projections, and none are classified as external or
+  internal). (c) No runtime drift signal (INFERRED, none found): a reader that
+  meets a missing field returns undefined locally, but nothing aggregates "field
+  F absent from endpoint E" into an alert. A shape change upstream would surface
+  as quiet wrong decisions, not as a red.
+
+  DESIRED CAPABILITY (general). For each external boundary (GitHub REST and
+  GraphQL, gh CLI JSON, model-provider responses), keep a small set of recorded
+  real payloads, with contract tests that parse them through the production
+  reader and a bounded refresh job. Use one read helper that tells absent apart
+  from false or empty, and that makes absence observable (a ledger row or an
+  incident event) instead of defaulting. Add a census that flags a new
+  default-on-missing read of an external field. This entry authorizes no gate
+  loosening and no new provider or model calls to manufacture fixtures.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: cross-repo-automation:external-payload-contracts:20261029
+thread_id: null
