@@ -21,8 +21,23 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/15643
+summary:
+  headline: Restore or justify missing served model evidence
+  what_happened: The `ci-judge` lane records `servedModel` for only 106 of 478
+    worker calls (22.2%) in the latest seven-day window, below the 90% floor.
+    The gap has persisted since October 8 and reopened October 29; overrides
+    were rejected.
+  decision: Restore `servedModel` at the lane’s ledger write site, or document why
+    this lane legitimately lacks the field.
+  options:
+    - label: Restore the field
+      consequence: Record `servedModel` for `ci-judge` worker calls and close the
+        coverage gap.
+      intent: approve
+    - label: Document the exception
+      consequence: Record why `ci-judge` legitimately does not provide `servedModel`.
+      intent: reframe
 expansion: null
 submission_key: null
 thread_id: null
