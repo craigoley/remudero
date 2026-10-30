@@ -1,0 +1,184 @@
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+
+import type { Clock } from "#src/lib/clock.js";
+import { runGardenAsync, type GardenerDeps } from "#src/lib/gardener.js";
+import type { PlanInventory } from "#src/lib/plan-gardener.js";
+import { parseTasksFromYaml } from "#src/lib/plan.js";
+import {
+  applyRedesignEdit, buildRedesignSources, parseRedesignAnswer, REDESIGN_AFTER_MS, REDESIGN_JUDGED_STEP, redesignCandidates, redesignEditRefusal, redesignGardenSpec,
+  type RedesignSources,
+} from "#src/lib/redesign-gardener.js";
+import { GARDEN_NAMES } from "#src/run-task.js";
+import { MACHINE_LANE_HEAD_RE } from "#src/lib/sweep.js";
+import { REGISTERED_GARDEN_NAMES } from "#src/lib/garden-registry.js";
+
+// 2026-10-29: #15404 (W1-T10661) read "fix needs design at this exact head" for hours and its shard carried a
+// refusal-amendment pointer ("an Architect must make the change above"), but no Architect existed to make it.
+
+const NOW = Date.parse("2026-10-30T03:00:00.000Z");
+const MIN = 60_000;
+const iso = (ms: number) => new Date(ms).toISOString();
+const ID = "W1-T10661";
+const REL = `plan/tasks.d/${ID}-check-body-coverage.yaml`;
+const CLAIM = "a recorded check:body-coverage round, replayed through the real code path in src/lib/prompt-render.ts, is prevented or self-healed without dispatching a fix round";
+const HEAD = "f4a25ce82040a489db41686f92b9c233cc6eaf94";
+type Row = Record<string, unknown>;
+
+const shard = (pointer = true) => [
+  `- id: ${ID}`,
+  '  title: "THE CI FRICTION GARDENER\'S COSTLIEST OPEN CAUSE: check:body-coverage"',
+  "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: human", "  risk: low", "  priority: 1.3",
+  ...(pointer ? [
+    "  # refusal-amendment (W1-T10661, run DAEMON-1@f4a25ce, 2026-10-29T11:03:31.670Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files",
+    "  #   worker evidence: The declared renderer cannot enforce report publication or prevent fix dispatch when proofs are omitted.",
+    "  #   this task is held from dispatch until its record changes; an Architect must make the change above",
+  ] : []),
+  "  status: queued", "  attempts: 0",
+  "  files:", "    - src/lib/prompt-render.ts", "    - test/worker/check-body-coverage.test.ts",
+  "  acceptance:", `    - claim: "${CLAIM}"`, '      proof: "unit test: test/worker/check-body-coverage.test.ts"',
+  '  note: "Filed by the ci-friction gardener."', "",
+].join("\n");
+
+const heldRow = (atMs: number): Row => ({
+  step: "sweep.disposed", pr_number: 15404, task_id: ID, head_sha: HEAD, disposition: "refused-escalate", ts: iso(atMs),
+  reason: "fix needs design at this exact head (round R:1:1) — the declared renderer cannot enforce report publication",
+});
+
+const AMEND = `REDESIGN: ${JSON.stringify({
+  verdict: "amend", reason: "the fix needs the fix lane's dispatch path, which files: did not declare",
+  files_add: ["src/cli/commands/fix.ts"], proofs: [{ criterion: 1, proof: "unit test: test/worker/check-body-coverage.test.ts" }],
+  amendment: "Prevent the round in src/cli/commands/fix.ts, where the dispatch is decided, and replay the recorded round in the test.",
+})}`;
+
+function world(t: { after: (fn: () => void) => void }, opts: { rows?: Row[]; pointer?: boolean; answers?: string[] } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-redesign-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  mkdirSync(join(root, "src", "cli", "commands"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "src", "cli", "commands", "fix.ts"), "export {};\n");
+  writeFileSync(join(root, REL), shard(opts.pointer ?? true));
+  const rows: Row[] = [...(opts.rows ?? [])];
+  const prompts: string[] = [];
+  const answers = [...(opts.answers ?? [AMEND])];
+  const landed: Array<{ paths: string[]; title: string; body: string }> = [];
+  const clock: Clock = { now: () => NOW, date: () => new Date(NOW), iso: () => iso(NOW) };
+  const plan = (): PlanInventory => {
+    const tasks = parseTasksFromYaml(readFileSync(join(root, REL), "utf8"), REL);
+    return { open: tasks, all: tasks, shards: new Map([[ID, REL]]) };
+  };
+  const sources: Partial<RedesignSources> = {
+    clock, plan,
+    readShard: (rel) => readFileSync(join(root, rel), "utf8"),
+    ledger: (steps) => rows.filter((r) => steps.includes(String(r.step))),
+    pathExists: (rel) => existsSync(join(root, rel)),
+    judgeText: async (prompt) => { prompts.push(prompt); return answers.shift() ?? 'REDESIGN: {"verdict":"grill","reason":"no answer"}'; },
+  };
+  const deps: GardenerDeps = {
+    stateDir: join(root, "state"), repoRoot: root, clock, seed: 1,
+    log: (step, extra = {}) => { rows.push({ task_id: "DAEMON", ...extra, step, ts: iso(NOW) }); },
+    landingRefusal: () => undefined,
+    mergedPlanLint: () => undefined,
+    openWorkspace: () => ({ root, land: (p) => { landed.push(p); return "https://example.test/pull/901"; }, dispose: () => {} }),
+  };
+  return { root, rows, prompts, landed, sources, deps, read: () => readFileSync(join(root, REL), "utf8") };
+}
+
+test("the redesign Architect amends a task its fix lane stood down on, keeping every claim and growing files only", async (t) => {
+  const w = world(t, { rows: [heldRow(NOW - 3 * 60 * MIN), heldRow(NOW - 5 * MIN)] });
+  await runGardenAsync(redesignGardenSpec(w.deps, w.sources), w.deps);
+  assert.equal(w.prompts.length, 1, "one Architect spawn for the one held task");
+  assert.match(w.prompts[0]!, /Standing rule 16/);
+  assert.match(w.prompts[0]!, /refusal-amendment pointer in the shard/);
+  assert.match(w.prompts[0]!, /PR #15404 at head f4a25ce is held: fix needs design at this exact head/);
+  assert.equal(w.landed.length, 1);
+  assert.match(w.landed[0]!.title, /the Architect amends W1-T10661 after its fix lane stood down/);
+  const [after] = parseTasksFromYaml(w.read(), REL);
+  assert.deepEqual(after!.acceptance!.map((c) => c.claim), [CLAIM], "the claim is untouched");
+  assert.deepEqual(after!.files, ["src/lib/prompt-render.ts", "test/worker/check-body-coverage.test.ts", "src/cli/commands/fix.ts"]);
+  assert.match(after!.amendment!, /by the redesign Architect \(machine, rule 16\): the fix needs the fix lane's dispatch path/);
+  assert.match(after!.amendment!, /Prevent the round in src\/cli\/commands\/fix\.ts/);
+  const marker = /^ {2}# redesign: signature=([a-f0-9]{16})$/m.exec(w.read());
+  assert.ok(marker, "the shard carries the marker its PR's proof greps");
+  assert.ok(w.landed[0]!.body.includes(`proof: "grep: # redesign: signature=${marker[1]} in ${REL}"`));
+  assert.ok(w.rows.some((r) => r.step === REDESIGN_JUDGED_STEP && r.outcome === "amend"));
+  // The same evidence is never asked about again.
+  assert.equal(redesignCandidates({ ...(w.sources as RedesignSources) }).length, 0);
+});
+
+test("a hold younger than an hour, or one the sweep no longer disposes, is left to the fix lane", (t) => {
+  const young = world(t, { pointer: false, rows: [heldRow(NOW - (REDESIGN_AFTER_MS - MIN)), heldRow(NOW - MIN)] });
+  assert.equal(redesignCandidates(young.sources as RedesignSources).length, 0);
+  const gone = world(t, { pointer: false, rows: [heldRow(NOW - 10 * 60 * MIN), heldRow(NOW - 3 * 60 * MIN)] });
+  assert.equal(redesignCandidates(gone.sources as RedesignSources).length, 0, "no disposition in two hours: the PR left the sweep");
+  const held = world(t, { pointer: false, rows: [heldRow(NOW - 2 * 60 * MIN), heldRow(NOW - MIN)] });
+  assert.equal(redesignCandidates(held.sources as RedesignSources).length, 1);
+});
+
+test("a GRILL answer lands nothing and the same evidence is not asked again", async (t) => {
+  const w = world(t, { answers: ['REDESIGN: {"verdict":"grill","reason":"the claim itself needs the operator"}'] });
+  await runGardenAsync(redesignGardenSpec(w.deps, w.sources), w.deps);
+  assert.equal(w.landed.length, 0);
+  assert.ok(w.rows.some((r) => r.step === REDESIGN_JUDGED_STEP && r.outcome === "grill" && r.task_id === ID));
+  assert.equal(redesignCandidates(w.sources as RedesignSources).length, 0);
+  assert.equal(w.read(), shard(), "the shard is untouched");
+});
+
+test("rule 16 and the operator's grants are enforced in code, whatever the Architect answers", (t) => {
+  const w = world(t);
+  const task = parseTasksFromYaml(shard(), REL)[0]!;
+  const exists = w.sources.pathExists!;
+  const edit = (over: object) => ({ filesAdd: [], proofs: [], amendment: "x", reason: "r", ...over });
+  for (const path of [".github/workflows/ci.yml", "deploy/Dockerfile", "plan/policy.yaml", "scripts/coverage-ratchet.mjs", "src/lib/review.ts"]) {
+    assert.match(String(redesignEditRefusal(task, edit({ filesAdd: [path] }), () => true)), /operator-only grant/, path);
+  }
+  assert.match(String(redesignEditRefusal(task, edit({ filesAdd: ["../escape.ts"] }), exists)), /not a plain repo path/);
+  assert.match(String(redesignEditRefusal(task, edit({ filesAdd: ["src/lib/invented.ts"] }), exists)), /does not exist/);
+  assert.equal(redesignEditRefusal(task, edit({ filesAdd: ["test/new-one.test.ts"] }), exists), undefined, "a new test may be declared");
+  assert.match(String(redesignEditRefusal(task, edit({ proofs: [{ criterion: 2, proof: "unit test: x" }] }), exists)), /does not have/);
+  assert.match(String(redesignEditRefusal(task, edit({ proofs: [{ criterion: 1, proof: "the test passes" }] }), exists)), /dialect prefix/);
+  // A shard with two records cannot be edited safely, and the edited text must still parse as the same record.
+  const two = `${shard()}${shard().replace(ID, "W1-T10662")}`;
+  assert.match(String((applyRedesignEdit(two, REL, edit({}), "0123456789abcdef", "2026-10-30") as { refused: string }).refused), /2 records/);
+});
+
+test("the redesign garden is registered wherever a garden is named", () => {
+  assert.ok((GARDEN_NAMES as readonly string[]).includes("redesign"));
+  assert.ok((REGISTERED_GARDEN_NAMES as readonly string[]).includes("redesign"));
+  assert.ok(MACHINE_LANE_HEAD_RE.test("redesign-garden-1793322451897"), "its plan PRs file from a machine-lane head");
+});
+
+test("an Architect answer that is not one REDESIGN: JSON line, with a reason and an amendment, is unparseable", () => {
+  assert.equal(parseRedesignAnswer("I would widen files.").verdict, "unparseable");
+  assert.match((parseRedesignAnswer("REDESIGN: {not json") as { reason: string }).reason, /not JSON/);
+  assert.equal(parseRedesignAnswer('REDESIGN: {"verdict":"maybe"}').verdict, "unparseable");
+  assert.equal(parseRedesignAnswer('REDESIGN: {"verdict":"amend","reason":"r"}').verdict, "unparseable", "an amend needs an amendment");
+  assert.equal(parseRedesignAnswer('REDESIGN: {"verdict":"grill"}').verdict, "grill");
+});
+
+test("an amendment is appended to the shard's existing amendment block, which keeps its operator history", () => {
+  const withBlock = shard().replace('  note: "Filed by the ci-friction gardener."',
+    '  note: "Filed by the ci-friction gardener."\n  amendment: |\n    2026-10-29, by operator decision: criterion 1 restated.');
+  const edit = { filesAdd: [], proofs: [], amendment: "Build the dispatch guard first.", reason: "the guard belongs in fix.ts" };
+  const out = applyRedesignEdit(withBlock, REL, edit, "0123456789abcdef", "2026-10-30") as { text: string };
+  const [task] = parseTasksFromYaml(out.text, REL);
+  assert.match(task!.amendment!, /^2026-10-29, by operator decision: criterion 1 restated\.\n\n2026-10-30, by the redesign Architect/);
+  assert.match(task!.amendment!, /Build the dispatch guard first\.\n?$/);
+});
+
+test("the production ledger reader reads the union and refuses an incomplete one", (t) => {
+  const w = world(t);
+  writeFileSync(join(w.root, "state", "ledger.ndjson"), `${JSON.stringify(heldRow(NOW - MIN))}\n`);
+  const sources = buildRedesignSources(w.deps);
+  assert.equal(sources.ledger(["sweep.disposed"], iso(NOW - 60 * MIN)).length, 1);
+  assert.equal(sources.readShard(REL), shard());
+  assert.equal(sources.pathExists("src/cli/commands/fix.ts"), true);
+  // A live ledger that cannot be read is an incomplete corpus, never an empty one.
+  rmSync(join(w.root, "state", "ledger.ndjson"));
+  mkdirSync(join(w.root, "state", "ledger.ndjson"));
+  assert.throws(() => sources.ledger(["sweep.disposed"], iso(NOW - 60 * MIN)), /incomplete ledger union/);
+});

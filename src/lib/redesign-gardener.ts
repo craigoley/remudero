@@ -1,0 +1,333 @@
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { backlogLandingGuard } from "./backlog-gardener.js";
+import { systemClock, type Clock } from "./clock.js";
+import { writeAtomic } from "./fs-race-safe.js";
+import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { parseTasksFromYaml, type Task } from "./plan.js";
+import { planInventory, type PlanInventory } from "./plan-gardener.js";
+import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
+import { INSTRUMENT_SURFACE, isDialectPrefixed } from "./review.js";
+
+/**
+ * The redesign gardener: the plan Architect amends a task its fix lane could not build (operator ruling 2026-10-30).
+ *
+ * A fix round that stands down ("fix needs design at this exact head", a refused criterion whose refusal-amendment
+ * pointer says "an Architect must make the change above") holds its PR until the task's record changes. Nothing made
+ * that change but a person, so on 2026-10-29 seven fleet PRs waited hours behind 149 needs-human issues. This garden
+ * asks an LLM Architect for the smallest amendment that lets the next round build the SAME claims, and lands it as a
+ * plan PR that review and auto-merge judge like any other. Standing rule 16 is enforced in code, never trusted to the
+ * model: every claim survives verbatim and in order, `files:` only grows, and an instrument path, a workflow, a deploy
+ * file or a plan file is never granted. A merged amendment changes the task's contract revision, which is exactly what
+ * releases the sweep's design and stand-down holds. When the Architect answers GRILL, or the code refuses its edit, the
+ * PR stays on the SLO ladder (HELD_ESCALATION_SLO_MS in sweep.ts), which judges a rebuild or a digest.
+ */
+
+export type RedesignClass = "amend";
+export const REDESIGN_CLASSES: readonly RedesignClass[] = ["amend"];
+export const REDESIGN_NAME = "redesign";
+export const REDESIGN_JUDGED_STEP = "redesign.judged";
+/** A hold younger than this is left to the fix lane's own next pass; an hour also bounds re-asking on a flapping hold. */
+export const REDESIGN_AFTER_MS = 60 * 60_000;
+/** How many tasks one pass asks about: each answer is one Architect spawn, and each landing is one plan PR to review. */
+export const REDESIGN_MAX_PER_PASS = 2;
+/** A held PR the sweep has not disposed for this long is no longer being swept (merged, closed or rebuilt). */
+const SWEPT_RECENTLY_MS = 2 * 60 * 60_000;
+const EVIDENCE_WINDOW_MS = 7 * 24 * 60 * 60_000;
+const HOLD_REASON = /^(?:fix needs design at this exact head|fix stood down at )/;
+const POINTER = /^ {2}# refusal-amendment \(.*(?:\n {2}# {3}.*)*/m;
+const MARKER = (signature: string) => `  # redesign: signature=${signature}`;
+const MARKER_RE = /^ {2}# redesign: signature=([a-f0-9]{16})\b/gm;
+const FORBIDDEN_PREFIXES = [".github/", "deploy/", "plan/", "state/", "hooks/"];
+
+type Row = Record<string, unknown>;
+
+export interface RedesignEdit {
+  filesAdd: string[];
+  proofs: Array<{ criterion: number; proof: string }>;
+  amendment: string;
+  reason: string;
+}
+
+export interface RedesignAction extends GardenAction<RedesignClass> {
+  shard: string;
+  signature: string;
+  edit: RedesignEdit;
+}
+
+export interface RedesignCandidate {
+  id: string;
+  shard: string;
+  text: string;
+  evidence: string[];
+  signature: string;
+}
+
+export interface RedesignInventory {
+  candidates: number;
+  actions: RedesignAction[];
+  outcomes: Array<{ task_id: string; outcome: "amend" | "grill" | "refused" | "unparseable"; reason: string }>;
+}
+
+export interface RedesignSources {
+  clock: Clock;
+  plan: () => PlanInventory;
+  readShard: (rel: string) => string;
+  /** Rows of exactly the named steps since `sinceIso`. */
+  ledger: (steps: readonly string[], sinceIso: string) => readonly Row[];
+  pathExists: (rel: string) => boolean;
+  /** One tool-less Architect spawn. */
+  judgeText: (prompt: string) => Promise<string>;
+}
+
+const signatureOf = (id: string, evidence: readonly string[]): string =>
+  createHash("sha256").update(JSON.stringify([id, ...evidence])).digest("hex").slice(0, 16);
+
+/** The tasks a person was asked to redesign and has not: a refusal-amendment pointer, or a PR the sweep holds. */
+export function redesignCandidates(sources: RedesignSources): RedesignCandidate[] {
+  const now = sources.clock.now();
+  const plan = sources.plan();
+  const open = new Map(plan.open.map((t) => [t.id, t]));
+  const evidence = new Map<string, string[]>();
+  const add = (id: string, line: string) => {
+    if (!open.has(id) || !plan.shards.has(id)) return;
+    const list = evidence.get(id) ?? [];
+    if (!list.includes(line)) list.push(line);
+    evidence.set(id, list);
+  };
+  for (const [id] of open) {
+    const rel = plan.shards.get(id);
+    if (rel === undefined) continue;
+    const pointer = POINTER.exec(sources.readShard(rel))?.[0];
+    if (pointer !== undefined) add(id, `refusal-amendment pointer in the shard:\n${pointer.trim()}`);
+  }
+  const rows = sources.ledger(["sweep.disposed", REDESIGN_JUDGED_STEP], new Date(now - EVIDENCE_WINDOW_MS).toISOString());
+  const newest = new Map<number, Row>();
+  for (const row of rows) {
+    if (row.step !== "sweep.disposed" || typeof row.pr_number !== "number") continue;
+    const prior = newest.get(row.pr_number);
+    if (prior === undefined || String(row.ts) >= String(prior.ts)) newest.set(row.pr_number, row);
+  }
+  for (const row of newest.values()) {
+    const at = Date.parse(String(row.ts));
+    if (row.disposition !== "refused-escalate" || typeof row.reason !== "string" || !HOLD_REASON.test(row.reason) ||
+        typeof row.task_id !== "string" || !Number.isFinite(at) || now - at > SWEPT_RECENTLY_MS) continue;
+    const since = rows.filter((r) => r.step === "sweep.disposed" && r.pr_number === row.pr_number && r.head_sha === row.head_sha &&
+      r.disposition === "refused-escalate").map((r) => Date.parse(String(r.ts))).filter(Number.isFinite);
+    if (since.length === 0 || now - Math.min(...since) < REDESIGN_AFTER_MS) continue;
+    add(row.task_id, `PR #${row.pr_number} at head ${String(row.head_sha).slice(0, 7)} is held: ${row.reason.slice(0, 1500)}`);
+  }
+  const judged = new Set(rows.filter((r) => r.step === REDESIGN_JUDGED_STEP).map((r) => String(r.signature)));
+  const out: RedesignCandidate[] = [];
+  for (const [id, lines] of evidence) {
+    const shard = plan.shards.get(id)!;
+    const text = sources.readShard(shard);
+    const signature = signatureOf(id, lines);
+    const marked = [...text.matchAll(MARKER_RE)].some((m) => m[1] === signature);
+    if (!marked && !judged.has(signature)) out.push({ id, shard, text, evidence: lines, signature });
+  }
+  return out.sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true }));
+}
+
+export function redesignPrompt(candidate: RedesignCandidate): string {
+  return [
+    "You are the plan Architect (MASTER-PLAN §5B). A fix worker could not build this task and stood down, so its PR waits on",
+    "a person. Propose the SMALLEST amendment to the task record that lets the next build satisfy the SAME claims.",
+    "",
+    "Standing rule 16: the Architect may correct a mis-specified task through a plan PR, and NO criterion is dropped or",
+    "weakened. You may: add paths to `files:` (never remove one), restate a criterion's proof so it tests that SAME claim",
+    "more directly, and write an `amendment:` that tells the next builder what changed and how to approach the work.",
+    "You may NOT change, reorder, add or remove any claim, and may not touch status, priority, verify or depends_on.",
+    "Never add a path under .github/, deploy/, plan/, state/ or hooks/, nor a CI instrument (a ratchet, baseline or gate",
+    "script, src/lib/review.ts): those grants are the operator's alone. If the fix needs one of them, a credential, a policy",
+    "or security decision, or a claim that is itself wrong, answer GRILL.",
+    "",
+    ...ACCEPTANCE_PROOF_GRAMMAR,
+    "",
+    "Answer with exactly one line starting `REDESIGN:` followed by a JSON object:",
+    '{"verdict":"amend"|"grill","reason":"one sentence","files_add":["path"],"proofs":[{"criterion":1,"proof":"unit test: ..."}],"amendment":"plain text"}',
+    "",
+    `TASK ${candidate.id} (shard ${candidate.shard}):`,
+    candidate.text.trimEnd(),
+    "",
+    "WHY IT IS HELD:",
+    ...candidate.evidence.map((e) => `- ${e}`),
+  ].join("\n");
+}
+
+type Parsed = { verdict: "amend"; edit: RedesignEdit } | { verdict: "grill"; reason: string } | { verdict: "unparseable"; reason: string };
+
+export function parseRedesignAnswer(text: string): Parsed {
+  const line = text.split("\n").find((l) => l.trim().startsWith("REDESIGN:"));
+  if (line === undefined) return { verdict: "unparseable", reason: "no REDESIGN: line" };
+  let value: Record<string, unknown>;
+  try { value = JSON.parse(line.trim().slice("REDESIGN:".length)) as Record<string, unknown>; }
+  catch (error) { return { verdict: "unparseable", reason: `REDESIGN: is not JSON (${String(error)})` }; }
+  const reason = typeof value.reason === "string" ? value.reason.trim() : "";
+  if (value.verdict === "grill") return { verdict: "grill", reason: reason || "no reason given" };
+  if (value.verdict !== "amend") return { verdict: "unparseable", reason: `verdict ${JSON.stringify(value.verdict)}` };
+  const filesAdd = Array.isArray(value.files_add) ? value.files_add : [];
+  const proofs = Array.isArray(value.proofs) ? value.proofs : [];
+  const amendment = typeof value.amendment === "string" ? value.amendment.trim() : "";
+  if (!filesAdd.every((p) => typeof p === "string") ||
+      !proofs.every((p) => typeof p === "object" && p !== null && Number.isSafeInteger((p as Row).criterion) && typeof (p as Row).proof === "string") ||
+      !amendment || !reason) return { verdict: "unparseable", reason: "amend needs reason, amendment, string files_add and {criterion, proof} proofs" };
+  return { verdict: "amend", edit: { filesAdd: filesAdd as string[], proofs: proofs as RedesignEdit["proofs"], amendment, reason } };
+}
+
+/** Rule 16 and the operator's grants, checked in code: the reason an edit is refused, or undefined. */
+export function redesignEditRefusal(task: Task, edit: RedesignEdit, pathExists: (rel: string) => boolean): string | undefined {
+  const instruments = INSTRUMENT_SURFACE.map((re) => new RegExp(re));
+  for (const path of edit.filesAdd) {
+    if (path.startsWith("/") || path.split("/").includes("..") || path.includes("*") || !/^[\w./-]+$/.test(path)) return `files_add ${path} is not a plain repo path`;
+    if (FORBIDDEN_PREFIXES.some((p) => path.startsWith(p)) || instruments.some((re) => re.test(path))) return `files_add ${path} is an operator-only grant`;
+    if (!pathExists(path) && !path.startsWith("test/")) return `files_add ${path} does not exist and is not a new test`;
+  }
+  const criteria = task.acceptance ?? [];
+  for (const { criterion, proof } of edit.proofs) {
+    if (criterion < 1 || criterion > criteria.length) return `proof for criterion ${criterion}, which the task does not have`;
+    if (!isDialectPrefixed(proof) || proof.includes("\n")) return `criterion ${criterion}'s proof has no dialect prefix or spans lines`;
+  }
+  if (edit.filesAdd.length === 0 && edit.proofs.length === 0 && task.amendment?.includes(edit.amendment)) return "the edit changes nothing";
+  return undefined;
+}
+
+/** The edited shard text, or why the edit cannot be applied to this shard's text safely. */
+export function applyRedesignEdit(text: string, rel: string, edit: RedesignEdit, signature: string, date: string): { text: string } | { refused: string } {
+  const before = parseTasksFromYaml(text, rel);
+  if (before.length !== 1) return { refused: `the shard holds ${before.length} records` };
+  let next = text;
+  const files = /^ {2}files:[ \t]*\n((?: {4}- .*\n)+)/m.exec(next);
+  const fresh = edit.filesAdd.filter((p) => !(before[0]!.files ?? []).includes(p));
+  if (fresh.length > 0) {
+    if (files === null) return { refused: "the shard has no block-list files:" };
+    const at = files.index + files[0].length;
+    next = next.slice(0, at) + fresh.map((p) => `    - ${p}\n`).join("") + next.slice(at);
+  }
+  const proofLines = [...next.matchAll(/^ {6}proof:.*$/gm)];
+  if (proofLines.length !== (before[0]!.acceptance ?? []).length && edit.proofs.length > 0) return { refused: "a proof is not on one line" };
+  for (const { criterion, proof } of [...edit.proofs].sort((a, b) => b.criterion - a.criterion)) {
+    const line = proofLines[criterion - 1]!;
+    next = next.slice(0, line.index) + `      proof: ${JSON.stringify(proof)}` + next.slice(line.index + line[0].length);
+  }
+  const paragraph = [`${date}, by the redesign Architect (machine, rule 16): ${edit.reason}`, ...edit.amendment.split("\n")]
+    .map((l) => (l.trim() ? `    ${l.trimEnd()}` : "")).join("\n");
+  const amendment = /^ {2}amendment: \|[-+]?[ \t]*\n((?: {4}.*\n| *\n)*)/m.exec(next);
+  if (amendment !== null) {
+    const at = amendment.index + amendment[0].length;
+    next = `${next.slice(0, at)}\n${paragraph}\n${next.slice(at)}`;
+  } else {
+    next = `${next.trimEnd()}\n  amendment: |\n${paragraph}\n`;
+  }
+  const status = /^ {2}status:/m.exec(next);
+  if (status === null) return { refused: "the shard has no status: line" };
+  next = `${next.slice(0, status.index)}${MARKER(signature)}\n${next.slice(status.index)}`;
+  let after: Task[];
+  try { after = parseTasksFromYaml(next, rel); } catch (error) { return { refused: `the edited shard does not parse: ${String(error)}` }; }
+  const [a, b] = [before[0]!, after[0]];
+  if (after.length !== 1 || b === undefined || b.id !== a.id) return { refused: "the edited shard is not the same one record" };
+  const claims = (t: Task) => JSON.stringify((t.acceptance ?? []).map((c) => c.claim));
+  if (claims(a) !== claims(b)) return { refused: "a claim changed" };
+  if (!(a.files ?? []).every((p) => (b.files ?? []).includes(p))) return { refused: "a declared file was removed" };
+  if (a.status !== b.status || a.priority !== b.priority || a.verify !== b.verify ||
+      JSON.stringify(a.depends_on ?? []) !== JSON.stringify(b.depends_on ?? [])) return { refused: "status, priority, verify or depends_on changed" };
+  return { text: next };
+}
+
+export async function redesignInventory(sources: RedesignSources, deps: GardenerDeps): Promise<RedesignInventory> {
+  const candidates = redesignCandidates(sources);
+  const plan = sources.plan();
+  const actions: RedesignAction[] = [];
+  const outcomes: RedesignInventory["outcomes"] = [];
+  for (const candidate of candidates.slice(0, REDESIGN_MAX_PER_PASS)) {
+    const task = plan.open.find((t) => t.id === candidate.id)!;
+    const parsed = parseRedesignAnswer(await sources.judgeText(redesignPrompt(candidate)));
+    let outcome: RedesignInventory["outcomes"][number];
+    if (parsed.verdict === "amend") {
+      const dryRun = applyRedesignEdit(candidate.text, candidate.shard, parsed.edit, candidate.signature, "0000-00-00");
+      const refused = redesignEditRefusal(task, parsed.edit, sources.pathExists) ?? ("refused" in dryRun ? dryRun.refused : undefined);
+      outcome = refused === undefined
+        ? { task_id: candidate.id, outcome: "amend", reason: parsed.edit.reason }
+        : { task_id: candidate.id, outcome: "refused", reason: refused };
+      if (refused === undefined) actions.push({ class: "amend", target: candidate.id, reason: parsed.edit.reason, shard: candidate.shard, signature: candidate.signature, edit: parsed.edit });
+    } else {
+      outcome = { task_id: candidate.id, outcome: parsed.verdict, reason: parsed.reason };
+    }
+    outcomes.push(outcome);
+    // A judged signature is never asked again: new evidence (a new hold, a new pointer) is a new signature.
+    if (outcome.outcome !== "amend") deps.log(REDESIGN_JUDGED_STEP, { ...outcome, signature: candidate.signature });
+  }
+  return { candidates: candidates.length, actions, outcomes };
+}
+
+export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<RedesignSources> = {}): RedesignSources {
+  return {
+    clock: deps.clock ?? systemClock,
+    plan: () => planInventory(deps.repoRoot, deps.stateDir),
+    readShard: (rel) => readFileSync(join(deps.repoRoot, rel), "utf8"),
+    ledger: (steps, sinceIso) => {
+      const read = readLedgerUnionRecordsSync(deps.stateDir, { step: [...steps], refuseIncomplete: true, sinceTs: sinceIso });
+      if (!read.ok) throw new Error(`redesign: incomplete ledger union: ${read.unread.join(", ")}`);
+      return read.rows;
+    },
+    pathExists: (rel) => existsSync(join(deps.repoRoot, rel)),
+    judgeText: () => Promise.reject(new Error("the redesign Architect's spawn is not wired")),
+    ...overrides,
+  };
+}
+
+export function redesignGardenSpec(
+  deps: GardenerDeps, overrides: Partial<RedesignSources> = {},
+): GardenSpec<RedesignClass, RedesignInventory, RedesignAction, GardenCheckout> {
+  const sources = buildRedesignSources(deps, overrides);
+  return {
+    name: REDESIGN_NAME,
+    classes: REDESIGN_CLASSES,
+    review: { amend: "a task amendment is the Architect's judgement call; close this PR to decline it." },
+    landingRefusal: backlogLandingGuard(deps),
+    cheapFingerprint: () => redesignCandidates(sources).map((c) => c.signature).join(",") || "none",
+    inventory: () => { throw new Error("the redesign Architect answers asynchronously: drive it with runGardenAsync"); },
+    inventoryAsync: () => redesignInventory(sources, deps),
+    fingerprint: (i) => i.actions.map((a) => a.signature).join(",") || "none",
+    unfinished: (i) => i.actions.length > 0,
+    candidates: (i) => i.actions,
+    scorecard: (i, plan) => {
+      const card = { candidates: i.candidates, outcomes: i.outcomes, acting: plan.acting };
+      deps.log("redesign.scorecard", card);
+      return card;
+    },
+    apply: (ws, plan) => {
+      const date = sources.clock.date().toISOString().slice(0, 10);
+      const landed: RedesignAction[] = [];
+      for (const action of plan.actions) {
+        const abs = join(ws.root, action.shard);
+        const edited = applyRedesignEdit(readFileSync(abs, "utf8"), action.shard, action.edit, action.signature, date);
+        if ("refused" in edited) { deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "refused", reason: edited.refused, signature: action.signature }); continue; }
+        writeAtomic(abs, edited.text);
+        landed.push(action);
+        deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "amend", reason: action.reason, signature: action.signature });
+      }
+      if (landed.length === 0) return undefined;
+      return {
+        paths: landed.map((a) => a.shard),
+        title: `docs(plan): the Architect amends ${landed.map((a) => a.target).join(", ")} after its fix lane stood down`,
+        body: [
+          "The redesign gardener's Architect amends tasks whose fix lane stood down and held a PR on a person. Every claim",
+          "is unchanged (standing rule 16, checked in code); `files:` only grows; no workflow, deploy, plan or CI-instrument",
+          "path is granted. A merged amendment changes the task's contract revision, which releases the held PR's next fix round.",
+          "Close this PR to decline an amendment.", "",
+          ...landed.map((a) => [
+            `- **${a.target}** (\`${a.shard}\`): ${a.reason}`,
+            ...(a.edit.filesAdd.length ? [`  - files added: ${a.edit.filesAdd.map((p) => `\`${p}\``).join(", ")}`] : []),
+            ...a.edit.proofs.map((p) => `  - criterion ${p.criterion}'s proof is now \`${p.proof}\``),
+          ].join("\n")),
+          "", "## Acceptance",
+          ...landed.map((a) => `- claim: ${a.target} carries the Architect's amendment\n  proof: "grep: # redesign: signature=${a.signature} in ${a.shard}"`),
+        ].join("\n"),
+      };
+    },
+  };
+}
