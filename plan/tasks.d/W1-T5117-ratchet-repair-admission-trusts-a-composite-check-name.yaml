@@ -17,6 +17,8 @@
     - test/ratchet-repair-admission-proven-diagnostic.test.ts
     - test/ratchet-repair-admission-insufficient-evidence.test.ts
     - test/ratchet-repair-admission-mixed-red.test.ts
+    - test/a-bundled-checks-remedy-follows-the-gate-that-refused.test.ts
+    - test/the-ratchet-repair-flag-is-reachable-from-policy.test.ts
   # refusal-amendment (W1-T5117, run W1-T5117-1791436776050, 2026-10-08T05:44:20.745Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: Both predicates already reject the recorded incident, triggering the task’s close-without-implementation instruction.
   # refusal-amendment (W1-T5117, run W1-T5117-1791436776050, 2026-10-08T05:44:20.745Z): the worker refused criterion 3 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
@@ -68,7 +70,7 @@
     registry entry, worker prompt, review policy or merge policy.
   acceptance:
     - claim: "a comment-load-ratchet check whose comment-load step passed while the expiring-fixture census failed is not admitted as a recordable repair by either predicate"
-      proof: "grep: commentLoadStepPassed in src/lib/sweep.ts"
+      proof: "unit test: a composite comment-load red with a passing comment-load step declines ratchet repair"
     - claim: "a generator-owned exact diagnostic still admits its matching generator"
       proof: "unit test: a proven comment-load diagnostic still admits the comment-load generator"
     - claim: "empty or unreadable or mismatched or generic log evidence declines rather than admitting any generator"
@@ -89,5 +91,13 @@
     has the same defect, so both are in scope.
     PRIORITY 3: the policy ships disabled, so today the harm is a misleading dispatch reason.
   amendment: |
-    2026-10-30, by the redesign Architect (machine, rule 16): Add missing test files and restate proof for claim 1 to directly check logTail handling
-    Added three unit‑test files covering claims 2‑4 and changed claim 1’s proof to a grep that ensures the implementation checks the logTail for a passing comment‑load step and a failing expiring‑fixture census.
+    2026-10-30, by the redesign Architect (machine, rule 16), corrected in PR #15791 round 1:
+    Declare the future test files for claims 2-4; this plan amendment does not create those tests.
+    Add the existing bundled-check and policy suites to the implementation scope so the builder
+    can update their name-only admission expectations, as the refusal evidence requires.
+    Restore criterion 1's behavioral unit-test proof; an implementation variable name alone
+    cannot prove that both predicates decline the composite failure. The builder must add the
+    named test, exercise both predicates, and verify that removing the evidence check makes it fail.
+    Claims and proofs for criteria 2-4 remain unchanged. Recheck the falsifier before building;
+    the recorded close-without-implementation instruction still applies if both predicates
+    already reject the incident.
