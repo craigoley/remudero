@@ -243,6 +243,14 @@ field-trials-refresh and fleet-heartbeat. The session's existing parent must be 
 owned mode-0700 directory. The session and its `.observations` sibling are mode 0600,
 regular single-link files opened without following symlinks. Observations stop at
 64 KiB; failure records a fixed diagnostic and the original shell effect continues.
+Shell capture and each observation have a five-second process deadline, including
+observer children that inherit capture pipes. Timeout terminates only the private
+observer process group, emits the same fixed diagnostic and resumes legacy behavior.
+The installed `~/.local/bin/rmd-field-trials-refresh` command resolves its adapter
+and source entry through the trusted `<RMD_STATE_DIR>/daemon-install` checkout,
+with the host installer's `/home/craigoleyagent/rmd-state2` default. It never sources
+an adapter beside the installed command. A missing checkout leaves observations
+unrecorded while the independent refresh continues.
 
 Only this option enables observations. `RMD_INSTANCE_REGISTRY` alone retains its
 existing legacy meaning. Capture preserves absence and explicit empty/invalid input
@@ -292,8 +300,9 @@ every receipt carries `publication_permission: not-granted`.
 Disposable transport fixtures exercise the real scripts, generated launcher and CLI.
 The mixed-version fixtures retain the installer and field-trials script from
 `f936be06908593755b64b37f79c56e563203fc55`, with file digests in their provenance
-receipt. A named Bash 3.2 executable can run the same lifecycle fixtures through
-`RMD_TEST_HISTORICAL_BASH`; a runner without one reports that execution unverified.
+receipt. Linux x64 runs a hash-verified Bash 3.2 package and its pinned libraries
+from disposable extraction roots; macOS verifies its native Bash 3.2 version.
+The mixed-version proof fails when its required historical interpreter is unavailable.
 This is source qualification only: merging can reach existing automatic image/code
 update paths, but does not enable the option, install a schedule, activate admission
 or prove deployment. Live launcher/mount/image replacement still requires the exact

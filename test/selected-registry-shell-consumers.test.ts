@@ -71,8 +71,16 @@ case "$*" in
 esac
 `, { mode: 0o700 });
   chmodSync(join(bin, "docker"), 0o700);
+  const cron = join(f.root, "crontab.snapshot"); writeFileSync(cron, "");
+  writeFileSync(join(bin, "crontab"), `#!/bin/sh
+if [ "$1" = -l ]; then cat "$CRONTAB_SNAPSHOT"; else cat > "$CRONTAB_SNAPSHOT"; fi
+`, { mode: 0o700 });
+  const trustedState = join(f.root, "trusted-state");
+  mkdirSync(join(trustedState, "daemon-install"), { recursive: true });
+  symlinkSync(join(REPO_ROOT, "deploy"), join(trustedState, "daemon-install/deploy"));
   const cases = join(f.root, "cases.json"); writeFileSync(cases, "{}\n");
   const env = { ...process.env, HOME: f.root, PATH: `${bin}:${process.env.PATH ?? ""}`,
+    RMD_STATE_DIR: trustedState, CRONTAB_SNAPSHOT: cron,
     DOCKER_CALLS: calls, RMD_INSTANCE_REGISTRY: legacyRegistry, RMD_FIELD_TRIALS_CASE_FILES: cases };
   const run = (args: string[] = [], script = join(REPO_ROOT, "deploy", "field-trials-refresh.sh"),
     shell = "bash", extra: NodeJS.ProcessEnv = {}) => {
@@ -146,6 +154,91 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers", asy
   assert.equal(host.status, 0, host.stdout + host.stderr);
   assert.ok(f.rows().some(row => row.action === "host-update"));
 });
+
+test("selected shell shadow reaches real lifecycle and heartbeat consumers: installed field trials command", t => {
+  const historical = bash32(t);
+  for (const interpreter of [{ shell: "bash", env: {} }, historical]) {
+    const f = refreshFixture(t);
+    const installer = join(REPO_ROOT, "deploy/install-field-trials-refresh.sh");
+    const installed = join(f.root, ".local/bin/rmd-field-trials-refresh");
+    const install = f.run(["--install"], installer, interpreter.shell, interpreter.env);
+    assert.equal(install.status, 0, install.stderr);
+    assert.equal(f.run(["--check"], installer, interpreter.shell, interpreter.env).status, 0);
+    const trap = join(f.root, "untrusted-sibling-ran");
+    writeFileSync(join(f.root, ".local/bin/registry-shadow.sh"), `touch '${trap}'\nexit 91\n`);
+    const legacy = f.run([], installed, interpreter.shell, interpreter.env);
+    const qualified = f.run(["--selected-registry-shadow", f.session], installed, interpreter.shell, interpreter.env);
+    assert.equal(qualified.status, 0, qualified.stderr);
+    assert.equal(qualified.stdout, legacy.stdout);
+    assert.equal(qualified.stderr, legacy.stderr);
+    assert.deepEqual(qualified.calls, legacy.calls, "installed qualification preserves actual Docker arguments");
+    assert.equal(existsSync(trap), false, "installed command never sources a sibling from the command directory");
+    const rows = f.rows();
+    assert.equal(rows.filter(row => row.action === "field-trials").length, 3,
+      "the installed command observes routing, credential and snapshot boundaries through the real entry");
+    assert.ok(rows.every(row => row.binding_digest === createHash("sha256")
+      .update(readFileSync(f.legacyRegistry)).digest("hex")));
+    for (const stateDir of [join(f.root, "missing-trusted-checkout"), "relative-unsupported"]) {
+      const missing = f.run(["--selected-registry-shadow", f.session], installed, interpreter.shell,
+        { ...interpreter.env, RMD_STATE_DIR: stateDir });
+      assert.equal(missing.status, legacy.status, missing.stderr);
+      assert.equal(missing.stdout, legacy.stdout);
+      assert.deepEqual(missing.calls, legacy.calls);
+      assert.match(missing.stderr, /instance_registry\.shell_shadow_unrecorded/);
+      assert.equal(f.rows().length, rows.length, "missing or unsupported trusted checkout stays unrecorded");
+      assert.equal(existsSync(trap), false);
+    }
+  }
+});
+
+for (const phase of ["capture", "observation"] as const) {
+test(`selected shell defaults and failures remain shadow only without live effects: observer deadlines (${phase})`, t => {
+  const historical = bash32(t);
+  for (const interpreter of [{ shell: "bash", env: {} }, historical]) {
+      const f = registryShellFixture(t);
+      const script = join(REPO_ROOT, "deploy/host-update.sh");
+      const legacy = f.run(script, ["--print-daemon-run"], interpreter.env, interpreter.shell);
+      assert.equal(legacy.status, 0, legacy.stderr);
+      const calls = join(f.root, "observer.calls");
+      const released = join(f.root, "observer-released");
+      // The unhealthy transport releases itself after 15s so deleting the deadline
+      // fails assertions without leaving a permanently hung test or descendant.
+      writeFileSync(join(f.root, "transports/node"), `#!${process.execPath}
+const fs = require('node:fs'), cp = require('node:child_process');
+const args = process.argv.slice(2);
+const phase = args.includes('--capture') ? 'capture' : 'observation';
+fs.appendFileSync(${JSON.stringify(calls)}, phase + '\\n');
+if (phase === ${JSON.stringify(phase)}) {
+  cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 15000)'], {stdio:'inherit'});
+  setTimeout(() => { fs.writeFileSync(${JSON.stringify(released)}, phase); process.exit(93); }, 15000);
+} else {
+  const result = cp.spawnSync(process.execPath, args, {stdio:'inherit'});
+  process.exit(result.status ?? 94);
+}
+`, { mode: 0o700 });
+      const qualified = f.run(script, ["--print-daemon-run", "--selected-registry-shadow", f.session],
+        interpreter.env, interpreter.shell);
+      assert.equal(qualified.status, legacy.status, qualified.stdout + qualified.stderr);
+      assert.equal(qualified.stdout, legacy.stdout, "legacy output continues after an observer deadline");
+      assert.ok(readFileSync(calls, "utf8").split("\n").includes(phase), "the intended unhealthy observer actually ran");
+      assert.equal(existsSync(released), false, `${phase} must be killed before the fixture releases itself`);
+      assert.match(qualified.stderr, /instance_registry\.shell_shadow_unrecorded/);
+      assert.ok(!qualified.stderr.includes(f.session) && !qualified.stderr.includes(f.selected));
+      if (phase === "observation") {
+        rmSync(join(f.root, "transports/node"));
+        f.capture();
+        assert.equal(f.install().status, 0);
+        // Reuse the hung transport at the independently executed generated boundary.
+        writeFileSync(join(f.root, "transports/node"), `#!/bin/sh\nexec sleep 15\n`, { mode: 0o700 });
+        const launched = f.run(join(f.output, "launcher"), ["--boot"], interpreter.env, interpreter.shell);
+        assert.equal(launched.status, 0, launched.stdout + launched.stderr);
+        assert.match(launched.stderr, /instance_registry\.shell_shadow_unrecorded/);
+        assert.ok(f.receipts().some(c => c.bin === "docker" && c.args[0] === "run"),
+          "a hung observer cannot prevent the generated launcher's actual legacy child effect");
+      }
+  }
+});
+}
 
 test("selected shell shadow reaches real lifecycle and heartbeat consumers across generated sudo convergence", t => {
   const f = registryShellFixture(t), pin = f.capture();

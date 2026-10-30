@@ -22,6 +22,12 @@ set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
 if [ -n "$registry_shadow_session" ]; then
   registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
   registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
+  # The maintained installer copies this command alone into ~/.local/bin. Its
+  # adapter and entry remain in the trusted host installation, never beside it.
+  if [ "${BASH_SOURCE[0]##*/}" = rmd-field-trials-refresh ]; then
+    registry_shadow_lib="${RMD_STATE_DIR-/home/craigoleyagent/rmd-state2}/daemon-install/deploy/registry-shadow.sh"
+    case "$registry_shadow_lib" in /*) :;; *) registry_shadow_lib="";; esac
+  fi
   if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
     registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
     registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
