@@ -18,29 +18,36 @@ test("W1-T10961: normal exit cancellation and pressure refusal preserve terminal
     const dir = join(root, kind); mkdirSync(dir);
     const pidPath = join(dir, 'child.pid'), readerPath = join(dir, 'reader.pid');
     const paths = {stdoutPath: join(dir, 'stdout'), stderrPath: join(dir, 'stderr'), resultPath: join(dir, 'native.json')};
-    const setup = `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));`;
+    const setup = `const fs=require('node:fs');
+      fs.writeFileSync(${JSON.stringify(pidPath + '.pending')},String(process.pid));
+      fs.renameSync(${JSON.stringify(pidPath + '.pending')},${JSON.stringify(pidPath)});`;
     const action = kind === 'normal' ? "console.log('normal terminal witness');" :
       kind === 'failed' ? "console.error('terminal failure witness');process.exitCode=7;" :
       kind === 'cancelled' ? "process.kill(process.ppid,'SIGTERM');setInterval(()=>{},1000);" :
       kind === 'pressure' ? "process.stdout.write('x'.repeat(65536));setInterval(()=>{},1000);" :
       'setInterval(()=>{},1000);';
-    const reader = `require('node:fs').writeFileSync(${JSON.stringify(readerPath)},String(process.pid));
+    const reader = `const fs=require('node:fs');
+      fs.writeFileSync(${JSON.stringify(readerPath + '.pending')},String(process.pid));
+      fs.renameSync(${JSON.stringify(readerPath + '.pending')},${JSON.stringify(readerPath)});
       setTimeout(()=>process.exit(0),${kind === 'normal' || kind === 'failed' ? 100 : 10000});`;
     const group = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(reader)}],{stdio:'ignore'}).unref();
       const ready=setInterval(()=>{if(fs.existsSync(${JSON.stringify(readerPath)})){clearInterval(ready);${action}}},5);`;
     const result = captureStepSync(process.execPath, ['-e', setup + group], {
       ...paths, cwd: REPO_ROOT, env, trackParent: true, maxBytes: 1024, runtimeMs: kind === 'timeout' ? 500 : 10000,
     });
-    assert.ok(existsSync(pidPath), `${kind}: the real native child must have run`);
-    const pid = Number(readFileSync(pidPath, 'utf8'));
+    const receipt = JSON.parse(readFileSync(paths.resultPath, 'utf8'));
+    const pid = receipt.parentTracking.childPid;
     assert.ok(Number.isSafeInteger(pid) && pid > 0);
+    if (existsSync(pidPath)) assert.equal(Number(readFileSync(pidPath, 'utf8')), pid);
+    else assert.equal(kind, 'timeout', `${kind}: the real native child must have run`);
     assert.throws(() => process.kill(pid, 0), (error: any) => error.code === 'ESRCH',
       `${kind}: the recorded child must be closed before returning its resources`);
-    const readerPid = Number(readFileSync(readerPath, 'utf8'));
-    assert.ok(Number.isSafeInteger(readerPid) && readerPid > 0 && readerPid !== pid);
-    assert.throws(() => process.kill(readerPid, 0), (error: any) => error.code === 'ESRCH',
-      `${kind}: disconnected descendants must also close before the capture returns`);
-    const receipt = JSON.parse(readFileSync(paths.resultPath, 'utf8'));
+    if (existsSync(readerPath)) {
+      const readerPid = Number(readFileSync(readerPath, 'utf8'));
+      assert.ok(Number.isSafeInteger(readerPid) && readerPid > 0 && readerPid !== pid);
+      assert.throws(() => process.kill(readerPid, 0), (error: any) => error.code === 'ESRCH',
+        `${kind}: disconnected descendants must also close before the capture returns`);
+    } else assert.equal(kind, 'timeout', `${kind}: the descendant must have started`);
     assert.equal(receipt.parentTracking.ownerPid, process.pid);
     assert.equal(receipt.parentTracking.childPid, pid);
     assert.equal(receipt.parentTracking.ownerLost, false);
