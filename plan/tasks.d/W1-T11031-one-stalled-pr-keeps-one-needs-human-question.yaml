@@ -1,0 +1,35 @@
+- id: W1-T11031
+  title: One stalled PR at one head keeps one open needs-human question; a new diagnosis is added to it, never filed as a new issue
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the stalled-stage escalation's dedup key and its append path; what is escalated is unchanged
+  origin: operator-session#fix-lane-effectiveness-2026-10-30
+  plan_refs:
+    - W1-T8267
+    - W1-T8167
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/one-stalled-pr-keeps-one-needs-human-question.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A stalled-stage escalation for a PR whose same head and blocker already has an open needs-human issue adds its new diagnosis to that issue instead of opening another, whatever the diagnosis text says. A moved head, a different blocker, or a closed earlier issue still opens a new one"
+      proof: "unit test: test/sweep/one-stalled-pr-keeps-one-needs-human-question.test.ts"
+  rationale: |
+    The operator asked how to stop clearing the PR queue by hand. OBSERVED, GitHub at 2026-10-30T15:55Z:
+    - 158 needs-human issues were open, and 55 of them named a PR. Three PRs carried 22 of those: #15520 had 10, #15046 had 7 and #15656 had 5.
+    - For #15520 at one head (9dca5f8), eight "[MANUAL] W1-T10842: PR ... needs a clarification — PR stage stalled: #15520 ... own-red; DIAGNOSIS: ..." issues were opened between 2026-10-29T20:20Z and 2026-10-30T14:00Z (#15561, #15567, #15571, #15586, #15626, #15674, #15724, #15750), all still open.
+    - #15542 (2026-10-29T19:42Z) stripped the elapsed minutes and "(owner: none)" from that title (stalledStageEscalationSummary, src/lib/sweep.ts), but the title still carries the DIAGNOSIS text, which changes between passes ("unknown signature", then "repeat: ..."). The escalation dedups on the exact title, so each new diagnosis opens a new issue.
+    One question per stuck PR is what lets a person, or the redesign gardener, answer it once.
+  design: |
+    Key the stalled-stage escalation's dedup on the PR, head and blocker class, not on the full title. When an open issue matches, append the new diagnosis as a comment through the existing escalation append path, and ledger which issue absorbed it. Keep the diagnosis in the detail and comments, never in the identity.
+  falsifier: |
+    Restore title-only dedup: the second fixture diagnosis for the same head opens a second issue and the test fails.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (W1-T11031 on run-unfiled-1793374065372).
+    Closing the duplicates already open is left to the issue-revalidation garden and the operator.
