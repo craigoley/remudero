@@ -27899,6 +27899,7 @@ export interface RunInChildInput {
   onPending?: (pending: RunChildPending) => void;
   /** W1-T10000: asked before the run stays in-process; `false` ends the lane with a {@link TaskAdmissionError}. */
   mayRunInProcess?: (reason: string) => boolean;
+  onSelectedRegistryIntent?: (intent: RunChildSpecOptions["selectedRegistryIntent"]) => void;
 }
 
 /** W1-T9085: under `sweep.runChild.mode: on` the run's settling promise from a detached child, else `undefined` (stays in-process; ledgered). */
@@ -27907,8 +27908,10 @@ export async function runInChildWhenOn(
   seams: { readMode?: () => RunChildMode; evidence?: () => RunChildModeEvidence; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
 ): Promise<RunChildHandle | undefined> {
   const options = { ...input.options };
-  const intent = await qualifySelectedRegistryIntent(options.selectedRegistryIntent ?? selectedRegistryIntentForConfig(input.config));
-  if (intent !== undefined) options.selectedRegistryIntent = intent;
+  const intent = await qualifySelectedRegistryIntent(Object.hasOwn(options, "selectedRegistryIntent")
+    ? options.selectedRegistryIntent : selectedRegistryIntentForConfig(input.config));
+  options.selectedRegistryIntent = intent;
+  input.onSelectedRegistryIntent?.(intent);
   const observer = selectedRegistryObserverFromIntent(intent, input.log);
   return withSelectedRegistryContext(observer, async () => {
     try {

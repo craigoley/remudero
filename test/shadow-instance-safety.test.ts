@@ -4,13 +4,18 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, selectedRegistryObserverFromIntent,
-  withSelectedRegistryContext } from "#src/lib/selected-registry-consumers.js";
+  type SelectedRegistryIntent } from "#src/lib/selected-registry-consumers.js";
+import { runChildMain } from "#src/run-child-main.js";
+import { RUN_CHILD_SCHEMA, writeSpec } from "#src/lib/run-child-contract.js";
+import { applyOperatorMergeHold } from "#src/lib/operator-merge-hold.js";
+import { automergeHoldFromLedger } from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import type { OpenPrView } from "../src/lib/sweep.js";
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
@@ -27,7 +32,7 @@ import {
   shadowLiveWouldHaveDone,
 } from "../src/run-task.js";
 
-const SELECTED_INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const SELECTED_INSTALL_ROOT = REPO_ROOT;
 
 const registry = (mode?: string) => [
   "instances:",
@@ -103,7 +108,10 @@ test("the independent sweep path cannot arm a shadow instance", async () => {
   assert.equal(sweepArmCalls, 0);
 });
 
-test("selected mode shadow evidence reaches actual run and sweep consumers", async (t) => {
+for (const contract of ["qualified", "unsupported", "absent"] as const) {
+test(contract === "qualified"
+  ? "selected child admission and resume retain current original source identity"
+  : `selected child mixed version contracts never invent authority - actual ${contract} deferred arm`, { timeout: 60_000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-mode-run-`));
   const origin = gitRepo({ bare: true }), seed = gitRepo({ cloneFrom: origin.dir });
   const repoDir = join(root, "repos", "remudero");
@@ -123,13 +131,13 @@ test("selected mode shadow evidence reaches actual run and sweep consumers", asy
     { when: "--json files", stdout: JSON.stringify({ files: [{ path: "src/lib/daemon.ts" }] }) },
     { when: "/check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "success" }] }) },
     { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
-    { when: "api repos/owner/remudero/pulls/1/files", stdout: "[]" },
-    { when: "api repos/owner/remudero/pulls/1", stdout: JSON.stringify({ number: 1, state: "closed", merged: true, merged_at: new Date(now).toISOString(), head: { sha: head } }) },
+    { when: "pulls/1/files", stdout: JSON.stringify([{ filename: "src/lib/daemon.ts" }]) },
+    { when: "api repos/owner/remudero/pulls/1", stdout: JSON.stringify({ number: 1, body: "Remudero-Task: T-SELECTED", state: "closed", merged: true, merged_at: new Date(now).toISOString(), mergeable_state: "clean", head: { sha: head } }) },
   ]);
   const previous = { path: process.env.PATH, registry: process.env.RMD_INSTANCE_REGISTRY, name: process.env.RMD_INSTANCE_NAME };
   process.env.PATH = `${shim.dir}:${previous.path}`; delete process.env.RMD_INSTANCE_REGISTRY; delete process.env.RMD_INSTANCE_NAME;
   const clock = t.mock.method(Date, "now", () => now);
-  let spawned = 0;
+  let spawned = 0, attemptedPushes = 0;
   try {
     const selectedConfig: Config = { root, claudeBin: "/bin/true", installRoot: SELECTED_INSTALL_ROOT,
       selectedRegistryMode: { mode: "shadow", instanceName: "fixture", registryPath: selected } };
@@ -147,10 +155,31 @@ test("selected mode shadow evidence reaches actual run and sweep consumers", asy
       inheritedRows.push({ step, ...fields });
     });
     assert.ok(inheritedObserver);
-    const res = await withSelectedRegistryContext(inheritedObserver, async () => {
-      const result = await withLiveWritesAllowed(() => runTask("T-SELECTED", {
+    let runResult: Awaited<ReturnType<typeof runTask>> | undefined;
+    const childDir = join(root, "run-selected"); mkdirSync(childDir);
+    const snapshot = join(root, "snapshot.json"); writeFileSync(snapshot, JSON.stringify({ tasks: [] }));
+    writeSpec(childDir, { schema: RUN_CHILD_SCHEMA, taskId: "T-SELECTED", runId: "run-selected", instance: "fixture",
+      engine: { sha: "b".repeat(40), sourceHash: "c".repeat(64) }, reservationId: "fixture", planSnapshotPath: snapshot,
+      options: { owner: "owner", skipGitSync: true, planPath,
+        ...(contract === "absent" ? {} : { selectedRegistryIntent: contract === "qualified" ? intent
+          : { version: 99, kind: "shadow", input: {} } as never }) } });
+    const specBefore = readFileSync(join(childDir, "spec.json"), "utf8");
+    let hold: ReturnType<typeof applyOperatorMergeHold>["current"];
+    let optionsSeen = false;
+    const exitCode = await runChildMain(["--run-dir", childDir], {
+      env: {}, selectedRegistryRecord: (step, fields) => { inheritedRows.push({ step, ...fields }); },
+      loadRunPath: async () => ({ runTask: async (taskId: string, options: Record<string, unknown>) => {
+      optionsSeen = true;
+      assert.ok(Object.hasOwn(options, "selectedRegistryIntent"));
+      assert.deepEqual(options.selectedRegistryIntent, contract === "qualified" ? intent
+        : contract === "unsupported" ? { version: 1, kind: "unknown" } : undefined);
+      const mutableIntent = options.selectedRegistryIntent === undefined ? undefined
+        : structuredClone(options.selectedRegistryIntent) as SelectedRegistryIntent;
+      const running = withLiveWritesAllowed(() => runTask(taskId, {
+      ...options, selectedRegistryIntent: mutableIntent,
       owner: "owner", skipGitSync: true, planPath,
       config: selectedConfig,
+      implementPush: async () => { attemptedPushes++; },
       github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
       spawn: async () => {
         spawned++;
@@ -165,24 +194,50 @@ test("selected mode shadow evidence reaches actual run and sweep consumers", asy
       containmentExec: async token => ({ transcript: `touch ../${token}.txt: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
       isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
       runReview: async () => {
-        writeFileSync(selected, selectedText("live"));
+        if (contract === "qualified") {
+          writeFileSync(selected, selectedText("live"));
+          const replacement = join(root, "replacement.yaml"); writeFileSync(replacement, selectedText("shadow"));
+          selectedConfig.selectedRegistryMode = { mode: "shadow", registryPath: replacement, instanceName: "fixture" };
+          hold = applyOperatorMergeHold(join(root, "state/ledger.ndjson"), { action: "engage", by: "fixture owner",
+            authority: "console-confirmed", reason: "review the admitted revision", prNumber: 1 }).current;
+        }
         return { state: "success", criteria: [], testTheater: false, summary: "fixture pass", floorDegraded: false,
           capped: false, keywordOnly: false, planOnly: false, headSha: head, reviewerOutcome: "success" };
       },
       }));
-      await inheritedObserver.settled();
-      return result;
+      if (contract === "qualified") {
+        const replacement = join(root, "transport-replacement.yaml"); writeFileSync(replacement, selectedText("live"));
+        (mutableIntent as { input: { configuredPath: string } }).input.configuredPath = replacement;
+      }
+      runResult = await running;
+      return runResult;
+      } }),
     });
-    assert.equal(res.verdict, "merged", "the contained independent legacy run still finishes normally");
-    assert.ok(inheritedRows.some(row => row.step === "instance_registry.consumer_shadow_observed"
+    inheritedObserver.close();
+    assert.equal(exitCode, 0); assert.equal(optionsSeen, true); assert.ok(runResult);
+    assert.equal(attemptedPushes, 1, "the real run body attempted its push through the recording transport");
+    assert.equal(readFileSync(join(childDir, "spec.json"), "utf8"), specBefore);
+    assert.equal(runResult.verdict, "merged", "the contained independent legacy run still finishes normally");
+    if (contract === "qualified") assert.ok(inheritedRows.some(row => row.step === "instance_registry.consumer_shadow_observed"
       && row.action === "run-task-resume" && row.selected_state === "unknown"
       && row.reason === "revision_changed" && row.legacy_outcome === "returned"),
     "the real runTask consumes the inherited observer and rechecks the source after the effect");
     const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
     const observed = rows.filter(row => row.step === "instance_mode.shadow_observed");
-    assert.ok(observed.length > 0, "the REAL runTaskBody deferred arm must carry the original selected binding");
-    assert.ok(observed.some(row => row.reason === "revision_changed" && row.selected_outcome === "would-refuse"));
-    assert.ok(observed.every(row => row.publication_permission === "not-granted"));
+    if (contract === "qualified") {
+      assert.ok(observed.length > 0, "the REAL runTaskBody deferred arm must carry the original selected binding");
+      assert.ok(observed.some(row => row.reason === "revision_changed" && row.selected_outcome === "would-refuse"));
+      assert.ok(observed.every(row => row.publication_permission === "not-granted"));
+      assert.ok(rows.some(row => row.step === "automerge.armed" && row.outcome === "hold-refused"));
+      assert.deepEqual(automergeHoldFromLedger(readLedgerLines(join(root, "state/ledger.ndjson")), 1), hold);
+    } else {
+      assert.deepEqual(observed, [], "unknown/absent child intent never qualifies using current global defaults");
+      assert.ok(rows.some(row => row.step === "automerge.armed" && row.outcome === "armed"), "legacy effect remains exact");
+      if (contract === "unsupported") {
+        assert.ok(inheritedRows.length > 0);
+        assert.ok(inheritedRows.every(row => row.selected_state === "unknown"));
+      } else assert.deepEqual(inheritedRows, []);
+    }
   } finally {
     clock.mock.restore(); process.env.PATH = previous.path;
     if (previous.registry === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = previous.registry;
@@ -191,3 +246,4 @@ test("selected mode shadow evidence reaches actual run and sweep consumers", asy
     seed.cleanup(); origin.cleanup();
   }
 });
+}

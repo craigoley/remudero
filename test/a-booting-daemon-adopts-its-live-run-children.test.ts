@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -14,6 +15,7 @@ import { loadPlan } from "#src/lib/plan.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import { daemonCommand, ledgerPathFor, orphanSweepRunActive, runInChildWhenOn } from "#src/run-task.js";
 import { defaultInstance } from "#src/lib/host-memory-ledger.js";
+import { captureSelectedRegistryIntent, type SelectedRegistryIntent } from "#src/lib/selected-registry-consumers.js";
 import { detachSweepAction } from "#src/lib/sweep.js";
 import {
   defaultReadMarkers, killProcessGroup, RUN_ID_ENV, spawnDetachedGroup, sweepOrphanWorkers,
@@ -67,16 +69,75 @@ test("selected child admission fallback preserves shadow intent and owner holds"
     allowStale: false, options: { owner: "human" }, planSync: async () => ({ plan: { tasks: [], byId: new Map() }, staleDispatch: false }),
     log: f.log };
   const receipts = () => f.rows.filter(row => row.step === "instance_registry.consumer_shadow_observed");
+  const supplied = captureSelectedRegistryIntent({ settings });
+  input.options.selectedRegistryIntent = supplied;
+  let captured: SelectedRegistryIntent | undefined;
+  let invoked = false;
+  input.onSelectedRegistryIntent = intent => { invoked = true; captured = intent; };
   assert.equal(await runInChildWhenOn(input, { readMode: () => "on", spawn: async forwarded => {
     assert.equal(forwarded.options.selectedRegistryIntent?.kind, "shadow");
     assert.equal(forwarded.options.owner, "human");
+    assert.equal(invoked, true, "the daemon fallback callback runs before admission yields");
+    assert.equal(captured, forwarded.options.selectedRegistryIntent);
+    assert.ok(captured?.kind === "shadow" && captured.input.expectedDigest);
+    assert.ok(Object.isFrozen(captured));
+    assert.ok(Object.isFrozen(captured.input));
     writeFileSync(path, text("changed-during-admission")); settings.registryPath = other;
     return { started: false, reason: "fixture startup failed" };
   } }), undefined);
   assert.equal(receipts().at(-1)?.selected_state, "unknown");
+  assert.ok(captured?.kind === "shadow");
+  assert.equal(captured.input.configuredPath, path);
+  assert.equal(input.options.selectedRegistryIntent, supplied, "caller transport remains untouched");
+  assert.equal(captured.input.expectedDigest, createHash("sha256").update(text()).digest("hex"));
+  for (const value of [undefined, { version: 1, kind: "unknown" } as const]) {
+    input.options.selectedRegistryIntent = value;
+    invoked = false;
+    assert.equal(await runInChildWhenOn(input, { readMode: () => "off" }), undefined);
+    assert.equal(invoked, true);
+    assert.deepEqual(captured, value, "explicit absence and unknown never borrow global shadow config");
+  }
   input.mayRunInProcess = () => false;
   await assert.rejects(runInChildWhenOn(input, { readMode: () => "off" }), /cannot run in-process/);
   assert.equal(receipts().at(-1)?.legacy_outcome, "threw");
+});
+
+test("selected registry shadow intent survives actual trusted child transport - daemon fallback", async t => {
+  const f = fixture(); t.after(f.cleanup);
+  const shim = ghShim([{ when: "", exit: 1, stderr: "fixture GitHub unavailable" }]);
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
+  const oldHome = process.env.HOME, oldPath = process.env.PATH;
+  process.env.HOME = f.root; process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+  t.after(() => {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+  });
+  const selected = join(f.root, "selected.yaml"), plan = join(f.root, "tasks.yaml");
+  writeFileSync(selected, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
+  writeFileSync(plan, "[]\n");
+  mkdirSync(join(f.root, ".config/remudero"), { recursive: true });
+  writeFileSync(join(f.root, ".config/remudero/config.json"), JSON.stringify({ root: f.root, claudeBin: "/bin/true",
+    selectedRegistryMode: { mode: "shadow", registryPath: selected, instanceName: "fixture" } }));
+  for (const mode of ["on", "off"] as const) {
+    let runs = 0;
+    assert.equal(await daemonCommand(["--allow-self-target", "--plan", plan, "--max", "0"], {
+      readRunChildMode: () => mode, checkStop: () => undefined, checkPause: () => undefined,
+      startGithubAppRefresh: () => ({ armed: false }),
+      runTask: async (_taskId, opts) => {
+        runs++;
+        const intent = opts?.selectedRegistryIntent;
+        assert.ok(intent?.kind === "shadow", "real daemon fallback receives dispatch's qualified intent");
+        assert.equal(intent.input.configuredPath, selected); assert.ok(intent.input.expectedDigest);
+        assert.ok(Object.isFrozen(intent));
+        return result("A");
+      },
+      runDaemon: async (_plan, deps) => {
+        await deps.runOne("A");
+        return { attempted: ["A"], merged: [], costUsd: 0, ticks: 1, stopReason: "max_reached" };
+      },
+    }), 0);
+    assert.equal(runs, 1);
+  }
 });
 
 test("W1-T9086: a boot adopts a live child before the boot gate", async () => {

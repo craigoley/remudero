@@ -199,6 +199,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
         : { result: await withSelectedRegistryContext(observer, async () => {
           try {
             return await observeSelectedRegistry(observer, "run-child", {}, () => withRunChildReservation(spec.value, () => runTask(spec.value.taskId, {
+          selectedRegistryIntent: options.selectedRegistryIntent,
           ...(options.planPath !== undefined ? { planPath: options.planPath } : {}),
           ...(options.owner !== undefined ? { owner: options.owner } : {}),
           ...(options.allowStale !== undefined ? { allowStale: options.allowStale } : {}),

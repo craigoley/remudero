@@ -2689,7 +2689,7 @@ function codexSpawnEnv(config: Config, args: CodexSpawnEnvArgs, nativeCacheRoot?
   for (const key of allowed) if (process.env[key] !== undefined) env[key] = process.env[key];
   env.CODEX_HOME = codexHome(config);
   for (const [key, value] of Object.entries(args.env ?? {})) {
-    if (!/^ANTHROPIC_|^OPENAI_API_KEY$/.test(key)) env[key] = value;
+    if (!/^ANTHROPIC_|^OPENAI_API_KEY$|^RMD_INSTANCE_REGISTRY$/.test(key)) env[key] = value;
   }
   // W1-T2800 — ASSIGNED AFTER `args.env` IS COPIED, AND FROM THE THREADED HOME ONLY.
   //
