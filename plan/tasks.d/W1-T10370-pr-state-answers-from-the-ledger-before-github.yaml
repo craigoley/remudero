@@ -14,6 +14,11 @@
     - src/lib/pr-state.ts
     - src/run-task.ts
     - test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts
+    - docs/cli-reference.md
+    - docs/operator-guide.md
+    - scripts/console-parity-ratchet.mjs
+    - scripts/console-parity-baseline.json
+    - test/help-renders-a-summary-not-a-paragraph.test.ts
   status: queued
   priority: 1.5  # every operator and builder session asks these questions many times an hour
   attempts: 0
@@ -47,6 +52,7 @@
        ledger's recent sweep pass rows or the policy that sets it), never a new literal; a changed default is the
        operator's call.
     5. Read-only: no ledger write, no GitHub write.
+    6. Declare this host-local, ledger-first read as one reasoned CLI-only entry and record its name in the existing parity baseline; add the command inventory and operator-guide row. Preserve every other parity entry, existing assertion, criterion and gate.
   acceptance:
     - claim: "the new test file passes"
       proof: "unit test: test/ledger/pr-state-answers-from-the-ledger-before-github.test.ts"

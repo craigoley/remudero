@@ -60,7 +60,7 @@ import { contributionOriginFromRest, feedbackContentDigest, observeFeedbackSourc
   type AdmissionRead, type AdmissionSettings, type FeedbackAdmissionSubject } from "./contributor-admission.js";
 import { openLedgerUnion } from "./ledger-union.js";
 import { captureFeedbackReply, replyRefusalFor, type PanelGraphDeps } from "./panel-graph.js";
-import { feedbackEntryRepoPath, findFeedbackBySubmissionKey, qualifyCanonicalGrillContinuation } from "./feedback.js";
+import { feedbackEntryRepoPath, findFeedbackBySubmissionKey, qualifyCanonicalGrillContinuation, stageFeedbackCapture } from "./feedback.js";
 import { parse as parseYaml } from "yaml";
 import { readQueuedFeedbackRecords } from "./feedback-landing.js";
 import {
@@ -424,7 +424,7 @@ async function applyGrilledFeedbackAnswer(
     if (findFeedbackBySubmissionKey(feedback.root, picked.origin, feedback.inboxRoot)) return undefined;
     const { entry, landingError } = captureFeedbackReply(feedback, {
       text: picked.text, replyTo: feedbackId, submissionKey: picked.origin, origin: "issue",
-    }, continuation);
+    }, continuation, (root, opts) => stageFeedbackCapture(root, feedback.inboxRoot, opts).entry);
     return { ...base, step: "escalation_answer.feedback_applied", reply_id: entry.id, answer: picked.text,
       ...(landingError === undefined ? { landing: "queued" } : { landing_error: landingError }) };
   } catch (error) {

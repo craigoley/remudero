@@ -6,12 +6,14 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 4.00
-  risk: medium
+  risk: high  # Rule 19 span: widened to fix, fix-outcome by a scope amendment for #15483
+  band_meaning: span
   origin: "operator session 2026-10-15 filing agent F4 lead 5: the fix-round twin of W1-T9708 (#12153)"
   plan_refs: [W1-T9561, W1-T9589, W1-T9708, W1-T6406]
   files:
     - src/lib/fix-outcome.ts
     - test/a-tree-walk-red-a-pr-causes-is-never-diff-cannot-reach.test.ts
+    - "src/cli/commands/fix.ts"
   status: queued
   priority: 2  # a PR-caused census red rerouted as a flake costs the PR its fix round and files evidence toward a false incident
   attempts: 0

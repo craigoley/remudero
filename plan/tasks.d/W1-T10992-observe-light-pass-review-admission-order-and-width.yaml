@@ -1,0 +1,40 @@
+- id: W1-T10992
+  title: Observe how light-pass review admission orders and sizes its picks (stale refill tails, review width, unmergeable queue heads) before any change to it
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: recon
+  verify: human
+  risk: low
+  origin: operator-session#slo-ladder-recon-2026-10-29
+  plan_refs:
+    - W1-T2584
+    - W1-T526
+    - W1-T2426
+    - W1-T9904
+  files:
+    - docs/recon/light-pass-review-admission-order-and-width.md
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The report replays the 7 days of ledger before this task is built. It lists every light-pass review admission made by refillFreedLanes (sweep.review_refilled) whose refillTail was taken from a snapshot older than the moment some other PR became review-eligible, while that PR was older by reviewAdmissionKey and still waiting. Each row gives the admitted PR, its snapshot age, the jumped PR, when the jumped PR became eligible, and the added wait until the jumped PR was admitted (or that it never was)"
+      proof: "demonstration: the operator reads the report and sees one row per jump with those fields, the total count and the added-wait distribution, the newest ledger ts read and the file count per ledger form"
+    - claim: "The report gives the distribution of the semantic review width per light pass (effectiveReviewWidth, the policySemanticBound before reviewAdmissionBound subtracts reviews in flight), and how often the oldest-first head of the review queue was a PR that cannot merge without a person: a CHANGES_REQUESTED review from a human, or a needs-human escalation already open at that head"
+      proof: "demonstration: the operator reads the report and sees the width distribution, the count of passes whose queue head could not merge, and which PRs those were"
+    - claim: "The report runs a positive control on the 2026-10-29 case, finding #15538's jump by the refills of #15543, #15551 and #15553, and says where a measure cannot be read from the ledger as written"
+      proof: "demonstration: the operator reads the report and sees the #15538 control reproduced, and a statement of every measure the ledger does not record and how it was reconstructed or why it could not be"
+    - claim: The report recommends whether to change refill ordering, the width or the queue head rule, or recommends no change, with its evidence. It changes no code, configuration or ledger
+      proof: "demonstration: the operator reads the report and sees one recommendation with its evidence, and the PR diff touches only the report"
+  rationale: |
+    OBSERVED by the operator's 2026-10-29 recon (newest ledger ts read 2026-10-29T21:01:37.569Z). PR #15538 (head 15d7b525c, created 18:41:06Z) had green CI from 19:44Z and became review-eligible at 20:02:55Z (sweep.review_eligible), but no review ran.
+    - 20:03:00Z and 20:18:34Z sweep.disposed post-review: "not admitted this pass: semantic post-review admission bound 0, in-flight 1".
+    - The width was spent by sweep.review_refilled for younger PRs from a pass whose snapshot was taken about 19:53:03Z to 19:53:06Z, before #15538 was eligible: #15543 at 20:03:14Z (snapshot_age_ms 611788), #15551 at 20:08:59Z (957451) and #15553 at 20:11:52Z (1126151). #15543 was created 18:56:09Z and #15553 19:38:05Z, both after #15538. A full pass with a snapshot from 19:21:54Z admitted #15548 (created 19:05:31Z) at 20:24:38Z.
+    - 20:44:23Z, 20:53:44Z and 20:54:30Z: "not admitted this pass: semantic post-review admission bound 1". The oldest-first pick was #14793 and then #15133. #14793 is held by a CHANGES_REQUESTED review from a person, and #15133 has a needs-human escalation open at its head (issue 15529). No sweep.review_admitted or sweep.review_refilled row was written fleet-wide from 20:40Z to 21:01:37Z.
+    - Positive control: #15547 (created 19:00:40Z) was refilled at 19:43:10.401Z, admitted at 19:43:12.516Z, and its review posted at 19:46:49.518Z.
+    INFERRED, not established: refillTail is fixed when its pass starts, so a long-running pass can refill younger PRs past an older PR that became eligible later. A width of 0 to 1, with an unmergeable PR at the head of the queue, can leave every other PR waiting. Three passes on one evening are a small sample (doctrine: recurrence is a class signal), so this task measures before any change.
+    Out of scope by operator decision 2026-10-29: the restart latch refusing a pick is not measured here. restartAdmission in src/lib/daemon.ts decides per kind, not per PR, so falling through to the next candidate would be refused too.
+  falsifier: |
+    If, over the 7 days, refill jumps are rare and add little wait, and the queue head is almost never an unmergeable PR, the 2026-10-29 case was a one-off and the report recommends no change. If the width per pass is not recorded and cannot be reconstructed from stand-down reasons and sweep.review_refilled rows, the report says so and recommends the missing record rather than a behavior change.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-29 as an observation proposal at priority normal (2).
+    Read-only: no change to selectReviewAdmissions, refillFreedLanes, effectiveReviewWidth or reviewAdmissionBound is authorized by this task. Any change is a separate filing.

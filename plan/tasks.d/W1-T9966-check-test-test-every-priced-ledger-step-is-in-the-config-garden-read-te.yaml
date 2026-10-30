@@ -3,9 +3,12 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   risk: low
   priority: 1.22
+  # refusal-amendment (W1-T9966, run DAEMON-1793261281327@77de72b0f78bdab3d3913573e517d066a23c6619, 2026-10-29T11:11:23.344Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: The recorded census failures do not establish a flaky test; the requested proof cannot show that a deterministic census failure is prevented.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
@@ -14,7 +17,7 @@
     - src/lib/config-gardener.ts
     - test/check-test-test-every-priced-ledger-step-is-in-the-config-garden-read-te.test.ts
   acceptance:
-    - claim: "the harness no longer spends a fix round on check:test:test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts:flaky"
+    - claim: "a recorded check:test:test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts:flaky round, replayed through the real code path in src/lib/config-gardener.ts, is prevented or self-healed without dispatching a fix round"
       proof: "grep: test(\"W1-T9966: check:test:test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts:flaky is prevented, not retried\" in test/check-test-test-every-priced-ledger-step-is-in-the-config-garden-read-te.test.ts"
   note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts:flaky's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
   rationale: |
@@ -56,3 +59,12 @@
       - "The gates state shows a machine-authored task from the ci-friction family (28 merged, 40 declined). That track record warrants some caution, but the change still goes through CI and review. No operator-only decision is requested."
     judged_at: "2026-10-17T03:13:51.505Z"
     pin: "a778020172261a0c055f6131b4e3b940c3d5f82f43c5e8550ac595179145466a"
+  amendment: |
+    2026-10-29, by operator decision: criterion 1's claim is restated to the mechanism wording the
+    ci-friction gardener drafts since #15538 (ciFrictionShardYaml in src/lib/ci-friction-gardener.ts).
+    The old claim was: "the harness no longer spends a fix round on check:test:test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts:flaky".
+    Reviews judged proofs of that claim non-responsive, because only the gardener's after-window
+    measurement can show a cause stopped costing fix rounds, and the PR was parked on it. The proof
+    line is unchanged. The after-window measurement still decides whether the cause's share fell.
+    verify is set to human so the machine-filing judge re-rules the amended record (its ruling pin
+    is stale once the claim changes); the judge's ruling, not this edit, releases it.

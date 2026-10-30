@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.26
+  # refusal-amendment (W1-T10792, run W1-T10792-1793276715210, 2026-10-29T13:56:40.652Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: Operator-free recovery requires changing repair execution beyond the declared gardener and test files.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

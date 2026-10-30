@@ -12,10 +12,10 @@ import { rm as rmAsync } from "node:fs/promises";
 import { RUN_AGENT_WAIT_HEAP_STEP, type AgentWaitHeap } from "../../lib/agent-wait-heap.js";
 import { type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
 import { type FixRoundReapplyPorts } from "../../lib/fix-round-reapply.js";
-import { productionFixProgressJudge, type JobRequeueOutcome } from "../../lib/sweep.js";
+import { fixRoundBranchClaim, productionFixProgressJudge, type JobRequeueOutcome } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { resolveRepoLayout } from "../../lib/repo-layout.js";
@@ -50,7 +50,7 @@ import { resolveInstallRoot } from "../../lib/install-root.js";
 import { escalate, escalateAsync, ghIssueGateway, ghIssueGatewayAsync, tryEscalate, type Escalation, type EscalationJudgeVerdict, type AsyncIssueGateway, type IssueGateway } from "../../lib/escalate.js";
 import { mapRestPr, prStateFromRest, singlePrRestArgs, type ReviewReuseFacts, type GhApiFetcher, type RestPullRow, type RestRollupEntry } from "../../lib/open-prs-rest.js";
 import { probeMerge, type MergedTypecheckPorts } from "../../lib/merge-probe.js";
-import { recordDecision } from "../../lib/feedback-landing.js";
+import { recordDecision, recordDecisionAsync, type LandFeedbackAsyncOpts } from "../../lib/feedback-landing.js";
 import { preflightFailureNotice, preflightSummaryPath } from "../../lib/ci-parity.js";
 import { coverageNarrowSuites, type CoverageRun, type CoverageVerdict } from "../../lib/coverage-narrow.js";
 import { buildAffectedSuitesGraph, type AffectedSelection } from "../../lib/affected-suites.js";
@@ -121,6 +121,7 @@ import { acquireDrainLock, defaultIsPidAlive, type DrainLockHandle } from "../..
 import { checkReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "../../lib/self-sync.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, type InflightLockHandle } from "../../lib/inflight-lock.js";
 import { runDiagnoseThenRetry, type DiagnoseThenRetryResult, type AttemptOutcome, type FailureSignal } from "../../lib/classify.js";
+import { captureLocalQualificationReceipt } from "../../lib/local-qualification-receipt.js";
 import { shouldRecordDecision, reversibilityFactor, type DiffFileChange } from "../../lib/risk-score.js";
 import { assertLiveWriteAllowed } from "../../lib/live-write-guard.js";
 import { runChildCredentialSocket } from "../../lib/secret-boundary.js";
@@ -271,7 +272,8 @@ export interface RunTaskCommandHost {
   readonly ghLiveState: (prUrl: string) => LiveStateResult;
   readonly ghLiveHead: (prUrl: string, gh?: (args: string[]) => unknown) => LiveHeadResult;
   readonly captureWorktreeSnapshotViaGit: (worktreePath: string) => WorktreeSnapshot | undefined;
-  readonly ghUpdateBranch: (owner: string, repo: string, prNumber: number, exec?: typeof execFileSync, via?: string, record?: BranchUpdateRecorder) => { ok: boolean; error?: string };
+  readonly ghUpdateBranch: (owner: string, repo: string, prNumber: number, exec?: typeof execFileSync, via?: string, record?: BranchUpdateRecorder, expectedHeadSha?: string) => { ok: boolean; error?: string };
+  readonly fixBranchClaimKey: (owner: string, repo: string, branch: string) => string;
   readonly redBaseRefreshFactsFromRest: (owner: string, repo: string, prNumber: number, fetch?: GhApiFetcher) => RedBaseRefreshFacts;
   readonly fixRebaseMergeFactsFromRest: (owner: string, repo: string, prNumber: number, fetch?: GhApiFetcher) => FixRebaseMergeFacts;
   readonly reclaimAbandonedWorker: (info: { runId: string; taskId: string; elapsedMs: number }, deps?: {
@@ -434,6 +436,8 @@ export interface RunTaskCommandHost {
     readMergeFacts?: (prNumber: number) => FixRebaseMergeFacts | Promise<FixRebaseMergeFacts>;
     
     updateBranch?: (prNumber: number) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
+    /** Separate from the historical unleased updater: inherited census recovery requires CAS. */
+    updateBranchAtHead?: (prNumber: number, expectedHeadSha: string) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
     
     readRedBaseRefreshFacts?: (prNumber: number) => RedBaseRefreshFacts | Promise<RedBaseRefreshFacts>;
     
@@ -526,6 +530,8 @@ export interface RunTaskCommandHost {
   readonly fixCensusAppliesToRepo: (repo: string | undefined, log: (step: string, extra?: Record<string, unknown>) => void, resolveSelf?: () => { owner: string; repo: string }) => boolean;
   readonly writeFixCensusSnapshot: (root: string, log: (step: string, extra?: Record<string, unknown>) => void, runGit?: typeof hostWorktreeGit) => string | undefined;
   readonly writeFixCensusSnapshotAsync: (root: string, log: (step: string, extra?: Record<string, unknown>) => void, runGit?: (root: string, args: string[], options?: HostWorktreeGitOptions) => string | Promise<string>) => Promise<string | undefined>;
+  readonly preserveInheritedCensusWork: (root: string, worktreePath: string, branch: string, context: Extract<InheritedCensusContext, { state: "inherited" }>) => Promise<Record<string, string>>;
+  readonly readInheritedCensusContextAsync: (root: string, path: string) => Promise<InheritedCensusContext>;
   readonly checkFixCensusSnapshotAsync: (root: string, path: string | undefined, log: (step: string, extra?: Record<string, unknown>) => void, run?: CensusChildRunner<Promise<CensusChildResult>>) => Promise<{ refusal?: CensusPushRefusal; unmeasured?: string } | undefined>;
   readonly FixRoundPushError: new (pushCause: RunErrorCause, refusal: CensusPushRefusal | undefined, detail: string) => RmdError & { readonly pushCause: RunErrorCause; readonly refusal: CensusPushRefusal | undefined; readonly detail: string };
   readonly pushFixRound: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string, deps?: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> & { mergedTypecheck?: MergedTypecheckPorts }) => Promise<FixRoundPushReceipt>;
@@ -824,6 +830,8 @@ export interface FixRungOutcome {
    */
   standDownReason?: string;
   superseded?: FixSuperseded;
+  /** The recovery checkout still owns unpublished work, including unprovable preservation. */
+  retainWorktree?: string;
   /**
    * W1-T1095: set only when `outcome === "parked"` — the prerequisite PR number
    * {@link outOfDiffBlockerFor} found. The rung spent ZERO strikes reaching this outcome
@@ -1090,7 +1098,7 @@ export interface RunTaskContext {
   owner: string;
   plan: Plan;
   planPath: string;
-  recordDecisionFn: typeof recordDecision;
+  recordDecisionFn: typeof recordDecision | typeof recordDecisionAsync;
   repoRoot: string;
   runId: string;
   runReviewFn: RunTaskCommandHost["runReview"];
@@ -1142,7 +1150,12 @@ export type RunErrorCause =
   | "subscription-only-refused"
   | "run-error";
 
+export type InheritedCensusContext =
+  | { state: "inherited"; headSha: string; mainSha: string; mergeBase: string; baselinePath: string }
+  | { state: "not-inherited" | "unavailable"; reason: string };
+
 export interface CensusPushRefusal {
+  inheritedMain?: InheritedCensusContext;
   text: string;
   censuses: string[];
   offeredBaselines: string[];
@@ -3228,6 +3241,7 @@ function endThrownRun(
 async function deferOpenToSiblingPr(
   helperHost: Pick<RunTaskHelperHost, "terminalVerdictFields" | "scrubGitCredentialText">, ctx: RunTaskContext,
   run: { impl: WorkerResult; branch: string; worktreePath: string; repoDir: string; costUsd: number },
+  remove: typeof worktreeRemove = worktreeRemove,
 ): Promise<RunResult | undefined> {
   const { terminalVerdictFields } = helperHost;
   const { log, say, opts, owner, task, taskId, runId } = ctx;
@@ -3248,7 +3262,7 @@ async function deferOpenToSiblingPr(
     head_sha: headSha,
     cost_usd: costUsd,
   });
-  reclaimRunWorktree(repoDir, worktreePath, "pr_open.deferred_to_existing", log);
+  reclaimRunWorktree(repoDir, worktreePath, "pr_open.deferred_to_existing", log, remove);
   log("verdict", {
     verdict: "blocked_inflight",
     reason: `${taskId} already has open PR #${sibling.number} (${sibling.head_ref}); not opening a second`,
@@ -3341,6 +3355,11 @@ async function repairCensusRefusedPush(helperHost: Pick<RunTaskHelperHost, "CENS
   const strikeCap = fixStrikeCap(input.config);
   let refusal = input.refusal;
   for (let strike = 1; strike <= strikeCap; strike++) {
+    if (refusal.inheritedMain?.state === "inherited") {
+      const reason = "inherited census contract needs native base refresh before another worker; no PR exists yet";
+      log("census_push.refresh_held", { strike, ...refusal.inheritedMain, refusal: refusal.text, reason });
+      return { outcome: "refused", strikes: strike - 1, refusal, reason };
+    }
     const catalogFiles = input.catalogFiles?.(refusal) ?? [];
     for (const path of catalogFiles) catalogOffered.add(path);
     log("census_push.refused", { strike, censuses: refusal.censuses, refusal: refusal.text, worktree: cwd });
@@ -3401,6 +3420,11 @@ async function repairCensusRefusedPush(helperHost: Pick<RunTaskHelperHost, "CENS
     const censusCheck = await checkFixCensusSnapshotAsync(cwd, censusSnapshotPath, log);
     if (censusCheck?.refusal) {
       refusal = censusCheck.refusal;
+      if (refusal.inheritedMain?.state === "inherited") {
+        const reason = "inherited census contract needs native base refresh before another worker; no PR exists yet";
+        log("census_push.refresh_held", { strike, ...refusal.inheritedMain, refusal: refusal.text, reason });
+        return { outcome: "refused", strikes: strike, refusal, reason };
+      }
       log("census_push.strike", { strike, ...receipt.ledgerFields(result), cost_usd: result.costUsd,
         reason: "saved edits refused by census before commit", refusal: refusal.text });
       continue;
@@ -4299,10 +4323,11 @@ export async function runTask(
     /** Injectable decision-record writer+lander (W1-T191, write site 1) — lets a behavioral
      *  test drive a REAL runTask() through the DECISION_REQUEST auto-choose branch and assert
      *  exactly what it writes/lands, without ever shelling out to a real git/gh. Default: the
-     *  real {@link recordDecision} (feedback-landing.js), which writes
+     *  real {@link recordDecisionAsync} (feedback-landing.js), which writes
      *  `plan/decisions.d/<taskId>-<runId>.md` and lands it via the shared decisions-landing
      *  bridge — the same mechanism W1-T243 proved for `plan/feedback/**`. */
-    recordDecision?: typeof recordDecision;
+    recordDecision?: typeof recordDecision | typeof recordDecisionAsync;
+    decisionLanding?: LandFeedbackAsyncOpts;
     /** W1-T1045: override the resolved clock bound (ms) — the SAME injection convention as
      *  every other opt-in seam above. Default: `policy.values.workerAbandon`, read below. */
     workerAbandonMs?: number;
@@ -4625,7 +4650,9 @@ export async function runTask(
   const rawSpawn = opts.spawn ?? spawnWorker;
   const runReviewFn = opts.runReview ?? runReview;
   const fetchPrBodyFn = opts.fetchPrBody ?? fetchPrBodyViaGh;
-  const recordDecisionFn = opts.recordDecision ?? recordDecision;
+  const recordDecisionFn = opts.recordDecision
+    ?? ((root: string, params: Parameters<typeof recordDecisionAsync>[1]) =>
+      recordDecisionAsync(root, params, opts.decisionLanding));
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
   const owner = opts.owner ?? resolveOwner();
@@ -5044,6 +5071,25 @@ export async function runTask(
   });
 }
 
+/** The initial run uses the same branch lease as the cold fix lane; unknown owners never get reclaimed. */
+export function claimRunTaskFixBranch(input: {
+  inflightDir: string; claimKey: string; runId: string; repoDir: string; worktreePath: string; branch: string;
+}): FixRoundBranchClaim {
+  const take = () => acquireInflightLock(input.inflightDir, input.claimKey, { run_id: input.runId, reclaim: false });
+  return fixRoundBranchClaim(take(), () => {
+    try {
+      const owners = listRegisteredWorktrees(input.repoDir).filter(w => w.branch === input.branch);
+      if (owners.length !== 1 || realpathSync(owners[0]!.path) !== realpathSync(input.worktreePath)) {
+        return "this run's branch worktree ownership is not confirmed";
+      }
+      return take();
+    } catch (error) {
+      const reason = `branch claim unavailable: ${String(error)}`;
+      return reason;
+    }
+  });
+}
+
 export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost): Promise<RunResult> {
   const {
     BRANCH_NAME_CONTRACT_PART,
@@ -5289,8 +5335,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
   } = ctx;
   // W1-T4655: set BEFORE the write, so no thrown-run exit (endThrownRun) writes a second verdict.
   let verdictWritten = false;
+  let prOpened = false;
   const log: RunTaskContext["log"] = (step, extra) => {
     if (step === "verdict") verdictWritten = true;
+    if (step === "pr.opened") prOpened = true;
     ctxLog(step, extra);
   };
   const restartPhase = ctx.restartPhase ?? { current: "recon" };
@@ -5518,11 +5566,27 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     provisionedInstallHash = current;
     reprovisionWorktreeDependencies(repoDir, worktreePath, reason, { ...opts.worktreeBaseDeps, log });
   };
-  /** W1-T8676/W1-T9786: the restored checkpoint a failed exit keeps, unless this run pushed its own branch (the newer
-   *  checkpoint, W1-T7837). Read while the worktree stands; only a proven absence (exit 1) keeps it. */
-  const checkpointToKeep = (): WorkerBoundaryCheckpoint | undefined => restoredCheckpoint !== undefined &&
-    hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).status === 1
-    ? restoredCheckpoint : undefined;
+  /** W1-T9815: after a failed verdict, keep the newest proven pre-PR head while the worktree still stands. */
+  const keepCheckpointOnFailedExit = (stage: string, failure: Record<string, unknown>): void => {
+    if (prOpened) return;
+    let kept: WorkerBoundaryCheckpoint | undefined;
+    try {
+      const remote = hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]);
+      if (remote.status === 1) {
+        kept = restoredCheckpoint;
+      } else if (remote.status === 0 && /^[0-9a-f]{40}$/.test(remote.stdout.trim())) {
+        kept = { branch, headSha: remote.stdout.trim() };
+      } else {
+        log("implement.checkpoint_keep_unproven", { task_id: taskId, status: remote.status,
+          error: remote.stderr || "origin tip could not be read", failed_stage: stage });
+      }
+    } catch (error) {
+      log("implement.checkpoint_keep_unproven", { task_id: taskId, failed_stage: stage,
+        error: String((error as Error)?.message ?? error) });
+    }
+    if (kept) log("implement.checkpoint_kept", { task_id: taskId, source_branch: kept.branch, head_sha: kept.headSha,
+      failed_stage: stage, ...failure, ...(kept.resumePhase ? { resume_phase: kept.resumePhase } : {}) });
+  };
   /** W1-T10752: the head a RETURNED failed verdict of a restored run keeps, read while the worktree stands: this run's own pushed
    *  tip when origin holds it and it differs from the restored head (the newer work), else the restored checkpoint. A run that
    *  restored nothing keeps nothing. Written after the verdict, which consumed the receipt, so the next run resumes the head. */
@@ -5548,19 +5612,15 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
   const failOnWorkerError = (r: WorkerResult, stage: string, reason?: string): RunResult | null => {
     const v = workerErrorVerdict(r, costUsd, stage);
     if (!v) return null;
-    // W1-T8676: a worker error is not the checkpoint's fault.
-    const keptCheckpoint = v.verdict === "failed" ? checkpointToKeep() : undefined;
+    log("verdict", { ...v.ledger, ...terminalVerdictFields(r), ...(reason ? { reason } : {}) });
+    if (v.verdict === "failed") {
+      keepCheckpointOnFailedExit(stage, { failed_subtype: r.subtype, failed_cause: r.subtype });
+    }
     try {
-      worktreeRemove(repoDir, worktreePath);
+      retireQualifiedWorktree();
       log("worktree.remove", { on: `${stage}.error` });
     } catch (e) {
       log("worktree.remove.error", { on: `${stage}.error`, error: String((e as Error)?.message ?? e) });
-    }
-    log("verdict", { ...v.ledger, ...terminalVerdictFields(r), ...(reason ? { reason } : {}) });
-    if (keptCheckpoint) {
-      log("implement.checkpoint_kept", { task_id: taskId, source_branch: keptCheckpoint.branch, head_sha: keptCheckpoint.headSha,
-        failed_stage: stage, failed_subtype: r.subtype,
-        ...(keptCheckpoint.resumePhase ? { resume_phase: keptCheckpoint.resumePhase } : {}) });
     }
     say(
       `verdict: ${v.verdict} (${r.subtype}) at ${stage} · ${r.numTurns} turns · notional $${costUsd.toFixed(4)}`,
@@ -5937,6 +5997,15 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
+  const captureQualification = (): void => {
+    if (!existsSync(worktreePath)) return;
+    captureLocalQualificationReceipt({ worktreeRoot: worktreePath, stateRoot: config.root,
+      repository: `${owner}/${task.repo}`, taskId, runId, log });
+  };
+  const retireQualifiedWorktree = (): void => {
+    captureQualification();
+    worktreeRemove(repoDir, worktreePath);
+  };
   // W1-T4356: nothing else fast-forwards repos/<repo>, so a lockfile change on main left every implement dispatch refused by
   // W1-T4193 below. A refusal here is that same deferral, raised before a worktree exists.
   let checkoutRefresh: ManagedCheckoutRefresh;
@@ -6004,7 +6073,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       endThrownRun(log, verdictWritten, "worktree.node_modules", e, costUsd);
       say(`REFUSED: ${e.message}`);
       try {
-        worktreeRemove(repoDir, worktreePath);
+        retireQualifiedWorktree();
         log("worktree.remove", { on: "node_modules_refused" });
       } catch (removeErr) {
         log("worktree.remove.error", { on: "node_modules_refused", error: String((removeErr as Error)?.message ?? removeErr) });
@@ -6722,7 +6791,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
     const transientVerdict = finishTransientRetry(driverResult, {
       taskId, runId, repoDir, worktreePath, costUsd, worker: impl, log, say,
-    });
+    }, retireQualifiedWorktree);
     if (transientVerdict) return transientVerdict;
     // ── The worker's OWN preflight verdict, surfaced before any verdict branch consumes the run.
     // `rmd preflight` writes `<repoRoot>/coverage/preflight-summary.json` in the worktree it ran
@@ -6791,7 +6860,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         // mentions this file), and best-effort landed via the SAME commit-bridge mechanism
         // W1-T243 proved for `plan/feedback/**`, so `repoRoot` never sits dirty waiting for
         // an operator to notice (the defect this task fixes).
-        landed = recordDecisionFn(repoRoot, {
+        landed = (await recordDecisionFn(repoRoot, {
           taskId,
           runId,
           options: decision.options,
@@ -6799,7 +6868,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           band: recordVerdict.band,
           reason: recordVerdict.reason,
           ...(decision.falsifier ? { falsifier: decision.falsifier } : {}),
-        }).landed;
+        })).landed;
       }
       log("decision.autochoose", {
         chosen,
@@ -7134,7 +7203,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         companions: scopeNeeded.companions.map((c) => c.path), git: (args) => hostWorktreeGit(worktreePath, args) });
       log("implement.scope_needed", { recovery_path: recoveryPath, paths: scopeNeeded.companions.map((c) => c.path),
         head_sha: harnessCommitted!.sha, amendment_url: "amendmentUrl" in amendment ? amendment.amendmentUrl : "" });
-      reclaimRunWorktree(repoDir, worktreePath, "implement.scope_needed", log);
+      reclaimRunWorktree(repoDir, worktreePath, "implement.scope_needed", log, retireQualifiedWorktree);
       log("verdict", {
         verdict: "no_pr",
         reason: "scope_needed",
@@ -7188,7 +7257,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         const credit = persistRunTaskCredit(ctx, task, resolved, github.changedFiles?.(resolved.url));
         log("already_satisfied.credit_persisted", { pr_number: resolved.number, outcome: credit });
         try {
-          worktreeRemove(repoDir, worktreePath);
+          retireQualifiedWorktree();
           log("worktree.remove", { on: "already_satisfied" });
         } catch (e) {
           log("worktree.remove.error", { on: "already_satisfied", error: String((e as Error)?.message ?? e) });
@@ -7237,7 +7306,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         harnessCommitRefused ? "harness_commit_refused" : undefined,
       );
       try {
-        worktreeRemove(repoDir, worktreePath);
+        retireQualifiedWorktree();
         log("worktree.remove", { on: "no_pr" });
       } catch (e) {
         log("worktree.remove.error", { on: "no_pr", error: String((e as Error)?.message ?? e) });
@@ -7479,7 +7548,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
             runnerConfigDigest: err.runnerConfigDigest,
           });
         }
-        reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
+        reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log, retireQualifiedWorktree);
         log("verdict", {
           verdict: "failed",
           reason: boundedVerdictReason(err.message),
@@ -7502,7 +7571,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         return { taskId, runId, merged: false, costUsd, verdict: "failed" };
       }
       // After the local open checks: a refused open never reads GitHub, and a sibling still stops the create.
-      const deferred = await deferOpenToSiblingPr(ctx, { impl, branch, worktreePath, repoDir, costUsd });
+      const deferred = await deferOpenToSiblingPr(ctx, { impl, branch, worktreePath, repoDir, costUsd }, retireQualifiedWorktree);
       if (deferred) return deferred;
       prUrl = runGhPrCreate(prCreate, branch, log, say, opts.prCreateExec).prUrl;
       // A worker may have opened this exact PR without reporting its URL. The generic-422
@@ -7714,6 +7783,23 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // drain/daemon path and the manual `rmd run-task` path both reach it, so both
     // get the rung for free (no duplicated fix-dispatch logic).
     if (review.state !== "success") {
+      const claimKey = host.fixBranchClaimKey(owner, task.repo, branch);
+      let branchClaim: FixRoundBranchClaim;
+      try {
+        branchClaim = claimRunTaskFixBranch({ inflightDir: join(config.root, "state", "inflight"), claimKey,
+          runId, repoDir, worktreePath, branch });
+        const reason = branchClaim.verify!();
+        if (reason) {
+          branchClaim.release();
+          throw new Error(reason);
+        }
+      } catch (error) {
+        const reason = `fix branch ownership unavailable: ${String(error)}`;
+        log("fix.stood_down", { site: "rung.branch_claim", head_sha: review.headSha, reason });
+        log("verdict", { verdict: "blocked", pr_url: prUrl, reason, cost_usd: costUsd,
+          ...terminalVerdictFields(impl) });
+        return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+      }
       const rung = await runFixRung({
         guardRoundHead: true,
         // A run on the real worker spawn is a production run: it always asks the LLM judge.
@@ -7739,6 +7825,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         openTaskIds,
         reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
         deps: {
+          branchClaim,
           writeFixCensusSnapshot: writeFixCensusSnapshotAsync,
           // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
           spawn: trackRepairLadder(spawn, { config, log }),
@@ -7809,6 +7896,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           // W1-T8396: this rung's own checkout already holds the head, so its trial merge needs no fetch of it.
           reproduceFailingTestsOnMerge: buildBaseReproductionProbe(config, worktreePath, ledgerPath, (s, extra) => log(s, extra), { merge: true }),
           updateBranch: (n) => ghUpdateBranch(owner, task.repo, n),
+          updateBranchAtHead: (n, head) => ghUpdateBranch(owner, task.repo, n, undefined, undefined, undefined, head),
           // W1-T1044: the wall-clock bound on this rung's own worker spawn, and the best-effort
           // reclaim of whatever it abandoned — see runFixRung's own deps doc. W1-T1219: reads
           // `fixSpawnWallClockBoundMs`, its OWN policy row, not the sweep tick's.
@@ -7832,7 +7920,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           commitGeneratorOutput: (o) => commitGeneratorOutputViaGit(o),
           packageScripts: readPackageScriptsFor(worktreePath),
         },
-      });
+      }).finally(() => branchClaim.release());
       review = rung.review;
       if (rung.outcome === "spawn_abandoned") {
         // W1-T1044: the worker never demonstrably returned — never a strike (see
@@ -8260,7 +8348,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
     if (outcome.merged) {
       log("pr.merged", { state: "MERGED" });
-      worktreeRemove(repoDir, worktreePath);
+      retireQualifiedWorktree();
       log("worktree.remove", {});
       log("verdict", {
         verdict: "merged",
@@ -8322,12 +8410,13 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         cost_usd: costUsd,
         ...terminalVerdictFields(null),
       });
+      keepCheckpointOnFailedExit("worker.abandoned", { failed_cause: err.reasonClass });
       say(
         `verdict: failed — worker abandoned after ${Math.round(evidence.elapsedMs / 1000)}s of silence ` +
           `(bound ${Math.round(evidence.boundMs / 1000)}s, last observed state: ${evidence.lastState ?? "unknown"})`,
       );
       try {
-        worktreeRemove(repoDir, worktreePath);
+        retireQualifiedWorktree();
         log("worktree.remove", { on: "worker.abandoned" });
       } catch (e) {
         log("worktree.remove.error", { on: "worker.abandoned", error: String((e as Error)?.message ?? e) });
@@ -8348,12 +8437,13 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         cost_usd: costUsd,
         ...terminalVerdictFields(null),
       });
+      keepCheckpointOnFailedExit("worker.bounded_output", { failed_cause: err.reasonClass });
       say(
         `verdict: failed — Codex worker ${err.stream} output exceeded ${err.limitBytes} bytes ` +
           `(${err.observedBytes} observed)`,
       );
       try {
-        worktreeRemove(repoDir, worktreePath);
+        retireQualifiedWorktree();
         log("worktree.remove", { on: "worker.bounded_output" });
       } catch (e) {
         log("worktree.remove.error", { on: "worker.bounded_output", error: String((e as Error)?.message ?? e) });
@@ -8361,27 +8451,16 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
     log("run.error", { error: String((err as Error)?.message ?? err) });
-    // W1-T9786: nor is a thrown harness error (W1-T9047's refused push), so this exit keeps it too.
-    let keptThroughThrow: WorkerBoundaryCheckpoint | undefined;
-    try {
-      keptThroughThrow = verdictWritten ? undefined : checkpointToKeep();
-    } catch (error) {
-      // Unproven (a refused worktree pointer): keep nothing, as before, and never replace the run's own error.
-      log("implement.checkpoint_keep_unproven", { task_id: taskId, error: String((error as Error)?.message ?? error) });
-    }
+    const failedThroughThrow = !verdictWritten;
     // W1-T4655: the run DID end, so it gets ONE terminal row naming the harness cause.
     endThrownRun(log, verdictWritten, "run.error", err, costUsd);
-    if (keptThroughThrow) {
-      log("implement.checkpoint_kept", { task_id: taskId, source_branch: keptThroughThrow.branch, head_sha: keptThroughThrow.headSha,
-        failed_stage: "run.error", failed_cause: runErrorCause(err),
-        ...(keptThroughThrow.resumePhase ? { resume_phase: keptThroughThrow.resumePhase } : {}) });
-    }
+    if (failedThroughThrow) keepCheckpointOnFailedExit("run.error", { failed_cause: runErrorCause(err) });
     // Reclaim the worktree even on an unexpected throw — a dead run must not
     // leave debris that blocks the next one (start-of-run prune is the backstop,
     // but clean up eagerly here too). Best-effort; the ledger already has the
     // error. The stale run-* branch is swept by the next run's pruneStaleRuns.
     try {
-      worktreeRemove(repoDir, worktreePath);
+      retireQualifiedWorktree();
       log("worktree.remove", { on: "run.error" });
     } catch (e) {
       log("worktree.remove.error", { on: "run.error", error: String((e as Error)?.message ?? e) });
@@ -8391,6 +8470,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // Terminal verdict (or throw) ⇒ this run no longer owns the worktree. Drop the
     // liveness token so a later prune may reclaim the worktree. Idempotent; the
     // sibling file also vanishes with the worktree on the paths that remove it.
+    captureQualification();
     removeRunLock(worktreePath);
     // W1-T1268: HOLDER ARM — drop the dispatch claim this run took, CAS'd on `claimAnchor` so
     // this can only ever delete the claim it still holds, never one that has since become

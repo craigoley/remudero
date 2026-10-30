@@ -171,7 +171,7 @@ test("W1-T9561: an unknown attribution keeps the scope amendment", async () => {
   // Pure: every missing fact is unknown, and unknown never reroutes.
   const base = { failingTestFiles: [SNAPSHOT_TEST], changedPaths: ["learnings/ci.yaml", "test/fixtures/g/case.json"],
     closure: new Map([[SNAPSHOT_TEST, new Set([SNAPSHOT_TEST])]]), baseOutcomes: new Map([[SNAPSHOT_TEST, "passes" as const]]),
-    isHarnessPath: () => false, namedInClosure: new Set<string>() };
+    isHarnessPath: () => false, namedInClosure: new Set<string>(), censusWalks: new Map([[SNAPSHOT_TEST, []]]) };
   assert.equal(redAttribution(base).kind, "diff-cannot-reach");
   for (const [why, input] of [
     ["no failing file", { ...base, failingTestFiles: [] }], ["diff unread", { ...base, changedPaths: undefined }],
@@ -185,7 +185,7 @@ test("W1-T9561: an unknown attribution keeps the scope amendment", async () => {
   // Every read that throws is unread, never an empty answer.
   const reads = { failingTestFiles: [SNAPSHOT_TEST], headSha: "h", prNumber: 1, ledger: [], rerunReproduced: false, isHarnessPath: () => false,
     mainTip: () => "m", changedPaths: () => ["test/fixtures/g/case.json"], closure: async () => new Map([[SNAPSHOT_TEST, new Set([SNAPSHOT_TEST])]]),
-    namedInClosure: () => new Set<string>() };
+    namedInClosure: () => new Set<string>(), readTestText: () => "export {};" };
   const boom = () => { throw new Error("unreadable"); };
   for (const broken of [{ mainTip: boom }, { changedPaths: boom }, { closure: async () => boom() }, { namedInClosure: boom }, { prNumber: undefined }]) {
     assert.equal((await readRedAttribution({ ...reads, ...broken })).kind, "unknown", JSON.stringify(Object.keys(broken)));

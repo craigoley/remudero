@@ -12,6 +12,7 @@
   plan_refs: [W1-T9786, W1-T8676, W1-T7837, W1-T1045, W1-T6352, W1-T4655, W1-T9482, W1-T9047]
   files:
     - src/run-task.ts
+    - src/cli/commands/run-task-verb.ts  # runTaskBody and the checkpoint exit paths moved here
     - test/a-restored-checkpoint-outlives-its-runs-thrown-error.test.ts
     - test/a-failed-exit-keeps-the-newest-checkpoint-it-can-prove.test.ts
   status: queued
