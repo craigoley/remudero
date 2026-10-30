@@ -93,53 +93,79 @@ test("W1-T9855: a failed root install is refused before worktree preparation fin
 });
 
 test("W1-T9855: runTask releases the claim without spawning a worker when the install is absent", async (t) => {
-  const origin = fixture(t);
-  const root = origin.dir;
-  origin.git("clone", "--quiet", root, join(root, "repos", "remudero"));
-  const taskId = "T-W1-T9855-PROBE";
-  const planPath = join(root, "tasks.yaml");
-  writeFileSync(planPath, [
-    `- id: ${taskId}`, "  title: missing install probe", "  repo: remudero", "  type: implement",
-    "  verify: auto", "  risk: medium", "  files: [src/lib/worker.ts]", "  origin: architect", "  status: queued", "",
-  ].join("\n"));
-  const dropped: string[] = [];
-  let spawned = 0;
-  await assert.rejects(() => withLiveWritesAllowed(() => runTask(taskId, {
-    skipGitSync: true,
-    planPath,
-    config: { claudeBin: "/bin/true", root, installRoot: REPO_ROOT },
-    github: {
-      prByRef: () => null, findMergedByTrailer: () => null,
-      headRefName: () => undefined, prBody: () => undefined,
-    },
-    spawn: async () => { spawned++; throw new Error("a worker must not run without an install"); },
-    containmentExec: async (token) => ({
-      transcript: `touch ../${token}.txt: Operation not permitted`,
-      outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0,
-    }),
-    isolationExec: async () => ({
-      transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -",
-      aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0,
-    }),
-    claimReserver: {
-      mintAnchor: () => "w1-t9855-anchor", attempt: () => "created", holder: () => undefined,
-      drop: (id) => { dropped.push(id); return true; },
-    },
-    worktreeBaseDeps: { resolveSource: () => undefined },
-    managedCheckoutInstall: () => {},
-  })), (error: unknown) => {
-    assert.ok(error instanceof WorktreeNodeModulesRefusedError, String(error));
-    assert.equal(isSpawnInfraBlockedError(error), true);
-    assert.match(error.message, /no-source/);
-    return true;
-  });
-  assert.equal(spawned, 0);
-  assert.deepEqual(dropped, [taskId]);
-  const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
-    .trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
-  assert.equal(rows.find((row) => row.step === "worktree.node_modules")?.outcome, "no-source");
-  assert.ok(rows.find((row) => row.step === "worktree.node_modules_refused"));
-  assert.equal(rows.find((row) => row.step === "worktree.add_failed"), undefined);
+  for (const skipRefresh of [false, true]) {
+    for (const outcome of ["no-source", "failed"] as const) {
+      await t.test(`${outcome}, refresh ${skipRefresh ? "skipped" : "current"}`, async (t) => {
+        const origin = fixture(t);
+        const root = origin.dir;
+        const checkout = join(root, "repos", "remudero");
+        origin.git("clone", "--quiet", root, checkout);
+        mkdirSync(join(checkout, "node_modules"));
+        writeFileSync(join(checkout, ".git", "info", "exclude"), "node_modules/\n");
+        if (skipRefresh) writeFileSync(join(checkout, "untracked.txt"), "keep this checkout dirty\n");
+        const source = outcome === "failed" ? join(root, "missing", "node_modules") : undefined;
+        const taskId = "T-W1-T9855-PROBE";
+        const planPath = join(root, "tasks.yaml");
+        writeFileSync(planPath, [
+          `- id: ${taskId}`, "  title: missing install probe", "  repo: remudero", "  type: implement",
+          "  verify: auto", "  risk: medium", "  files: [src/lib/worker.ts]", "  origin: architect", "  status: queued", "",
+        ].join("\n"));
+        const dropped: string[] = [];
+        let spawned = 0;
+        await assert.rejects(() => withLiveWritesAllowed(() => runTask(taskId, {
+          skipGitSync: true,
+          planPath,
+          config: { claudeBin: "/bin/true", root, installRoot: REPO_ROOT },
+          github: {
+            prByRef: () => null, findMergedByTrailer: () => null,
+            headRefName: () => undefined, prBody: () => undefined,
+          },
+          spawn: async () => { spawned++; throw new Error("a worker must not run without an install"); },
+          containmentExec: async (token) => ({
+            transcript: `touch ../${token}.txt: Operation not permitted`,
+            outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0,
+          }),
+          isolationExec: async () => ({
+            transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -",
+            aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0,
+          }),
+          claimReserver: {
+            mintAnchor: () => "w1-t9855-anchor", attempt: () => "created", holder: () => undefined,
+            drop: (id) => { dropped.push(id); return true; },
+          },
+          worktreeBaseDeps: { resolveSource: () => source },
+          managedCheckoutInstall: () => { assert.equal(skipRefresh, false); },
+        })), (error: unknown) => {
+          assert.ok(error instanceof WorktreeNodeModulesRefusedError, String(error));
+          assert.equal(isSpawnInfraBlockedError(error), true);
+          assert.equal(error.outcome, outcome);
+          assert.equal(error.nodeModulesSource, source);
+          assert.ok(error.message.includes(`node_modules provisioning returned ${outcome}`), error.message);
+          if (skipRefresh) {
+            assert.match(error.message, /the managed checkout was not fast-forwarded: checkout is dirty/);
+          }
+          return true;
+        });
+        assert.equal(spawned, 0);
+        assert.deepEqual(dropped, [taskId]);
+        const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+          .trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+        assert.equal(rows.find((row) => row.step === "worktree.node_modules")?.outcome, outcome);
+        const refused = rows.find((row) => row.step === "worktree.node_modules_refused");
+        assert.ok(refused);
+        const skipped = rows.find((row) => row.step === "managed_checkout.refresh_skipped");
+        if (skipRefresh) {
+          assert.ok(skipped);
+          assert.equal(skipped.reason, "checkout is dirty (1 changed path(s))");
+          assert.equal(refused.managed_checkout_not_refreshed, skipped.reason);
+        } else {
+          assert.equal(skipped, undefined);
+          assert.equal(refused.managed_checkout_not_refreshed, undefined);
+        }
+        assert.equal(rows.find((row) => row.step === "worktree.add_failed"), undefined);
+      });
+    }
+  }
 });
 
 test("test/a-run-worktree-without-node-modules-is-refused-before-its-worker.test.ts", async (t) => {
