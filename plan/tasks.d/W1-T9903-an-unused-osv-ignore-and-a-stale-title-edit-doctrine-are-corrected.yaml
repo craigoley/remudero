@@ -15,6 +15,9 @@
     - doctrine/ci-and-merging/title-needs-a-re-run.md
     - CLAUDE.md
     - test/an-osv-ignore-names-an-advisory-the-lockfile-still-carries.test.ts
+    - "AGENTS.md"
+    - "doctrine/ci-and-merging/edit-relints-the-title.md"
+    - "doctrine/merged-rules.json"
   status: queued
   priority: 2  # an unused suppression hides the next real hit on the same id, and the stale page tells every reader a retitle needs a re-run
   attempts: 0

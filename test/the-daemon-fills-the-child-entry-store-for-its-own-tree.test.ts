@@ -7,7 +7,7 @@
 // a fake build seam for the request rules, and the real buildIntoStore (a child process) for the hit.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -22,6 +22,7 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO, "scripts", "build-child-entries.mjs");
 const script = createRequire(import.meta.url)(SCRIPT) as {
   CHILD_ENTRIES: readonly { name: string; source: string }[];
+  HASHED_ROOT_FILES: readonly string[];
   sourceHash(root: string): string;
 };
 const MARKER = "W1-T9601-BUNDLE";
@@ -79,8 +80,13 @@ test("W1-T9601: a miss for the daemon tree requests one store build", async () =
     assert.equal(fake.calls[0]!.opts.storeRoot, store);
     const requested = r.rows.filter((row) => row.step === "child_entry.store_build_requested");
     assert.deepEqual(requested, [{ step: "child_entry.store_build_requested", source: DAEMON_TREE_FILL_SOURCE, tree: resolve(tree), hash }]);
+    const bytesRead = [...script.CHILD_ENTRIES.map((entry) => entry.source), ...script.HASHED_ROOT_FILES]
+      .filter((path) => existsSync(join(tree, path)))
+      .reduce((bytes, path) => bytes + statSync(join(tree, path)).size, 0);
+    assert.ok(Number.isFinite(launch.hash.ms) && launch.hash.ms >= 0);
+    assert.deepEqual(launch.hash, { computed: 1, reused: 0, bytes_read: bytesRead, ms: launch.hash.ms });
     assert.deepEqual(r.rows.find((row) => row.step === "child_entry.store_miss"),
-      { step: "child_entry.store_miss", entry: "run-task", tree_reason: "no-manifest", outcome: "miss", reason: "no-stored-build", hash, daemon_tree_fill: "requested" });
+      { step: "child_entry.store_miss", entry: "run-task", tree_reason: "no-manifest", outcome: "miss", reason: "no-stored-build", tree_hash: hash, hash: launch.hash, daemon_tree_fill: "requested" });
     // An empty store misses without hashing the tree: the request then names no hash, and still asks once.
     const e = record(), emptyFake = fakeBuild();
     const empty = gardenLaunch(emptyTree, { root: emptyStore, log: e.log, ownTree: emptyTree, daemonOwned: true, build: emptyFake.build });

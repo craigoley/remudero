@@ -1,0 +1,31 @@
+id: incident-856bbd1f2b3a0d17
+ts: 2026-10-30T01:30:05.123Z
+raw: >-
+  Incident 856bbd1f2b3a: intervention
+  own-red:fix-lane:comment-load-ratchet-failed-on-claims-fa
+
+  First seen: 2026-10-30T01:27:55.702Z
+
+  Last seen: 2026-10-30T01:29:56.341Z
+
+  Count: 9, burn: 9.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#13416@3cd6abdaa actor=cao825 cause=own-red:fix-lane:comment-load-ratchet-failed-on-claims-fa — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#13416@8e199c2f4 actor=cao825 cause=own-red:fix-lane:comment-load-ratchet-failed-on-claims-fa — a hand action answered a fleet state no lane resolved
+    - surface=pr action=push target=pr#13416@9c607b164 actor=cao825 cause=own-red:fix-lane:comment-load-ratchet-failed-on-claims-fa — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#856bbd1f2b3a0d17ebc93fc25b05a3cc7fef9bff4c2cc8d5f852c2ac43798115
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

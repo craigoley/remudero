@@ -77,14 +77,10 @@ export function appendExternalEffectLedger(
   }, opts);
 }
 
-/**
- * True for a spawn-INFRASTRUCTURE refusal (worker.ts's `ClaudeToolchainBlockedError`), duck-typed
- * on a string tag rather than `instanceof`, so this module keeps its "fs + JSON only" contract. It
- * fires before the SDK subprocess launches, so no worker ran and nothing was billed, and
- * `runFixRung` gates strike eligibility on it (see {@link isRealStrike}).
- * Why: a spawn-ENOENT crash once debited a strike on a worker that never ran (W1-T127, #212/#213;
- * docs/forensics/ledger.md#isspawninfrablockederror).
- */
+/** worker.ts ClaudeToolchainBlockedError, duck-typed by tag to keep the "fs + JSON only" contract.
+ * The SDK never launched: no worker ran or was billed, so {@link isRealStrike} excludes it.
+ * Trap: spawn-ENOENT once cost a strike (W1-T127, #212/#213).
+ * See docs/forensics/ledger.md#isspawninfrablockederror and runFixRung. */
 export function isSpawnInfraBlockedError(err: unknown): err is { reasonClass: "blocked_toolchain"; message: string } {
   return typeof err === "object" && err !== null && (err as { reasonClass?: unknown }).reasonClass === "blocked_toolchain";
 }
@@ -135,13 +131,8 @@ export function isRealStrike(evidence: { workerRan: boolean; judgmentPosted: boo
   return evidence.workerRan && evidence.judgmentPosted;
 }
 
-// ── W1-T2697: THE ACTOR STAMP ────────────────────────────────────────────────────────────────
-// A ledger row records `step`, `task_id`, `run_id` and `ts` but never WHO invoked it — a worker
-// subprocess, the daemon's own in-process loop, and an operator's bare `./bin/rmd` from a shell
-// are indistinguishable (`git grep -nE 'actor|invoked_by' src/lib/ledger.ts` read nothing at
-// intake). Derived at WRITE TIME from process context only, never guessed after the fact and
-// never asked of the caller (design note i, plan/tasks.d — "the operator teaches by doing").
-
+// W1-T2697: stamp the actor at write time from process context, never caller claims or inference.
+// Previously worker, daemon and operator rows were indistinguishable (design note i, plan/tasks.d).
 /** Who wrote a ledger row, as {@link deriveLedgerActor} derives it. */
 export type LedgerActor = "daemon" | "worker" | "service" | "host_automation" | "test" |
   "operator_human" | "operator_ai" | "unknown" | "operator" | "run_child";
@@ -171,11 +162,8 @@ export function markRunChildProcessActor(env: NodeJS.ProcessEnv = process.env): 
   };
 }
 
-/** Mark THIS process as the daemon. Call once, at the top of `daemonCommand` (run-task.ts),
- *  before its first `appendLedger` call. Every ledger row this process (or anything it calls
- *  in-process, e.g. a wired sweep tick) writes from here on reports `actor: "daemon"` — UNLESS
- *  that same write also carries a worker's own markers, which win first (see
- *  {@link deriveLedgerActor}'s ordering). */
+/** Mark the daemon once at daemonCommand boot, before its first appendLedger.
+ * In-process calls inherit this actor; worker markers win in {@link deriveLedgerActor}. */
 export function markDaemonProcessActor(): void {
   markLedgerProcessActor("daemon");
   process.env[DAEMON_PROCESS_ACTOR_ENV] = "1";
@@ -236,24 +224,13 @@ function futureStampRow(record: Record<string, unknown>, mtimeMs: number): Recor
   };
 }
 
-/**
- * Append one line. The record is issued as exactly ONE `writeSync` and the kernel's acceptance is
- * checked, so a writer's record is never split across two syscalls with another appender's line in
- * the gap. `O_APPEND` already makes concurrent appenders safe; this is NOT a lock (W1-T206). A
- * short write is LOUD, never retried. Falsifier: test/ledger-atomic.test.ts. Why (the torn-line
- * contract; a lock rejected): docs/forensics/ledger.md#appendledger.
- *
- * `identity` stamps the writing machine onto every row under the same `host` key this repo's
- * lock-holder records use. Appended LAST so no caller shifts; injectable only so one test can
- * drive two identities in one process (W1-T972, test/ledger-host-identity.test.ts).
- *
- * `actor` stamps who invoked this write (`opts.actor`, defaulting to {@link deriveLedgerActor}) —
- * design note i, W1-T2697. `actor_pid` carries the writing process's own pid alongside it, for
- * `hand-run-census.ts`'s session mining (design note ii). Named `actor_pid`, NOT `pid` —
- * `fix.spawn_reclaimed` (run-task.ts) already logs a `pid` field naming a DIFFERENT process (the
- * reclaimed candidate's), and this stamp's spread position (before `...line`) would let that
- * unrelated meaning silently win the key if the two shared a name.
- */
+/** Append with one checked writeSync: never split a record around another appender's write.
+ * O_APPEND provides concurrency safety, not a lock; short writes are loud and never retried
+ * (W1-T206; test/ledger-atomic.test.ts; docs/forensics/ledger.md#appendledger).
+ * Stamp host last using identity, injectable for test/ledger-host-identity.test.ts (W1-T972).
+ * Stamp actor via opts.actor or deriveLedgerActor (W1-T2697 design i), plus the writer's actor_pid
+ * for hand-run-census.ts (design ii). Do not use pid: fix.spawn_reclaimed already uses that key
+ * for the reclaimed process, and ...line would overwrite the writer's stamp. */
 /** W1-T4107: the one shape every "append a row, spy on the writer in a test" seam shared under four
  *  names (mutation-gate verdicts, follow-up harvest, contradiction resolution, replay results). */
 export interface LedgerWriterDeps {
@@ -332,13 +309,8 @@ export function appendLedger(
   }
 }
 
-/**
- * Append a line on behalf of a PSEUDO sender — a producer that is not itself a plan task (the
- * daemon loop, retro, drain, sweep; producer-identity.ts holds the closed registry). An undeclared
- * sender is REFUSED rather than becoming a new ungoverned key. Resolution is a GATE ONLY:
- * `task_id` is written exactly as `senderId` was passed, and no historical row is rewritten by
- * this path (W1-T2495).
- */
+/** Append for a pseudo sender (daemon, retro, drain, sweep), gated by producer-identity.ts's registry.
+ * Refuse undeclared senders; keep task_id exactly as passed and never rewrite historical rows (W1-T2495). */
 export function appendProducerLedger(
   path: string,
   senderId: string,
@@ -432,12 +404,8 @@ export function groupSpendByAccount(lines: readonly LedgerLine[]): AccountSpendS
   return { byAccount, refused };
 }
 
-// ── W1-T4100 design note (i): WHAT WRITES SO MUCH ───────────────────────────────────────────
-// 369 archives in a day is a symptom; the cause is bytes-per-hour concentrated in whichever
-// `step` is misbehaving that day. Pure over raw lines — never I/O — so a caller (a digest, an ad
-// hoc `rmd` read, a test) decides which corpus window to measure: a rotation's own archived
-// snapshot, the live file, or several stitched together.
-
+// W1-T4100 design (i): 369 archives/day reflected concentrated bytes/hour from noisy steps.
+// Pure over raw lines: callers choose a rotation snapshot, live file or stitched corpus.
 /** One step's measured share of a ledger-line corpus — the unit {@link topLedgerWriters} ranks. */
 export interface LedgerWriterShare {
   step: string;
@@ -478,10 +446,8 @@ export function topLedgerWriters(lines: readonly string[], limit = 10): LedgerWr
     .slice(0, limit);
 }
 
-/** {@link LedgerWriterShare} plus whether THIS step has grown its share of write volume well past
- *  its own historical baseline — design note (i)'s "a step writing far above its historical share
- *  is flagged", not merely "whichever step happens to be biggest today" (a flat, evenly-spread
- *  corpus would otherwise flag its own top entry for no reason). */
+/** Flag growth against each step's own baseline (W1-T4100 design i), not the largest step:
+ * an evenly spread corpus must not flag its own top entry. */
 export interface LedgerWriterFlag extends LedgerWriterShare {
   aboveHistoricalShare: boolean;
 }
@@ -1000,15 +966,10 @@ export interface RiskOverrideRecord {
   reason?: string;
 }
 
-/**
- * Recover the most recent {@link RISK_OVERRIDE_RECORDED_STEP} line for `taskId`, "last one wins" —
- * the idiom {@link import("./review.js").cappedOverrideFromLedger} uses for its sibling.
- * HEAD-BOUND (design viii): the caller's `headSha` must equal the row's own, or the row is skipped
- * as if absent, because an override that outlived the head it judged is evidence about a diff that
- * no longer exists. A row outside the closed disposition and reason-class sets is skipped too.
- * READ FOR DISPLAY ONLY (design ix/x) — nothing may call this to decide dispatch or merge.
- * Falsifier: test/risk-override-reader-refusals.test.ts.
- */
+/** Last valid override wins, as in cappedOverrideFromLedger (W1-T2244 design viii–x).
+ * Require the caller's headSha: an old head describes a vanished diff. Skip unknown dispositions
+ * and reason classes. Display only; never decide dispatch or merge from this record.
+ * Falsifier: test/risk-override-reader-refusals.test.ts. */
 export function riskOverrideFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -1066,13 +1027,9 @@ function isModelAttributionStep(step: string): boolean {
   return MODEL_ATTRIBUTION_LEDGER_STEPS.has(step);
 }
 
-/**
- * RENDER-RELEVANT, not decision-relevant: consulted by the console to render OPERATOR-VISIBLE
- * HISTORY, never to make a daemon-side decision. They get a recency-bounded category of their own
- * because a step added to the decision core is retained FOREVER. Each entry names its consumer, and
- * test/ledger-render-retention.test.ts re-derives the set from those consumers' own source. Why:
- * the ACCOUNT strip read "unknown" on a healthy fleet (docs/forensics/ledger.md#render_relevant_ledger_steps).
- */
+/** Recency-bounded console history, never daemon decisions or the permanent decision core.
+ * Each entry names its consumer; test/ledger-render-retention.test.ts re-derives membership.
+ * Trap: ACCOUNT read "unknown" on a healthy fleet (docs/forensics/ledger.md#render_relevant_ledger_steps). */
 export const RENDER_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "daemon.headroom",
   "console.kick_refused",
@@ -1132,10 +1089,8 @@ export const RENDER_STEP_RETENTION_WINDOW_MS = 30 * 60 * 1000;
  *  decision-, relevant, and {@link appendDailyCostCeilingOverrideAudit} for what it carries. */
 export const CEILING_OVERRIDE_WRITTEN_STEP = "console.ceiling_override_written";
 
-/** One console write to the daily cost ceiling override, as ledgered — the who/when/from/to the
- *  operator asked for, plus the RESULTING effective value. `when` is deliberately not a field
- *  here: {@link appendLedger} stamps `ts` itself, at write time, so the line's own `ts` IS the
- *  "when" — a caller-supplied one could drift from the actual write instant it is meant to record. */
+/** Audit who/from/to and the resulting effective ceiling. appendLedger stamps when as ts;
+ * a caller-supplied timestamp could drift from the actual write. */
 export interface DailyCostCeilingOverrideAudit {
   runId: string;
   taskId: string;
@@ -1143,10 +1098,8 @@ export interface DailyCostCeilingOverrideAudit {
   who: string;
   fromUsd: number;
   toUsd: number;
-  /** The effective ceiling immediately after the write (per `policy.ts`'s
-   *  `resolveDailyCostCeiling`) — ordinarily equal to `toUsd`, but recorded independently so a
-   *  write that the store immediately refused to honor is still visible as a mismatch here rather
-   *  than silently assumed to have taken effect. */
+  /** policy.ts resolveDailyCostCeiling after writing; record independently of toUsd so a refused
+   * override stays visible as a mismatch rather than an assumed success. */
   effectiveUsd: number;
 }
 
@@ -1165,11 +1118,10 @@ export function appendDailyCostCeilingOverrideAudit(ledgerPath: string, audit: D
   });
 }
 
-/** Hard cap on how many lines of any single decision-relevant `step` {@link rotateLedger} retains,
- *  EXCLUDING `sweep.disposed` and the health-window steps, which carry their own bound. The core is
- *  otherwise UNBOUNDED, so over enough runs it alone exceeds the ceiling and every append re-rotates
- *  forever. Newest-N survive, because a consumer reads RECENT history only. Why: 80+ archives,
- *  bursts of 12 rotations a second, observed live (docs/forensics/ledger.md#max_retained_lines_per_step). */
+/** Keep newest-N per decision step, except sweep.disposed and health steps with their own bounds.
+ * Without this cap the core alone exceeds the ceiling and every append re-rotates: 80+ archives,
+ * bursts of 12 rotations/second (docs/forensics/ledger.md#max_retained_lines_per_step).
+ * Consumers read recent history. */
 export const MAX_RETAINED_LINES_PER_STEP = 200;
 
 export const REVIEW_POSTED_RETAINED_ROWS = 140; // W1-T5517 PRIMARY CONTROL: 200 x the 70% of rows newest for their task
@@ -1208,10 +1160,8 @@ export function ledgerExceedsRotationCeiling(
   return fsDeps.statSize(path) > limit;
 }
 
-/** One snapshot line, parsed ONCE and carried by reference through `rotateLedger`'s whole
- *  retention pipeline (classify → health-window → sweep dedup → per-step cap → convergence
- *  shed) so every pass can regroup/reorder freely and the final step still recovers original
- *  file order by identity, without re-parsing or fuzzy-matching raw text back to a line. */
+/** Parse once; carry object identity through classification, windows, sweep dedup, caps and shedding.
+ * Regroup freely, then recover file order by identity without re-parsing or fuzzy text matching. */
 interface ParsedLedgerLine {
   raw: string;
   json?: Record<string, unknown>;
@@ -1455,10 +1405,8 @@ function archivedPrefixBytes(carried: CarriedPrefix | null, snapshot: Buffer): n
   return sha256Hex(snapshot.subarray(0, bytes)) === carried?.sha256 ? bytes : undefined;
 }
 
-/** What the rotation lock records about its holder — the SAME `{pid, host, startedAt}` shape
- *  (and the same parser) `acquireDrainLock` already uses, so {@link isHolderStale}'s three
- *  rungs (host, pid liveness, process start time) judge it exactly as they judge every other
- *  lock in this repo, with no rotation-specific holder shape or liveness logic to drift. */
+/** Share acquireDrainLock's {pid, host, startedAt} shape and parser, so isHolderStale applies
+ * the same host, pid-liveness and process-start-time checks without rotation-specific drift. */
 type LedgerRotationLockInfo = DrainLockInfo;
 
 export function isRotationLockHolderStale(
@@ -1473,16 +1421,11 @@ export function isRotationLockHolderStale(
   return isHolderStale(held, { isPidAlive: opts.isPidAlive ?? defaultIsPidAlive, hostname: opts.hostname, inContainer: opts.inContainer });
 }
 
-/**
- * Try to take the rotation lock. Returns a release function, or `null` when a LIVE holder owns it —
- * the caller then SKIPS this rotation rather than waiting. APPEND IS THE PRIORITY: the append that
- * triggered it has already landed, and the holder's own catch-up read folds it in. Same acquire
- * shape as `acquireDrainLock`: an `O_EXCL` create is the atomic win, and a dead holder is cleared
- * through {@link reclaimStaleLock}. W1-T4820: {@link isRotationLockHolderStale} judges a holder in the
- * OTHER container by age, since daemon and serve share this ledger; calling it a dead container's cut
- * twin archives. Falsifiers: test/ledger-rotation-is-locked.test.ts, test/the-status-board-reads-each-
- * ledger-row-once.test.ts. Why: docs/forensics/ledger.md#tryacquirerotationlock (R-1).
- */
+/** Take O_EXCL rotation lock; reclaim dead holders via reclaimStaleLock, as acquireDrainLock does.
+ * Skip live holders immediately: append already landed and the holder's catch-up folds it in.
+ * W1-T4820: judge other-container holders by age; treating daemon/serve peers as dead cut twin archives.
+ * Falsifiers: test/ledger-rotation-is-locked.test.ts, test/the-status-board-reads-each-ledger-row-once.test.ts.
+ * See docs/forensics/ledger.md#tryacquirerotationlock (R-1). */
 function tryAcquireRotationLock(lockPath: string): (() => void) | null {
   const info: LedgerRotationLockInfo = { pid: process.pid, host: hostname(), startedAt: new Date().toISOString() };
   for (;;) {
@@ -1516,29 +1459,15 @@ function datedArchivePath(path: string, now: Date): string {
   return join(dirname(path), `${base}.${stamp}.ndjson`);
 }
 
-/** W1-T4100 — THE NAME MUST NEVER RUN AHEAD OF ITS FILE. READ 2026-09-23: an archive named
- *  `ledger.2027-10-14T21-24-52-494Z.ndjson.gz` with a real file mtime of 2026-09-13 — a name over
- *  a YEAR ahead of when the archive actually landed, so every "pick the newest by name" reader
- *  (the exact contract {@link rotationStampIso}'s callers rely on) picked that stale file over
- *  every real one written since. `datedArchivePath` stamped straight off whatever `Date` its
- *  caller handed it; the incident is that value running ahead of reality, not the formatting.
- *
- *  The one clock that cannot lie about when a file actually landed is the file's OWN mtime,
- *  stamped by the OS independently of whatever produced the name — so it is the ceiling every
- *  archive stamp is checked against, both the one this rotation is about to write (see
- *  {@link healIfAheadOfOwnMtime}) and every one already on disk (this function, run at the start
- *  of every rotation so a bad name left by a still-corrupted caller never survives past the next
- *  one). EACH renamed to reflect its OWN real mtime — deliberately NOT bumped forward to sort
- *  after whatever else is on disk: the whole point of the incident this fixes is a stale file
- *  LOOKING newest, so healing it to look newest again (just under a different name) would repeat
- *  the defect rather than remove it. A name collision at millisecond precision (two real writes
- *  landing the same ms, vanishingly rare) is nudged forward by the smallest amount that clears it,
- *  never reordered relative to any other archive's OWN mtime.
- *
- *  Returns the newest SAFE stamp found across every archive (healed or not), so the archive THIS
- *  rotation is about to write — a genuinely new write, unlike the historical files above — is
- *  named no earlier than the real newest thing already on disk.
- *  Falsifier: test/the-ledger-rotates-at-a-steady-pace.test.ts. */
+/** Heal archive names against each file's own OS mtime (W1-T4100).
+ * Incident, 2026-09-23: ledger.2027-10-14T21-24-52-494Z.ndjson.gz had mtime 2026-09-13;
+ * newest-by-name readers (rotationStampIso callers) picked that stale file over every later write.
+ * datedArchivePath trusted its caller's Date; formatting was not the defect.
+ * On every rotation, check all existing archives and heal each to its own mtime, never promote
+ * stale history to newest. Nudge millisecond collisions minimally without reordering other mtimes.
+ * Return the newest safe stamp so the genuinely new archive sorts no earlier than existing ones.
+ * healIfAheadOfOwnMtime checks the new write independently of its caller's clock.
+ * Falsifier: test/the-ledger-rotates-at-a-steady-pace.test.ts. */
 function reconcileArchiveStamps(dir: string, fs: ArchiveNamingFs): number | undefined {
   let maxSafeMs: number | undefined;
   for (const { name, mtimeMs } of archiveMtimes(dir, fs)) {
@@ -1597,12 +1526,9 @@ function renameArchiveTo(fullPath: string, currentName: string, stampMs: number,
   }
 }
 
-/** Post-write correction for the archive THIS rotation just wrote. `now` (the value
- *  {@link rotateLedgerLocked} named the archive with) can itself be the corrupted clock — that is
- *  the actual incident, not a hypothetical — so the archive's own real mtime, read back from disk
- *  right after {@link writeArchive} lands it, is what decides whether the name needs healing, not
- *  a second opinion from the same `now`. `lastArchiveMs` (from {@link reconcileArchiveStamps})
- *  keeps the healed name monotonic against every archive already on disk. */
+/** Check the new archive against its own real mtime after writeArchive (W1-T4100).
+ * The naming clock now caused the incident; rereading it cannot validate the name.
+ * lastArchiveMs from reconcileArchiveStamps keeps the healed name monotonic against existing files. */
 function healIfAheadOfOwnMtime(archivePath: string, lastArchiveMs: number | undefined, fs: ArchiveNamingFs): string {
   let mtimeMs: number;
   try {
@@ -1641,14 +1567,9 @@ const realArchiveFs: ArchiveNamingFs = {
   renameSync: (from, to) => renameSync(from, to),
 };
 
-/**
- * W1-T2482 — COMPRESS AT ROTATION, the half the reader already expected: ledger-grep.ts has
- * classified `.ndjson.gz` as gzip-form since W1-T444, but this writer never produced one. The `.gz`
- * suffix is appended only once compression has succeeded, so the returned path names a real file.
- * FALLBACK, NOT LOSS: if `gzipSync` throws, the archive lands PLAIN — the shape the union reader
- * has always classified — rather than the rotation losing the snapshot; compression is layered on
- * "relocated, never deleted". Falsifier: test/rotation-compresses-what-the-reader-already-decompresses.test.ts.
- */
+/** Compress rotation snapshots (W1-T2482); ledger-grep.ts already reads gzip since W1-T444.
+ * Append .gz only after compression succeeds. On failure archive plain, preserving the snapshot:
+ * relocated, never deleted. Falsifier: test/rotation-compresses-what-the-reader-already-decompresses.test.ts. */
 function writeArchive(plainArchivePath: string, snapshot: string, fsDeps: LedgerArchiveFsDeps): string {
   try {
     const compressed = fsDeps.gzipSync(Buffer.from(snapshot, "utf8"));
@@ -1709,25 +1630,13 @@ export interface LedgerRotationResult {
  * Why: without the lock the second rotator's catch-up saw the first's smaller live file, took an
  * empty tail and renamed over it (R-1; docs/forensics/ledger.md#rotateledger).
  */
-// ── W1-T3237: COMPACTION — reclaim the archive without losing a row ──────────────────────────
-//
-// MEASURED on the fleet host 2026-09-09: 646 `.gz` rotations + 2 plain + the live file,
-// 2,709,938,810 bytes uncompressed, reducing to 900,813 DISTINCT rows = 283,539,709 bytes. A 9.6x
-// collapse. `rotateLedger` keeps MAX_RETAINED_LINES_PER_STEP newest lines per step and archives the
-// rest; NOTHING has ever deleted, merged or aged out an archive. "Keep everything, forever" was
-// never chosen — it is what happens when rotation is written and retention is not. That pile is the
-// corpus that OOM-killed the retro (W1-T3229).
-//
-// COMPACT, NEVER DELETE, and this repo already knows why: the archives are NOT cumulative
-// snapshots, so most history exists ONLY in older ones and dropping any destroys unique data.
-// Claims of the form "N occurrences" — and especially "zero in the entire history" — become
-// unsupportable the moment a file goes. A retention policy that deletes is not a smaller version of
-// this; it is a different and worse one.
-//
-// AND THIS IS never a side effect of rotation. `rotateLedger` runs inside the daemon's write path,
-// and a multi-hundred-megabyte rewrite there would sit on the latency of every ledger append.
-// Compaction is an operator act, like `deploy/host-update.sh` and the image rebuild.
-
+// W1-T3237: compact archives without losing unique history; never delete them for retention.
+// Fleet 2026-09-09: 646 gzip + 2 plain archives + live, 2,709,938,810 uncompressed bytes;
+// 900,813 distinct rows = 283,539,709 bytes (9.6x collapse). The pile OOM-killed retro (W1-T3229).
+// Rotation caps newest-per-step live rows but archives the rest; no archive retention was chosen.
+// Archives are not cumulative: deleting one destroys unique data and invalidates history counts.
+// Compaction is an operator act, like deploy/host-update.sh and image rebuilds, never a rotation
+// side effect: a multi-hundred-megabyte rewrite would block the daemon's ledger append path.
 /** What one compaction did, in terms a caller can assert on rather than infer from bytes. */
 export interface LedgerCompactionResult {
   /** Rotations read and replaced. */
@@ -2021,29 +1930,14 @@ function rotateLedgerLocked(
   // ── PASS 2: recency-window bound — health and render steps are heartbeats, not one-shot
   // decisions, so only lines inside their own window are retained; that stops a restart storm's
   // boot spam bloating the core. A line with no parseable `ts` is kept, never guessed away. ────
-  // W1-T3755 — EXACTLY ONE BOOT ROW OUTLIVES THE HEALTH WINDOW, AND IT IS THE NEWEST.
-  //
-  // MEASURED 2026-09-18: a daemon booted at 00:49 and was still running at 06:00, but its
-  // `daemon.boot` row — the only record of the sha that process booted on — was gone. Present in
-  // the 00:52 and 01:52 rotation snapshots, absent from 04:28, zero in the live ledger. So
-  // `readLatestBootSha` (deployer.ts) returned `undefined`, the deployer could not rule out mount
-  // staleness, and the board reported STALE against a sha the running process had never booted on
-  // while prescribing `rmd deploy` — which skips on the same missing record.
-  //
-  // THE WINDOW WAS SIZED FOR A DIFFERENT CONSUMER. Its comment says so: comfortably larger than
-  // `assessBootHealth`'s window (45s). `readLatestBootSha`'s need is not a health window at all —
-  // it lasts as long as the PROCESS. HEALTH_STEP_RETENTION_WINDOW_MS is not the seam for that, and
-  // widening it would re-couple two consumers whose needs have nothing to do with each other; the
-  // next one with a longer need would break the same way, silently.
-  //
-  // WHY EXACTLY ONE, AND WHY THE NEWEST. PASS 2 exists to stop "a restart storm's boot spam
-  // bloating the core" (its own comment, directly below). Exempting every `daemon.boot` would
-  // restore precisely that bloat — the one way this fix could be worse than the bug it repairs —
-  // so a storm still collapses to a single line. The NEWEST because any older one names a process
-  // that has since been replaced, which is a wrong answer rather than a missing one.
-  //
-  // In one line: exactly one boot row outlives the health window, every older one ages out as
-  // before, and HEALTH_STEP_RETENTION_WINDOW_MS is not the seam this repair touches.
+  // W1-T3755: retain exactly the newest daemon.boot beyond the health window, not every boot.
+  // 2026-09-18: a 00:49 daemon still ran at 06:00; its boot row survived 00:52/01:52 snapshots
+  // but vanished by 04:28. readLatestBootSha returned undefined, the board falsely reported STALE
+  // and prescribed rmd deploy, which skipped on the same missing row.
+  // assessBootHealth needs 45s; readLatestBootSha needs the process lifetime. Do not widen
+  // HEALTH_STEP_RETENTION_WINDOW_MS to couple those consumers. Older boots name replaced
+  // processes and must age out, or a restart storm bloats the core again.
+  // Falsifier: test/the-newest-boot-row-outlives-the-health-window.test.ts.
   const newestBootLine = candidates.reduce<ParsedLedgerLine | undefined>(
     (best, p) =>
       p.step === "daemon.boot" && p.tsMs !== undefined && (best?.tsMs === undefined || p.tsMs > best.tsMs) ? p : best,

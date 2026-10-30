@@ -1,0 +1,29 @@
+- id: W1-T11010
+  title: "THE FIX-LANE GARDENER'S COSTLIEST DEFECT CLASS — stood-down:rung.evidence_head:published branch advanced from <sha> to <sha> before the worker started; the ordinary sweep must read fresh exact-head failure evidence cost 45.87 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.25
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "fix-lane:stood-down:rung.evidence_head:published branch advanced from <sha> to <sha> before the worker started; the ordinary sweep must read fresh exact-head failure evidence"
+  files:
+    - scripts/test-placement/test-folders.tsv
+    - test/gardeners/fix-lane-stood-down-rung-evidence-head-published-branch-advanced-from-sha-to-sha-before-t.test.ts
+  acceptance:
+    - claim: "stood-down:rung.evidence_head:published branch advanced from <sha> to <sha> before the worker started; the ordinary sweep must read fresh exact-head failure evidence no longer needs an operator hand fix"
+      proof: "grep: test(\"W1-T11010: fix-lane-stood-down-rung-evidence-head-published-branch-advanced-from-sha-to-sha-before-t clears without a person\" in test/gardeners/fix-lane-stood-down-rung-evidence-head-published-branch-advanced-from-sha-to-sha-before-t.test.ts"
+  note: "Filed by fix-lane at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    stood-down:rung.evidence_head:published branch advanced from <sha> to <sha> before the worker started; the ordinary sweep must read fresh exact-head failure evidence cost 45.87 PR-hours; owner fix-lane
+    Owner: the fix lane itself (a defect in the harness that repairs PRs, not in the PR).
+    Source owner: scripts/test-placement/test-folders.tsv. Top five PRs by observed hours, with original blocker reasons:
+    - PR #14793: 5.99 PR-hours — published branch advanced from 364250a24601e6e310089dd4c2282a8edbaa9806 to 5f0aed7575a348c63e492ee674f45d9c19ec3e74 before the worker started; the ordinary sweep must read fresh exact-head failure evidence
+    - PR #15034: 4.32 PR-hours — published branch advanced from 1441400e04ad9c2b2417d864854a810a813cb53c to 3ecf08780306f247f94b1bc1c2de53fab664f844 before the worker started; the ordinary sweep must read fresh exact-head failure evidence
+    - PR #14789: 3.95 PR-hours — published branch advanced from c00b628c808ab4088e8abf5835766f6157adf228 to 622f2a476a2a8d8f055ca837a400c919ad70c80f before the worker started; the ordinary sweep must read fresh exact-head failure evidence
+    - PR #15041: 2.99 PR-hours — published branch advanced from f1523badb5cb3c4d642f57dc8fe59b713dab3509 to e7dd0d9c1a32b3601a57e817bf619fbfda3340d4 before the worker started; the ordinary sweep must read fresh exact-head failure evidence
+    - PR #15312: 2.41 PR-hours — published branch advanced from b8656b67f26de4650a95960a2a1a9a33a73121e8 to 9e31d828c6ff96e7b826ca0b8cf94736214bdfb3 before the worker started; the ordinary sweep must read fresh exact-head failure evidence
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
