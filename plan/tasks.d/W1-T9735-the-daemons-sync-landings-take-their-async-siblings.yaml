@@ -17,6 +17,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/the-daemons-sync-landings-take-their-async-siblings.test.ts
+    - "src/cli/commands/run-task-verb.ts"
   status: queued
   priority: 2  # operator-2026-10-15: each sync landing holds the loop for the plan-PR preflight's in-tree checks
   attempts: 0

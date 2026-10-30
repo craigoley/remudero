@@ -291,7 +291,139 @@ export interface components {
       outcome: "proposed" | "queued" | "admitted" | "running" | "succeeded" | "failed" | "unknown" | "blocked";
       objectiveRevision: ProductRevision;
       observedAt: string;
+      receipt?: ProductEvidenceReceipt;
       references: (ProductResearchLink)[];
+    };
+    ProductRunReceipt: (ProductLocalRunReceipt) | (ProductHostedRunReceipt);
+    ProductEvidenceReceipt: (ProductLocalRunReceipt) | (ProductHostedRunReceipt) | (ProductDeployReceipt) | (ProductPhoneReceipt);
+    ProductLocalRunReceipt: {
+      channel: "local";
+      actor: string;
+      productId: ProductId;
+      objectiveRevision: ProductRevision;
+      operationId: string;
+      runId: string;
+      taskId: string;
+      repository: {
+        id: ProductRevision;
+        owner: string;
+        name: string;
+      };
+      head: string;
+      execution: "running" | "ended" | "silent" | "unknown";
+      qualification: {
+        producer: "core-author" | "consumer" | "unavailable";
+        verdict: "passed" | "failed" | "partial" | "unknown";
+        tests: number;
+        suites: number;
+        reason: string;
+        originalVerdict?: string;
+        reference?: string;
+        digest?: string;
+      };
+    };
+    ProductHostedRunReceipt: {
+      channel: "hosted";
+      actor: string;
+      productId: ProductId;
+      objectiveRevision: ProductRevision;
+      operationId: string;
+      runId: string;
+      taskId: string;
+      repository: {
+        id: ProductRevision;
+        owner: string;
+        name: string;
+      };
+      head: string;
+      execution: "running" | "ended" | "silent" | "unknown";
+      contexts: ({
+        name: string;
+        conclusion: string;
+      })[];
+      review: "success" | "failure" | "pending" | "absent" | "unknown";
+      reason: string;
+    };
+    ProductCaseRunEvidence: ({
+      id: string;
+      reference: string;
+      outcome: "proposed" | "queued" | "admitted" | "running" | "succeeded" | "failed" | "unknown" | "blocked";
+      current: boolean;
+      receipt?: ProductRunReceipt;
+    })[];
+    ProductCaseDeployEvidence: ({
+      id: string;
+      reference: string;
+      outcome: "proposed" | "queued" | "admitted" | "running" | "succeeded" | "failed" | "unknown" | "blocked";
+      current: boolean;
+      receipt?: ProductDeployReceipt;
+    })[];
+    ProductDeployReceipt: {
+      channel: "deploy";
+      actor: string;
+      productId: ProductId;
+      objectiveRevision: ProductRevision;
+      operationId: string;
+      repository: {
+        id: ProductRevision;
+        owner: string;
+        name: string;
+      };
+      projectId: string;
+      teamId: string;
+      deploymentId: string | null;
+      providerCreatedAt: number | null;
+      target: "preview" | "production" | null | null;
+      commit: string | null;
+      url: string | null;
+      readyState: string | null;
+      servedStatus: number | null;
+      outcome: "succeeded" | "failed" | "running" | "unknown" | "blocked";
+      reason: string;
+      /** Original admitted revision and digest of the sorted deployment receipt identities, for partial observation resumption. */
+      observation?: {
+        expectedRevision: ProductRevision;
+        receiptSetDigest: string;
+      };
+    };
+    /** An operator attestation of a physical phone browser observation, never automated device verification. */
+    ProductPhoneReceipt: {
+      channel: "mobile";
+      actor: string;
+      productId: ProductId;
+      objectiveRevision: ProductRevision;
+      repository: {
+        id: ProductRevision;
+        owner: string;
+        name: string;
+      };
+      provenance: "operator-attested";
+      source: "physical-phone-browser";
+      deployEvidenceId: string;
+      deploymentId: string;
+      target: "preview" | "production";
+      commit: string;
+      url: string;
+      platform: "ios" | "android";
+      browser: string;
+      deviceModel: string;
+      scenarioId: string;
+      outcome: "passed" | "failed" | "blocked";
+      observedAt: string;
+    };
+    ProductCasePhoneEvidence: ({
+      id: string;
+      reference: string;
+      outcome: "passed" | "failed" | "blocked" | "unknown";
+      platform: "ios" | "android" | null | null;
+      provenance: "operator-attested" | "unverified";
+      current: boolean;
+      receipt?: ProductPhoneReceipt;
+    })[];
+    /** Latest observed outcome per platform for the current objective; an absent platform is unverified. */
+    ProductPhoneCoverage: {
+      ios: "passed" | "failed" | "blocked" | "unverified";
+      android: "passed" | "failed" | "blocked" | "unverified";
     };
     ProductReceipt: {
       operationId: string;
@@ -663,7 +795,26 @@ export interface components {
       /** The correlated plan pull request */
       proposal?: string;
     };
-    /** At most 65536 raw bytes. Import an approved brief, adopt its existing repository, verify a merged reviewed plan, propose one native plan for the saved brief, or request one guarded build. Client evidence and verification fields are rejected. */
+    ProductCaseDeploymentObservation: {
+      productId: ProductId;
+      expectedRevision: ProductRevision;
+      expectedObjectiveRevision: ProductRevision;
+      operationId: string;
+    };
+    /** Requires an operator-session actor and a succeeded deploy receipt for this product, objective and repository. Deployment details are copied from that receipt. Repeating the same observation replays its durable receipt. */
+    ProductCasePhoneObservation: {
+      productId: ProductId;
+      expectedRevision: ProductRevision;
+      expectedObjectiveRevision: ProductRevision;
+      deployEvidenceId: string;
+      platform: "ios" | "android";
+      browser: string;
+      deviceModel: string;
+      scenarioId: string;
+      outcome: "passed" | "failed" | "blocked";
+      observedAt: string;
+    };
+    /** At most 65536 raw bytes. Import an approved brief, adopt its existing repository, verify a merged reviewed plan, propose one native plan for the saved brief, request one guarded build, observe provider deployments of a persisted project binding, or attest a physical-phone browser observation of a recorded deployment. Client deployment details and verification fields are rejected. */
     ProductCaseCommand: ({
       version: "product-case-v1";
       action: "import";
@@ -684,6 +835,14 @@ export interface components {
       version: "product-case-v1";
       action: "propose";
       command: ProductCasePropose;
+    }) | ({
+      version: "product-case-v1";
+      action: "observe-deployment";
+      command: ProductCaseDeploymentObservation;
+    }) | ({
+      version: "product-case-v1";
+      action: "observe-phone";
+      command: ProductCasePhoneObservation;
     });
     ProductCaseResponse: {
       version: "product-case-v1";
@@ -696,14 +855,8 @@ export interface components {
           id: string;
           reference: string;
         })[];
-        local: ({
-          id: string;
-          reference: string;
-        })[];
-        hosted: ({
-          id: string;
-          reference: string;
-        })[];
+        local: ProductCaseRunEvidence;
+        hosted: ProductCaseRunEvidence;
         review: ({
           id: string;
           reference: string;
@@ -712,21 +865,16 @@ export interface components {
           id: string;
           reference: string;
         })[];
-        deploy: ({
-          id: string;
-          reference: string;
-        })[];
-        mobile: ({
-          id: string;
-          reference: string;
-        })[];
+        deploy: ProductCaseDeployEvidence;
+        mobile: ProductCasePhoneEvidence;
       };
+      mobileCoverage: ProductPhoneCoverage;
       build?: ProductBuildReceipt;
       planOperation?: ProductPlanOperation;
     };
     ProductCaseError: {
       version: "product-case-v1";
-      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "concurrency_exceeded" | "fleet_halted" | "kick_failed" | "creation_denied" | "envelope_missing" | "handoff_unavailable";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "concurrency_exceeded" | "fleet_halted" | "kick_failed" | "creation_denied" | "envelope_missing" | "handoff_unavailable" | "binding_not_found" | "operator_required" | "deployment_not_qualified" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_not_found" | "project_conflict" | "not_configured";
     };
     /** At most 4096 raw request bytes. Names one task the target repository's own plan filed for the product's approved plan evidence. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
     ProductBuildCommand: {

@@ -1,0 +1,35 @@
+- id: W1-T10969
+  title: "Compress the 912 comment lines in src/lib/ci-parity.ts without changing executable code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "comment-compression:src/lib/ci-parity.ts"
+  files:
+    - src/lib/ci-parity.ts
+    - test/ci/parity/compress-src-lib-ci-parity-ts.test.ts
+  acceptance:
+    - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
+      proof: "unit test: W1-T10969: comment compression preserves executable code"
+  rationale: |
+    Observed 912 comment lines in src/lib/ci-parity.ts. This is maintenance debt, never a merge ceiling.
+    Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
+    Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.
+    Add the named regression in test/ci/parity/compress-src-lib-ci-parity-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
+    Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
+    Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed scope is comment compression in one source file plus a regression test, with explicit requirements to preserve executable tokens, behavioral assertions, invariants and historical citations."
+      - "The plan requires measurable comment reduction and actual caller validation, forbids a new hard ceiling, and preserves existing owners, stops and deployment holds."
+      - "The supplied filing-time gates report no adverse finding; the missing test is explicitly planned as a new file. Implementation compliance remains subject to CI and review."
+    judged_at: "2026-10-29T13:52:33.680Z"
+    pin: "eeb84df1b4c4c715217a13be4212013b07af25ec6eb560614c6ee34d9fe177e8"

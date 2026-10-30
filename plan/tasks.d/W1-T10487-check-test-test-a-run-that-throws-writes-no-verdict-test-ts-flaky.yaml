@@ -7,6 +7,9 @@
   risk: high
   band_meaning: blast-radius
   priority: 1.68
+  # refusal-amendment (W1-T10487, run W1-T10487-1793254713567, 2026-10-29T07:50:03.483Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: Both cited failing test titles were replaced in merged PR #12660; both suites import `Config` only as a type and inject configuration, leaving no evidenced remedy in `src/lib/config.ts`.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

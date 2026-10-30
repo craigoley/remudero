@@ -274,26 +274,24 @@ capabilities:
       low:    [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna, claude-haiku-5-5]
       medium: [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna, claude-haiku-5-5]
       high:   [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna, claude-haiku-5-5]
-    # Sol 6.1 trails balanced cheap candidates as a bounded Responses fallback; no economy promotion.
+    # Terra 6.1 precedes Sol 6.1 after the cheap balanced candidates (W1-T10839).
     # NORMAL CASH ORDER STAYS MEASURED: economy/balanced continue to lead with the per-task winners
     # from W1-T3614. Luna is nevertheless a real cash deployment, independently of subscription
     # Codex. It trails both normal candidates so cheap routine work does not move lanes, and
     # selectOpenWeightModel(..., { cashSqueezed: true }) promotes it only when the subscription
     # auction has already blocked and this cash request is the squeeze fallback.
     balanced:
-      low:    [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-sol]
-      medium: [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-sol]
-      high:   [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-sol]
+      low:    [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-6.1-sol]
+      medium: [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-6.1-sol]
+      high:   [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-6.1-sol]
     # LUNA TAKES gpt-5-mini's PLACE; TERRA IS THE ESCALATION BEHIND IT. Luna is cheaper
     # than mini on both axes ($0.20/$1.20 vs $0.25/$2.00) and spent 0 reasoning tokens on an
     # identical trivial prompt where mini spent 64 of 76, so mini was REMOVED rather than demoted.
-    # Terra TRAILS rather than leads: at 10x luna on both axes ($2.00/$12.00) it is reached only
-    # when luna is unavailable or below reserve -- "only when absolutely necessary", per operator
-    # direction. Sol ($5.00/$30.00) is deliberately absent: 2.5x terra for the same band.
+    # Terra 6.1 trails both Lunas; Terra 5.6 remains the final escalation (W1-T10839).
     frontier:
-      low:    [gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra]
-      medium: [gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra]
-      high:   [gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra]
+      low:    [gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-5.6-terra]
+      medium: [gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-5.6-terra]
+      high:   [gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-5.6-terra]
 
 # ── The Architect mount (the bookend: plan authorship, orchestration) ──────────
 # claude-opus-5-5/high — the sole top-tier mount; strictly above every worker below. Governs ONLY

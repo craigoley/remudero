@@ -880,10 +880,186 @@ components:
         outcome: { type: string, enum: [proposed, queued, admitted, running, succeeded, failed, unknown, blocked] }
         objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
         observedAt: { type: string, format: date-time }
+        receipt: { $ref: "#/components/schemas/ProductEvidenceReceipt" }
         references:
           type: array
           maxItems: 16
           items: { $ref: "#/components/schemas/ProductResearchLink" }
+    ProductRunReceipt:
+      oneOf:
+        - $ref: "#/components/schemas/ProductLocalRunReceipt"
+        - $ref: "#/components/schemas/ProductHostedRunReceipt"
+    ProductEvidenceReceipt:
+      oneOf:
+        - $ref: "#/components/schemas/ProductLocalRunReceipt"
+        - $ref: "#/components/schemas/ProductHostedRunReceipt"
+        - $ref: "#/components/schemas/ProductDeployReceipt"
+        - $ref: "#/components/schemas/ProductPhoneReceipt"
+    ProductLocalRunReceipt:
+      type: object
+      additionalProperties: false
+      required: [channel, actor, productId, objectiveRevision, operationId, runId, taskId, repository, head, execution, qualification]
+      properties:
+        channel: { type: string, enum: [local] }
+        actor: &caseReceiptActor { type: string, minLength: 1, maxLength: 512 }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        operationId: &caseReceiptOperation { type: string, pattern: '^pbuild_[a-f0-9]{64}$' }
+        runId: &caseReceiptRun { type: string, minLength: 1, maxLength: 160 }
+        taskId: &caseReceiptTask { type: string, minLength: 1, maxLength: 120 }
+        repository: &caseReceiptRepository
+          type: object
+          additionalProperties: false
+          required: [id, owner, name]
+          properties:
+            id: { $ref: "#/components/schemas/ProductRevision" }
+            owner: { type: string, minLength: 1, maxLength: 39, pattern: '^[A-Za-z0-9][A-Za-z0-9-]*$' }
+            name: { type: string, minLength: 1, maxLength: 100, pattern: '^[A-Za-z0-9_.-]+$' }
+        head: &caseReceiptHead { type: string, pattern: '^(?:[a-f0-9]{40}|unknown)$' }
+        execution: &caseReceiptExecution { type: string, enum: [running, ended, silent, unknown] }
+        qualification:
+          type: object
+          additionalProperties: false
+          required: [producer, verdict, tests, suites, reason]
+          properties:
+            producer: { type: string, enum: [core-author, consumer, unavailable] }
+            verdict: { type: string, enum: [passed, failed, partial, unknown] }
+            tests: { type: integer, minimum: 0 }
+            suites: { type: integer, minimum: 0 }
+            reason: &caseReceiptReason { type: string, minLength: 1, maxLength: 500 }
+            originalVerdict: { type: string, minLength: 1, maxLength: 80 }
+            reference: { type: string, minLength: 1, maxLength: 160 }
+            digest: { type: string, pattern: '^[a-f0-9]{64}$' }
+    ProductHostedRunReceipt:
+      type: object
+      additionalProperties: false
+      required: [channel, actor, productId, objectiveRevision, operationId, runId, taskId, repository, head, execution, contexts, review, reason]
+      properties:
+        channel: { type: string, enum: [hosted] }
+        actor: *caseReceiptActor
+        productId: { $ref: "#/components/schemas/ProductId" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        operationId: *caseReceiptOperation
+        runId: *caseReceiptRun
+        taskId: *caseReceiptTask
+        repository: *caseReceiptRepository
+        head: *caseReceiptHead
+        execution: *caseReceiptExecution
+        contexts:
+          type: array
+          maxItems: 99
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, conclusion]
+            properties:
+              name: { type: string, minLength: 1, maxLength: 255 }
+              conclusion: { type: string, minLength: 1, maxLength: 80 }
+        review: { type: string, enum: [success, failure, pending, absent, unknown] }
+        reason: *caseReceiptReason
+    ProductCaseRunEvidence:
+      type: array
+      maxItems: 128
+      items:
+        type: object
+        additionalProperties: false
+        required: [id, reference, outcome, current]
+        properties:
+          id: { type: string, minLength: 1, maxLength: 128 }
+          reference: { type: string, minLength: 1, maxLength: 2048 }
+          outcome: { type: string, enum: [proposed, queued, admitted, running, succeeded, failed, unknown, blocked] }
+          current: { type: boolean }
+          receipt: { $ref: "#/components/schemas/ProductRunReceipt" }
+    ProductCaseDeployEvidence:
+      type: array
+      maxItems: 128
+      items:
+        type: object
+        additionalProperties: false
+        required: [id, reference, outcome, current]
+        properties:
+          id: { type: string, minLength: 1, maxLength: 128 }
+          reference: { type: string, minLength: 1, maxLength: 2048 }
+          outcome: { type: string, enum: [proposed, queued, admitted, running, succeeded, failed, unknown, blocked] }
+          current: { type: boolean }
+          receipt: { $ref: "#/components/schemas/ProductDeployReceipt" }
+    ProductDeployReceipt:
+      type: object
+      additionalProperties: false
+      required: [channel, actor, productId, objectiveRevision, operationId, repository, projectId, teamId, deploymentId, target, providerCreatedAt, commit, url, readyState, servedStatus, outcome, reason]
+      properties:
+        channel: { type: string, enum: [deploy] }
+        actor: *caseReceiptActor
+        productId: { $ref: "#/components/schemas/ProductId" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        operationId: { type: string, pattern: '^pdeploy_[a-f0-9]{64}$' }
+        repository: *caseReceiptRepository
+        projectId: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
+        teamId: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
+        deploymentId: { type: [string, "null"], minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' }
+        providerCreatedAt: { type: [integer, "null"], minimum: 0, maximum: 9007199254740991 }
+        target: { type: [string, "null"], enum: [preview, production, null] }
+        commit: { type: [string, "null"], pattern: '^[a-f0-9]{40}$' }
+        url: { type: [string, "null"], maxLength: 2048, format: uri, pattern: '^https://' }
+        readyState: { type: [string, "null"], minLength: 1, maxLength: 80 }
+        servedStatus: { type: [integer, "null"], minimum: 100, maximum: 599 }
+        outcome: { type: string, enum: [succeeded, failed, running, unknown, blocked] }
+        reason: *caseReceiptReason
+        observation:
+          type: object
+          additionalProperties: false
+          description: Original admitted revision and digest of the sorted deployment receipt identities, for partial observation resumption.
+          required: [expectedRevision, receiptSetDigest]
+          properties:
+            expectedRevision: { $ref: "#/components/schemas/ProductRevision" }
+            receiptSetDigest: { type: string, pattern: '^[a-f0-9]{64}$' }
+    ProductPhoneReceipt:
+      type: object
+      additionalProperties: false
+      description: An operator attestation of a physical phone browser observation, never automated device verification.
+      required: [channel, actor, productId, objectiveRevision, repository, provenance, source, deployEvidenceId, deploymentId, target, commit, url, platform, browser, deviceModel, scenarioId, outcome, observedAt]
+      properties:
+        channel: { type: string, enum: [mobile] }
+        actor: { type: string, minLength: 1, maxLength: 512, pattern: '^operator:.+$' }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        objectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        repository: *caseReceiptRepository
+        provenance: { type: string, enum: [operator-attested] }
+        source: { type: string, enum: [physical-phone-browser] }
+        deployEvidenceId: { type: string, minLength: 1, maxLength: 128 }
+        deploymentId: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' }
+        target: { type: string, enum: [preview, production] }
+        commit: { type: string, pattern: '^[a-f0-9]{40}$' }
+        url: { type: string, maxLength: 2048, format: uri, pattern: '^https://' }
+        platform: &phonePlatform { type: string, enum: [ios, android] }
+        browser: &phoneBrowser { type: string, minLength: 1, maxLength: 160 }
+        deviceModel: *phoneBrowser
+        scenarioId: &phoneScenario { type: string, minLength: 1, maxLength: 120 }
+        outcome: &phoneOutcome { type: string, enum: [passed, failed, blocked] }
+        observedAt: { type: string, format: date-time }
+    ProductCasePhoneEvidence:
+      type: array
+      maxItems: 128
+      items:
+        type: object
+        additionalProperties: false
+        required: [id, reference, outcome, platform, provenance, current]
+        properties:
+          id: { type: string, minLength: 1, maxLength: 128 }
+          reference: { type: string, minLength: 1, maxLength: 2048 }
+          outcome: { type: string, enum: [passed, failed, blocked, unknown] }
+          platform: { type: [string, "null"], enum: [ios, android, null] }
+          provenance: { type: string, enum: [operator-attested, unverified] }
+          current: { type: boolean }
+          receipt: { $ref: "#/components/schemas/ProductPhoneReceipt" }
+    ProductPhoneCoverage:
+      type: object
+      additionalProperties: false
+      description: Latest observed outcome per platform for the current objective; an absent platform is unverified.
+      required: [ios, android]
+      properties:
+        ios: &phoneCoverage { type: string, enum: [passed, failed, blocked, unverified] }
+        android: *phoneCoverage
     ProductReceipt:
       type: object
       additionalProperties: false
@@ -1568,10 +1744,36 @@ components:
         briefDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
         requestedAt: { type: string, format: date-time }
         proposal: { type: string, maxLength: 2048, description: The correlated plan pull request, only once the native run opened it. }
+    ProductCaseDeploymentObservation:
+      type: object
+      additionalProperties: false
+      required: [productId, expectedRevision, expectedObjectiveRevision, operationId]
+      properties:
+        productId: { $ref: "#/components/schemas/ProductId" }
+        expectedRevision: { $ref: "#/components/schemas/ProductRevision" }
+        expectedObjectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        operationId: { type: string, pattern: '^pdeploy_[a-f0-9]{64}$' }
+    ProductCasePhoneObservation:
+      type: object
+      additionalProperties: false
+      description: Requires an operator-session actor and a succeeded deploy receipt for this product, objective and repository. Deployment details are copied from that receipt. Repeating the same observation replays its durable receipt.
+      required: [productId, expectedRevision, expectedObjectiveRevision, deployEvidenceId, platform, browser, deviceModel, scenarioId, outcome, observedAt]
+      properties:
+        productId: { $ref: "#/components/schemas/ProductId" }
+        expectedRevision: { $ref: "#/components/schemas/ProductRevision" }
+        expectedObjectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        deployEvidenceId: { type: string, minLength: 1, maxLength: 128 }
+        platform: *phonePlatform
+        browser: *phoneBrowser
+        deviceModel: *phoneBrowser
+        scenarioId: *phoneScenario
+        outcome: *phoneOutcome
+        observedAt: { type: string, format: date-time }
     ProductCaseCommand:
       description: At most 65536 raw bytes. Import an approved brief, adopt its existing repository,
-        verify a merged reviewed plan, propose one native plan for the saved brief, or request one guarded build. Client evidence and verification
-        fields are rejected.
+        verify a merged reviewed plan, propose one native plan for the saved brief, request one guarded build,
+        observe provider deployments of a persisted project binding, or attest a physical-phone browser
+        observation of a recorded deployment. Client deployment details and verification fields are rejected.
       oneOf:
         - type: object
           additionalProperties: false
@@ -1658,6 +1860,20 @@ components:
                 - propose
             command:
               $ref: "#/components/schemas/ProductCasePropose"
+        - type: object
+          additionalProperties: false
+          required: [version, action, command]
+          properties:
+            version: { type: string, enum: [product-case-v1] }
+            action: { type: string, enum: [observe-deployment] }
+            command: { $ref: "#/components/schemas/ProductCaseDeploymentObservation" }
+        - type: object
+          additionalProperties: false
+          required: [version, action, command]
+          properties:
+            version: { type: string, enum: [product-case-v1] }
+            action: { type: string, enum: [observe-phone] }
+            command: { $ref: "#/components/schemas/ProductCasePhoneObservation" }
     ProductCaseResponse:
       type: object
       additionalProperties: false
@@ -1668,6 +1884,7 @@ components:
         - objectiveRevision
         - replayed
         - evidence
+        - mobileCoverage
       properties:
         version:
           type: string
@@ -1709,12 +1926,13 @@ components:
                     type: string
                     minLength: 1
                     maxLength: 2048
-            local: *a2
-            hosted: *a2
+            local: { $ref: "#/components/schemas/ProductCaseRunEvidence" }
+            hosted: { $ref: "#/components/schemas/ProductCaseRunEvidence" }
             review: *a2
             merge: *a2
-            deploy: *a2
-            mobile: *a2
+            deploy: { $ref: "#/components/schemas/ProductCaseDeployEvidence" }
+            mobile: { $ref: "#/components/schemas/ProductCasePhoneEvidence" }
+        mobileCoverage: { $ref: "#/components/schemas/ProductPhoneCoverage" }
         build:
           $ref: "#/components/schemas/ProductBuildReceipt"
         planOperation:
@@ -1767,6 +1985,15 @@ components:
             - creation_denied
             - envelope_missing
             - handoff_unavailable
+            - binding_not_found
+            - operator_required
+            - deployment_not_qualified
+            - repository_required
+            - repository_mismatch
+            - team_mismatch
+            - project_not_found
+            - project_conflict
+            - not_configured
     ProductBuildCommand:
       type: object
       additionalProperties: false
