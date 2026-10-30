@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as triage from "#src/lib/auto-triage.js";
+import { WorktreePointerRefusedError } from "#src/lib/worktree-git.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const start = Date.parse("2026-10-16T00:00:00Z");
 const at = (minutes: number) => new Date(start + minutes * 60_000);
@@ -75,4 +77,59 @@ test("long failure streaks have no retry cap and never throw when formatting a r
   });
   assert.equal(decision.fire, false);
   assert.match(decision.reason, /beyond the representable date range/);
+});
+
+test("feedback content history reads the last origin/main commit for the candidate", async () => {
+  const calls: unknown[][] = [];
+  const timestamp = at(1).toISOString();
+  const changedAt = await triage.feedbackChangedAtOnMain("/feedback-root", "fb-old", async (...args) => {
+    calls.push(args);
+    return `  ${timestamp}\n`;
+  });
+  assert.equal(changedAt, timestamp);
+  assert.deepEqual(calls, [["/feedback-root",
+    ["log", "-1", "--format=%cI", "origin/main", "--", "plan/feedback/fb-old.yaml"],
+    { timeout: 10_000 }]]);
+  assert.equal(triage.failedFireBackoff([failure(0)], "fb-old", 60, at(2), changedAt).failures, 0);
+});
+
+test("missing or malformed content history retains the failed fire", async () => {
+  for (const output of ["", " \n", "not a timestamp\n"]) {
+    const changedAt = await triage.feedbackChangedAtOnMain("/feedback-root", "fb-old", async () => output);
+    assert.equal(changedAt, undefined);
+    assert.equal(triage.failedFireBackoff([failure(0)], "fb-old", 60, at(2), changedAt).backedOff, true);
+  }
+});
+
+test("content history command failures retain the failed fire", async () => {
+  for (const error of [Object.assign(new Error("git exited"), { status: 128 }),
+    Object.assign(new Error("git unavailable"), { code: "ENOENT" })]) {
+    const changedAt = await triage.feedbackChangedAtOnMain("/feedback-root", "fb-old", async () => { throw error; });
+    assert.equal(changedAt, undefined);
+    assert.equal(triage.failedFireBackoff([failure(0)], "fb-old", 60, at(2), changedAt).backedOff, true);
+  }
+});
+
+test("content history propagates failures without a command error code or status", async () => {
+  for (const error of [new Error("security refusal"), null, "refused"]) {
+    await assert.rejects(
+      triage.feedbackChangedAtOnMain("/feedback-root", "fb-old", async () => { throw error; }),
+      (observed: unknown) => { assert.equal(observed, error); return true; },
+    );
+  }
+});
+
+test("the default content history reader propagates the hardened leaf's pointer refusal", async (t) => {
+  const { dir } = ownedFixtureDir(t, "failed-fire-history");
+  const log = t.mock.method(console, "error", () => {});
+  await assert.rejects(triage.feedbackChangedAtOnMain(dir, "fb-old"), (error: unknown) => {
+    assert.ok(error instanceof WorktreePointerRefusedError);
+    assert.equal(error.worktree, dir);
+    assert.equal(error.observed, "<absent>");
+    return true;
+  });
+  assert.equal(log.mock.callCount(), 1);
+  const row = JSON.parse(log.mock.calls[0]!.arguments[0] as string);
+  assert.equal(row.event, "worktree_git.pointer_refused");
+  assert.equal(row.worktree, dir);
 });

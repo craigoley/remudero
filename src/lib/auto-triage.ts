@@ -697,9 +697,11 @@ export function failedFireBackoff(
 }
 
 /** Unreadable main history retains the failure history; security refusals still propagate. */
-export async function feedbackChangedAtOnMain(root: string, feedbackId: string): Promise<string | undefined> {
+export async function feedbackChangedAtOnMain(
+  root: string, feedbackId: string, git: typeof hostWorktreeGitAsync = hostWorktreeGitAsync,
+): Promise<string | undefined> {
   try {
-    const ts = (await hostWorktreeGitAsync(root,
+    const ts = (await git(root,
       ["log", "-1", "--format=%cI", "origin/main", "--", `plan/feedback/${feedbackId}.yaml`],
       { timeout: 10_000 })).trim();
     return Number.isFinite(Date.parse(ts)) ? ts : undefined;
