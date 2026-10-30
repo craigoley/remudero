@@ -12230,29 +12230,59 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     judged_against: required.kind, ...(required.kind === "all-checks" ? { required_fallback: required.fallback } : {}) });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
-  try {
-    reconcileDepReviewHold({
-      statePath: holdStatePath,
-      prUrl: view.url,
-      prNumber: view.number,
-      title: view.title ?? "",
-      body: view.body ?? "",
-      headSha: view.headRefOid,
-      result,
-      nowMs: clock.now(),
-      escalationDeps: () => ({ issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
-      log,
-    });
-  } catch (error) {
-    log("dep-review.decided", {
-      ...result, decision: "hold", review_decision: result.decision,
-      reason: `dependency hold reconciliation incomplete: ${String(error)}`,
-      pr_url: view.url, head_sha: view.headRefOid,
-    });
-    log("dep-review.hold_reconcile_failed", { pr_url: view.url, head_sha: view.headRefOid, error: String(error) });
-    console.log(`dependency hold escalation reconciliation failed; will retry: ${String(error)}`);
-    return 1;
-  }
+  let remedyAskUrl: string | undefined;
+  const reconcileHold = async () => {
+    try {
+      await reconcileDepReviewHold({
+        statePath: holdStatePath,
+        prUrl: view.url,
+        prNumber: view.number,
+        title: view.title ?? "",
+        body: view.body ?? "",
+        headSha: view.headRefOid,
+        result,
+        checks: selectedChecks,
+        remedyAskUrl,
+        proposalProgress: async (feedbackId) => {
+          const path = join(proposalRoot, "plan", "feedback", `${feedbackId}.yaml`);
+          const feedback = existsSync(path) ? readFeedbackEntry(proposalRoot, feedbackId) : undefined;
+          const planPath = join(proposalRoot, "plan", "tasks.yaml");
+          const tasks = existsSync(planPath) ? loadPlan(planPath).tasks.filter(t => t.origin === `feedback#${feedbackId}`) : [];
+          const rows = tasks.length ? readLedgerUnionRecordsSync(dirname(ledgerPath), { refuseIncomplete: true }).rows : [];
+          const outcomes = await Promise.all(tasks.map(async task => {
+            const history = rows.filter(r => r.task_id === task.id);
+            const taskRows = history.slice(Math.max(0, history.findLastIndex(r => r.step === "run.start" || r.step === "dispatch")));
+            const last = taskRows.at(-1);
+            const prUrl = taskRows.findLast(r => typeof r.pr_url === "string")?.pr_url;
+            const pr = typeof prUrl === "string" ? await (deps.gh ?? ghJsonAsync)(["pr", "view", prUrl, "--repo", slug,
+              "--json", "state,headRefOid,statusCheckRollup"]) as { state?: string; headRefOid?: string; statusCheckRollup?: RollupEntry[] } : undefined;
+            if (pr && !["OPEN", "CLOSED", "MERGED"].includes(pr.state ?? "")) throw new Error(`owned-build PR state unreadable: ${prUrl}`);
+            const verdict = taskRows.findLast(r => r.step === "verdict");
+            return { taskId: task.id, last, pr,
+              terminal: pr?.state === "CLOSED" || pr?.state === "MERGED" ||
+                ["failed", "no_pr"].includes(String(verdict?.verdict)) };
+          }));
+          return { evidence: { feedback: feedback?.status ?? "captured", proposal: feedback?.proposal_pr, outcomes },
+            terminal: feedback?.status === "rejected" || (outcomes.length > 0 && outcomes.every(o => o.terminal)) };
+        },
+        nowMs: clock.now(),
+        escalationDeps: () => ({ issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+        log,
+      });
+    } catch (error) {
+      log("dep-review.decided", {
+        ...result, decision: "hold", review_decision: result.decision,
+        reason: `dependency hold reconciliation incomplete: ${String(error)}`,
+        pr_url: view.url, head_sha: view.headRefOid,
+      });
+      log("dep-review.hold_reconcile_failed", { pr_url: view.url, head_sha: view.headRefOid, error: String(error) });
+      console.log(`dependency hold escalation reconciliation failed; will retry: ${String(error)}`);
+      return false;
+    }
+    return true;
+  };
+
+  if (result.decision !== "hold" && !(await reconcileHold())) return 1;
 
   if (result.decision === "refuse") {
     const refused = reconcileDependabotRefusedPath({
@@ -12309,10 +12339,11 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
     try { // W1-T9995: a re-run that went red holds the head; this pass confirms it and escalates once.
       const rerun = dependabot ? await supersededReruns([]) : undefined;
-      if (rerun?.redNow) escalateStale(rerun.checks, rerun.kind);
+      if (rerun?.redNow) remedyAskUrl = escalateStale(rerun.checks, rerun.kind) ?? undefined;
     } catch (error) {
       log("dep-review.superseded_red.rerun_failed", { pr_number: view.number, head_sha: view.headRefOid, action: "confirm", error: String(error) });
     }
+    if (!(await reconcileHold())) return 1;
     console.log(`no remudero-review posted (holding for gates): ${view.url}`);
     return 1;
   }
