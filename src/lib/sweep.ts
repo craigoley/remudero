@@ -4485,7 +4485,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               head_sha: pr.headSha,
               reason: atHead.standDown,
             });
-            return;
+            throw new Error(atHead.standDown);
           }
           task = atHead.task;
         }

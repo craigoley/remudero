@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
@@ -544,6 +544,7 @@ test("W1-T9114: a restart does not drain child reviews or fix dispatches", async
     const bareRow = bare.find((r) => r.step === "daemon.freshness_drain.completed");
     assert.equal((bareRow?.detached_work_placement as Record<string, string>).review, "process");
     await proveFreshFixAdmissionAcrossRestart();
+    await proveFreshFixAdmissionAcrossRestart("readable", "absent");
   } finally { installDetachedWorkHost(undefined); f.cleanup(); }
 });
 
@@ -999,10 +1000,11 @@ const fixPr = (over: Partial<OpenPrView> = {}): OpenPrView => ({
 });
 
 type FixIdentityRead = "readable" | "missing-branch" | "empty-branch" | "missing-head" | "moved-head" | "throws";
+type FixContractRead = "readable" | "absent" | "throws" | "divergent";
 
-async function proveFreshFixAdmissionAcrossRestart(identity: FixIdentityRead = "readable") {
+async function proveFreshFixAdmissionAcrossRestart(identity: FixIdentityRead = "readable", contract: FixContractRead = "readable") {
   const { runDetachedWork, buildSweepEffects, runFixRung } = await import("#src/run-task.js");
-  const admissions = identity === "readable" ? ["refused", "unreadable", "throws", "admitted"] as const : ["admitted"] as const;
+  const admissions = identity === "readable" && contract === "readable" ? ["refused", "unreadable", "throws", "admitted"] as const : ["admitted"] as const;
   for (const admission of admissions) {
     const f = fixture();
     let nowMs = Date.parse("2026-10-12T12:00:00Z");
@@ -1029,6 +1031,8 @@ async function proveFreshFixAdmissionAcrossRestart(identity: FixIdentityRead = "
       let dispatches = 0;
       let headReads = 0;
       let checkouts = 0;
+      let contractReads = 0;
+      const removedWorktrees: string[] = [];
       const dispatchControls: Array<Parameters<SweepDeps["dispatchFix"]>[3]> = [];
       let pressureReads = 0;
       let enteredRead!: () => void;
@@ -1067,10 +1071,18 @@ async function proveFreshFixAdmissionAcrossRestart(identity: FixIdentityRead = "
             registeredWorktreeOwnerImpl: () => undefined,
             createFixRungWorktreeImpl: (_repo: string, path: string) => { checkouts++; mkdirSync(path, { recursive: true }); },
             captureWorktreeSnapshotImpl: () => ({ headSha: FIX_HEAD, dirty: false }),
-            resolveTaskContractAtHeadImpl: async () => ({ criteria: UNMET, taskDeclaredFiles: task.files, taskRisk: "high", taskNarrative: {} }),
+            resolveTaskContractAtHeadImpl: async () => {
+              contractReads++;
+              assert.equal(readdirSync(join(f.stateRoot, "inflight")).filter(name => name.endsWith(".lock")).length, 1,
+                "the real dispatcher owns the branch claim when it reads the PR-head contract");
+              if (contract === "absent") return undefined;
+              if (contract === "throws") throw new Error("head contract object missing");
+              if (contract === "divergent") return { criteria: [], taskId: FIX_TASK, divergence: { taskId: FIX_TASK, reason: "duplicate head task" } };
+              return { criteria: UNMET, taskDeclaredFiles: task.files, taskRisk: "high", taskNarrative: {} };
+            },
             readPreservedOwnerPatchImpl: () => undefined,
             readPackageScriptsImpl: () => ({}),
-            worktreeRemoveImpl: (_repo, path) => { rmSync(path, { recursive: true, force: true }); },
+            worktreeRemoveImpl: (_repo, path) => { removedWorktrees.push(path); rmSync(path, { recursive: true, force: true }); },
             runFixRungImpl: async (opts: Parameters<typeof runFixRung>[0]) => {
               assert.equal(opts.deps.branchClaim?.verify?.(), undefined, "the real native helper gave the child a verified branch claim");
               assert.equal(opts.deps.branchClaim?.last().info.pid, process.pid);
@@ -1168,15 +1180,23 @@ async function proveFreshFixAdmissionAcrossRestart(identity: FixIdentityRead = "
         "the pre-restart admission timestamp survives the producer, disk spec and fresh adoption without a retry reset");
       writePlan("high");
       releaseRead();
-      const succeeded = admission === "admitted" && identity === "readable";
+      const checkedOut = admission === "admitted" && identity === "readable";
+      const succeeded = checkedOut && contract === "readable";
       assert.equal(await childDone, succeeded ? 0 : 1);
       const status = readStatus(children[1]!.dir);
       assert.ok(status.ok);
       assert.equal(status.value.state, succeeded ? "done" : "failed");
       assert.equal(planReads, 1);
       assert.equal(headReads, admission === "admitted" ? 1 : 0, "the real dispatcher reads its own head identity after admission");
-      assert.equal(checkouts, succeeded ? 1 : 0, "unread or changed identities refuse before the branch checkout");
-      assert.equal(existsSync(join(f.stateRoot, "inflight")), succeeded, "a refused identity never takes a fix-branch claim");
+      assert.equal(checkouts, checkedOut ? 1 : 0, "unread or changed identities refuse before the branch checkout");
+      assert.equal(contractReads, checkedOut ? 1 : 0, "the child reaches the real dispatcher's PR-head contract fence");
+      assert.equal(existsSync(join(f.stateRoot, "inflight")), checkedOut, "a refused identity never takes a fix-branch claim");
+      if (checkedOut) {
+        assert.equal(readdirSync(join(f.stateRoot, "inflight")).filter(name => name.endsWith(".lock")).length, 0,
+          "settling the dispatcher releases the native branch claim even on an unread contract");
+        assert.equal(removedWorktrees.length, 1);
+        assert.equal(existsSync(removedWorktrees[0]!), false, "the dispatcher cleans up its checkout before settling");
+      }
       assert.equal(dispatches, succeeded ? 1 : 0);
       if (succeeded) {
         assert.equal(dispatchControls[0]?.admissionSinceMs, admissionSinceMs,
@@ -1204,6 +1224,19 @@ async function proveFreshFixAdmissionAcrossRestart(identity: FixIdentityRead = "
           row.step === "sweep.fix.checkout_claim_declined" && row.head_sha === FIX_HEAD &&
           row.owner_recovery_reason === (identity === "moved-head" ? "head_identity_changed" : "head_identity_unreadable")), true);
       }
+      if (contract !== "readable") {
+        const reason = contract === "absent" ? /no contract returned/ :
+          contract === "throws" ? /resolver threw: head contract object missing/ : /duplicate head task/;
+        assert.equal(status.value.result, undefined, "an unread contract cannot become a successful child result");
+        assert.match(status.value.failure!.message, /PR-head task contract unreadable/);
+        assert.match(status.value.failure!.message, reason);
+        const rows = readLedgerLines(ledgerPathFor(ports.config));
+        const refusal = rows.find(row => row.step === "sweep.fix.head_contract_unreadable");
+        assert.equal(refusal?.pr_number, 9379);
+        assert.equal(refusal?.head_sha, FIX_HEAD);
+        assert.match(String(refusal?.reason), reason);
+        assert.equal(rows.some(row => row.step === "fix.dispatch"), false, "contract refusal spends no strike");
+      }
     } finally {
       releaseRead?.();
       finishReview(result(FIX_TASK));
@@ -1220,6 +1253,12 @@ async function proveFreshFixAdmissionAcrossRestart(identity: FixIdentityRead = "
 test("W1-T9114: unread identities in the real dispatcher refuse after restart instead of succeeding", async () => {
   for (const identity of ["missing-branch", "empty-branch", "missing-head", "moved-head", "throws"] as const) {
     await proveFreshFixAdmissionAcrossRestart(identity);
+  }
+});
+
+test("W1-T9114: an unread PR-head contract fails the real fix child after restart", async () => {
+  for (const contract of ["absent", "throws", "divergent"] as const) {
+    await proveFreshFixAdmissionAcrossRestart("readable", contract);
   }
 });
 
