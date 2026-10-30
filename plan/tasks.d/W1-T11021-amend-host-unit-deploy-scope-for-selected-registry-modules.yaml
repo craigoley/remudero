@@ -1,0 +1,25 @@
+- id: W1-T11021
+  title: "Amend host-unit deploy scope for selected-registry modules"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  files:
+    - deploy/install-host-units.sh
+  acceptance:
+    - claim: "DEPLOY_LOGIC_PATHS covers the selected-registry modules required to detect deploy-logic drift."
+      proof: "unit test: install-host-units selected-registry deploy logic paths"
+    - claim: "A busy primary defers the unsafe recycle and reports the selected-registry deploy-logic drift."
+      proof: "unit test: busy primary selected-registry deploy logic safety"
+  origin: "followup:W1-T9794-1793328420779:2026-10-30T04:16:43.447Z:0"
+  rationale: >-
+    From the 2026-10-30 follow-up on https://github.com/craigoley/remudero/pull/15656, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: Amend scope for `deploy/install-host-units.sh`; its
+    `DEPLOY_LOGIC_PATHS` omits the newly imported selected-registry modules and fails the
+    busy-primary safety test. — from W1-T9794 (run W1-T9794-1793328420779,
+    https://github.com/craigoley/remudero/pull/15656)

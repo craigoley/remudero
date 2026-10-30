@@ -22,7 +22,7 @@
     - src/lib/product-intent.ts
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
-    - test/plan/product-case-device-observations.test.ts
+    - test/console-api/serve/product-case-device-observations.test.ts
   status: queued
   attempts: 0
   rationale: >-
@@ -55,7 +55,7 @@
     concurrent-revision rules. Declare the member and its failure codes in openapi/daemon.yaml and the route status
     map, then regenerate the client. Out of scope: running gameplay, buying or provisioning a device, scanning,
     access or credential changes, OleyArcade catalog edits, and the eventual live iPhone evidence itself. First
-    gameplay stays signed-in Console C4. TEST. One whole file at test/plan/product-case-device-observations.test.ts.
+    gameplay stays signed-in Console C4. TEST. One whole file at test/console-api/serve/product-case-device-observations.test.ts.
     Confirm it with rmd test-place from the actual imports, and use aliases. Drive buildProductCaseRoutes' default
     handler over a real product store with a real operator-session-verified request and a bearer-verified control.
     Typed receipt follow-through: extend the strict optional receipt metadata in src/lib/product-intent.ts for
@@ -76,6 +76,6 @@
   falsifier: >-
     Remove each mechanism on its own: the operator-session actor gate, the deploy-receipt ownership and objective
     check, the desktop refusal, and the per-platform split. Each removal must make a named test in
-    test/plan/product-case-device-observations.test.ts fail against the same real-file fixture, and the test must
+    test/console-api/serve/product-case-device-observations.test.ts fail against the same real-file fixture, and the test must
     pass once that piece is restored. A fixture observation never stands in for the operator's real iPhone or
     Android evidence.

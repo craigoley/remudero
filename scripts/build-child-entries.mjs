@@ -17,11 +17,12 @@
 // store, and validates a stored build with this same childEntryIsCurrent (`outDir` = the stored directory).
 import { createHash } from "node:crypto";
 import {
-  closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync,
-  rmSync, writeFileSync,
+  closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync,
+  rmSync, statSync, writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 /** The child entries this build emits. `check-proof-main` is W1-T7728's narrow entry; W1-T8775 switches its spawn site. `run-child` is W1-T9082's (ADR 0007). */
@@ -126,24 +127,80 @@ function withRegularFile(path, use) {
  * holding the same source share one hash. That absolute-path key is exactly what makes tsx's cache
  * miss in every fresh worktree.
  */
-export function sourceHash(root, esbuildVersion = loadEsbuild(root).version) {
+export function sourceHash(root, esbuildVersion = loadEsbuild(root).version, stats) {
   root = resolve(root);
   const h = createHash("sha256");
+  const measured = (bytes) => {
+    if (stats) stats.bytes_read += bytes === null ? 0 : Buffer.byteLength(bytes);
+    return bytes;
+  };
   h.update(`recipe:${RECIPE_VERSION}\0esbuild:${esbuildVersion}\0`);
   const srcDir = join(root, "src");
   if (!existsSync(srcDir)) throw new Error(`no src/ directory under ${root}`);
   for (const file of listFiles(srcDir)) {
     const rel = relative(root, file.path).split(sep).join("/");
     h.update(`file:${rel}\0`);
-    h.update(file.symlink ? `symlink:${readlinkSync(file.path)}` : readFileSync(file.path));
+    const bytes = measured(file.symlink ? readlinkSync(file.path) : readFileSync(file.path));
+    h.update(file.symlink ? `symlink:${bytes}` : bytes);
     h.update("\0");
   }
   for (const name of HASHED_ROOT_FILES) {
     h.update(`root:${name}\0`);
-    h.update(readIfPresent(join(root, name)) ?? "<absent>");
+    h.update(measured(readIfPresent(join(root, name))) ?? "<absent>");
     h.update("\0");
   }
   return h.digest("hex");
+}
+
+const sourceHashes = new Map();
+
+/** All content-hash inputs, by stat only. Root symlinks include their targets because sourceHash reads through them. */
+function sourceSignature(root, version) {
+  const describe = (path, follow) => {
+    const st = (follow ? statSync : lstatSync)(path, { bigint: true });
+    return [st.size, st.mtimeNs, st.ctimeNs, st.ino, st.dev, st.mode].map(String);
+  };
+  const files = listFiles(join(root, "src")).map((file) => [relative(root, file.path), describe(file.path, false)]);
+  for (const name of HASHED_ROOT_FILES) {
+    const path = join(root, name);
+    try {
+      files.push([name, describe(path, false), describe(path, true)]);
+    } catch (err) {
+      if (err?.code !== "ENOENT") throw err;
+      files.push([name, "<absent>"]);
+    }
+  }
+  return JSON.stringify([RECIPE_VERSION, version, files]);
+}
+
+/** One memo entry per root; a concurrent edit refuses the launch rather than caching a hash of a moving tree. */
+export function memoizedSourceHash(root, stats, hash = sourceHash) {
+  root = resolve(root);
+  const version = loadEsbuild(root).version;
+  const signature = sourceSignature(root, version);
+  const cached = sourceHashes.get(root);
+  if (cached?.signature === signature) {
+    stats.reused++;
+    return cached.hash;
+  }
+  sourceHashes.delete(root);
+  const started = performance.now();
+  stats.computed++;
+  try {
+    const value = hash(root, version, stats);
+    if (sourceSignature(root, version) !== signature) throw new Error("source changed while hashing child entry");
+    sourceHashes.set(root, { signature, hash: value });
+    return value;
+  } finally {
+    stats.ms += performance.now() - started;
+  }
+}
+
+/** Check that a previously hashed tree still has the same inputs, without reading their contents again. */
+export function sourceHashStillCurrent(root, hash) {
+  root = resolve(root);
+  const cached = sourceHashes.get(root);
+  return cached?.hash === hash && cached.signature === sourceSignature(root, loadEsbuild(root).version);
 }
 
 /**
@@ -297,16 +354,16 @@ const isSafeRelativePath = (p) =>
  * A matching digest is integrity, not authenticity: someone who can replace both the payload and the
  * manifest passes. The store is instance-owned, which is the boundary this relies on.
  */
-export function childEntryIsCurrent(root, name, { outDir = OUT_DIR, treeHash } = {}) {
+export function childEntryIsCurrent(root, name, { outDir = OUT_DIR, treeHash, hashSource = sourceHash } = {}) {
   try {
-    return judgeChildEntry(resolve(root), name, outDir, treeHash);
+    return judgeChildEntry(resolve(root), name, outDir, treeHash, hashSource);
   } catch (err) {
     return notCurrent(`validation-error: ${String(err?.code ?? err?.message ?? err).slice(0, 80)}`);
   }
 }
 
 /** `treeHash`, when given, is `sourceHash(root)` the caller already computed (W1-T8776: one hash per lookup, not per entry). */
-function judgeChildEntry(root, name, outDir, treeHash) {
+function judgeChildEntry(root, name, outDir, treeHash, hashSource) {
   if (typeof name !== "string" || !ENTRY_NAME.test(name)) return notCurrent("entry-name-invalid");
   const read = validManifest(root, outDir);
   if (!read.manifest) return read;
@@ -316,7 +373,7 @@ function judgeChildEntry(root, name, outDir, treeHash) {
   const declared = CHILD_ENTRIES.find((e) => e.name === name);
   if (!isSafeRelativePath(entry.source) || (declared && declared.source !== entry.source)) return notCurrent("entry-source-invalid");
   if (entry.bundle !== `${name}.mjs`) return notCurrent("bundle-name-invalid");
-  return judgeBundleFile(root, outDir, manifest, entry, treeHash, true);
+  return judgeBundleFile(root, outDir, manifest, entry, treeHash, true, hashSource);
 }
 
 /** A manifest that this build wrote, or why not: the checks every entry kind starts from. */
@@ -330,7 +387,7 @@ function validManifest(root, outDir) {
 }
 
 /** The bundle a manifest entry names: a regular file inside the output directory, of the size and digest recorded, built from `root`'s source when `verifySource`. */
-function judgeBundleFile(root, outDir, manifest, entry, treeHash, verifySource) {
+function judgeBundleFile(root, outDir, manifest, entry, treeHash, verifySource, hashSource = sourceHash) {
   if (!Number.isSafeInteger(entry.bytes) || entry.bytes <= 0 || !SHA256_HEX.test(String(entry.sha256))) return notCurrent("entry-metadata-invalid");
   const dir = resolve(root, outDir);
   const bundle = join(dir, entry.bundle);
@@ -349,7 +406,7 @@ function judgeBundleFile(root, outDir, manifest, entry, treeHash, verifySource) 
   }
   if (refusal) return refusal;
   if (!verifySource) return { current: true, reason: "bundle-intact", bundle };
-  const now = treeHash ?? sourceHash(root);
+  const now = treeHash ?? hashSource(root);
   if (manifest.sourceHash !== now) return { current: false, reason: "source-changed", built: manifest.sourceHash, now };
   return { current: true, reason: "source-hash-match", bundle };
 }

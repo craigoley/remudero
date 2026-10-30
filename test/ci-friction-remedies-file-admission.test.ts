@@ -116,7 +116,26 @@ test("a census remedy proves its diagnosed mechanism while retaining healthy ref
   for (const name of ["other-refusal", "census-precheck-other"]) {
     const other = loadPlanFromYaml(ciFrictionShardYaml({ price: { ...price, cause: { ...cause, name } }, rung: 1,
       owner: { files: [owner], why: [] }, rounds: [] }, "W1-T99988"), "unrelated contract").tasks[0]!;
-    assert.equal(other.acceptance![0]!.claim, `the harness no longer spends a fix round on fix_refusal:${name}`);
+    assert.equal(other.acceptance![0]!.claim, `a recorded fix_refusal:${name} round, replayed through the real code path in ${owner}, is prevented or self-healed without dispatching a fix round`);
     assert.equal(other.acceptance![0]!.proof, `unit test: W1-T99988: fix_refusal:${name} is prevented, not retried`);
   }
+});
+
+test("every drafted remedy claims a mechanism a review can judge from the diff, never the after-window outcome", () => {
+  const owner = "src/lib/prompt-render.ts";
+  const key = "check:body-coverage";
+  const rounds = [{ pr: 13946, causeKey: key, minutes: 2, at: "2026-10-24T13:44:46.109Z", detail: "body-coverage round" }];
+  const yaml = ciFrictionShardYaml({ price: { cause: { kind: "check", name: "body-coverage" }, minutes: 20.3, rounds: 10, prs: 10 },
+    rung: 1, owner: { files: [owner, "src/cli/commands/fix.ts"], why: ["names body-coverage"] }, rounds }, "W1-T99987");
+  const task = loadPlanFromYaml(yaml, "mechanism claim").tasks[0]!;
+  const claim = task.acceptance![0]!.claim;
+  assert.equal(claim, `a recorded ${key} round, replayed through the real code path in ${owner}, is prevented or self-healed without dispatching a fix round`);
+  assert.doesNotMatch(claim, /no longer/, "the outcome over future windows is the gardener's measurement, not the build's claim");
+  assert.equal(task.acceptance![0]!.proof, `unit test: ${ciFrictionRemedyTestTitle("W1-T99987", key)}`, "the proof title is unchanged");
+  assert.match(task.note!, /replay one recorded round of this cause through the real owner path/);
+  assert.match(task.rationale!, /not assert a label, prompt text or report wording/);
+  assert.match(task.rationale!, /after-window measurement decides that/);
+  const plan = loadPlanFromYaml(yaml, "mechanism claim admission");
+  assert.deepEqual(lintTask(task, { duplicateSlug: ciFrictionShardStem(key), machineFilingAdmission: { plan, releasedIds: new Set(),
+    pathExists: p => existsSync(join(REPO_ROOT, p)) } }).violations.filter(v => v.severity === "block"), []);
 });
