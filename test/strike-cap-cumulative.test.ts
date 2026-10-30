@@ -255,7 +255,7 @@ async function driveDispatchFix(prOver: Partial<OpenPrView>, headRefName: string
       'const a = process.argv.slice(2); const i = a.indexOf("--json"); const f = i >= 0 ? a[i+1] : undefined;',
       `const HEAD = ${JSON.stringify(headRefName)};`,
       // The one round trip a run PAST the budget gate makes for the head.
-      'if (f && f.includes("headRefName")) process.stdout.write(JSON.stringify({ headRefName: HEAD, body: "" }));',
+      `if (f && f.includes("headRefName")) process.stdout.write(JSON.stringify({ headRefName: HEAD, headRefOid: ${JSON.stringify(pr(prOver).headSha)}, body: "" }));`,
       // ghLiveState's REST read — answered OPEN so the preflight never stands the run down.
       'else if (a[0] === "api" && typeof a[1] === "string" && /^repos\\/[^/]+\\/[^/]+\\/pulls\\/\\d+$/.test(a[1])) process.stdout.write(JSON.stringify({ state: "open", merged: false }));',
       'else process.stdout.write("{}");',

@@ -54,6 +54,7 @@ import { defaultListCandidates, defaultReadMarkers, killProcessGroup, sweepOrpha
 import { sweepStaleTempDirs } from "../../lib/tmp.js";
 import { sweepStaleWorkerScratch } from "../../lib/worker-scratch.js";
 import { daemonInstanceRegistryPath } from "../../lib/deployer.js";
+import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
@@ -90,6 +91,7 @@ import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
 import { resolveClaudeExecutable, claudeExecutableCache } from "../../lib/worker.js";
 import { defaultInstance, memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "../../lib/host-memory-ledger.js";
 import { type DispatchGovernorDeps } from "../../lib/dispatch-governor.js";
+import { focusGateFor } from "../../lib/focus-gardener.js";
 import { captureHeavyNewBuildStartupGate } from "../../lib/heavy-ready-startup.js";
 import { hostWorktreeGitAsync } from "../../lib/worktree-git.js";
 import { step } from "../../lib/git-push.js";
@@ -596,6 +598,10 @@ export async function daemonCommand(
      * the watcher closes before the daemon re-raises SIGINT/SIGTERM without signalling the test
      * runner itself. */
     wireSweepWake?: typeof wireSweepWakeToDaemon;
+    startGitCredentialSocket?: typeof startDaemonGitCredentialSocket;
+    startReadPlane?: typeof startReadPlane;
+    startLoopTelemetry?: typeof startReadPlaneTelemetry;
+    startMemoryCensus?: typeof startDaemonMemoryCensus;
     processKill?: (pid: number, signal: NodeJS.Signals) => boolean;
     /** Best-effort boot projection for provider routing; production writes one bounded state file. */
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
@@ -1084,7 +1090,9 @@ export async function daemonCommand(
     return { ...own, owned, foreign };
   };
   const openPrCount = () => openPrOwnership().owned;
-  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
+  // W1-T11026: the focus gardener judges every new-task consultation and holds it while the stuck stack is deep.
+  const queueGate = focusGateFor(queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure),
+    { stateDir: dirname(ledgerPath), log, clock: clockFromMillisFn(deps.now) });
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -1176,6 +1184,12 @@ export async function daemonCommand(
     }
     throw e;
   }
+  // Register each release only after acquisition; boot and the loop share this finally.
+  const cleanup: Array<{ resource: string; close: () => void | Promise<void> }> = [
+    { resource: "drain_lock", close: () => drainLock.release() },
+    { resource: "stop_marker", close: () => { consumeStop(config.root); } },
+  ];
+  try {
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
   const landedClaimRerunReported = new Set<string>();
   try {
@@ -1251,6 +1265,7 @@ export async function daemonCommand(
     // older full sweep is still executing and the resulting wake is refused by its liveness gate.
     onCheckBurstSettled: () => void mainHealthRung(),
   });
+  cleanup.push({ resource: "github_event_wake", close: () => githubEventWake.close() });
   const processKill = deps.processKill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const onSignal = (sig: NodeJS.Signals) => {
     archivedLifetime.history?.close?.();
@@ -1260,7 +1275,9 @@ export async function daemonCommand(
     processKill(process.pid, sig); // re-raise with the default handler now cleared
   };
   process.once("SIGINT", onSignal);
+  cleanup.push({ resource: "sigint_listener", close: () => { process.removeListener("SIGINT", onSignal); } });
   process.once("SIGTERM", onSignal);
+  cleanup.push({ resource: "sigterm_listener", close: () => { process.removeListener("SIGTERM", onSignal); } });
 
   log("daemon.start", {
     max: opts.max ?? null,
@@ -1378,7 +1395,10 @@ export async function daemonCommand(
   // `runDaemon` is a test-only loop seam. Its fixtures must not inherit the live shared hold a
   // production daemon is deliberately required to honour; injected `checkPause` still takes precedence.
   const checkPause = deps.checkPause ?? (deps.runDaemon ? () => pauseDetail(config.root) : () => checkSharedPause(config.root, realDeps().sharedPauseGit));
-  if (!deps.checkPause && !deps.runDaemon && !checkStop()) await prepareSharedPause(config.root, realDeps().sharedPauseGit);
+  if (!deps.checkPause && !deps.runDaemon) {
+    cleanup.push({ resource: "shared_pause_refresh", close: () => disposeSharedPauseRefresh(realDeps().sharedPauseGit) });
+    if (!checkStop()) await prepareSharedPause(config.root, realDeps().sharedPauseGit);
+  }
   if (target.isSelf && !deps.runDaemon) unwireOwnCheckoutCredentialHelper(repoRoot, log);
   const invokeDaemonBoot: typeof daemonBoot = (...args) => daemonBoot(...args);
   const bootHold = resolveFleetControlHold({ checkStop, checkPause });
@@ -1517,7 +1537,7 @@ export async function daemonCommand(
   // Without this line `deps.checkAutoTriage` is undefined and the whole rung is dead code, which is
   // exactly how #1066 merged: consumer wired, producer never.
   const autoTriageHooks = target.isSelf ? (deps.buildAutoTriageHooks ?? buildAutoTriageDaemonHooks)({ config, repairSnapshot: () => {
-    const generation = freshReadGeneration(tickReadGeneration, { consumer: "auto_triage_repair", log });
+    const generation = freshReadGeneration(tickReadGeneration, { consumer: "auto_triage_repair", log, maxAgeMs: DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS });
     if (!generation || generation.facts.openPrError) {
       log("auto_triage.repair_snapshot_unavailable", {
         reasonCode: tickReadGeneration === undefined ? "unpublished-generation" : !generation ? "stale-generation" : "open-pr-read-error",
@@ -1588,21 +1608,24 @@ export async function daemonCommand(
   // W1-T5115: the daemon's ONE git credential socket, started only on an App-configured host and
   // only once the first App mint above has settled. Its path reaches every task worker (`runOne`)
   // and every sweep fix worker (`sweep:`) below; `undefined` leaves both on the ambient helper.
-  const gitCredentialSocket = await startDaemonGitCredentialSocket({
+  const gitCredentialSocket = await (deps.startGitCredentialSocket ?? startDaemonGitCredentialSocket)({
     ready: githubAppRefresh.ready,
     stateDir: join(config.root, "state"),
     log,
     mint: deps.gitCredentialMint,
   });
+  if (gitCredentialSocket) cleanup.push({ resource: "git_credential_socket", close: () => gitCredentialSocket.close() });
   const readOptions: TickReadOptions = { owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot };
   let inlineProducer: ReturnType<typeof tickReadProducer> | undefined;
-  const readPlane = deps.githubFactory ? undefined : startReadPlane({
+  const readPlane = deps.githubFactory ? undefined : (deps.startReadPlane ?? startReadPlane)({
     // W1-T9722: the worker starts from the narrow tick-read entry (a current bundle when one is vouched for).
     workerUrl: tickReadWorkerUrl(), workerInput: readOptions, log, spawn: () => startTickReadWorker(readOptions),
     inline: (input: TickReadRequest) => (inlineProducer ??= planReaders.inlineTickRead(readOptions, { log }))(input),
   });
+  if (readPlane) cleanup.push({ resource: "read_plane", close: () => readPlane.stop() });
   const readTick = readPlane && planReaders.tickRead(readPlane.read);
-  const loopTelemetry = startReadPlaneTelemetry();
+  const loopTelemetry = (deps.startLoopTelemetry ?? startReadPlaneTelemetry)();
+  cleanup.push({ resource: "loop_telemetry", close: () => loopTelemetry.stop() });
   // The daemon's rolling rss+swap samples, kept across rotations and restarts for the memory budget's daemon split.
   const daemonFootprint = createDaemonFootprint(daemonFootprintPath(join(config.root, "state")));
   installDaemonFootprint(daemonFootprint);
@@ -1619,7 +1642,7 @@ export async function daemonCommand(
   installDaemonSlackReclaimer(slackReclaimer);
   // W1-T9647: what holds the heap, on its own unref'd timer; `unattributed_live_bytes` is read against the reclaimer's
   // last measured live set above. Cheap counters and sliced walks only: no snapshot, no forced collection.
-  const stopMemoryCensus = startDaemonMemoryCensus({
+  const stopMemoryCensus = (deps.startMemoryCensus ?? startDaemonMemoryCensus)({
     holders: daemonHolderSource({
       planCopies: daemonPlanCopies,
       sizedMemos: { terminalUnionScans: terminalUnionScans.size, mergeLogEvidenceByRoot: mergeLogEvidenceByRoot.size,
@@ -1631,8 +1654,8 @@ export async function daemonCommand(
     }),
     log, liveSet: daemonLiveSet.read, bootHeadSha: daemonLoadedCodeSha,
   });
+  cleanup.push({ resource: "memory_census", close: stopMemoryCensus });
   log("daemon.heap_ceiling_shadow", { basis: "boot", ...slackReclaimer.derivedCeiling() });
-  try {
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     // W1-T7744: the filing read is awaited here, before the loop, and behind each selection after — never on the loop.
     await dispatchFilingPrefetch.refresh(target.planPath);
@@ -2353,19 +2376,21 @@ export async function daemonCommand(
     // reason still resolves through `daemonExitCode` itself, unchanged.
     return daemonExitCodeForSummary(summary);
   } finally {
-    await readPlane?.stop();
-    if (!deps.checkPause && !deps.runDaemon) disposeSharedPauseRefresh(realDeps().sharedPauseGit);
-    loopTelemetry.stop();
-    stopMemoryCensus();
-    process.removeListener("SIGINT", onSignal);
-    process.removeListener("SIGTERM", onSignal);
-    githubEventWake.close(); // W1-T2568: never outlives the daemon's own normal-stop path either
-    // W1-T5115: closed and its path removed on normal stop; a failed close is ledgered, never thrown.
-    await gitCredentialSocket?.close().catch((e: unknown) => log(LEDGER_REQUEST_STEP, {
-      host: "github.com", decision: "refuse", status: "error", reason: `git credential socket did not close: ${String(e)}`,
-    }));
-    consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
-    drainLock.release();
+    for (const { resource, close } of cleanup.reverse()) {
+      try {
+        await close();
+      } catch (error) {
+        try {
+          log("daemon.cleanup_failed", { resource, error: String(error) });
+          if (resource === "git_credential_socket") log(LEDGER_REQUEST_STEP, {
+            host: "github.com", decision: "refuse", status: "error", reason: `git credential socket did not close: ${String(error)}`,
+          });
+        } catch (logError) {
+          // A failed ledger cannot replace the boot/loop error or skip sibling releases.
+          console.error("daemon cleanup reporting failed", { resource, error: String(error), reason: String(logError) });
+        }
+      }
+    }
   }
   } finally {
     archivedLifetime.history?.close?.();

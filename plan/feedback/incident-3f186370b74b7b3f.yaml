@@ -1,0 +1,29 @@
+id: incident-3f186370b74b7b3f
+ts: 2026-10-30T01:31:06.554Z
+raw: >-
+  Incident 3f186370b74b: intervention
+  own-red:fix-lane:operator-answered-the-clarification-ques
+
+  First seen: 2026-10-30T01:27:55.702Z
+
+  Last seen: 2026-10-30T01:30:56.742Z
+
+  Count: 4, burn: 4.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#13317@1c4a21600 actor=cao825 cause=own-red:fix-lane:operator-answered-the-clarification-ques — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#3f186370b74b7b3f149797fff996eb3db505534d1e2e87735d12810e657091a1
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

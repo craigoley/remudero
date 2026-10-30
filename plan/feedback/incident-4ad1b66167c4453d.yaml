@@ -1,0 +1,33 @@
+id: incident-4ad1b66167c4453d
+ts: 2026-10-30T20:42:22.576Z
+raw: >-
+  Incident 4ad1b66167c4: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix stood down at rung.evidence_head and nothing it read has changed
+  (head <sha>, task contract) — no worker is dispatched until one does:
+  published branch advanced from <sha> to <sha> before the worker started; the
+  ordinary sweep must read fresh exact-head failure evidence
+
+  First seen: 2026-10-30T20:39:26.176Z
+
+  Last seen: 2026-10-30T20:39:26.176Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15638 escalated: already escalated (reason unreadable: no escalation of this PR at head b03885d is in the ledger); this pass: fix stood down at rung.evidence_head and nothing it read has changed (head b03885d, task contract) — no worker is dispatched until one does: published branch advanced from b03885de6d82511eb3f308d72ad40622c4a19ef5 to 7aae62aa80086e179610f687c84406cf431cea5a before the worker started; the ordinary sweep must read fresh exact-head failure evidence
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#4ad1b66167c4453d0f0ae36403ecfab99d5f4f04aee2ff9bf4c216f612c086df
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

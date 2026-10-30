@@ -1,0 +1,69 @@
+id: automation-skip-is-not-green-20261029
+ts: 2026-10-30T01:25:15.094Z
+raw: >-
+  Cross-repository automation finding from the operator's 2026-10-29 session on
+  craigoley/ClawApp. It is an agent technical finding, not an operator ruling.
+
+  OBSERVED in ClawApp, two related defects. (1) The hosted review action exits
+  SUCCESS without reviewing ("workflow validation") whenever a PR edits the
+  review workflow itself. No review exists, yet the PR looks reviewed.
+  craigoley/ClawApp#1201 detects that skip, marks it neutral, and dispatches the
+  review from main. (2) A review loop guard keyed on a bot login: a commit
+  authored as the review bot resolves through the API to github-actions[bot]
+  (user id 41898282), so the guard skipped every step on a PR that still reported
+  SUCCESS and sat for days (craigoley/ClawApp#1101; fix proposed in #1194, open).
+  The fix keys the guard on a signal the workflow writes itself and makes a skip
+  visible instead of green.
+
+  WHAT REMUDERO ALREADY HAS (OBSERVED). The bot-login half is covered. The fix
+  rung's stand-down is keyed on SHA lineage (branchAuthorshipStandDownReason,
+  src/cli/commands/fix.ts, W1-T296), not on committer identity. The
+  remudero-review publisher is identified by app identity (src/lib/review.ts).
+  The review runs host-side from the install checkout, not inside the PR's
+  workflow, so a PR that edits a workflow cannot switch the review off. The one
+  login-keyed exemption found, Dependabot in scripts/acceptance-author-gate.mjs
+  (EXEMPT_BOT_LOGINS), reads the PR author from the pull_request payload, which
+  the platform sets, not from a commit author. ci-gate waits for a required check
+  that never registers and then times out red (.github/workflows/ci-gate.yml),
+  so an absent required check is not green.
+
+  WHAT IT LACKS (OBSERVED unless marked). A required check that concludes
+  SKIPPED counts as a pass. ci-gate's evaluate_fails fails only on
+  failure/timed_out/cancelled/action_required/startup_failure ("skipped/absent
+  are OK"). Which required suites skip is decided by PR-head code: ci.yml runs
+  scripts/diff-class.mjs (which imports isInPlanScope from
+  src/lib/plan-architect.ts) from the PR checkout and gates jobs on its
+  PLAN_ONLY / DOCS_ONLY / SOURCE output. scripts/ci-gate-from-contract.mjs, also
+  from the PR head, does not cross-check that class against one computed from
+  base code. gate-monotonic refuses a REQUIRED-list demotion, but not a
+  classifier change that makes required jobs skip. diff-class.mjs is in
+  INSTRUMENT_SURFACE, and that flag is advisory since Standing rule 25 was
+  withdrawn. Only two workflows pin trusted code to the base today
+  (security-merge-policy.yml checks out main; osv-scanner-pr.yml checks out the
+  base sha). INFERRED: a PR that edits the classifier to report PLAN_ONLY would
+  get green skips for its own test suites, and remudero-review would be the only
+  remaining stop. On this very filing (head a1793667e), 15 of ci-gate's REQUIRED
+  names showed a completed/skipped run (lint-plan, task-id-existence, claims,
+  leak-grep and others). ci-gate.yml notes that a skipped stub and the
+  consolidated job's real post can share one name, so some of those are expected.
+  But the conclusion alone does not separate an expected skip from an unearned
+  one.
+
+  DESIRED CAPABILITY (general). A skip is never a pass by default. The gate
+  computes the expected skip set from base-pinned code (the classifier at the
+  base sha, as security-merge-policy already does for its producer) and accepts a
+  SKIPPED required check only when that base computation says it may skip. Any
+  other skip is neutral or red, named in the gate's output, and surfaced by the
+  sweep. A test plants a head-side classifier that reports PLAN_ONLY for a src/
+  diff and proves the gate does not go green. Ground against W1-T2428 (fast-lane
+  classes), W1-T3519 (gate-monotonic) and Standing rule 25 first. This entry
+  authorizes no change to branch protection and no loosening of any gate.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: cross-repo-automation:skip-is-not-green:20261029
+thread_id: null
