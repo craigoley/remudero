@@ -140,7 +140,7 @@ export function stringLiteralMask(text) {
         }
         const word = text.slice(start, i);
         if (word === "function") {
-          const expressionHeads = ["=", "(", "[", ",", ":", "return", "=>", "&", "|", "?"];
+          const expressionHeads = ["=", "(", "[", ",", ":", "return", "=>", "&", "|", "?", "void", "!", "typeof"];
           functionExpressionPending = expressionHeads.includes(prev)
             || (prev === "async" && expressionHeads.includes(beforePrev));
         }
