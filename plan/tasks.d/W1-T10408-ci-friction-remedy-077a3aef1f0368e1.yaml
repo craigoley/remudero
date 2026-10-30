@@ -6,6 +6,9 @@
   verify: human
   risk: low
   priority: 1.43
+  # refusal-amendment (W1-T10408, run DAEMON-1793320452557@00b9992df18a1eba330d4abe3d187e12553228f8, 2026-10-30T03:16:31.172Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Preventing publication through a census refusal can still dispatch a repair worker, so scheduler enrollment cannot substantiate the required zero-fix-round replay.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
