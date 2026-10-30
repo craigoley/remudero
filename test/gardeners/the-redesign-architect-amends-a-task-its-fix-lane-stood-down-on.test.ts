@@ -7,7 +7,9 @@ import { test } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
 import { gardenStatePath, readGardenState, runGardenAsync, type GardenerDeps } from "#src/lib/gardener.js";
 import type { PlanInventory } from "#src/lib/plan-gardener.js";
+import { machineShardFilingRefusal, machineShardLandingRefusal } from "#src/lib/machine-filing.js";
 import { parseTasksFromYaml } from "#src/lib/plan.js";
+import { taskRulingPin } from "#src/lib/task-linter.js";
 import {
   applyRedesignEdit, buildRedesignSources, parseRedesignAnswer, POINTER_STAMP_RE, REDESIGN_AFTER_MS, REDESIGN_JUDGED_STEP, REDESIGN_MARKER_RE, redesignCandidates, redesignEditRefusal, redesignGardenSpec,
   type RedesignSources,
@@ -49,9 +51,9 @@ const heldRow = (atMs: number): Row => ({
 });
 
 const AMEND = `REDESIGN: ${JSON.stringify({
-  verdict: "amend", reason: "the fix needs the fix lane's dispatch path, which files: did not declare",
-  files_add: ["src/cli/commands/fix.ts"], proofs: [{ criterion: 1, proof: "unit test: test/worker/check-body-coverage.test.ts" }],
-  amendment: "Prevent the round in src/cli/commands/fix.ts, where the dispatch is decided, and replay the recorded round in the test.",
+  verdict: "amend", reason: "the fix needs the renderer's own suite, which files: did not declare",
+  files_add: ["test/worker/prompt-render.test.ts"], proofs: [{ criterion: 1, proof: "unit test: test/worker/check-body-coverage.test.ts" }],
+  amendment: "Prevent the round in src/lib/prompt-render.ts and replay the recorded round in test/worker/prompt-render.test.ts.",
 })}`;
 
 function world(t: { after: (fn: () => void) => void }, opts: { rows?: Row[]; pointer?: boolean; stamp?: string; answers?: string[] } = {}) {
@@ -83,7 +85,6 @@ function world(t: { after: (fn: () => void) => void }, opts: { rows?: Row[]; poi
   const deps: GardenerDeps = {
     stateDir: join(root, "state"), repoRoot: root, clock, seed: 1,
     log: (step, extra = {}) => { rows.push({ task_id: "DAEMON", ...extra, step, ts: iso(NOW) }); },
-    landingRefusal: () => undefined,
     mergedPlanLint: () => undefined,
     openWorkspace: () => ({ root, land: (p) => { landed.push(p); return "https://example.test/pull/901"; }, dispose: () => {} }),
   };
@@ -101,9 +102,9 @@ test("the redesign Architect amends a task its fix lane stood down on, keeping e
   assert.match(w.landed[0]!.title, /the Architect amends W1-T10661 after its fix lane stood down/);
   const [after] = parseTasksFromYaml(w.read(), REL);
   assert.deepEqual(after!.acceptance!.map((c) => c.claim), [CLAIM], "the claim is untouched");
-  assert.deepEqual(after!.files, ["src/lib/prompt-render.ts", "test/worker/check-body-coverage.test.ts", "src/cli/commands/fix.ts"]);
-  assert.match(after!.amendment!, /by the redesign Architect \(machine, rule 16\): the fix needs the fix lane's dispatch path/);
-  assert.match(after!.amendment!, /Prevent the round in src\/cli\/commands\/fix\.ts/);
+  assert.deepEqual(after!.files, ["src/lib/prompt-render.ts", "test/worker/check-body-coverage.test.ts", "test/worker/prompt-render.test.ts"]);
+  assert.match(after!.amendment!, /by the redesign Architect \(machine, rule 16\): the fix needs the renderer's own suite/);
+  assert.match(after!.amendment!, /Prevent the round in src\/lib\/prompt-render\.ts/);
   const marker = w.read().split("\n").map((line) => REDESIGN_MARKER_RE.exec(line)).find((m) => m !== null);
   assert.ok(marker, "the shard carries the marker its PR's proof greps");
   assert.ok(w.landed[0]!.body.includes(`proof: "grep: # redesign: signature=${marker[1]} in ${REL}"`));
@@ -226,6 +227,38 @@ test("a landed amendment is not asked again after the framework releases its sti
   assert.equal(readGardenState(gardenStatePath(w.deps.stateDir, "redesign"), ["amend"]).pending, undefined, "the framework released it");
   assert.equal(redesignCandidates(buildRedesignSources(at(NOW + 26 * 60 * MIN), w.sources)).length, 0, "its landing still holds the signature");
   assert.equal(w.prompts.length, 1, "and no Architect is spawned for it again");
+});
+
+test("a machine record's amendment drops its stale ruling and parks for its judge, and a guard refusal is a recorded verdict", async (t) => {
+  // 2026-10-30 review: on W1-T10781 (author_class: machine, risk_ruling pinned) a proof-only amendment left the pin stale,
+  // and machine-author-verify refuses a stale pin at landing.
+  const w = world(t, { answers: [AMEND] });
+  const [base] = parseTasksFromYaml(w.read(), REL);
+  const machine = (pin: string) => w.read().replace("  attempts: 0\n", "  attempts: 0\n  author_class: machine\n  origin: \"ci-friction:check-body-coverage#r1\"\n")
+    .replace(/\n$/, "") + `\n  risk_ruling:\n    verdict: "low"\n    action: proceed\n    confidence: 0.8\n    reasons:\n      - "declared files only"\n    judged_at: "2026-10-28T03:43:51.964Z"\n    pin: "${pin}"\n`;
+  // Machine admission requires every declared path to exist, so the record's files and the added suite are on disk.
+  for (const rel of ["src/lib/prompt-render.ts", "test/worker/check-body-coverage.test.ts", "test/worker/prompt-render.test.ts"]) {
+    mkdirSync(join(w.root, rel, ".."), { recursive: true });
+    writeFileSync(join(w.root, rel), "export {};\n");
+  }
+  const unpinned = machine("0".repeat(64));
+  writeFileSync(join(w.root, REL), machine(taskRulingPin(parseTasksFromYaml(unpinned, REL)[0]!)));
+  assert.ok(base);
+  assert.equal(machineShardFilingRefusal(w.read(), REL, { pathExists: () => true }), undefined, "the judged record lands as filed");
+  await runGardenAsync(redesignGardenSpec(w.deps, w.sources), w.deps);
+  assert.equal(w.landed.length, 1, "the real landing guard passed it");
+  const [after] = parseTasksFromYaml(w.read(), REL);
+  assert.equal(after!.risk_ruling, undefined, "the stale ruling is dropped");
+  assert.equal(after!.verify, "human", "and the record parks for the machine-filing judge");
+  assert.deepEqual(after!.acceptance!.map((c) => c.claim), [CLAIM]);
+  assert.equal(machineShardLandingRefusal(w.root, [REL], () => true), undefined);
+  // An amendment the guard would refuse (a second concern at risk: low) is refused before landing, never re-asked.
+  const wide = world(t, { answers: [AMEND.replace("test/worker/prompt-render.test.ts", "src/cli/commands/fix.ts")] });
+  await runGardenAsync(redesignGardenSpec(wide.deps, wide.sources), wide.deps);
+  assert.equal(wide.landed.length, 0);
+  assert.ok(wide.rows.some((r) => r.step === REDESIGN_JUDGED_STEP && r.outcome === "refused" && /sizing/.test(String(r.reason))));
+  assert.equal(redesignCandidates(wide.sources as RedesignSources).length, 0, "the refused signature is not asked again");
+  assert.equal(wide.read(), shard(), "the shard is untouched");
 });
 
 test("the pointer stamp is read only from the head refusal-amendment.ts writes", () => {

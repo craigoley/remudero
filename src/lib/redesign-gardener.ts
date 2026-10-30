@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
 
 import { backlogLandingGuard } from "./backlog-gardener.js";
@@ -7,10 +7,12 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { gardenStatePath, readGardenState, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { machineShardFilingRefusal, reparkStaleRuling } from "./machine-filing.js";
 import { parseTasksFromYaml, type Task } from "./plan.js";
 import { planInventory, type PlanInventory } from "./plan-gardener.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { INSTRUMENT_SURFACE, isDialectPrefixed } from "./review.js";
+import { lintTask } from "./task-linter.js";
 
 /**
  * The redesign gardener: the plan Architect amends a task its fix lane could not build (operator ruling 2026-10-30).
@@ -88,6 +90,9 @@ export interface RedesignSources {
   pathKind: (rel: string) => PathKind;
   /** One tool-less Architect spawn. */
   judgeText: (prompt: string) => Promise<string>;
+  /** The landing guard's verdict on the edited shard, checked before an amend is accepted, so an amendment the guard
+   *  would refuse is a recorded refusal rather than a filing that fails on every pass. */
+  landingRefusal: (rel: string, text: string) => string | undefined;
   /** Signatures a landed PR carried, an open PR carries, or an operator's close declined: none is asked again. */
   settled: () => ReadonlySet<string>;
 }
@@ -181,6 +186,8 @@ export function redesignPrompt(candidate: RedesignCandidate): string {
     "Never add a path under .github/, deploy/, plan/, state/ or hooks/, nor a CI instrument (a ratchet, baseline or gate",
     "script, src/lib/review.ts): those grants are the operator's alone. If the fix needs one of them, a credential, a policy",
     "or security decision, or a claim that is itself wrong, answer GRILL.",
+    "The amended record must pass the plan linter as it lands: every added path stays inside the task's one concern",
+    "(Rule 19 sizing at its risk), and a record with `author_class: machine` may declare only paths that already exist.",
     "",
     ...ACCEPTANCE_PROOF_GRAMMAR,
     "",
@@ -279,7 +286,10 @@ export function applyRedesignEdit(text: string, rel: string, edit: RedesignEdit,
   const rest = (t: Task) => JSON.stringify(Object.entries({ ...t, files: undefined, amendment: undefined, acceptance: undefined })
     .filter(([, v]) => v !== undefined).sort(([x], [y]) => x.localeCompare(y)));
   if (rest(a) !== rest(b)) return { refused: "a field other than files, a proof or the amendment changed" };
-  return { text: next };
+  // A machine record edited after it was judged goes back to its judge (reparkStaleRuling): the stale ruling is
+  // dropped and the record parks at verify: human, as every machine filing arrives, so the landing never carries a pin
+  // machine-author-verify refuses.
+  return { text: reparkStaleRuling(next, rel) };
 }
 
 export async function redesignInventory(sources: RedesignSources, deps: GardenerDeps): Promise<RedesignInventory> {
@@ -293,7 +303,8 @@ export async function redesignInventory(sources: RedesignSources, deps: Gardener
     let outcome: RedesignInventory["outcomes"][number];
     if (parsed.verdict === "amend") {
       const dryRun = applyRedesignEdit(candidate.text, candidate.shard, parsed.edit, candidate.signature, "0000-00-00");
-      const refused = redesignEditRefusal(task, parsed.edit, sources.pathKind) ?? ("refused" in dryRun ? dryRun.refused : undefined);
+      const refused = redesignEditRefusal(task, parsed.edit, sources.pathKind) ??
+        ("refused" in dryRun ? dryRun.refused : sources.landingRefusal(candidate.shard, dryRun.text));
       outcome = refused === undefined
         ? { task_id: candidate.id, outcome: "amend", reason: parsed.edit.reason }
         : { task_id: candidate.id, outcome: "refused", reason: refused };
@@ -323,6 +334,21 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
       return stat === undefined ? "none" : stat.isFile() ? "file" : "dir";
     },
     judgeText: () => Promise.reject(new Error("the redesign Architect's spawn is not wired")),
+    // backlogLandingGuard's two arms over the drafted text: a machine record is linted whole with admission, any
+    // other record only for block violations its base did not already have.
+    landingRefusal: (rel, text) => {
+      const exists = (p: string) => existsSync(join(deps.repoRoot, p));
+      const head = parseTasksFromYaml(text, rel);
+      if (head.some((t) => t.author_class === "machine")) return machineShardFilingRefusal(text, rel, { pathExists: exists, pathExistsAtBase: exists });
+      const base = parseTasksFromYaml(readFileSync(join(deps.repoRoot, rel), "utf8"), rel);
+      const blocks = (t: Task | undefined) => new Map((t === undefined ? [] : lintTask(t, { moduleExists: exists }).violations)
+        .filter((v) => v.severity === "block").map((v) => [v.check, v.message]));
+      const reasons = head.flatMap((t) => {
+        const had = blocks(base.find((b) => b.id === t.id));
+        return [...blocks(t)].filter(([check]) => !had.has(check)).map(([check, message]) => `${t.id}: ${check}: ${message}`);
+      });
+      return reasons.length > 0 ? reasons.join("; ") : undefined;
+    },
     ...overrides,
   };
   return {
