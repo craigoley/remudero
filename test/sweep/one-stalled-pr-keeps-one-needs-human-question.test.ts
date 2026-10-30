@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { buildSweepEffects, renderClarificationQuestion, type OpenPrView } from "#src/lib/sweep.js";
+import { buildSweepEffects, renderClarificationQuestion, stalledStageEscalationSummary, type OpenPrView } from "#src/lib/sweep.js";
 import type { Config } from "#src/lib/config.js";
-import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import { escalationIssueTitle, renderIssueBody, type Escalation, type IssueGateway, type OpenIssue } from "#src/lib/escalate.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
@@ -41,9 +41,22 @@ function fixture(t: TestContext) {
   };
   const task = { id: pr.taskId, files: ["src/lib/sweep.ts"], acceptance: [] } as unknown as Task;
   const ledgerPath = join(root, "ledger.ndjson");
-  const escalate = async (diagnosis: string, blocker = "own-red", view = pr) => {
-    const reason = `PR stage stalled: #${view.prNumber} ${view.prUrl} — ${blocker} for 45 minutes ` +
+  const reasonFor = (diagnosis: string, blocker: string, view: OpenPrView) =>
+    `PR stage stalled: #${view.prNumber} ${view.prUrl} — ${blocker} for 45 minutes ` +
       `(owner: none); since 2026-10-29T20:20:00.000Z; DIAGNOSIS: ${diagnosis}`;
+  const legacyIssue = (diagnosis: string, blocker = "own-red") => {
+    const reason = reasonFor(diagnosis, blocker, pr);
+    const legacy: Escalation = {
+      class: "MANUAL", taskId: task.id, headSha: pr.headSha, cause: "stage-stall",
+      summary: `PR ${pr.prUrl} needs a clarification — ${stalledStageEscalationSummary(reason)}`,
+      detail: reason, options: [{ label: "inspect", detail: "inspect the stalled stage" }],
+      recommendation: "inspect",
+    };
+    issues.create(escalationIssueTitle(legacy), renderIssueBody(legacy), ["needs-human"]);
+    return created[created.length - 1];
+  };
+  const escalate = async (diagnosis: string, blocker = "own-red", view = pr) => {
+    const reason = reasonFor(diagnosis, blocker, view);
     // Rebuild between observations: dedup must survive a sweep restart.
     const effects = buildSweepEffects({
       owner: "craigoley", repo: "remudero", repoRoot: root,
@@ -58,7 +71,7 @@ function fixture(t: TestContext) {
     });
   };
   const rows = () => readFileSync(ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
-  return { created, comments, pr, escalate, rows };
+  return { created, comments, pr, escalate, legacyIssue, rows };
 }
 
 test("test/sweep/one-stalled-pr-keeps-one-needs-human-question.test.ts: changing diagnoses append to one open question", async t => {
@@ -80,14 +93,49 @@ test("test/sweep/one-stalled-pr-keeps-one-needs-human-question.test.ts: changing
 
 test("a legacy stalled issue absorbs a new diagnosis at the same head and blocker", async t => {
   const f = fixture(t);
-  await f.escalate("unknown signature");
-  f.created[0].title = `[MANUAL] ${f.pr.taskId}: PR ${f.pr.prUrl} needs a clarification — ` +
-    `PR stage stalled: #${f.pr.prNumber} ${f.pr.prUrl} — own-red; DIAGNOSIS: unknown signature`;
+  f.legacyIssue("unknown signature");
   await f.escalate("repeat: launch refused");
   assert.equal(f.created.length, 1);
   assert.equal(f.comments[0].url, f.created[0].url);
   assert.match(f.comments[0].body, /DIAGNOSIS: repeat: launch refused/);
 });
+
+for (const [repoLength, prNumber, clippedSuffix] of [
+  [37, 15520, "; DIAGNOSI…"], [37, 155200, "; DIAGN…"], [38, 15520, "; DIAGNO…"],
+  [39, 15520, "; DIAG…"], [40, 15520, "; DI…"], [41, 15520, "; …"],
+] as const) {
+  test(`a real legacy title clipped at ${clippedSuffix} absorbs the new diagnosis`, async t => {
+    const f = fixture(t);
+    f.pr.prNumber = prNumber;
+    f.pr.prUrl = `https://github.com/craigoley/${"remudero".padEnd(repoLength, "-")}/pull/${f.pr.prNumber}`;
+    const legacy = f.legacyIssue("unknown signature", "awaiting-review");
+    assert.ok(legacy.title!.endsWith(clippedSuffix), legacy.title);
+    const diagnosis = "repeat: own-red; DIAGNOSIS: a different remedy\nwith more evidence";
+    await f.escalate(diagnosis, "awaiting-review");
+    assert.equal(f.created.length, 1);
+    assert.equal(f.comments.length, 1);
+    assert.equal(f.comments[0].url, legacy.url);
+    assert.ok(f.comments[0].body.includes(diagnosis));
+    assert.deepEqual(f.rows().filter(row => row.step === "escalation.deduped").map(row => row.issue_url),
+      [legacy.url]);
+  });
+}
+
+for (const change of ["head", "blocker", "closed"] as const) {
+  test(`a clipped legacy title still opens a new question when ${change} differs`, async t => {
+    const f = fixture(t);
+    f.pr.prUrl = `https://github.com/craigoley/${"remudero".padEnd(38, "-")}/pull/${f.pr.prNumber}`;
+    const legacy = f.legacyIssue("unknown signature", "awaiting-review");
+    assert.ok(legacy.title!.endsWith("; DIAGNO…"), legacy.title);
+    if (change === "closed") legacy.open = false;
+    await f.escalate("repeat: launch refused", change === "blocker" ? "own-red" : "awaiting-review",
+      change === "head" ? { ...f.pr, headSha: "new-head" } : f.pr);
+    assert.equal(f.created.length, 2);
+    assert.equal(f.comments.length, 0);
+    assert.equal(f.created[1].open, true);
+    assert.equal(f.rows().filter(row => row.step === "escalation.deduped").length, 0);
+  });
+}
 
 test("a moved head opens a new stalled question even when its diagnosis is unchanged", async t => {
   const f = fixture(t);

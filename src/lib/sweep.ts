@@ -619,11 +619,11 @@ export function stalledStageEscalationSummary(reason: string): string {
     .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
 }
 
-/** Read the stable PR/blocker portion from current or legacy stalled-issue titles. */
+/** Read through the blocker, before the semicolon: a legacy title may clip its diagnosis marker. */
 function stalledStageEscalationIdentity(text: string): string | undefined {
   const start = text.indexOf("PR stage stalled: ");
   if (start < 0) return undefined;
-  return stalledStageEscalationSummary(text.slice(start)).split("; DIAGNOSIS:", 1)[0];
+  return stalledStageEscalationSummary(text.slice(start)).split(";", 1)[0];
 }
 
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
