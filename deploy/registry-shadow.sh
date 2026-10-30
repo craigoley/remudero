@@ -2,7 +2,7 @@
 # Explicit private qualification only. No exports, mounts, schedulers or effect gates.
 registry_shadow_session=""
 registry_shadow_pin="${registry_shadow_pin:-}"
-registry_shadow_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+registry_shadow_root="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 registry_shadow_args=()
 
 # A known child without this argv grammar keeps its original arguments. This probes one
@@ -12,7 +12,20 @@ registry_shadow_supports() {
 }
 
 registry_shadow_call() {
-  node --import "$registry_shadow_root/node_modules/tsx/dist/loader.mjs" \
+  local observer_user=()
+  # sudo's caller owns the private session. Run only the observer back as that
+  # caller; the installer and all legacy effects retain their elevated identity.
+  # The observer still checks both owners itself, with no root ownership exemption.
+  if [ "$(id -u)" = 0 ]; then
+    case "${SUDO_UID:-}" in
+      ''|0|*[!0-9]*) ;;
+      *) observer_user=(sudo -n -u "#${SUDO_UID}" -- env)
+        if [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
+          observer_user+=("RMD_INSTANCE_REGISTRY=$RMD_INSTANCE_REGISTRY")
+        fi ;;
+    esac
+  fi
+  ${observer_user[@]+"${observer_user[@]}"} node --import "$registry_shadow_root/node_modules/tsx/dist/loader.mjs" \
     "$registry_shadow_root/src/lib/child-entry-argv.ts" --selected-registry-shadow "$registry_shadow_root" --shadow \
     --session "$registry_shadow_session" "$@" 2>/dev/null ||
     printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :

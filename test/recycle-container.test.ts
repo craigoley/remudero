@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -159,6 +160,7 @@ function writeStubs(dir: string): void {
     'rec() { printf "%s" "docker" >> "$STUB_REC/calls"; for a in "$@"; do printf "\\t%s" "$a" >> "$STUB_REC/calls"; done; printf "\\n" >> "$STUB_REC/calls"; }',
     'rec "$@"',
     'case "$1" in',
+    '  ps) if [ "${FIXTURE_LAUNCHER_RUNNING:-}" = 1 ] && [ "${2:-}" = -q ] && [ "${3:-}" = -f ]; then echo fixture-id; fi; exit 0 ;;',
     "  image)",
     '    if [ "$2" = "inspect" ]; then',
     "      shift 2",
@@ -285,7 +287,51 @@ interface RunOpts {
   extraEnv?: Record<string, string>;
   instanceRoot?: string;
   shellPath?: string;
+  pathTail?: string;
 }
+
+test("selected shell shadow reaches real lifecycle and heartbeat consumers: recycler preserves actual child argv", async t => {
+  const { registryShellFixture } = await import("#test/helpers/registry-shell-fixture.js");
+  const f = registryShellFixture(t), pin = f.capture();
+  const legacy = runRecycle("good");
+  const selected = runRecycle("good", { args: ["--selected-registry-shadow", f.session],
+    extraEnv: { RMD_INSTANCE_REGISTRY: f.legacy, HOME: f.env.HOME!, RMD_SCRATCH: "off" } });
+  assert.equal(legacy.status, 0, legacy.stderr);
+  assert.equal(selected.status, legacy.status, selected.stderr);
+  const launched = (run: Run) => run.calls.filter(c => c.bin === "docker" && c.argv[0] === "run")
+    .map(c => c.argv.map(a => a.replace(/recycle-state-[^/\s:]+/g, "recycle-state-FIXTURE")
+      .replace(/recycle-rec-[^/\s:]+/g, "recycle-rec-FIXTURE")));
+  assert.ok(launched(selected).length > 0, "actual recycler must launch its replacement child");
+  assert.deepEqual(launched(selected), launched(legacy));
+  assert.ok(f.rows().some(r => r.action === "recycle" && r.selected_outcome === "would-refuse"));
+  assert.ok(!JSON.stringify(selected.calls).includes(f.session));
+  assert.equal(createHash("sha256").update(readFileSync(f.session)).digest("hex"), pin);
+});
+
+test("selected shell shadow reaches real lifecycle and heartbeat consumers: generated watchdog invokes the real recycler", async t => {
+  const { registryShellFixture } = await import("#test/helpers/registry-shell-fixture.js");
+  const f = registryShellFixture(t), pin = f.capture();
+  assert.equal(f.install().status, 0);
+  mkdirSync(join(f.state, "remudero/bin"));
+  writeFileSync(join(f.state, "remudero/bin/rmd"), '#!/bin/sh\nprintf \'%s\\n\' \'{"state":"FROZEN","action":"recycle","progressAgeMs":900000}\'\n', { mode: 0o700 });
+  const run = runRecycle("good", { scriptPath: join(f.output, "launcher"), stateDir: f.state,
+    pathTail: f.env.PATH, extraEnv: {
+      HOME: f.env.HOME!, TMPDIR: f.root, FIXTURE_LAUNCHER_RUNNING: "1",
+      FIXTURE_CALLS: f.env.FIXTURE_CALLS!, FIXTURE_UID: f.env.FIXTURE_UID!,
+      FIXTURE_PAYLOAD: f.payload, FIXTURE_SELECTED: f.selected,
+      RMD_UNIT_DIR: f.env.RMD_UNIT_DIR!, RMD_BIN_DIR: f.env.RMD_BIN_DIR!,
+      RMD_LAUNCHER_PATH: f.env.RMD_LAUNCHER_PATH!, RMD_SYSTEMCTL_CMD: f.env.RMD_SYSTEMCTL_CMD!,
+      RMD_MEMINFO_PATH: f.env.RMD_MEMINFO_PATH!, RMD_MEMINFO: f.env.RMD_MEMINFO!,
+      RMD_INSTANCE_REGISTRY: f.legacy, RMD_SCRATCH: "off", RMD_SCRATCH_CHECKOUTS: "off",
+    } });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(run.stdout, /progress-watchdog -- FROZEN/);
+  assert.match(run.stdout, /recycling remudero-daemon via/);
+  assert.ok(f.rows().some(r => r.action === "recycle"), "the actual generated recycler child observes its inherited binding");
+  assert.ok(run.calls.some(c => c.bin === "docker" && c.argv[0] === "run"), "the actual recycler reaches the replacement effect");
+  assert.ok(!JSON.stringify(run.calls).includes(f.session), "no private session goes to container transports");
+  assert.equal(createHash("sha256").update(readFileSync(f.session)).digest("hex"), pin);
+});
 
 function runRecycle(mode: string, opts: RunOpts = {}): Run {
   if (opts.scriptPath) cpSync(join(REPO_ROOT, "deploy", "acr-login.sh"), join(dirname(opts.scriptPath), "acr-login.sh"));
@@ -314,7 +360,7 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      PATH: `${dir}:${process.env.PATH ?? ""}`,
+      PATH: `${dir}:${opts.pathTail ?? process.env.PATH ?? ""}`,
       STUB_REC: rec,
       STUB_MODE: mode,
       RMD_STATE_DIR: state,

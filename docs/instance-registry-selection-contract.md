@@ -256,6 +256,12 @@ Generated installer/recycler forwarding first checks the known child's bounded a
 header. An older child without this grammar receives its original arguments and no
 private selection; missing child evidence remains unknown. Capability checking never
 executes an older heartbeat or field-trial script as a probe.
+An installer elevated by sudo runs only its observer back as sudo's original numeric
+caller. Session and parent ownership checks still run as that caller; root gets no
+ownership exemption. Explicit selected environment input travels only on this trusted
+observer command, preserving unset versus empty across sudo's environment reset.
+Legacy installer writes keep their original elevated identity. Failure to return to
+the caller leaves qualification unrecorded and does not suppress those writes.
 
 The maintained CLI dispatch is `rmd inspect selected-registry-shadow --shadow
 --capture --session /absolute/private/session.json`. It prints only the session pin.
@@ -284,6 +290,10 @@ state roots or credentials from this adapter. A digest grants no release consent
 every receipt carries `publication_permission: not-granted`.
 
 Disposable transport fixtures exercise the real scripts, generated launcher and CLI.
+The mixed-version fixtures retain the installer and field-trials script from
+`f936be06908593755b64b37f79c56e563203fc55`, with file digests in their provenance
+receipt. A named Bash 3.2 executable can run the same lifecycle fixtures through
+`RMD_TEST_HISTORICAL_BASH`; a runner without one reports that execution unverified.
 This is source qualification only: merging can reach existing automatic image/code
 update paths, but does not enable the option, install a schedule, activate admission
 or prove deployment. Live launcher/mount/image replacement still requires the exact
