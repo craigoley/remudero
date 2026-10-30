@@ -526,17 +526,18 @@ test("W1-T9985: a root pass under assumed foreign ownership reads only the fixtu
     git(untrusted, "init", "--bare", "-b", "main");
     const probe = join(fx.root, "probe.sh");
     const scopes = join(fx.root, "trusted-origins.txt");
-    // Local upload-pack ownership checks vary across Git versions. Check trust through repository
-    // discovery as well as the publication transport so both trusted and untrusted controls hold.
+    // Ref enumeration requires repository setup; rev-parse --git-dir can bypass its ownership
+    // check on a bare repository. Keep publication transport checks alongside the trust controls.
     writeFileSync(probe, [
       "#!/bin/bash",
       "unset BASH_ENV",
       `git config --global --get-all safe.directory > '${scopes}' || exit 10`,
-      `git -C '${join(fx.root, "origin.git")}' rev-parse --git-dir > /dev/null || exit 11`,
-      `git -C '${join(fx.root, "main", ".git")}' rev-parse --git-dir > /dev/null || exit 12`,
+      `git -C '${join(fx.root, "origin.git")}' for-each-ref > /dev/null || exit 11`,
+      `git -C '${join(fx.root, "main", ".git")}' for-each-ref > /dev/null || exit 12`,
       `git -C '${fx.root}' ls-remote '${join(fx.root, "origin.git")}' HEAD || exit 11`,
       `git -C '${fx.root}' ls-remote '${join(fx.root, "main")}' HEAD || exit 12`,
-      `if git -C '${untrusted}' rev-parse --git-dir; then exit 13; fi`,
+      `if git -C '${untrusted}' for-each-ref; then exit 13; fi`,
+      `git -c 'safe.directory=${realpathSync(untrusted)}' -C '${untrusted}' for-each-ref || exit 14`,
       ":",
     ].join("\n") + "\n");
     const r = run(fx, {
