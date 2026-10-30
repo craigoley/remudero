@@ -1221,6 +1221,25 @@ interface DepReviewHoldState {
   supersededReruns?: SupersededRerunRecord[];
 }
 
+/** Validate the durable hold before any remedy can mutate it or act on its behalf. */
+export function readDepReviewHoldState(statePath: string, headSha: string): DepReviewHoldState {
+  const state: DepReviewHoldState = existsSync(statePath)
+    ? JSON.parse(readFileSync(statePath, "utf8"))
+    : { headSha, heldSinceMs: null, asks: [] };
+  if (!state || typeof state !== "object" || typeof state.headSha !== "string" ||
+      !(state.heldSinceMs === null || (typeof state.heldSinceMs === "number" && Number.isFinite(state.heldSinceMs))) ||
+      (state.progress !== undefined && !validHoldProgress(state.progress)) ||
+      (state.recoveredGaps !== undefined && !validGaps(state.recoveredGaps)) ||
+      (state.pendingRecoveryGaps !== undefined && !validGaps(state.pendingRecoveryGaps)) ||
+      (state.deliveredRemedyAsks !== undefined && (!state.deliveredRemedyAsks || typeof state.deliveredRemedyAsks !== "object" ||
+        Array.isArray(state.deliveredRemedyAsks) || Object.values(state.deliveredRemedyAsks).some(url => typeof url !== "string"))) ||
+      !Array.isArray(state.asks) || state.asks.some((ask) =>
+        !ask || typeof ask.headSha !== "string" || typeof ask.issueUrl !== "string" || typeof ask.retired !== "boolean")) {
+    throw new Error("invalid dependency hold state; refusing to forget delivered heads");
+  }
+  return state;
+}
+
 /** Durable per-PR state survives ledger rotation; delivered heads stay recorded after retirement. */
 export async function reconcileDepReviewHold(args: {
   statePath: string;
@@ -1239,20 +1258,7 @@ export async function reconcileDepReviewHold(args: {
   log: (step: string, extra: Record<string, unknown>) => void;
 }): Promise<void> {
   if (args.result.decision !== "hold" && !existsSync(args.statePath)) return;
-  const state: DepReviewHoldState = existsSync(args.statePath)
-    ? JSON.parse(readFileSync(args.statePath, "utf8"))
-    : { headSha: args.headSha, heldSinceMs: null, asks: [] };
-  if (!state || typeof state !== "object" || typeof state.headSha !== "string" ||
-      !(state.heldSinceMs === null || (typeof state.heldSinceMs === "number" && Number.isFinite(state.heldSinceMs))) ||
-      (state.progress !== undefined && !validHoldProgress(state.progress)) ||
-      (state.recoveredGaps !== undefined && !validGaps(state.recoveredGaps)) ||
-      (state.pendingRecoveryGaps !== undefined && !validGaps(state.pendingRecoveryGaps)) ||
-      (state.deliveredRemedyAsks !== undefined && (!state.deliveredRemedyAsks || typeof state.deliveredRemedyAsks !== "object" ||
-        Array.isArray(state.deliveredRemedyAsks) || Object.values(state.deliveredRemedyAsks).some(url => typeof url !== "string"))) ||
-      !Array.isArray(state.asks) || state.asks.some((ask) =>
-        !ask || typeof ask.headSha !== "string" || typeof ask.issueUrl !== "string" || typeof ask.retired !== "boolean")) {
-    throw new Error("invalid dependency hold state; refusing to forget delivered heads");
-  }
+  const state = readDepReviewHoldState(args.statePath, args.headSha);
   const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
   for (const ask of state.asks) {
     if (ask.retired || (ask.headSha === args.headSha && args.result.decision === "hold")) continue;

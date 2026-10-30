@@ -1718,6 +1718,7 @@ import {
   buildDepReviewArmUnreachableEscalation,
   buildDepReviewEscalation,
   reconcileDepReviewHold,
+  readDepReviewHoldState,
   reconcileDependabotRefresh,
   dependabotCommandAnswer,
   type DependabotIssueComment,
@@ -12167,6 +12168,15 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   const captureProposal = deps.captureMigrationFeedback ?? depReviewProposalCapture(
     deps.landingStateRoot ?? (deps.root === undefined ? undefined : config.root));
   const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
+  try {
+    readDepReviewHoldState(holdStatePath, view.headRefOid);
+  } catch (error) {
+    const reason = `dependency hold reconciliation incomplete: ${String(error)}`;
+    log("dep-review.decided", { decision: "hold", reason, pr_url: view.url, head_sha: view.headRefOid });
+    log("dep-review.hold_reconcile_failed", { pr_url: view.url, head_sha: view.headRefOid, error: String(error) });
+    console.log(`dependency hold escalation reconciliation failed; will retry: ${String(error)}`);
+    return 1;
+  }
   const dependabot = isDependabotAuthor({ login: view.author?.login ?? "" });
   const actions = deps.actions ?? (deps.gh === undefined ? defaultDepReviewActions(owner, repo) : undefined);
   const supersededReruns = (superseded: readonly string[]) => reconcileSupersededRedReruns({

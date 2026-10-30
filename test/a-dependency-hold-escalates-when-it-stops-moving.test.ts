@@ -14,7 +14,7 @@ function fixture(t: TestContext) {
   let now = Date.now(), attempt = 1, head = "a".repeat(40), red = true;
   let prNumber = 9818;
   let taskPrState = "OPEN", taskAttempt = 1, refreshAllowed = true;
-  const opened: string[] = [], closed: string[] = [], captured: string[] = [];
+  const opened: string[] = [], closed: string[] = [], captured: string[] = [], updates: string[] = [];
   const deps: DepReviewDeps = {
     root, config: { root, ledger } as never, clock: clockFromMillisFn(() => now),
     prDiff: () => "diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n",
@@ -24,7 +24,10 @@ function fixture(t: TestContext) {
     },
     postStatus: (async () => ({ posted: true })) as DepReviewDeps["postStatus"], arm: () => "armed",
     prMutations: { comment: () => assert.fail("unexpected comment"), close: () => assert.fail("unexpected close"),
-      updateBranch: async () => ({ ok: refreshAllowed, error: "refresh refused" }) },
+      updateBranch: async (number, expected) => {
+        updates.push(`${number}:${expected}`);
+        return { ok: refreshAllowed, error: "refresh refused" };
+      } },
     captureMigrationFeedback: ({ id }) => { captured.push(id); return { id } as never; },
   };
   // A check's completion timestamp belongs to its attempt, not to a review pass.
@@ -37,7 +40,7 @@ function fixture(t: TestContext) {
       conclusion: red ? "FAILURE" : "SUCCESS", checkRunId: attempt,
       externalId: `run:100:${attempt}:job:${attempt}`, completedAt: new Date(started + attempt).toISOString() }] });
   const state = (number = 9818) => JSON.parse(readFileSync(join(dirname(statePath), `PR${number}.json`), "utf8"));
-  return { root, statePath, opened, closed, captured, state,
+  return { root, statePath, opened, closed, captured, updates, state,
     task: (feedbackId = "fb-repair") => {
       mkdirSync(join(root, "plan"), { recursive: true });
       writeFileSync(join(root, "plan", "tasks.yaml"), JSON.stringify([{
@@ -222,6 +225,44 @@ test("a dependency hold refuses corrupt progress without forgetting its asks", a
     assert.equal(await f.run(), 1);
     assert.deepEqual(f.state().asks, asks);
     assert.equal(f.opened.length, 1);
+  }
+});
+
+test("a corrupt dependency hold refuses remedies before any effects or state writes", async (t) => {
+  for (const remedy of ["refresh", "owned build"]) {
+    await t.test(remedy, async (t) => {
+      const f = fixture(t);
+      const flags = remedy === "refresh"
+        ? ["--dependabot-refresh", "base-red-recovered"]
+        : ["--dependabot-own-red", "main-passes"];
+      await f.run(...(remedy === "owned build" ? flags : []));
+      const valid = readFileSync(f.statePath, "utf8");
+      const state = f.state();
+      const corruptions = [
+        "{", "null", '"invalid"',
+        ...[
+          { headSha: 1 }, { heldSinceMs: "yesterday" }, { asks: {} }, { asks: [null] },
+          { progress: { fingerprint: "x", lastChangedMs: "yesterday", remedies: {} } },
+          { recoveredGaps: { refresh: -1 } },
+          { pendingRecoveryGaps: { proposal: -1 } },
+          { deliveredRemedyAsks: { [state.headSha]: 1 } },
+        ].map(extra => JSON.stringify({ ...state, ...extra })),
+      ];
+      f.advance();
+      for (const corrupt of corruptions) {
+        writeFileSync(f.statePath, corrupt);
+        assert.equal(await f.run(...flags), 1);
+        assert.equal(readFileSync(f.statePath, "utf8"), corrupt, "refusal preserves the exact saved state");
+        assert.deepEqual(f.updates, [], "corrupt state cannot request a refresh");
+        assert.deepEqual(f.captured, [], "corrupt state cannot capture an owned build");
+        assert.deepEqual(f.opened, [], "corrupt state cannot ask the operator");
+        assert.deepEqual(f.closed, [], "corrupt state cannot retire an ask");
+      }
+      writeFileSync(f.statePath, valid);
+      await f.run(...flags);
+      assert.equal(remedy === "refresh" ? f.updates.length : f.captured.length, 1,
+        "the same pass executes its remedy after the state is repaired");
+    });
   }
 });
 
