@@ -3033,6 +3033,7 @@ async function withPrivateRegistryCodexProfile<T>(
   if (args.resumeSessionId) throw new InstanceRegistryRuntimeError("worker_resume_not_qualified");
   const name = `rmd_registry_${randomUUID().replaceAll("-", "")}`;
   let path: string, text: string, identity: { dev: number; ino: number }, profile: PrivateRegistryCodexProfile;
+  let fd: number | undefined;
   try {
     // An exclusive invocation file only: do not create a home, copy credentials or edit base configuration.
     path = join(realpathSync(codexHome(config)), `${name}.config.toml`);
@@ -3081,12 +3082,11 @@ async function withPrivateRegistryCodexProfile<T>(
     profile = { name, overrides: ["-c", `default_permissions=${JSON.stringify(name)}`,
       "-c", `permissions.${name}.extends=${JSON.stringify(readOnly ? ":read-only" : ":workspace")}`,
       "-c", `permissions.${name}.filesystem={${inline}}`, "-c", `permissions.${name}.network.enabled=${review || !readOnly}`] };
-    const created = openSync(path, "wx", 0o600);
-    try {
-      writeFileSync(created, text);
-      identity = fstatSync(created);
-    } finally { closeSync(created); }
+    fd = openSync(path, "wx+", 0o600);
+    writeFileSync(fd, text);
+    identity = fstatSync(fd);
   } catch (error) {
+    if (fd !== undefined) closeSync(fd);
     // Unavailable private profile is unknown containment, never a fallback to broad workspace reads.
     if (error instanceof InstanceRegistryRuntimeError) throw error;
     throw new InstanceRegistryRuntimeError("worker_profile_unavailable");
@@ -3096,21 +3096,22 @@ async function withPrivateRegistryCodexProfile<T>(
   catch (error) { operationFailed = true; originalError = error; throw error; }
   finally {
     try {
-      const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
-      try {
-        const current = fstatSync(fd);
-        if (!current.isFile() || current.nlink !== 1 || current.dev !== identity.dev || current.ino !== identity.ino
-          || current.size !== Buffer.byteLength(text) || readFileSync(fd, "utf8") !== text) {
-          throw new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
-        }
-      } finally { closeSync(fd); }
+      // Read only the exclusive creation handle; a pathname replacement cannot redirect this read.
+      const current = fstatSync(fd!), binding = lstatSync(path);
+      const contents = Buffer.alloc(Buffer.byteLength(text));
+      if (!current.isFile() || current.nlink !== 1 || current.dev !== identity.dev || current.ino !== identity.ino
+        || !binding.isFile() || binding.dev !== identity.dev || binding.ino !== identity.ino
+        || current.size !== contents.length || readSync(fd!, contents, 0, contents.length, 0) !== contents.length
+        || contents.toString("utf8") !== text) {
+        throw new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
+      }
       rmSync(path);
     } catch {
       // Missing/replaced/unreadable evidence is not certified cleanup. Retain any original failure as cause.
       const error = new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
       if (operationFailed) error.cause = originalError;
       throw error;
-    }
+    } finally { closeSync(fd!); }
   }
 }
 

@@ -652,6 +652,75 @@ test("selected Codex profile identity belongs to the exclusive creation handle",
   } finally { writeMock.mock.restore(); syncBuiltinESMExports(); fixture.cleanup(); }
 });
 
+test("selected Codex cleanup retains its creation descriptor without reopening the profile", async (t) => {
+  const fixture = runtimeRegistryFixture(), codexHome = join(fixture.root, "codex-home");
+  const cwd = join(fixture.root, "checkout"), original = new Error("contained descriptor probe");
+  mkdirSync(codexHome); mkdirSync(cwd);
+  const realOpen = fs.openSync, realFstat = fs.fstatSync;
+  let artifact = "", created: number | undefined, reopens = 0;
+  const openMock = t.mock.method(fs, "openSync", ((...args: Parameters<typeof fs.openSync>) => {
+    if (artifact !== "" && args[0] === artifact) reopens++;
+    const result = realOpen(...args);
+    if (typeof args[0] === "string" && args[0].startsWith(codexHome + "/")) {
+      artifact = args[0]; created = result;
+    }
+    return result;
+  }) as typeof fs.openSync);
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(runtimeRegistryRunner()(() => spawnCodexWorker({
+      cwd, workerHome: fixture.root, prompt: "contained descriptor probe",
+      settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: ["Read", "Bash"],
+      containment: { spawn: () => {
+        assert.notEqual(created, undefined);
+        assert.ok(realFstat(created!).isFile(), "the creation handle stays open during the worker call");
+        throw original;
+      }, teardown: () => {} },
+    }, { root: fixture.root, claudeBin: "/unused", workerProviders: {
+      enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome,
+    } }), { envPath: fixture.selected }), error => error === original);
+    assert.equal(reopens, 0, "cleanup cannot resolve a checked pathname again");
+    assert.equal(existsSync(artifact), false);
+    assert.throws(() => realFstat(created!), { code: "EBADF" }, "cleanup closes its descriptor");
+  } finally { openMock.mock.restore(); syncBuiltinESMExports(); fixture.cleanup(); }
+});
+
+test("selected Codex profile setup failure closes its creation descriptor and redacts the cause", async (t) => {
+  const fixture = runtimeRegistryFixture(), codexHome = join(fixture.root, "codex-home");
+  const cwd = join(fixture.root, "checkout"); mkdirSync(codexHome); mkdirSync(cwd);
+  const realOpen = fs.openSync, realWrite = fs.writeFileSync, realFstat = fs.fstatSync;
+  let created: number | undefined, spawns = 0;
+  const openMock = t.mock.method(fs, "openSync", ((...args: Parameters<typeof fs.openSync>) => {
+    const result = realOpen(...args);
+    if (typeof args[0] === "string" && args[0].startsWith(codexHome + "/")) created = result;
+    return result;
+  }) as typeof fs.openSync);
+  const writeMock = t.mock.method(fs, "writeFileSync", ((...args: Parameters<typeof fs.writeFileSync>) => {
+    if (created !== undefined && args[0] === created) throw new Error(`write refused at ${fixture.selected}`);
+    return realWrite(...args);
+  }) as typeof fs.writeFileSync);
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(runtimeRegistryRunner()(() => spawnCodexWorker({
+      cwd, workerHome: fixture.root, prompt: "contained setup failure",
+      settingsFile: join(REPO_ROOT, "settings", "worker.json"), tools: ["Read", "Bash"],
+      containment: { spawn: () => { spawns++; throw new Error("must not spawn"); }, teardown: () => {} },
+    }, { root: fixture.root, claudeBin: "/unused", workerProviders: {
+      enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome,
+    } }), { envPath: fixture.selected }), error => {
+      assert.ok(error instanceof runtimeRegistry.InstanceRegistryRuntimeError);
+      assert.match(error.message, /worker_profile_unavailable/);
+      assert.equal(error.message.includes(fixture.root), false);
+      return true;
+    });
+    assert.equal(spawns, 0);
+    assert.notEqual(created, undefined);
+    assert.throws(() => realFstat(created!), { code: "EBADF" });
+  } finally {
+    openMock.mock.restore(); writeMock.mock.restore(); syncBuiltinESMExports(); fixture.cleanup();
+  }
+});
+
 test("selected private denials follow scratch-backed Claude invocations without polluting the rendered template", async () => {
   const fixture = runtimeRegistryFixture(), operator = join(fixture.root, "operator");
   const selected = join(operator, ".config", "remudero", "selected-registry.yaml");
@@ -712,8 +781,9 @@ for (const provider of ["codex", "claude"] as const) {
       renameSync(artifact, artifact + ".original");
       symlinkSync(artifact + ".original", artifact);
     };
-    // Reproduce the old stat/read window, or substitute immediately before the atomic open.
+    // Codex checks the final link against its retained descriptor; Claude opens without following links.
     const statMock = t.mock.method(fs, "lstatSync", ((...args: Parameters<typeof fs.lstatSync>) => {
+      if (provider === "codex") substitute(args[0]);
       const result = realLstat(...args); substitute(args[0]); return result;
     }) as typeof fs.lstatSync);
     const openMock = t.mock.method(fs, "openSync", ((...args: Parameters<typeof fs.openSync>) => {
