@@ -1,0 +1,34 @@
+id: incident-83638d490b96f3cc
+ts: 2026-10-30T02:04:10.244Z
+raw: >-
+  Incident 83638d490b96: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) — The
+  recorded failures require command classification repairs. Scheduler enrollment
+  only moves detection before push, where census repair can still dispatch a
+  worker; automatic classification would weaken the gate. A remedy satisfying
+  zero fix dispatches needs an operator design decision.
+
+  First seen: 2026-10-30T02:02:24.169Z
+
+  Last seen: 2026-10-30T02:02:24.169Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15133 escalated: already escalated (reason unreadable: no escalation of this PR at head 00b9992 is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793320452557:1:1793325394901) — The recorded failures require command classification repairs. Scheduler enrollment only moves detection before push, where census repair can still dispatch a worker; automatic classification would weaken the gate. A remedy satisfying zero fix dispatches needs an operator design decision.
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#83638d490b96f3cc5d316441157a69da8c2a1677a547e3e94aff5d0d55354528
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

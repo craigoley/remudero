@@ -1493,6 +1493,15 @@ export async function deployStateRowsOffLoop(
   }, history, onUnreadableLatch);
 }
 
+export interface FleetStateParts {
+  union_ms: number;
+  union_rotations: number;
+  commits_walked: number;
+  commit_reads: number;
+  commit_read_ms: number;
+  deploy_ms: number;
+}
+
 export interface BuildSweepEffectsDeps {
   selectedModeFileIO?: RegistryFileIO;
   contributorAdmissionImpl?: AdmissionObserver;
@@ -4836,6 +4845,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T4817 — every read rides `readJsonImpl`, the one write rides `ghRunImpl`; a failed read
     // degrades to "no gap found this pass", never a guessed dispatch.
     readFleetState: async (live) => {
+      const parts: FleetStateParts = {
+        union_ms: 0, union_rotations: 0, commits_walked: 0, commit_reads: 0, commit_read_ms: 0, deploy_ms: 0,
+      };
+      const unionStarted = nowMsImpl();
       readdirSync(dirname(ledgerPath));
       const freshLive = readFileSync(ledgerPath, "utf8");
       const union = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), {
@@ -4844,25 +4857,37 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       });
       if (!union.ok || union.unclassified.length > 0) throw new Error(`fleet reconciliation history unreadable: ${[...union.unread, ...union.unclassified].join(", ")}`);
       const history = [...parseLedger(union.rawLines.join("\n")), ...parseLedger(freshLive), ...live];
+      parts.union_ms = Math.max(0, nowMsImpl() - unionStarted);
+      parts.union_rotations = union.archiveCount;
       const rows: FleetStateRow[] = [];
+      // The same object survives deferred workflow observations during reconciliation.
+      const readCommit = async (args: string[]): Promise<unknown> => {
+        parts.commit_reads++;
+        const started = nowMsImpl();
+        try {
+          return await readJsonImpl(args);
+        } finally {
+          parts.commit_read_ms += Math.max(0, nowMsImpl() - started);
+        }
+      };
       const runCount = async (sha: string, workflow?: string): Promise<number | undefined> => {
         const endpoint = workflow ? `actions/workflows/${workflow}/runs` : "actions/runs";
-        const body = await readJsonImpl(["api", `repos/${owner}/${repo}/${endpoint}?head_sha=${sha}&per_page=1`]) as
+        const body = await readCommit(["api", `repos/${owner}/${repo}/${endpoint}?head_sha=${sha}&per_page=1`]) as
           { total_count?: unknown } | undefined;
         return typeof body?.total_count === "number" ? body.total_count : undefined;
       };
       try {
         rows.push(...await mainWorkflowStateRows({
           listMainCommits: async (limit) => {
-            const body = await readJsonImpl(["api", `repos/${owner}/${repo}/commits?sha=main&per_page=${limit * 2}`]) as
+            const body = await readCommit(["api", `repos/${owner}/${repo}/commits?sha=main&per_page=${limit * 2}`]) as
               Array<{ sha: string; parents: Array<{ sha: string }> }>;
             if (!Array.isArray(body)) throw new Error("main commit listing is not an array");
             return body.filter((c) => typeof c?.sha === "string").map((c) => ({ sha: c.sha, parents: (c.parents ?? []).map((p) => p.sha) }));
           },
-          countRunsForSha: (sha) => runCount(sha),
+          countRunsForSha: (sha) => { parts.commits_walked++; return runCount(sha); },
           countWorkflowRuns: runCount,
           changedFiles: async (sha) => {
-            const body = await readJsonImpl(["api", `repos/${owner}/${repo}/commits/${sha}`]) as
+            const body = await readCommit(["api", `repos/${owner}/${repo}/commits/${sha}`]) as
               { files?: Array<{ filename: string }> } | undefined;
             return body?.files?.map((f) => f.filename);
           },
@@ -4871,6 +4896,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       } catch (error) {
         log("reconcile.unreadable", { pipeline: "ci", reason: String((error as Error)?.message ?? error) });
       }
+      const deployStarted = nowMsImpl();
       try {
         const failedAt = (): number | undefined => {
           try {
@@ -4909,8 +4935,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }));
       } catch (error) {
         log("reconcile.unreadable", { pipeline: "deploy", reason: String((error as Error)?.message ?? error) });
+      } finally {
+        parts.deploy_ms = Math.max(0, nowMsImpl() - deployStarted);
       }
-      return { rows, history };
+      return { rows, history, parts };
     },
     reconcileMainRunGaps: async (history) => {
       let commits: MainCommitRef[] = [];
@@ -14198,7 +14226,7 @@ export interface SweepDeps {
    *  `publishedAtMs`). `sweep.disposed` rows record `snapshot_age_ms` against it at the moment a PR is
    *  acted on. Omitted, the age is measured from the pass's own start. */
   snapshotPublishedAtMs?: number;
-  markPrelude?: (stage: string, walkStarts?: boolean) => void;
+  markPrelude?: FullPreludeTimer["mark"];
   /** W1-T2752 — a SYNCHRONOUS, READ-ONLY admission read consulted immediately before
    *  `blocked-fixable` and `conflicted` invoke {@link dispatchFix}, never a replacement for either
    *  surface's own live-state/claim checks. `buildSweepEffects` supplies it from the SAME
@@ -14315,6 +14343,7 @@ export interface SweepDeps {
   reconcileMainRunGaps?: (history: MainRunGapHistory) => Promise<readonly MainRunGapDispatch[]>;
   readFleetState?: (live: readonly Record<string, unknown>[]) => Promise<{
     rows: readonly FleetStateRow[]; history: readonly Record<string, unknown>[];
+    parts?: FleetStateParts;
   }>;
   /** W1-T2927 — pulls CI's `mutation-verdict-ledger` artifact (see mutation-verdict-pull.ts). */
   pullMutationVerdicts?: (recorded: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
@@ -17301,7 +17330,7 @@ export interface FullPreludeTimer {
   readonly startedAtMs: number;
   time<T>(stage: string, run: () => T | Promise<T>): Promise<T>;
   note(fields: Record<string, unknown>): void;
-  mark(stage: string, walkStarts?: boolean): void;
+  mark(stage: string, walkStarts?: boolean, fields?: Record<string, unknown>): void;
   write(walkReached: boolean): void;
 }
 
@@ -17328,7 +17357,8 @@ export function createFullPreludeTimer(
       }
     },
     note(extra) { Object.assign(fields, extra); },
-    mark(stage, walkStarts = false) {
+    mark(stage, walkStarts = false, extra) {
+      Object.assign(fields, extra);
       const at = clock();
       record(stage, at - cursorMs);
       cursorMs = at;
@@ -18401,9 +18431,11 @@ export async function runSweep(
   // Full passes only: a light pass fans this function out one PR at a time, and the reads below
   // are per-pass, not per-PR. The dedupe is the ledger fold handed to the effect, so a commit
   // already handled costs no read and is never dispatched a second time.
+  let fleetStateParts: FleetStateParts | undefined;
   if (deps.readFleetState && !deps.dryRun && deps.repairAdmissionSurface !== "light") {
     try {
-      const { rows, history } = await deps.readFleetState(ledgerLines);
+      const { rows, history, parts } = await deps.readFleetState(ledgerLines);
+      fleetStateParts = parts;
       await reconcileFleetState(rows, history, (event) => {
         appendLine(deps.ledgerPath, { ...event, run_id: deps.runId, task_id: "SWEEP" });
         log(event.step, event);
@@ -18452,7 +18484,7 @@ export async function runSweep(
     }
   }
 
-  deps.markPrelude?.("fleet_state");
+  deps.markPrelude?.("fleet_state", false, fleetStateParts && { fleet_state_parts: fleetStateParts });
   // Full passes only: one paced list per pass, deduped on the ledger's own run_ids.
   if (deps.pullMutationVerdicts && deps.repairAdmissionSurface !== "light") {
     try {

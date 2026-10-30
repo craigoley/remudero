@@ -1,0 +1,30 @@
+id: incident-4fbb12e74c18b11c
+ts: 2026-10-30T01:37:47.898Z
+raw: >-
+  Incident 4fbb12e74c18: flow pr-stage-stall:awaiting-review:checks green,
+  review orphaned by a push (reviewed on an earlier head, silent on this one) —
+  re-running the review lane on #<pr>
+
+  First seen: 2026-10-30T01:31:47.082Z
+
+  Last seen: 2026-10-30T01:31:47.082Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15539 awaiting-review: repeat: "checks green, review orphaned by a push (reviewed on an earlier head, silent on this one) — re-running the review lane on #<pr>" x2; review running past its observed length; review loop
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#4fbb12e74c18b11c3bfdfd770ce672771d60aa1dd4886899d1246edd20fd667c
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
