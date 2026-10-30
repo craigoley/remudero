@@ -4,7 +4,8 @@ import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO,
   type RegistrySelectionInput, type SelectedRegistryBinding } from "./instance-registry-selection.js";
 
 export type RegistryConsumerAction = "serve-registry" | "serve-readiness" | "serve-go-live" | "serve-shadow-evidence" | "serve-topology"
-  | "serve-liveness" | "repositories-view" | "repo-dashboard" | "benchmark-discovery" | "inbox-discovery";
+  | "serve-liveness" | "repositories-view" | "repo-dashboard" | "benchmark-discovery" | "inbox-discovery"
+  | "run-child" | "run-child-dispatch" | "run-task-resume";
 export interface RegistryConsumerTarget { repository?: string; instanceName?: string }
 export type RegistryObservationSink = (step: string, fields: Readonly<Record<string, unknown>>) => unknown;
 export type RegistryConsumerRead = typeof readSelectedInstanceRegistry;
@@ -112,6 +113,17 @@ export function captureSelectedRegistryIntent(options: SelectedRegistryConsumerO
   if (captured.kind !== "selected" || !captured.transferable) return unavailableIntent();
   const { signal: _signal, ...input } = captured.input;
   return copySelectedRegistryIntent({ kind: "shadow", version: 1, input, instanceName: captured.name });
+}
+
+/** Pin trusted transport before admission can yield; a failed initial read cannot acquire a later identity. */
+export async function qualifySelectedRegistryIntent(value: unknown): Promise<SelectedRegistryIntent | undefined> {
+  const intent = copySelectedRegistryIntent(value);
+  if (intent === undefined || intent.kind === "unknown") return intent;
+  const read = await readSelectedInstanceRegistry(intent.input);
+  if (read.kind !== "ready" || !read.binding.capabilities.includes("identity")) return unavailableIntent();
+  return copySelectedRegistryIntent({ ...intent, input: { ...intent.input,
+    expectedDigest: read.binding.digest, contractVersion: read.binding.contractVersion,
+    requiredCapabilities: read.binding.capabilities } });
 }
 
 export function selectedRegistryObserverFromIntent(intent: unknown, record: RegistryObservationSink): SelectedRegistryObserver | undefined {

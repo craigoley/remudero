@@ -27,6 +27,7 @@ import {
   type RunChildEntryKind, type RunChildFailureClass, type RunChildProbe, type RunChildSpecOptions, type RunChildStatus,
 } from "./run-child-contract.js";
 import { waitingStarts } from "./host-memory-admission.js";
+import { copySelectedRegistryIntent, qualifySelectedRegistryIntent } from "./selected-registry-consumers.js";
 import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservation.js";
 import type { RunResult } from "./run-result.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -267,6 +268,8 @@ const failureClassOf = (value: unknown): RunChildFailureClass | "ok" => (value =
  * until their tasks land, and the row says so.
  */
 export async function startRunChildProbe(input: RunChildProbeInput, seams: RunChildProbePorts = {}): Promise<RunChildProbeOutcome> {
+  const options = { ...input.options };
+  if (options.selectedRegistryIntent !== undefined) options.selectedRegistryIntent = copySelectedRegistryIntent(options.selectedRegistryIntent);
   const log: Log = (step, extra) => {
     try {
       input.log(step, extra);
@@ -287,6 +290,7 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
   }
   const effective = runChildEffectiveMode(mode);
   if (effective.mode === "off") return { started: false, reason: "mode off" };
+  options.selectedRegistryIntent = await qualifySelectedRegistryIntent(options.selectedRegistryIntent);
   let reservation: LearnedReservation | undefined;
   const runId = `probe-${sanitiseId(input.taskId)}-${clock()}-${randomBytes(2).toString("hex")}`;
   try {
@@ -320,7 +324,7 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
     writeSpec(dir, {
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
       engine: { sourceHash: engine.sourceHash, sha: engine.sha }, planSnapshotPath: snapshot.path,
-      reservationId: reservation.id ?? "", options: input.options,
+      reservationId: reservation.id ?? "", options,
     });
     const child = (seams.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], { cwd: options.cwd, stdio: ["ignore", "ignore", "pipe"] })))(
       process.execPath, launch.argv, { cwd: launch.cwd },
@@ -636,6 +640,8 @@ const defaultRunChildSpawn: NonNullable<SpawnRunChildPorts["spawn"]> = (command,
  * NEVER rejects: a child that cannot be started returns `started: false` and ledgers `run_child.fallback`.
  */
 export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunChildPorts = {}): Promise<RunChildLaunch> {
+  const options = { ...input.options };
+  if (options.selectedRegistryIntent !== undefined) options.selectedRegistryIntent = copySelectedRegistryIntent(options.selectedRegistryIntent);
   const clock = ports.clock ?? Date.now;
   const log: Log = (step, extra) => {
     try {
@@ -657,6 +663,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
   let engineSha = "";
   const nodeArgs = childHeapPolicyArgs();
   try {
+    options.selectedRegistryIntent = await qualifySelectedRegistryIntent(options.selectedRegistryIntent);
     if (listEngines(input.stateRoot).length === 0) return unavailable("no engine tree has been built yet");
     const mainSha = (await (ports.mainSha ?? mainTipSha)(input.repoDir)).trim();
     const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...ports.engine });
@@ -694,7 +701,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     writeSpec(dir, {
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
       engine: { sourceHash: engine.sourceHash, sha: engine.sha }, planSnapshotPath: snapshot.path,
-      reservationId: reservation.id ?? "", options: input.options,
+      reservationId: reservation.id ?? "", options,
     });
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
     // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).

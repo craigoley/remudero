@@ -1312,7 +1312,7 @@ import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
-import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -11189,7 +11189,8 @@ export async function repairCensusRefusedPush(input: {
 }
 
 export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
-  return runTaskBodyFromModule(ctx, runTaskCommandHost());
+  return observeSelectedRegistry(selectedRegistryObserverInContext(), "run-task-resume", {}, () =>
+    runTaskBodyFromModule(ctx, runTaskCommandHost()));
 }
 
 /**
@@ -27905,6 +27906,21 @@ export interface RunInChildInput {
 export async function runInChildWhenOn(
   input: RunInChildInput,
   seams: { readMode?: () => RunChildMode; evidence?: () => RunChildModeEvidence; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
+): Promise<RunChildHandle | undefined> {
+  const options = { ...input.options };
+  const intent = await qualifySelectedRegistryIntent(options.selectedRegistryIntent ?? selectedRegistryIntentForConfig(input.config));
+  if (intent !== undefined) options.selectedRegistryIntent = intent;
+  const observer = selectedRegistryObserverFromIntent(intent, input.log);
+  return withSelectedRegistryContext(observer, async () => {
+    try {
+      return await observeSelectedRegistry(observer, "run-child-dispatch", {}, () => runInChildWithIntent({ ...input, options }, seams));
+    } finally { await observer?.settled(); }
+  });
+}
+
+async function runInChildWithIntent(
+  input: RunInChildInput,
+  seams: { readMode?: () => RunChildMode; evidence?: () => RunChildModeEvidence; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts },
 ): Promise<RunChildHandle | undefined> {
   const mode = runChildModeIsOn(seams.readMode, seams.evidence);
   const inProcess = (reason: string): undefined => {
