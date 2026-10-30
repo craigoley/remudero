@@ -824,7 +824,7 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
   if (target === undefined) {
     if (backedOff.length > 0) {
       const soonest = Math.min(...backedOff.map((c) => i.backedOffCandidates!.get(c)!));
-      const date = new Date(soonest);
+      const date = fixedClock(soonest).date();
       const retry = Number.isFinite(date.getTime()) ? date.toISOString() : "beyond the representable date range";
       return { fire: false, reason: `${backedOff.length} candidate(s) in failed-fire backoff; soonest re-offer ${retry}; ` +
         `${i.candidates.filter((c) => heldSet.has(c)).length} held by a live claim — nothing to fire on` };
