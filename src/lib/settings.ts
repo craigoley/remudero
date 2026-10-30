@@ -78,6 +78,7 @@ export const SANDBOX_KEYS = new Set([
   "credentials",
   "ignoreViolations",
   "enableWeakerNestedSandbox",
+  "allowNestedUserNamespaces",
   "enableWeakerNetworkIsolation",
   "allowAppleEvents",
   "excludedCommands",
@@ -190,6 +191,15 @@ export function validateWorkerSettings(settings: unknown): void {
     throw new WorkerSettingsError(
       "`sandbox.allowUnsandboxedCommands` must be false (absent defaults to true, which lets a " +
         "worker's dangerouslyDisableSandbox Bash call run outside the sandbox, W1-T6157).",
+    );
+  }
+
+  // SDK 0.3.310 added this key; true lets a sandboxed command make its own user namespace, which the SDK says
+  // "removes code-execution isolation" (it can then write past denyWrite and plant code that runs outside).
+  if (sandbox.allowNestedUserNamespaces === true) {
+    throw new WorkerSettingsError(
+      "`sandbox.allowNestedUserNamespaces` must not be true (it removes code-execution isolation, so a worker " +
+        "could write past denyWrite and plant code that later runs outside the sandbox).",
     );
   }
 

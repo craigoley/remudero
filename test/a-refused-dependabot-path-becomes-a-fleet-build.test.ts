@@ -178,7 +178,7 @@ test("an aged refused-path repair receives exact-head priority after capture and
   assert.equal(f.captures.length, 1);
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).preserved, { identity: "keep" });
   for (const changed of [
-    { ...snapshot, asOfMs: NOW - 300001 },
+    { ...snapshot, asOfMs: NOW - 3600001 },
     { ...snapshot, prs: [{ ...snapshot.prs[0], headSha: "different" }] },
     { ...snapshot, prs: [{ ...snapshot.prs[0], checksState: "pending" as const }] },
     { ...snapshot, prs: [{ ...snapshot.prs[0], createdAt: new Date(NOW - 3599999).toISOString() }] },
@@ -241,7 +241,7 @@ test("a dependency repair priority refusal names its unavailable evidence withou
   const snapshot = { owner: "craigoley", repo: "remudero", asOfMs: NOW, prs: [] };
   for (const [input, now, reasonCode] of [
     [undefined, NOW, "snapshot-missing"],
-    [{ ...snapshot, asOfMs: NOW - 300001 }, NOW, "snapshot-stale"],
+    [{ ...snapshot, asOfMs: NOW - 3600001 }, NOW, "snapshot-stale"],
     [{ ...snapshot, asOfMs: NOW + 1 }, NOW, "snapshot-future"],
     [{ ...snapshot, asOfMs: Number.NaN }, NOW, "clock-unreadable"],
     [snapshot, Number.NaN, "clock-unreadable"],

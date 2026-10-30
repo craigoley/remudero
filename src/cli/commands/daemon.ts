@@ -54,6 +54,7 @@ import { defaultListCandidates, defaultReadMarkers, killProcessGroup, sweepOrpha
 import { sweepStaleTempDirs } from "../../lib/tmp.js";
 import { sweepStaleWorkerScratch } from "../../lib/worker-scratch.js";
 import { daemonInstanceRegistryPath } from "../../lib/deployer.js";
+import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
@@ -90,6 +91,7 @@ import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
 import { resolveClaudeExecutable, claudeExecutableCache } from "../../lib/worker.js";
 import { defaultInstance, memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "../../lib/host-memory-ledger.js";
 import { type DispatchGovernorDeps } from "../../lib/dispatch-governor.js";
+import { focusGateFor } from "../../lib/focus-gardener.js";
 import { captureHeavyNewBuildStartupGate } from "../../lib/heavy-ready-startup.js";
 import { hostWorktreeGitAsync } from "../../lib/worktree-git.js";
 import { step } from "../../lib/git-push.js";
@@ -1084,7 +1086,9 @@ export async function daemonCommand(
     return { ...own, owned, foreign };
   };
   const openPrCount = () => openPrOwnership().owned;
-  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
+  // W1-T11026: the focus gardener judges every new-task consultation and holds it while the stuck stack is deep.
+  const queueGate = focusGateFor(queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure),
+    { stateDir: dirname(ledgerPath), log, clock: clockFromMillisFn(deps.now) });
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -1517,7 +1521,7 @@ export async function daemonCommand(
   // Without this line `deps.checkAutoTriage` is undefined and the whole rung is dead code, which is
   // exactly how #1066 merged: consumer wired, producer never.
   const autoTriageHooks = target.isSelf ? (deps.buildAutoTriageHooks ?? buildAutoTriageDaemonHooks)({ config, repairSnapshot: () => {
-    const generation = freshReadGeneration(tickReadGeneration, { consumer: "auto_triage_repair", log });
+    const generation = freshReadGeneration(tickReadGeneration, { consumer: "auto_triage_repair", log, maxAgeMs: DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS });
     if (!generation || generation.facts.openPrError) {
       log("auto_triage.repair_snapshot_unavailable", {
         reasonCode: tickReadGeneration === undefined ? "unpublished-generation" : !generation ? "stale-generation" : "open-pr-read-error",
