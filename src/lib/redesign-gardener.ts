@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
 
 import { backlogLandingGuard } from "./backlog-gardener.js";
@@ -82,6 +82,7 @@ export interface RedesignSources {
   readShard: (rel: string) => string;
   /** Rows of exactly the named steps since `sinceIso`. */
   ledger: (steps: readonly string[], sinceIso: string) => readonly Row[];
+  /** Whether the repo path is an existing FILE: a directory would grant every file under it. */
   pathExists: (rel: string) => boolean;
   /** One tool-less Architect spawn. */
   judgeText: (prompt: string) => Promise<string>;
@@ -102,17 +103,6 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     if (!list.includes(line)) list.push(line);
     evidence.set(id, list);
   };
-  for (const [id] of open) {
-    const rel = plan.shards.get(id);
-    if (rel === undefined) continue;
-    const pointer = POINTER.exec(sources.readShard(rel))?.[0];
-    // The pointer's own stamp is when the lane stood down; a pointer younger than the fix lane's hour, or one with no
-    // stamp to age, is not yet the Architect's.
-    const stamped = pointer === undefined ? NaN : Date.parse(POINTER_STAMP_RE.exec(pointer)?.[1] ?? "");
-    if (pointer !== undefined && Number.isFinite(stamped) && now - stamped >= REDESIGN_AFTER_MS) {
-      add(id, `refusal-amendment pointer in the shard:\n${pointer.trim()}`);
-    }
-  }
   const rows = sources.ledger(["sweep.disposed"], fixedClock(now - EVIDENCE_WINDOW_MS).iso());
   const newest = new Map<number, Row>();
   for (const row of rows) {
@@ -120,8 +110,12 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     const prior = newest.get(row.pr_number);
     if (prior === undefined || String(row.ts) >= String(prior.ts)) newest.set(row.pr_number, row);
   }
+  // A task with a PR the sweep still disposes is the PR's to judge: its pointer counts only once that hold qualifies.
+  const swept = new Set<string>();
+  const qualified = new Set<string>();
   for (const row of newest.values()) {
     const at = Date.parse(String(row.ts));
+    if (typeof row.task_id === "string" && Number.isFinite(at) && now - at <= SWEPT_RECENTLY_MS) swept.add(row.task_id);
     if (row.disposition !== "refused-escalate" || typeof row.reason !== "string" || !HOLD_REASON.test(row.reason) ||
         typeof row.task_id !== "string" || !Number.isFinite(at) || now - at > SWEPT_RECENTLY_MS) continue;
     // The hold is aged from the start of its unbroken run: walking back from the newest row, any other disposition, an
@@ -136,7 +130,19 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
       heldSince = Math.min(heldSince, ts);
     }
     if (now - heldSince < REDESIGN_AFTER_MS) continue;
+    qualified.add(row.task_id);
     add(row.task_id, `PR #${row.pr_number} at head ${String(row.head_sha).slice(0, 7)} is held: ${row.reason.slice(0, 1500)}`);
+  }
+  for (const [id] of open) {
+    const rel = plan.shards.get(id);
+    if (rel === undefined || (swept.has(id) && !qualified.has(id))) continue;
+    const pointer = POINTER.exec(sources.readShard(rel))?.[0];
+    // The pointer's own stamp is when the lane stood down; a pointer younger than the fix lane's hour, or one with no
+    // stamp to age, is not yet the Architect's.
+    const stamped = pointer === undefined ? NaN : Date.parse(POINTER_STAMP_RE.exec(pointer)?.[1] ?? "");
+    if (pointer !== undefined && Number.isFinite(stamped) && now - stamped >= REDESIGN_AFTER_MS) {
+      add(id, `refusal-amendment pointer in the shard:\n${pointer.trim()}`);
+    }
   }
   // A verdict is never windowed: an unchanged pointer is the same evidence a week later, and is not asked again.
   const judged = new Set(sources.ledger([REDESIGN_JUDGED_STEP], fixedClock(0).iso()).map((r) => String(r.signature)));
@@ -205,7 +211,7 @@ export function redesignEditRefusal(task: Task, edit: RedesignEdit, pathExists: 
     if (path.startsWith("/") || posix.normalize(path) !== path || path.startsWith("./") || path.endsWith("/") ||
         path.split("/").includes("..") || path.includes("*") || !/^[\w./-]+$/.test(path)) return `files_add ${path} is not a plain repo path`;
     if (FORBIDDEN_PREFIXES.some((p) => path.startsWith(p)) || instruments.some((re) => re.test(path))) return `files_add ${path} is an operator-only grant`;
-    if (!pathExists(path) && !path.startsWith("test/")) return `files_add ${path} does not exist and is not a new test`;
+    if (!pathExists(path) && !path.startsWith("test/")) return `files_add ${path} is not an existing file and is not a new test`;
   }
   const criteria = task.acceptance ?? [];
   for (const { criterion, proof } of edit.proofs) {
@@ -234,7 +240,8 @@ export function applyRedesignEdit(text: string, rel: string, edit: RedesignEdit,
     const line = proofLines[criterion - 1]!;
     next = next.slice(0, line.index) + `      proof: ${JSON.stringify(proof)}` + next.slice(line.index + line[0].length);
   }
-  const paragraph = [`${date}, by the redesign Architect (machine, rule 16): ${edit.reason}`, ...edit.amendment.split("\n")]
+  // The reason is one line of the scalar: a newline in it would end the block and start a new key.
+  const paragraph = [`${date}, by the redesign Architect (machine, rule 16): ${edit.reason.replace(/\s+/g, " ").trim()}`, ...edit.amendment.split("\n")]
     .map((l) => (l.trim() ? `    ${l.trimEnd()}` : "")).join("\n");
   const amendment = /^ {2}amendment: \|[-+]?[ \t]*\n((?: {4}.*\n| *\n)*)/m.exec(next);
   if (amendment !== null) {
@@ -255,6 +262,10 @@ export function applyRedesignEdit(text: string, rel: string, edit: RedesignEdit,
   if (!(a.files ?? []).every((p) => (b.files ?? []).includes(p))) return { refused: "a declared file was removed" };
   if (a.status !== b.status || a.priority !== b.priority || a.verify !== b.verify ||
       JSON.stringify(a.depends_on ?? []) !== JSON.stringify(b.depends_on ?? [])) return { refused: "status, priority, verify or depends_on changed" };
+  // Every other field is the record's own: only files, proofs and the amendment may differ.
+  const rest = (t: Task) => JSON.stringify(Object.entries({ ...t, files: undefined, amendment: undefined, acceptance: undefined })
+    .filter(([, v]) => v !== undefined).sort(([x], [y]) => x.localeCompare(y)));
+  if (rest(a) !== rest(b)) return { refused: "a field other than files, a proof or the amendment changed" };
   return { text: next };
 }
 
@@ -294,7 +305,7 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
       if (!read.ok) throw new Error(`redesign: incomplete ledger union: ${read.unread.join(", ")}`);
       return read.rows;
     },
-    pathExists: (rel) => existsSync(join(deps.repoRoot, rel)),
+    pathExists: (rel) => statSync(join(deps.repoRoot, rel), { throwIfNoEntry: false })?.isFile() === true,
     judgeText: () => Promise.reject(new Error("the redesign Architect's spawn is not wired")),
     ...overrides,
   };

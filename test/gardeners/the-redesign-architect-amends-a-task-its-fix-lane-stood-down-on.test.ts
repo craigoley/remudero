@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -75,7 +75,7 @@ function world(t: { after: (fn: () => void) => void }, opts: { rows?: Row[]; poi
     clock, plan,
     readShard: (rel) => readFileSync(join(root, rel), "utf8"),
     ledger: (steps, since) => rows.filter((r) => steps.includes(String(r.step)) && String(r.ts) >= since),
-    pathExists: (rel) => existsSync(join(root, rel)),
+    pathExists: (rel) => statSync(join(root, rel), { throwIfNoEntry: false })?.isFile() === true,
     judgeText: async (prompt) => { prompts.push(prompt); return answers.shift() ?? 'REDESIGN: {"verdict":"grill","reason":"no answer"}'; },
   };
   const deps: GardenerDeps = {
@@ -127,6 +127,11 @@ test("a hold younger than an hour, or one the sweep no longer disposes, is left 
   const otherHead = world(t, { pointer: false, rows: [{ ...heldRow(NOW - 3 * 60 * MIN), head_sha: "0".repeat(40) },
     heldRow(NOW - 30 * MIN), heldRow(NOW - MIN)] });
   assert.equal(redesignCandidates(otherHead.sources as RedesignSources).length, 0, "a hold on an older head does not age this one");
+  // A task whose PR the sweep still disposes is that PR's to judge, so an aged pointer does not overrule a young hold.
+  const youngWithPointer = world(t, { rows: [heldRow(NOW - 30 * MIN), heldRow(NOW - MIN)] });
+  assert.equal(redesignCandidates(youngWithPointer.sources as RedesignSources).length, 0, "an aged pointer waits on a young hold");
+  const movingWithPointer = world(t, { rows: [{ ...heldRow(NOW - MIN), disposition: "blocked-fixable", reason: "fix round dispatched" }] });
+  assert.equal(redesignCandidates(movingWithPointer.sources as RedesignSources).length, 0, "an aged pointer waits on a PR that moves");
   // A refusal-amendment pointer is aged by its own stamp, and a pointer with no stamp to age is never the Architect's.
   const fresh = world(t, { stamp: iso(NOW - (REDESIGN_AFTER_MS - MIN)) });
   assert.equal(redesignCandidates(fresh.sources as RedesignSources).length, 0, "a pointer younger than an hour waits");
@@ -168,10 +173,17 @@ test("rule 16 and the operator's grants are enforced in code, whatever the Archi
   for (const path of ["./deploy/Dockerfile", "./src/lib/review.ts", "src//lib/review.ts", "src/lib/./review.ts", "src/lib/"]) {
     assert.match(String(redesignEditRefusal(task, edit({ filesAdd: [path] }), () => true)), /not a plain repo path/, path);
   }
-  assert.match(String(redesignEditRefusal(task, edit({ filesAdd: ["src/lib/invented.ts"] }), exists)), /does not exist/);
+  assert.match(String(redesignEditRefusal(task, edit({ filesAdd: ["src/lib/invented.ts"] }), exists)), /not an existing file/);
+  assert.match(String(redesignEditRefusal(task, edit({ filesAdd: ["src/cli"] }), exists)), /not an existing file/, "a directory grants nothing");
   assert.equal(redesignEditRefusal(task, edit({ filesAdd: ["test/new-one.test.ts"] }), exists), undefined, "a new test may be declared");
   assert.match(String(redesignEditRefusal(task, edit({ proofs: [{ criterion: 2, proof: "unit test: x" }] }), exists)), /does not have/);
   assert.match(String(redesignEditRefusal(task, edit({ proofs: [{ criterion: 1, proof: "the test passes" }] }), exists)), /dialect prefix/);
+  // A reason with newlines stays inside the amendment scalar, so it can never write a key of its own.
+  const smuggled = applyRedesignEdit(shard(), REL, edit({ reason: "x\n  dispatch_hold: true\n  priority: 9" }), "0123456789abcdef", "2026-10-30");
+  const parsed = parseTasksFromYaml((smuggled as { text: string }).text, REL)[0]! as unknown as Record<string, unknown>;
+  assert.equal(parsed.dispatch_hold, undefined, "no key escapes the amendment block");
+  assert.equal(parsed.priority, 1.3);
+  assert.match(String(parsed.amendment), /rule 16\): x dispatch_hold: true priority: 9/);
   // A path the Architect names twice is declared once.
   const twice = applyRedesignEdit(shard(), REL, edit({ filesAdd: ["src/cli/commands/fix.ts", "src/cli/commands/fix.ts"] }), "0123456789abcdef", "2026-10-30");
   assert.deepEqual(parseTasksFromYaml((twice as { text: string }).text, REL)[0]!.files,
@@ -218,6 +230,7 @@ test("the production ledger reader reads the union and refuses an incomplete one
   assert.equal(sources.ledger(["sweep.disposed"], iso(NOW - 60 * MIN)).length, 1);
   assert.equal(sources.readShard(REL), shard());
   assert.equal(sources.pathExists("src/cli/commands/fix.ts"), true);
+  assert.equal(sources.pathExists("src/cli/commands"), false, "a directory is not a file the task may declare");
   // A live ledger that cannot be read is an incomplete corpus, never an empty one.
   rmSync(join(w.root, "state", "ledger.ndjson"));
   mkdirSync(join(w.root, "state", "ledger.ndjson"));
