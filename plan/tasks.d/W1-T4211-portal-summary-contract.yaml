@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 30.00
+  budget_usd: 9.50
   risk: low
   origin: "feedback#fb-1789327800532-71d91d"
   plan_refs: []
