@@ -93,6 +93,26 @@ test("W1-T11029 criterion 1: a deletion, a mode change, a rename or a binary dif
   assert.equal(classifyInstrumentDiff("stray line before any header\n" + additiveCensus, [CENSUS]).verdict, "would_grant");
 });
 
+test("W1-T11029 criterion 1: both endpoints of a rename modify the requested paths", () => {
+  for (const edits of [[], ["@@ -1 +1,2 @@", " unchanged", "+added"]]) {
+    const diff = [
+      `diff --git a/${CENSUS} b/${BASELINE}`,
+      `similarity index ${edits.length ? 90 : 100}%`,
+      `rename from ${CENSUS}`,
+      `rename to ${BASELINE}`,
+      ...(edits.length ? [`--- a/${CENSUS}`, `+++ b/${BASELINE}`, ...edits] : []),
+    ].join("\n");
+    const judgement = classifyInstrumentDiff(diff, [CENSUS, BASELINE]);
+    assert.equal(judgement.verdict, "would_escalate");
+    assert.deepEqual(judgement.paths, [BASELINE, CENSUS].map((path) => ({
+      path, verdict: "modifies", added: edits.length ? 1 : 0, removed: 0, reason: "the file is renamed",
+    })));
+    for (const path of [CENSUS, BASELINE]) {
+      assert.equal(classifyInstrumentDiff(diff, [path]).paths[0]!.verdict, "modifies");
+    }
+  }
+});
+
 test("W1-T11029 criterion 1: the stand-down ledgers its shadow verdict and saves the worker's patch for the spot-check", async () => {
   await withTempDir("instrument-grant", async (dir) => {
     const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
@@ -137,3 +157,30 @@ test("W1-T11029 criterion 1: an unreadable diff or an unwritable patch is ledger
     assert.equal(rows[1]!.patch_path, undefined);
   });
 });
+
+for (const readable of [true, false]) {
+  test(`W1-T11029 criterion 1: a ledger failure after an ${readable ? "additive" : "unreadable"} diff never rejects`, async () => {
+    await withTempDir("instrument-grant", async (dir) => {
+      const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+      await assert.doesNotReject(async () => {
+        const judgement = await recordInstrumentGrantShadow({
+          worktreePath: "/worktree", instrumentPaths: [CENSUS], stateDir: dir,
+          roundId: readable ? "readable" : "unreadable", prNumber: 15520, headSha: "h",
+          git: async () => {
+            if (!readable) throw new Error("not a git repository");
+            return additiveCensus;
+          },
+          log: (step, fields) => {
+            rows.push({ step, fields });
+            throw new Error("ledger filesystem unavailable");
+          },
+        });
+        assert.equal(judgement, undefined);
+      });
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.step, INSTRUMENT_GRANT_SHADOW_STEP);
+      assert.equal(rows[0]!.fields.verdict, readable ? "would_grant" : "unreadable");
+      if (readable) assert.equal(readFileSync(join(dir, INSTRUMENT_GRANT_SHADOW_DIR, "readable.patch"), "utf8"), additiveCensus);
+    });
+  });
+}

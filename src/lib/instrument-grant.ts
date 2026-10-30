@@ -53,6 +53,7 @@ function parseUnifiedDiff(diff: string): Map<string, FileDiff> {
       const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
       if (header) {
         current = { path: header[2]!, added: 0, removed: 0 };
+        files.set(header[1]!, current);
         files.set(current.path, current);
         continue;
       }
@@ -125,6 +126,16 @@ export interface InstrumentGrantShadowInput {
 
 /** Record the shadow judgement for one instrument stand-down. Never throws: shadow must not change the escalation. */
 export async function recordInstrumentGrantShadow(input: InstrumentGrantShadowInput): Promise<InstrumentGrantJudgement | undefined> {
+  try {
+    return await recordShadow(input);
+  } catch {
+    // A failed shadow observation, including a ledger write failure, cannot block the operator escalation.
+    // The logger itself may be unavailable, so retrying it here could escape this best-effort boundary.
+    return undefined;
+  }
+}
+
+async function recordShadow(input: InstrumentGrantShadowInput): Promise<InstrumentGrantJudgement | undefined> {
   const base = { pr_number: input.prNumber, round_id: input.roundId, head_sha: input.headSha, paths: [...input.instrumentPaths].sort() };
   let diff: string;
   try {
