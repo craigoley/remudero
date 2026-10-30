@@ -80,7 +80,7 @@ function fixture(t: TestContext) {
   };
 }
 
-test("W1-T5022: aged dependency hold escalates once per head", async (t) => {
+test("W1-T5022: stalled dependency hold escalates once per head", async (t) => {
   const f = fixture(t);
   assert.equal(await f.run(), 1);
   assert.equal(f.opened.length, 0);
