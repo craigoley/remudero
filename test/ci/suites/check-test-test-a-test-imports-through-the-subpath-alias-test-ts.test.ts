@@ -56,6 +56,34 @@ function assertRegularForRawPreservation() {
 
 test("regular for clauses preserve of-tagged template raw values", assertRegularForRawPreservation);
 
+test("named function tags after logical operators preserve raw values through the codemod CLI", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-fixture-escape-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, "fixture.test.ts");
+  const raw = fixtureImport("./fixture.js");
+  for (const prefix of ["true &&", "false ||", "null ??", "true ?", "false ? null :"]) {
+    const source = `${prefix} function named(parts) { return String.raw(parts); }\``
+      + raw + "`" + (prefix === "true ?" ? " : null" : "") + ";";
+    assert.equal(runInNewContext(source), raw, `control: ${prefix} evaluates the tag`);
+    assert.equal(census(source).status, 0, "control: the census sees the tagged fixture import");
+    writeFileSync(file, source);
+    const written = spawnSync(process.execPath, [
+      join(REPO_ROOT, "scripts/test-location-codemod.mjs"), "--write", file,
+    ], { encoding: "utf8" });
+    assert.equal(written.status, 0, written.stderr);
+    const actual = readFileSync(file, "utf8");
+    assert.equal(runInNewContext(actual), raw, `${prefix} must preserve observable raw text`);
+    assert.equal(actual, source);
+    assert.match(written.stdout, /UNRESOLVED .*raw spelling left as written/);
+    assert.match(written.stdout, /0 of 1 file\(s\) rewritten/);
+    const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
+    assert.equal(result.rewritten, 0);
+    assert.equal(result.unresolved.length, 1);
+    assert.match(result.unresolved[0], /raw spelling/);
+    assert.equal(runInNewContext(result.text), raw);
+  }
+});
+
 test("W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.ts is prevented, not retried", () => {
   assertRegularForRawPreservation();
   const source = fixtures();
