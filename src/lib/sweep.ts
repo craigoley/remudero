@@ -22913,6 +22913,7 @@ export async function runSweep(
                 // retain the historical empty-task fallback.
                 task_id: reviewOutcomeTaskIdFor(job.pr),
                 step: "review.post_refused",
+                ts: clockFromMillisFn(deps.now).iso(),
                 review_attempt_id: reviewAttemptId,
                 head_sha: job.pr.headSha,
                 ...(job.pr.reviewInputDigest !== undefined
