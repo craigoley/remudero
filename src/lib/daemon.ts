@@ -5207,6 +5207,8 @@ export async function runDaemon(
             detachSweepAction(work.then((result) => {
               log("benchmark_cohort.ran", {
                 state: result.state,
+                due_because: result.dueBecause,
+                pass_ms: result.passMs,
                 scanned_sources: result.scannedSources,
                 pending_sources: result.pendingSources,
                 tail_pending_bytes: result.tailPendingBytes ?? 0,

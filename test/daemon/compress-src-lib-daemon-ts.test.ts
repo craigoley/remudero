@@ -35,9 +35,14 @@ const EXPECTED_EMITTED = "4831fdc63eba6ea903fc370ea77fde702c2f5dd272684e77c0ef34
 
 test("W1-T10871: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/daemon.ts"), "utf8");
-  assert.equal(executableDigest(source), EXPECTED_EXECUTABLE, "all non-comment code lines match the accepted snapshot");
+  // W1-T9912 intentionally adds these two cohort ledger fields after the compression baseline.
+  // Remove only that exact addition when comparing the W1-T9819 executable snapshot.
+  const cohortFields = "                due_because: result.dueBecause,\n                pass_ms: result.passMs,\n";
+  assert.equal(source.split(cohortFields).length, 2, "the cohort fields occur once in the daemon row");
+  const baselineSource = source.replace(cohortFields, "");
+  assert.equal(executableDigest(baselineSource), EXPECTED_EXECUTABLE, "all other non-comment code lines match the accepted snapshot");
   // Independently catch ASI changes and whitespace inside multiline string/template literals.
-  assert.equal(emittedDigest(source), EXPECTED_EMITTED, "emitted JavaScript matches the accepted snapshot");
+  assert.equal(emittedDigest(baselineSource), EXPECTED_EMITTED, "other emitted JavaScript matches the accepted snapshot");
   const { comments } = countCommentLines(source, "src/lib/daemon.ts");
   assert.ok(comments < BEFORE_COMMENTS, `comments must decrease from the measured ${BEFORE_COMMENTS}; got ${comments}`);
 });
