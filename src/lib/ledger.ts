@@ -820,6 +820,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // no prior value, which reads exactly like a first attempt and repeats the dispatch it must stop.
   "fix.instrument_entangled",
   "dep-review.decided",
+  "dispatch", // W1-T9818: dependency holds read owned-build dispatches as proposal progress.
   // W1-T2705: the dedup marker for a migration already submitted. `depReviewOutcomeFor`
   // (run-task.ts) reads it back per PR + head and answers "migrate" only when present —
   // archived away, a completed migration reads as `hold` and the rung submits it again.

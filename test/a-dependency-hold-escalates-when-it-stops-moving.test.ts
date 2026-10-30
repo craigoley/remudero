@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFile
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { depReviewCommand, type DepReviewDeps } from "#src/run-task.js";
+import { depReviewCommand, type DepReviewDeps } from "#test/helpers/run-task-test.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 
 function fixture(t: TestContext) {
