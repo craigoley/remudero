@@ -22,7 +22,7 @@ import type { RunResult } from "./run-result.js";
 
 /** The contract's schema version. The schema only grows within a major: a reader refuses an unknown major and
  *  ignores unknown minor fields. */
-export const RUN_CHILD_SCHEMA = { major: 1, minor: 1 } as const;
+export const RUN_CHILD_SCHEMA = { major: 1, minor: 2 } as const;
 
 export interface RunChildSchema {
   major: number;
@@ -64,6 +64,14 @@ export interface RunChildIdentity {
   containerGeneration: ContainerGeneration;
 }
 
+/** A ledger-proven end whose child's pid was never recorded. Only an aborted status may use it. */
+export interface ParentSettledIdentity {
+  settledByParent: true;
+  pid?: never;
+  startTicks?: string;
+  containerGeneration?: never;
+}
+
 /** The closed set of failures the settle loop distinguishes, plus the contract's own. */
 export type RunChildFailureClass =
   | "task_admission"
@@ -100,9 +108,9 @@ export interface RunChildFailure {
 export interface RunChildStatus {
   schema: RunChildSchema;
   runId: string;
-  identity: RunChildIdentity;
+  identity: RunChildIdentity | ParentSettledIdentity;
   engineSha: string;
-  entryKind: RunChildEntryKind;
+  entryKind: RunChildEntryKind | "unknown";
   phase: string;
   heartbeatAt: number;
   state: RunChildState;
@@ -258,10 +266,14 @@ export function parseStatus(raw: unknown): RunChildRead<RunChildStatus> {
   if (!isRecord(raw)) return bad("status is not an object");
   const schema = parseSchema(raw.schema);
   if (!schema.ok) return schema;
-  const identity = parseIdentity(raw.identity);
   const state = RUN_CHILD_STATES.find((s) => s === raw.state);
+  const parentSettled = state === "aborted" && isRecord(raw.identity) && raw.identity.settledByParent === true &&
+    raw.identity.pid === undefined && raw.identity.startTicks === undefined && raw.identity.containerGeneration === undefined;
+  const identity = isRecord(raw.identity) && raw.identity.settledByParent === true
+    ? (parentSettled ? { settledByParent: true as const } : undefined) : parseIdentity(raw.identity);
   const runId = str(raw.runId), engineSha = str(raw.engineSha), phase = str(raw.phase);
-  const entryKind = raw.entryKind === "bundle" || raw.entryKind === "tsx" ? raw.entryKind : undefined;
+  const entryKind = raw.entryKind === "bundle" || raw.entryKind === "tsx" || (state === "aborted" && raw.entryKind === "unknown")
+    ? raw.entryKind : undefined;
   if (
     identity === undefined || state === undefined || runId === undefined || engineSha === undefined ||
     phase === undefined || entryKind === undefined || typeof raw.heartbeatAt !== "number" || !Number.isFinite(raw.heartbeatAt)
@@ -326,12 +338,16 @@ export function childIdentity(pid: number, probe: RunChildProbe = realRunChildPr
 export type RunDirKind = "live" | "terminal" | "lost" | "dead" | "unreadable";
 export const RUN_DIR_KINDS: readonly RunDirKind[] = ["live", "terminal", "lost", "dead", "unreadable"];
 
-export interface RunDirClassification {
-  kind: RunDirKind;
+export type RunDirClassification = {
+  kind: "live";
+  status: RunChildStatus & { identity: RunChildIdentity };
+  detail?: undefined;
+} | {
+  kind: Exclude<RunDirKind, "live">;
   /** The reason, for every kind but a plain `live` or `terminal`. `unreadable` always carries one. */
   detail?: string;
   status?: RunChildStatus;
-}
+};
 
 export function isTerminalState(state: RunChildState): boolean {
   return TERMINAL_STATES.has(state);
@@ -347,18 +363,20 @@ export function classifyRunDir(dir: string, probe: RunChildProbe = realRunChildP
   if (!read.ok) return { kind: "unreadable", detail: `${read.reason}: ${read.detail}` };
   const status = read.value;
   if (isTerminalState(status.state)) return { kind: "terminal", status };
+  // parseStatus permits a parent-settled identity only on an aborted status.
+  const identity = status.identity as RunChildIdentity;
   const generation = probe.generation();
-  const named = status.identity.containerGeneration;
+  const named = identity.containerGeneration;
   if (named.containerId !== generation.containerId || named.initStart !== generation.initStart) {
     return { kind: "dead", status, detail: `status names container ${named.containerId}@${named.initStart}, this is ${generation.containerId}@${generation.initStart}` };
   }
-  const seen = probe.process(status.identity.pid);
-  if (seen.state === "gone") return { kind: "lost", status, detail: `pid ${status.identity.pid} is gone` };
-  if (seen.state === "unknown") return { kind: "unreadable", status, detail: `pid ${status.identity.pid} start time unreadable: ${seen.reason}` };
-  if (status.identity.startTicks === "unknown") return { kind: "unreadable", status, detail: "recorded start ticks are unknown" };
-  return seen.start === status.identity.startTicks
-    ? { kind: "live", status }
-    : { kind: "lost", status, detail: `pid ${status.identity.pid} was reused: started ${seen.start}, recorded ${status.identity.startTicks}` };
+  const seen = probe.process(identity.pid);
+  if (seen.state === "gone") return { kind: "lost", status, detail: `pid ${identity.pid} is gone` };
+  if (seen.state === "unknown") return { kind: "unreadable", status, detail: `pid ${identity.pid} start time unreadable: ${seen.reason}` };
+  if (identity.startTicks === "unknown") return { kind: "unreadable", status, detail: "recorded start ticks are unknown" };
+  return seen.start === identity.startTicks
+    ? { kind: "live", status: { ...status, identity } }
+    : { kind: "lost", status, detail: `pid ${identity.pid} was reused: started ${seen.start}, recorded ${identity.startTicks}` };
 }
 
 export type RunDirCensus = Record<RunDirKind, number>;
