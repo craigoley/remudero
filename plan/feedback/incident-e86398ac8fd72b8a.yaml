@@ -1,0 +1,35 @@
+id: incident-e86398ac8fd72b8a
+ts: 2026-10-30T01:36:46.480Z
+raw: >-
+  Incident e86398ac8fd7: flow pr-stage-stall:own-red:required checks red —
+  comment-load-ratchet refused by expiring-fixture-census — refused (<n> at this
+  head) — retrying the fix round — NOT DISPATCHED this pass: a needs-human
+  escalation for this exact (task, PR, head <sha>, cause) is ALREADY OPEN and
+  awaiting a human (https://github.com/craigoley/remudero/issues/<n>) — a strike
+  here would re-ask a question already in front of someone and append to that
+  same issue; standing down until it is closed, the head moves, or the task
+  contract changes, or an operator answers
+
+  First seen: 2026-10-30T01:31:47.808Z
+
+  Last seen: 2026-10-30T01:31:47.808Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15520 own-red: repeat: "required checks red — comment-load-ratchet refused by expiring-fixture-census — refused (<n> at this head) — retrying the fix round — NOT DISPATCHED this pass: a needs-human escalation for this exact (task, PR, head <sha>, cause) is ALREADY OPEN and awaiting a human (https://github.com/craigoley/remudero/issues/<n>) — a strike here would re-ask a question already in front of someone and append to that same issue; standing down until it is closed, the head moves, or the task contract changes, or an operator answers" x3
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#e86398ac8fd72b8a40e6b98d4ab43f14ca5c843b8c4ef63add913bdec3efc106
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

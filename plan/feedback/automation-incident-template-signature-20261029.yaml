@@ -1,0 +1,51 @@
+id: automation-incident-template-signature-20261029
+ts: 2026-10-30T01:25:15.094Z
+raw: >-
+  Cross-repository automation finding from the operator's 2026-10-29 session on
+  craigoley/ClawApp. It is an agent technical finding, not an operator ruling.
+
+  OBSERVED in craigoley/ClawApp#1186 and #1189 (both merged). An error gardener
+  clusters client telemetry into one GitHub issue per signature. #1189 changed the
+  signature to the literal source template of the log call, with a placeholder
+  for every interpolation, because the earlier value-scrubbing approach (a word
+  allowlist) leaked interpolated values into issues. It also fails closed when it
+  finds no templates, and it has a guard against closing issues in bulk.
+  craigoley/ClawApp#1187 (merged) lets a label start a fix-PR workflow from such
+  an issue.
+
+  WHAT REMUDERO ALREADY HAS (OBSERVED). The same pipeline. src/lib/incident-events.ts
+  scrubs each event, fingerprints it (kind, name, normalized message, the first
+  three in-app frames) and ledgers incident.event rows with per-minute sampling.
+  src/lib/sre-lane.ts files one incident#<fingerprint> feedback entry per pass. It
+  dedupes against open work, files no more per day than the fleet merged in the
+  last day, and has a pause switch. Triage then build is the fix path.
+
+  WHAT IT LACKS (OBSERVED unless marked). The scrub is a denylist: redactSecrets
+  (incident-events.ts) replaces only UUID, email and 20-plus-character token
+  shapes, and normalizeIdsAndDigits collapses only hex runs and digits for the
+  fingerprint. Any other interpolated value survives in the message: a path, a
+  branch name, user-entered text, a short secret. It splits fingerprints, and
+  incidentFeedbackRaw (sre-lane.ts) copies it verbatim under "Sample events:" into
+  plan/feedback/incident-*.yaml. craigoley/remudero is a public repository, and
+  plan/feedback/incident-63ec27b12fa2d7e4.yaml carries such a raw sample message.
+  INFERRED: POST /v1/incidents/events accepts messages from console clients, so
+  text an operator typed can reach a public file.
+
+  DESIRED CAPABILITY (general). Build the incident signature from the emitter's
+  literal message template, with a placeholder for every interpolation. Keep
+  interpolated values out of the fingerprint and out of any published body,
+  except named allowlisted fields. An emitter that cannot supply a template fails
+  closed: no filing, plus one counted refusal, never a fallback to scrubbed free
+  text. A test plants values the denylist misses (a short secret, a path, free
+  text) and proves they reach neither the fingerprint basis nor plan/feedback.
+  Ground against existing incident and SRE-lane tasks and every open PR head
+  first. This entry authorizes no history rewrite of already-landed entries.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: cross-repo-automation:incident-template-signature:20261029
+thread_id: null
