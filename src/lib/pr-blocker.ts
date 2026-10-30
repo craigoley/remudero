@@ -227,7 +227,7 @@ export interface SloRungDecision {
 export const utcDayOf = (ms: number): number => Math.floor(ms / MS_PER_UTC_DAY);
 
 export async function judgeSloRebuild(input: SloRungInput, progressInput: FixProgressInput,
-  judge: FixProgressJudge, log?: (step: string, fields: Record<string, unknown>) => void,
+  judge: FixProgressJudge, log?: (step: string, fields: Record<string, unknown>) => void, held?: string,
 ): Promise<SloRungDecision & { progress?: FixProgressResult }> {
   const prior = decideSloRung(input);
   if (input.blockerAgeMs < BLOCKER_SLO_MS || input.unavailable?.includes("rebuild") ||
@@ -235,7 +235,8 @@ export async function judgeSloRebuild(input: SloRungInput, progressInput: FixPro
   const rebuilds = input.rungHistory.filter(row => row.rung === "rebuild");
   const facts = { ...progressInput, strikesSpent: rebuilds.length, formerCeiling: MAX_SLO_REBUILDS,
     remedyHistory: input.rungHistory.map(row => ({ ...row })),
-    parkedReason: `rebuild: ${rebuilds.length} previous rebuilds; ${JSON.stringify(input.rungHistory)}` };
+    parkedReason: `rebuild: ${rebuilds.length} previous rebuilds; ${JSON.stringify(input.rungHistory)}` +
+      (held === undefined ? "" : `; held on an unanswered escalation: ${held}`) };
   const progress = await judgeFixProgress(facts, judge);
   log?.("fix.progress_judged", { site: "rebuild", pr_number: facts.prNumber, head_sha: facts.headSha,
     former_ceiling: facts.formerCeiling, parked_reason: facts.parkedReason,
