@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "fan-out 2026-10-16 agent E1: S1 lead (a), split worker versus environment causes at the thrown arm"
   plan_refs: [W1-T9738, W1-T9077, W1-T4655, W1-T4597, W1-T113, W1-T5344, W1-T9855]
-  files: [src/run-task.ts, src/lib/status.ts, src/lib/run-child-contract.ts, test/a-harness-module-that-cannot-load-is-an-environment-failure.test.ts]
+  files: [src/run-task.ts, src/lib/status.ts, src/lib/run-child-contract.ts, test/a-harness-module-that-cannot-load-is-an-environment-failure.test.ts, "src/cli/commands/run-task-verb.ts", "src/lib/run-child.ts"]
   status: queued
   priority: 2  # a design call (the brief's own words); W1-T9738 stops today's trigger
   attempts: 0
