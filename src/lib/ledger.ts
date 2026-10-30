@@ -547,6 +547,7 @@ export type RiskOverrideDisposition = (typeof RISK_OVERRIDE_DISPOSITIONS)[number
  * docs/forensics/ledger.md#decision_relevant_ledger_steps.
  */
 export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
+  "auto_triage.run_failed", // W1-T9853: failedFireBackoff derives the per-entry retry from these rows.
   "retro_triggered", // W1-T9119: the retro cadence reader learns the persistent-deferral interval from these rows.
   "implement.preopen_gate", // preopen-gate.ts counts the fleet streak across rotations.
   "implement.preopen_gate.alert", // preopen-gate.ts dedups raises and clears on recovery.
