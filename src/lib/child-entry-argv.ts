@@ -21,8 +21,8 @@ import {
 } from "./child-entry-store.js";
 import { daemonOwnedProcess } from "./host-memory-learning.js";
 
-interface ChildEntryCurrency { current: boolean; reason: string; bundle?: string }
-type CurrencyCheck = (root: string, name: string) => ChildEntryCurrency;
+interface ChildEntryCurrency { current: boolean; reason: string; bundle?: string; now?: string }
+type CurrencyCheck = (root: string, name: string, opts?: { treeHash?: string; hashSource?: (root: string) => string }) => ChildEntryCurrency;
 /** W1-T8777: scripts/build-child-entries.mjs's workerBundle, as a seam. */
 export type WorkerBundleCheck = (root: string, module: string, opts: { verifySource: boolean }) => ChildEntryCurrency;
 
@@ -275,6 +275,8 @@ const loadCurrencyCheck = (): CurrencyCheck =>
   (createRequire(import.meta.url)("../../scripts/build-child-entries.mjs") as { childEntryIsCurrent: CurrencyCheck }).childEntryIsCurrent;
 
 export type ChildEntryKind = "bundle" | "tsx";
+export interface ChildEntryHash { computed: number; reused: number; bytes_read: number; ms: number }
+type SourceHash = (root: string, version: string, stats: ChildEntryHash) => string;
 export interface ChildEntryLaunch {
   /** Arguments for `node`: the bundle path, or `--import <tsx> <source entry>`, then `args`. */
   argv: string[];
@@ -284,6 +286,8 @@ export interface ChildEntryLaunch {
    * otherwise what childEntryIsCurrent gave for the tree.
    */
   reason: string;
+  /** Present on resolved launches; external launch overrides may omit it. Payload integrity reads are separate. */
+  hash?: ChildEntryHash;
   /** W1-T8776: what the store answered, when it was asked (the tree had no current bundle). */
   store?: StoreLookup;
 }
@@ -298,6 +302,8 @@ export interface ChildEntryStoreOptions {
   daemonOwned?: boolean;
   /** W1-T9601: the fill's build. Default: buildIntoStore, in a child process. */
   build?: OwnTreeFillOptions["build"];
+  /** Counting seam for the content hash; memo validation and currency checks remain real. */
+  hashSource?: SourceHash;
 }
 
 /** W1-T9601: the `source` a fill for the daemon's own tree ledgers on child_entry.store_build_requested. */
@@ -334,39 +340,48 @@ export function childEntryArgv(
   store: ChildEntryStoreOptions = {},
   /** W1-T9077: a tree to resolve tsx from (a run child's engine tree); by default this package's own. */
   tsxFrom?: string,
-): ChildEntryLaunch {
-  const judge = (): ChildEntryCurrency => {
+): ChildEntryLaunch & { hash: ChildEntryHash } {
+  const hash: ChildEntryHash = { computed: 0, reused: 0, bytes_read: 0, ms: 0 };
+  let treeHash: string | undefined;
+  const hashOf = (): string => {
+    if (treeHash !== undefined) return treeHash;
+    const script = createRequire(import.meta.url)("../../scripts/build-child-entries.mjs") as {
+      memoizedSourceHash(root: string, stats: ChildEntryHash, hashSource?: SourceHash): string;
+    };
+    return treeHash = script.memoizedSourceHash(root, hash, store.hashSource);
+  };
+  const judge = (knownHash?: string): ChildEntryCurrency => {
     try {
-      return (currencyCheck ?? loadCurrencyCheck())(root, name);
+      return (currencyCheck ?? loadCurrencyCheck())(root, name, { treeHash: knownHash, hashSource: hashOf });
     } catch (err) {
       return { current: false, reason: `currency-check-unavailable: ${String((err as Error)?.message ?? err).slice(0, 80)}` };
     }
   };
   const verdict = judge();
   if (verdict.current && typeof verdict.bundle === "string") {
-    return { argv: [verdict.bundle, ...args], kind: "bundle", reason: verdict.reason };
+    return { argv: [verdict.bundle, ...args], kind: "bundle", reason: verdict.reason, hash };
   }
   const storeRoot = store.root ?? (currencyCheck ? false : defaultStoreRoot());
   let lookup: StoreLookup | undefined;
   if (storeRoot !== false && !verdict.reason.startsWith("currency-check-unavailable") && verdict.reason !== "entry-name-invalid") {
-    lookup = materializeFromStore(resolve(root), storeRoot);
+    lookup = materializeFromStore(resolve(root), storeRoot, verdict.now ?? treeHash, hashOf);
     // A published copy runs only if the tree's own judgement now holds: any doubt is tsx.
-    const after = lookup.outcome === "hit" ? judge() : undefined;
+    const after = lookup.outcome === "hit" ? judge(lookup.hash) : undefined;
     if (lookup.outcome === "hit" && !(after?.current && typeof after.bundle === "string")) {
       lookup = { outcome: "miss", reason: `materialized-not-current: ${after?.reason}`, hash: lookup.hash };
     }
     // W1-T9601: `daemon_tree_fill` on a miss counts the tsx launches a fill was asked for, joined, or already tried.
     const fill = fillOnMiss(resolve(root), lookup, storeRoot, store);
     store.log?.(lookup.outcome === "hit" ? "child_entry.store_hit" : "child_entry.store_miss",
-      { entry: name, tree_reason: verdict.reason, ...lookup, ...(fill ? { daemon_tree_fill: fill } : {}) });
+      { entry: name, tree_reason: verdict.reason, ...lookup, tree_hash: lookup.hash, hash: { ...hash }, ...(fill ? { daemon_tree_fill: fill } : {}) });
     if (lookup.outcome === "hit" && typeof after?.bundle === "string") {
-      return { argv: [after.bundle, ...args], kind: "bundle", reason: "store-hit", store: lookup };
+      return { argv: [after.bundle, ...args], kind: "bundle", reason: "store-hit", store: lookup, hash };
     }
   }
   const fromEngine = tsxFrom === undefined ? undefined : resolveTsxFrom(tsxFrom);
   const tsx = fromEngine ?? createRequire(import.meta.url).resolve("tsx");
   const reason = tsxFrom !== undefined && fromEngine === undefined ? `${verdict.reason}; tsx-not-in-engine` : verdict.reason;
-  return { argv: ["--import", tsx, resolve(root, sourceEntry), ...args], kind: "tsx", reason, ...(lookup ? { store: lookup } : {}) };
+  return { argv: ["--import", tsx, resolve(root, sourceEntry), ...args], kind: "tsx", reason, hash, ...(lookup ? { store: lookup } : {}) };
 }
 
 /** tsx as the tree at `root` resolves it, or undefined when that tree cannot (no node_modules, or no tsx in it). */
@@ -409,8 +424,8 @@ export function engineChildEntryArgv(
 export const CHILD_ENTRY_SPAWNED_STEP = "child_entry.spawned";
 
 /** The one row shape for {@link CHILD_ENTRY_SPAWNED_STEP}: which entry ran which verb, as which kind, and why. */
-export function childEntrySpawnedRow(name: string, verb: string, launch: Pick<ChildEntryLaunch, "kind" | "reason">): Record<string, unknown> {
-  return { name, verb, kind: launch.kind, reason: launch.reason };
+export function childEntrySpawnedRow(name: string, verb: string, launch: Pick<ChildEntryLaunch, "kind" | "reason"> & Partial<Pick<ChildEntryLaunch, "hash">>): Record<string, unknown> {
+  return { name, verb, kind: launch.kind, reason: launch.reason, hash: launch.hash ?? { computed: 0, reused: 0, bytes_read: 0, ms: 0 } };
 }
 
 /** This instance's store, or `false` when its config cannot be read: the store is advisory and a miss runs tsx. */
