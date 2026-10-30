@@ -1,0 +1,37 @@
+- id: W1-T10985
+  repo: remudero
+  title: Explain Daily progress PR-source cutoff gaps before activation
+  type: recon
+  verify: auto
+  author_class: machine
+  risk: low
+  priority: 1
+  budget_usd: 8
+  status: queued
+  attempts: 0
+  depends_on:
+    - W1-T10829
+  plan_refs:
+    - W1-T10559
+    - W1-T10829
+    - W1-T10898
+  files:
+    - docs/views.md
+  origin: cockpit-closeout:daily-cutoff:operator-authorized-2026-10-29
+  rationale: The operator requested normal filing of uncovered cockpit follow-ups. Authenticated read-only commissioning on2026-10-29 observed three natural hourly jobs with lastSuccessAt null, closedThrough2026-10-26 and the reason Some required PR sources do not yet cover the requested report cutoffs. All intended-repository/consolidated Today/Yesterday reads were view_disabled. Memory repair15244 is merged; that is not complete source coverage or serving readiness. A cause has not been established.
+  design: Read existing Daily manifests/revisions, required PR-source collection receipts and server-owned hourly publication evidence through the maintained read-only readers. Identify the exact authorized repository set, report civil date/zone, requested cutoff, last successful collection cutoff and state of each required source, distinguishing unavailable, partial, stale and observed complete. Use America/New_York civil-midnight boundaries and actual job clocks, not a fixed24-hour subtraction. Prove corpus coverage and include a known fleet PR plus an independently reconciled sampled report as positive controls; a zero result without those controls remains unknown. Separate inherited historical gaps, current-source collection gaps, worker publication and view activation. Identify the demonstrated blocking mechanism or explicitly state which evidence is unavailable. Append a concise public-safe DAILY PR CUTOFF FINDING section to docs/views.md with bounded source references and a recommendation for the smallest separate repair only if justified. Do not publish service tokens, private paths, full ledgers, source result messages or personal identifiers. Existing artifacts named in the cockpit handoff are provenance; actual current evidence must be refreshed. No product source, thresholds, source-completeness rules, schedules, services, switches, claims, budgets, test/review gates or console holds may change. No forced collection, fabricated complete report, live write-parity action or extra model/scanner run. If an existing owner or source repair already covers the mechanism, name it and avoid a duplicate implement task. Preserve all unknown and failed observations.
+  acceptance:
+    - claim: A source-qualified report names the missing required PR cutoffs, positive controls and demonstrated mechanism or explicit unknowns without activating Daily
+      proof: "grep: DAILY PR CUTOFF FINDING in docs/views.md"
+  falsifier: If current authoritative required-source receipts already cover the requested report windows and the saved reports reconcile independently, close the source-gap hypothesis and investigate the distinct publication/activation boundary instead. Missing or unreadable receipts never support a source-complete finding.
+  note: Filing only. Read-only investigation plus a bounded existing documentation update; any product repair or activation is separate governed work. Do not duplicate existing gatewayW1-T10898 or held consoleCONSOLE-T143. Preserve owner, admission, spending, recovery, scope, source and review guards. Existing original acceptance still requires natural hourly collection with no browser and civil-midnight rollover.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.95
+    reasons:
+      - "The filed scope is read-only investigation and a bounded report in docs/views.md; activation, product repairs, service changes and policy changes are explicitly excluded."
+      - "The task requires refreshed source evidence, corpus coverage, positive controls and explicit unknowns rather than asserting an unestablished cause."
+      - "The supplied filing states existing owners and guards must be preserved and duplicate repair work avoided; no concerning gate condition is shown."
+    judged_at: "2026-10-29T15:09:25.275Z"
+    pin: "fede718ed20a14a522e600bb9231cb5eccffd82f983ba1114201bb04a550137f"

@@ -1,0 +1,91 @@
+- id: W1-T10999
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts cost 11.1 PR minute(s) across 5 round(s) on 5 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.34
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts"
+  files:
+    - src/lib/tmp.ts
+    - test/deploy/check-test-test-the-deploy-tick-runs-current-deploy-code-without-trippin.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts"
+      proof: "unit test: W1-T10999: check:test:test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts cost 11.1 PR minute(s) (seven-day half-life) across 5 fix round(s) on 5 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/tmp.ts: test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts imports it
+    - test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts: named by the failing check
+    - the rounds name a failing test: test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #15493 (https://github.com/craigoley/remudero/pull/15493) at 2026-10-29T17:26:12.903Z: ci-log round — test-slow-shard (1/2): test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts
+        failing tests: W1-T4917: codex refuses the code refresh, and the tick still asks deploy-run on the old code
+        log excerpt:
+          | not ok 3412 - W1-T4917: codex refuses the code refresh, and the tick still asks deploy-run on the old code
+          |   ---
+          |   duration_ms: 30254.143291
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts:51:2546'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     env: ‘/tmp/rmd-deploy-code-iyLxoO/state-root/daemon-install/deploy/install-host-units.sh’: No such file or directory
+          |     rmd-relaunch: units -- converge FAILED; the next tick re-asks.
+          |     rmd-relaunch: deploy code -- active workers; deferring.
+          | 
+          | 
+          |     null !
+    - PR #13992 (https://github.com/craigoley/remudero/pull/13992) at 2026-10-24T18:30:09.718Z: ci-log round — coverage-shard (1/8): test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts; coverage-shard (4/8): test/the-machine-judge-settles-an-operator-released-ruling.
+        failing tests: W1-T4917: the real deploy-run is not the install-separation no-op; an edit re-pins fresh and an operator release never re-asks; an operator-released ruling that differs from main in any field but judged_at still lands; an operator release the linter refuses is refused once and staged as one inbox proposal, an unchanged released record the linter refused is not re-rendered and opens no workspace, an edited released record is taken again after a refusal, an operator-released ruling main carries with an earlier judged_at is settled and lands nothing, an operator-released ruling that differs from main in any field but judged_at still lands; W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame
+        log excerpt:
+          | not ok 3543 - W1-T4917: the real deploy-run is not the install-separation no-op
+          |   ---
+          |   duration_ms: 30253.129828
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts:202:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     env: ‘/tmp/rmd-deploy-code-qcAY1v/state-root/daemon-install/deploy/install-host-units.sh’: No such file or directory
+          |     rmd-relaunch: units -- converge FAILED; the next tick re-asks.
+          |     unexpected simulated git command: ls-files --error-unmatch -- benchmark-run.ts
+          | 
+          | 
+          |     null !== 0
+    - PR #13382 (https://github.com/craigoley/remudero/pull/13382) at 2026-10-21T18:35:46.519Z: ci-log round — coverage-shard (6/8): test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts; coverage-shard (3/8): test/inbox/an-amended-contract-releases-a-design-or-scope-h
+        failing tests: W1-T4917: the real deploy-run is not the install-separation no-op; a refused report requesting an out-of-scope file routes to a scope amendment, W1-T4917: the real deploy-run is not the install-separation no-op; a refused report requesting an out-of-scope file routes to a scope amendment; test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts; a NEEDS_SCOPE hold releases when the task's scope is amended on main, test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts
+        log excerpt:
+          | ...
+          | not ok 3816 - W1-T4917: the real deploy-run is not the install-separation no-op
+          |   ---
+          |   duration_ms: 30277.075986
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts:202:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     env: ‘/tmp/rmd-deploy-code-xZVI9e/state-root/daemon-install/deploy/install-host-units.sh’: No such file or directory
+          |     rmd-relaunch: units -- converge FAILED; the next tick re-asks.
+          |     unexpected simulated git command: ls-files --error-unmatch -- benchmark-run.ts
+          | 
+          | 
+          |     null !==
+    - PR #11487 (https://github.com/craigoley/remudero/pull/11487) at 2026-10-13T22:33:23.383Z: ci-log round — coverage-shard (5/8): test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts
+        log excerpt:
+          | Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/rmd-deploy-code-DgGz2C/state-root/remudero/packages/api-client/src/client.js' imported from /tmp/rmd-deploy-code-DgGz2C/state-root/remudero/src/run-task.ts
+          |         at finalizeResolution (node:internal/modules/esm/resolve:272:11)
+          |         at moduleResolve (node:internal/modules/esm/resolve:879:10)
+          |         at defaultResolve (node:internal/modules/esm/resolve:1006:11)
+          |         at #cachedDefaultResolve (node:internal/modules/esm/loader:705:20)
+          |         at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:725:38)
+          |         at nex
+    - PR #9311 at 2026-10-05T13:03:11.439Z: ci-log round — test-slow-shard (1/2): test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

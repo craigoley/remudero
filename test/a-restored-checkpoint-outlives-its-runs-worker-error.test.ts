@@ -176,21 +176,34 @@ test("W1-T8676: any other verdict still consumes the receipt", async () => {
     assert.equal(rows.some((row) => row.step === "implement.checkpoint_kept"), false);
     assert.equal(pendingWorkerBoundaryHandoffs(lines(rows)).size, 0);
   } finally { budget.cleanup(); }
+});
 
-  // A run that pushed its own branch: that branch is the newer checkpoint (W1-T7837), so nothing is kept.
+test("W1-T9815: a worker error keeps its own pushed branch even at the restored sha", async () => {
   const pushed = checkpointFixture();
+  let own: string | undefined;
   try {
     const outcome = await dispatch(pushed, async (args, call) => {
       if (call === 1) return worker("RECON REPORT\nOBSERVED: restored checkpoint\n");
-      const own = pushed.origin.git("-C", args.cwd, "rev-parse", "--abbrev-ref", "HEAD");
+      own = pushed.origin.git("-C", args.cwd, "rev-parse", "--abbrev-ref", "HEAD");
       pushed.origin.git("-C", args.cwd, "push", "--quiet", "origin", `HEAD:refs/heads/${own}`);
       return codexError();
     });
     assert.equal(outcome.verdict, "failed");
     const rows = pushed.readRows();
     assert.ok(rows.some((row) => row.step === "implement.checkpoint_restored"));
-    assert.equal(rows.some((row) => row.step === "implement.checkpoint_kept"), false);
-    assert.equal(pendingWorkerBoundaryHandoffs(lines(rows)).size, 0);
+    assert.ok(own);
+    assert.notEqual(own, SOURCE);
+    assert.equal(pushed.origin.git("rev-parse", `refs/heads/${own}`), pushed.headSha);
+    const verdictAt = rows.findIndex((row) => row.step === "verdict");
+    const keptRows = rows.filter((row) => row.step === "implement.checkpoint_kept");
+    assert.equal(keptRows.length, 1);
+    assert.equal(rows[verdictAt + 1], keptRows[0], "the receipt follows its failed verdict immediately");
+    assert.equal(keptRows[0]?.run_id, rows[verdictAt]?.run_id);
+    assert.equal(keptRows[0]?.failed_stage, "implement");
+    assert.equal(keptRows[0]?.failed_subtype, "error_codex");
+    assert.equal(keptRows[0]?.source_branch, own);
+    assert.equal(keptRows[0]?.head_sha, pushed.headSha);
+    assert.deepEqual(pendingWorkerBoundaryHandoffs(lines(rows)).get(TASK), { branch: own, headSha: pushed.headSha });
   } finally { pushed.cleanup(); }
 });
 

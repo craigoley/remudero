@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high  # Shared selector changes affect census discovery across the repository.
   band_meaning: span
   priority: 1.32
@@ -53,3 +53,12 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-29T09:19:03.561Z"
+    pin: "44148e78946f6366411b5042608c1f465554bb9e26fe84d1be070de48c7dadbf"
+    operator_release_pin: "79c4188484df21cd20c8604bf7678c558e109a23454310048b719b0c4c67624d"

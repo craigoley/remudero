@@ -246,7 +246,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   run: 1,
   runCoverageImprovementCadence: 1,
   runGhPrCreate: 1,
-  runInTree: 1, // W1-T9660: via defaultPreflightChecks; W1-T9695/W1-T9696/W1-T9734 moved the boot sweep, daemon landContent, CI-learning and daemon feedback captures off it. Still sync: recordDecision, setFeedbackStatus, landFoldDebt, gardenCheckout; by name only, the planPrPreflight option and the sweepFeedbackLanding dep
+  runInTree: 1, // W1-T9660: via defaultPreflightChecks; W1-T9695/W1-T9696/W1-T9734/W1-T9735 moved the boot sweep, daemon landContent, CI-learning, daemon feedback captures, decision records, alert status flips, fold debt and knowledge garden off it; by name only, the planPrPreflight option and the sweepFeedbackLanding dep
   runMachineFilingJudge: 1,
   runNpmScriptViaSpawn: 1,
   runPrewarmChannelsSync: 1,

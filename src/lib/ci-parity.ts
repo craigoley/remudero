@@ -25,15 +25,9 @@ import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
 const require = createRequire(import.meta.url);
 
-/** BACKSTOP (W1-T1266) — it cannot fire on a healthy run, only on one that has already stopped
- * making progress, and the measurement is why: the two full local suites completed in 1,024,664 ms
- * (17.1 minutes) on 2026-09-09. Thirty minutes leaves nearly thirteen minutes of headroom while
- * still refusing a stalled suite. Naming the kind is what stops a later resize from quietly
- * promoting this into the thing that normally stops the run, which is the defect W1-T1266 exists
- * for. THE SIBLING TAG IS DELIBERATELY NOT SPELLED HERE: the census matches either kind word
- * anywhere in the block, so naming the other one would leave this declaration ambiguous and
- * satisfied by the wrong tag. This is deliberately LOCAL: CI keeps its independently configured
- * 35-minute job timeouts. */
+/** BACKSTOP (W1-T1266): 30 minutes catches stalled local suites; two full runs took 17.1 minutes
+ * on 2026-09-09. CI retains its independent 35-minute timeout. Keep only this kind tag here:
+ * the census scans the whole block, so naming another kind would make the declaration ambiguous. */
 export const LOCAL_FULL_SUITE_TIMEOUT_MS = 30 * 60 * 1_000;
 
 const BOUNDED_SUITE_OUTPUT_TAIL_CHARS = 4_096;
@@ -311,29 +305,14 @@ export function runBoundedSuite(file: string, args: string[], opts: BoundedSuite
   }
 }
 
-/**
- * lib/ci-parity.ts — `rmd preflight --ci-parity` (W1-T294, MASTER-PLAN §5/§5C): a second,
- * additive mode on the `preflight` verb that runs CI's own gate set locally. Never a second
- * command, never a change to the default route. CLAUDE.md's "Before you push" bullet states the
- * rule it serves; docs/forensics/ci-parity.md holds the design record.
- *
- * INVARIANTS
- * - ONE ENTRY PER PR-TRIGGERED JOB. {@link CI_PARITY_TABLE} owns ci.yml; {@link
- *   PR_WORKFLOW_PARITY_TABLE} owns every other pull-request workflow. A job not mirrored carries
- *   `mirrored: false` and a `reason`, so an absent entry and a considered exclusion never look
- *   alike.
- * - CI'S OWN COMMAND, NEVER A PROXY. Each mirrored step shells the argv ci.yml invokes.
- * - MERGE-BASE PARITY. `origin/main` is fetched ONCE per run and immediately RESOLVED TO A SHA
- *   ({@link pinnedBase}); every diff-consuming step diffs three-dot against that SHA, never the
- *   ref. A stale base silently changes what counts as added (#585), and a base moved mid-run by a
- *   sibling worktree sharing the clone does the same in the other direction — which memoizing the
- *   fetch cannot prevent, because refs are clone-scoped (W1-T3017).
- * - EACH STEP REPORTS INDEPENDENTLY. {@link runStep} never lets one job throw out of the run.
- *
- * TRAP: a job added to any pull-request workflow with no entry would under-cover in silence;
- * `ci-parity:drift` fails on it. FALSIFIER: test/preflight-ci-parity.test.ts,
- * test/a-required-check-outside-ci-yml-has-a-local-route.test.ts.
- */
+/** `rmd preflight --ci-parity` adds CI's gate set without changing the default route
+ * (W1-T294, MASTER-PLAN §5/§5C; docs/forensics/ci-parity.md).
+ * Each PR-triggered job belongs to CI_PARITY_TABLE or PR_WORKFLOW_PARITY_TABLE; exclusions
+ * carry `mirrored: false` and a reason. Mirrored steps shell CI's own argv and report independently.
+ * Fetch origin/main once and pin its SHA immediately: shared-clone fetches can move the ref
+ * mid-run, changing added lines even with a memoized fetch (#585, W1-T3017).
+ * Unregistered jobs fail ci-parity:drift. Falsifiers: test/preflight-ci-parity.test.ts,
+ * test/a-required-check-outside-ci-yml-has-a-local-route.test.ts. */
 
 /** One `--ci-parity` step's outcome, keyed by an open `name`: one job can produce several steps. */
 export interface CiParityStepResult {
@@ -344,20 +323,21 @@ export interface CiParityStepResult {
   staticTiming?: StaticCheckTiming;
   /** W1-T2862: bounded stdout, kept only where a fast step opts in; a truncated payload is never complete. */
   successOutput?: { text: string; truncated: boolean };
+  qualification?: {
+    command: { file: string; args: string[] };
+    output: string; complete: boolean; exitCode: number | null;
+    provenance: "default-subprocess";
+    profile?: string;
+    sourceBefore?: { head: string; clean: boolean; error?: string };
+    sourceAfter?: { head: string; clean: boolean; error?: string };
+  };
 }
 
 /** BACKSTOP: the durable summary must not grow with an unbounded child stdout stream. */
 export const MAX_RETAINED_SUCCESS_OUTPUT_CHARS = 65_536;
-/**
- * Where a preflight run writes its verdict, so the result survives the container that produced it.
- * TRAP: an operator lost an eight-minute run's verdict twice in one day, the container removed
- * before its summary was read.
- *
- * INVARIANT: `<repoRoot>/coverage/` — this route's gitignored artefact directory, and on a
- * container host inside the mounted state volume. Never the ledger (a verdict decides nothing),
- * never `config.root` (`loadConfig` would acquire a claude-binary dependency).
- * Why: docs/forensics/ci-parity.md — the two lost runs, and the two paths ruled out.
- */
+/** Keep the verdict in gitignored <repoRoot>/coverage/ so it survives container removal.
+ * Two eight-minute verdicts were lost before they could be read. Never use the ledger (no decision)
+ * or config.root (loadConfig requires claude). Record: docs/forensics/ci-parity.md. */
 export function preflightSummaryPath(repoRoot: string): string {
   return join(repoRoot, "coverage", "preflight-summary.json");
 }
@@ -404,18 +384,9 @@ export function buildPreflightSummary(input: {
   };
 }
 
-/**
- * The worker's own preflight verdict, read back out of the worktree it ran in — `undefined` when
- * there is nothing worth saying.
- *
- * INVARIANT: the file cannot be stale. `coverage/` is gitignored, the worktree is cut fresh from
- * `origin/main`, and `runTask` removes it only below the implement dispatch, so a summary found
- * there was written by THIS worker on every exit path.
- *
- * TRAP: silence must stay silence. No file, unreadable JSON, or a PASS all report nothing — a
- * phase line on every dispatch is noise that gets filtered out and then missed.
- * Why: why the orchestrator reads a file at all — docs/forensics/ci-parity.md.
- */
+/** Read this worker's failing verdict; absent/unreadable/PASS summaries stay silent to avoid noise.
+ * Fresh worktrees and runTask's implement-only removal prevent stale coverage/ summaries.
+ * Every exit path writes the summary. Record: docs/forensics/ci-parity.md. */
 export function preflightFailureNotice(
   repoRoot: string,
   readFile: (path: string) => string = (p) => readFileSync(p, "utf8"),
@@ -449,6 +420,7 @@ interface CiParityLeafResult {
   detail: string;
   matched?: boolean;
   successOutput?: CiParityStepResult["successOutput"];
+  qualification?: CiParityStepResult["qualification"];
 }
 
 /** One ci.yml job's parity entry. A `mirrored: false` entry MUST carry a `reason` — that is what records it. */
@@ -643,20 +615,27 @@ export function boundedSuiteLeaf(
 ): CiParityLeafResult {
   if (spawn !== defaultPreflightSpawn) return shellOut(spawn, label, file, args, opts);
   const res = runBoundedSuite(file, args, { label, timeoutMs, ...opts });
+  const output = `${res.stdout}\n${res.stderr}`;
+  const qualification: NonNullable<CiParityStepResult["qualification"]> = {
+    command: { file, args: [...args] }, output: output.slice(0, MAX_RETAINED_SUCCESS_OUTPUT_CHARS),
+    complete: !opts.stream && !res.timeout && !res.error && !res.signal && res.status !== null && output.length <= MAX_RETAINED_SUCCESS_OUTPUT_CHARS,
+    exitCode: res.status, provenance: "default-subprocess",
+  };
   if (res.timeout) {
     const lastOutput = res.timeout.lastOutput.trim();
     return {
       ok: false,
+      qualification,
       detail:
         `FAIL — ${res.timeout.label} exceeded its ${timeoutMs}ms wall-clock ceiling; its process group was killed with SIGKILL. ` +
         `The suite's failure set is UNVERIFIED.${lastOutput ? ` Last output before termination:\n${lastOutput}` : " No suite output arrived before termination."}`,
     };
   }
   const spawnFailed = spawnFailureDetail(label, res);
-  if (spawnFailed) return { ok: false, detail: spawnFailed };
-  if (res.status === 0) return { ok: true, detail: `PASS — ${label}` };
+  if (spawnFailed) return { ok: false, detail: spawnFailed, qualification };
+  if (res.status === 0) return { ok: true, detail: `PASS — ${label}`, qualification };
   const captured = (res.stdout + res.stderr).trim();
-  return { ok: false, detail: `FAIL — ${label}\n${opts.stream ? "(output streamed above as it ran — not re-captured here)" : captured}` };
+  return { ok: false, detail: `FAIL — ${label}\n${opts.stream ? "(output streamed above as it ran — not re-captured here)" : captured}`, qualification };
 }
 
 /** A trigger leaf: both trigger scripts exit 0 in EITHER verdict and say matched/skip only in
@@ -705,23 +684,11 @@ function refreshOriginMain(repoRoot: string, spawn: PreflightSpawn): CiParityLea
   return result;
 }
 
-/**
- * W1-T3017 — the base this run diffs against, RESOLVED TO A SHA and cached per (spawn, repoRoot).
- *
- * WHY A SHA AND NOT THE REF. A ref is CLONE-scoped, not process-scoped: any worktree sharing this
- * clone moves `origin/main` for every process at once the moment it fetches, and
- * {@link refreshOriginMain} is itself such a fetch — test/moving-base-changed-files.test.ts states
- * the mechanism outright ("the fleet moves the ref on itself"). So memoizing the FETCH cannot make
- * a run self-consistent; only naming a sha can. What moves is what counts as an ADDED line, so a
- * base that shifts mid-run makes `diff-coverage` gain or lose lines it must cover, and the red
- * names the author's own file.
- *
- * REFUSES, NEVER FALLS BACK TO THE REF NAME. The `lint-plan` entry below previously read
- * `rev-parse origin/main` and fell back with `|| "origin/main"` — which silently restores the
- * moving-ref behaviour at exactly the moment the pin is most needed. {@link runPreflightCoverage}
- * already refuses outright on a base-refresh failure, so refusing here follows the precedent
- * standing beside it rather than inventing a policy.
- */
+/** W1-T3017: cache the resolved base SHA per (spawn, repoRoot), never the clone-scoped ref.
+ * Memoizing a fetch cannot stop sibling worktrees moving origin/main mid-run and changing coverage's
+ * added-line set. test/moving-base-changed-files.test.ts demonstrates this shared-ref trap.
+ * Refuse resolution failures; falling back to "origin/main" restores the race precisely when
+ * the pin is needed. runPreflightCoverage already refuses failed base refreshes. */
 export type BasePin = { sha: string } | { failure: string };
 
 const basePinCache = new WeakMap<PreflightSpawn, Map<string, BasePin>>();
@@ -782,40 +749,15 @@ function mergeBaseDiffText(repoRoot: string, spawn: PreflightSpawn): string {
   return res.stdout;
 }
 
-/**
- * W1-T3013 — THE ONE REFUSAL BOTH COVERAGE MODES REACH when there is no diff to measure.
- *
- * Lifted to a constant rather than written twice: {@link runPreflightCoverage}'s
- * `coverage-mode:diff-scope` arm already refused in these words, and the coverage-ratchet entry
- * needed the same sentence. Two hand-written copies of one refusal are two things to drift.
- */
+/** W1-T3013: both coverage modes share this empty-diff refusal so their wording cannot drift. */
 export const EMPTY_DIFF_COVERAGE_REFUSAL = "origin/main...HEAD (freshly refreshed) is an empty diff; there is no diff to assert coverage over";
 
-/**
- * W1-T3013 — THE THREE-DOT DIFF, CHECKED, because feeding an unchecked one to `diff-coverage.mjs`
- * produces a gate that cannot fail.
- *
- * THE DEFECT THIS EXISTS FOR, and both halves are correct in isolation. {@link mergeBaseDiffText}
- * returns `res.stdout` without reading `res.status`, so a failed `git diff` yields "".
- * `scripts/diff-coverage.mjs` over an empty added-line set reports OK — rightly, since the claim
- * is vacuously true. Composed through the entry's `input:`, a git failure renders as a clean green
- * `diff-coverage` step: the vacuous-pass family CLAUDE.md's coverage section already names,
- * reached from the diff side rather than the lcov side.
- *
- * BOTH CONDITIONS ARE READ BECAUSE THEY CATCH DIFFERENT FAULTS, and neither subsumes the other:
- * a non-zero or null `status` is git ERRORING; an empty `stdout` on a zero status is git
- * SUCCEEDING over a PR that diffs nothing. The second is equally not a coverage result, and is
- * exactly what `coverage-mode:diff-scope` refuses on the other path.
- *
- * REFUSES, NEVER REPAIRS: no retry, no fallback ref, no synthesised diff. A gate that cannot
- * measure says so in its own step.
- *
- * THE DETAIL OPENS WITH `FAIL`, NOT `REFUSED`, and that is this table's contract rather than a
- * preference: test/preflight-ci-parity.test.ts asserts every step detail matches
- * `^<name>: (PASS|FAIL|EXCLUDED)`. {@link runPreflightCoverage} builds its steps by hand, outside
- * that contract, so it keeps its own `REFUSED —` opening. The SENTENCE is what is shared
- * ({@link EMPTY_DIFF_COVERAGE_REFUSAL}); the opening word belongs to each mode's own vocabulary.
- */
+/** W1-T3013: refuse failed git diffs AND successful empty diffs; neither measures coverage.
+ * mergeBaseDiffText returns stdout without checking status. Feeding its empty result to
+ * diff-coverage.mjs would vacuously pass. Never retry, synthesize a diff, or fall back to a ref.
+ * test/preflight-ci-parity.test.ts requires step details to start ^<name>: (PASS|FAIL|EXCLUDED).
+ * This table therefore uses FAIL; runPreflightCoverage's separate pipeline uses REFUSED.
+ * Both share EMPTY_DIFF_COVERAGE_REFUSAL's sentence. */
 function mergeBaseDiffForCoverage(
   repoRoot: string,
   spawn: PreflightSpawn,
@@ -2444,36 +2386,14 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
  *  real `Date.now()` delta is compared against on every run. */
 export const FAST_GATE_CENSUS_BOUND_MS = 2000;
 
-/**
- * W1-T2545 — THE BOUND ABOVE IS THE SOFT ONE; THE REFUSAL IS RELATIVE.
- *
- * TRAP: a census entry's cost grows with the corpus it walks, so a fixed ceiling ejects its own
- * entries over time, silently restoring the blindness W1-T2478 closed. MEASURED: the same entry
- * read 2509ms locally and 2268/2250ms on GitHub runners while main's `ci` passed.
- *
- * INVARIANT: refusal is measured against the SAME RUN's own census durations, a ratio a slow
- * machine cannot manufacture; the soft bound still REPORTS its cost, so growth is visible first.
- * Why: docs/forensics/ci-parity.md (W1-T2545).
- *
- * W1-T3408 — THE REFERENCE IS THE RUN'S MEDIAN, NEVER ITS MINIMUM.
- *
- * TRAP: `Math.min` pins the reference to whichever single entry happens to be cheapest — often a
- * near-trivial `git ls-files`/`git grep` walk whose own cost barely moves with load, while a
- * heavier, spawn-and-I/O-bound entry (e.g. `negative-reachability-census`) IS sensitive to load.
- * MEASURED 2026-09-11 on PR #5087: under contention that cheap entry stayed near the floor while
- * a healthy sibling's cost rose from its usual range to 4296ms/5034ms, tripping a threshold that
- * was floor-pinned at 4000/4776ms purely because the CHEAPEST entry never got slow — both refused
- * steps' own commands PASSed, and the identical suite idle (or on origin/main) passed 20/20. The
- * bound was tightest exactly when the fastest entry in the run was fastest — a healthy condition,
- * not a runaway one.
- *
- * FIX: the reference is the MEDIAN of this run's own census durations, not the minimum. A single
- * cheap outlier (or, symmetrically, a single genuinely-runaway one) cannot drag the median to an
- * extreme the way it can drag a min or a mean — the reference tracks the run's typical entry, so
- * a sibling that merely finished fast no longer manufactures a false RUNAWAY for a slower-but-
- * healthy neighbour, while an entry costing several times the TYPICAL entry (not merely the
- * cheapest one) is still refused. Why: docs/forensics/ci-parity.md (W1-T3408).
- */
+/** W1-T2545: the fixed bound reports cost; refusal is relative to this run's census durations.
+ * A fixed ceiling ejected growing suites (2509ms locally; 2268/2250ms hosted) despite passing CI,
+ * restoring the blindness W1-T2478 closed.
+ * W1-T3408: use the MEDIAN, never the minimum. On PR #5087 (2026-09-11), a cheap entry pinned
+ * thresholds at 4000/4776ms while healthy siblings rose to 4296/5034ms under load; idle runs
+ * passed 20/20. A cheap outlier must not manufacture RUNAWAY for a healthy neighbour.
+ * The median tracks typical cost without being dragged by one cheap or expensive entry.
+ * Record: docs/forensics/ci-parity.md (W1-T2545, W1-T3408). */
 
 /** The same-run reference is floored, so a run with only trivially-cheap entries cannot make the ratio harsh for all of them. */
 export const FAST_GATE_CENSUS_REFERENCE_FLOOR_MS = 1000;
@@ -3859,13 +3779,8 @@ export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDe
 
 // ── W1-T3099: Standing rule 15, at author time ────────────────────────────────────────────────
 
-/**
- * THE JUDGE'S REMEDY, COPIED VERBATIM from `checkSatisfiedByGuard` (review.ts). An author who reads
- * one sentence at preflight and another at review must reconcile two texts to learn one rule.
- * review.ts's own comment records why BOTH halves are needed: telling an author only to SPLIT
- * converts one refusal into another (#3626, #3631, #3636, #3669 each split correctly and were
- * refused anyway).
- */
+/** Keep checkSatisfiedByGuard's remedy verbatim: telling authors only to split caused another
+ * refusal even after correct splits (#3626, #3631, #3636, #3669; review.ts). */
 export const RULE_15_SPLIT_REMEDY =
   "REMEDY: file the shard in its own plan-only PR (no src/ or test/ file in that diff), then build " +
   "it in a second PR. In the filing PR's body, substantiate each criterion by NAMING the proof that " +
@@ -3877,21 +3792,10 @@ export interface Rule15SplitVerdict {
   reason?: string;
 }
 
-/**
- * W1-T3099 — Standing rule 15 evaluated on a LOCAL diff, so `rmd preflight` and `lint-plan --base`
- * refuse before a push what the judge refuses after a full CI cycle.
- *
- * ONE PREDICATE, TWO VERBS, consuming the JUDGE'S OWN primitives rather than a second notion of
- * either half: {@link criterionFieldTampered} decides "a criterion moved" and {@link planOnlyDiff}
- * decides "this diff is a filing". A local re-implementation of either could disagree with review,
- * and an author-time check that refuses what the judge allows is worse than no check.
- *
- * DELIBERATELY WEAKER THAN THE JUDGE, IN THE SAFE DIRECTION. `checkSatisfiedByGuard` carves out
- * `planOnly && humanAuthored`; authorship is not knowable from a diff, so this carves out
- * `planOnly` alone. Stated rather than hidden: a plan-only WORKER-authored diff passes here and may
- * still be refused at review. That is an UNDER-refusal — it never blocks work the judge would have
- * allowed, which is the only direction an early warning may err in.
- */
+/** W1-T3099: preflight and lint-plan --base reuse the judge's criterionFieldTampered and
+ * planOnlyDiff predicates, preventing a divergent local rule. Authorship is unknowable from a
+ * diff, so planOnly alone passes here; the judge also requires humanAuthored. This deliberate
+ * under-refusal may pass worker filings locally but never blocks a filing the judge allows. */
 export function rule15SplitViolation(diff: string): Rule15SplitVerdict {
   if (!criterionFieldTampered(diff)) return { refused: false };
   // The filing PR's own shape — the judge's derivation, not "no src/ file" spelled a second time.
@@ -3905,11 +3809,7 @@ export function rule15SplitViolation(diff: string): Rule15SplitVerdict {
   };
 }
 
-/**
- * The preflight step. REFUSES rather than warns: `rmd preflight` already exits non-zero for parity
- * failures and this joins them, because a warning at author time is a line in a scroll-back and the
- * failure it prevents costs a full CI cycle.
- */
+/** Refuse parity failures before a push; a scroll-back warning would still cost a full CI cycle. */
 export function rule15SplitStep(diff: string): CiParityStepResult {
   const verdict = rule15SplitViolation(diff);
   return verdict.refused
