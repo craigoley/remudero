@@ -6,6 +6,9 @@ import * as cohort from "#src/lib/benchmark-cohort.js";
 import { benchmarkCohortCadence, runBenchmarkCohortPass,
   type BenchmarkCohortCadenceDeps } from "#src/lib/benchmark-cohort.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { drainDetachedSweepActions } from "#src/lib/sweep.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 function assignment(id: string): string {
@@ -13,7 +16,7 @@ function assignment(id: string): string {
     worker_assignment: { id, selected: { provider: "cash", model: "gpt-5-nano" } } }) + "\n";
 }
 
-function fixture(t: TestContext) {
+function fixture(t: TestContext, passMs = 0) {
   const stateDir = ownedFixtureDir(t, "cohort-input-pace").dir;
   const live = join(stateDir, "ledger.ndjson");
   writeFileSync(live, assignment("boot"));
@@ -22,6 +25,7 @@ function fixture(t: TestContext) {
   const clock = clockFromMillisFn(() => now);
   const hooks = benchmarkCohortCadence({ stateDir: () => stateDir, clock, run: async (dir) => {
     runs += 1;
+    now += passMs;
     return runBenchmarkCohortPass(dir, { maxSources: 1, nowIso: clock.iso() });
   } });
   return { stateDir, live, hooks, clock, runs: () => runs, advance: (ms: number) => { now += ms; } };
@@ -36,26 +40,55 @@ function files(stateDir: string) {
 }
 
 test("W1-T9912: live growth alone never makes a cohort pass due", async (t) => {
-  const f = fixture(t);
-  assert.equal(f.hooks.checkBenchmarkCohort(), true, "boot is the positive control");
-  const boot = await f.hooks.runBenchmarkCohortPass();
-  assert.equal(boot.pendingSources, 0);
-  assert.equal(boot.snapshot.sourceRows.assignments, 1);
+  const f = fixture(t, 37);
+  const planPath = join(f.stateDir, "tasks.yaml");
+  writeFileSync(planPath, "- id: A\n  title: a\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n");
+  const rows: { step: string; fields?: Record<string, unknown> }[] = [];
+  const tick = async () => {
+    try {
+      await runDaemon(loadPlan(planPath), {
+        refreshMerged: () => () => false,
+        runOne: async (id) => ({ taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }),
+        sleep: async () => {}, sweep: async () => {}, now: () => new Date(f.clock.now()),
+        log: (step, fields) => { rows.push({ step, fields }); },
+        ...f.hooks,
+      }, { max: 1 });
+    } finally {
+      await drainDetachedSweepActions();
+    }
+  };
+  const cohortRows = () => rows.filter((row) => row.step.startsWith("benchmark_cohort."));
+  await tick();
+  assert.equal(f.runs(), 1, "boot is the positive control");
+  const boot = rows.find((row) => row.step === "benchmark_cohort.ran");
+  assert.equal(boot?.fields?.due_because, "boot");
+  assert.equal(boot?.fields?.pass_ms, 37);
+  assert.equal(boot?.fields?.pending_sources, 0);
   const runsAtBoot = f.runs();
+  const rowsAtBoot = cohortRows().length;
   for (let minute = 1; minute <= 120; minute += 1) {
     f.advance(60_000);
     appendFileSync(f.live, assignment(`tail-${minute}`));
+    if (minute % 15 !== 0) continue;
     const before = files(f.stateDir);
-    if (f.hooks.checkBenchmarkCohort()) await f.hooks.runBenchmarkCohortPass();
-    else assert.deepEqual(files(f.stateDir), before, "a skipped check changes neither bytes nor metadata");
+    await tick();
+    assert.deepEqual(files(f.stateDir), before, "a skipped check changes neither bytes nor metadata");
   }
   assert.equal(f.runs() - runsAtBoot, 0, "two hours of live growth runs ZERO daemon passes");
+  assert.equal(cohortRows().length, rowsAtBoot, "skipped daemon checks emit no cohort rows");
 
   const sealed = join(f.stateDir, "ledger.2026-10-16T08-00-00-000Z.ndjson");
   writeFileSync(sealed, assignment("sealed"));
   assert.equal(f.hooks.checkBenchmarkCohort(), true);
-  assert.equal((await f.hooks.runBenchmarkCohortPass()).dueBecause, "sealed_sources");
-  while (f.hooks.checkBenchmarkCohort()) await f.hooks.runBenchmarkCohortPass();
+  await tick();
+  assert.equal(f.runs(), runsAtBoot + 1, "a new sealed rotation runs at the next daemon check");
+  const sealedRow = rows.filter((row) => row.step === "benchmark_cohort.ran").at(-1);
+  assert.equal(sealedRow?.fields?.due_because, "sealed_sources");
+  assert.equal(sealedRow?.fields?.pass_ms, 37, "the daemon emits the cadence's measured pass cost");
+  while (f.hooks.checkBenchmarkCohort()) await tick();
+  const partialRow = rows.filter((row) => row.step === "benchmark_cohort.ran").at(-1);
+  assert.equal(partialRow?.fields?.due_because, "partial");
+  assert.equal(partialRow?.fields?.pass_ms, 37);
   const checkpoint = JSON.parse(readFileSync(join(f.stateDir, "benchmark-cohort-index.json"), "utf8"));
   assert.equal(checkpoint.lastGood.sourceRows.assignments, 122, "the pass folds both archive and live tail");
 });
