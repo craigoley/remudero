@@ -1,0 +1,45 @@
+- id: W1-T11030
+  title: An instrument edit the shadow judge finds additive, and an independent reviewer agrees loosens nothing, rides its own instrument-only PR instead of waiting for the operator
+  repo: remudero
+  depends_on:
+    - W1-T11029
+  priority: 2
+  type: implement
+  verify: human
+  principles:
+    tdd: strict
+  risk: high # admits an instrument-path edit without the operator; the integrity of every gate it measures rests on the judge
+  origin: operator-session#fix-lane-effectiveness-2026-10-30
+  plan_refs:
+    - W1-T297
+    - W1-T11029
+  files:
+    - src/lib/instrument-grant.ts
+    - src/cli/commands/fix.ts
+    - test/ci/gates/an-additive-instrument-edit-rides-its-own-reviewed-pr.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When W1-T11029's judgement for an instrument stand-down is would_grant and an independent reviewer, not the round's worker, answers that the saved patch removes or loosens no measurement, the fix lane opens that patch alone as an instrument-only PR (with its own test falsifier when the worker wrote one) and ledgers instrument_grant.granted naming both PRs. The stood-down PR's next round runs once that PR merges. A would_escalate judgement, a reviewer that disagrees or cannot answer, or a patch that no longer applies escalates exactly as today"
+      proof: "unit test: test/ci/gates/an-additive-instrument-edit-rides-its-own-reviewed-pr.test.ts"
+    - claim: The fix lane's instrument-scope stand-down calls the grant step after the shadow judgement
+      proof: "grep: grantInstrumentEdit( in src/cli/commands/fix.ts"
+  rationale: |
+    Operator ruling 2026-10-30, "Judged grant, shadow first": a separate judge admits an instrument edit only if it purely adds (registers an entry, tightens) and removes or loosens nothing, checked mechanically plus by an independent reviewer. It runs in shadow first (W1-T11029) and flips to act if every would-be grant was additive and the operator's spot-check agrees. The instrument-only PR is Standing rule 25's sanctioned shape ("land the instrument change in its own PR, then rebase this one onto it").
+  design: |
+    RELEASE CRITERIA, pre-agreed with the operator (this record stays verify: human until they are met):
+    - W1-T11029 has been live for at least 48 h and written at least one instrument_grant.shadow row.
+    - Every would_grant patch saved under state/instrument-grant-shadow is purely additive (true by construction) and the operator's spot-check of those patches agrees that each one adds a registration or tightens and weakens nothing.
+    The reviewer is independent of the round: a fresh judge given only the instrument patch, the gate it belongs to and the stood-down PR's failing check, asked whether the patch can make any check pass that would otherwise fail for a reason other than the registration it adds.
+  falsifier: |
+    Skip the reviewer: the fixture whose additive patch appends a skip entry to a census exclusion list is granted, and the test fails. Grant a would_escalate judgement: the modifies fixture opens a PR, and the test fails.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (run-unfiled-1793374065372). Filed at verify: human by operator ruling: release it only after the shadow evidence and the operator's spot-check above.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.98
+    reasons:
+      - "high-risk verdict at confidence 0.98 — on the change's description/files alone, no diff was read — Acceptance 1 authorizes automatic instrument-edit PRs after shadow judgement and independent review instead of operator escalation, changing review policy within the stated HIGH criteria.; on the change's description/files alone, no diff was read — The filed note requires shadow evidence and an operator spot-check before release; neither is supplied, and the record currently states verify: auto despite its noted verify: human release condition."
+    judged_at: "2026-10-30T17:51:49.421Z"
+    pin: "c64d15c01be8ef141f39e011164daf32c56448dbd757cd2a4319192fd2aa7fba"
