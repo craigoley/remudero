@@ -63,6 +63,8 @@ export interface RedesignEdit {
 export interface RedesignAction extends GardenAction<RedesignClass> {
   shard: string;
   signature: string;
+  /** One key per evidence line ({@link RedesignCandidate.keys}), recorded with every verdict and landing. */
+  keys: string[];
   edit: RedesignEdit;
 }
 
@@ -72,6 +74,8 @@ export interface RedesignCandidate {
   text: string;
   evidence: string[];
   signature: string;
+  /** One key per evidence line: the candidate is asked only while one of them has no verdict and no landing. */
+  keys: string[];
 }
 
 export interface RedesignInventory {
@@ -99,6 +103,12 @@ export interface RedesignSources {
 
 const signatureOf = (id: string, evidence: readonly string[]): string =>
   createHash("sha256").update(JSON.stringify([id, ...evidence])).digest("hex").slice(0, 16);
+
+/** The verdict and landing keys a ledger row carries: its signature and, since round 8 of #15621, its evidence keys. */
+const rowKeys = (r: Row, signatures: unknown): string[] => [
+  ...(Array.isArray(signatures) ? signatures.map(String) : typeof signatures === "string" ? [signatures] : []),
+  ...(Array.isArray(r.evidence_keys) ? r.evidence_keys.map(String) : []),
+];
 
 /** The tasks a person was asked to redesign and has not: a refusal-amendment pointer, or a PR the sweep holds. */
 export function redesignCandidates(sources: RedesignSources): RedesignCandidate[] {
@@ -158,18 +168,23 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
       add(id, `refusal-amendment pointer in the shard:\n${pointers.map((p) => p.trim()).join("\n")}`);
     }
   }
-  // A verdict is never windowed: an unchanged pointer is the same evidence a week later, and is not asked again.
-  const judged = new Set(sources.ledger([REDESIGN_JUDGED_STEP], fixedClock(0).iso()).map((r) => String(r.signature)));
+  // A verdict is never windowed: an unchanged pointer is the same evidence a week later, and is not asked again. It is
+  // kept per evidence line, because the set of lines is windowed: a hold row leaving the seven days changes the set,
+  // and a set that only lost lines, or reordered them, holds no line a verdict has not already seen.
+  const judged = new Set(sources.ledger([REDESIGN_JUDGED_STEP], fixedClock(0).iso()).flatMap((r) => rowKeys(r, r.signature)));
   // An amend is recorded by its landing, not by its answer: the open PR holds it, a merge marks the shard, a close
   // declines it, and a filing that failed leaves it free to be asked again.
   const settled = sources.settled();
   const out: RedesignCandidate[] = [];
-  for (const [id, lines] of evidence) {
+  for (const [id, unordered] of evidence) {
     const shard = plan.shards.get(id)!;
     const text = sources.readShard(shard);
+    const lines = [...unordered].sort();
     const signature = signatureOf(id, lines);
+    const keys = lines.map((line) => signatureOf(id, [line]));
     const marked = text.split("\n").some((line) => REDESIGN_MARKER_RE.exec(line)?.[1] === signature);
-    if (!marked && !judged.has(signature) && !settled.has(signature)) out.push({ id, shard, text, evidence: lines, signature });
+    const known = (key: string) => judged.has(key) || settled.has(key);
+    if (!marked && !known(signature) && !keys.every(known)) out.push({ id, shard, text, evidence: lines, signature, keys });
   }
   return out.sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true }));
 }
@@ -308,13 +323,13 @@ export async function redesignInventory(sources: RedesignSources, deps: Gardener
       outcome = refused === undefined
         ? { task_id: candidate.id, outcome: "amend", reason: parsed.edit.reason }
         : { task_id: candidate.id, outcome: "refused", reason: refused };
-      if (refused === undefined) actions.push({ class: "amend", target: candidate.id, reason: parsed.edit.reason, shard: candidate.shard, signature: candidate.signature, edit: parsed.edit });
+      if (refused === undefined) actions.push({ class: "amend", target: candidate.id, reason: parsed.edit.reason, shard: candidate.shard, signature: candidate.signature, keys: candidate.keys, edit: parsed.edit });
     } else {
       outcome = { task_id: candidate.id, outcome: parsed.verdict, reason: parsed.reason };
     }
     outcomes.push(outcome);
     // A judged signature is never asked again: new evidence (a new hold, a new pointer) is a new signature.
-    if (outcome.outcome !== "amend") deps.log(REDESIGN_JUDGED_STEP, { ...outcome, signature: candidate.signature });
+    if (outcome.outcome !== "amend") deps.log(REDESIGN_JUDGED_STEP, { ...outcome, signature: candidate.signature, evidence_keys: candidate.keys });
   }
   return { candidates: candidates.length, actions, outcomes };
 }
@@ -358,7 +373,7 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
       // The framework releases a decision pending after 24 h while its PR is still open, so a landing's own scorecard
       // row, which only a filed PR carries a url on, is what keeps that PR's signatures from a second PR.
       const landed = sources.ledger([REDESIGN_SCORECARD_STEP], fixedClock(0).iso())
-        .filter((r) => typeof r.pr_url === "string" && Array.isArray(r.signatures)).flatMap((r) => (r.signatures as unknown[]).map(String));
+        .filter((r) => typeof r.pr_url === "string" && Array.isArray(r.signatures)).flatMap((r) => rowKeys(r, r.signatures));
       return new Set([...(state.pending?.targets ?? []), ...(state.declinedTargets ?? [])].map((t) => t.target).concat(landed));
     }),
   };
@@ -378,10 +393,14 @@ export function redesignGardenSpec(
     inventoryAsync: () => redesignInventory(sources, deps),
     fingerprint: (i) => i.actions.map((a) => a.signature).join(",") || "none",
     unfinished: (i) => i.actions.length > 0,
-    candidates: (i, _rng, declined = []) => i.actions.filter((a) => !declined.some((d) => d.target === a.signature)),
-    pendingTargets: (plan) => plan.actions.map((a) => ({ class: "amend" as const, target: a.signature })),
+    candidates: (i, _rng, declined = []) => {
+      const no = new Set(declined.map((d) => d.target));
+      return i.actions.filter((a) => !no.has(a.signature) && !a.keys.every((k) => no.has(k)));
+    },
+    pendingTargets: (plan) => plan.actions.flatMap((a) => [a.signature, ...a.keys].map((target) => ({ class: "amend" as const, target }))),
     scorecard: (i, plan) => {
-      const card = { candidates: i.candidates, outcomes: i.outcomes, acting: plan.acting, signatures: plan.actions.map((a) => a.signature) };
+      const card = { candidates: i.candidates, outcomes: i.outcomes, acting: plan.acting, signatures: plan.actions.map((a) => a.signature),
+        evidence_keys: plan.actions.flatMap((a) => a.keys) };
       deps.log(REDESIGN_SCORECARD_STEP, card);
       return card;
     },
@@ -391,7 +410,7 @@ export function redesignGardenSpec(
       for (const action of plan.actions) {
         const abs = join(ws.root, action.shard);
         const edited = applyRedesignEdit(readFileSync(abs, "utf8"), action.shard, action.edit, action.signature, date);
-        if ("refused" in edited) { deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "refused", reason: edited.refused, signature: action.signature }); continue; }
+        if ("refused" in edited) { deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "refused", reason: edited.refused, signature: action.signature, evidence_keys: action.keys }); continue; }
         writeAtomic(abs, edited.text);
         landed.push(action);
       }

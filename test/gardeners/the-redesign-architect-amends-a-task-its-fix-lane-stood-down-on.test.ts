@@ -109,8 +109,9 @@ test("the redesign Architect amends a task its fix lane stood down on, keeping e
   assert.ok(marker, "the shard carries the marker its PR's proof greps");
   assert.ok(w.landed[0]!.body.includes(`proof: "grep: # redesign: signature=${marker[1]} in ${REL}"`));
   assert.ok(!w.rows.some((r) => r.step === REDESIGN_JUDGED_STEP && r.outcome === "amend"), "an answer is not a landing");
-  assert.deepEqual(readGardenState(gardenStatePath(w.deps.stateDir, "redesign"), ["amend"]).pending?.targets,
-    [{ class: "amend", target: marker[1] }], "the open PR carries the signature it amends");
+  const pending = readGardenState(gardenStatePath(w.deps.stateDir, "redesign"), ["amend"]).pending?.targets ?? [];
+  assert.deepEqual(pending[0], { class: "amend", target: marker[1] }, "the open PR carries the signature it amends");
+  assert.ok(pending.length > 1 && pending.every((p) => /^[a-f0-9]{16}$/.test(p.target)), "and one key per evidence line");
   // The same evidence is never asked about again.
   assert.equal(redesignCandidates({ ...(w.sources as RedesignSources) }).length, 0);
 });
@@ -202,11 +203,11 @@ test("an amend is recorded by its landing: a failed filing re-asks, an open PR h
   await runGardenAsync(redesignGardenSpec(later, w.sources), later);
   const after = readGardenState(gardenStatePath(deps.stateDir, "redesign"), ["amend"]);
   assert.equal(after.pending, undefined);
-  assert.equal(after.declinedTargets?.length, 1, "the close declines the signature");
+  assert.ok((after.declinedTargets?.length ?? 0) > 1, "the close declines the signature and its evidence keys");
   assert.equal(redesignCandidates(buildRedesignSources(deps, w.sources)).length, 0, "a declined signature is not asked again");
   assert.equal(w.prompts.length, 2);
   // The framework hands candidates its declined list too; an action whose signature was declined never acts.
-  const action = { class: "amend" as const, target: ID, reason: "r", shard: REL, signature: after.declinedTargets![0]!.target, edit: { reason: "r", filesAdd: [], proofs: [], amendment: "a" } };
+  const action = { class: "amend" as const, target: ID, reason: "r", shard: REL, signature: after.declinedTargets![0]!.target, keys: after.declinedTargets!.slice(1).map((d) => d.target), edit: { reason: "r", filesAdd: [], proofs: [], amendment: "a" } };
   const spec = redesignGardenSpec(deps, w.sources);
   const inv = { candidates: 1, actions: [action], outcomes: [] };
   assert.deepEqual(spec.candidates(inv, () => 0, after.declinedTargets), []);
@@ -278,6 +279,53 @@ test("a GRILL answer lands nothing and the same evidence is not asked again", as
   const verdict = w.rows.find((r) => r.step === REDESIGN_JUDGED_STEP)!;
   verdict.ts = iso(NOW - 8 * 24 * 60 * MIN);
   assert.equal(redesignCandidates(w.sources as RedesignSources).length, 0, "an eight-day-old GRILL is not asked again");
+});
+
+test("a GRILL answer lands nothing and the same evidence is not asked again, in any order and once the window drops a line; a new line is asked", async (t) => {
+  // #15621 round 8: two PRs of one task held, GRILL answered, then PR #15404's oldest row left the seven-day window.
+  // The newest-row map was then filled #15405 first, the same two lines hashed in the other order, and GRILL was asked again.
+  const at = (ms: number): Clock => ({ now: () => ms, date: () => new Date(ms), iso: () => iso(ms) });
+  const held = (pr: number, ms: number): Row => ({ ...heldRow(ms), pr_number: pr });
+  const DAY = 24 * 60 * MIN;
+  const rows = [held(15404, NOW - 7 * DAY + 30 * MIN), held(15405, NOW - 100 * MIN), held(15404, NOW - 5 * MIN), held(15405, NOW - 5 * MIN)];
+  const w = world(t, { pointer: false, rows, answers: ['REDESIGN: {"verdict":"grill","reason":"the claim itself needs the operator"}'] });
+  const ask = (ms: number) => redesignCandidates({ ...(w.sources as RedesignSources), clock: at(ms) });
+  assert.equal(ask(NOW).length, 1);
+  assert.equal(ask(NOW)[0]!.evidence.length, 2, "both PRs' holds are its evidence");
+  await runGardenAsync(redesignGardenSpec(w.deps, w.sources), w.deps);
+  assert.equal(w.prompts.length, 1);
+  // Two hours on, the oldest #15404 row is outside the window and both PRs are still disposed held.
+  const later = NOW + 120 * MIN;
+  w.rows.push(held(15405, later - 5 * MIN), held(15404, later - 4 * MIN));
+  assert.equal(ask(later).length, 0, "the same two lines in another order are the same evidence");
+  // #15405 stops being disposed: what remains is a subset of what was judged.
+  const quiet = later + 150 * MIN;
+  w.rows.push(held(15404, quiet - 5 * MIN));
+  assert.equal(ask(quiet).length, 0, "a set that only lost a line holds nothing a verdict has not seen");
+  // A third PR's hold is a line no verdict has seen.
+  w.rows.push(held(15406, quiet - 3 * 60 * MIN), held(15406, quiet - 4 * MIN));
+  assert.equal(ask(quiet).length, 1, "a new hold is new evidence");
+});
+
+test("a landed amendment is not asked again after the framework releases its still-open PR at 24 h, whatever order the window leaves its lines in", async (t) => {
+  const at = (ms: number): Clock => ({ now: () => ms, date: () => new Date(ms), iso: () => iso(ms) });
+  const held = (pr: number, ms: number): Row => ({ ...heldRow(ms), pr_number: pr });
+  const DAY = 24 * 60 * MIN;
+  const rows = [held(15404, NOW - 7 * DAY + 30 * MIN), held(15405, NOW - 100 * MIN), held(15404, NOW - 5 * MIN), held(15405, NOW - 5 * MIN)];
+  const w = world(t, { pointer: false, rows, answers: [AMEND, AMEND] });
+  const ws = mkdtempSync(join(tmpdir(), "rmd-redesign-ws-"));
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  cpSync(join(w.root, "plan"), join(ws, "plan"), { recursive: true });
+  const deps = (ms: number): GardenerDeps => ({ ...w.deps, clock: at(ms), prState: () => "open",
+    openWorkspace: () => ({ root: ws, land: () => "https://example.test/pull/904", dispose: () => {} }) });
+  await runGardenAsync(redesignGardenSpec(deps(NOW), w.sources), deps(NOW));
+  assert.equal(w.prompts.length, 1);
+  const later = NOW + 26 * 60 * MIN;
+  w.rows.push(held(15405, later - 5 * MIN), held(15404, later - 4 * MIN));
+  await runGardenAsync(redesignGardenSpec(deps(later), { ...w.sources, clock: at(later) }), deps(later));
+  assert.equal(readGardenState(gardenStatePath(w.deps.stateDir, "redesign"), ["amend"]).pending, undefined, "the framework released it");
+  assert.equal(redesignCandidates({ ...(w.sources as RedesignSources), clock: at(later) }).length, 0, "its landing holds the reordered lines");
+  assert.equal(w.prompts.length, 1, "and no Architect is spawned for them again");
 });
 
 test("rule 16 and the operator's grants are enforced in code, whatever the Architect answers", (t) => {
