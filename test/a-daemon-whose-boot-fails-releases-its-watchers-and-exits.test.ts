@@ -96,6 +96,39 @@ test("W1-T9909: the boot error propagates and a failed release is ledgered", asy
   }
 });
 
+test("a failed cleanup ledger write preserves the boot error and releases the drain lock", async (t) => {
+  const f = fixture();
+  const bootError = new Error("boot refused while ledger is unavailable");
+  const beforeListeners = listeners();
+  const reports = t.mock.method(console, "error", () => {});
+  let closes = 0;
+  try {
+    await assert.rejects(f.run({
+      wireSweepWake: () => ({ sleep: async () => "timeout", acknowledge: () => {}, close: () => {
+        closes++;
+        throw new Error("watcher close failed");
+      } }),
+      daemonBoot: async () => {
+        const ledger = join(f.root, "state", "ledger.ndjson");
+        rmSync(ledger);
+        mkdirSync(ledger);
+        throw bootError;
+      },
+    }), (error) => error === bootError);
+    assert.equal(closes, 1);
+    assert.deepEqual(listeners(), beforeListeners);
+    assert.equal(existsSync(f.lock), false);
+    assert.equal(reports.mock.calls.length, 1);
+    const [message, detail] = reports.mock.calls[0]!.arguments;
+    assert.equal(message, "daemon cleanup reporting failed");
+    assert.equal(detail.resource, "github_event_wake");
+    assert.equal(detail.error, "Error: watcher close failed");
+    assert.match(detail.reason, /EISDIR/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 function resources(failedRelease?: string) {
   const released = { wake: 0, socket: 0, read: 0, telemetry: 0, memory: 0 };
   const release = (key: keyof typeof released) => {
