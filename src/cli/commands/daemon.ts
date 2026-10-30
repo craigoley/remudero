@@ -90,6 +90,7 @@ import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
 import { resolveClaudeExecutable, claudeExecutableCache } from "../../lib/worker.js";
 import { defaultInstance, memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "../../lib/host-memory-ledger.js";
 import { type DispatchGovernorDeps } from "../../lib/dispatch-governor.js";
+import { focusGateFor } from "../../lib/focus-gardener.js";
 import { captureHeavyNewBuildStartupGate } from "../../lib/heavy-ready-startup.js";
 import { hostWorktreeGitAsync } from "../../lib/worktree-git.js";
 import { step } from "../../lib/git-push.js";
@@ -1084,7 +1085,9 @@ export async function daemonCommand(
     return { ...own, owned, foreign };
   };
   const openPrCount = () => openPrOwnership().owned;
-  const queueGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
+  // W1-T11026: the focus gardener judges every new-task consultation and holds it while the stuck stack is deep.
+  const queueGate = focusGateFor(queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure),
+    { stateDir: dirname(ledgerPath), log, clock: clockFromMillisFn(deps.now) });
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
