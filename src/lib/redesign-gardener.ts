@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 
 import { backlogLandingGuard } from "./backlog-gardener.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -40,6 +40,8 @@ const SWEPT_RECENTLY_MS = 2 * 60 * 60_000;
 const EVIDENCE_WINDOW_MS = 7 * 24 * 60 * 60_000;
 const HOLD_REASON = /^(?:fix needs design at this exact head|fix stood down at )/;
 const POINTER = /^ {2}# refusal-amendment \(.*(?:\n {2}# {3}.*)*/m;
+/** The stamp refusal-amendment.ts writes into the pointer's head: `(<task>, run <run>, <iso>)`. */
+export const POINTER_STAMP_RE = /^ {2}# refusal-amendment \([^,]+, run [^,]+, (\d{4}-\d\d-\d\dT[\d:.]+Z)\)/;
 const MARKER = (signature: string) => `  # redesign: signature=${signature}`;
 /** One shard line recording that the Architect already amended the task for this evidence signature. */
 export const REDESIGN_MARKER_RE = /^ {2}# redesign: signature=([a-f0-9]{16})$/;
@@ -104,9 +106,14 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     const rel = plan.shards.get(id);
     if (rel === undefined) continue;
     const pointer = POINTER.exec(sources.readShard(rel))?.[0];
-    if (pointer !== undefined) add(id, `refusal-amendment pointer in the shard:\n${pointer.trim()}`);
+    // The pointer's own stamp is when the lane stood down; a pointer younger than the fix lane's hour, or one with no
+    // stamp to age, is not yet the Architect's.
+    const stamped = pointer === undefined ? NaN : Date.parse(POINTER_STAMP_RE.exec(pointer)?.[1] ?? "");
+    if (pointer !== undefined && Number.isFinite(stamped) && now - stamped >= REDESIGN_AFTER_MS) {
+      add(id, `refusal-amendment pointer in the shard:\n${pointer.trim()}`);
+    }
   }
-  const rows = sources.ledger(["sweep.disposed", REDESIGN_JUDGED_STEP], fixedClock(now - EVIDENCE_WINDOW_MS).iso());
+  const rows = sources.ledger(["sweep.disposed"], fixedClock(now - EVIDENCE_WINDOW_MS).iso());
   const newest = new Map<number, Row>();
   for (const row of rows) {
     if (row.step !== "sweep.disposed" || typeof row.pr_number !== "number") continue;
@@ -122,7 +129,8 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     if (since.length === 0 || now - Math.min(...since) < REDESIGN_AFTER_MS) continue;
     add(row.task_id, `PR #${row.pr_number} at head ${String(row.head_sha).slice(0, 7)} is held: ${row.reason.slice(0, 1500)}`);
   }
-  const judged = new Set(rows.filter((r) => r.step === REDESIGN_JUDGED_STEP).map((r) => String(r.signature)));
+  // A verdict is never windowed: an unchanged pointer is the same evidence a week later, and is not asked again.
+  const judged = new Set(sources.ledger([REDESIGN_JUDGED_STEP], fixedClock(0).iso()).map((r) => String(r.signature)));
   const out: RedesignCandidate[] = [];
   for (const [id, lines] of evidence) {
     const shard = plan.shards.get(id)!;
@@ -184,7 +192,9 @@ export function parseRedesignAnswer(text: string): Parsed {
 export function redesignEditRefusal(task: Task, edit: RedesignEdit, pathExists: (rel: string) => boolean): string | undefined {
   const instruments = INSTRUMENT_SURFACE.map((re) => new RegExp(re));
   for (const path of edit.filesAdd) {
-    if (path.startsWith("/") || path.split("/").includes("..") || path.includes("*") || !/^[\w./-]+$/.test(path)) return `files_add ${path} is not a plain repo path`;
+    // Only the canonical spelling is compared against the grant lists: ./deploy/x or src//lib/x would slip a prefix match.
+    if (path.startsWith("/") || posix.normalize(path) !== path || path.startsWith("./") || path.endsWith("/") ||
+        path.split("/").includes("..") || path.includes("*") || !/^[\w./-]+$/.test(path)) return `files_add ${path} is not a plain repo path`;
     if (FORBIDDEN_PREFIXES.some((p) => path.startsWith(p)) || instruments.some((re) => re.test(path))) return `files_add ${path} is an operator-only grant`;
     if (!pathExists(path) && !path.startsWith("test/")) return `files_add ${path} does not exist and is not a new test`;
   }

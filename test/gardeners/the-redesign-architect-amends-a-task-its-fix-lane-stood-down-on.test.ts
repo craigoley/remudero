@@ -9,7 +9,7 @@ import { runGardenAsync, type GardenerDeps } from "#src/lib/gardener.js";
 import type { PlanInventory } from "#src/lib/plan-gardener.js";
 import { parseTasksFromYaml } from "#src/lib/plan.js";
 import {
-  applyRedesignEdit, buildRedesignSources, parseRedesignAnswer, REDESIGN_AFTER_MS, REDESIGN_JUDGED_STEP, REDESIGN_MARKER_RE, redesignCandidates, redesignEditRefusal, redesignGardenSpec,
+  applyRedesignEdit, buildRedesignSources, parseRedesignAnswer, POINTER_STAMP_RE, REDESIGN_AFTER_MS, REDESIGN_JUDGED_STEP, REDESIGN_MARKER_RE, redesignCandidates, redesignEditRefusal, redesignGardenSpec,
   type RedesignSources,
 } from "#src/lib/redesign-gardener.js";
 import { MACHINE_LANE_HEAD_RE } from "#src/lib/sweep.js";
@@ -27,12 +27,13 @@ const CLAIM = "a recorded check:body-coverage round, replayed through the real c
 const HEAD = "f4a25ce82040a489db41686f92b9c233cc6eaf94";
 type Row = Record<string, unknown>;
 
-const shard = (pointer = true) => [
+const STAMP = "2026-10-29T11:03:31.670Z";
+const shard = (pointer = true, stamp = STAMP) => [
   `- id: ${ID}`,
   '  title: "THE CI FRICTION GARDENER\'S COSTLIEST OPEN CAUSE: check:body-coverage"',
   "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: human", "  risk: low", "  priority: 1.3",
   ...(pointer ? [
-    "  # refusal-amendment (W1-T10661, run DAEMON-1@f4a25ce, 2026-10-29T11:03:31.670Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files",
+    `  # refusal-amendment (W1-T10661, run DAEMON-1@f4a25ce, ${stamp}): the worker refused criterion 1 [outside-declared-files] — proposed widen-files`,
     "  #   worker evidence: The declared renderer cannot enforce report publication or prevent fix dispatch when proofs are omitted.",
     "  #   this task is held from dispatch until its record changes; an Architect must make the change above",
   ] : []),
@@ -53,14 +54,14 @@ const AMEND = `REDESIGN: ${JSON.stringify({
   amendment: "Prevent the round in src/cli/commands/fix.ts, where the dispatch is decided, and replay the recorded round in the test.",
 })}`;
 
-function world(t: { after: (fn: () => void) => void }, opts: { rows?: Row[]; pointer?: boolean; answers?: string[] } = {}) {
+function world(t: { after: (fn: () => void) => void }, opts: { rows?: Row[]; pointer?: boolean; stamp?: string; answers?: string[] } = {}) {
   const root = mkdtempSync(join(tmpdir(), "rmd-redesign-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
   mkdirSync(join(root, "src", "cli", "commands"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(join(root, "src", "cli", "commands", "fix.ts"), "export {};\n");
-  writeFileSync(join(root, REL), shard(opts.pointer ?? true));
+  writeFileSync(join(root, REL), shard(opts.pointer ?? true, opts.stamp));
   const rows: Row[] = [...(opts.rows ?? [])];
   const prompts: string[] = [];
   const answers = [...(opts.answers ?? [AMEND])];
@@ -73,7 +74,7 @@ function world(t: { after: (fn: () => void) => void }, opts: { rows?: Row[]; poi
   const sources: Partial<RedesignSources> = {
     clock, plan,
     readShard: (rel) => readFileSync(join(root, rel), "utf8"),
-    ledger: (steps) => rows.filter((r) => steps.includes(String(r.step))),
+    ledger: (steps, since) => rows.filter((r) => steps.includes(String(r.step)) && String(r.ts) >= since),
     pathExists: (rel) => existsSync(join(root, rel)),
     judgeText: async (prompt) => { prompts.push(prompt); return answers.shift() ?? 'REDESIGN: {"verdict":"grill","reason":"no answer"}'; },
   };
@@ -116,6 +117,19 @@ test("a hold younger than an hour, or one the sweep no longer disposes, is left 
   assert.equal(redesignCandidates(gone.sources as RedesignSources).length, 0, "no disposition in two hours: the PR left the sweep");
   const held = world(t, { pointer: false, rows: [heldRow(NOW - 2 * 60 * MIN), heldRow(NOW - MIN)] });
   assert.equal(redesignCandidates(held.sources as RedesignSources).length, 1);
+  // A refusal-amendment pointer is aged by its own stamp, and a pointer with no stamp to age is never the Architect's.
+  const fresh = world(t, { stamp: iso(NOW - (REDESIGN_AFTER_MS - MIN)) });
+  assert.equal(redesignCandidates(fresh.sources as RedesignSources).length, 0, "a pointer younger than an hour waits");
+  const unstamped = world(t, { stamp: "sometime" });
+  assert.equal(redesignCandidates(unstamped.sources as RedesignSources).length, 0, "an unstamped pointer is not aged as old");
+  const aged = world(t, { stamp: iso(NOW - REDESIGN_AFTER_MS) });
+  assert.equal(redesignCandidates(aged.sources as RedesignSources).length, 1);
+});
+
+test("the pointer stamp is read only from the head refusal-amendment.ts writes", () => {
+  assert.equal(POINTER_STAMP_RE.test(`  # refusal-amendment (W1-T1, run W1-T1-17, ${STAMP}): the worker refused`), true);
+  assert.equal(POINTER_STAMP_RE.test(`  # refusal-amendment (W1-T1, ${STAMP}): the worker refused`), false, "no run, no stamp");
+  assert.equal(POINTER_STAMP_RE.test("  # refusal-amendment (W1-T1, run W1-T1-17, yesterday): the worker refused"), false);
 });
 
 test("a GRILL answer lands nothing and the same evidence is not asked again", async (t) => {
@@ -125,6 +139,10 @@ test("a GRILL answer lands nothing and the same evidence is not asked again", as
   assert.ok(w.rows.some((r) => r.step === REDESIGN_JUDGED_STEP && r.outcome === "grill" && r.task_id === ID));
   assert.equal(redesignCandidates(w.sources as RedesignSources).length, 0);
   assert.equal(w.read(), shard(), "the shard is untouched");
+  // The unchanged pointer is the same evidence a week later: a verdict older than the evidence window still counts.
+  const verdict = w.rows.find((r) => r.step === REDESIGN_JUDGED_STEP)!;
+  verdict.ts = iso(NOW - 8 * 24 * 60 * MIN);
+  assert.equal(redesignCandidates(w.sources as RedesignSources).length, 0, "an eight-day-old GRILL is not asked again");
 });
 
 test("rule 16 and the operator's grants are enforced in code, whatever the Architect answers", (t) => {
@@ -136,6 +154,10 @@ test("rule 16 and the operator's grants are enforced in code, whatever the Archi
     assert.match(String(redesignEditRefusal(task, edit({ filesAdd: [path] }), () => true)), /operator-only grant/, path);
   }
   assert.match(String(redesignEditRefusal(task, edit({ filesAdd: ["../escape.ts"] }), exists)), /not a plain repo path/);
+  // Only the canonical spelling reaches the grant lists, so a spelling that resolves to a grant is refused, never passed.
+  for (const path of ["./deploy/Dockerfile", "./src/lib/review.ts", "src//lib/review.ts", "src/lib/./review.ts", "src/lib/"]) {
+    assert.match(String(redesignEditRefusal(task, edit({ filesAdd: [path] }), () => true)), /not a plain repo path/, path);
+  }
   assert.match(String(redesignEditRefusal(task, edit({ filesAdd: ["src/lib/invented.ts"] }), exists)), /does not exist/);
   assert.equal(redesignEditRefusal(task, edit({ filesAdd: ["test/new-one.test.ts"] }), exists), undefined, "a new test may be declared");
   assert.match(String(redesignEditRefusal(task, edit({ proofs: [{ criterion: 2, proof: "unit test: x" }] }), exists)), /does not have/);
