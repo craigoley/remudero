@@ -1,0 +1,107 @@
+id: fb-dep-review-1b8cbb1333590bed
+ts: 2026-10-30T20:12:35.481Z
+raw: |-
+  Land the dependency bump(s) of Dependabot PR #15180, whose red is its own: chore(deps): bump the image-cli-minor-and-patch group across 1 directory with 2 updates
+
+  Dependabot proposed a minor/patch update whose head fails a required check that main's newest run passes.
+  A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest
+  allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:
+  tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked
+  SDK's claudeCodeVersion), and the bumps of every sibling Dependabot PR named below that the fix needs.
+  Do not edit or close the Dependabot PRs: the superseded-by row closes them once the owned PR carries
+  their hunks, or Dependabot does once main carries the versions.
+
+  PR: https://github.com/craigoley/remudero/pull/15180
+  Head: 02b16319303eebd5685b72698d0aa3c18483a848
+  Bumps: @anthropic-ai/claude-code 2.1.310 -> 2.1.311, @openai/codex 0.163.0 -> 0.164.0
+  Red checks: ci-gate, coverage-ratchet
+  Sibling Dependabot PRs folded in: none
+
+  Dependabot proposal body:
+
+  Bumps the image-cli-minor-and-patch group with 2 updates in the /deploy directory: [@anthropic-ai/claude-code](https://github.com/anthropics/claude-code) and [@openai/codex](https://github.com/openai/codex/tree/HEAD/codex-cli).
+
+  Updates `@anthropic-ai/claude-code` from 2.1.310 to 2.1.311
+  <details>
+  <summary>Release notes</summary>
+  <p><em>Sourced from <a href="https://github.com/anthropics/claude-code/releases">@​anthropic-ai/claude-code's releases</a>.</em></p>
+  <blockquote>
+  <h2>v2.1.311</h2>
+  <h2>What's changed</h2>
+  <ul>
+  <li>Added <code>--hold-idle-file</code> and <code>--max-hold-min</code> to <code>self-hosted-runner</code>, to keep an idle session while your host reports processes it left running</li>
+  <li>Added a tip for the Explanatory output style, shown when you ask Claude for explanations</li>
+  <li>Fixed long freezes at startup and after reading or editing files when a CLAUDE.md file holds a very long list item</li>
+  <li>Fixed interrupting Claude not taking effect until a timeout while an MCP server had not answered a resource read or a skill was still downloading</li>
+  <li>Fixed standard-context sessions stopping with &quot;Usage credits required for 1M context&quot; when a request ran over 200K tokens; Claude Code now compacts the conversation and continues</li>
+  <li>Fixed Write and Edit stalling for up to 5 seconds after they ran, and reporting 0 lines changed, when changing thousands of lines in a file</li>
+  <li>Fixed subagents being unable to use MCP tools from servers that finish connecting after the subagent starts</li>
+  <li>Fixed Claude seeing stale MEMORY.md and CLAUDE.md content right after automatic compaction when those files were edited earlier in the session</li>
+  <li>Fixed <code>claude -p</code> and SDK sessions saving transcript messages out of order or keeping messages that were taken back</li>
+  <li>Fixed <code>SubagentStop</code> hooks running about twice a minute for each running subagent instead of once when it finishes</li>
+  <li>Fixed the @ file picker ignoring <code>.ignore</code>/<code>.rgignore</code> negation rules that re-include git-ignored files</li>
+  <li>Fixed a subagent's isolated worktree being removed while a background subagent it started was still working in it</li>
+  <li>Fixed background agents in auto mode that wait on their own shells starting a new main conversation turn on every wake</li>
+  <li>Fixed the Bash tool description claiming the working directory always persists between calls</li>
+  <li>Fixed the environment block naming a shell commands don't run in, such as fish when the Bash tool uses zsh</li>
+  <li>Fixed <code>claude mcp add</code>, <code>claude mcp remove</code> and <code>/mcp</code> naming the current folder instead of the project entry in <code>~/.claude.json</code> that holds a local-scope server when run below a repository root</li>
+  <li>Fixed <code>claude mcp list</code> and <code>claude mcp get</code> showing the error code twice on failed-connection lines (for example <code>ENOENT: ENOENT: …</code>)</li>
+  <li>Fixed Remote Control sessions staying on &quot;Connecting&quot; for about two minutes when a network proxy blocks a startup request</li>
+  <li>Fixed messages that Claude sends to a cloud or Remote Control session appearing as your own message in the Claude mobile apps</li>
+  <li>Fixed Claude not being told the cause when a file attached to a message sent over Remote Control or to a cloud session could not be saved because the disk was full, or that a message's attachments past the first 20 were left out</li>
+  <li>Fixed WebFetch and WebSearch hanging on a stalled response in Cowork cloud sessions; an unfinished request now fails after 300 seconds</li>
+  <li>Fixed a background session that crashed between turns not being restarted while it was attached, pinned, or had a scheduled task or wake-up set</li>
+  <li>Fixed the &quot;background service did not respond&quot; error suggesting the disabled <code>claude daemon restart</code>; it now suggests <code>claude daemon stop --any</code> and says it ends background sessions</li>
+  <li>Fixed <code>claude respawn &lt;id&gt;</code> starting the background service before reporting that no background session matches the id</li>
+  <li>Fixed <code>/effort</code> not warning about a prompt cache miss in plan mode when the plan model differs from the session model</li>
+  <li>Fixed <code>/ide</code> saying the VS Code extension was installed before the install finished or when it failed</li>
+  <li>Fixed the Write tool's file preview skipping rows and miscounting hidden lines when a line is wider than the terminal</li>
+  <li>Fixed ↑ in an agent's chat tab recalling a message that was still waiting to be delivered, so resending it sent a second copy</li>
+  <li>Fixed Cowork cloud sessions losing their connectors and most tools after a restart when a plugin or your settings named an <code>agent</code>; Cowork cloud sessions now ignore that setting</li>
+  <li>Fixed agent teams sessions showing an empty task list when coming back with <code>--resume</code>, <code>--continue</code>, <code>/resume</code> or <code>--session-id</code>, including after <code>/clear</code> or a crash, and <code>/branch</code> writing to the original session's list</li>
+  <li>Fixed pasting text that mentions an image file, such as <code>! open /tmp/shot.png</code> or <code>/review look at /tmp/shot.png</code>, attaching the image and dropping its path from the prompt</li>
+  <li>Fixed the feedback draft card showing its 1/2/0 and Esc shortcuts while the prompt has text, when those keys act on the prompt instead of the card</li>
+  <li>Fixed a lone backslash in quotes or brackets, like <code>&quot;\&quot;</code> or <code>(\)</code>, disappearing from Claude's responses</li>
+  <li>Fixed agent teammates compacting their history when <code>DISABLE_COMPACT</code> is set</li>
+  <li>Fixed the rewind menu offering &quot;Summarize from here&quot; and &quot;Summarize up to here&quot; when <code>DISABLE_COMPACT</code> is set</li>
+  <li>Fixed a finished <code>/code-review</code>, or another skill that runs in a sub-agent, running a second time when a cloud or background session restarts</li>
+  <li>Fixed long hidden thinking being cut off as idle on Google Vertex AI, Microsoft Foundry and Claude Platform on AWS, where the endpoint sends thinking progress updates</li>
+  <li>Fixed <code>/ide</code> saying it had installed the JetBrains plugin when nothing was installed</li>
+  <li>Fixed Claude Pro and Max subscribers being told to ask their admin when their subscription can't be used; the message now points to billing settings</li>
+  <li>Fixed the diff pane opening by itself after an edit in wide fullscreen terminals when it had nothing to show</li>
+  <li>Fixed <code>/mcp</code> showing a remote server as failed after &quot;Clear authentication&quot; when the server works without sign-in</li>
+  <li>Fixed <code>/mcp</code> showing &quot;authenticated&quot; for a remote server that Claude Code sends no credentials to</li>
+  <li>Fixed a <code>--plugin-dir</code> folder of plugins loading as one plugin when an empty <code>.mcp.json</code> was at its top</li>
+  <li>Fixed <code>/usage</code> never showing large prompt-cache misses under &quot;What's contributing to your limits usage?&quot;</li>
+  <li>Fixed status line links staying plain text in background sessions after you open them from a terminal that supports links</li>
+  <li>Fixed the /rewind confirmation saying the conversation &quot;will be forked&quot; when the later messages are removed from the conversation</li>
+  <li>Fixed the /rewind warning that wrongly said manual and Bash edits are never affected by a code restore</li>
+  </ul>
+  <!-- raw HTML omitted -->
+  </blockquote>
+  <p>... (truncated)</p>
+  </details>
+  <details>
+  <summary>Commits</summary>
+  <ul>
+  <li><a href="https://github.com/anthropics/claude-code/commit/08c6a4f5121ae140d3c1b5c96e3e5ae53587b54b"><code>08c6a4f</code></a> chore: Update CHANGELOG.md and feed.xml</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/398b6d71cb850ddaa0a92e7005146d0f676a5db1"><code>398b6d7</code></a> security-guidance: remove the copy here; install it from claude-plugins-offic...</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/a5b0f2e03aba37ea34e527fe30b2f6aaa4895b9f"><code>a5b0f2e</code></a> chore: Update mods/</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/2eff7a8d21c80be48904f62ebdea36d945d7b504"><code>2eff7a8</code></a> chore: Update mods/</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/318b7e6ac4e726e88a4ad326214866a93c373b1b"><code>318b7e6</code></a> chore: Update mods/</li>
+  <li><a href="https://github.com/anthropics/claude-code/commit/761551ef86c6ce2801a961db81c764db5e3f45fd"><code>761551e</code></a> chore: Update mods/</li>
+  <li>See full diff in <a href="https://github.com/anthropics/claude-code/compare/v2.1.310...v2.1.311">compare view</a></li>
+  </ul>
+  </details>
+  <br />
+
+  Updates `@openai/codex` from 0.163.0 to 0.164.0
+attachments: []
+origin: repair#dep-review
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: dep-review:own-red:craigoley/remudero:@anthropic-ai/claude-code@2.1.311,@openai/codex@0.164.0
+thread_id: null
