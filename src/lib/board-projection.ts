@@ -22,7 +22,8 @@
  * what differs, and reports it: the rules above are measured, not assumed.
  *
  * WHAT IT HOLDS (W1-T9436): a re-derived task reads its own rows from the fact store, task by task, and they are
- * released with the update (`storeIndex`). The rows it keeps in memory are only those {@link BOARD_ROW_RETENTION}
+ * released with the update (`storeIndex`), except hot task histories bounded by {@link BOARD_TASK_CACHE_MAX_BYTES}.
+ * The rows it keeps for other readers are only those {@link BOARD_ROW_RETENTION}
  * holds for the now view's readers outside the derive: per key, never per row ever ingested (board:core held 663,486
  * entries on 2026-10-14). `keepEveryRow` keeps the old behaviour as an equality test's reference arm.
  *
@@ -71,6 +72,8 @@ export const BOARD_DERIVE_DEBOUNCE_MS = 500;
 export const BOARD_INGEST_CHUNK_ROWS = 5_000;
 /** PRIMARY CONTROL (W1-T6467): the longest string value a projection's table shares; a longer one stays as parsed. */
 export const BOARD_INTERN_MAX_CHARS = 96;
+/** PRIMARY CONTROL (W1-T9716): operator-approved 16 MiB of fact-body bytes, evicted by task recency. */
+export const BOARD_TASK_CACHE_MAX_BYTES = 16 * 1024 * 1024;
 /** ...and the ms one `update`'s ingest runs for at most, so a slow disk ends a chunk early. */
 export const BOARD_INGEST_CHUNK_MS = 250;
 /** A drift found again this soon after a self-heal is a projection bug, not a blip: it escalates (as #8075's oracle). */
@@ -431,6 +434,8 @@ export interface BoardProjectionOptions {
   onIngest?: (rows: ReadonlyArray<Row>) => void;
   /** W1-T9718: the slices one oracle rotation audits in turn; {@link BOARD_ORACLE_SLICES} when omitted. */
   oracleSlices?: number;
+  /** Task-history body-byte bound; zero disables the cache for the A/A reference arm. */
+  taskCacheMaxBytes?: number;
 }
 
 /**
@@ -667,6 +672,13 @@ interface StepBucket {
   readonly bytes: number;
 }
 
+interface TaskBucket {
+  readonly bucket: StepBucket;
+  readonly upTo: number;
+  readonly strings: Map<string, string> | undefined;
+  readonly digest: StepDigest;
+}
+
 /** W1-T9604: the two plan-only sets, as `storeIndex`'s full read builds them; never mutated once handed out. */
 interface PlanOnlySets {
   readonly filing: Set<string>;
@@ -783,8 +795,12 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     upsertHeal: db.prepare("INSERT INTO board_oracle_heal(task_id, at_ms) VALUES(?, ?) ON CONFLICT(task_id) DO UPDATE SET at_ms = excluded.at_ms"),
     removeHeal: db.prepare("DELETE FROM board_oracle_heal WHERE task_id = ?"),
     latest: db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"),
-    taskFacts: db.prepare(`SELECT seq, ts_ms, step, body FROM fact WHERE task_id = ? AND seq <= ? AND step NOT IN (${unreadSql})
-      UNION ALL SELECT f.seq, f.ts_ms, f.step, f.body FROM fact_alias a JOIN fact f ON f.seq = a.seq WHERE a.task = ? AND f.seq <= ? AND f.step NOT IN (${unreadSql})`),
+    taskFacts: db.prepare(`SELECT seq, ts_ms, step, body FROM fact WHERE task_id = ? AND seq > ? AND seq <= ? AND step NOT IN (${unreadSql})
+      UNION ALL SELECT f.seq, f.ts_ms, f.step, f.body FROM fact_alias a JOIN fact f ON f.seq = a.seq WHERE a.task = ? AND f.seq > ? AND f.seq <= ? AND f.step NOT IN (${unreadSql})`),
+    // Include unread steps so the primary arm stays covered by fact_task, without visiting old fact bodies.
+    taskDigest: db.prepare(`SELECT count(*) AS n, sum(seq) AS s FROM (
+      SELECT seq FROM fact WHERE task_id = ? AND seq <= ?
+      UNION ALL SELECT a.seq FROM fact_alias a JOIN fact f ON f.seq = a.seq WHERE a.task = ? AND a.seq <= ?)`),
     seqFact: db.prepare("SELECT seq, ts_ms, step, body FROM fact WHERE seq = ?"),
     stepFacts: db.prepare("SELECT seq, ts_ms, body FROM fact WHERE step = ? AND seq <= ? ORDER BY ts_ms, seq"),
     planOnlyFacts: db.prepare(`SELECT step, body FROM fact WHERE step IN ('pr.opened', 'review.posted', ?) AND seq <= ? AND json_type(body, '$.plan_only') = 'true'`),
@@ -875,6 +891,15 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   let planOnlyDigest: StepDigest | undefined;
   const cacheStrings = strings ? new Map<string, string>() : undefined;
   let stepReads = noStepReads();
+  const taskCache = new Map<string, TaskBucket>();
+  const taskCacheMaxBytes = Number.isFinite(opts.taskCacheMaxBytes) ? Math.max(0, opts.taskCacheMaxBytes!) : BOARD_TASK_CACHE_MAX_BYTES;
+  let taskCacheBytes = 0;
+  const noTaskReads = () => ({ hits: 0, extended_rows: 0, full_reads: 0, evictions: 0 });
+  let taskReads = noTaskReads();
+  const taskDigest = (id: string, upTo: number): StepDigest => {
+    const r = sql.taskDigest.get(id, upTo, id, upTo);
+    return { n: Number(r?.n ?? 0), s: Number(r?.s ?? 0), t: 0 };
+  };
   let lastCredit: { credit: CreditStore; overrides: string } = { credit: {}, overrides: "" };
   let latestTsMs = 0;
   const held = new Map<string, Held>();
@@ -1290,6 +1315,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     planOnlyPending = [];
     planOnlyDigest = undefined;
     cacheStrings?.clear();
+    taskCache.clear();
+    taskCacheBytes = 0;
   }
 
   /** The store's digest of `step`'s rows up to `lastSeq`, or of every row of the plan-only steps. */
@@ -1366,9 +1393,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
 
   /** W1-T9604: the oracle's A/A of the cache: every cached step and both plan-only sets against `fresh`, its uncached
    *  index at the same seq. A difference drops the cache, and the differing names ride the oracle's row. */
-  function auditStepCache(fresh: LedgerIndex): { steps: number; rows: number; mismatches: string[] } {
+  function auditStepCache(fresh: LedgerIndex, audited: readonly string[]): { steps: number; rows: number; mismatches: string[] } {
     // The audit's own look at the cache is not a build's: of its counts, only a reset it finds is kept.
     const counted = stepReads;
+    const countedTasks = { ...taskReads };
     stepReads = noStepReads();
     const mine = storeIndex(rows);
     const cachedSteps = [...stepCache.keys()].sort();
@@ -1385,19 +1413,26 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       ]);
       if (sorted(mine) !== sorted(fresh)) mismatches.push("plan_only");
     }
+    for (const id of audited.filter((id) => taskCache.has(id))) {
+      const [have, want] = [mine.byTask.get(id) ?? [], fresh.byTask.get(id) ?? []];
+      compared += want.length;
+      if (JSON.stringify(have) !== JSON.stringify(want)) mismatches.push(`task:${id}`);
+    }
     if (mismatches.length > 0) {
       dropStepCache();
       stepReads.resets.audit++;
     }
     const found = stepReads.resets;
     stepReads = { ...counted, resets: { deleted: counted.resets.deleted + found.deleted, behind: counted.resets.behind + found.behind, audit: counted.resets.audit + found.audit } };
+    taskReads = countedTasks;
     return { steps: cachedSteps.length, rows: compared, mismatches };
   }
 
   /**
    * W1-T9436: a ledger index whose task and step buckets are read on demand from the fact store, as
    * {@link buildLedgerIndex} would file them over every row: a task's rows by `fact_task` and `fact_alias`, with
-   * its runs' stand-ins built as ingest builds them, in row order. Its rows are released with it, after the update.
+   * its runs' stand-ins built as ingest builds them, in row order. W1-T9716 keeps hot fact histories under a byte
+   * bound, extends them by seq, and hands readers copies; run stand-ins are rebuilt for every index.
    *
    * W1-T9604: `cached` (every index but the oracle's) takes its step buckets and plan-only sets from the projection's
    * step cache, which is read in full once and then extended by the rows the ingest reads; uncached, the index reads
@@ -1410,6 +1445,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       checkStepCache();
     }
     const aliasReady = factAliasReady(db);
+    if (cached && (!aliasReady || Number(sql.maxSeq.get()?.seq ?? 0) < upTo)) {
+      taskCache.clear();
+      taskCacheBytes = 0;
+    }
     let aliasSeqs: Map<string, number[]> | undefined;
     let last: { id: string; rows: Row[] } | undefined;
     const steps = new Map<string, readonly Row[]>();
@@ -1431,8 +1470,26 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     };
     const taskBucket = (id: string): Row[] => {
       const facts: Array<{ row: Row; key: [number, number, number] }> = [];
-      const source = aliasReady ? sql.taskFacts.iterate(id, upTo, ...unread, id, upTo, ...unread) : sql.taskFacts.iterate(id, upTo, ...unread, "\u0000", 0, ...unread);
-      for (const r of source) facts.push({ row: parse(counted(r.body)), key: [Number(r.ts_ms), 0, Number(r.seq)] });
+      const useCache = cached && aliasReady && taskCacheMaxBytes > 0;
+      let entry = useCache ? taskCache.get(id) : undefined;
+      // An old index reads at its own seq without replacing a newer cache entry.
+      const historical = entry !== undefined && entry.upTo > upTo;
+      if (historical) entry = undefined;
+      if (entry && !sameDigest(entry.digest, taskDigest(id, entry.upTo))) {
+        taskCache.delete(id);
+        taskCacheBytes -= entry.bucket.bytes;
+        entry = undefined;
+      }
+      const after = entry?.upTo ?? 0;
+      const more: StepRow[] = [];
+      const table = entry?.strings ?? (useCache && strings ? new Map<string, string>() : undefined);
+      const source = sql.taskFacts.iterate(id, after, upTo, ...unread, aliasReady ? id : "\u0000", after, aliasReady ? upTo : 0, ...unread);
+      for (const r of source) {
+        const body = counted(r.body);
+        const row = parse(body);
+        if (table) internRowStrings(row, table);
+        more.push({ row, tsMs: Number(r.ts_ms), seq: Number(r.seq), bytes: Buffer.byteLength(body), step: String(r.step) });
+      }
       if (!aliasReady) {
         if (!aliasSeqs) {
           // A store whose writer has not yet backfilled `fact_alias`: one scan of the fact bodies, held for this index only.
@@ -1445,8 +1502,33 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         }
         for (const seq of aliasSeqs.get(id) ?? []) {
           const r = sql.seqFact.get(seq);
-          if (r && seq <= upTo && !BOARD_UNREAD_STEPS.has(String(r.step))) facts.push({ row: parse(r.body), key: [Number(r.ts_ms), 0, seq] });
+          if (r && seq <= upTo && !BOARD_UNREAD_STEPS.has(String(r.step))) {
+            const body = counted(r.body);
+            more.push({ row: parse(body), tsMs: Number(r.ts_ms), seq, bytes: Buffer.byteLength(body), step: String(r.step) });
+          }
         }
+      }
+      const bucket = entry && more.length === 0 ? entry.bucket : extendBucket(entry?.bucket ?? { rows: [], tsMs: [], seqs: [], bytes: 0 }, more);
+      if (cached) {
+        if (entry) { taskReads.hits++; taskReads.extended_rows += more.length; }
+        else taskReads.full_reads++;
+      }
+      if (useCache && !historical && bucket.bytes > 0) {
+        const previous = taskCache.get(id);
+        if (previous) { taskCache.delete(id); taskCacheBytes -= previous.bucket.bytes; }
+        if (bucket.bytes <= taskCacheMaxBytes) {
+          taskCache.set(id, { bucket, upTo, strings: table, digest: entry?.upTo === upTo ? entry.digest : taskDigest(id, upTo) });
+          taskCacheBytes += bucket.bytes;
+        } else if (previous) taskReads.evictions++;
+        while (taskCacheBytes > taskCacheMaxBytes) {
+          const oldest = taskCache.keys().next().value!;
+          taskCacheBytes -= taskCache.get(oldest)!.bucket.bytes;
+          taskCache.delete(oldest);
+          taskReads.evictions++;
+        }
+      }
+      for (let at = 0; at < bucket.rows.length; at++) {
+        facts.push({ row: useCache ? structuredClone(bucket.rows[at]!) : bucket.rows[at]!, key: [bucket.tsMs[at]!, 0, bucket.seqs[at]!] });
       }
       const newest = new Map<string, number>();
       for (const f of facts) {
@@ -1670,7 +1752,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     let outcome: BoardOracleOutcome = "agree";
     const reasons: string[] = [];
     let healedCount = 0;
-    const audit = first ? auditStepCache(first) : undefined;
+    const audit = first ? auditStepCache(first, audited) : undefined;
     if (mismatches.length > 0) {
       pass = derive();
       fresh = pass.projections;
@@ -1722,8 +1804,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       });
     }
     // W1-T9604: what the step cache read and reused since the last oracle row, and its audit: the saving, measured.
-    const stepCacheRow = fromRows ? {} : { step_cache: { ...stepReads, held: heldStepCache(), ...(audit ? { audit } : {}) } };
+    const stepCacheRow = fromRows ? {} : { step_cache: { ...stepReads, held: heldStepCache(), task_cache: { ...taskReads, bytes: taskCacheBytes }, ...(audit ? { audit } : {}) } };
     stepReads = noStepReads();
+    taskReads = noTaskReads();
     const crossTask = crossTotals;
     crossTotals = { rows: 0, rederived: 0, reused: 0 };
     log("read_model.board_oracle", {
