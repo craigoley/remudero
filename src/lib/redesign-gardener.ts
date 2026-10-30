@@ -40,7 +40,7 @@ export const REDESIGN_MAX_PER_PASS = 2;
 const SWEPT_RECENTLY_MS = 2 * 60 * 60_000;
 const EVIDENCE_WINDOW_MS = 7 * 24 * 60 * 60_000;
 const HOLD_REASON = /^(?:fix needs design at this exact head|fix stood down at )/;
-const POINTER = /^ {2}# refusal-amendment \(.*(?:\n {2}# {3}.*)*/m;
+const POINTER = /^ {2}# refusal-amendment \(.*(?:\n {2}# {3}.*)*/gm;
 /** The stamp refusal-amendment.ts writes into the pointer's head: `(<task>, run <run>, <iso>)`. */
 export const POINTER_STAMP_RE = /^ {2}# refusal-amendment \([^,]+, run [^,]+, (\d{4}-\d\d-\d\dT[\d:.]+Z)\)/;
 const MARKER = (signature: string) => `  # redesign: signature=${signature}`;
@@ -114,16 +114,18 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     const prior = newest.get(row.pr_number);
     if (prior === undefined || String(row.ts) >= String(prior.ts)) newest.set(row.pr_number, row);
   }
-  // A task whose PR the sweep still disposes is that PR's to judge: its pointer waits until the hold qualifies. A pointer
-  // holds its task from dispatch until the record changes (readWorkerRefusalHold), so once no live PR owns the task,
-  // nothing but an amendment moves it, and the pointer is the Architect's whatever became of an earlier PR.
-  const swept = new Set<string>();
-  const qualified = new Set<string>();
+  // A PR the sweep still disposes is its task's to judge: the task's pointer waits until EVERY such PR's hold qualifies,
+  // so a qualifying older PR never speaks for a younger one. A pointer holds its task from dispatch until the record
+  // changes (readWorkerRefusalHold), so once no live PR owns the task, nothing but an amendment moves it, and the
+  // pointer is the Architect's whatever became of an earlier PR. The sweep writes no row when a PR closes, so "live" is
+  // read as disposed within SWEPT_RECENTLY_MS; a closed PR's task waits at most that long.
+  const waiting = new Set<string>();
   for (const row of newest.values()) {
     const at = Date.parse(String(row.ts));
-    if (typeof row.task_id === "string" && Number.isFinite(at) && now - at <= SWEPT_RECENTLY_MS) swept.add(row.task_id);
-    if (row.disposition !== "refused-escalate" || typeof row.reason !== "string" || !HOLD_REASON.test(row.reason) ||
-        typeof row.task_id !== "string" || !Number.isFinite(at) || now - at > SWEPT_RECENTLY_MS) continue;
+    if (typeof row.task_id !== "string" || !Number.isFinite(at) || now - at > SWEPT_RECENTLY_MS) continue;
+    // Every live PR waits its task's pointer until its own hold qualifies below.
+    waiting.add(`${row.task_id}#${row.pr_number}`);
+    if (row.disposition !== "refused-escalate" || typeof row.reason !== "string" || !HOLD_REASON.test(row.reason)) continue;
     // The hold is aged from the start of its unbroken run: walking back from the newest row, any other disposition, an
     // unrelated refusal or another head ends it, so an interrupted hold restarts its hour.
     const history = rows.filter((r) => r.step === "sweep.disposed" && r.pr_number === row.pr_number)
@@ -136,18 +138,19 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
       heldSince = Math.min(heldSince, ts);
     }
     if (now - heldSince < REDESIGN_AFTER_MS) continue;
-    qualified.add(row.task_id);
+    waiting.delete(`${row.task_id}#${row.pr_number}`);
     add(row.task_id, `PR #${row.pr_number} at head ${String(row.head_sha).slice(0, 7)} is held: ${row.reason.slice(0, 1500)}`);
   }
   for (const [id] of open) {
     const rel = plan.shards.get(id);
-    if (rel === undefined || (swept.has(id) && !qualified.has(id))) continue;
-    const pointer = POINTER.exec(sources.readShard(rel))?.[0];
-    // The pointer's own stamp is when the lane stood down; a pointer younger than the fix lane's hour, or one with no
-    // stamp to age, is not yet the Architect's.
-    const stamped = pointer === undefined ? NaN : Date.parse(POINTER_STAMP_RE.exec(pointer)?.[1] ?? "");
-    if (pointer !== undefined && Number.isFinite(stamped) && now - stamped >= REDESIGN_AFTER_MS) {
-      add(id, `refusal-amendment pointer in the shard:\n${pointer.trim()}`);
+    if (rel === undefined || [...waiting].some((key) => key.startsWith(`${id}#`))) continue;
+    // refusal-amendment.ts appends each run's pointer above `status:`, so a shard can hold several: every one is
+    // evidence, and the NEWEST stamp is when the lane last stood down. A pointer set younger than the fix lane's hour,
+    // or one with no stamp to age, is not yet the Architect's.
+    const pointers = [...sources.readShard(rel).matchAll(POINTER)].map((m) => m[0]);
+    const stamps = pointers.map((p) => Date.parse(POINTER_STAMP_RE.exec(p)?.[1] ?? ""));
+    if (pointers.length > 0 && stamps.every(Number.isFinite) && now - Math.max(...stamps) >= REDESIGN_AFTER_MS) {
+      add(id, `refusal-amendment pointer in the shard:\n${pointers.map((p) => p.trim()).join("\n")}`);
     }
   }
   // A verdict is never windowed: an unchanged pointer is the same evidence a week later, and is not asked again.

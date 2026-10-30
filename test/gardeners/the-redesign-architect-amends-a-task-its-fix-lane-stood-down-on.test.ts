@@ -152,6 +152,28 @@ test("a refusal pointer is the Architect's once no live PR of its task is inside
     const gone = world(t, { rows: [heldRow(NOW - lastSweptMs - 60 * MIN), heldRow(NOW - lastSweptMs)] });
     assert.equal(redesignCandidates(gone.sources as RedesignSources).length, 1, `a PR last swept ${lastSweptMs / MIN} min ago owns nothing`);
   }
+  // The sweep writes no row when a PR closes, so a PR is live while it was disposed in the last two hours: a closed PR's
+  // task waits out that window, and no longer.
+  const justClosed = world(t, { rows: [{ ...heldRow(NOW - 90 * MIN), disposition: "blocked-fixable", reason: "fix round dispatched" }] });
+  assert.equal(redesignCandidates(justClosed.sources as RedesignSources).length, 0, "a PR disposed 90 min ago may still be open");
+  const closed = world(t, { rows: [{ ...heldRow(NOW - 121 * MIN), disposition: "blocked-fixable", reason: "fix round dispatched" }] });
+  assert.equal(redesignCandidates(closed.sources as RedesignSources).length, 1, "past the window, the closed PR owns nothing");
+  // Each run appends its own pointer above status:, so the newest stamp ages the set and every pointer is evidence.
+  const second = (stamp: string) => (w2: ReturnType<typeof world>) => writeFileSync(join(w2.root, REL), w2.read().replace("  status: queued",
+    `  # refusal-amendment (W1-T10661, run W1-T10661-1793330000000, ${stamp}): the worker refused criterion 1 [outside-declared-files] — proposed widen-files\n  #   this task is held from dispatch until its record changes; an Architect must make the change above\n  status: queued`));
+  const restacked = world(t);
+  second(iso(NOW - 10 * MIN))(restacked);
+  assert.equal(redesignCandidates(restacked.sources as RedesignSources).length, 0, "a fresh stand-down restarts the hour");
+  const stacked = world(t);
+  second(iso(NOW - 2 * 60 * MIN))(stacked);
+  const [both2] = redesignCandidates(stacked.sources as RedesignSources);
+  assert.match(both2!.evidence.join("\n"), /run DAEMON-1@f4a25ce[\s\S]*run W1-T10661-1793330000000/, "every pointer is evidence");
+  // Every live PR of the task must qualify: an older PR's long hold does not speak for a younger PR's young one.
+  const twoPrs = world(t, { rows: [heldRow(NOW - 3 * 60 * MIN), heldRow(NOW - MIN),
+    { ...heldRow(NOW - 20 * MIN), pr_number: 15405 }, { ...heldRow(NOW - MIN), pr_number: 15405 }] });
+  const [both] = redesignCandidates(twoPrs.sources as RedesignSources);
+  assert.ok(both!.evidence.some((e) => e.startsWith("PR #15404")), "the qualifying hold is still evidence");
+  assert.ok(!both!.evidence.some((e) => e.includes("refusal-amendment pointer")), "the pointer waits on the younger PR's hour");
 });
 
 test("an amend is recorded by its landing: a failed filing re-asks, an open PR holds it, and a close declines it", async (t) => {
