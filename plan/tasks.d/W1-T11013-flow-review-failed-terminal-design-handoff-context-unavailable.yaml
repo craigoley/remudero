@@ -23,6 +23,12 @@
     Source owner: fix-lane → src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
     - PR #15065: 9.29 PR-hours — terminal design handoff context unavailable — no fix admitted
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  design: |
+    Root cause, OBSERVED by the operator recon of 2026-10-29 (PR #15065, W1-T10781, head 7c6f773):
+    - terminalFixDesignHandoff (src/lib/sweep.ts) needs the round's fix.dispatch and its completed fix.done (fix_outcome NEEDS_DESIGN) beside the fix.needs_design row. It reads only the live ledger file.
+    - Rotation keeps the newest MAX_RETAINED_LINES_PER_STEP (200) rows of each carried step (src/lib/ledger.ts). The live file held exactly 200 fix.dispatch and 200 fix.done rows, the oldest from 2026-10-28T11:31Z, but all 45 fix.needs_design rows, back to 2026-10-25.
+    - #15065's round (DAEMON-1793172279613:1:1793175423257) dispatched and finished at 2026-10-28T08:20:27Z, so only its fix.needs_design survived. The read found 0 completed rounds, returned "unavailable", and the PR held in wait from 2026-10-29T17:10Z on.
+    The fix makes the handoff resolvable after rotation: either the read consults the ledger union for that one round, or rotation carries a round's fix.dispatch and fix.done for as long as it carries the round's fix.needs_design. A handoff whose round rows are truly absent still reads unavailable.
   risk_ruling:
     verdict: "high"
     action: escalate
