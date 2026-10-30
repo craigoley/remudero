@@ -77,7 +77,7 @@ const PR: OpenPrView = {
  * `fixRungTaskFor` against the PLAN above (`"W1-T500"` ⇒ a real task ⇒ `synthetic:false`;
  * `undefined` ⇒ no task ⇒ `synthetic:true`). Nothing here is asserted — the caller does that.
  */
-type Drive = { logs: Array<{ step: string; extra?: Record<string, unknown> }>; threw: unknown };
+type Drive = { logs: Array<{ step: string; extra?: Record<string, unknown> }>; threw: unknown; outcome: unknown };
 
 async function driveDispatchFix(headRefName: string | undefined, taskId: string | undefined): Promise<Drive> {
   const root = mkdtempSync(join(tmpdir(), "uch-root-"));
@@ -90,7 +90,7 @@ async function driveDispatchFix(headRefName: string | undefined, taskId: string 
       `const HEAD = ${JSON.stringify(headRefName ?? null)};`,
       // The one round trip `dispatchFix` makes for the head: `--json headRefName,body`. A null
       // HEAD omits the key entirely, which is exactly what an unresolvable head looks like.
-      'if (f && f.includes("headRefName")) process.stdout.write(JSON.stringify(HEAD === null ? { body: "" } : { headRefName: HEAD, body: "" }));',
+      'if (f && f.includes("headRefName")) process.stdout.write(JSON.stringify(HEAD === null ? { body: "" } : { headRefName: HEAD, headRefOid: "cafe1234", body: "" }));',
       // `ghLiveState` reads live PR state over REST. Without this arm the read falls through to
       // the `{}` default, folds to NOT-OPEN, and the run stands down at `sweep.fix.not_open`
       // before the branch under test is ever reached.
@@ -104,6 +104,7 @@ async function driveDispatchFix(headRefName: string | undefined, taskId: string 
   process.env.PATH = `${bin}:${oldPath}`;
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   let threw: unknown;
+  let outcome: unknown;
   try {
     mkdirSync(join(root, "repos"), { recursive: true });
     const effects = buildSweepEffects({
@@ -120,7 +121,7 @@ async function driveDispatchFix(headRefName: string | undefined, taskId: string 
     // real repository this gateway-free suite deliberately does not create, so it throws. That
     // throw is EVIDENCE (the guard let the head through), not a failure: it is captured, never
     // swallowed silently, and the acceptance test below asserts on it.
-    await effects.dispatchFix(
+    outcome = await effects.dispatchFix(
       { ...PR, taskId, headRefName } as never,
       { unmetCriteria: [], ciFailures: [] } as never,
     );
@@ -131,7 +132,7 @@ async function driveDispatchFix(headRefName: string | undefined, taskId: string 
     rmSync(root, { recursive: true, force: true });
     rmSync(bin, { recursive: true, force: true });
   }
-  return { logs, threw };
+  return { logs, threw, outcome };
 }
 
 /** The decline row, with the assertion that it was reached at all and that no strike was spent. */
@@ -144,12 +145,16 @@ function declineRow(logs: Array<{ step: string; extra?: Record<string, unknown> 
 
 // ── each condition, driven to the emission point through the real closure ─────
 
-test("an unresolvable headRefName declines with reason head_unresolved", async () => {
+test("an unresolvable headRefName reports an unread identity instead of a successful dispatch", async () => {
   // `gh pr view` returns a payload with no `headRefName` key at all — the `!realBranch` arm,
   // which reaches the decline WITHOUT ever consulting the acceptability predicate.
-  const extra = declineRow((await driveDispatchFix(undefined, "W1-T500")).logs);
-  assert.equal(extra.reason, "head_unresolved");
-  assert.equal(extra.head, undefined, "and the row still reports the absent head, unchanged");
+  const { logs, outcome } = await driveDispatchFix(undefined, "W1-T500");
+  assert.deepEqual(outcome, { claimDeclined: true, ownerRecoveryReason: "head_identity_unreadable" });
+  const extra = logs.find(row => row.step === "sweep.fix.checkout_claim_declined")?.extra;
+  assert.equal(extra?.reason, "head_identity");
+  assert.equal(extra?.head_sha, PR.headSha);
+  assert.equal(logs.some(row => row.step === "fix.dispatch" || row.step === "sweep.fix.uncreditable_head"), false,
+    "unread evidence spends no strike and cannot label the head uncreditable");
 });
 
 test("a plan task's PR on some OTHER task's run branch declines with reason foreign_run_branch", async () => {

@@ -502,7 +502,8 @@ test("W1-T4193: a worktree created without the implement option keeps the warn-a
     assert.equal(lstatSync(join(wt, "node_modules")).isSymbolicLink(), true, "the same-package mismatch is still linked");
     assert.equal(readlinkSync(join(wt, "node_modules")), join(repoDir, "node_modules"));
     assert.ok(errors.some((m) => m.startsWith("node_modules lockfile mismatch:")), "and still warned, exactly as W1-T2777 shipped");
-    assert.deepEqual(logs.filter((s) => s.startsWith("worktree.node_modules")), [], "no W1-T4193 line without the option");
+    assert.deepEqual(logs.filter((s) => s.startsWith("worktree.node_modules")), ["worktree.node_modules"],
+      "the root link is logged without an implement-only refusal");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -606,7 +607,8 @@ test("W1-T4193: a package-less worktree under the implement option keeps todays 
     const wt = join(root, "wt");
     worktreeAdd(repoDir, wt, "run-t4193-nopkg", "origin/main", { log: (step) => logs.push(step), warn: () => {}, refuseSamePackageLockfileMismatch: true });
     assert.equal(lstatSync(join(wt, "node_modules")).isSymbolicLink(), true);
-    assert.deepEqual(logs.filter((s) => s.startsWith("worktree.node_modules")), []);
+    assert.deepEqual(logs.filter((s) => s.startsWith("worktree.node_modules")), ["worktree.node_modules"],
+      "a package-less worktree still links and logs the root outcome");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -1,0 +1,60 @@
+- id: W1-T11033
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts cost 8.7 PR minute(s) across 2 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.37
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts"
+  files:
+    - src/lib/fix-outcome.ts
+    - test/fix-lane/check-test-test-a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amend.test.ts
+  acceptance:
+    - claim: "a recorded check:test:test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts round, replayed through the real code path in src/lib/fix-outcome.ts, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11033: check:test:test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts cost 8.7 PR minute(s) (seven-day half-life) across 2 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/fix-outcome.ts: test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts imports it
+    - test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts: named by the failing check
+    - the rounds name a failing test: test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #15483 (https://github.com/craigoley/remudero/pull/15483) at 2026-10-29T17:00:19.372Z: ci-log round — coverage-shard (8/8): test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts
+        failing tests: W1-T9561: an unknown attribution keeps the scope amendment; W1-T9561: a rerouted flake leaves a fix-round flake retry row; W1-T9561: a NEEDS_SCOPE red the diff cannot reach reruns as a flake, W1-T9561: an unknown attribution keeps the scope amendment, W1-T9561: a rerouted flake leaves a fix-round flake retry row
+        log excerpt:
+          | ...
+          | not ok 3 - W1-T9561: an unknown attribution keeps the scope amendment
+          |   ---
+          |   duration_ms: 1026.73345
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts:156:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     The input did not match the regular expression /no passing verdict at main/. Input:
+          | 
+          |     'head test text is unread for test/the-state-snapshot-actually-runs-on-this-host.test.ts'
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 2 occurrence(s) across 7 day(s), last seen 2026-10-29T17:00:19.372Z, and the record declares no privileged path"
+    judged_at: "2026-10-30T17:51:21.472Z"
+    pin: "827b792706ae9d38c8a8515a912b179b7dc2c46dd73c2a574eceac83a2596848"

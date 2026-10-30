@@ -1493,6 +1493,15 @@ export async function deployStateRowsOffLoop(
   }, history, onUnreadableLatch);
 }
 
+export interface FleetStateParts {
+  union_ms: number;
+  union_rotations: number;
+  commits_walked: number;
+  commit_reads: number;
+  commit_read_ms: number;
+  deploy_ms: number;
+}
+
 export interface BuildSweepEffectsDeps {
   selectedModeFileIO?: RegistryFileIO;
   contributorAdmissionImpl?: AdmissionObserver;
@@ -3078,6 +3087,20 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
       });
       try {
+        // W1-T9114: a full review the installed host starts as a run child is not run (or waited for) here. The registry holds its
+        // slot and mutex key until the child settles, so the PR is not re-admitted while it runs, and a restart adopts it.
+        const reviewKey = reviewOutcomeKeyForPr(pr);
+        const hosted = mode.kind === "full-review"
+          ? await installedWorkHost?.spawnReview({ pr, reviewKey, reviewAttemptId }) : undefined;
+        if (hosted !== undefined) {
+          void adoptChildWork({
+            runId: hosted.runId, taskId: pr.taskId ?? `PR-${pr.prNumber}`,
+            work: { kind: "review", prNumber: pr.prNumber, headSha: pr.headSha, reviewKey },
+            settled: hosted.settled, ...(hosted.acknowledge === undefined ? {} : { acknowledge: hosted.acknowledge }),
+          }, log);
+          log("sweep.post_review.child", { pr_number: pr.prNumber, head_sha: pr.headSha, review_key: reviewKey, child_run_id: hosted.runId });
+          return;
+        }
         const exit =
           mode.kind === "full-review" || !deps.reviewReuseRunner
             ? await reviewRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId)
@@ -3801,6 +3824,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         };
         log("sweep.fix.prepare_timing", { pr_number: pr.prNumber, stage: "head-lookup",
           elapsed_ms: performance.now() - headReadStarted, asynchronous: deps.ghJsonImpl === undefined });
+        // An unread identity is retryable evidence loss, not an uncreditable head or a successful child.
+        if (typeof headRef?.headRefName !== "string" || !headRef.headRefName.trim() ||
+            typeof headRef.headRefOid !== "string" || !headRef.headRefOid.trim()) {
+          return declineClaim({ pr_number: pr.prNumber, reason: "head_identity", owner_recovery_reason: "head_identity_unreadable" });
+        }
+        if (headRef.headRefOid !== pr.headSha) {
+          return declineClaim({ pr_number: pr.prNumber, reason: "head_identity", owner_recovery_reason: "head_identity_changed" });
+        }
         const realBranch = headRef.headRefName;
         const changedPaths = (headRef.files ?? []).map((f) => f.path);
         // impl-FY: a PR with no plan task is STILL repairable — see fixRungTaskFor. The rung used to
@@ -4371,7 +4402,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               head_sha: pr.headSha,
               reason: atHead.standDown,
             });
-            return;
+            throw new Error(atHead.standDown);
           }
           task = atHead.task;
         }
@@ -4836,6 +4867,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T4817 — every read rides `readJsonImpl`, the one write rides `ghRunImpl`; a failed read
     // degrades to "no gap found this pass", never a guessed dispatch.
     readFleetState: async (live) => {
+      const parts: FleetStateParts = {
+        union_ms: 0, union_rotations: 0, commits_walked: 0, commit_reads: 0, commit_read_ms: 0, deploy_ms: 0,
+      };
+      const unionStarted = nowMsImpl();
       readdirSync(dirname(ledgerPath));
       const freshLive = readFileSync(ledgerPath, "utf8");
       const union = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), {
@@ -4844,25 +4879,37 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       });
       if (!union.ok || union.unclassified.length > 0) throw new Error(`fleet reconciliation history unreadable: ${[...union.unread, ...union.unclassified].join(", ")}`);
       const history = [...parseLedger(union.rawLines.join("\n")), ...parseLedger(freshLive), ...live];
+      parts.union_ms = Math.max(0, nowMsImpl() - unionStarted);
+      parts.union_rotations = union.archiveCount;
       const rows: FleetStateRow[] = [];
+      // The same object survives deferred workflow observations during reconciliation.
+      const readCommit = async (args: string[]): Promise<unknown> => {
+        parts.commit_reads++;
+        const started = nowMsImpl();
+        try {
+          return await readJsonImpl(args);
+        } finally {
+          parts.commit_read_ms += Math.max(0, nowMsImpl() - started);
+        }
+      };
       const runCount = async (sha: string, workflow?: string): Promise<number | undefined> => {
         const endpoint = workflow ? `actions/workflows/${workflow}/runs` : "actions/runs";
-        const body = await readJsonImpl(["api", `repos/${owner}/${repo}/${endpoint}?head_sha=${sha}&per_page=1`]) as
+        const body = await readCommit(["api", `repos/${owner}/${repo}/${endpoint}?head_sha=${sha}&per_page=1`]) as
           { total_count?: unknown } | undefined;
         return typeof body?.total_count === "number" ? body.total_count : undefined;
       };
       try {
         rows.push(...await mainWorkflowStateRows({
           listMainCommits: async (limit) => {
-            const body = await readJsonImpl(["api", `repos/${owner}/${repo}/commits?sha=main&per_page=${limit * 2}`]) as
+            const body = await readCommit(["api", `repos/${owner}/${repo}/commits?sha=main&per_page=${limit * 2}`]) as
               Array<{ sha: string; parents: Array<{ sha: string }> }>;
             if (!Array.isArray(body)) throw new Error("main commit listing is not an array");
             return body.filter((c) => typeof c?.sha === "string").map((c) => ({ sha: c.sha, parents: (c.parents ?? []).map((p) => p.sha) }));
           },
-          countRunsForSha: (sha) => runCount(sha),
+          countRunsForSha: (sha) => { parts.commits_walked++; return runCount(sha); },
           countWorkflowRuns: runCount,
           changedFiles: async (sha) => {
-            const body = await readJsonImpl(["api", `repos/${owner}/${repo}/commits/${sha}`]) as
+            const body = await readCommit(["api", `repos/${owner}/${repo}/commits/${sha}`]) as
               { files?: Array<{ filename: string }> } | undefined;
             return body?.files?.map((f) => f.filename);
           },
@@ -4871,6 +4918,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       } catch (error) {
         log("reconcile.unreadable", { pipeline: "ci", reason: String((error as Error)?.message ?? error) });
       }
+      const deployStarted = nowMsImpl();
       try {
         const failedAt = (): number | undefined => {
           try {
@@ -4909,8 +4957,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }));
       } catch (error) {
         log("reconcile.unreadable", { pipeline: "deploy", reason: String((error as Error)?.message ?? error) });
+      } finally {
+        parts.deploy_ms = Math.max(0, nowMsImpl() - deployStarted);
       }
-      return { rows, history };
+      return { rows, history, parts };
     },
     reconcileMainRunGaps: async (history) => {
       let commits: MainCommitRef[] = [];
@@ -9868,7 +9918,7 @@ export const PLAN_REPAIR_STEP = "sweep.plan_repair";
  *  A session's head (`run-unfiled-*`, `run-W1-T*`, `codex/*`) never matches, whoever pushed it.
  *  Exported so a fixture drives its refusing arm directly (W1-T2317's negative-reachability ratchet). */
 export const MACHINE_LANE_HEAD_RE = new RegExp(
-  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay|queue-judge)-garden-\\d+" +
+  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay|queue-judge|redesign)-garden-\\d+" +
     "|(?:feedback|decisions|plan-reconcile|ci-learning)-landing(?:-[a-z0-9-]+)?" +
     "|run-(?:TRIAGE|APPROVE)-.+|run-RETRO(?:-.+)?)$",
 );
@@ -9910,7 +9960,7 @@ export interface PlanRepairFacts {
   gardenRecordRefusal?: string;
 }
 
-const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay|queue-judge)-garden-\d+$/;
+const GARDEN_PLAN_HEAD_RE = /^(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout|review-replay|queue-judge|redesign)-garden-\d+$/;
 
 function gardenRecordRefusalCandidate(pr: OpenPrView): boolean {
   const names = [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map(f => f.name)]
@@ -14198,7 +14248,7 @@ export interface SweepDeps {
    *  `publishedAtMs`). `sweep.disposed` rows record `snapshot_age_ms` against it at the moment a PR is
    *  acted on. Omitted, the age is measured from the pass's own start. */
   snapshotPublishedAtMs?: number;
-  markPrelude?: (stage: string, walkStarts?: boolean) => void;
+  markPrelude?: FullPreludeTimer["mark"];
   /** W1-T2752 — a SYNCHRONOUS, READ-ONLY admission read consulted immediately before
    *  `blocked-fixable` and `conflicted` invoke {@link dispatchFix}, never a replacement for either
    *  surface's own live-state/claim checks. `buildSweepEffects` supplies it from the SAME
@@ -14315,6 +14365,7 @@ export interface SweepDeps {
   reconcileMainRunGaps?: (history: MainRunGapHistory) => Promise<readonly MainRunGapDispatch[]>;
   readFleetState?: (live: readonly Record<string, unknown>[]) => Promise<{
     rows: readonly FleetStateRow[]; history: readonly Record<string, unknown>[];
+    parts?: FleetStateParts;
   }>;
   /** W1-T2927 — pulls CI's `mutation-verdict-ledger` artifact (see mutation-verdict-pull.ts). */
   pullMutationVerdicts?: (recorded: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
@@ -15719,6 +15770,9 @@ export function fixRungInputsUnchanged(row: Record<string, unknown>, current: Fi
     row.read_body_sha256 !== current.bodySha256);
 }
 
+/** Operator ruling 2026-10-30: how long a PR may wait on an unanswered fix-lane escalation before the ladder acts. */
+export const HELD_ESCALATION_SLO_MS = 6 * 60 * 60_000;
+
 /** W1-T9999 — the ledger row a pass writes when it settles an orphaned fix seed. */
 export const FIX_SEED_ORPHANED_STEP = "sweep.fix.seed_orphaned";
 
@@ -15726,7 +15780,7 @@ export interface FixSeed { ts?: string; runId?: string }
 /** `orphaned`: the earlier run no longer owns a continuation; ordinary checkout/worker claims still gate redispatch. */
 export type FixSeedRead = { kind: "live" | "ended" | "orphaned" | "held"; seed: FixSeed; orphanReason?: "owner-run-ended";
   /** W1-T10339: `held` only — the stand-down that ended the rung while every input it read still stands. */
-  hold?: { site: string; reason: string } };
+  hold?: { site: string; reason: string; at?: string } };
 
 function continuationEndedAtEmptyBoot(
   lines: ReadonlyArray<Record<string, unknown>>, from: number, ownerRunId: string, taskId: string, runId: string,
@@ -15787,7 +15841,8 @@ export function fixSeedRead(
     // W1-T10339: a stand-down whose recorded inputs all still stand is a hold, not an ended rung.
     if (current !== undefined && end.standDown !== undefined && fixRungInputsUnchanged(end.standDown, current)) {
       return { kind: "held", seed, hold: { site: String(end.standDown.site ?? "unknown"),
-        reason: typeof end.standDown.reason === "string" ? end.standDown.reason : "no reason recorded" } };
+        reason: typeof end.standDown.reason === "string" ? end.standDown.reason : "no reason recorded",
+        ...(typeof end.standDown.ts === "string" ? { at: end.standDown.ts } : {}) } };
     }
     return { kind: "ended", seed };
   }
@@ -16467,9 +16522,13 @@ export function inFlightReviewRunsNow(): Promise<void>[] {
 
 /** Wait for the reviews in flight NOW to settle, bounded. Reviews admitted after the call are not
  *  awaited, so the drain cannot be extended by new work. Returns how many were still running at the bound. */
-export async function drainInFlightReviews(opts: { boundMs: number; onWait?: (item: RestartDrainInventoryEntry) => void }): Promise<number> {
+export async function drainInFlightReviews(opts: {
+  boundMs: number; onWait?: (item: RestartDrainInventoryEntry) => void;
+  /** W1-T9114: `false` when the next review admitted is a run child, which the restart does not wait for. Default: close. */
+  closeRefills?: boolean;
+}): Promise<number> {
   // A drain is an exit: a freed lane must not refill behind it. The next light pass reopens refills.
-  lightPassRefillsClosed = true;
+  if (opts.closeRefills !== false) lightPassRefillsClosed = true;
   const running = [...inFlightReviewRuns.keys()];
   for (const work of running) opts.onWait?.(reviewRestartItem(work, inFlightReviewRuns.get(work)!));
   if (running.length === 0) return 0;
@@ -16487,10 +16546,302 @@ export async function drainInFlightReviews(opts: { boundMs: number; onWait?: (it
   return abandoned.length;
 }
 
+/** W1-T9114 — DETACHED WORK THAT RUNS AS A RUN CHILD. A review or a fix dispatch hosted in a child is registered here, not in
+ *  {@link inFlightReviewRuns} or {@link detachedSweepActions}: those are what a restart WAITS for, and it waits for nothing it
+ *  does not own. The registry still holds the work's slot and mutex key, so the PR is not re-admitted while the child runs. */
+export interface ChildWorkRegistration {
+  runId: string; kind: string; taskId: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string;
+}
+const childWork = new Map<string, ChildWorkRegistration>();
+const settledChildWork = new Set<string>();
+const childWorkSettleKey = (runId: string, headSha?: string): string => `${runId}@${headSha ?? ""}`;
+
+/** Claims the slot and the mutex key of a child's work. Registering a run id again is a no-op. */
+export function registerChildWork(work: ChildWorkRegistration): void {
+  if (childWork.has(work.runId)) return;
+  childWork.set(work.runId, work);
+  if (work.reviewKey !== undefined) inFlightReviewKeys.add(work.reviewKey);
+  if (work.fixKey !== undefined) inFlightFixKeys.add(work.fixKey);
+}
+
+/** How many registered children run `kind`, or all of them. */
+export function childWorkCount(kind?: string): number {
+  let n = 0;
+  for (const work of childWork.values()) if (kind === undefined || work.kind === kind) n++;
+  return n;
+}
+
+/** The children a restart leaves running, counted by kind. Empty when none. */
+export function childWorkLeftRunning(): Record<string, number> {
+  const byKind: Record<string, number> = {};
+  for (const work of childWork.values()) byKind[work.kind] = (byKind[work.kind] ?? 0) + 1;
+  return byKind;
+}
+
+/**
+ * Releases the slot and the keys of a settled child's work, once per run id and head sha: a second boot (or a second call) finds it
+ * settled and returns `false`, so nothing is posted or acknowledged twice. A lost child releases the same way and its PR is
+ * re-admitted by the next light pass, because the review's durable outcome is its ledger row, which a lost child never wrote.
+ */
+export function settleChildWork(runId: string): boolean {
+  const work = childWork.get(runId);
+  if (work === undefined) return false;
+  const settleKey = childWorkSettleKey(runId, work.headSha);
+  childWork.delete(runId);
+  if (work.reviewKey !== undefined) inFlightReviewKeys.delete(work.reviewKey);
+  if (work.fixKey !== undefined) inFlightFixKeys.delete(work.fixKey);
+  releaseReviewSlot();
+  if (settledChildWork.has(settleKey)) return false;
+  settledChildWork.add(settleKey);
+  return true;
+}
+
+/** Forgets every registered child and every settlement. For a test's fresh process. */
+export function resetChildWork(): void {
+  for (const runId of [...childWork.keys()]) settleChildWork(runId);
+  settledChildWork.clear();
+}
+
+/** Does a registered child hold this review's mutex key? The review that spawned it must not release the key behind it. */
+export function childWorkHoldsReviewKey(reviewKey: string): boolean {
+  for (const work of childWork.values()) if (work.reviewKey === reviewKey) return true;
+  return false;
+}
+
+/** A review started as a run child: the handle the sweep registers, the same one a boot adopts from its spec and status. */
+export interface ReviewChildLaunch {
+  runId: string;
+  settled: Promise<unknown>;
+  acknowledge?: (outcome: PromiseSettledResult<never>) => void;
+}
+
+/** Abandoned admission refuses the dispatch; only ordinary unavailability permits an in-process fallback. */
+export type FixChildLaunch = ReviewChildLaunch | { abandoned: true; reason: "admission-abandoned"; runId: string; waitedMs: number };
+
+/**
+ * W1-T9114: what starts detached work as a run child in this process, installed by the daemon's composition root. Unset, every kind
+ * runs in process. `hosts` is what is wired (never what the design intends), and the drain reads it as the evidence that an entry
+ * hosts a kind; `mode` is `sweep.runChild.mode` resolved on the ledger evidence W1-T9087 uses.
+ */
+export interface DetachedWorkHost {
+  hosts: ReadonlySet<string>;
+  mode: () => "off" | "shadow" | "on";
+  /** Starts one review as a child, or `undefined` when it stays in process (the mode, the placement, no engine, no admission). */
+  spawnReview: (input: {
+    pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean };
+    reviewKey: string;
+    reviewAttemptId: string | undefined;
+  }) => Promise<ReviewChildLaunch | undefined>;
+  /** Starts a fix child, refuses abandoned admission, or returns `undefined` to stay in process. Absent: stay in process. */
+  spawnFix?: (input: {
+    pr: { prNumber: number; headSha: string; taskId?: string };
+    fixKey: string;
+    envelope: FixDispatchEnvelope;
+  }) => Promise<FixChildLaunch | undefined>;
+  /** Hosts the existing retro subprocess's settle when its measured drain cost moves it. */
+  spawnRetro?: (input: { decision: Record<string, unknown> }) => Promise<FixChildLaunch | undefined>;
+}
+let installedWorkHost: DetachedWorkHost | undefined;
+
+/**
+ * W1-T9114 — THE TYPED, SERIALIZABLE DECISION ENVELOPE a fix dispatch crosses the process boundary in: the sweep's producer builds it
+ * ({@link buildFixDispatchEnvelope}) and the child's callee reads it ({@link readFixDispatchEnvelope}), so the two share one shape.
+ * It carries the PR view the sweep judged and the evidence it judged, and nothing live: never the claim keeper, a dependency function
+ * or the phase callback. The child rebuilds those, rechecks the PR ({@link recheckFixDispatch}) and takes its own claim.
+ */
+export interface FixDispatchEnvelope {
+  schema: 1;
+  pr: OpenPrView;
+  evidence: Omit<FixDispatchEvidence, "progressJudge">;
+  /** The in-process mutex key the sweep held when it decided; the child's registration holds it until the child settles. */
+  fixKey: string;
+  decidedAtMs: number;
+  /** The original admission wait survives retries and daemon restarts. */
+  admissionSinceMs?: number;
+  /** The canonical task context the sweep saw (`planContextDigestFor`); a child that reads another one refuses. */
+  planContextDigest?: string;
+  dedupeKey?: string;
+}
+
+/** The envelope for a decision, as plain JSON. Throws when the view or the evidence is not serializable: the dispatch then stays in process. */
+export function buildFixDispatchEnvelope(
+  pr: OpenPrView, evidence: FixDispatchEvidence, facts: {
+    fixKey: string; decidedAtMs: number; admissionSinceMs?: number; planContextDigest?: string; dedupeKey?: string;
+  },
+): FixDispatchEnvelope {
+  const serializable: Omit<FixDispatchEvidence, "progressJudge"> & { progressJudge?: FixProgressJudge } = { ...evidence };
+  delete serializable.progressJudge;
+  return JSON.parse(JSON.stringify({ schema: 1, pr, evidence: serializable, ...facts })) as FixDispatchEnvelope;
+}
+
+/** The envelope a spec's `inputs.envelope` holds, or `undefined` when it is not one (an unread envelope is a refusal, never a dispatch). */
+export function readFixDispatchEnvelope(raw: unknown): FixDispatchEnvelope | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const e = raw as Partial<FixDispatchEnvelope>;
+  if (e.schema !== 1 || typeof e.fixKey !== "string" || typeof e.decidedAtMs !== "number") return undefined;
+  if (e.admissionSinceMs !== undefined && (typeof e.admissionSinceMs !== "number" || !Number.isFinite(e.admissionSinceMs))) return undefined;
+  const { pr, evidence } = e;
+  if (typeof pr !== "object" || pr === null || typeof pr.prNumber !== "number" || typeof pr.prUrl !== "string" || typeof pr.headSha !== "string") return undefined;
+  if (typeof evidence !== "object" || evidence === null || !Array.isArray(evidence.unmetCriteria)) return undefined;
+  return e as FixDispatchEnvelope;
+}
+
+/** What the fix-dispatch child reads live and rebuilds; a port that cannot answer makes the recheck refuse. */
+export interface FixDispatchChildPorts {
+  /** The PR now, or `undefined` when it cannot be read. */
+  readLivePr: (prUrl: string) => Promise<{ state: string; merged?: boolean; headSha?: string } | undefined>;
+  /** The canonical plan's task now: `found: false` when the plan has no such task; a plan that cannot be read throws. */
+  readTask: (taskId: string) => { found: false } | { found: true; merged: boolean; retired: boolean; contextDigest?: string };
+  /** The fleet hold on worker admission now (STOP, PAUSE), or `undefined` when none holds. */
+  hold: () => string | undefined;
+  claimFixAdmission: NonNullable<SweepDeps["claimFixAdmission"]>;
+  /** Reconstructs the sweep's live dependencies in this process. A reconstruction that cannot be read throws, and the child refuses. */
+  dispatcher: () => Pick<SweepDeps, "dispatchFix"> & Partial<Pick<SweepDeps, "fixProgressJudge">>;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  /** The phase sink: the owned run's `status.json`, so a fix's admission, worker and CI wait stay visible to the adopting daemon. */
+  onPhase?: (phase: string) => void;
+}
+
+export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" | "readTask" | "hold">;
+
+/**
+ * W1-T9114 — THE CHILD'S RECHECK, run before it takes its own claim: the fleet hold, the PR's current state and head, and the
+ * canonical task (merged, retired, or its context changed since the sweep decided). A port that throws or cannot answer refuses:
+ * an unread identity, grant or reconstruction is never a successful dispatch.
+ */
+export async function recheckFixDispatch(
+  envelope: FixDispatchEnvelope, ports: FixDispatchRecheckPorts,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const refuse = (reason: string) => ({ ok: false as const, reason });
+  try {
+    const hold = ports.hold();
+    if (hold !== undefined) return refuse(`worker admission is held: ${hold}`);
+    const live = await ports.readLivePr(envelope.pr.prUrl);
+    if (live === undefined) return refuse("the PR's live state could not be read");
+    if (live.merged === true || live.state.toLowerCase() !== "open") return refuse(`the PR is no longer open (${live.merged === true ? "merged" : live.state})`);
+    if (live.headSha !== envelope.pr.headSha) return refuse(`the PR head moved from ${envelope.pr.headSha} to ${live.headSha ?? "an unreadable head"}`);
+    const taskId = envelope.pr.taskId;
+    if (taskId !== undefined) {
+      const task = ports.readTask(taskId);
+      if (task.found && task.merged) return refuse(`task ${taskId} is already merged`);
+      if (task.found && task.retired) return refuse(`task ${taskId} is retired`);
+      if (envelope.planContextDigest !== undefined && (!task.found || task.contextDigest !== envelope.planContextDigest)) {
+        return refuse(`task ${taskId}'s canonical context changed since the sweep decided`);
+      }
+    }
+    return { ok: true };
+  } catch (error) {
+    const reason = `the recheck could not read its evidence (${String((error as Error)?.message ?? error)})`;
+    return refuse(reason);
+  }
+}
+
+/**
+ * W1-T9114 — THE CHILD'S CALLEE: the fix dispatch a run child hosts. It reads the envelope the sweep's producer built, rechecks the
+ * PR, the task and the fleet hold, rebuilds the live dependencies, and calls the SAME `dispatchFix` the sweep calls in process, so
+ * every write-time fence before the normal rung (the live-state preflight, creditable head, the branch claim through the native
+ * helper and its identity checks) runs unchanged and the child takes its own claim there. It never calls the operator `rmd fix`
+ * route or `--requested`, which lacks the board-wide merged/retired projections. A refusal THROWS: it is a failed child (settled as
+ * lost, never as success), not a quiet return.
+ */
+export async function runFixDispatchChild(inputs: Record<string, unknown>, deps: FixDispatchChildPorts): Promise<void> {
+  const envelope = readFixDispatchEnvelope(inputs.envelope);
+  if (envelope === undefined) throw new Error("fix dispatch refused: the spec carries no readable decision envelope");
+  const rechecked = await recheckFixDispatch(envelope, deps);
+  if (!rechecked.ok) {
+    deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason: rechecked.reason });
+    throw new Error(`fix dispatch refused: ${rechecked.reason}`);
+  }
+  let grant: ReturnType<FixDispatchChildPorts["claimFixAdmission"]>;
+  try {
+    grant = deps.claimFixAdmission(envelope.pr);
+    if (grant?.admitted !== true) throw new Error(grant?.reason ?? "no readable admission grant");
+  } catch (error) {
+    const reason = `worker admission refused (${String((error as Error)?.message ?? error)})`;
+    deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason });
+    throw new Error(`fix dispatch refused: ${reason}`);
+  }
+  try {
+    let effects: ReturnType<FixDispatchChildPorts["dispatcher"]>;
+    try {
+      effects = deps.dispatcher();
+    } catch (error) {
+      const reason = `the live dependencies could not be reconstructed (${String((error as Error)?.message ?? error)})`;
+      deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason });
+      throw new Error(`fix dispatch refused: ${reason}`);
+    }
+    const outcome = await effects.dispatchFix(
+      envelope.pr, { ...envelope.evidence, ...(effects.fixProgressJudge === undefined ? {} : { progressJudge: effects.fixProgressJudge }) },
+      (phase) => {
+        deps.onPhase?.(phase);
+        deps.log("sweep.fix.child_phase", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, phase });
+      },
+      { signal: new AbortController().signal, admissionSinceMs: envelope.admissionSinceMs },
+    );
+    const declined = fixClaimDeclinedReason(outcome);
+    if (declined !== undefined) throw new Error(`fix dispatch refused: ${declined}`);
+  } finally {
+    grant.release?.();
+  }
+}
+
+/** Installs (or, with `undefined`, removes) the process's detached-work host. */
+export function installDetachedWorkHost(host: DetachedWorkHost | undefined): void {
+  installedWorkHost = host;
+}
+
+/** The installed host, or `undefined` when every kind runs in process. */
+export function installedDetachedWorkHost(): DetachedWorkHost | undefined {
+  return installedWorkHost;
+}
+
+/** The child a boot adopted, as the registry takes it: structural, so this module imports nothing from run-child. */
+export interface AdoptedWorkChild {
+  runId: string; taskId: string;
+  work: { kind: string; prNumber?: number; headSha?: string; reviewKey?: string; fixKey?: string; inputs?: Record<string, unknown> };
+  settled: Promise<unknown>;
+  acknowledge?: (outcome: PromiseSettledResult<never>) => void;
+}
+
+/**
+ * W1-T9114: a booting daemon adopts a work child instead of draining it. It keeps its slot and key while it runs; when it settles
+ * the registry releases them and the receipt is acknowledged exactly once, so the boot after never replays it. A terminal review
+ * posted its verdict itself (the child owns the post), so the daemon posts nothing.
+ */
+export function adoptChildWork(child: AdoptedWorkChild, log: (step: string, extra?: Record<string, unknown>) => void): Promise<void> {
+  // Already settled in this process for this head: nothing to claim, post or acknowledge a second time.
+  if (settledChildWork.has(childWorkSettleKey(child.runId, child.work.headSha))) return Promise.resolve();
+  const { inputs, ...registered } = child.work;
+  registerChildWork({ runId: child.runId, taskId: child.taskId, ...registered });
+  return child.settled.then(
+    (value) => ({ status: "fulfilled" as const, value }),
+    (reason: unknown) => ({ status: "rejected" as const, reason }),
+  ).then((outcome) => {
+    const first = settleChildWork(child.runId);
+    // A fix child that ended lost (a refusal at its recheck, a failure before its `fix.dispatch` row, a dead or misidentified process)
+    // voids the dedup exactly as a detached in-process rejection does (`sweep.fix.dispatch_failed`), once per run id and head.
+    if (first && outcome.status === "rejected" && child.work.kind === "fix-dispatch" && child.work.prNumber !== undefined && child.work.headSha !== undefined) {
+      // In this process the registration carries the key; after a boot it is read back from the spec's envelope.
+      const dedupeKey = inputs?.dedupeKey ?? (inputs?.envelope as { dedupeKey?: unknown } | undefined)?.dedupeKey;
+      log("sweep.fix.dispatch_failed", {
+        pr_number: child.work.prNumber, head_sha: child.work.headSha, child_run_id: child.runId,
+        ...(typeof dedupeKey === "string" ? { dedupe_key: dedupeKey } : {}),
+        error: capStderrExcerpt(String((outcome.reason as Error)?.message ?? outcome.reason), STDERR_EXCERPT_CAP),
+      });
+    }
+    child.acknowledge?.(outcome as PromiseSettledResult<never>);
+    log("daemon.child_work_settled", {
+      run_id: child.runId, task_id: child.taskId, kind: child.work.kind, ...(child.work.prNumber === undefined ? {} : { pr: child.work.prNumber }),
+      outcome: outcome.status === "fulfilled" ? "terminal" : "lost", first_settlement: first,
+    });
+  });
+}
+
 /** W1-T2981 — is an action of this kind already detached? A second concurrent retro would race the
  *  same marker file, so the rung refuses rather than stacking. A KIND query, not a separate boolean,
  *  so the registry stays the one source of truth about what is in flight. */
 export function detachedActionInFlight(kind: DetachedActionKind): boolean {
+  if (childWorkCount(kind) > 0) return true;
   for (const action of detachedSweepActions.values()) if (action.actionKind === kind) return true;
   return false;
 }
@@ -17297,7 +17648,7 @@ export interface FullPreludeTimer {
   readonly startedAtMs: number;
   time<T>(stage: string, run: () => T | Promise<T>): Promise<T>;
   note(fields: Record<string, unknown>): void;
-  mark(stage: string, walkStarts?: boolean): void;
+  mark(stage: string, walkStarts?: boolean, fields?: Record<string, unknown>): void;
   write(walkReached: boolean): void;
 }
 
@@ -17324,7 +17675,8 @@ export function createFullPreludeTimer(
       }
     },
     note(extra) { Object.assign(fields, extra); },
-    mark(stage, walkStarts = false) {
+    mark(stage, walkStarts = false, extra) {
+      Object.assign(fields, extra);
       const at = clock();
       record(stage, at - cursorMs);
       cursorMs = at;
@@ -18397,9 +18749,11 @@ export async function runSweep(
   // Full passes only: a light pass fans this function out one PR at a time, and the reads below
   // are per-pass, not per-PR. The dedupe is the ledger fold handed to the effect, so a commit
   // already handled costs no read and is never dispatched a second time.
+  let fleetStateParts: FleetStateParts | undefined;
   if (deps.readFleetState && !deps.dryRun && deps.repairAdmissionSurface !== "light") {
     try {
-      const { rows, history } = await deps.readFleetState(ledgerLines);
+      const { rows, history, parts } = await deps.readFleetState(ledgerLines);
+      fleetStateParts = parts;
       await reconcileFleetState(rows, history, (event) => {
         appendLine(deps.ledgerPath, { ...event, run_id: deps.runId, task_id: "SWEEP" });
         log(event.step, event);
@@ -18448,7 +18802,7 @@ export async function runSweep(
     }
   }
 
-  deps.markPrelude?.("fleet_state");
+  deps.markPrelude?.("fleet_state", false, fleetStateParts && { fleet_state_parts: fleetStateParts });
   // Full passes only: one paced list per pass, deduped on the ledger's own run_ids.
   if (deps.pullMutationVerdicts && deps.repairAdmissionSurface !== "light") {
     try {
@@ -18528,7 +18882,8 @@ export async function runSweep(
   const ladderActedPrs = new Set<number>();
   // W1-T5690: the SLO clock's view of one PR — set only for a blocked-ambiguous PR whose blocker has
   // outlived BLOCKER_SLO_MS. `noOp` is the repeated-refusal hold, which enters the climb at rebuild.
-  interface SloContext { blocker: PrBlocker; owner: string; ageMs: number; noOp: boolean; strikeOwned: boolean }
+  // `held` (W1-T5690 extension, operator ruling 2026-10-30) names the escalation an unanswered refused-escalate PR waits on.
+  interface SloContext { blocker: PrBlocker; owner: string; ageMs: number; noOp: boolean; strikeOwned: boolean; held?: string }
   const applyStrikeLadder = async (pr: OpenPrView, slo?: SloContext): Promise<string> => {
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha };
     const record = (step: string, extra: Record<string, unknown>) => {
@@ -18622,7 +18977,7 @@ export async function runSweep(
           nowMs: now, rungHistory: history, unavailable: ["refresh"],
         }, buildFixProgressInput({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
           currentRed: redCheckNames(pr), ledger: strikeLadderRows, operatorAnswer: pr.pendingAnswer?.constraint }),
-        deps.fixProgressJudge, record);
+        deps.fixProgressJudge, record, slo?.held);
         if (progress.rung === "none") return hold(progress.reason);
         decision = { rung: progress.rung, reason: progress.reason };
       }
@@ -18635,7 +18990,8 @@ export async function runSweep(
         }
         const refusals = fixRoundTally(strikeLadderRows, fixLedgerTaskIdFor(pr), pr.headSha).refusals;
         const note = capStrikeLadderNote(
-          `${reason}\nClosed PR: ${pr.prUrl}; head: ${pr.headSha}\n` +
+          `${reason}\n${slo?.held === undefined ? "" : `Unanswered escalation it was held on: ${slo.held}\n`}` +
+          `Closed PR: ${pr.prUrl}; head: ${pr.headSha}\n` +
           `Failing checks/tests: ${(pr.ciFailures ?? []).map(f => `${f.name}: ${firstFailingTestTitle(f.logTail) ?? "no failing title"}`).join("; ")}\n` +
           `Unmet claims: ${pr.unmetCriteria.map(c => `${c.claim}: ${c.reason}`).join("; ")}\n` +
           `Strike history: ${JSON.stringify(pr.strikeHistory ?? [])}\nfix.commit_refused: ${JSON.stringify(refusals)}`,
@@ -18754,7 +19110,54 @@ export async function runSweep(
 
   /** W1-T5932 — {@link detachSweepAction} for a fix dispatch: a rejection, which `dispatchFix` raises only
    *  before its `fix.dispatch` row (W1-T1127), is ledgered so the next pass does not read it as dispatched. */
-  function detachFixDispatch(pr: OpenPrView, work: (onPhase: DetachedFixPhaseObserver) => Promise<unknown>, claim: DetachedFixClaim, dedupeKey?: string): void {
+  /** W1-T9114 — a fix dispatch the installed host starts as a run child. SPAWNED BEFORE THE FIX-BRANCH CLAIM: nothing here takes it, the
+   *  child takes its own through the native helper once it has rechecked the PR. What this pass held is the in-process mutex key,
+   *  which the registry takes over (it holds until the child settles), so a restart waits for nothing it does not own. `false`: stay in process. */
+  async function hostFixDispatch(pr: OpenPrView, evidence: FixDispatchEvidence, claim: DetachedFixClaim, dedupeKey?: string): Promise<boolean> {
+    const host = installedWorkHost;
+    if (deps.dryRun || host?.spawnFix === undefined || host.mode() !== "on") return false;
+    let envelope: FixDispatchEnvelope;
+    try {
+      envelope = buildFixDispatchEnvelope(pr, evidence, { fixKey: claim.fixKey, decidedAtMs: deps.now?.() ?? systemClock.now(),
+        admissionSinceMs: claim.control.admissionSinceMs, planContextDigest: deps.planContextDigestFor?.(pr), dedupeKey });
+    } catch (error) {
+      log("sweep.fix.child_envelope_refused", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
+      return false;
+    }
+    let hosted: FixChildLaunch | undefined;
+    try {
+      hosted = await host.spawnFix({ pr: { prNumber: pr.prNumber, headSha: pr.headSha, taskId: escalationTaskIdFor(pr) }, fixKey: claim.fixKey, envelope });
+    } catch (error) {
+      log("sweep.fix.child_spawn_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
+      return false;
+    }
+    if (hosted === undefined) return false;
+    if ("abandoned" in hosted) {
+      claim.release();
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: "sweep.fix.dispatch_failed",
+        pr_number: pr.prNumber, head_sha: pr.headSha, dedupe_key: dedupeKey,
+        reason: hosted.reason, admission_run_id: hosted.runId, admission_waited_ms: hosted.waitedMs,
+        error: "fix child admission abandoned; no worker spawned",
+      });
+      return true;
+    }
+    // Release this pass's claim (its capacity too), then let the registry hold the same key at once: no await between the two.
+    claim.release();
+    void adoptChildWork({
+      runId: hosted.runId, taskId: escalationTaskIdFor(pr),
+      work: { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey: claim.fixKey, ...(dedupeKey === undefined ? {} : { inputs: { dedupeKey } }) },
+      settled: hosted.settled, ...(hosted.acknowledge === undefined ? {} : { acknowledge: hosted.acknowledge }),
+    }, log);
+    log("sweep.fix.child", { pr_number: pr.prNumber, head_sha: pr.headSha, fix_key: claim.fixKey, child_run_id: hosted.runId });
+    return true;
+  }
+
+  /** The detached fix dispatch: hosted as a run child when the installed host takes it (`evidence` names the decision to carry),
+   *  otherwise started in this process and handed to the registry a restart drains. */
+  async function detachFixDispatch(pr: OpenPrView, work: (onPhase: DetachedFixPhaseObserver) => Promise<unknown>, claim: DetachedFixClaim,
+    dedupeKey?: string, evidence?: FixDispatchEvidence): Promise<void> {
+    if (evidence !== undefined && await hostFixDispatch(pr, evidence, claim, dedupeKey)) return;
     detachSweepAction(
       (onPhase) => work(onPhase).catch((e: unknown) => appendLine(deps.ledgerPath, {
         run_id: deps.runId,
@@ -19857,7 +20260,9 @@ export async function runSweep(
     // W1-T10339: a PR with no task trailer is judged on its BODY, so the body is an input a stand-down read.
     const standDownBodySha = carriesTaskTrailer(pr) ? undefined : prBodyDigest(pr.body);
     let designReleasedByBody = false;
-    let standDownHold: { site: string; reason: string } | undefined;
+    let standDownHold: { site: string; reason: string; at?: string } | undefined;
+    let heldEscalationAt: string | undefined;
+    let heldEscalationDedup: string | undefined;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
@@ -19904,7 +20309,10 @@ export async function runSweep(
               `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
             : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
           if (mainAdoption) designMainAdoptionSpent = true;
-          if (!amended && !mainAdoption) ruleBlockerByIndex.set(prIndex, "escalated");
+          if (!amended && !mainAdoption) {
+            ruleBlockerByIndex.set(prIndex, "escalated");
+            heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;
+          }
         }
       } else if (handoff.kind === "unavailable") {
         disposition = "wait";
@@ -19932,12 +20340,21 @@ export async function runSweep(
         held?.hold?.site === "rung.strike" && held.hold.reason === CONFLICT_REPAIR_HANDOFF_REASON;
       if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff) {
         standDownHold = held.hold;
+        heldEscalationAt = held.hold.at;
         disposition = "refused-escalate";
         reason = `fix stood down at ${held.hold.site} and nothing it read has changed (head ${pr.headSha.slice(0, 7)}, task contract` +
           `${standDownBodySha === undefined ? "" : ", PR body"}) — no worker is dispatched until one does: ${held.hold.reason}`;
         ruleBlockerByIndex.set(prIndex, "escalated");
       }
     }
+    // Operator ruling 2026-10-30: a fix lane that escalated to a person and got no answer for HELD_ESCALATION_SLO_MS takes the
+    // ladder's rebuild rung (the fix-progress judge, then close and requeue with the findings as a note, or a digest) instead
+    // of re-escalating. The age is read off the hold's own row, so neither blocker bookkeeping nor a re-escalation resets it.
+    const heldAgeMs = heldEscalationAt === undefined ? NaN : now - Date.parse(heldEscalationAt);
+    const heldEscalationSlo: SloContext | undefined = deps.strikeLadder !== undefined && disposition === "refused-escalate" &&
+      !deps.dryRun && pr.isPlanFiling !== true && !(pr.pendingAnswer && !pr.pendingAnswer.spent) &&
+      Number.isFinite(heldAgeMs) && heldAgeMs >= HELD_ESCALATION_SLO_MS
+      ? { blocker: "escalated", owner: "NONE", ageMs: heldAgeMs, noOp: true, strikeOwned: false, held: reason } : undefined;
     byDisposition[disposition]++;
     const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue && !sloLadderDue;
     const contradictionKey = isContradictory ? contradictoryKey(pr, ledgerLines) : undefined;
@@ -20220,6 +20637,12 @@ export async function runSweep(
             ? `stand-down hold: ${reason} — escalated once for this head (${pr.headSha.slice(0, 7)}), no worker dispatched and no capacity spent`
             : `an escalation was already filed for this head (${pr.headSha.slice(0, 7)}) — the ` +
             `escalation is deduped, not skipped, and a new head re-earns its own`;
+        }
+        // An unanswered escalation past its SLO reaches the ladder in the action arm; the dedup still forbids a second issue.
+        if (alreadyDone && heldEscalationSlo !== undefined) {
+          heldEscalationDedup = dedupStandDownReason;
+          alreadyDone = false;
+          dedupStandDownReason = undefined;
         }
         break;
       case "dep-review":
@@ -20551,7 +20974,7 @@ export async function runSweep(
                 extraDisposedFields = { code_scanning_fix_preparing: true, code_scanning_fix_reason: codeScanning.reason };
                 const fixEvidence = { unmetCriteria: [], ciFailures: codeScanningFixCiFailures(codeScanning.alerts, codeScanning.reason) };
                 if (deps.detachFixWait) {
-                  detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim);
+                  await detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim, undefined, fixEvidence);
                   break;
                 }
                 const fixOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
@@ -20982,7 +21405,7 @@ export async function runSweep(
                 const judgedCodeqlEvidence: FixDispatchEvidence = { ...codeqlEvidence, progressDecision,
                   progressApproach: progressDecision?.verdict === "change-approach" ? progressDecision.approach : undefined };
                 if (deps.detachFixWait) {
-                  detachFixDispatch(pr, (onPhase) => codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence, onPhase, codeqlClaim.control)), codeqlClaim, dedupeKey);
+                  await detachFixDispatch(pr, (onPhase) => codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence, onPhase, codeqlClaim.control)), codeqlClaim, dedupeKey, judgedCodeqlEvidence);
                   break;
                 }
                 const codeqlOutcome = await codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence));
@@ -21674,7 +22097,7 @@ export async function runSweep(
                 standDownReason = `flake claim refuted at ${pr.headSha} — dispatching a real fix round`;
               }
               if (deps.detachFixWait) {
-                detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim);
+                await detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim, undefined, fixEvidence);
                 break;
               }
               const dispatchOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
@@ -21797,7 +22220,7 @@ export async function runSweep(
               }
               // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
               if (deps.detachFixWait) {
-                detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence, onPhase, conflictedFixClaim.control)), conflictedFixClaim);
+                await detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence, onPhase, conflictedFixClaim.control)), conflictedFixClaim, undefined, conflictedEvidence);
                 break;
               }
               const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));
@@ -21860,6 +22283,20 @@ export async function runSweep(
               break;
             }
             case "refused-escalate":
+              if (heldEscalationSlo) {
+                const ladder = await applyStrikeLadder(pr, heldEscalationSlo);
+                if (ladderActedPrs.has(pr.prNumber)) {
+                  standDownReason = ladder;
+                  reason = ladder;
+                  break;
+                }
+                extraDisposedFields = { ...extraDisposedFields, held_escalation_ladder: ladder };
+                if (heldEscalationDedup !== undefined) {
+                  acted = false;
+                  standDownReason = `${heldEscalationDedup}; ladder: ${ladder}`;
+                  break;
+                }
+              }
               try {
                 await deps.escalate(pr, reason, question!);
                 if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_escalation_outcome: "delivered" };
@@ -22476,6 +22913,7 @@ export async function runSweep(
                 // retain the historical empty-task fallback.
                 task_id: reviewOutcomeTaskIdFor(job.pr),
                 step: "review.post_refused",
+                ts: clockFromMillisFn(deps.now).iso(),
                 review_attempt_id: reviewAttemptId,
                 head_sha: job.pr.headSha,
                 ...(job.pr.reviewInputDigest !== undefined
@@ -22491,7 +22929,8 @@ export async function runSweep(
         // and BEFORE `finalizeDisposition`, which only ledgers and never gates a future pass. On
         // success `postReview` has already durably written the reviewed state a later pass sees; on
         // failure the row just above establishes a bounded retry clock.
-        claim.release();
+        // W1-T9114: a review child holds this key until it settles; releasing it here would re-admit the PR under a running review.
+        if (!childWorkHoldsReviewKey(job.reviewKey)) claim.release();
       }
       if (!deps.detachReviewWait) await finalizeDisposition(
         job.index,
@@ -23143,7 +23582,8 @@ function lightPassMemoryWaitSummary(pr: OpenPrView, deps: SweepDeps, sinceMs?: n
 
 /** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */
 export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
-  const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight;
+  // W1-T9114: a review child holds its slot while it runs, adopted or not.
+  const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight + childWorkCount("review");
   return { bound: Math.max(0, width - inFlight), inFlight };
 }
 
@@ -23925,8 +24365,9 @@ export function renderSweepSummary(s: SweepSummary): string {
 // DESIGN: {@link checkQueueGovernor} is consulted ONLY on the NEW-task dispatch path, NEVER by
 // `runSweep`, which drains already-open PRs at ANY depth. // Why: docs/forensics/sweep.md.
 
-/** W1-T4465 design (ii) — which of the three admission tiers a consultation fell into. */
-export type QueueGovernorTier = "under_limit" | "draining" | "growing";
+/** W1-T4465 design (ii) — which admission tier a consultation fell into. `focus` is W1-T11026's hold, answered by
+ *  the focus gardener's wrapper (focus-gardener.ts) over an admitting reading, never by {@link checkQueueGovernor}. */
+export type QueueGovernorTier = "under_limit" | "draining" | "growing" | "focus";
 
 /** W1-T4465 design (i)/(ii) — the ownership and flow observation {@link checkQueueGovernor}
  *  compares against its measured bound. Every field is OPTIONAL

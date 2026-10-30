@@ -13,6 +13,9 @@
   files:
     - src/lib/board-projection.ts
     - test/a-re-derived-task-extends-its-cached-history.test.ts
+  # refusal-amendment (W1-T9716, run DAEMON-1793328098219@749846f3719f93014d1f4c3713d3c00c72af2739, 2026-10-30T05:29:45.248Z): the worker refused criterion 3 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Design item 3 requires a measured bound proposal and operator decision; neither is supplied.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 2
   attempts: 0

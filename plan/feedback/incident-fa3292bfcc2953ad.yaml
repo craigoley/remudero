@@ -1,0 +1,32 @@
+id: incident-fa3292bfcc2953ad
+ts: 2026-10-30T16:26:10.149Z
+raw: >-
+  Incident fa3292bfcc29: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) — The
+  <n> MiB production bound lacks measured sizing evidence and documented
+  operator approval; passing eviction tests cannot satisfy this requirement.
+
+  First seen: 2026-10-30T04:40:05.091Z
+
+  Last seen: 2026-10-30T05:21:39.621Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15639 escalated: already escalated (reason unreadable: no escalation of this PR at head 749846f is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793328098219:1:1793334083431) — The 16 MiB production bound lacks measured sizing evidence and documented operator approval; passing eviction tests cannot satisfy this requirement.
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#fa3292bfcc2953ad315bc3dad9dc47c8bd919dcfee8eb3c539eb402e1c9f2156
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

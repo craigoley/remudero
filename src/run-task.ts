@@ -137,6 +137,8 @@ import {
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
 import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
+import { daemonBoot } from "./lib/daemon.js";
+import { settleRunChildBacklog } from "./lib/run-child.js";
 export { readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync };
 import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
@@ -370,6 +372,7 @@ import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOvers
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { queueJudgeGardenSpec, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
+import { redesignGardenSpec } from "./lib/redesign-gardener.js";
 import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
@@ -475,7 +478,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout", "review-replay", "queue-judge"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout", "review-replay", "queue-judge", "redesign"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -1719,6 +1722,7 @@ import {
   buildDepReviewArmUnreachableEscalation,
   buildDepReviewEscalation,
   reconcileDepReviewHold,
+  readDepReviewHoldState,
   reconcileDependabotRefresh,
   dependabotCommandAnswer,
   type DependabotIssueComment,
@@ -1756,7 +1760,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, failedFireBackoff, feedbackChangedAtOnMain, AUTO_TRIAGE_FAILURE_STEPS, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, releaseDispatchClaimAsync, gitDispatchClaimReserver, gitDispatchClaimReserverAsync, gitClaimRunnerAsync, dispatchClaimRef, claimDropRefusal, pidIsPresent, readNamespaceBootMs, reclaimSilentDispatchClaim, holdDispatchClaim, renewDispatchClaim, DISPATCH_CLAIM_RENEW_INTERVAL_MS, type DispatchClaimRenewal, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "./lib/dispatch-claim.js";
 import {
   checkGithubPosture,
@@ -12168,6 +12172,15 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   const captureProposal = deps.captureMigrationFeedback ?? depReviewProposalCapture(
     deps.landingStateRoot ?? (deps.root === undefined ? undefined : config.root));
   const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
+  try {
+    readDepReviewHoldState(holdStatePath, view.headRefOid);
+  } catch (error) {
+    const reason = `dependency hold reconciliation incomplete: ${String(error)}`;
+    log("dep-review.decided", { decision: "hold", reason, pr_url: view.url, head_sha: view.headRefOid });
+    log("dep-review.hold_reconcile_failed", { pr_url: view.url, head_sha: view.headRefOid, error: String(error) });
+    console.log(`dependency hold escalation reconciliation failed; will retry: ${String(error)}`);
+    return 1;
+  }
   const dependabot = isDependabotAuthor({ login: view.author?.login ?? "" });
   const actions = deps.actions ?? (deps.gh === undefined ? defaultDepReviewActions(owner, repo) : undefined);
   const supersededReruns = (superseded: readonly string[]) => reconcileSupersededRedReruns({
@@ -12231,29 +12244,59 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     judged_against: required.kind, ...(required.kind === "all-checks" ? { required_fallback: required.fallback } : {}) });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
-  try {
-    reconcileDepReviewHold({
-      statePath: holdStatePath,
-      prUrl: view.url,
-      prNumber: view.number,
-      title: view.title ?? "",
-      body: view.body ?? "",
-      headSha: view.headRefOid,
-      result,
-      nowMs: clock.now(),
-      escalationDeps: () => ({ issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
-      log,
-    });
-  } catch (error) {
-    log("dep-review.decided", {
-      ...result, decision: "hold", review_decision: result.decision,
-      reason: `dependency hold reconciliation incomplete: ${String(error)}`,
-      pr_url: view.url, head_sha: view.headRefOid,
-    });
-    log("dep-review.hold_reconcile_failed", { pr_url: view.url, head_sha: view.headRefOid, error: String(error) });
-    console.log(`dependency hold escalation reconciliation failed; will retry: ${String(error)}`);
-    return 1;
-  }
+  let remedyAskUrl: string | undefined;
+  const reconcileHold = async () => {
+    try {
+      await reconcileDepReviewHold({
+        statePath: holdStatePath,
+        prUrl: view.url,
+        prNumber: view.number,
+        title: view.title ?? "",
+        body: view.body ?? "",
+        headSha: view.headRefOid,
+        result,
+        checks: selectedChecks,
+        remedyAskUrl,
+        proposalProgress: async (feedbackId) => {
+          const path = join(proposalRoot, "plan", "feedback", `${feedbackId}.yaml`);
+          const feedback = existsSync(path) ? readFeedbackEntry(proposalRoot, feedbackId) : undefined;
+          const planPath = join(proposalRoot, "plan", "tasks.yaml");
+          const tasks = existsSync(planPath) ? loadPlan(planPath).tasks.filter(t => t.origin === `feedback#${feedbackId}`) : [];
+          const rows = tasks.length ? readLedgerUnionRecordsSync(dirname(ledgerPath), { refuseIncomplete: true }).rows : [];
+          const outcomes = await Promise.all(tasks.map(async task => {
+            const history = rows.filter(r => r.task_id === task.id);
+            const taskRows = history.slice(Math.max(0, history.findLastIndex(r => r.step === "run.start" || r.step === "dispatch")));
+            const last = taskRows.at(-1);
+            const prUrl = taskRows.findLast(r => typeof r.pr_url === "string")?.pr_url;
+            const pr = typeof prUrl === "string" ? await (deps.gh ?? ghJsonAsync)(["pr", "view", prUrl, "--repo", slug,
+              "--json", "state,headRefOid,statusCheckRollup"]) as { state?: string; headRefOid?: string; statusCheckRollup?: RollupEntry[] } : undefined;
+            if (pr && !["OPEN", "CLOSED", "MERGED"].includes(pr.state ?? "")) throw new Error(`owned-build PR state unreadable: ${prUrl}`);
+            const verdict = taskRows.findLast(r => r.step === "verdict");
+            return { taskId: task.id, last, pr,
+              terminal: pr?.state === "CLOSED" || pr?.state === "MERGED" ||
+                ["failed", "no_pr"].includes(String(verdict?.verdict)) };
+          }));
+          return { evidence: { feedback: feedback?.status ?? "captured", proposal: feedback?.proposal_pr, outcomes },
+            terminal: feedback?.status === "rejected" || (outcomes.length > 0 && outcomes.every(o => o.terminal)) };
+        },
+        nowMs: clock.now(),
+        escalationDeps: () => ({ issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+        log,
+      });
+    } catch (error) {
+      log("dep-review.decided", {
+        ...result, decision: "hold", review_decision: result.decision,
+        reason: `dependency hold reconciliation incomplete: ${String(error)}`,
+        pr_url: view.url, head_sha: view.headRefOid,
+      });
+      log("dep-review.hold_reconcile_failed", { pr_url: view.url, head_sha: view.headRefOid, error: String(error) });
+      console.log(`dependency hold escalation reconciliation failed; will retry: ${String(error)}`);
+      return false;
+    }
+    return true;
+  };
+
+  if (result.decision !== "hold" && !(await reconcileHold())) return 1;
 
   if (result.decision === "refuse") {
     const refused = reconcileDependabotRefusedPath({
@@ -12310,10 +12353,11 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
     try { // W1-T9995: a re-run that went red holds the head; this pass confirms it and escalates once.
       const rerun = dependabot ? await supersededReruns([]) : undefined;
-      if (rerun?.redNow) escalateStale(rerun.checks, rerun.kind);
+      if (rerun?.redNow) remedyAskUrl = escalateStale(rerun.checks, rerun.kind) ?? undefined;
     } catch (error) {
       log("dep-review.superseded_red.rerun_failed", { pr_number: view.number, head_sha: view.headRefOid, action: "confirm", error: String(error) });
     }
+    if (!(await reconcileHold())) return 1;
     console.log(`no remudero-review posted (holding for gates): ${view.url}`);
     return 1;
   }
@@ -20328,7 +20372,8 @@ function readRetroTriggerLedger(config: Config): string {
 // W1-T10046: OBSERVED 2026-10-17, each boot re-read the whole corpus twice (retro 288 MB, auto-triage 243 MB on the loop) for ~1 MB slices.
 export const RETRO_TRIGGER_RUN_SLICE: EscalationTriageSlice = { holder: "run-task.retro-trigger-runs", steps: RETRO_TRIGGER_RUN_STEPS, version: "1" };
 export const AUTO_TRIAGE_REFUSAL_SLICE: EscalationTriageSlice = {
-  holder: "run-task.auto-triage-refusals", steps: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP], version: "1",
+  holder: "run-task.auto-triage-refusals",
+  steps: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP, ...AUTO_TRIAGE_FAILURE_STEPS], version: "2",
 };
 
 let retroTriggerRunReader: EscalationTriageHistoryReader | undefined;
@@ -20483,7 +20528,7 @@ export async function readRetroTriggerRunsAsync(
   return records;
 }
 
-/** The refusal rows from `reader`; `undefined` when a rotation went unread. */
+/** Refusal and failure history from `reader`; `undefined` when a rotation went unread. */
 export async function readAutoTriageRefusalRowsAsync(
   config: Config,
   reader: EscalationTriageHistoryReader,
@@ -20493,7 +20538,9 @@ export async function readAutoTriageRefusalRowsAsync(
   const read = await reader(join(config.root, "state"));
   appendSliceReadRow(ledgerPathFor(config), "AUTO-TRIAGE", "auto_triage.refusal_read",
     { ok: read.ok, rows: read.rows.length, ...sliceReadCost(reader, read, startedMs) }, append);
-  return read.ok ? read.rows : undefined;
+  return read.ok ? read.rows.filter((row) => row.step === TRIAGE_COMMIT_REFUSED_STEP ||
+    row.step === TRIAGE_REFUSAL_CLEARED_STEP || row.step === "auto_triage.run_failed" ||
+    (typeof row.task_id === "string" && row.task_id.startsWith("TRIAGE-"))) : undefined;
 }
 
 /** What the trigger knows once its local reads are done and only the GitHub-backed pass remains. */
@@ -20865,9 +20912,10 @@ export async function autoTriageCheck(
     /** W1-T4769: injected owner/repo resolver for the real reserver's clone path; production uses
      *  {@link resolveOwnerRepo}. */
     resolveClaimRepo?: () => { repo: string };
-    /** W1-T4203: injected read of the refused-triage-commit rows; `undefined` = unreadable. */
+    /** Refused commits, failed fires and triage ends; `undefined` = unreadable. */
     readRefusalRows?: () => Array<Record<string, unknown>> | undefined | Promise<Array<Record<string, unknown>> | undefined>;
     refusalHistory?: EscalationTriageHistoryReader;
+    readFeedbackChangedAt?: (feedbackId: string) => Promise<string | undefined>;
   } = {},
 ): Promise<AutoTriageDecision> {
   const config = opts.config ?? loadConfig();
@@ -20914,21 +20962,28 @@ export async function autoTriageCheck(
   if (!first.fire) return first;
   // W1-T4203: an entry whose triage commit was REFUSED is terminal until cleared. An unreadable
   // ledger reads as no refusals (the entry is retried, today's behaviour) rather than starving the rung. W1-T10046: off the loop.
-  const refused = refusedTriageIds(
-    (await (opts.readRefusalRows ??
-      (() => readAutoTriageRefusalRowsAsync(config, opts.refusalHistory ?? autoTriageRefusalHistory())))()) ?? [],
-  );
+  const rows = await (opts.readRefusalRows ??
+    (() => readAutoTriageRefusalRowsAsync(config, opts.refusalHistory ?? autoTriageRefusalHistory())))();
+  const refused = refusedTriageIds(rows ?? []);
   const candidates = inputs.candidates.filter((c) => !refused.has(c));
   if (candidates.length === 0) {
     return { fire: false, reason: `every one of the ${inputs.candidates.length} candidate(s) at status: new has a refused triage commit — cleared by a ${TRIAGE_REFUSAL_CLEARED_STEP} row` };
   }
   const passInputs = { ...inputs, candidates };
+  const backedOffCandidates = rows === undefined ? undefined : new Map<string, number>();
+  for (const id of candidates) {
+    if (rows === undefined || !failedFireBackoff(rows, id, inputs.policy.minIntervalMinutes, now).backedOff) continue;
+    const changedAt = await (opts.readFeedbackChangedAt ?? ((c) => feedbackChangedAtOnMain(feedbackRoot, c)))(id);
+    const backoff = failedFireBackoff(rows, id, inputs.policy.minIntervalMinutes, now, changedAt);
+    if (backoff.backedOff) backedOffCandidates!.set(id, backoff.retryAtMs!);
+  }
   const sweep = await triageClaimSweepForPass(config, now, candidates, opts);
   const ordered = await prioritizeDepReviewRepairs(candidates, join(config.root, "state"), opts.repairSnapshot?.(), now.getTime(),
     (step, extra) => appendProducerLedger(ledgerPathFor(config), "daemon", { run_id: "AUTO-TRIAGE", step, ...extra }));
-  const decision = decideAutoTriage({ ...passInputs, candidates: ordered, ...(sweep === undefined ? {} : { heldCandidates: sweep }) });
+  const decision = decideAutoTriage({ ...passInputs, candidates: ordered, backedOffCandidates,
+    ...(sweep === undefined ? {} : { heldCandidates: sweep }) });
   return decision.fire && ordered.indexOf(decision.feedbackId) < candidates.indexOf(decision.feedbackId)
-    ? { ...decision, reason: "verified aged dependency repair precedes ordinary FIFO feedback; all normal triage bounds passed" }
+    ? { ...decision, reason: `verified aged dependency repair precedes ordinary FIFO feedback; ${decision.reason}` }
     : decision;
 }
 
@@ -26637,7 +26692,17 @@ export function reviewerCodeRecoveryFromLoadedModule(
 // builders while `daemonCommand` may shadow their names with a test injection below. Keeping the
 // live calls as `buildSweepHook(...)`/`buildSweepLightHook(...)` preserves the composition-root
 // contract that existing daemon wiring tests inspect.
-const daemonDefaultBuildSweepHook = buildSweepHook;
+// W1-T9114: the daemon's own sweep builder also installs the detached-work host its review path and its restart drain read
+// (src/lib/sweep.ts `installDetachedWorkHost`): mode from `sweep.runChild.mode` on the ledger evidence, the review kind as the one
+// an entry hosts (`runDetachedWork`, below). An injected builder (a test) installs nothing, so every kind stays in process there.
+const daemonDefaultBuildSweepHook: typeof buildSweepHook = (...args) => {
+  const [, repo, config, ledgerPath] = args;
+  installDetachedWorkHost(createDetachedWorkHost({
+    stateRoot: join(config.root, "state"), repoDir: args[16] ?? repoRoot, root: config.root, repo, log: args[6],
+    readLedger: () => readLedgerLines(ledgerPath),
+  }));
+  return buildSweepHook(...args);
+};
 const daemonDefaultBuildSweepLightHook = buildSweepLightHook;
 
 
@@ -27438,6 +27503,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       return gardenPass(backlogGardenSpec(d), d);
     }
     // W1-T9925: the queue judge re-ranks queued tasks by measured cost of delay through its own reviewed plan PR.
+    case "redesign": {
+      const d = deps("redesign", raiseDuplicate);
+      const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log });
+      return gardenPass(redesignGardenSpec(d, { judgeText: (prompt) => judge.judgeText(prompt, 0) }), d);
+    }
     case "queue-judge": {
       const d = deps("queue-judge", raiseDuplicate);
       return gardenPass(queueJudgeGardenSpec(d, queueJudgeRunTaskPorts({ owner, repo, repoRoot, stateDir, root: config.root, log })), d);
@@ -27943,6 +28013,11 @@ export async function daemonCommand(
   rest: string[],
   deps: Parameters<typeof daemonCommandFromModule>[1] = {},
 ): Promise<number> {
+  const boot = deps.daemonBoot ?? daemonBoot;
+  deps = { ...deps, daemonBoot: (...args) => {
+    settleRunChildBacklog(join((deps.config ?? loadConfig()).root, "state"), args[0]);
+    return boot(...args);
+  } };
   return daemonCommandFromModule(rest, deps, daemonCommandHost());
 }
 
@@ -41835,7 +41910,9 @@ import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js"
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
-import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, runChildModeIsOn, spawnRunChild, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, runChildModeIsOn, spawnRunChild, type DetachedWorkSpec, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, readFixDispatchEnvelope, runFixDispatchChild, type FixDispatchChildPorts } from "./lib/sweep.js";
+import { classEstimate, classTypical } from "./lib/host-memory-learning.js";
 import { type RunChildMode } from "./lib/policy.js";
 import {
   escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
@@ -42864,6 +42941,132 @@ if (!readWorkerOptions && process.argv[1] && fileURLToPath(import.meta.url) === 
 }
 
 export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, retroCommand, initCommand, projectCommand };
+
+/**
+ * W1-T9114: the detached work a run child hosts (src/run-child-main.ts calls it for a spec that carries `work`). A review is the
+ * same `reviewCommand` call the sweep's in-process review makes, from the serializable inputs the spec holds: the PR number, the
+ * repository, the plan-filing flag and the review attempt id. A kind this entry does not host throws, which the child writes as a
+ * failed status through the closed failure union; an unknown kind is never read as success.
+ */
+type DetachedFixRuntimePorts = Partial<Pick<FixDispatchChildPorts, "hold" | "log" | "claimFixAdmission">> & {
+  dispatcher?: (plan: Plan) => ReturnType<FixDispatchChildPorts["dispatcher"]>;
+  /** The production builder's argument boundary: tests may replace its write effect after calling the real builder. */
+  buildEffects?: typeof buildSweepEffects;
+  readFixPressure?: SweepDeps["readFixPressure"];
+  planPath?: string;
+  planSnapshot?: (options: { allowStale?: boolean }) => SyncedPlan;
+  config?: Config;
+  github?: GitHub;
+  readPr?: (args: string[]) => Promise<unknown>;
+  runRetroSubprocess?: typeof runAutomatedRetroSubprocess;
+  reviewCommand?: typeof reviewCommand;
+};
+export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void }, ports: DetachedFixRuntimePorts = {}): Promise<RunResult> {
+  if (work.kind === "fix-dispatch") return runFixDispatchWork(work, ctx, ports);
+  if (work.kind === "retro") {
+    const decision = decodeAutomatedRetroDecision(JSON.stringify(work.inputs?.decision));
+    const log = ports.log ?? ((step: string, extra?: Record<string, unknown>) => {
+      appendLedger(ledgerPathFor(ports.config ?? loadConfig()), { run_id: ctx.runId, task_id: ctx.taskId, step, lane: "retro", ...extra });
+    });
+    ctx.onPhase?.("subprocess");
+    await buildRetroDaemonHooks({ config: ports.config, runSubprocess: ports.runRetroSubprocess }).runRetroTrigger(decision, log);
+    return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
+  }
+  if (work.kind !== "review" || work.prNumber === undefined) {
+    throw new Error(`the run child hosts no detached work of kind ${work.kind}${work.kind === "review" ? " without a PR number" : ""}`);
+  }
+  const inputs = work.inputs ?? {};
+  const code = await (ports.reviewCommand ?? reviewCommand)(String(work.prNumber), typeof inputs.repo === "string" ? ["--repo", inputs.repo] : [], {
+    executionMode: "semantic",
+    ...(typeof inputs.planOnlyFiling === "boolean" ? { planOnlyFiling: inputs.planOnlyFiling } : {}),
+    ...(typeof inputs.reviewAttemptId === "string" ? { reviewAttemptId: inputs.reviewAttemptId } : {}),
+  });
+  if (code !== 0) {
+    throw Object.assign(new Error(`detached review of PR #${work.prNumber} exited with code ${code}`), {
+      code: String(code), reasonClass: code === 2 ? "review_withheld" : "review_failed",
+    });
+  }
+  return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
+}
+
+/**
+ * W1-T9114: a fix dispatch as a run child's work. The decision envelope comes from the spec; the live dependencies are rebuilt HERE,
+ * the way `rmd sweep` builds them (config, ledger, the canonical plan, `buildSweepEffects` with the production progress judge), and
+ * `runFixDispatchChild` (src/lib/sweep.ts) rechecks the PR, the task and the fleet hold before it calls the sweep's own `dispatchFix`,
+ * whose branch claim is taken through the native helper in this process. Nothing here routes through `rmd fix` or `--requested`.
+ * A plan, a config or a PR read that fails throws: an unread reconstruction refuses and the child ends as a failed status.
+ */
+async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void }, ports: DetachedFixRuntimePorts): Promise<RunResult> {
+  const inputs = work.inputs ?? {};
+  // Every read is lazy: the child reads its envelope first, and an unreadable one refuses before any config, plan or PR is read.
+  const envelope = readFixDispatchEnvelope(inputs.envelope);
+  const target = envelope === undefined ? undefined : prUrlTarget(envelope.pr.prUrl);
+  if (envelope !== undefined && (target === undefined || target.number !== envelope.pr.prNumber ||
+      (work.prNumber !== undefined && target.number !== work.prNumber) ||
+      (work.headSha !== undefined && work.headSha !== envelope.pr.headSha) ||
+      (typeof inputs.repo === "string" && inputs.repo.toLowerCase() !== target.repo.toLowerCase()))) {
+    throw new Error("fix dispatch refused: the saved PR target does not match its child spec");
+  }
+  let configMemo: ReturnType<typeof loadConfig> | undefined;
+  const cfg = () => (configMemo ??= ports.config ?? loadConfig());
+  let selfMemo: ReturnType<typeof resolveOwnerRepo> | undefined;
+  const self = () => (selfMemo ??= resolveOwnerRepo());
+  const repoName = (): string => target?.repo ?? self().repo;
+  const ownerName = (): string => target?.owner ?? self().owner;
+  const ledgerPath = (): string => ledgerPathFor(cfg());
+  const log = (step: string, extra: Record<string, unknown> = {}): void => {
+    appendLedger(ledgerPath(), { run_id: ctx.runId, task_id: ctx.taskId, step, lane: "sweep-fix", ...extra });
+  };
+  let planMemo: ReturnType<typeof loadPlan> | undefined;
+  const planNow = (): Plan => {
+    if (planMemo) return planMemo;
+    const planPath = ports.planPath ?? (ownerName() === self().owner && repoName() === self().repo
+      ? join(repoRoot, "plan", "tasks.yaml") : join(cfg().root, "repos", repoName(), "plan", "tasks.yaml"));
+    const synced = syncPlanOrRefuse(planPath, { allowStale: false, log: ports.log ?? log, say: () => {}, planSnapshot: ports.planSnapshot });
+    if ("error" in synced) throw new Error(synced.error);
+    return planMemo = synced.plan;
+  };
+  let projection: Map<string, StatusProjection> | undefined;
+  await runFixDispatchChild(inputs, {
+    log: ports.log ?? log,
+    claimFixAdmission: ports.claimFixAdmission ?? ((pr) => createSweepFixAdmissionController({
+      surface: "full", queueDepth: 1, hostWorkerBudget: DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget,
+      activeWorkers: activeWorkerCount(), readActiveWorkers: activeWorkerCount, reviewReservations: 0,
+      readPressure: ports.readFixPressure ?? (() => productionFixPressure(DEFAULT_SWEEP_POLICY.memoryFloorMib, ledgerPath(), classEstimate("fix").estimateMib)),
+      readEstimate: classEstimate, readTypical: classTypical, readResidents: () => productionFixAdmissionResidents(cfg().root),
+      log: ports.log ?? log,
+    }).claim(pr)),
+    ...(ctx.onPhase === undefined ? {} : { onPhase: ctx.onPhase }),
+    hold: ports.hold ?? (() => {
+      const stopped = stopDetail(cfg().root);
+      if (stopped !== undefined) return `STOP: ${stopped}`;
+      const paused = checkSharedPause(cfg().root, realDeps().sharedPauseGit);
+      return paused === undefined ? undefined : `PAUSE: ${paused}`;
+    }),
+    readLivePr: async (prUrl) => {
+      const live = await (ports.readPr ?? ghJsonAsync)(["pr", "view", prUrl, "--json", "state,mergedAt,headRefOid"]) as
+        { state?: unknown; mergedAt?: unknown; headRefOid?: unknown } | undefined;
+      if (typeof live?.state !== "string") return undefined;
+      return { state: live.state, merged: typeof live.mergedAt === "string" && live.mergedAt !== "",
+        ...(typeof live.headRefOid === "string" ? { headSha: live.headRefOid } : {}) };
+    },
+    readTask: (taskId) => {
+      const plan = planNow();
+      const task = plan.byId.get(taskId);
+      if (task === undefined) return { found: false };
+      projection ??= projectPlan(plan, { ledgerPath: ledgerPath(), github: ports.github ?? buildBatchedGithub(ownerName(), repoName()) });
+      const status = projection.get(taskId);
+      if (!status || status.indeterminate) throw new Error(`task ${taskId}'s merge projection is unreadable`);
+      const digest = riskJudgePlanContextDigestFor(plan)({ taskId });
+      return { found: true, merged: status.merged,
+        retired: task.status === "blocked" && task.retirement !== undefined, ...(digest === undefined ? {} : { contextDigest: digest }) };
+    },
+    dispatcher: () => ports.dispatcher ? ports.dispatcher(planNow()) : (ports.buildEffects ?? buildSweepEffects)({ productionProgressJudge: true,
+        owner: ownerName(), repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
+        plan: planNow(), log, policy: DEFAULT_SWEEP_POLICY }),
+  });
+  return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
+}
 // Exported for a behavioral test of the drain gateway-targeting fix (W1-T53): drainCommand's
 // injectable deps (config/planPath/skipGitSync/githubFactory) let a test prove `--repo` scopes
 // the merged-status gateway to the NAMED repo, not a hardcoded literal — logic unchanged, export

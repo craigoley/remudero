@@ -1,0 +1,27 @@
+- id: W1-T11037
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — review-failed:<n> unmet criteria cost 9.66 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.18
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:review-failed:<n> unmet criteria#r2"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/flow-review-failed-n-unmet-criteria.test.ts
+  acceptance:
+    - claim: "review-failed:<n> unmet criteria is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T11037: flow-review-failed-n-unmet-criteria clears without a person\" in test/sweep/flow-review-failed-n-unmet-criteria.test.ts"
+  note: "Filed by flow at rung 2; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    review-failed:<n> unmet criteria cost 9.66 PR-hours; owner fix-lane
+    Owner fix-lane failed to clear eligible episodes.
+    Source owner: fix-lane → src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #15368: 7.09 PR-hours — 2 unmet criteria — fix round 5 — judge: change-approach (The current review still flags both proofs as non-responsive after two FIXED ...) — NOT DISPATCHED this pass: a needs-human escalation for this exact (task, PR, head 10cd791ae62efe6864d05f735e262a0dab3744fb, cause) is ALREADY OPEN and awaiting a human (https://github.com/craigoley/remudero/issues/15741) — a strike here would re-ask a question already in front of someone and append to that same issue; standing down until it is closed, the head moves, or the task contract changes, or an operator answers
+    - PR #15532: 2.69 PR-hours — 4 unmet criteria — fix round 14 — judge: change-approach (The same four review findings remain after 13 rounds, with four no-op rounds,...) — NOT DISPATCHED this pass: a needs-human escalation for this exact (task, PR, head 25fec8ecf0e4f6f5d8e8b815e81f4c5320c95667, cause) is ALREADY OPEN and awaiting a human (https://github.com/craigoley/remudero/issues/15776) — a strike here would re-ask a question already in front of someone and append to that same issue; standing down until it is closed, the head moves, or the task contract changes, or an operator answers
+    Previous remedy W1-T10596: src/lib/sweep.ts, test/sweep/flow-review-failed-n-unmet-criteria.test.ts; did not fall: share of PR-hours 3.9% (42.390932777777714/1089.1938177777802) before, 3.1% (56.022692500000026/1794.1836144444426) after, over 3 day(s) each side. Take a structurally different remedy.
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.

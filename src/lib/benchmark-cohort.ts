@@ -132,6 +132,8 @@ export interface BenchmarkCohortPassResult {
   checkpointBytes?: number;
   checkpointReadBytes?: number;
   checkpointWrittenBytes?: number;
+  dueBecause?: string;
+  passMs?: number;
 }
 
 type ManifestEntry = { name: string; path: string; form: Form; size: number; mtimeMs: number };
@@ -1126,13 +1128,11 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     snapshot, scannedSources, pendingSources: 0, tailPendingBytes, checkpointBytes };
 }
 
-export const BENCHMARK_COHORT_MIN_INTERVAL_MS = 900_000; // W1-T8876: one pass re-parses a 37 MB checkpoint
 const BENCHMARK_COHORT_DAEMON_MAX_SOURCES = 4;
 
 export interface BenchmarkCohortCadenceDeps {
   stateDir: () => string;
   clock?: Clock;
-  intervalMs?: number;
   run?: (stateDir: string) => Promise<BenchmarkCohortPassResult>;
 }
 
@@ -1141,40 +1141,72 @@ export interface BenchmarkCohortCadence {
   runBenchmarkCohortPass: () => Promise<BenchmarkCohortPassResult>;
 }
 
-function benchmarkCohortInputs(stateDir: string): string | undefined {
+type BenchmarkCohortInputs = {
+  config: string;
+  sealed: string;
+  live: { ino: number; size: number } | null;
+};
+
+function benchmarkCohortInputs(stateDir: string): BenchmarkCohortInputs | { error: string } {
   try {
     const live = statSync(ledgerLivePath(stateDir), { throwIfNoEntry: false });
-    const rotations = ledgerRotationEntries(readdirSync(stateDir), stateDir).length;
-    return JSON.stringify([BENCHMARK_COHORT_VERSION, stateDir, BENCHMARK_COHORT_DAEMON_MAX_SOURCES,
-      live ? [live.ino, live.size] : null, rotations]);
-  } catch { /* an unreadable state directory matches no finished inputs, so the pass runs and reports it */
-    return undefined;
+    const rotations = ledgerRotationEntries(readdirSync(stateDir), stateDir).map((entry) => {
+      const stat = statSync(entry.path);
+      return [basename(entry.path), stat.size, stat.mtimeMs];
+    });
+    return { config: JSON.stringify([BENCHMARK_COHORT_VERSION, stateDir, BENCHMARK_COHORT_DAEMON_MAX_SOURCES]),
+      sealed: JSON.stringify(rotations), live: live ? { ino: live.ino, size: live.size } : null };
+  } catch (error) {
+    return { error: String((error as Error)?.message ?? error) };
   }
 }
 
-/** W1-T8876: a pass runs only when its inputs changed since the last finished pass, at most once per floor.
- * A partial or failed pass records no inputs, so its unfinished work is retried at the next floor. */
+/** W1-T9912: readers fold live growth themselves. Only sealed/config changes or a departing live
+ * prefix need a daemon pass; unfinished work continues at its own speed and failures wait their cost. */
 export function benchmarkCohortCadence(deps: BenchmarkCohortCadenceDeps): BenchmarkCohortCadence {
   const clock = deps.clock ?? systemClock;
-  const intervalMs = deps.intervalMs ?? BENCHMARK_COHORT_MIN_INTERVAL_MS;
   const run = deps.run ?? benchmarkCohortDaemonPass;
-  let lastStartedAt = Number.NEGATIVE_INFINITY;
-  let finishedInputs: string | undefined;
+  let finishedInputs: BenchmarkCohortInputs | undefined;
+  let continuation: "partial" | "retry" | undefined;
+  let retryAt = Number.NEGATIVE_INFINITY;
+  let failureMultiplier = 1;
+  function dueBecause(inputs: ReturnType<typeof benchmarkCohortInputs>): string | undefined {
+    if (clock.now() < retryAt) return undefined;
+    if (continuation) return continuation;
+    if ("error" in inputs) return `inputs_unreadable: ${inputs.error}`;
+    if (!finishedInputs) return "boot";
+    if (inputs.config !== finishedInputs.config) return "config";
+    if (inputs.sealed !== finishedInputs.sealed) return "sealed_sources";
+    if (inputs.live?.ino !== finishedInputs.live?.ino) return "live_identity";
+    if (inputs.live && finishedInputs.live && inputs.live.size < finishedInputs.live.size) return "live_shrank";
+    return undefined;
+  }
   return {
-    checkBenchmarkCohort: () => {
-      const current = clock.now();
-      if (current - lastStartedAt < intervalMs) return false;
-      if (finishedInputs !== undefined && benchmarkCohortInputs(deps.stateDir()) === finishedInputs) return false;
-      lastStartedAt = current;
-      return true;
-    },
+    checkBenchmarkCohort: () => dueBecause(benchmarkCohortInputs(deps.stateDir())) !== undefined,
     runBenchmarkCohortPass: async () => {
       const stateDir = deps.stateDir();
       const inputs = benchmarkCohortInputs(stateDir);
-      finishedInputs = undefined;
-      const result = await run(stateDir);
-      if (result.pendingSources === 0) finishedInputs = inputs;
-      return result;
+      const reason = dueBecause(inputs) ?? "requested";
+      const startedAt = clock.now();
+      try {
+        const result = await run(stateDir);
+        const passMs = Math.max(0, clock.now() - startedAt);
+        retryAt = Number.NEGATIVE_INFINITY;
+        failureMultiplier = 1;
+        continuation = result.pendingSources > 0 ? "partial" : undefined;
+        if (!continuation) {
+          finishedInputs = "error" in inputs ? undefined : inputs;
+          if (finishedInputs?.live && result.snapshot.state !== "unavailable" && result.snapshot.liveWatermark)
+            finishedInputs.live.size = result.snapshot.liveWatermark.prefixBytes;
+        }
+        return { ...result, dueBecause: reason, passMs };
+      } catch (error) {
+        const failedAt = clock.now();
+        retryAt = failedAt + Math.max(0, failedAt - startedAt) * failureMultiplier;
+        failureMultiplier *= 2;
+        continuation = "retry";
+        throw error;
+      }
     },
   };
 }

@@ -1,0 +1,33 @@
+id: incident-952e06e35060c980
+ts: 2026-10-30T16:25:10.123Z
+raw: >-
+  Incident 952e06e35060: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  supplied CI tail omits worker diagnostics, local reproduction passes, and
+  review status provides no concrete failing codemod input; a justified repair
+  cannot yet be selected
+
+  First seen: 2026-10-30T08:15:35.134Z
+
+  Last seen: 2026-10-30T10:02:18.478Z
+
+  Count: 4, burn: 2.25/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15108 escalated: already escalated (reason unreadable: no escalation of this PR at head a95ab8c is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793338756960:1:1793347644433) — supplied CI tail omits worker diagnostics, local reproduction passes, and review status provides no concrete failing codemod input; a justified repair cannot yet be selected
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#952e06e35060c98062383ed3589e1b7f02b8614e6235f4e355ccca822f0a0d86
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
