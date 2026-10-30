@@ -186,7 +186,7 @@ function fixture(primary = true): { root: string; env: NodeJS.ProcessEnv } {
     `instances:\n  core:\n    repo: remudero\n${primary ? "    primary: true\n" : ""}    container_name: remudero-daemon\n    state_dir: ${root}\n`,
   );
   // No MemTotal: serve's memory.high (sized from host RAM) stays out of these limits on every runner.
-  return { root, env: { PATH: process.env.PATH, RMD_MEMINFO_PATH: join(root, "no-meminfo") } };
+  return { root, env: { PATH: process.env.PATH, NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT, RMD_MEMINFO_PATH: join(root, "no-meminfo") } };
 }
 
 test("the shipped serve wiring reads the serve role against remudero-serve and replaces through serve-container.sh", () => {
@@ -370,9 +370,8 @@ function launcherFixture(): { root: string; log: string; proc: string; env: Node
     RMD_MEMINFO_PATH: join(root, "no-meminfo"), RMD_SERVE_BANNER_WAIT_S: "1",
     RMD_SERVE_ADMIT_MEMINFO_PATH: join(proc, "meminfo"), RMD_SERVE_ADMIT_VMSTAT_PATH: join(proc, "vmstat"),
     RMD_SERVE_ADMIT_PSI_PATH: join(proc, "psi"), RMD_SERVE_ADMIT_SAMPLE_S: "0.05",
-    // This env drops NODE_TEST_CONTEXT, so deploy/scratch-mounts.sh's test guard cannot see a test.
-    // On the Azure host (switch on, /mnt/scratch mounted) every admitted replace laid out
-    // /mnt/scratch/rmd/rmd-serve-policy-*; 47 empty layouts were left there 2026-10-12..20.
+    NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT,
+    // Admission fixtures stay on their state disk; scratch tests opt into a fixture mount below.
     RMD_SCRATCH: "off",
   };
   // The shipped process seam, with only its environment contained.

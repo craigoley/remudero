@@ -1,0 +1,44 @@
+id: automation-operator-local-day-20261029
+ts: 2026-10-30T01:25:15.094Z
+raw: >-
+  Cross-repository automation finding from the operator's 2026-10-29 session on
+  craigoley/ClawApp. It is an agent technical finding, not an operator ruling.
+
+  OBSERVED in ClawApp (no PR number was recorded for the prompt fix; the related
+  local-day bucketing fix is craigoley/ClawApp#1167). An LLM prompt was given the
+  UTC date, and the model stamped the next day's date on an evening report for
+  the user. The remedy there: give the model the user's local weekday, date and
+  time, and bucket days in one explicit zone.
+
+  WHAT REMUDERO ALREADY HAS (OBSERVED). W1-T10559 (queued) derives daily-progress
+  civil days in one explicit IANA zone, initially America/New_York, with DST
+  handled (src/lib/daily-progress-calendar.ts). src/lib/human-handoff.ts
+  evaluates quiet hours in a configured timezone. Doctrine fixed-date-time-bomb
+  covers the test side. INFERRED from a grep of the prompt builders: no LLM prompt
+  builder injects a calendar date today.
+
+  WHAT IT LACKS (OBSERVED). Other operator-facing "today" surfaces bucket by UTC
+  day text. src/lib/now-view.ts mergedTodayCount is documented "Merges today
+  (UTC)", and src/lib/board-projection.ts declares its window "utc-day-text".
+  src/lib/inbox.ts stamps "RATIFIED
+  <date>" from toISOString().slice(0, 10), and src/lib/flow-gardener.ts keys its
+  once-a-day report on clock.iso().slice(0, 10). For an operator in
+  America/New_York these roll over at 19:00 or 20:00 local, so an evening merge
+  or ratification is labelled with tomorrow's date. No shared rule says that a
+  date handed to a model must be the operator's local one.
+
+  DESIRED CAPABILITY (general). Every operator-facing day label and day bucket
+  uses one operator reporting-zone source (the one W1-T10559 introduces). Where
+  UTC is kept on purpose, the label says UTC, as the cash caps in DECISIONS.md
+  already do ("per UTC day"). Add a prompt-builder rule with a test: any date or
+  time given to a model is the operator's local weekday, date and time, with the
+  zone named. Ledger timestamps and spend caps stay in UTC.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: cross-repo-automation:operator-local-day:20261029
+thread_id: null

@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator instruction 2026-10-16: qualify remaining trusted lifecycle consumers in opt-in shadow, never stop or retarget live workers"
   plan_refs: [W1-T9435, W1-T9559, W1-T9572, W1-T9793, W1-T7755, W1-T7756]
-  files: [src/lib/selected-registry-consumers.ts, src/lib/deployer.ts, src/lib/pause-target.ts, src/lib/serve-policy-convergence.ts, src/lib/sre-lane.ts, src/run-task.ts, test/selected-registry-lifecycle-consumers.test.ts, test/deployer.test.ts, test/a-pause-holds-only-the-instance-it-targets.test.ts, test/a-changed-serve-policy-reaches-the-running-console.test.ts, test/the-sre-lane-finds-its-instance-from-inside-its-container.test.ts, test/the-sre-lane-runs-on-the-primary-instance.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json, src/lib/instance-registry-selection.ts, test/one-registry-for-the-fleet.test.ts]
+  files: [src/lib/selected-registry-consumers.ts, src/lib/deployer.ts, src/lib/pause-target.ts, src/lib/serve-policy-convergence.ts, src/lib/sre-lane.ts, src/run-task.ts, test/selected-registry-lifecycle-consumers.test.ts, test/deployer.test.ts, test/a-pause-holds-only-the-instance-it-targets.test.ts, test/a-changed-serve-policy-reaches-the-running-console.test.ts, test/the-sre-lane-finds-its-instance-from-inside-its-container.test.ts, test/the-sre-lane-runs-on-the-primary-instance.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json, src/lib/instance-registry-selection.ts, test/one-registry-for-the-fleet.test.ts, "deploy/install-host-units.sh"]
   status: queued
   attempts: 0
   rationale: |

@@ -1246,7 +1246,7 @@ export class ManagedCheckoutRefreshRefusedError extends RmdError {
 
 class ManagedCheckoutNotRefreshedError extends WorktreeNodeModulesRefusedError {
   constructor(refused: WorktreeNodeModulesRefusedError, readonly notRefreshed: string) {
-    super(refused.packageName, refused.worktreePath, refused.nodeModulesSource);
+    super(refused.packageName, refused.worktreePath, refused.nodeModulesSource, refused.outcome);
     this.message += `; the managed checkout was not fast-forwarded: ${notRefreshed}`;
   }
 }
