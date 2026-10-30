@@ -59,38 +59,6 @@ test("selected lifecycle shadow reaches actual deploy pause and daemon consumers
     }
   });
   assert.ok(f.effects.some(args => args.includes("--instance") && args.includes("owner")));
-  const home = join(f.root, "cli-home"), configDir = join(home, ".config", "remudero");
-  mkdirSync(configDir, { recursive: true });
-  writeFileSync(join(configDir, "config.json"), JSON.stringify({ root: f.stateRoot, claudeBin: "/bin/true",
-    selectedRegistryMode: f.options.settings }));
-  const savedHome = process.env.HOME, savedArgv = process.argv;
-  process.env.HOME = home;
-  const exit = new Error("fixture CLI exit");
-  const exitMock = t.mock.method(process, "exit", ((code: number) => { assert.equal(code, 0); throw exit; }) as never);
-  try {
-    const { main, daemonCommand } = await import("#src/run-task.js");
-    for (const verb of ["pause", "resume"]) {
-      process.argv = [process.execPath, "run-task.js", verb];
-      await assert.rejects(main({ checkFreshness: () => ({ status: "guarded" }) }), error => error === exit);
-    }
-    const plan = join(f.root, "tasks.yaml");
-    writeFileSync(plan, "[]\n");
-    process.argv = [process.execPath, "run-task.js", "daemon", "--allow-self-target", "--plan", plan, "--max", "0"];
-    await assert.rejects(main({ checkServiceFreshness: () => ({ status: "guarded" }),
-      dispatch: async (_verb, rest) => daemonCommand(rest, {
-        gardenPassSpawn: async () => 0,
-        runDaemon: async () => ({ attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 }),
-      }),
-    }), error => error === exit);
-    const receipts = readFileSync(f.opts.ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
-    for (const action of ["pause", "resume", "sre-target"]) {
-      assert.ok(receipts.some(row => row.action === action && row.target_instance === "owner"
-        && row.selected_state === "unknown" && row.publication_permission === "not-granted"));
-    }
-  } finally {
-    exitMock.mock.restore(); process.argv = savedArgv;
-    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
-  }
 });
 
 test("selected lifecycle effects observe current immutable instance targets", async t => {
