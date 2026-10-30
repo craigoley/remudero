@@ -84,26 +84,28 @@ test("named function tags after logical operators preserve raw values through th
   }
 });
 
-test("named function tags after unary operators preserve raw values through the codemod CLI", (t) => {
+test("named function tags after unary operators preserve raw values through the codemod CLI", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-unary-tag-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const file = join(dir, "fixture.test.ts");
   const raw = fixtureImport("./fixture.js");
-  for (const operator of ["void", "!", "typeof"]) {
-    const source = `let observed; ${operator} function named(parts) { observed = String.raw(parts); }\``
-      + raw + "`; observed;";
-    assert.equal(runInNewContext(source), raw, `control: ${operator} evaluates the tag`);
-    assert.equal(census(source).status, 0, "control: the census sees the tagged fixture import");
-    writeFileSync(file, source);
-    const written = spawnSync(process.execPath, [
-      join(REPO_ROOT, "scripts/test-location-codemod.mjs"), "--write", file,
-    ], { encoding: "utf8" });
-    assert.equal(written.status, 0, written.stderr);
-    const actual = readFileSync(file, "utf8");
-    assert.equal(runInNewContext(actual), raw, `${operator} must preserve the tag's observable raw text`);
-    assert.equal(actual, source);
-    assert.match(written.stdout, /UNRESOLVED .*raw spelling left as written/);
-    assert.match(written.stdout, /0 of 1 file\(s\) rewritten/);
+  for (const operator of ["void", "!", "typeof", "+", "-", "~", "delete"]) {
+    await t.test(operator, () => {
+      const source = `let observed; ${operator} function named(parts) { observed = String.raw(parts); }\``
+        + raw + "`; observed;";
+      assert.equal(runInNewContext(source), raw, `control: ${operator} evaluates the tag`);
+      assert.equal(census(source).status, 0, "control: the census sees the tagged fixture import");
+      writeFileSync(file, source);
+      const written = spawnSync(process.execPath, [
+        join(REPO_ROOT, "scripts/test-location-codemod.mjs"), "--write", file,
+      ], { encoding: "utf8" });
+      assert.equal(written.status, 0, written.stderr);
+      const actual = readFileSync(file, "utf8");
+      assert.equal(runInNewContext(actual), raw, `${operator} must preserve the tag's observable raw text`);
+      assert.equal(actual, source);
+      assert.match(written.stdout, /UNRESOLVED .*raw spelling left as written/);
+      assert.match(written.stdout, /0 of 1 file\(s\) rewritten/);
+    });
   }
 });
 
