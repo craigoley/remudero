@@ -222,7 +222,7 @@ export function applyRedesignEdit(text: string, rel: string, edit: RedesignEdit,
   if (before.length !== 1) return { refused: `the shard holds ${before.length} records` };
   let next = text;
   const files = /^ {2}files:[ \t]*\n((?: {4}- .*\n)+)/m.exec(next);
-  const fresh = edit.filesAdd.filter((p) => !(before[0]!.files ?? []).includes(p));
+  const fresh = [...new Set(edit.filesAdd)].filter((p) => !(before[0]!.files ?? []).includes(p));
   if (fresh.length > 0) {
     if (files === null) return { refused: "the shard has no block-list files:" };
     const at = files.index + files[0].length;

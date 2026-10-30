@@ -172,6 +172,10 @@ test("rule 16 and the operator's grants are enforced in code, whatever the Archi
   assert.equal(redesignEditRefusal(task, edit({ filesAdd: ["test/new-one.test.ts"] }), exists), undefined, "a new test may be declared");
   assert.match(String(redesignEditRefusal(task, edit({ proofs: [{ criterion: 2, proof: "unit test: x" }] }), exists)), /does not have/);
   assert.match(String(redesignEditRefusal(task, edit({ proofs: [{ criterion: 1, proof: "the test passes" }] }), exists)), /dialect prefix/);
+  // A path the Architect names twice is declared once.
+  const twice = applyRedesignEdit(shard(), REL, edit({ filesAdd: ["src/cli/commands/fix.ts", "src/cli/commands/fix.ts"] }), "0123456789abcdef", "2026-10-30");
+  assert.deepEqual(parseTasksFromYaml((twice as { text: string }).text, REL)[0]!.files,
+    ["src/lib/prompt-render.ts", "test/worker/check-body-coverage.test.ts", "src/cli/commands/fix.ts"]);
   // A shard with two records cannot be edited safely, and the edited text must still parse as the same record.
   const two = `${shard()}${shard().replace(ID, "W1-T10662")}`;
   assert.match(String((applyRedesignEdit(two, REL, edit({}), "0123456789abcdef", "2026-10-30") as { refused: string }).refused), /2 records/);
