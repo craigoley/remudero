@@ -1,0 +1,61 @@
+- id: W1-T10994
+  title: The fleet runs Node 24.22.0 — the pin, the engines range, the image and the coverage scripts' Node-internals copies move together, proven by a full coverage run on 24.22.0
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: human
+  risk: high # the runtime of every container and CI job, and the coverage merge's copy of a Node-private line write
+  origin: operator-session#slo-ladder-recon-2026-10-29
+  plan_refs:
+    - W1-T5883
+    - W1-T6064
+    - W1-T5882
+  files:
+    - .nvmrc
+    - package.json
+    - package-lock.json
+    - deploy/Dockerfile
+    - scripts/coverage-merge-ratchet.mjs
+    - scripts/lib/read-map-platform-outcomes.mjs
+    - test/ci/read-map-platform-outcomes.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: .nvmrc pins Node 24.22.0
+      proof: "grep: 24\\.22\\.0 in .nvmrc"
+    - claim: package.json's engines range starts at 24.22.0
+      proof: "grep: \"node\": \">=24\\.22\\.0\" in package.json"
+    - claim: deploy/Dockerfile's FROM line pins Node to the exact .nvmrc version, now 24.22.0, by tag and digest
+      proof: "unit test: W1-T2770: deploy/Dockerfile pins Node to the EXACT `.nvmrc` version"
+    - claim: The coverage merge's copy of Node's private mapRangeToLines line write is checked against 24.22.0's source and says so
+      proof: "grep: 24\\.22\\.0 in scripts/coverage-merge-ratchet.mjs"
+    - claim: The read-map platform outcome reader accepts the 24.22.0 runtime
+      proof: "grep: v24\\.22\\.0 in scripts/lib/read-map-platform-outcomes.mjs"
+    - claim: A full coverage run on Node 24.22.0 passes on the PR head
+      proof: "demonstration: the operator sees every coverage shard and coverage-ratchet green on the PR head, with the job logs showing node v24.22.0, and the PR body names the run"
+  rationale: |
+    OBSERVED 2026-10-29: Dependabot #15176 ("bump node from 24.21.0-bookworm-slim to 24.22.0", head d017fa762) changes only deploy/Dockerfile, to FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4. It has been red on ci, ci-gate and ci-shard (3/8) and (5/8) since 2026-10-28.
+    - The dep-review lane's in-lane pin sync (syncNodePinForImageBump, from W1-T6064) refused it at 2026-10-28T14:41:44.076Z: dep-review.node_pin_refused, reason unreadable, "deploy/Dockerfile, .nvmrc or the head ref could not be read".
+    - dep-review.decided then escalated: "semver level could not be determined from the PR title/body — fail closed, treated like a major" (issue 15210).
+    OBSERVED on origin/main: 24.21.0 is pinned in .nvmrc, package.json engines (">=24.21.0"), package-lock.json's root engines, and deploy/Dockerfile.
+    - scripts/coverage-merge-ratchet.mjs carries "Node 24.21.0's private mapRangeToLines line write", a copy of Node-internal coverage code that must match the runtime.
+    - scripts/lib/read-map-platform-outcomes.mjs accepts only runtime node "v24.21.0", and test/ci/read-map-platform-outcomes.test.ts builds its fixture at v24.21.0.
+    INFERRED: a Dockerfile-only bump cannot pass, because the pin, the engines range and these copies must move with it. W1-T6064's sync covers only .nvmrc, and it refused here.
+  design: |
+    Move every pin listed in files: to 24.22.0 in one PR. Re-read Node 24.22.0's lib/internal/test_runner/coverage.js (mapRangeToLines and the lcov writer) and update the copy in scripts/coverage-merge-ratchet.mjs if it changed. Say in the PR body whether it changed.
+    Comments that record a measurement made on 24.21.0 stay as written, since they name what was measured.
+    #15176 may close as superseded once this merges. Do not edit or close it from this task.
+  falsifier: |
+    If the coverage run on 24.22.0 shows a line-count drift between the merged lcov and Node's own reporter, the private-copy claim fails and the copy must be updated before merge.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-29 at priority 3.
+    verify: human because the coverage run on the new runtime is demonstrated on the PR's hosted checks, not by a unit proof. A .github/workflows change, if one proves needed, routes the build to an operator.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares deploy/Dockerfile, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-30T01:16:06.662Z"
+    pin: "f5e245c4f4662f09611d4e8c26562ba402db578947b98d2e4617716687262d57"

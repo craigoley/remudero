@@ -24,6 +24,7 @@ import { instanceRouteSet, mountUnderInstance } from "#src/lib/instance-gateway.
 import { createService, type Route, type Scope } from "#src/lib/service.js";
 import { isPaused, isStopped } from "#src/lib/fleet-control.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { clockFromMillisFn, systemClock } from "#src/lib/clock.js";
 
 const DISCOVERY = "/v1/control/assistant-action/discovery";
@@ -503,6 +504,28 @@ test("assistant discovery cooperatively yields while enumerating receipts withou
   immediate.mock.restore();
 });
 
+function spawnNamedPipeDiscoveryChild(script: string) {
+  return spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 5000, killSignal: "SIGKILL" });
+}
+
+test("W1-T9954: a stuck named-pipe discovery child ends at its bound", () => {
+  const started = performance.now();
+  const child = spawnNamedPipeDiscoveryChild(`
+    process.on("SIGTERM", () => {});
+    console.log("blocking");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30_000);
+    process.exit(0);
+  `);
+  const elapsed = performance.now() - started;
+  const diagnostic = `stuck named-pipe discovery child: elapsed=${elapsed}ms, status=${child.status}, signal=${child.signal}, error=${child.error}, stderr=${child.stderr}`;
+  assertWallClockBound(elapsed, 10_000, diagnostic);
+  assert.equal(child.stdout, "blocking\n", diagnostic);
+  assert.equal(child.signal, "SIGKILL", diagnostic);
+  assert.equal((child.error as NodeJS.ErrnoException | undefined)?.code, "ETIMEDOUT", diagnostic);
+  assert.equal(child.status, null, diagnostic);
+});
+
 test("assistant discovery refuses a real claim named pipe without waiting for a writer", async (t) => {
   const shared = root(); t.after(() => rmSync(shared, { recursive: true, force: true }));
   const dir = claimsDir(shared); mkdirSync(dir, { recursive: true });
@@ -512,12 +535,13 @@ test("assistant discovery refuses a real claim named pipe without waiting for a 
     instance: "core", repository: null, submittedAt: new Date().toISOString(), fingerprint: "f".repeat(64) }));
   assert.deepEqual((await readAssistantActionDiscovery(request)).pending.map(row => row.actionId), [actionId], "regular claim is the positive control");
   rmSync(path); execFileSync("mkfifo", [path]);
-  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval",
+  const child = spawnNamedPipeDiscoveryChild(
     `import { readAssistantActionDiscovery } from "./src/lib/assistant-action-discovery.ts";
-     console.log(JSON.stringify(await readAssistantActionDiscovery(${JSON.stringify(request)})));`],
-    { cwd: process.cwd(), encoding: "utf8", timeout: 5000 });
-  assert.equal(child.error, undefined, "nonregular claim must not block in open before stat can reject it");
-  assert.equal(child.status, 0, child.stderr);
+     console.log(JSON.stringify(await readAssistantActionDiscovery(${JSON.stringify(request)})));`);
+  const diagnostic = `named-pipe discovery child timed out or failed (5000ms bound): status=${child.status}, signal=${child.signal}, error=${child.error}, stderr=${child.stderr}`;
+  assert.equal(child.signal, null, diagnostic);
+  assert.equal(child.error, undefined, diagnostic);
+  assert.equal(child.status, 0, diagnostic);
   const result: AssistantActionDiscovery = JSON.parse(child.stdout);
   assert.equal(result.completeness, "partial"); assert.deepEqual(result.limitations, ["unreadable_entries"]);
   assert.deepEqual(result.pending, []); assert.equal(result.verifiedEmpty, false);

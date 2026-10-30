@@ -14,8 +14,8 @@
     - scripts/test-location-codemod.mjs
     - test/ci/suites/check-test-test-a-test-imports-through-the-subpath-alias-test-ts.test.ts
   acceptance:
-    - claim: "the harness no longer spends a fix round on check:test:test/a-test-imports-through-the-subpath-alias.test.ts"
-      proof: "unit test: W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.ts is prevented, not retried"
+    - claim: "a recorded check:test:test/a-test-imports-through-the-subpath-alias.test.ts round, replayed through the real code path in scripts/test-location-codemod.mjs, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: test/ci/suites/check-test-test-a-test-imports-through-the-subpath-alias-test-ts.test.ts"
   note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/a-test-imports-through-the-subpath-alias.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
   rationale: |
     MEASURED by the ci-friction gardener: check:test:test/a-test-imports-through-the-subpath-alias.test.ts cost 32.6 PR minute(s) (seven-day half-life) across 15 fix round(s) on 14 pull request(s).
@@ -83,11 +83,22 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  amendment: |
+    2026-10-29, by operator decision: criterion 1's claim is restated to the mechanism wording the
+    ci-friction gardener drafts since #15538 (ciFrictionShardYaml in src/lib/ci-friction-gardener.ts).
+    The old claim was: "the harness no longer spends a fix round on check:test:test/a-test-imports-through-the-subpath-alias.test.ts".
+    Reviews judged proofs of that claim non-responsive, because only the gardener's after-window
+    measurement can show a cause stopped costing fix rounds, and the PR was parked on it. The proof
+    line changed only in form. The after-window measurement still decides whether the cause's share fell.
+    verify is set to human so the machine-filing judge re-rules the amended record (its ruling pin
+    is stale once the claim changes); the judge's ruling, not this edit, releases it.
+    The proof moves from the title form "unit test: W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.ts is prevented, not retried" to the path form of the task's own
+    test file, because that title resolves to no test on main and lint refuses an edited shard that names it.
   risk_ruling:
     verdict: "rule-3-low-privilege"
     action: proceed
     confidence: 1
     reasons:
       - "rule 3 (live and low-privilege): the symptom is live, 1 occurrence(s) across 7 day(s), last seen 2026-10-25T06:46:53.318Z, and the record declares no privileged path"
-    judged_at: "2026-10-28T03:42:53.852Z"
-    pin: "6c43d4661c7184ef0b1c9924a59ce4ad2e1300c02031f5b56c170fd37d42edfc"
+    judged_at: "2026-10-30T01:13:54.597Z"
+    pin: "4e8c3be9318fcf92819dfdc5ff8fcd96499beaec4c86f0a80ef5949b5579ef1a"

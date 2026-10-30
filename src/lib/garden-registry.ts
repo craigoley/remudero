@@ -73,6 +73,8 @@ export const REGISTERED_GARDEN_NAMES = [
   "review-replay",
   // W1-T9925: an LLM judge re-ranks queued tasks by measured cost of delay and is scored on its own predictions.
   "queue-judge",
+  // Operator ruling 2026-10-30: the plan Architect amends a task its fix lane stood down on, through a reviewed plan PR.
+  "redesign",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];

@@ -1,0 +1,32 @@
+- id: W1-T11005
+  title: "THE GARDENER PR review_queue_wait STAGE SLOWED ON THE LIGHT SURFACE — p50 10 min against a 0.1 min baseline over the last 24 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-regression:gardener:review_queue_wait:light"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/the-gardener-review-queue-wait-flow-stage-recovers.test.ts
+  acceptance:
+    - claim: "the gardener review_queue_wait stage on the light surface returns under 2x its baseline p50"
+      proof: "grep: test(\"the gardener review_queue_wait stage recovers\" in test/sweep/the-gardener-review-queue-wait-flow-stage-recovers.test.ts"
+  note: "Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open."
+  rationale: |
+    gardener PRs, stage review_queue_wait on the light surface: p50 10 min against a 0.1 min baseline (rolling).
+    Last 24 h: n 39, p50 10, p90 99.9 min.
+    Slowest PRs: #15487 (139.9 min), #15460 (111.2 min), #15333 (111 min).
+    Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filing reports latency statistics and three PR references, but supplies no per-PR findings establishing a shared cause; its rationale explicitly leaves that investigation outstanding.; on the change's description/files alone, no diff was read — Acceptance uses a grep for a test declaration to establish recovery below 2x baseline; that proof establishes text presence, not measured stage recovery.; on the change's description/files alone, no diff was read — The supplied escalation rule requires HIGH when the finding cannot be verified from what is shown; the filing does not yet provide a verified finding or a bounded remedy."
+    judged_at: "2026-10-30T04:34:45.766Z"
+    pin: "f05be908b6382d5dbe173c54de942b078cb3a13f4703d5d0d525e82fb728ba86"

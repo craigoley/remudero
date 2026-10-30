@@ -135,9 +135,11 @@
     {
       "id": "the-two-scope-time-checks-as-commands-run-both-before-building-a",
       "headline": "THE TWO SCOPE-TIME CHECKS, AS COMMANDS — RUN BOTH BEFORE BUILDING A FILED TASK.",
-      "bodyBytes": 905,
-      "bodySha256": "8ca6341f882d10b9717f9e29d135d2f4151b5398b03b23ebdb2e0e33315581bb",
-      "meaningHash": "75d7f977f35044ffafa5e048502051202a2c282c39aa2fb7c5765ede1935693c"
+      "bodyBytes": 1946,
+      "bodySha256": "9f5ff5ce0996088a96bdacc3c2dae1c3723f21fe05bad79bfb901a4e3369dc14",
+      "meaningHash": "75d7f977f35044ffafa5e048502051202a2c282c39aa2fb7c5765ede1935693c",
+      "refrozenAt": "2026-10-30",
+      "refrozenReason": "W1-T9742: preserve the two scope-time checks while making scripts/task-shipped.mjs the primary shipped check with a local-history positive control; document the old query's single-page limit and the merged head-ref credit path."
     },
     {
       "id": "sweep-the-subject-over-open-pr-heads-not-only-origin-main-the-id",
