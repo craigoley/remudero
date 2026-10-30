@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -32,6 +32,80 @@ import {
   workerTranscript,
 } from "../src/lib/worker.js";
 import { ledgeredNonDispatchSpawn, runReview } from "../src/run-task.js";
+import { BoundedOutput } from "#src/lib/bounded-file-tail.js";
+import { WORKER_OUTPUT_BYTES } from "#src/lib/worker.js";
+import fs from "node:fs";
+import { readConfigGardenLedgerRows } from "#src/lib/config-gardener.js";
+
+test("W1-T10962: truncated or unreadable worker and gardener output stays explicit and cannot become a complete success", async (t) => {
+  {
+    const stream = (async function* () {
+      yield { type: "assistant", message: { content: [{ type: "text", text: "🙂".repeat(WORKER_OUTPUT_BYTES) }] } };
+      yield { type: "result", subtype: "success", is_error: false, result: "done", session_id: "worker-attempt",
+        total_cost_usd: 1.25, num_turns: 9 };
+      throw Object.assign(new Error("child failed"), { exitCode: 23 });
+    })();
+    const result = await collectWorkerResult(stream, { childEnvKeys: [] });
+    assert.equal(result.outputRetention?.blocks.state, "truncated");
+    assert.equal(result.outputRetention?.originalSubtype, "success");
+    assert.equal(result.isError, true);
+    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(result.sessionId, "worker-attempt");
+    assert.equal(result.numTurns, 9);
+    assert.equal(result.costUsd, 1.25);
+    assert.deepEqual(result.exit, { kind: "exit", code: 23 });
+    assert.ok(Buffer.byteLength(result.blocks.join("")) <= WORKER_OUTPUT_BYTES);
+    assert.equal(workerLedgerFields(result).output_retention?.blocks.state, "truncated");
+  }
+  const failed = t.mock.method(fs, "readSync", () => { throw new Error("report read refused"); });
+  const stderrOutput = new BoundedOutput(4);
+  stderrOutput.push("large stderr");
+  const unreadable = await collectWorkerResult(successStream(), { childEnvKeys: [], stderrOutput });
+  assert.equal(unreadable.outputRetention?.stderr.state, "unreadable");
+  assert.match(unreadable.outputRetention!.stderr.reason!, /report read refused/);
+  assert.equal(unreadable.isError, true);
+  assert.equal(unreadable.subtype, "error_incomplete_output");
+  assert.deepEqual(unreadable.exit, { kind: "unobserved" });
+  failed.mock.restore();
+  const clean = await collectWorkerResult(successStream(), { childEnvKeys: [] });
+  assert.equal(clean.outputRetention?.text.state, "complete");
+  assert.equal(clean.isError, false);
+  assert.equal(clean.subtype, "success");
+  const dir = mkdtempSync(join(tmpdir(), "rmd-garden-report-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "state"));
+  writeFileSync(join(dir, "state", "ledger.ndjson"), "");
+  const archiveAt = new Date(Date.now() - 24 * 3600 * 1000).toISOString().replaceAll(":", "-").replace(".", "-");
+  writeFileSync(join(dir, "state", `ledger.${archiveAt}.ndjson.gz`), "unreadable archive");
+  assert.throws(() => readConfigGardenLedgerRows(join(dir, "state")), /incomplete ledger union/);
+});
+
+test("W1-T10962: retention preserves error envelopes and refuses an absent result", async () => {
+  const result = await collectWorkerResult((async function* () {
+    yield { type: "result", subtype: "error_max_budget_usd", is_error: true,
+      result: "x".repeat(WORKER_OUTPUT_BYTES + 1), session_id: "budget-attempt", total_cost_usd: 2, num_turns: 7 };
+  })(), { childEnvKeys: [] });
+  assert.equal(result.outputRetention?.text.state, "truncated");
+  assert.equal(result.subtype, "error_max_budget_usd");
+  assert.equal(result.isError, true);
+  assert.equal(result.sessionId, "budget-attempt");
+  assert.equal(result.costUsd, 2);
+  const absent = await collectWorkerResult((async function* () {})(), { childEnvKeys: [] });
+  assert.equal(absent.outputRetention?.text.state, "absent");
+  assert.equal(absent.isError, true);
+  assert.equal(absent.subtype, "error_incomplete_output");
+});
+
+test("W1-T10962: complete reports keep the last result envelope", async () => {
+  const result = await collectWorkerResult((async function* () {
+    yield* successStream();
+    yield { type: "result", subtype: "success", is_error: false, result: "last report",
+      session_id: "last-session", total_cost_usd: 3, num_turns: 10 };
+  })(), { childEnvKeys: [] });
+  assert.equal(result.text, "last report");
+  assert.equal(result.sessionId, "last-session");
+  assert.equal(result.costUsd, 3);
+});
 
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();

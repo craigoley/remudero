@@ -30,6 +30,7 @@ import { homedir } from "node:os";
 import { basename, join, normalize } from "node:path";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { readBoundedFileTail } from "./bounded-file-tail.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import {
   DEFAULT_ESTIMATE_MIB,
@@ -224,13 +225,13 @@ function instanceFile(opts: PeakStoreOptions): string {
   return join(storeDir(opts), `${name}.ndjson`);
 }
 
-/** The last `maxBytes` of a file, starting at a whole line. A store file is compacted near PEAK_COMPACT_BYTES, so the
- *  whole-file read this slices is bounded by it. */
+/** Retain whole NDJSON lines only; failures reach the store's existing diagnostic path. */
 export function readFileTail(path: string, maxBytes: number): string {
-  const buf = readFileSync(path);
-  if (buf.length <= maxBytes) return buf.toString("utf8");
-  const text = buf.subarray(buf.length - maxBytes).toString("utf8");
-  return text.slice(text.indexOf("\n") + 1);
+  const tail = readBoundedFileTail(path, maxBytes);
+  if (tail.state !== "complete" && tail.state !== "truncated") throw new Error(`${tail.state}: ${tail.reason}`);
+  if (tail.state === "complete") return tail.text;
+  const newline = tail.text.indexOf("\n");
+  return newline < 0 ? "" : tail.text.slice(newline + 1);
 }
 
 function parseSamples(text: string): PeakSample[] {
