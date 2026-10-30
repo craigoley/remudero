@@ -1,0 +1,47 @@
+- id: W1-T10984
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:Analyze (actions) cost 28.1 PR minute(s) across 23 round(s) on 23 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.16
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:Analyze (actions)"
+  files:
+    - .github/workflows/codeql.yml
+    - test/gardeners/check-analyze-actions.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:Analyze (actions)"
+      proof: "unit test: W1-T10984: check:Analyze (actions) is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:Analyze (actions)'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:Analyze (actions) cost 28.1 PR minute(s) across 23 red run(s) within the measured window on 23 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/codeql.yml: declares job analyze for Analyze (actions)
+
+    RECENT ROUNDS (newest first):
+    - PR #14442 (https://github.com/craigoley/remudero/pull/14442) at 2026-10-26T15:36:27.927Z: ci-log round — Analyze (actions): [command]/opt/hostedtoolcache/CodeQL/N.N.N/xN/codeql/codeql database export-diagnostics /home/runner/work/_temp/codeql_d; Scan; security-merge-policy: security-merge-
+        log excerpt:
+          | [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/remudero/remudero/.git/worktrees/*.path
+          | /home/runner/work/_temp/git-credentials-d7650320-175a-4430-b651-37f9558cefc5.config
+          | [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/remudero/remudero/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-d7650320\-175a\-4430\-b651\-37f9558cefc5\.config
+          | [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+          | /github/runner_temp/git-credentials-d7650320-175a-4430-b651-37f9558cefc5.config
+          | [comma
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/codeql.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-29T17:21:34.760Z"
+    pin: "98de4647136ddfd33a1a6fb3b35011524d0376571f65bc36a78a09ec1646362f"

@@ -1,0 +1,80 @@
+- id: W1-T10995
+  title: "Trace and repair containment cost evidence at the joined receipt boundary"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: feedback#evidence-coverage-containment-cost
+  plan_refs: ["§7B", "W1-T4553", "W1-T4596", "W1-T9553", "W1-T10318"]
+  files:
+    - src/lib/containment.ts
+    - src/lib/benchmark-run.ts
+    - test/containment.test.ts
+    - test/benchmark-nondispatch-attempts.test.ts
+    - test/benchmark-evidence.test.ts
+  rationale: |
+    The captured gardener finding reports cost on 215/843 joined containment calls
+    (25.5%) for 2026-10-22T17:59:07.863Z through 2026-10-29T17:59:07.863Z,
+    below the 90% floor. This is supplied evidence, not a fresh ledger measurement.
+    W1-T9553 explicitly records the earlier mistaken closure of this cost gap and
+    fixes finding publication/reopening; it does not restore cost receipts.
+    W1-T10318 audits served identity, not cost. W1-T4596 retires duplicate receipt
+    infrastructure while explicitly leaving runtime coverage audit independent.
+    probeContainment already uses benchmarkNonDispatchSpawn("containment"). The
+    shared benchmarkWorkerAttemptResources boundary conditionally carries cost and
+    billing fields and deliberately suppresses a Codex placeholder zero. The evidence
+    reader counts a nonnegative terminal costUsd. The percentage alone cannot tell
+    a dropped receipt field from honestly unavailable provider telemetry.
+  design: |
+    Audit the containment lane's joined assignments and terminal receipts over the
+    complete ledger union. Report coverage of all rotation forms, window bounds,
+    newest source timestamp, a positive observed-cost control and per-cause counts
+    that reconcile to the denominator. If the captured window is unavailable, name
+    that limitation and measure a fresh bounded window separately. Trace available
+    cost from worker result through benchmarkWorkerAttemptResources and the actual
+    receipt writer to the existing evidence projection; a containment.probe cost_usd
+    row alone is not proof that the joined worker receipt contains cost.
+    Repair only a demonstrated loss at this declared receipt boundary. Where the
+    upstream provider supplies no usable per-call cost, retain a named unavailable
+    reason and document that lane/provider disposition with representative receipts
+    in the implementation PR. If propagation is already correct, establish that
+    explanation with regression evidence rather than adding duplicate writes.
+    Keep API request cost and subscription notional cost distinct. Never substitute
+    probe totals, guessed rates, requested-model prices, a placeholder zero or a
+    missing-value default for an observed per-attempt cost. A legitimate reported
+    zero remains distinguishable from an unreported placeholder. Reasons do not
+    become observed cost and unexplained omissions remain visible debt.
+    Exercise the production containment caller through its shared wrapper with an
+    isolated ledger and controlled worker transport, then read its joined receipts
+    through the existing benchmark evidence projection. Cover reported positive
+    and legitimate zero cost, absent/placeholder telemetry, billing modes, failed
+    results carrying telemetry and retries with distinct assignment IDs. Receipt
+    sink failure must preserve containment decisions, worker errors and callbacks.
+    Reuse the declared existing suites; coordinate benchmark-run overlap with
+    W1-T10318. No historical ledger rewrite, coverage-floor or denominator change,
+    gardener suppression, routing/billing policy change, paid probe, new provider
+    pricing implementation or weakening of containment is authorized. An upstream
+    defect outside this boundary must be named with evidence for separately scoped
+    follow-up rather than silently expanding the implementation.
+  acceptance:
+    - claim: "The containment caller through the production wrapper preserves available per-attempt cost and billing semantics in receipts consumed by the existing evidence reader"
+      proof: "unit test: test/containment.test.ts"
+    - claim: "Failed results and retries retain available costs on distinct assignments, missing and placeholder costs remain unavailable, and receipt sink failures preserve normal behavior"
+      proof: "unit test: test/benchmark-nondispatch-attempts.test.ts"
+    - claim: "Joined receipt projection preserves cost missingness and separates API request cost from subscription notional cost, including a legitimate reported zero"
+      proof: "unit test: test/benchmark-evidence.test.ts"
+  falsifier: |
+    Remove the evidenced propagation repair and show the caller-to-receipt regression
+    fails, then restore it to pass. If no propagation defect is found, provide the
+    reconciled audit dispositions and show that removing demonstrated cost/reason
+    propagation fails the regression. An absent cost or Codex placeholder must never
+    increase observed-cost coverage; a real reported zero must not disappear. A
+    retry must not inherit another assignment's cost, and a failed receipt write
+    must not change the containment outcome.
+  priority: 4
+  status: queued
+  attempts: 0

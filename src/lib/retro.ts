@@ -84,44 +84,20 @@ export function parseLedger(ndjson: string): LedgerRecord[] {
   return out;
 }
 
-// ── W1-T3229: the retro's ledger read is bounded by RETAINED BYTES ──────────────────────────
-//
-// This read used to be `openLedgerUnion(stateDir)` with no options and `lines.join("\n")`. That
-// opened every rotation the state dir had ever kept and held four full copies of the corpus at
-// once — the union's own `seen` dedupe Set, the accumulating array, the joined string, and then
-// ~900k objects from `parseLedger`. MEASURED on the fleet host 2026-09-09: 646 rotations,
-// 2.7GB uncompressed, 900,813 distinct rows = 270.4MB of ndjson, 641MB of heap to stream it
-// ONCE. Against `AUTOMATED_RETRO_HEAP_LIMIT_MB` (1792) that is a SIGABRT every fire, which is
-// what froze `state/last-retro.json` at 2026-09-03 for six days.
-//
-// WHY THE BOUND IS BYTES AND NOT DAYS. The obvious repair is W1-T2833's 30-day window, already
-// applied to the follow-up reader one function away. MEASURED, it drops 153 rows out of 900,813:
-// the oldest rotation is 2026-08-13 and 30 days reaches back past it, so the window is wider than
-// the data. Rotation VOLUME, not calendar span, is what crossed the heap. {@link
-// RETRO_LEDGER_MAX_BYTES} is therefore the load-bearing bound and the window below is a cost
-// optimisation on top of it — not the other way round.
+// W1-T3229: bound retained bytes first; marker windows only reduce I/O.
+// Fleet measurement, 2026-09-09: 646 rotations, 2.7GB uncompressed; 900,813 distinct rows
+// occupied 270.4MB ndjson / 641MB streaming heap. Four corpus copies SIGABRT'd the 1792MB
+// subprocess, freezing state/last-retro.json at 2026-09-03 for six days. W1-T2833's 30-day
+// window excluded only 153 rows: the oldest rotation was 2026-08-13. Volume caused the OOM.
 
-/** The ceiling on ndjson bytes {@link readRetroLedgerNdjson} RETAINS, whatever the corpus holds.
- *
- *  PRIMARY CONTROL. This is the bound that keeps the retro inside its heap — not the marker window
- *  below, which is a cost optimisation layered on top. The distinction is measured, not stylistic:
- *  a 30-day window over the corpus that OOM'd excluded 153 rows out of 900,813, because rotation
- *  VOLUME rather than calendar span is what crossed the heap. If this cap is ever removed, the
- *  window does not catch the fall.
- *
- *  Sized against the retro subprocess's own 1792MB heap with the measured multiplier: the retained
- *  ndjson is held in one insertion-ordered identity map, joined into a flat string, and parsed into
- *  objects costing roughly 3x their text. The identity map owns only this retained window; it no
- *  longer grows over every line ever streamed. */
+/** PRIMARY CONTROL: retained ndjson bytes, independent of the marker window.
+ * The 1792MB subprocess holds an insertion-ordered identity map, a joined string and parsed
+ * objects (~3x text). The map covers only retained rows; removing this cap defeats the window. */
 export const RETRO_LEDGER_MAX_BYTES = 96 * 1024 * 1024;
 
-/** PRIMARY CONTROL: maximum retained rows, and therefore maximum exact-string identity-map entries.
- *
- *  A byte ceiling alone does not bound Set bookkeeping when rows are very small. The live read
- *  retained 318,931 rows on 2026-09-09; 350k preserves that measured byte-bounded population while
- *  preventing a small-row corpus from rebuilding the 900,813-entry / 641MB Set that SIGABRT'd the
- *  1792MB subprocess. When this ceiling binds, the oldest retained row is dropped and reported by
- *  the same honesty path as the byte ceiling — dedupe never silently degrades. */
+/** PRIMARY CONTROL: row/identity-map bound: byte limits alone cannot bound bookkeeping for tiny rows.
+ * The 2026-09-09 read retained 318,931 rows; 350k accommodates that population without rebuilding
+ * the 900,813-entry / 641MB Set. Evict oldest rows and report losses, as with the byte ceiling. */
 export const RETRO_LEDGER_MAX_ROWS = 350_000;
 
 /** How far back {@link retroLedgerWindowSince} reaches when there is NO marker — a first-ever
@@ -164,13 +140,9 @@ function msToIso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-/** The window to read from, given the marker's timestamp (absent on a first-ever retro).
- *
- *  DELIBERATELY NOT CLAMPED to {@link RETRO_LEDGER_NO_MARKER_LOOKBACK_MS} when a marker IS present.
- *  A marker frozen for weeks is exactly the state this defect produces, and clamping it would make
- *  the recovery run silently skip the history it exists to consume. The byte budget bounds that
- *  case instead, and REPORTS what it dropped — a loss that is counted is not a loss that is
- *  hidden. */
+/** Marker window; never clamp an existing marker to the no-marker lookback.
+ * A weeks-old frozen marker needs recovery history. The byte budget bounds that read and reports
+ * losses; clamping would silently skip it. */
 export function retroLedgerWindowSince(markerTs: string | undefined, nowMs: number): string {
   const parsed = markerTs === undefined ? Number.NaN : Date.parse(markerTs);
   const fromMs = Number.isNaN(parsed) ? nowMs - RETRO_LEDGER_NO_MARKER_LOOKBACK_MS : parsed - RETRO_LEDGER_WINDOW_LEAD_MS;
@@ -241,18 +213,10 @@ export async function readRetroLedgerNdjson(
   };
 }
 
-/** Report a truncated read — a ledger row and a stderr line — or do NOTHING when nothing was
- *  dropped.
- *
- *  THE NO-OP ARM LIVES HERE, NOT AT THE CALL SITE, AND THAT IS DELIBERATE. Written as an `if` in
- *  `retroCommand` the reporting body is unreachable in every test that does not truncate, and
- *  `diff-coverage` blocks the PR naming exactly those lines — which is what it did. Extracted, the
- *  call site is one unconditional line that every retro run executes, and BOTH arms are reachable
- *  from a unit test. Same extraction-and-injection remedy `resolveEventPath` used, rather than a
- *  coverage exemption comment.
- *
- *  NEVER SILENT is the contract: a retro reasoning over less than its own window says so in the
- *  ledger AND on its own report. Returns whether it reported, so a caller (and a test) can see. */
+/** Report truncation in both ledger and stderr; return whether anything was reported.
+ * Keep the no-op arm here so callers execute unconditionally and tests reach both arms.
+ * This follows resolveEventPath's extraction/injection remedy after diff-coverage rejected the
+ * call-site conditional, without a coverage exemption. Never present a partial window as whole. */
 export function reportRetroLedgerTruncation(
   read: RetroLedgerRead,
   ctx: {
@@ -285,14 +249,9 @@ export function reportRetroLedgerTruncation(
   return true;
 }
 
-/** The scope line the retro report carries under any section reduced from {@link
- *  RetroLedgerRead.ndjson}.
- *
- *  WHY THIS EXISTS AT ALL: `ratifyTelemetry`'s approval rate used to be computed over the whole
- *  ledger and read as a lifetime figure. Under a windowed read it is a window figure. That is the
- *  better signal — a rubber-stamp rate over all history cannot show a trend — but it is a
- *  DIFFERENT number, and a changed denominator presented under an unchanged label is how a report
- *  lies without a single false statement in it. */
+/** Scope label for sections reduced from {@link RetroLedgerRead.ndjson}.
+ * ratifyTelemetry's approval rate is now a window figure, not a lifetime figure: a changed
+ * denominator needs a changed label, even when the window provides the better trend signal. */
 export function retroLedgerScopeNote(read: RetroLedgerRead): string {
   const window = read.sinceTs === undefined ? "the whole ledger corpus" : `the ledger since ${read.sinceTs}`;
   const truncation =
@@ -728,18 +687,10 @@ const defaultThrottleProbeRun: ThrottleProbeRun = (args) => {
  *  status is not: a 403 is also how an ordinary permissions failure reads. */
 export const GITHUB_THROTTLE_REFUSAL_RE = /rate limit|secondary rate|abuse detection/i;
 
-/**
- * Is GitHub usable? Checked once per retro, before any merge is credited (W1-T132).
- *
- * TWO SIGNALS, BECAUSE ONE OF THEM CANNOT SEE THE FAILURE THAT MATTERS.
- *
- *   (1) THE BUCKETS — `gh api rate_limit`, the PRIMARY quota, which is all this probe used to read.
- *   (2) A REAL CALL, because a SECONDARY (abuse/concurrency) limit does not appear in
- *       `/rate_limit` and refuses calls anyway. MEASURED 2026-09-08T07:26Z: every bucket full
- *       (core 5000/5000) while `gh api user` and the open-PR fetch both returned 403 "API rate
- *       limit exceeded". On (1) alone the probe said "available" and the retro stamped
- *       `source: github` on a census built from three refused fetches. W1-T3132.
- */
+/** Probe once before crediting merges (W1-T132): primary quota AND a real call.
+ * Secondary limits do not appear in /rate_limit. On 2026-09-08T07:26Z core was 5000/5000,
+ * but api user and open-PR reads returned 403 "API rate limit exceeded". Quota alone falsely
+ * labelled a census from three refused fetches `source: github` (W1-T3132). */
 export function probeGithubThrottle(run: ThrottleProbeRun = defaultThrottleProbeRun): string | undefined {
   return throttleFromBuckets(run(THROTTLE_BUCKETS_ARGS)) ?? throttleFromLiveCall(run(THROTTLE_LIVE_ARGS));
 }
@@ -1150,13 +1101,10 @@ export interface RunModelAttribution {
   source: ModelAttributionSource;
 }
 
-/** run_id -> the model that earned its verdict, in PRIORITY order (highest first):
- *  `verdict.served_model` > `verdict.model` > `implement.done.served_model` >
- *  `implement.done.model` > `run.start.mount.model` (W1-T3080). Before this task the `verdict`
- *  row carried neither key and `implement.done` was shed by rotation before this join ever saw
- *  it (docs/forensics/retro.md, P53) — both writer-side gaps this task's companion `run-task.ts`/
- *  `ledger.ts` changes close, so this reader now finds real rows to prefer over the guessed
- *  fallback. */
+/** run_id -> earned model, highest priority first (W1-T3080): verdict.served_model >
+ * verdict.model > implement.done.served_model > implement.done.model > run.start.mount.model.
+ * Previously verdict lacked both keys and rotation shed implement.done before the join.
+ * Companion run-task.ts/ledger.ts writer fixes supply real evidence (docs/forensics/retro.md, P53). */
 export function runModelAttribution(records: LedgerRecord[]): Map<string, RunModelAttribution> {
   // Lowest priority first, so a later `.set` for the SAME run_id overwrites an earlier, weaker one
   // — mirrors the `new Map([...low, ...high])` idiom this function replaces, without allocating
@@ -1716,14 +1664,10 @@ export function renderInfrastructure(events: InfrastructureEvent[], recurrence: 
   ].join("\n");
 }
 
-// ── Mutation gate lifetime (W1-T393, MASTER-PLAN §11 D-10) ────────────────
-//
-// D-10 stood open for seven retro cycles on a prose demand no gather rung executed. Clause (i) is
-// to READ THE GATE'S OWN HISTORY, never re-run Stryker here; that history exists nowhere durable,
-// and THAT is the finding. So this ships the emission plus a rung reading it, reporting "starts
-// now, N=0" as a stated limitation. `MUTATION_GATE_VERDICT_STEP` joins
-// `DECISION_RELEVANT_LEDGER_STEPS` in the SAME change, because a lifetime count rotation could
-// reset would recreate the defect. Why: docs/forensics/retro.md.
+// Mutation gate lifetime (W1-T393, MASTER-PLAN §11 D-10): read history, never rerun Stryker.
+// After seven retro cycles without durable history, emission plus this reader report "starts
+// now, N=0". Retain MUTATION_GATE_VERDICT_STEP in DECISION_RELEVANT_LEDGER_STEPS so rotation
+// cannot reset a lifetime count. Why: docs/forensics/retro.md.
 
 /** The ledger step for `mutation-ratchet`'s PR-gate verdict: one line per REAL Stryker run. */
 export const MUTATION_GATE_VERDICT_STEP = "mutation.ratchet_verdict";
@@ -2258,18 +2202,11 @@ export interface PlanHealthReport {
   correctiveTasks: CorrectiveTaskProposal[];
 }
 
-/** RE-GRADE every OPEN task against every standing rule the deterministic linter encodes — the
- *  forward-only gap Standing rule 20 names. A merged or done task is out of scope. Pure: no I/O
- *  and no plan write, so the corrective tasks are PROPOSALS the Architect stage files.
- *
- *  "Already shipped" is decided by `isMerged`, NEVER by the yaml `status:` field. The
- *  {@link yamlMergedFallback} default exists only so this stays callable from a pure unit test.
- *  An unresolved read is safe to leave in scope: the worst case is one extra advisory proposal.
- *
- *  A RETIRED task (any `retirement:` value) is also out of scope, and for the same "leave it
- *  alone" reason `isMerged` already gets: W1-T3076's ratification (a) requires a retired shard to
- *  leave every re-lint loop, this sweep included, so the operator's closed ruling never gets
- *  re-flagged and re-proposed as a corrective task on every cycle (W1-T3399). */
+/** Re-grade open tasks against deterministic standing-rule lint (Standing rule 20).
+ * Pure proposals for the Architect: no I/O or plan write. isMerged decides shipped state,
+ * never yaml status; yamlMergedFallback only supports pure tests. Unresolved reads stay in scope
+ * at the cost of an extra advisory proposal. Any retirement value excludes a task from re-lint,
+ * preserving the operator's closed ruling (W1-T3076 ratification (a), W1-T3399). */
 export function planHealthSweep(
   tasks: Task[],
   optsFor: (task: Task) => LintOpts = () => ({}),
@@ -2411,12 +2348,8 @@ export function renderOverrunProposals(proposals: ClassOverrunProposal[]): strin
   return ["## Overrun mining — CLASS-level fixes proposed", "", ...proposals.map((p) => `- ${p.proposal}`)].join("\n");
 }
 
-// ── Degraded-success mining (W1-T73) ──────────────────────────────────────
-//
-// The overrun mining above reads FAILURE verdicts. It is blind to a run that ended MERGED — a
-// claimed PASS — that took a WEAKER path than its own acceptance criteria named. `review.posted`'s
-// `proof_exec` array already recorded that, per criterion, and nothing read it. The signal set
-// below is DATA: the next class is a table row, never new mining code.
+// Degraded-success mining (W1-T73): failure mining misses MERGED runs that used weaker proof
+// than acceptance required. Read review.posted.proof_exec per criterion; signals are DATA.
 // Why, with the measured retro: docs/forensics/retro.md.
 
 /** The reduced `review.posted` facts one signal predicate judges against — the run's MOST RECENT
@@ -2693,14 +2626,10 @@ export function renderDegradedSuccess(findings: DegradedSuccessFinding[]): strin
   ].join("\n");
 }
 
-// ── Procedural-success mining (W1-T87, ratifies P13) ──────────────────────
-//
-// Everything above mines FAILURE, or a weaker-than-claimed PASS — half the compounding loop P13
-// names. The other half was blind: a run that merged CLEAN, first attempt, every criterion
-// actually OBSERVED, is a POSITIVE signal whose shape was captured nowhere. This mines that shape
-// DETERMINISTICALLY (Rule 2 — the signal set is DATA), so every field is computed before any LLM
-// sees it, and {@link phraseProceduralCandidate} is the ONLY place an LLM enters. A shape needs
-// `threshold` (default 2) supporting runs. Why: docs/forensics/retro.md.
+// Procedural-success mining (W1-T87, ratifies P13): clean first-attempt merges with every
+// criterion OBSERVED provide positive evidence. Compute shapes deterministically from DATA
+// before any LLM; phraseProceduralCandidate is the only LLM seam. Require threshold supporting
+// runs (default 2). Why: docs/forensics/retro.md.
 
 /** The reduced facts one {@link ProceduralSuccessSignal} judges a MERGED run against. */
 export interface ProceduralRunContext {
@@ -3000,18 +2929,11 @@ function followupMatchesTitle(text: string, titleWords: Set<string>): boolean {
   return overlap / textWords.size >= 0.6;
 }
 
-// ── W1-T2638: refuse a "flip the decorative yaml `status:` field" follow-up at harvest ─────
-//
-// Dispatch eligibility and dependency satisfaction both resolve through the GitHub-derived
-// projection, never a task's yaml `status:` field (W1-T367) — but that refutation lives in a shard
-// `mineFollowups` never reads, so the class recurred a FOURTH time. This is the narrowest place it
-// can die: BEFORE a candidate becomes a proposal id.
-//
-// THE SCOPE FENCE IS THE HALF MOST LIKELY TO BE GOT WRONG. This refuses ONLY an entry editing a
-// task's yaml `status:` toward a merged-meaning value or one outside TASK_STATUSES. It never
-// refuses an entry about `blocked`, the one status that genuinely gates dispatch, nor the
-// `retirement:` field, nor the derived projection. Ambiguity resolves toward HARVESTING, never a
-// silent drop. Why: docs/forensics/retro.md.
+// W1-T2638: refuse decorative yaml status flips BEFORE minting a proposal id. W1-T367's
+// GitHub projection governs eligibility/dependencies; mineFollowups could not read that shard,
+// allowing a fourth recurrence. Refuse only edits toward merged-meaning or invalid TASK_STATUSES.
+// Preserve blocked, retirement and projection work; ambiguity HARVESTS, never silently drops.
+// Why: docs/forensics/retro.md.
 
 /** TASK_STATUSES (plan.ts:15-26), mirrored rather than imported — this module stays a leaf over
  *  the ledger and gains no dependency on the plan loader for one closed-vocabulary check. */
@@ -3072,16 +2994,10 @@ function decorativeStatusFlipReason(text: string): string | undefined {
   );
 }
 
-/** Mine every `report.followups` event for entries not yet harvested or deduped. PURE over
- *  `records`, idempotent, and never writing a ledger line itself. An entry already named by a
- *  `followup.harvested` or `.deduped` line is skipped: a followup must survive PAST the marker
- *  window, so this module tracks it explicitly rather than relying on marker scoping.
- *
- *  The entry id is `run_id:ts:index` (W1-T2252). `run_id` alone is not enough: one run emits
- *  `report.followups` from up to five call sites, and with `index` restarting per row a second
- *  row's entry 0 collided onto the first row's id and was silently dropped. Why, with the measured
- *  collision rate: docs/forensics/retro.md. `openTitles` is the caller's set of open titles; an
- *  entry largely covered by one is DEDUPED rather than minted twice. */
+/** Pure, idempotent harvest of report.followups not already harvested/deduped; writes no ledger.
+ * Explicit tracking survives the marker window. Entry id run_id:ts:index (W1-T2252) prevents
+ * collisions when up to five call sites restart index per row. openTitles dedupes covered work.
+ * Measured collision evidence: docs/forensics/retro.md. */
 export function mineFollowups(records: LedgerRecord[], openTitles: string[] = []): FollowupHarvest {
   const processed = new Set<string>();
   for (const r of records) {
@@ -3179,15 +3095,9 @@ export function renderFollowupCandidates(harvest: FollowupHarvest): string {
   return lines.join("\n");
 }
 
-// ── Follow-up routing (W1-T2458) ───────────────────────────────────────────
-//
-// `mineFollowups` finds candidates; until this task nothing read them back, and no plan task had
-// ever been filed from one. `routeFollowupsToRegistry` is the missing consumer: it files each
-// still-open candidate through the SAME single writer the other lanes use.
-//
-// THE ROUTING CHOICE IS THIS LANE'S OWN, NOT A RULE'S. A routed follow-up is a proposal candidate
-// for the inbox's tiering and an operator's `rmd approve`, not a task this lane commits directly.
-// §12 rule 27 permits the fleet to file its own work; this is a deliberate narrower choice.
+// Follow-up routing (W1-T2458): consume mineFollowups through the registry's single writer.
+// Route candidates to inbox tiering and operator rmd approve, not directly committed tasks.
+// This lane deliberately chooses less authority than §12 rule 27 permits.
 // Why, measured: docs/forensics/retro.md.
 
 /** `FollowupEntry.type` semantics — defined HERE because nothing previously defined what the three
@@ -3233,19 +3143,11 @@ export function isSelfReferentialFollowup(candidate: FollowupCandidate): boolean
   return textAsksToImplementItsOwnTask(candidate.text, candidate.taskId);
 }
 
-// ── W1-T2613: the third refusal arm — "dispatch-only" ──────────────────────────
-//
-// Two routed proposals asked for NOTHING but "task X is ready, hand it off", and neither the
-// title-dedup arm nor the type arm declines either. Why, measured: docs/forensics/retro.md.
-//
-// THE SIGNAL, deliberately narrow: the entry names its OWN originating task — always an
-// already-filed id — AND carries a bare-dispatch marker phrase AND no other action-verb marker. A
-// cross-task ask is NOT this arm's shape and stays routed.
-//
-// HEURISTIC OVER FREE PROSE, NOT A PARSER. A live entry pairing a dispatch marker with real work
-// worded outside the action-verb list is WRONGLY DECLINED here, alongside every entry it declines
-// correctly — named in each declined outcome's own `reason`, never hidden behind a "0 false
-// declines" claim this predicate cannot back.
+// W1-T2613, dispatch-only refusal: two proposals merely asked to dispatch existing work.
+// Match the entry's OWN originating task + bare-dispatch phrase + no other action verb.
+// Cross-task asks remain routed. This prose heuristic can wrongly decline real work phrased
+// outside its action-verb list; every declined reason names that risk, never claims zero errors.
+// Why, measured: docs/forensics/retro.md.
 
 /** Marker phrases signalling a followup's text is a BARE DISPATCH ask. Free prose, so a heuristic
  *  — see the arm's doc for the false-decline risk it knowingly accepts. */
@@ -3266,19 +3168,10 @@ function dispatchOnlyReferent(candidate: FollowupCandidate): string | undefined 
   return candidate.taskId;
 }
 
-// ── W1-T2645: the fifth refusal arm — "settled-question" ────────────────────────
-//
-// None of the four earlier arms asks whether a candidate's REMEDY contradicts a question the plan
-// has already, on record, decided. The seed case is the FOURTH recorded instance of one
-// misdiagnosis: that a task's yaml `status:` field drives dispatch. `followupMatchesTitle` cannot
-// catch it (no open title matches) and `decorativeStatusFlipReason` cannot either (its regex needs
-// the literal word "field", which the phrasing lacks).
-//
-// THE TABLE IS DATA, NOT BRANCHES: a second settled question later is a ROW in
-// `SETTLED_QUESTIONS`, never a new `if` in `routeFollowupsToRegistry`. FAIL-OPEN IS THE CORRECT
-// POLARITY here, the opposite of this repo's usual default: refusing a genuine follow-up loses
-// work permanently, so each row's predicate matches the proposed-WRITE shape, never the bare word
-// "status". THIS ARM DECLINES PROMOTION ONLY, NEVER THE HARVEST.
+// W1-T2645, settled-question refusal: fourth recurrence of the yaml-status dispatch misdiagnosis.
+// Title dedup had no open match; decorativeStatusFlipReason required the absent word "field".
+// SETTLED_QUESTIONS is DATA: extend rows, not routing branches. Match proposed WRITES, not bare
+// "status"; fail open to avoid losing genuine work. Decline promotion ONLY, never harvest.
 // Why, with the corpus entry verbatim: docs/forensics/retro.md.
 
 /** One row of the settled-question table: a candidate whose remedy re-decides a question the plan
@@ -3503,22 +3396,11 @@ export function publishFollowupHarvest(
   return outcomes;
 }
 
-// ── Follow-up retirement (W1-T2563) ────────────────────────────────────────
-//
-// `routeFollowupsToRegistry` appends every routable candidate and refuses to re-add one already
-// present. THE GAP IS THAT NOTHING EVER REMOVES ONE: the registry only grows.
-//
-// A routed follow-up cannot be retired the way board-review findings are (W1-T2451): their
-// referent is a `BoardItem.id` a batched read resolves, while a followup's `evidenceAnchors: []`
-// is permanent by design, so an anchor-drift check would read vacuously true and retire the whole
-// population on its first pass. THE REFERENT THIS FAMILY DOES CARRY is the originating TASK,
-// stated in the minted summary; {@link followupOriginatingTaskId} recovers it by PARSING THE
-// SUMMARY AT READ TIME, so this needs no registry migration.
-//
-// THE SIGNAL: the originating task has MERGED. Chosen because it is the one candidate already
-// available, NOT because it is reliable. IT IS NOT: a merged task can leave real follow-up work
-// undone, so this retires some LIVE candidates alongside settled ones, and EVERY OUTCOME NAMES
-// THAT RISK in its own `reason`. Why, measured: docs/forensics/retro.md.
+// Follow-up retirement (W1-T2563): routing only appended; nothing removed proposals.
+// Unlike board findings (W1-T2451), permanent evidenceAnchors: [] cannot prove anchor drift.
+// Parse originating TASK from the summary at read time, without migration. Retire on its merge,
+// but EVERY outcome must name the risk of retiring LIVE work the merged task left undone.
+// Why, measured: docs/forensics/retro.md.
 
 /** The ONE batched read this pass needs: which task referents have merged, read ONCE per pass.
  *  `"unreadable"` leaves every proposal alone — cannot-observe means WAIT (W1-T130). */
@@ -3541,16 +3423,10 @@ export function followupOriginatingTaskId(proposal: Proposal): string | undefine
   return /— from (\S+) \(run /.exec(proposal.summary)?.[1];
 }
 
-/** The originating PULL REQUEST number, when the referent {@link followupOriginatingTaskId}
- *  recovers is a `PR-<n>` reference rather than a task id.
- *
- *  WHY THIS EXISTS. `retireSettledFollowups` matched its referent against a set of TASK ids, so a
- *  `PR-3606` referent could never match anything and the proposal was unretirable by construction.
- *  MEASURED 2026-09-13: 62 of 114 open follow-ups carried a PR referent — the single largest reason
- *  the class only grows. A sampled 12 of those PRs: 11 merged, 1 closed-unmerged.
- *
- *  Same parse position, same summary, so the two readers cannot disagree about which token is the
- *  referent — this only classifies the token the other one already found. */
+/** Parse PR-<n> at the same summary position as followupOriginatingTaskId.
+ * retireSettledFollowups' task-id set could never match PR-3606. On 2026-09-13, 62/114 open
+ * follow-ups had PR referents (largest growth cause); sampled 12: 11 merged, 1 closed-unmerged.
+ * Shared parse position ensures both readers identify the same referent. */
 export function followupOriginatingPr(proposal: Proposal): number | undefined {
   const referent = followupOriginatingTaskId(proposal);
   const digits = /^PR-(\d+)$/.exec(referent ?? "")?.[1];
@@ -3945,25 +3821,13 @@ export function applyContradictionResolution(
   return updated;
 }
 
-// ── Citation mining (W1-T419, extended W1-T2760) ────────────────────────────
-//
-// `selectLearnings` already tiebreaks on `cited`, so this corpus has the RANKING half of the
-// Stack-Overflow-shaped loop. The signal feeding it was dead: hand-stamped dates, and effectively
-// zero `learnings#<id>` citations in the commit history. This section mines the two real sources —
-// `learnings.injected` rows' `matched_ids`, and `learnings#<id>` mentions in git-log — and stamps
-// `cited` plus `cited_count` onto each ACTIVE entry. An id with no evidence is left untouched.
-// Why, measured: docs/forensics/retro.md.
-//
-// W1-T2760: BOTH of those sources measure INJECTION — was the fact put in a prompt? — never USE:
-// did a worker actually act on it? No prompt ever asked a worker to say, so `cited_count` was a
-// proxy standing in for a signal nothing produced, and compression ranked the least-INJECTED entry
-// as the least useful, feeding the next injection. `LEARNINGS_USED` (compaction.ts's contract) and
-// `parseLearningsUsed` (worker.ts) are the producer; `learnings.used` ledger rows are its evidence.
-// `mineLedgerCitations` now mines BOTH ledger steps, tagging each occurrence's `kind`; the two
-// counts are aggregated and stamped SEPARATELY and NEVER SUMMED (see `CitationStamp` below).
-// `mineGitLogCitations` is UNCHANGED (design v) and its evidence keeps aggregating as INJECTED
-// evidence exactly as it always has — `kind` defaults to `"injected"` when absent, so this stays a
-// pure addition with zero behaviour change for every existing caller of the git-log half.
+// Citation mining (W1-T419, W1-T2760): selectLearnings ranks by cited; hand-stamped dates and
+// near-zero git-log citations left its signal dead. Mine learnings.injected.matched_ids plus
+// git-log learnings#<id>; stamp only ACTIVE entries with evidence (docs/forensics/retro.md).
+// INJECTION is not USE. compaction.ts's LEARNINGS_USED and worker.ts's parseLearningsUsed
+// produce learnings.used rows. mineLedgerCitations tags both kinds; aggregate/stamp them
+// SEPARATELY, NEVER SUM. mineGitLogCitations is unchanged (design v); absent kind defaults to
+// "injected", preserving existing git-log callers.
 
 /** One evidence occurrence for a learning id — WHEN it was cited, regardless of source, and which
  *  of the two things it is evidence OF. `kind` absent means `"injected"` — the default every
@@ -4578,17 +4442,11 @@ export function checkRetroIntegrity(priorMergesSinceMarker: number, gatherShippe
   return { ok: true };
 }
 
-// ── W1-T4664: a retro that cannot publish backs off ────────────────────────
-//
-// A retro that FIRES but fails prepublish never advances the marker (by design — the runs it
-// read are still unconsumed), so `evaluateRetroTrigger` sees the same over-threshold count on
-// the very next poll: 24 of 37 retros 2026-09-25..28 re-fired inside the hour, each a full
-// 379-suite Opus attempt. A flat retry fence (state/last-retro-attempt.json, PR #7579) stops the
-// worst of it, but applies the SAME wait after the 1st failure and the 50th. This widens it to a
-// TIERED backoff with NO FIXED CEILING (the task's own design (ii)): the wait DOUBLES with each
-// consecutive failed attempt in the same marker cycle, and a further threshold's worth of merges
-// since that attempt opens an early exit independent of the clock. A published retro (the marker
-// moves) resets both — a fresh cycle earns a fresh, un-backed-off first attempt.
+// W1-T4664: unpublished retros retain the marker, so unchanged over-threshold counts refire.
+// On 2026-09-25..28, 24/37 re-fired within an hour, each a 379-suite Opus attempt. PR #7579's
+// flat state/last-retro-attempt.json fence gave failures 1 and 50 the same wait. Now double
+// the wait per failed attempt in one marker cycle, with NO FIXED CEILING (design ii).
+// Another threshold of merges opens an independent early exit; publication resets the cycle.
 
 /** One recorded automated-retro attempt — what {@link evaluateRetroBackoff} reads back to decide
  *  whether a new attempt is due. `markerTs` is `null` (never `undefined`) for "no marker yet" so
@@ -5174,32 +5032,19 @@ export function renderPlanCoherence(report: PlanCoherenceReport): string {
 }
 
 
-// ── RETRO PUBLICATION ESCALATION (W1-T2988) ──────────────────────────────────────────────────
-//
-// Withholding the marker when publication fails is CORRECT and this task does not change it: the
-// runs the retro was meant to read must stay in scope for the next attempt. What was wrong is that
-// the same failure then repeated forever with nothing said. MEASURED 2026-09-06: the marker frozen
-// at 2026-09-03T02:24:39, 172 `retro.triggered` rows against ZERO `retro.done`, and a ~49-minute
-// subprocess burned per attempt.
-//
-// THIS IS NOT A RETRY CAP. A cap that silently stopped the retro would move the invisibility rather
-// than remove it (the shard says so in as many words). The retro still returns its failure and the
-// trigger still fires; what changes is that a REPEATED failure now reaches the operator once per
-// episode, carrying the exit class that makes the next occurrence diagnosable.
+// Retro publication escalation (W1-T2988): failed publication must retain the marker so runs
+// remain unconsumed. On 2026-09-06 the marker was frozen at 2026-09-03T02:24:39: 172
+// retro.triggered, ZERO retro.done, ~49 minutes burned per subprocess. Report repeated failure
+// once per episode with its exit class. This is NOT a retry cap: return failures and keep firing.
 
 /** How long one publication-failure EPISODE lasts. A second escalation inside this window is
  *  suppressed, so a daemon restart mid-episode cannot re-open the same needs-human issue — the
  *  identical guard {@link DISK_HEADROOM_EPISODE_MS} exists for in run-task.ts. */
 export const RETRO_PUBLICATION_EPISODE_MS = 6 * 60 * 60 * 1000;
 
-/** Consecutive failures before the operator is told. ONE failure is ordinary — a flake, a transient
- *  suite failure, a repair that will succeed next pass — and escalating it would train the operator
- *  to ignore the notice. TWO in an episode is a pattern the retro cannot repair itself.
- *
- *  PRIMARY CONTROL, not a BACKSTOP: this number alone decides whether the operator hears about a
- *  stuck retro. Nothing else notices — that is the whole defect W1-T2988 exists to close — so
- *  raising it silences the only signal, and there is no second mechanism behind it to catch what
- *  it lets through. */
+/** PRIMARY CONTROL: escalate after TWO failures in an episode (W1-T2988).
+ * One may be transient; two indicate a pattern the retro cannot repair. No other mechanism
+ * notices a stuck retro, so raising this threshold silences its only signal. */
 export const RETRO_PUBLICATION_STRIKE_CAP = 2;
 
 /** The only two fields this decision reads. Deliberately STRUCTURAL rather than `LedgerLine`: the

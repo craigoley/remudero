@@ -13,11 +13,12 @@ import { buildCodeHealthOpportunities } from "#src/lib/codeql-quality-intake.js"
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { inboxThreadIdentity, readThread, appendThreadMessage } from "#src/lib/inbox-thread.js";
+import { buildRegisteredGarden, improvementNativeFilingReceipt } from "#src/run-task.js";
+import * as outcomes from "#src/lib/opportunity-outcomes.js";
 
 test("improvement filing receipts retain task identities across ledger rotation", async () => {
   const { appendLedger, rotateLedger } = await import("#src/lib/ledger.js");
   const { readLedgerLines } = await import("#src/lib/status.js");
-  const { improvementNativeFilingReceipt } = await import("#src/run-task.js");
   assert.equal(typeof improvementNativeFilingReceipt, "function", "the native filing receipt reader must exist");
   await withTempDir("improvement-filing-rotation", dir => {
     const ledgerPath = join(dir, "ledger.ndjson"), clock = fixedClock(Date.now());
@@ -876,4 +877,179 @@ test("saved improvement CLI refuses an unowned default before reading execution 
   const { improvementActionCommand } = await import("#src/run-task.js");
   const readConfig = () => { assert.fail("an unowned CLI must not inspect stores or invoke workers"); };
   assert.equal(await improvementActionCommand(["a".repeat(64), "--state-dir", "/unreachable/state"], { readConfig }), 1);
+});
+
+test("native improvement filing preserves the original baseline after a newer chat goal", async () => {
+  const { join } = await import("node:path"), fsForOwner = await import("node:fs"), { mkdirSync, writeFileSync } = fsForOwner;
+  const { withTempDir } = await import("#src/lib/tmp.js");
+  const { codeHealthRepositoryStateDir, publishCodeHealthSnapshot } = await import("#src/lib/code-health-store.js");
+  const { createImprovementThread, readImprovementThread, requestImprovementAction, runImprovementAction } = await import("#src/lib/improvement-thread.js");
+  const { captureInboxDraftSnapshot, commitInboxDraftOutcomes, loadProposalRegistry } = await import("#src/lib/inbox.js");
+  const { appendLedger } = await import("#src/lib/ledger.js");
+  await withTempDir("improvement-native-discovery", async dir => {
+    const { deps: { clock: now }, request: fixtureRequest, inboxRoot, input } = sourceFixture(dir);
+    const at = (minutes: number): string => new Date(now.now() + minutes * 60_000).toISOString();
+    const repository = fixtureRequest.repository, inboxState = join(inboxRoot, "state"), ledgerPath = join(inboxState, "ledger.ndjson"), mergeSha = "b".repeat(40);
+    const original = structuredClone(input); original.observedAt = at(-1439); original.baseline = null;
+    original.scans = original.scans.map(scan => ({ ...scan, scanId: `${scan.kind}:before`, componentIds: [`${scan.kind}:before`], observedAt: at(-1440), scopeHash: `${scan.kind}:same-scope` }));
+    const next = structuredClone(original); next.currentSha = next.analyzedSha = mergeSha; next.observedAt = at(-59);
+    next.scans = next.scans.map(scan => ({ ...scan, scanId: `${scan.kind}:after`, componentIds: [`${scan.kind}:after`], analyzedSha: mergeSha, observedAt: at(-60), findings: scan.findings.map(row => ({ ...row, status: "fixed", fixedAt: at(-120), fixedSha: mergeSha })) }));
+    const source = { repository, opportunityId: fixtureRequest.opportunityId, taskIds: ["W1-T99999"], planPrUrl: "https://github.com/acme/atlas/pull/1" };
+    const evidence = { before: { input: original }, after: { input: next }, merges: [{ taskId: "W1-T99999", repository, url: "https://github.com/acme/atlas/pull/2", mergeSha, headSha: mergeSha, mergedAt: at(-120), credit: "trailer" as const }] };
+    mkdirSync(join(dir, "read-model"), { recursive: true });
+    writeFileSync(join(dir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [{ instanceId: "atlas", options: { controlRoot: inboxRoot, ledgerPath, planPath: join(inboxRoot, "repos", "atlas", "plan", "tasks.yaml") } }], improvementEvidence: { version: "repository-evidence-inventory-v1", measurementState: "not_collected", repositories: [{ repository, instanceIds: ["atlas"], expectedDailySources: ["pull_requests", "ledger_activity", "deployments"], expectedQualitySources: ["quality", "coverage"] }], unresolvedInstances: [] } }));
+    const filingClock = fixedClock(Date.parse(at(-1380)));
+    const state = codeHealthRepositoryStateDir(dir, repository), baseline = publishCodeHealthSnapshot({ stateDir: state, input: evidence.before.input, expectedSnapshotId: null, clock: filingClock }); assert(baseline.state === "published");
+    const deps = { stateDir: dir, actorId: "operator:test", clock: filingClock };
+    const request = { repository, instance: "atlas", opportunityId: source.opportunityId, snapshotId: baseline.snapshotId, goal: "Simplify the repeated work.", constraints: [], idempotencyKey: "native-discovery-original-01" };
+    const chat = await createImprovementThread(request, deps); assert(chat.state === "saved");
+    let view = readImprovementThread(chat.requestId, deps); assert(view.state === "saved");
+    const draft = await requestImprovementAction("draft", { requestId: chat.requestId, goalDigest: view.goalDigest, idempotencyKey: "native-discovery-draft-01" }, deps); assert(draft.state === "requested");
+    const drafted = await runImprovementAction(draft.operation.operationId, deps, async () => {
+      const proposal = loadProposalRegistry(join(inboxState, "inbox-proposals.json")).find(p => p.id === chat.proposalId)!;
+      const snapshot = captureInboxDraftSnapshot(proposal, { repository });
+      const candidate = { proposalId: proposal.id, fragmentYaml: "- id: NEW-1\n  title: Simplify repeated work\n", stampLine: "Reviewed improvement", anchorFingerprint: "", completion: { snapshot, lintClean: true, violations: [] } };
+      commitInboxDraftOutcomes({ stateDir: inboxState, scope: { repository }, snapshots: [snapshot], outcomes: [{ ok: true, proposalId: proposal.id, candidate, snapshot }], log: () => {} });
+    }, async () => assert.fail("a draft action must not file"), () => undefined);
+    assert.equal(drafted.state, "completed");
+    view = readImprovementThread(chat.requestId, deps); assert(view.state === "saved"); assert(view.drafting.digest);
+    const filing = await requestImprovementAction("file", { requestId: chat.requestId, goalDigest: view.goalDigest, draftDigest: view.drafting.digest, idempotencyKey: "native-discovery-file-001" }, deps); assert(filing.state === "requested");
+    const filed = await runImprovementAction(filing.operation.operationId, deps, async () => assert.fail("a filing action must not draft"), async target => {
+      appendLedger(ledgerPath, { ts: filingClock.iso(), run_id: "APPROVE-DISCOVERY", task_id: target.proposalId, proposal_id: target.proposalId, step: "approve.id_materialized", ids: source.taskIds });
+      appendLedger(ledgerPath, { ts: filingClock.iso(), run_id: "APPROVE-DISCOVERY", task_id: target.proposalId, step: "ratify.approved", pr_url: source.planPrUrl!, branch: "ratify-native-discovery" });
+      return improvementNativeFilingReceipt(ledgerPath, target.proposalId, repository, filingClock);
+    }, () => undefined);
+    assert.equal(filed.state, "completed");
+    const intermediate = structuredClone(evidence.before.input); intermediate.observedAt = at(-179); intermediate.scans = intermediate.scans.map(scan => ({ ...scan, observedAt: at(-180), scanId: `${scan.kind}:intermediate`, componentIds: [`${scan.kind}:intermediate`] }));
+    const nextSource = publishCodeHealthSnapshot({ stateDir: state, input: intermediate, expectedSnapshotId: baseline.snapshotId, clock: now }); assert(nextSource.state === "published");
+    const newer = await createImprovementThread({ ...request, snapshotId: nextSource.snapshotId, goal: "Preserve the public API while simplifying it.", idempotencyKey: "native-discovery-newer-goal" }, { ...deps, clock: now }); assert(newer.state === "saved");
+    const after = publishCodeHealthSnapshot({ stateDir: state, input: evidence.after.input, expectedSnapshotId: nextSource.snapshotId, clock: now }); assert(after.state === "published");
+    const work = { proposals: loadProposalRegistry(join(inboxState, "inbox-proposals.json")), tasks: [{ id: "W1-T99999", repo: "atlas" }], prs: [], mergedKeys: [], feedback: [] };
+    writeFileSync(join(dir, "merge-credit.json"), JSON.stringify({ "W1-T99999": { trailer: { source: "trailer", prUrl: evidence.merges[0]!.url, prNumber: 2, prState: "MERGED" } } }));
+    const fetch = (args: string[]): unknown => args[1]!.includes("/compare/") ? { status: "ahead", merge_base_commit: { sha: evidence.before.input.analyzedSha } } : { merged: true, html_url: evidence.merges[0]!.url, merged_at: evidence.merges[0]!.mergedAt, merge_commit_sha: evidence.merges[0]!.mergeSha, body: "Remudero-Task: W1-T99999", head: { sha: evidence.merges[0]!.headSha, ref: "ordinary-branch" }, base: { repo: { full_name: repository } } };
+    const ports = outcomes.productionOpportunityOutcomePorts({ stateDir: dir, repoRoot: dir, clock: now, log: () => {}, openWorkspace: () => { throw new Error("this read-only injected intake must not create a workspace"); } } as import("#src/lib/gardener.js").GardenerDeps, { intake: { repo: repository, readWork: () => work } as unknown as import("#src/lib/opportunity-intake.js").OpportunityIntakePorts, fetch, readRows: () => [] });
+    const result = outcomes.reconcileOpportunityOutcomes(ports).find(row => row.proposalId === chat.proposalId)!;
+    assert(result); assert.equal(result.improvement?.snapshotId, baseline.snapshotId); assert.equal(result.improvement.sourceVerified, true); assert.equal(result.effect?.verdict, "helped", JSON.stringify(result.effect)); assert.equal(result.effect.evidence.afterSnapshotId, after.snapshotId);
+    const managed = outcomes.reconcileManagedImprovementEffects;
+    const namespace = outcomes.improvementOutcomeStateDir;
+    assert.equal(typeof managed, "function", "the admitted gardener must follow saved work across the configured repository roster"); assert(managed); assert(namespace);
+    const planPath = join(inboxRoot, "repos", "atlas", "plan", "tasks.yaml"); mkdirSync(join(inboxRoot, "repos", "atlas", "plan"), { recursive: true });
+    writeFileSync(planPath, JSON.stringify([{ id: "W1-T99999", title: "Simplify repeated work", repo: "atlas", type: "implement", verify: "auto", files: ["src/example.ts"], depends_on: [] }]));
+    writeFileSync(join(inboxState, "merge-credit.json"), JSON.stringify({ "W1-T99999": { trailer: { source: "trailer", prUrl: evidence.merges[0]!.url, prNumber: 2, prState: "MERGED" } } }));
+    const globalBefore = (await import("node:fs")).readFileSync(join(dir, "opportunity-outcomes.json"), "utf8");
+    const crossRepo = await managed({ stateDir: dir, repoRoot: dir, repository: "acme/core", clock: now, log: () => {}, fetch });
+    assert.equal(crossRepo.state, "reported"); assert.equal(crossRepo.publishedScopes, 1);
+    const targetState = namespace(dir, repository, "atlas"), saved = JSON.parse((await import("node:fs")).readFileSync(join(targetState, "opportunity-outcomes.json"), "utf8"));
+    assert.equal(saved[0].effect.verdict, "helped"); assert.equal(saved[0].improvement.snapshotId, baseline.snapshotId);
+    assert.equal((await import("node:fs")).readFileSync(join(dir, "opportunity-outcomes.json"), "utf8"), globalBefore, "the core's native opportunity registry is unchanged");
+    assert.equal((await import("node:fs")).existsSync(join(inboxState, "opportunity-outcomes.json")), false, "another repository's native gardener store is untouched");
+    const historyPath = join(targetState, "ledger.ndjson");
+    const observations = () => fsForOwner.readFileSync(historyPath, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(row => row.step === "opportunity_outcome.effect_observed");
+    assert.equal(observations().length, 1, "a consumer repository needs durable local projection history for Daily progress");
+    assert.equal(observations()[0].task_id, "DAEMON", "projection history uses the existing registered production identity");
+    const { ghShim } = await import("#test/helpers/gh-shim.js");
+    const shim = ghShim([
+      { when: `/pulls/2`, stdout: JSON.stringify(fetch(["api", `repos/${repository}/pulls/2`])), delaySeconds: 0.1 },
+      { when: `/compare/`, stdout: JSON.stringify(fetch(["api", `repos/${repository}/compare/baseline...merged`])), delaySeconds: 0.1 },
+      { when: "", stderr: "Unexpected follow-up evidence query", exit: 1 },
+    ]);
+    const priorPath = process.env.PATH, priorCache = process.env.RMD_GH_CACHE_HOME;
+    try {
+      process.env.PATH = `${shim.dir}:${priorPath}`;
+      process.env.RMD_GH_CACHE_HOME = join(dir, "isolated-follow-up-read-cache");
+      let settled = false;
+      const pending = managed({ stateDir: dir, repoRoot: dir, repository: "acme/core", clock: now, log: () => {} });
+      void pending.then(() => { settled = true; });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(settled, false, "the production follow-up yields while its real evidence child is running");
+      assert.equal((await pending).state, "reported");
+      assert.equal(shim.calls().length, 2, "the actual default performs one credited PR read and one shared ancestry read");
+      assert(shim.calls().every(call => call.includes("/pulls/2") || call.includes("/compare/")));
+    } finally {
+      if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
+      if (priorCache === undefined) delete process.env.RMD_GH_CACHE_HOME; else process.env.RMD_GH_CACHE_HOME = priorCache;
+      fsForOwner.rmSync(shim.dir, { recursive: true, force: true });
+    }
+    assert.equal(observations().length, 1, "re-reading unchanged evidence must not add another improvement observation");
+    const nativeRegistry = join(inboxState, "inbox-proposals.json"), validRegistry = fsForOwner.readFileSync(nativeRegistry, "utf8");
+    writeFileSync(nativeRegistry, "malformed");
+    const failedRefresh = await managed({ stateDir: dir, repoRoot: dir, repository: "acme/core", clock: fixedClock(now.now() + 1000), log: () => {}, fetch });
+    assert.equal(failedRefresh.state, "partial", "a failed source refresh must remain visible in the pass summary");
+    const unavailable = JSON.parse(fsForOwner.readFileSync(join(targetState, "opportunity-outcomes.json"), "utf8"));
+    assert.equal(unavailable[0].effect.verdict, "insufficient_evidence", "a failed refresh cannot continue to publish a current helped classification");
+    assert.equal(observations().length, 2, "the earlier measured observation remains in history beside the failed refresh");
+    writeFileSync(nativeRegistry, validRegistry);
+    const recovered = await managed({ stateDir: dir, repoRoot: dir, repository: "acme/core", clock: fixedClock(now.now() + 2000), log: () => {}, fetch });
+    assert.equal(recovered.state, "reported");
+    assert.equal(JSON.parse(fsForOwner.readFileSync(join(targetState, "opportunity-outcomes.json"), "utf8"))[0].effect.verdict, "helped");
+    assert.equal(observations().length, 3);
+    const { readCodeHealthReport } = await import("#src/lib/code-health-view.js");
+    const codeHealth = () => readCodeHealthReport({ stateDir: dir, params: new URLSearchParams({ repository }), now: now.now() + 2000 });
+    const detail = codeHealth().data.improvementFollowUp; assert(detail);
+    assert.equal(detail.state, "reported"); assert.equal(detail.items[0]!.assessment.verdict, "helped");
+    assert.equal(detail.items[0]!.currentEvidence.state, "matches_latest_analysis", "the actual cached view exposes the independent follow-up with its source status");
+    const projectionPath = join(targetState, "opportunity-outcomes.json"), validProjection = fsForOwner.readFileSync(projectionPath, "utf8");
+    writeFileSync(projectionPath, "corrupt projection");
+    assert.equal(codeHealth().data.improvementFollowUp?.state, "unavailable");
+    assert.equal(fsForOwner.readFileSync(projectionPath, "utf8"), "corrupt projection", "page reads preserve corrupt evidence and cannot report a successful empty result");
+    writeFileSync(projectionPath, validProjection);
+    const { acquireInflightLock } = await import("#src/lib/inflight-lock.js");
+    const held = acquireInflightLock(join(targetState, "effect-locks"), "publication", { run_id: "other-effect-owner", reclaim: false });
+    try { const deferred = await managed({ stateDir: dir, repoRoot: dir, repository: "acme/core", clock: now, log: () => {}, fetch }); assert.equal(deferred.state, "partial"); assert.equal(deferred.publishedScopes, 0); assert((await import("node:fs")).existsSync(held.path)); }
+    finally { held.release(); }
+    const lockPath = join(targetState, "effect-locks", "publication.lock");
+    writeFileSync(lockPath, "unreadable-owner");
+    const unknown = await managed({ stateDir: dir, repoRoot: dir, repository: "acme/core", clock: now, log: () => {}, fetch });
+    assert.equal(unknown.state, "partial"); assert.equal(unknown.publishedScopes, 0); assert.equal((await import("node:fs")).readFileSync(lockPath, "utf8"), "unreadable-owner");
+    (await import("node:fs")).unlinkSync(lockPath);
+    const prior = (await import("node:fs")).readFileSync(join(targetState, "opportunity-outcomes.json"), "utf8"); let changedOwner = false;
+    const lost = await managed({ stateDir: dir, repoRoot: dir, repository: "acme/core", clock: fixedClock(now.now() + 1000), log: () => {}, fetch: (args: string[]) => {
+      if (!changedOwner && args[1]!.includes("/pulls/")) { changedOwner = true; (awaitableFs => { awaitableFs.unlinkSync(lockPath); awaitableFs.writeFileSync(lockPath, "replacement-owner"); })(fsForOwner); }
+      return fetch(args);
+    } });
+    assert.equal(lost.state, "partial"); assert.equal(lost.publishedScopes, 0); assert(changedOwner);
+    assert.equal((await import("node:fs")).readFileSync(lockPath, "utf8"), "replacement-owner"); assert.equal((await import("node:fs")).readFileSync(join(targetState, "opportunity-outcomes.json"), "utf8"), prior);
+  });
+});
+
+test("native improvement gardener registration preserves the off switch and source bounds", async () => {
+  const { join } = await import("node:path"), fs = await import("node:fs");
+  const { withTempDir } = await import("#src/lib/tmp.js");
+  await withTempDir("improvement-registered-caller", async root => {
+    const stateDir = join(root, "state"), native = join(root, "atlas");
+    for (const dir of [stateDir, join(stateDir, "read-model"), join(native, "state"), join(native, "repos", "atlas", "plan")]) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(join(stateDir, "ledger.ndjson"), "");
+    // Actual Core source observation: 1,735 Inbox rows, none saved improvement conversations.
+    const nativeRegistry = join(native, "state", "inbox-proposals.json");
+    const unrelated = Array.from({ length: 1735 }, (_, index) => ({ id: `other-producer:${index}`, summary: "An unrelated native proposal", evidenceAnchors: [] }));
+    fs.writeFileSync(nativeRegistry, JSON.stringify({ version: 1, proposals: unrelated }));
+    const originalRegistry = fs.readFileSync(nativeRegistry, "utf8");
+    const planPath = join(native, "repos", "atlas", "plan", "tasks.yaml"); fs.writeFileSync(planPath, "[]\n");
+    fs.writeFileSync(join(stateDir, "read-model", "repositories-sources.json"), JSON.stringify({ instances: [{ instanceId: "atlas", options: { controlRoot: native, planPath } }], improvementEvidence: { version: "repository-evidence-inventory-v1", measurementState: "not_collected", repositories: [{ repository: "acme/atlas", instanceIds: ["atlas"], expectedDailySources: ["pull_requests", "ledger_activity", "deployments"], expectedQualitySources: ["quality", "coverage"] }], unresolvedInstances: [] } }));
+    const events: string[] = [];
+    const ctx: Parameters<typeof buildRegisteredGarden>[1] = { config: { root, claudeBin: "/bin/true", overflow: "none" }, repoRoot: root, owner: "acme", repo: "core", log: (step: string) => { events.push(step); }, raiseDuplicate: () => "" };
+    const projection = join(outcomes.improvementOutcomeStateDir(stateDir, "acme/atlas", "atlas"), "opportunity-outcomes.json");
+    const off = join(stateDir, "GARDENER_OVERSEER_OFF"); fs.writeFileSync(off, "operator paused\n");
+    const pass = await buildRegisteredGarden("overseer", ctx); await pass();
+    assert.equal(fs.existsSync(projection), false, "the operator's off switch must also stop independent follow-up");
+    fs.unlinkSync(off); await pass();
+    assert(events.includes("gardener_overseer.scorecard"), "the ordinary overseer still runs as a positive control");
+    assert.equal(fs.existsSync(projection), true, "the production registered caller must reach the read-only follow-up");
+    assert.deepEqual(JSON.parse(fs.readFileSync(projection, "utf8")), []);
+    assert.equal(fs.readFileSync(nativeRegistry, "utf8"), originalRegistry, "unrelated source proposals are read-only and never retired or rewritten");
+    const previous = fs.readFileSync(projection, "utf8");
+    const savedImprovement = { version: "improvement-thread-v1", repository: "acme/atlas", instance: "atlas", opportunityId: "acme/atlas/codeql-quality:one", snapshotId: "a".repeat(64), requestId: "b".repeat(64), threadId: "thread:improvement:one", goalDigest: "c".repeat(64), conversationReady: true };
+    const exceedsFollowUpBound = Array.from({ length: 513 }, (_, index) => ({ id: `improvement:${index}`, summary: "A saved improvement", evidenceAnchors: [], improvement: savedImprovement }));
+    for (const body of [
+      JSON.stringify({ version: 1, proposals: exceedsFollowUpBound }),
+      JSON.stringify({ version: 1, proposals: [...unrelated, { id: "damaged-unrelated-row" }] }),
+      JSON.stringify({ version: 1, proposals: unrelated }).padEnd(2 * 1024 * 1024 + 1, " "),
+    ]) {
+      fs.writeFileSync(nativeRegistry, body);
+      const held = await outcomes.reconcileManagedImprovementEffects({ stateDir, repoRoot: root, repository: "acme/core", log: () => {}, fetch: () => assert.fail("a source-bound refusal cannot start evidence reads") });
+      assert.equal(held.state, "partial"); assert.equal(held.publishedScopes, 0);
+      assert.equal(fs.readFileSync(projection, "utf8"), previous, "the 512-improvement cap, whole-source validation and 2 MiB read bound still preserve the prior projection");
+      assert.equal(fs.readFileSync(nativeRegistry, "utf8"), body, "a refusal cannot edit another owner's source");
+    }
+  });
 });

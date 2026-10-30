@@ -13,6 +13,7 @@
   files:
     - src/lib/benchmark-cohort.ts
     - test/the-cohort-checkpoint-rewrites-only-what-a-pass-changed.test.ts
+    - "src/lib/daemon.ts"
   status: queued
   priority: 2
   attempts: 0

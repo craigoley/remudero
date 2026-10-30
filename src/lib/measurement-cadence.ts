@@ -1009,6 +1009,7 @@ export interface CoverageImprovementCadenceOpts
   > {
   root: string;
   stateDir: string;
+  landingStateRoot?: string;
   producer?: (deps: InjectCoverageImprovementDeps) => InjectCoverageImprovementResult;
   reader?: (deps: FetchMergedCoverageArtifactDeps) => FetchMergedCoverageArtifactResult;
   capture?: InjectCoverageImprovementDeps["capture"];
@@ -1045,6 +1046,7 @@ export function runCoverageImprovementCadence(opts: CoverageImprovementCadenceOp
   const produced = producer({
     root: opts.root,
     stateDir: opts.stateDir,
+    landingStateRoot: opts.landingStateRoot,
     ledgerPath: opts.ledgerPath ?? join(opts.stateDir, LEDGER_FILENAME),
     runId: String(read.workflowRunId),
     lcovText: read.lcovText,
@@ -1819,6 +1821,7 @@ export function defaultMeasurementCadenceGitLog(cwd: string): { dump: string; re
 export interface MeasurementCadenceReportOpts {
   /** `<root>/state`, the ledger union's root. */
   stateDir: string;
+  landingStateRoot?: string;
   /** The rule table the efficacy report grades; absent is the shipped RULE_SIGNATURES. */
   ruleSignatures?: readonly RuleSignature[];
   /** Repo working directory for the verdict-calibration/autonomy-rate git join. */
@@ -2602,14 +2605,15 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   });
   // ── coverage-improvement: daemon-side reader for CI's merged coverage artifact ─────────────
   const coverageImprovement = opts.coverageImprovement
-    ? runCoverageImprovementCadence({ ...opts.coverageImprovement, stateDir: opts.stateDir })
+    ? runCoverageImprovementCadence({ ...opts.coverageImprovement, stateDir: opts.stateDir, landingStateRoot: opts.landingStateRoot })
     : undefined;
 
   // ── hand-run census (W1-T2697): census the operator's own ledger rows, propose a routine for
   // each verb sequence that recurs across the policy floor of distinct days — see
   // hand-run-census.ts's module doc for the full design. Opt-in like coverageImprovement above,
   // for the same reason: its own ledger marker needs a caller-supplied run_id.
-  const handRunCensusResult = opts.handRunCensus ? handRunCensus({ ...opts.handRunCensus, stateDir: opts.stateDir }) : undefined;
+  const handRunCensusResult = opts.handRunCensus ? handRunCensus({ ...opts.handRunCensus, stateDir: opts.stateDir,
+    landingStateRoot: opts.landingStateRoot }) : undefined;
 
   // ── the adoption report's mint — gated on `opts.escalate` like rule-efficacy's write above;
   // off, it reports the measured status without touching the registry.
