@@ -50,6 +50,7 @@ import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "../../lib/derivative-ci-failure.js";
 import { ghJson, parseReport, foreignTreeStandDownReason, workerTranscript, worktreeAdd, worktreeRemove, type SpawnWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, workerContinuation } from "../../lib/worker.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
+import { recordInstrumentGrantShadow } from "../../lib/instrument-grant.js";
 import type { MergeConflictEvidence } from "../../lib/merge-state.js";
 import { runStepsAsync, runStepsSync, step } from "../../lib/git-push.js";
 import { FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "../../lib/fix-fence.js";
@@ -4719,6 +4720,11 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       if (workflowPaths.length > 0 || instrumentPaths.length > 0 || unfiledScope) {
         const scopeKind = workflowPaths.length > 0 ? "workflow" : instrumentPaths.length > 0 ? "instrument" : "unfiled";
         const paths = [...new Set(fixAction.paths)].sort();
+        // W1-T11029: judge the worker's instrument edit in shadow and save it for the operator's spot-check. It grants
+        // nothing and never throws, so the escalation below is unchanged.
+        if (scopeKind === "instrument") await recordInstrumentGrantShadow({ worktreePath: opts.worktreePath, instrumentPaths,
+          stateDir: join(opts.config.root, "state"), roundId, prNumber, headSha: priorHeadSha, log: deps.log,
+          git: (cwd, args) => (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(cwd, args, { maxBuffer: 1 << 26 }) });
         // #14217: an unfiled question is the same question at every head that still lacks these paths, so its identity
         // (the issue's Contract line) and its issue dedup omit the head; a closed issue still gets a fresh one.
         const headIndependent = scopeKind === "unfiled";
