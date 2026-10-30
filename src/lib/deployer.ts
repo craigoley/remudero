@@ -39,7 +39,7 @@ import { appendLedger } from "./ledger.js";
 import { createHash } from "node:crypto";
 import { fixedClock } from "./clock.js";
 import { InstanceRegistryRuntimeError, runtimeInstanceRegistryPrivateFile, runtimeInstanceRegistryText,
-  trustedInstanceRegistryLaunchPacket } from "./instance-registry-selection.js";
+  runtimeInstanceRegistryInstanceName, assertInstanceRegistryRuntimeCurrent, trustedInstanceRegistryLaunchPacket } from "./instance-registry-selection.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   DEPLOY_RESTART_PRESSURE_STEP,
@@ -2631,7 +2631,8 @@ export function realDeploySensorsAsync(o: RealDeployOpts, gh: (args: string[]) =
   return realDeployDeps(o, (cmd, args) => {
     if (o.execFile) return Promise.resolve(o.execFile(cmd, args));
     return cmd === "gh" ? gh(args)
-      : execFileLoopBounded(cmd, args, { encoding: "utf8" }).then(({ stdout }) => stdout);
+      : execFileLoopBounded(cmd, args, { encoding: "utf8",
+        ...(cmd === "docker" && args[0] === "inspect" ? { timeout: 10_000, maxBuffer: 64 * 1024 } : {}) }).then(({ stdout }) => stdout);
   });
 }
 
@@ -2687,11 +2688,50 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
   const selectedFile = runtimeInstanceRegistryPrivateFile();
   if (selectedFile !== undefined) o = { ...o };
   const selectedText = runtimeInstanceRegistryText();
-  const selectedInstance = selectedText === undefined ? undefined : instanceForStateRoot(selectedText, o.stateRoot);
-  if (selectedFile !== undefined && (selectedInstance === undefined || (o.instance !== undefined && o.instance !== selectedInstance))) {
+  const selectedInstance = selectedText === undefined ? undefined
+    : runtimeInstanceRegistryInstanceName() ?? instanceForStateRoot(selectedText, o.stateRoot);
+  const selectedRow = selectedText === undefined || selectedInstance === undefined ? undefined : daemonInstanceRows(selectedText).get(selectedInstance);
+  const containerNamespace = selectedRow !== undefined && normalisedDir(selectedRow.stateDir) !== normalisedDir(o.stateRoot);
+  if (selectedFile !== undefined && (selectedRow === undefined || !isAbsolute(selectedRow.stateDir) || !isAbsolute(o.stateRoot)
+    || !selectedRow.containerName || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(selectedRow.containerName)
+    || instanceForStateRoot(selectedText!, selectedRow.stateDir) !== selectedInstance
+    || (o.instance !== undefined && o.instance !== selectedInstance) || (containerNamespace && sensorExec === undefined))) {
     throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
   }
   const selectedPacket = selectedFile === undefined ? undefined : trustedInstanceRegistryLaunchPacket(selectedInstance);
+  if (sensorExec !== undefined && selectedPacket !== undefined) {
+    const transport = sensorExec, packet = selectedPacket.split("\n");
+    sensorExec = async (cmd, args) => {
+      await assertInstanceRegistryRuntimeCurrent();
+      if (trustedInstanceRegistryLaunchPacket(selectedInstance) !== selectedPacket) throw new InstanceRegistryRuntimeError("revision_changed");
+      if (containerNamespace) {
+        try {
+          const live = JSON.parse(await transport("docker", ["inspect", selectedRow!.containerName!, "--format",
+            '{"Name":{{json .Name}},"Mounts":{{json .Mounts}},"Config":{"Env":{{json .Config.Env}}}}'])) as {
+              Name?: unknown; Mounts?: Array<{ Type?: unknown; Source?: unknown; Destination?: unknown; RW?: unknown }>;
+              Config?: { Env?: unknown };
+            };
+          const env = live.Config?.Env;
+          const expectedEnv = [`RMD_INSTANCE_NAME=${selectedInstance}`, `RMD_INSTANCE_REGISTRY=${selectedFile}`,
+            `RMD_INSTANCE_REGISTRY_DIGEST=${packet[2]}`, `RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet[4]}`];
+          const stateMounts = live.Mounts?.filter(mount => mount.Destination === o.stateRoot);
+          const registryMounts = live.Mounts?.filter(mount => mount.Destination === selectedFile);
+          if (selectedRow === undefined || selectedRow.containerName === undefined || live.Name !== `/${selectedRow.containerName}` || !Array.isArray(env)
+            || expectedEnv.some(line => env.filter(value => typeof value === "string" && value.split("=")[0] === line.split("=")[0]).join() !== line)
+            || stateMounts?.length !== 1 || stateMounts[0]!.Type !== "bind" || stateMounts[0]!.Source !== selectedRow.stateDir || stateMounts[0]!.RW !== true
+            || registryMounts?.length !== 1 || registryMounts[0]!.Type !== "bind" || registryMounts[0]!.RW !== false
+            || typeof registryMounts[0]!.Source !== "string" || !isAbsolute(registryMounts[0]!.Source)) throw new Error("binding mismatch");
+        } catch (error) {
+          // Docker failure, malformed inspect and foreign mounts are unknown binding, never public/core facts.
+          throw new InstanceRegistryRuntimeError(error instanceof SyntaxError ? "container_binding_malformed" : "container_binding_unqualified");
+        }
+        await assertInstanceRegistryRuntimeCurrent();
+      }
+      const result = await transport(cmd, args);
+      await assertInstanceRegistryRuntimeCurrent();
+      return result;
+    };
+  }
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const clock = (): number => Date.now();
   const exec = o.execFile ?? ((cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }) =>
@@ -2777,7 +2817,10 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
       return undefined; // absent or unreadable — every consumer below keeps its pre-registry default
     }
   })();
-  const imageShaContainer = registryText === undefined ? IMAGE_SHA_CONTAINER : imageShaContainerFor(registryText, o.stateRoot);
+  const registryStateRoot = selectedRow?.stateDir ?? o.stateRoot;
+  const imageShaContainer = selectedRow === undefined
+    ? registryText === undefined ? IMAGE_SHA_CONTAINER : imageShaContainerFor(registryText, registryStateRoot)
+    : selectedRow.containerName!;
   const recycleInstance =
     o.instance ??
     (() => {
@@ -3002,7 +3045,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
     // The build tags each image with the commit that triggered it (acr-build.yml), so a tag for
     // the newest image-input commit exists exactly when that image is published.
     imagePublished: (sha: string) => drive((function* (): DeploySteps<boolean | undefined> {
-      const image = registryText === undefined ? undefined : imageRefFor(registryText, o.stateRoot);
+      const image = registryText === undefined ? undefined : imageRefFor(registryText, registryStateRoot);
       if (!image) return undefined;
       const repository = image.replace(/:[^:/]+$/, "");
       const ref = `${repository}:${sha}`;

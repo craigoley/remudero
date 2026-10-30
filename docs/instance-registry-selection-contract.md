@@ -69,6 +69,15 @@ image probe and the daemon's default adoption compare that identity with the
 original host file, independently of its namespace path. Identical bytes at a
 different inode do not qualify; namespaces that remap file identity stay unknown.
 A host path is never substituted as a container path.
+The daemon sweep retains its container-local state root for holds and ledger reads.
+Its asynchronous deploy sensors resolve the invocation's selected instance, then
+qualify that container's name, generated registry environment, read-only file mount
+and host-state-to-container-root bind before collecting facts. Each read rechecks
+the original file identity; foreign, malformed or revised bindings remain unknown.
+Synchronous supervisors still require a direct host-state match. The generated
+file-binding variable is recognized only during selected recycling, so a second
+selected launch accepts the first launch's environment without admitting arbitrary
+runtime names.
 Unsupported images or source namespaces refuse; no directory is silently created
 for a missing file. This example is not a command to install, start or recycle it.
 

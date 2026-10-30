@@ -198,6 +198,7 @@ function writeStubs(dir: string): void {
     '        echo "test-registry/remudero:old"',
     "        exit 0 ;;",
     "      *Config.Env*)",
+    '        if [ -n "${STUB_PREVIOUS_ENV:-}" ]; then cat "$STUB_PREVIOUS_ENV"; exit 0; fi',
     ...bashCaseEchoLines(CONTAINER_ENV_BY_MODE, containerEnvLines()).map((l) => `  ${l}`),
     "        exit 0 ;;",
     "      *.Image}}*)",
@@ -264,7 +265,7 @@ function writeStubs(dir: string): void {
     "    esac",
     "    exit 0 ;;",
     // W1-T4197: this mode models an operator replacing the recycle's PAUSE with their own mid-run.
-    '  stop) [ "$STUB_MODE" = pause-swapped ] && printf \'%s\' \'{"reason":"operator hold","requestedAt":"2026-10-01T00:00:00.000Z"}\' > "$RMD_STATE_DIR/state/PAUSE"; exit 0 ;;',
+    '  stop) [ "$STUB_MODE" = pause-swapped ] && printf \'%s\' \'{"reason":"operator hold","requestedAt":"2026-10-01T00:00:00.000Z"}\' > "$RMD_STATE_DIR/state/PAUSE"; if [ "$STUB_MODE" = private-final-revised ]; then printf "\\n# revised after qualification\\n" >> "$RMD_INSTANCE_REGISTRY"; fi; exit 0 ;;',
     '  run) case "$*" in *selected-registry-capability-*)',
     '    case "$STUB_MODE" in private-old-image|private-probe-fail) exit 2 ;; private-marker-only) echo selected-registry-capability-v1; exit 0 ;; esac',
     '    source_file="$RMD_INSTANCE_REGISTRY"',
@@ -499,6 +500,34 @@ test("private registry selection reaches real host and daemon readers: recorded 
   } finally { fixture.cleanup(); }
 });
 
+test("private registry selection preserves legacy and refuses unknown selected inputs: two consecutive selected launches", () => {
+  const fixture = privateRecyclerFixture(["gh_app_id: 123", "gh_app_installation_id: 456",
+    "gh_app_private_key_path: /home/node/.claude/synthetic-app.pem"]);
+  writeFileSync(join(fixture.root, "claude", "synthetic-app.pem"), "synthetic fixture key\n", { mode: 0o600 });
+  try {
+    const first = fixture.run("private-good");
+    assert.equal(first.status, 0, first.stderr);
+    const launch = first.calls.find(c => isRun(c) && c.argv.includes("-d"))!;
+    const env = [...IMAGE_ENV_LINES, ...launch.argv.flatMap((arg, i) => {
+      if (arg !== "-e") return [];
+      const value = launch.argv[i + 1]!;
+      return [value.includes("=") ? value : `${value}=${DECLARED_RUNTIME_FIXTURE[value] ?? ""}`];
+    })];
+    assert.ok(env.some(line => line.startsWith("RMD_INSTANCE_REGISTRY_FILE_BINDING=")));
+    const previousEnv = join(fixture.root, "previous-env");
+    writeFileSync(previousEnv, env.join("\n") + "\n");
+    const second = fixture.run("private-good", false, { STUB_PREVIOUS_ENV: previousEnv });
+    assert.equal(second.status, 0, second.stderr);
+    const secondLaunch = second.calls.find(c => isRun(c) && c.argv.includes("-d"))!;
+    assert.ok(secondLaunch, "the next recycle must accept its own generated runtime contract");
+    assert.deepEqual(secondLaunch.argv, launch.argv, "unchanged selected evidence renders identical replacement arguments");
+    writeFileSync(previousEnv, env.join("\n") + "\nRMD_INSTANCE_REGISTRY_UNDECLARED=unknown\n");
+    const refused = fixture.run("private-good", false, { STUB_PREVIOUS_ENV: previousEnv });
+    assert.equal(refused.status, 1);
+    assert.equal(refused.calls.some(isStop), false, "recognizing the binding must not admit arbitrary selected runtime names");
+  } finally { fixture.cleanup(); }
+});
+
 test("selected private recycler refuses unsupported image remote namespace and revised binding before stop", () => {
   for (const mode of ["private-old-image", "private-remote", "private-revised"]) {
     const fixture = privateRecyclerFixture();
@@ -528,6 +557,21 @@ test("private registry selection defaults and falsifiers forbid live effects: re
       { envPath: fixture.selected, instanceName: "fixture" });
     assert.ok(launch.argv.includes(`RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet.split("\n")[4]}`));
   } finally { fixture.cleanup(); }
+});
+
+test("private registry selection defaults and falsifiers forbid live effects: final launch binding survives the stop wait", () => {
+  for (const serve of [false, true]) {
+    const fixture = privateRecyclerFixture();
+    try {
+      const result = fixture.run("private-final-revised", serve);
+      assert.equal(result.status, 2, result.stderr);
+      assert.ok(result.calls.some(isStop), "the synthetic revision occurs after image qualification at the recorded stop");
+      assert.equal(result.calls.some(c => isRun(c) && c.argv.includes("-d")), false,
+        "the final binding check must refuse the original argument snapshot after the wait");
+      assert.equal(result.calls.some(c => c.bin === "forbidden"), false);
+      assert.equal((result.stdout + result.stderr).includes(fixture.root), false);
+    } finally { fixture.cleanup(); }
+  }
 });
 
 test("private registry selection defaults and falsifiers forbid live effects: real image identity and catches", () => {

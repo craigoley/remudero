@@ -1250,7 +1250,7 @@ CAPTURED_SOURCE_get() { local ref="CAPTURED_SOURCE__$1"; printf '%s' "${!ref-}";
 is_declared_runtime_var() {
   local needle="$1" candidate
   if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
-    case "$needle" in RMD_INSTANCE_REGISTRY|RMD_INSTANCE_REGISTRY_DIGEST) return 0 ;; esac
+    case "$needle" in RMD_INSTANCE_REGISTRY|RMD_INSTANCE_REGISTRY_DIGEST|RMD_INSTANCE_REGISTRY_FILE_BINDING) return 0 ;; esac
   fi
   for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}" RMD_INSTANCE_NAME GLIBC_TUNABLES; do
     [ "${candidate}" = "${needle}" ] && return 0

@@ -323,6 +323,8 @@ export function instanceRegistryRuntimePresent(): boolean { return runtimeRegist
 /** Trusted harness input only: never forward this value to worker env, prompt, argv or diagnostics. */
 export function runtimeInstanceRegistryPrivateFile(): string | undefined { return selectedRuntime()?.canonicalPath; }
 
+export function runtimeInstanceRegistryInstanceName(): string | undefined { return selectedRuntime()?.instanceName; }
+
 export function assertInstanceRegistryWorkerEnvironment(env: Readonly<Record<string, string>> | undefined): void {
   const selected = runtimeInstanceRegistryPrivateFile();
   if (selected === undefined || env === undefined) return;

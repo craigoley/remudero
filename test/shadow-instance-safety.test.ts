@@ -17,6 +17,7 @@ import { daemonCommand } from "#src/cli/commands/daemon.js";
 import { runTask as directRunTask } from "#src/cli/commands/run-task-verb.js";
 import { spawnCodexWorker, spawnFoundryClaudeWorker, spawnOpenWeightWorker, type OpenWeightSpawnArgs } from "#src/lib/worker-provider.js";
 import { deployLedgerPath, realDeployDeps, realDeploySensorsAsync } from "#src/lib/deployer.js";
+import type { SweepDeps } from "#src/lib/sweep.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import * as modeRuntime from "#src/lib/instance-mode.js";
 import * as workerRuntime from "#src/lib/worker.js";
@@ -346,6 +347,87 @@ test("private registry selection reaches real host and daemon readers: async dep
     }, { envPath: fixture.selected, instanceName: "worker" });
   } finally { fixture.cleanup(); }
 });
+
+test("private registry selection reaches real host and daemon readers: actual sweep qualifies distinct state namespaces", async () => withGhShim([
+  { when: "", stderr: "forbidden fixture transport", exit: 97 },
+], async github => {
+  const fixture = runtimeRegistryFixture(), containerRoot = join(fixture.root, "container-state");
+  const hostRoot = "/srv/synthetic/selected-state", container = "synthetic-selected-worker";
+  const image = "synthetic.invalid/selected-worker:current", sha = "a".repeat(40);
+  const bin = github.dir, callsPath = join(fixture.root, "calls"), inspectPath = join(fixture.root, "inspect.json");
+  mkdirSync(join(containerRoot, "state"), { recursive: true });
+  mkdirSync(join(fixture.root, ".github", "workflows"), { recursive: true });
+  const ledgerPath = join(containerRoot, "state", "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  writeFileSync(fixture.selected, registry("shadow") + `    state_dir: ${hostRoot}\n    container_name: ${container}\n    image: ${image}\n`);
+  const stub = `#!${process.execPath}
+const fs=require("node:fs"), path=require("node:path"), args=process.argv.slice(2), bin=path.basename(process.argv[1]);
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify([bin,...args])+"\\n");
+if(bin==="docker" && args[0]==="inspect") { process.stdout.write(fs.readFileSync(${JSON.stringify(inspectPath)})); }
+else if(bin==="docker" && args[0]==="manifest") { process.stdout.write("{}"); }
+else if(bin==="docker" && args[0]==="exec") { process.stdout.write(${JSON.stringify(sha)}); }
+else if(bin==="git" && args[2]==="log") { process.stdout.write(${JSON.stringify(sha)}); }
+else if(bin==="git" && args[2]==="show") { process.stdout.write(args[3].endsWith(":package-lock.json") ? '{"lockfileVersion":3,"packages":{"":{}}}' : '{}'); }
+else if(bin==="git" && args[2]==="rev-list") { process.stdout.write(args.includes("--parents") ? ${JSON.stringify(sha)} : "0"); }
+else if(bin==="git" && args[2]==="config" && args.at(-1)==="remote.origin.url") { process.stdout.write("https://github.com/owner/repo.git"); }
+else { process.stderr.write("forbidden fixture transport"); process.exitCode=97; }
+`;
+  for (const name of ["docker", "git", "az", "systemctl", "install-host-units.sh"]) writeFileSync(join(bin, name), stub, { mode: 0o755 });
+  const calls = () => readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as string[]);
+  try {
+    await runtimeRegistryRunner()(async () => {
+      const packet = runtimeRegistry.trustedInstanceRegistryLaunchPacket().split("\n");
+      const inspect = { Name: `/${container}`, Config: { Env: ["RMD_INSTANCE_NAME=worker",
+        `RMD_INSTANCE_REGISTRY=${fixture.selected}`, `RMD_INSTANCE_REGISTRY_DIGEST=${packet[2]}`,
+        `RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet[4]}`] }, Mounts: [
+        { Type: "bind", Source: hostRoot, Destination: containerRoot, RW: true },
+        { Type: "bind", Source: "/srv/synthetic/private.yaml", Destination: fixture.selected, RW: false },
+      ] };
+      const logs: Array<Record<string, unknown>> = [];
+      const effects = buildSweepEffects({ owner: "owner", repo: "repo", repoRoot: fixture.root,
+        config: { root: containerRoot, installRoot: fixture.root, claudeBin: "/bin/false" }, ledgerPath,
+        runId: "selected-namespace-sweep", plan: { tasks: [], byId: new Map() } as Plan,
+        readJsonImpl: async () => [], ghRunImpl: () => assert.fail("unexpected GitHub write"),
+        log: (step, data) => { logs.push({ step, ...data }); } });
+      const readFleetState = Reflect.get(effects, "readFleetState") as NonNullable<SweepDeps["readFleetState"]>;
+      assert.equal(typeof readFleetState, "function", "the actual sweep factory composes the default fleet reader");
+      const read = async (value: unknown) => {
+        writeFileSync(inspectPath, typeof value === "string" ? value : JSON.stringify(value));
+        writeFileSync(callsPath, ""); logs.length = 0;
+        const state = await readFleetState([]);
+        assert.deepEqual(github.calls(), [], "selected fleet reads must not invoke GitHub");
+        return state;
+      };
+      const healthy = await read(inspect);
+      assert.ok(healthy.rows.some(row => row.pipeline === "image"), "the real sweep default must collect image facts in the container namespace");
+      assert.ok(healthy.rows.some(row => row.pipeline === "deploy"));
+      assert.ok(calls().some(args => args[0] === "docker" && args[1] === "exec" && args[2] === container));
+      assert.ok(calls().some(args => args[0] === "docker" && args[1] === "manifest" && args.includes(`synthetic.invalid/selected-worker:${sha}`)));
+      assert.equal(calls().some(args => args.includes("remudero-daemon")), false, "the public core is never an image fallback");
+      assert.throws(() => realDeployDeps({ installPath: fixture.root, stateRoot: containerRoot, ledgerPath,
+        daemonLabel: "fixture", serveLabel: "fixture", servePort: 1, uid: 1 }), /selected instance registry unavailable/,
+        "a synchronous supervisor cannot claim fresh asynchronous container binding");
+      for (const invalid of ["invalid json", { ...inspect, Name: "/another-instance" },
+        { ...inspect, Config: { Env: inspect.Config.Env.map(line => line === "RMD_INSTANCE_NAME=worker" ? "RMD_INSTANCE_NAME=other" : line) } },
+        { ...inspect, Mounts: inspect.Mounts.map((mount, i) => i === 0 ? { ...mount, Source: "/srv/synthetic/other-state" } : mount) },
+        { ...inspect, Mounts: inspect.Mounts.map((mount, i) => i === 1 ? { ...mount, RW: true } : mount) },
+        { ...inspect, Config: { Env: inspect.Config.Env.filter(line => !line.startsWith("RMD_INSTANCE_REGISTRY_FILE_BINDING=")) } }]) {
+        const unknown = await read(invalid);
+        assert.equal(unknown.rows.some(row => row.pipeline === "image" || row.pipeline === "deploy"), false);
+        assert.ok(calls().length > 0, "an unknown result must actually inspect its corpus");
+        assert.ok(calls().every(args => args[0] === "docker" && args[1] === "inspect"), "unqualified binding must not collect facts or launch anything");
+      }
+      assert.ok((await read(inspect)).rows.some(row => row.pipeline === "image"), "a valid new observation is a positive control after refusals");
+      assert.equal(JSON.stringify(logs).includes(fixture.root), false, JSON.stringify(logs));
+      writeFileSync(fixture.selected, readFileSync(fixture.selected, "utf8") + "\n# revised\n");
+      const revised = await read(inspect);
+      assert.equal(revised.rows.some(row => row.pipeline === "image" || row.pipeline === "deploy"), false);
+      assert.deepEqual(calls(), [], "revised file evidence refuses before the Docker binding read");
+    }, { envPath: fixture.selected, instanceName: "worker" });
+  } finally {
+    fixture.cleanup();
+  }
+}));
 
 test("selected supervisor defaults cover target refusals derived waits and nested binding changes without live effects", async () => {
   const fixture = runtimeRegistryFixture(), stateRoot = join(fixture.root, "selected-state"), calls: string[][] = [];
