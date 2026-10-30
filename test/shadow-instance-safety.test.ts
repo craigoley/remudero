@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, selectedRegistryObserverFromIntent,
+  withSelectedRegistryContext } from "#src/lib/selected-registry-consumers.js";
 import type { OpenPrView } from "../src/lib/sweep.js";
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
@@ -139,7 +141,14 @@ test("selected mode shadow evidence reaches actual run and sweep consumers", asy
     assert.equal(await effects.arm({ prUrl: "https://github.com/owner/remudero/pull/1", prNumber: 1,
       taskId: "T-SELECTED", headSha: head } as OpenPrView), "armed");
     assert.equal(sweepRows.at(-1)?.selected_outcome, "would-shadow", "real sweep construction and selected filesystem control");
-    const res = await withLiveWritesAllowed(() => runTask("T-SELECTED", {
+    const inheritedRows: Array<Record<string, unknown>> = [];
+    const intent = await qualifySelectedRegistryIntent(captureSelectedRegistryIntent({ settings: selectedConfig.selectedRegistryMode }));
+    const inheritedObserver = selectedRegistryObserverFromIntent(intent, (step, fields) => {
+      inheritedRows.push({ step, ...fields });
+    });
+    assert.ok(inheritedObserver);
+    const res = await withSelectedRegistryContext(inheritedObserver, async () => {
+      const result = await withLiveWritesAllowed(() => runTask("T-SELECTED", {
       owner: "owner", skipGitSync: true, planPath,
       config: selectedConfig,
       github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
@@ -160,8 +169,15 @@ test("selected mode shadow evidence reaches actual run and sweep consumers", asy
         return { state: "success", criteria: [], testTheater: false, summary: "fixture pass", floorDegraded: false,
           capped: false, keywordOnly: false, planOnly: false, headSha: head, reviewerOutcome: "success" };
       },
-    }));
+      }));
+      await inheritedObserver.settled();
+      return result;
+    });
     assert.equal(res.verdict, "merged", "the contained independent legacy run still finishes normally");
+    assert.ok(inheritedRows.some(row => row.step === "instance_registry.consumer_shadow_observed"
+      && row.action === "run-task-resume" && row.selected_state === "unknown"
+      && row.reason === "revision_changed" && row.legacy_outcome === "returned"),
+    "the real runTask consumes the inherited observer and rechecks the source after the effect");
     const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
     const observed = rows.filter(row => row.step === "instance_mode.shadow_observed");
     assert.ok(observed.length > 0, "the REAL runTaskBody deferred arm must carry the original selected binding");
