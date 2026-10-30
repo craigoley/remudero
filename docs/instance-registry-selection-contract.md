@@ -64,7 +64,11 @@ the selected bytes, physical identity, Docker source namespace and image reader
 before any replacement. The generated container arguments contain exactly one
 `--mount type=bind,src=<qualified-host-file>,dst=/home/node/.config/remudero/selected-registry.yaml,readonly`;
 only the trusted daemon/serve readers receive that container path, the original
-digest and instance name. A host path is never substituted as a container path.
+digest, instance name and `RMD_INSTANCE_REGISTRY_FILE_BINDING` identity. Both the
+image probe and the daemon's default adoption compare that identity with the
+original host file, independently of its namespace path. Identical bytes at a
+different inode do not qualify; namespaces that remap file identity stay unknown.
+A host path is never substituted as a container path.
 Unsupported images or source namespaces refuse; no directory is silently created
 for a missing file. This example is not a command to install, start or recycle it.
 
@@ -73,7 +77,8 @@ per-invocation policy artifacts. Neither prompts nor untrusted child arguments
 carry the selected filename. Read-only/review work cannot write its public source;
 writers retain their ordinary public workspace and admitted test-slot access.
 Cash/Foundry tools also refuse a selected file inside their public worktree/home
-scope and recheck binding before model requests and local tool effects. Unknown
+scope and recheck binding before model requests, local tool effects and brokered
+web searches, including after a model response or observer revises the file. Unknown
 scope or cleanup remains an explicit redacted refusal, never broader permission.
 Unselected provider policies and supported owner/service flows stay unchanged.
 

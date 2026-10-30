@@ -5686,6 +5686,9 @@ export async function spawnOpenWeightWorker(
         args.streamObserver?.({ kind: "tool-executing", tsMs: clock.now(), text: `[tool_use: ${name}]` });
         let content: string;
         let toolFailed = false;
+        if (name === CASH_WEB_SEARCH_FUNCTION.name && runtimeInstanceRegistryPrivateFile() !== undefined) {
+          await assertInstanceRegistryRuntimeCurrent();
+        }
         try {
           // `web_search` is the one declared tool this process does not execute: the daemon brokers
           // it against a different API, with its own credential, and returns a document only when

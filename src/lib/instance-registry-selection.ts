@@ -253,7 +253,11 @@ interface TrustedRegistryBytes {
   readonly contractVersion: number;
 }
 const trustedRegistryBytes = new WeakMap<SelectedRegistryBinding, TrustedRegistryBytes>();
-export interface InstanceRegistryRuntimeInput extends RegistrySelectionInput { instanceName?: string }
+export const INSTANCE_REGISTRY_FILE_BINDING_VERSION = 1;
+export interface InstanceRegistryRuntimeInput extends RegistrySelectionInput {
+  instanceName?: string;
+  expectedFileBinding?: string;
+}
 interface InstanceRegistryRuntime {
   readonly binding?: SelectedRegistryBinding;
   readonly instanceName?: string;
@@ -277,7 +281,7 @@ function selectedRuntime(): InstanceRegistryRuntime | undefined {
 export async function withInstanceRegistryRuntime<T>(
   operation: () => T | Promise<T>,
   input: InstanceRegistryRuntimeInput = { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME,
-    expectedDigest: process.env.RMD_INSTANCE_REGISTRY_DIGEST },
+    expectedDigest: process.env.RMD_INSTANCE_REGISTRY_DIGEST, expectedFileBinding: process.env.RMD_INSTANCE_REGISTRY_FILE_BINDING },
   io: RegistryFileIO = registryFileIO,
 ): Promise<T> {
   let snapshot: InstanceRegistryRuntimeInput, stableIO: RegistryFileIO;
@@ -300,7 +304,17 @@ export async function withInstanceRegistryRuntime<T>(
   const scope: InstanceRegistryRuntime = { active: true,
     ...(read.kind === "ready" ? { binding: read.binding, instanceName: snapshot.instanceName,
       canonicalPath: trustedRegistryBytes.get(read.binding)!.canonicalPath } : {}) };
-  try { return await runtimeRegistry.run(scope, operation); }
+  try { return await runtimeRegistry.run(scope, () => {
+    if (snapshot.expectedFileBinding !== undefined) {
+      if (typeof snapshot.expectedFileBinding !== "string" || !/^[a-f0-9]{64}$/.test(snapshot.expectedFileBinding)) {
+        throw new InstanceRegistryRuntimeError("invalid_file_binding");
+      }
+      if (trustedInstanceRegistryLaunchPacket().split("\n")[4] !== snapshot.expectedFileBinding) {
+        throw new InstanceRegistryRuntimeError("revision_changed");
+      }
+    }
+    return operation();
+  }); }
   finally { scope.active = false; }
 }
 

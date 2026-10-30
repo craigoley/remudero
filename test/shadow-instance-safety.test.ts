@@ -260,6 +260,29 @@ test("selected recycler default child checks the original parent digest and phys
   } finally { fixture.cleanup(); }
 });
 
+test("private registry selection reaches real host and daemon readers: default child adoption retains physical binding", async () => {
+  const fixture = runtimeRegistryFixture();
+  try {
+    const packet = await runtimeRegistryRunner()(() => runtimeRegistry.trustedInstanceRegistryLaunchPacket(),
+      { envPath: fixture.selected, instanceName: "worker" });
+    const fields = packet.split("\n"), sameBytes = join(fixture.root, "another-file.yaml");
+    writeFileSync(sameBytes, readFileSync(fixture.selected));
+    const program = 'const m=await import("#src/lib/instance-registry-selection.js"); try { await m.withInstanceRegistryRuntime(()=>process.stdout.write("adopted")); } catch(error) { process.stderr.write(error.message); process.exitCode=2; }';
+    const invoke = (path: string, binding = fields[4]!, name = "worker") => spawnSync(process.execPath,
+      ["--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--input-type=module", "-e", program],
+      { cwd: REPO_ROOT, env: { ...process.env, RMD_INSTANCE_REGISTRY: path, RMD_INSTANCE_NAME: name,
+        RMD_INSTANCE_REGISTRY_DIGEST: fields[2], RMD_INSTANCE_REGISTRY_FILE_BINDING: binding }, encoding: "utf8", timeout: 10000 });
+    const healthy = invoke(fixture.selected);
+    assert.equal(healthy.status, 0, healthy.stderr); assert.equal(healthy.stdout, "adopted");
+    for (const result of [invoke(sameBytes), invoke(fixture.selected, ""), invoke(fixture.selected, "0".repeat(64)),
+      invoke(fixture.selected, fields[4], "another-instance")]) {
+      assert.equal(result.status, 2, "a new invocation must verify the original host identity and instance");
+      assert.equal(result.stdout, ""); assert.match(result.stderr, /selected instance registry unavailable/);
+      assert.equal(result.stderr.includes(fixture.root), false);
+    }
+  } finally { fixture.cleanup(); }
+});
+
 test("selected supervisor hands immutable private identity only to its trusted recycler and redacts failures", async () => {
   const fixture = runtimeRegistryFixture(), calls: string[][] = [];
   const callerKinds: Array<string | undefined> = [];
@@ -1024,6 +1047,53 @@ test("selected provider retry rechecks immutable binding before another request"
   }
 });
 
+test("private registry selection preserves legacy and refuses unknown selected inputs: brokered search", async () => {
+  for (const mode of ["legacy", "healthy", "revised-response", "replaced-response", "missing-response", "revised-observer"] as const) {
+    const fixture = runtimeRegistryFixture(), cwd = join(fixture.root, "public-checkout"), home = join(fixture.root, "public-home");
+    mkdirSync(cwd); mkdirSync(home);
+    const model = "gpt-oss-120b", requests: string[] = [];
+    const healthy = mode === "legacy" || mode === "healthy";
+    const config: Config = { root: fixture.root, claudeBin: "/unused", dailyCapUsd: 25,
+      workerProviders: { cashEndpoint: "https://cash.example.invalid", cashWebSearch: true } };
+    const revise = () => writeFileSync(fixture.selected, registry("live"));
+    const args: OpenWeightSpawnArgs = { cwd, workerHome: home, prompt: "synthetic public search", tools: ["WebSearch"], maxTurns: 2,
+      env: { RMD_OPENWEIGHT_API_KEY: "synthetic", RMD_CASH_WEB_SEARCH_API_KEY: "synthetic-search" },
+      streamObserver: event => { if (event.kind === "tool-executing" && mode === "revised-observer") revise(); },
+      fetchImpl: async (url, init) => {
+        assert.ok(String(url).startsWith("https://cash.example.invalid/"), "every request is contained by this recording transport");
+        const body = JSON.parse(String(init?.body));
+        assert.equal(String(init?.body).includes(fixture.selected), false);
+        const search = Array.isArray(body.tools) && body.tools.some((tool: { type: string }) => tool.type === "web_search");
+        requests.push(search ? "search" : "model");
+        if (search) {
+          assert.ok(healthy, "forbidden broker effect after selected evidence changed");
+          return new Response(JSON.stringify({ output: [{ type: "web_search_call" }, { type: "message", content: [{ type: "output_text",
+            text: "synthetic public result", annotations: [{ type: "url_citation", url: "https://example.invalid/source", title: "fixture" }] }] }],
+            usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200 });
+        }
+        const first = requests.length === 1;
+        if (first && mode === "revised-response") revise();
+        if (first && mode === "missing-response") unlinkSync(fixture.selected);
+        if (first && mode === "replaced-response") {
+          const replacement = join(fixture.root, "same-bytes.yaml");
+          writeFileSync(replacement, readFileSync(fixture.selected)); renameSync(replacement, fixture.selected);
+        }
+        return new Response(JSON.stringify({ id: "fixture", model, choices: [{ index: 0,
+          message: { role: "assistant", content: first ? null : "complete", ...(first ? { tool_calls: [{ id: "fixture-search", type: "function",
+            function: { name: "web_search", arguments: JSON.stringify({ query: "synthetic public query" }) } }] } : {}) },
+          finish_reason: first ? "tool_calls" : "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200 });
+      } };
+    try {
+      const result = await runtimeRegistryRunner()(() => spawnOpenWeightWorker(args, config, { model, effort: "low" }),
+        mode === "legacy" ? {} : { envPath: fixture.selected });
+      assert.deepEqual(requests, healthy ? ["model", "search", "model"] : ["model"], "a refused binding permits zero brokered requests");
+      assert.equal(result.isError, !healthy, result.stderr);
+      if (healthy) assert.equal(result.webSearchAccepted, 1);
+      else { assert.match(result.stderr, /selected instance registry unavailable/); assert.equal(result.stderr.includes(fixture.root), false); }
+    } finally { fixture.cleanup(); }
+  }
+});
+
 test("selected read-only Claude scopes refuse contradictory scratch grants before query", async () => {
   for (const mode of ["temp-in-cwd", "home-in-cwd", "temp-is-review-source"] as const) {
     const fixture = runtimeRegistryFixture(), sink = { calls: 0 };
@@ -1256,6 +1326,37 @@ test("private registry selection defaults and falsifiers forbid live effects", a
   };
   try {
     await verify(modeRuntime);
+  } finally { fixture.cleanup(); }
+});
+
+test("private registry selection defaults and falsifiers forbid live effects: bounded reader catches", async () => {
+  const fixture = runtimeRegistryFixture();
+  try {
+    for (const phase of ["lstat", "open", "stat", "read", "close", "canonicalPath"] as const) {
+      let effects = 0, closes = 0;
+      const actual = runtimeRegistry.registryFileIO;
+      const fail = () => { throw new Error(fixture.selected); };
+      const io: runtimeRegistry.RegistryFileIO = { ...actual,
+        ...(phase === "lstat" ? { lstat: async () => fail() } : {}),
+        ...(phase === "canonicalPath" ? { canonicalPath: async () => fail() } : {}),
+        open: async path => {
+          if (phase === "open") fail();
+          const handle = await actual.open(path);
+          return { ...handle, ...(phase === "stat" ? { stat: async () => fail() } : {}),
+            ...(phase === "read" ? { read: async () => fail() } : {}),
+            close: async () => { closes++; await handle.close(); if (phase === "close") fail(); } };
+        } };
+      const reason = phase === "canonicalPath" ? "file_identity_unqualified" : `${phase}_failed`;
+      await assert.rejects(runtimeRegistry.withInstanceRegistryRuntime(() => { effects++; }, { envPath: fixture.selected }, io), error => {
+        assert.ok(error instanceof runtimeRegistry.InstanceRegistryRuntimeError);
+        assert.equal(error.details?.reason, reason); assert.equal(error.message.includes(fixture.root), false); return true;
+      });
+      assert.equal(effects, 0, `${phase} failure grants no selected effect`);
+      assert.equal(closes, phase === "open" || phase === "lstat" ? 0 : 1, "real opened descriptors close even on failure");
+    }
+    unlinkSync(join(fixture.root, ".remudero", "daemon-instances.yaml"));
+    assert.equal(readInstanceRegistryText(fixture.root), undefined, "legacy missing read retains its original catch result");
+    assert.equal(instanceMode("owner/repo", "invalid yaml"), "live", "legacy malformed read retains its original catch result");
   } finally { fixture.cleanup(); }
 });
 

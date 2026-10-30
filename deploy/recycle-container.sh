@@ -63,6 +63,7 @@ selected_registry_init() {
     fi
     SELECTED_REGISTRY_LAUNCH_ARGS=(--mount "type=bind,src=${SELECTED_REGISTRY_HOST_FILE},dst=${SELECTED_REGISTRY_CONTAINER_FILE},readonly"
       -e "RMD_INSTANCE_REGISTRY=${SELECTED_REGISTRY_CONTAINER_FILE}" -e "RMD_INSTANCE_REGISTRY_DIGEST=${SELECTED_REGISTRY_DIGEST}"
+      -e "RMD_INSTANCE_REGISTRY_FILE_BINDING=$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '5p')"
       -e "RMD_INSTANCE_NAME=${SELECTED_REGISTRY_NAME}")
   fi
 }
@@ -136,15 +137,18 @@ selected_registry_image() {
     "${SELECTED_REGISTRY_LAUNCH_ARGS[@]}" --entrypoint node -w /app "$image" --import tsx --input-type=module -e '
       try {
         const m=await import("./src/lib/instance-registry-selection.ts");
+        if(m.INSTANCE_REGISTRY_FILE_BINDING_VERSION!==1) throw Error();
         await m.withInstanceRegistryRuntime(async()=>{
-          m.trustedInstanceRegistryLaunchPacket(); await m.assertInstanceRegistryRuntimeCurrent();
-          process.stdout.write("selected-registry-capability-v1");
+          const packet=m.trustedInstanceRegistryLaunchPacket(); await m.assertInstanceRegistryRuntimeCurrent();
+          process.stdout.write("selected-registry-capability-v2\n"+packet.split("\n")[4]);
         });
       } catch { process.exitCode=2; }
     ')"; then
     selected_registry_refuse image_reader_unknown; return 2
   fi
-  [ "$probe" = selected-registry-capability-v1 ] || { selected_registry_refuse image_reader_unknown; return 2; }
+  [ "$probe" = "$(printf 'selected-registry-capability-v2\n%s' "$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '5p')")" ] || {
+    selected_registry_refuse image_reader_unknown; return 2;
+  }
   selected_registry_recheck
 }
 selected_registry_diagnostic_filter() {
@@ -152,7 +156,7 @@ selected_registry_diagnostic_filter() {
     const caller=process.argv[1], completion=process.argv[2]; let pending="", count=0, completed=false;
     const reasons=new Set(["missing","not_regular","oversized","revision_changed","lstat_failed","open_failed","stat_failed",
       "read_failed","close_failed","cancelled","timeout","invalid_encoding","malformed","digest_mismatch","file_identity_unqualified",
-      "invalid_path","invalid_bounds","invalid_digest","unsupported_contract","unsupported_capability","unsupported_field",
+      "invalid_path","invalid_bounds","invalid_digest","invalid_file_binding","unsupported_contract","unsupported_capability","unsupported_field",
       "instance_missing","invalid_instance","target_missing_or_mismatched","unsupported_mount_path","reader_unavailable",
       "unsupported_reader","packet_unreadable","namespace_unknown","image_reader_unknown","mount_alias_unknown"]);
     const emit=line=>{ if(count++<64) process.stdout.write(caller+": "+line+"\n"); };

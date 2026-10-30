@@ -6,6 +6,8 @@ import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { withInstanceRegistryRuntime, trustedInstanceRegistryLaunchPacket } from "#src/lib/instance-registry-selection.js";
 
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
 
@@ -263,7 +265,18 @@ function writeStubs(dir: string): void {
     "    exit 0 ;;",
     // W1-T4197: this mode models an operator replacing the recycle's PAUSE with their own mid-run.
     '  stop) [ "$STUB_MODE" = pause-swapped ] && printf \'%s\' \'{"reason":"operator hold","requestedAt":"2026-10-01T00:00:00.000Z"}\' > "$RMD_STATE_DIR/state/PAUSE"; exit 0 ;;',
-    '  run) case "$*" in *selected-registry-capability-v1*) case "$STUB_MODE" in private-good|private-revised) echo selected-registry-capability-v1; exit 0 ;; *) exit 2 ;; esac ;; esac; exit 0 ;;',
+    '  run) case "$*" in *selected-registry-capability-*)',
+    '    case "$STUB_MODE" in private-old-image|private-probe-fail) exit 2 ;; private-marker-only) echo selected-registry-capability-v1; exit 0 ;; esac',
+    '    source_file="$RMD_INSTANCE_REGISTRY"',
+    '    case "$STUB_MODE" in private-alias|private-replaced|private-lost-binding) cp "$source_file" "$STUB_REC/same-bytes.yaml"; source_file="$STUB_REC/same-bytes.yaml" ;; esac',
+    '    if [ "$STUB_MODE" = private-replaced ]; then mv "$source_file" "$RMD_INSTANCE_REGISTRY"; source_file="$RMD_INSTANCE_REGISTRY"; fi',
+    '    code="${!#}"',
+    '    while [ "$#" -gt 0 ]; do if [ "$1" = -e ]; then shift; case "$1" in RMD_INSTANCE_*) export "$1" ;; esac; fi; shift; done',
+    '    export RMD_INSTANCE_REGISTRY="$source_file"',
+    '    if [ "$STUB_MODE" = private-lost-binding ]; then unset RMD_INSTANCE_REGISTRY_FILE_BINDING; fi',
+    '    cd "$STUB_READER_ROOT" || exit 2',
+    '    exec node --import tsx --import ./test/setup/tmp-hygiene.ts --input-type=module -e "$code"',
+    '    ;; esac; exit 0 ;;',
     '  rm) [ "$STUB_MODE" = rm-hang ] && sleep 10; exit 0 ;;',
     "esac",
     "exit 0",
@@ -293,6 +306,7 @@ interface RunOpts {
   shellPath?: string;
   unsetDockerHost?: boolean;
   unselectedRegistry?: boolean;
+  forbidHostEffects?: boolean;
 }
 
 function runRecycle(mode: string, opts: RunOpts = {}): Run {
@@ -317,51 +331,62 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
   writeFileSync(cashKeyPath, `${durableCashKey}\n`, { mode: 0o600 });
   chmodSync(cashKeyPath, 0o600);
   writeStubs(dir);
-  const r = spawnSync(opts.shellPath ?? "bash", [opts.scriptPath ?? SCRIPT, ...(opts.args ?? [])], {
-    encoding: "utf8",
-    cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      PATH: `${dir}:${process.env.PATH ?? ""}`,
-      STUB_REC: rec,
-      STUB_MODE: mode,
-      RMD_STATE_DIR: state,
-      RMD_CLAUDE_DIR: claudeDir,
-      RMD_CODEX_DIR: join(providerRuntime, "absent-codex"),
-      RMD_CONTAINER_CONFIG_DIR: containerConfigDir,
-      RMD_RECYCLE_WAIT_S: "1",
-      RMD_RECYCLE_POLL_S: "1",
-      // W1-T2555: this suite drives docker orchestration (stop/rm/run, locks, drift), never the
-      // STATE_DIR-is-a-checkout predicate itself — that predicate has its own dedicated suite,
-      // test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts. Every fixture directory
-      // here is a fresh mkdtemp with no state/ or remudero/.git inside it, so without this opt-in
-      // every test below would now hit the NEW refusal before reaching the behaviour it means to
-      // exercise. Passing it here is the "operator's own word" the new check requires — this suite
-      // is intentionally always running the first-boot path.
-      RMD_RECYCLE_FIRST_BOOT: "1",
-      GH_TOKEN: "",
-      // App auth is a CREDENTIAL as of this PR, and these fixtures spread `...process.env`, so an
-      // ambient `GH_APP_*` trio makes the script stop refusing and exit 0 — silently converting
-      // every negative control below into a vacuous pass. The daemon container really does carry
-      // all three, which is where the reviewer executes proofs: MEASURED there, this suite went
-      // 26/26 on main to 25/26 on this branch, and the checkout suite 12/12 to 11/12, while both
-      // stayed green on a host and on CI (neither sets them). Neutralise them exactly as GH_TOKEN
-      // above already is, so the credential inputs are the fixture's to state, never the runner's.
-      GH_APP_ID: "",
-      GH_APP_INSTALLATION_ID: "",
-      GH_APP_PRIVATE_KEY_PATH: "",
-      RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
-      // Points at a path that (almost certainly) does not exist, so section 1's guard does not fire
-      // merely because the TEST RUNNER itself is sandboxed inside a container — that is a fact about
-      // this suite's own environment, not about the script under test. The dedicated guard test below
-      // overrides this deliberately to point at a real file.
-      RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "recycle-container-test-no-such-dockerenv-marker"),
-      ...opts.extraEnv,
-      ...(opts.unsetDockerHost ? { DOCKER_HOST: undefined } : {}),
-      ...(opts.unselectedRegistry ? { RMD_INSTANCE_REGISTRY: undefined, RMD_INSTANCE_REGISTRY_DIGEST: undefined,
-        RMD_INSTANCE_REGISTRY_LAUNCH_BINDING: undefined } : {}),
-    },
-  });
+  if (opts.forbidHostEffects) for (const bin of ["git", "systemctl", "sudo", "install-host-units.sh"]) {
+    writeFileSync(join(dir, bin), '#!/usr/bin/env bash\nprintf "forbidden\\t%s\\n" "$0" >> "$STUB_REC/calls"\nexit 97\n', { mode: 0o755 });
+  }
+  const github = opts.forbidHostEffects ? ghShim([{ when: "", exit: 97 }]) : undefined;
+  let r;
+  try {
+    r = spawnSync(opts.shellPath ?? "bash", [opts.scriptPath ?? SCRIPT, ...(opts.args ?? [])], {
+      encoding: "utf8",
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        PATH: `${dir}:${github ? `${github.dir}:` : ""}${process.env.PATH ?? ""}`,
+        STUB_REC: rec,
+        STUB_MODE: mode,
+        STUB_READER_ROOT: REPO_ROOT,
+        RMD_STATE_DIR: state,
+        RMD_CLAUDE_DIR: claudeDir,
+        RMD_CODEX_DIR: join(providerRuntime, "absent-codex"),
+        RMD_CONTAINER_CONFIG_DIR: containerConfigDir,
+        RMD_RECYCLE_WAIT_S: "1",
+        RMD_RECYCLE_POLL_S: "1",
+        // W1-T2555: this suite drives docker orchestration (stop/rm/run, locks, drift), never the
+        // STATE_DIR-is-a-checkout predicate itself — that predicate has its own dedicated suite,
+        // test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts. Every fixture directory
+        // here is a fresh mkdtemp with no state/ or remudero/.git inside it, so without this opt-in
+        // every test below would now hit the NEW refusal before reaching the behaviour it means to
+        // exercise. Passing it here is the "operator's own word" the new check requires — this suite
+        // is intentionally always running the first-boot path.
+        RMD_RECYCLE_FIRST_BOOT: "1",
+        GH_TOKEN: "",
+        // App auth is a CREDENTIAL as of this PR, and these fixtures spread `...process.env`, so an
+        // ambient `GH_APP_*` trio makes the script stop refusing and exit 0 — silently converting
+        // every negative control below into a vacuous pass. The daemon container really does carry
+        // all three, which is where the reviewer executes proofs: MEASURED there, this suite went
+        // 26/26 on main to 25/26 on this branch, and the checkout suite 12/12 to 11/12, while both
+        // stayed green on a host and on CI (neither sets them). Neutralise them exactly as GH_TOKEN
+        // above already is, so the credential inputs are the fixture's to state, never the runner's.
+        GH_APP_ID: "",
+        GH_APP_INSTALLATION_ID: "",
+        GH_APP_PRIVATE_KEY_PATH: "",
+        RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
+        // Points at a path that (almost certainly) does not exist, so section 1's guard does not fire
+        // merely because the TEST RUNNER itself is sandboxed inside a container — that is a fact about
+        // this suite's own environment, not about the script under test. The dedicated guard test below
+        // overrides this deliberately to point at a real file.
+        RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "recycle-container-test-no-such-dockerenv-marker"),
+        ...opts.extraEnv,
+        ...(opts.unsetDockerHost ? { DOCKER_HOST: undefined } : {}),
+        ...(opts.unselectedRegistry ? { RMD_INSTANCE_REGISTRY: undefined, RMD_INSTANCE_REGISTRY_DIGEST: undefined,
+          RMD_INSTANCE_REGISTRY_LAUNCH_BINDING: undefined } : {}),
+      },
+    });
+    assert.deepEqual(github?.calls() ?? [], [], "unexpected GitHub invocation in a host-effect-free fixture");
+  } finally {
+    if (github) rmSync(github.dir, { recursive: true, force: true });
+  }
   let calls: Call[] = [];
   try {
     calls = readFileSync(join(rec, "calls"), "utf8")
@@ -440,6 +465,7 @@ function privateRecyclerFixture(extra: string[] = []) {
   return { root, selected, run(mode: string, serve = false, extraEnv: Record<string, string> = {}, dryRun = false) {
     const result = runRecycle(mode, { ...(serve ? { scriptPath: join(REPO_ROOT, "deploy/serve-container.sh") } : {}),
       args: ["--instance", "fixture", ...(serve ? ["--replace"] : []), ...(dryRun ? ["--dry-run"] : [])], stateDir: join(root, "state"), unsetDockerHost: true,
+      forbidHostEffects: true,
       extraEnv: { RMD_INSTANCE_REGISTRY: selected, RMD_RECYCLE_HOST_LOCK: join(root, "own-recycle.lock"),
         ...(serve ? { RMD_SERVE_DOCKERENV_PATH: join(root, "no-container-marker"), RMD_SERVE_PORT: "4317",
           RMD_SERVE_REPO_DIR: join(root, "serve-repo"), RMD_SERVE_BANNER_WAIT_S: "1", RMD_SERVE_BANNER_POLL_S: "1",
@@ -452,12 +478,12 @@ function privateRecyclerFixture(extra: string[] = []) {
 }
 
 
-test("private registry selection reaches real host and daemon readers: recorded readonly mount and image reader", () => {
+test("private registry selection reaches real host and daemon readers: recorded readonly mount and image reader", async () => {
   const fixture = privateRecyclerFixture();
   try {
     const result = fixture.run("private-good");
     assert.equal(result.status, 0, result.stderr);
-    const probe = result.calls.findIndex(c => isRun(c) && c.argv.some(a => a.includes("selected-registry-capability-v1")));
+    const probe = result.calls.findIndex(c => isRun(c) && c.argv.some(a => a.includes("selected-registry-capability-")));
     const stop = result.calls.findIndex(isStop);
     assert.ok(probe >= 0 && stop > probe, "a healthy contained image-reader control must precede any stop");
     const launch = result.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
@@ -465,6 +491,10 @@ test("private registry selection reaches real host and daemon readers: recorded 
     assert.ok(launch.argv.includes(`type=bind,src=${fixture.selected},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`));
     assert.ok(launch.argv.includes("RMD_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"));
     assert.ok(launch.argv.some(a => /^RMD_INSTANCE_REGISTRY_DIGEST=[a-f0-9]{64}$/.test(a)));
+    const packet = await withInstanceRegistryRuntime(() => trustedInstanceRegistryLaunchPacket(),
+      { envPath: fixture.selected, instanceName: "fixture" });
+    assert.ok(launch.argv.includes(`RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet.split("\n")[4]}`),
+      "the daemon adoption receives the original physical identity, not just equal bytes");
     assert.equal(launch.argv.includes(`type=bind,src=${fixture.root},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`), false);
   } finally { fixture.cleanup(); }
 });
@@ -483,17 +513,58 @@ test("selected private recycler refuses unsupported image remote namespace and r
   }
 });
 
-test("selected private serve mounts the same readonly file and qualifies its image before replacement", () => {
+test("private registry selection defaults and falsifiers forbid live effects: real serve assembly", async () => {
   const fixture = privateRecyclerFixture();
   try {
     const result = fixture.run("private-good", true);
     assert.equal(result.status, 0, result.stderr);
-    const probe = result.calls.findIndex(c => isRun(c) && c.argv.some(a => a.includes("selected-registry-capability-v1")));
+    const probe = result.calls.findIndex(c => isRun(c) && c.argv.some(a => a.includes("selected-registry-capability-")));
     assert.ok(probe >= 0 && result.calls.findIndex(isStop) > probe);
     const launch = result.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
     assert.ok(launch.argv.includes(`type=bind,src=${fixture.selected},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`));
     assert.ok(launch.argv.includes("RMD_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"));
     assert.ok(launch.argv.includes("sha256:PULLEDID"), "the launched image must be the immutable qualified image, not a moving tag");
+    const packet = await withInstanceRegistryRuntime(() => trustedInstanceRegistryLaunchPacket(),
+      { envPath: fixture.selected, instanceName: "fixture" });
+    assert.ok(launch.argv.includes(`RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet.split("\n")[4]}`));
+  } finally { fixture.cleanup(); }
+});
+
+test("private registry selection defaults and falsifiers forbid live effects: real image identity and catches", () => {
+  for (const serve of [false, true]) for (const mode of ["private-alias", "private-replaced", "private-lost-binding", "private-marker-only", "private-probe-fail"]) {
+    const fixture = privateRecyclerFixture();
+    try {
+      const result = fixture.run(mode, serve);
+      assert.equal(result.status, 2, `${mode}: ${result.stderr}`);
+      assert.ok(result.calls.some(c => isRun(c) && c.argv.includes("--rm")), "the real bounded probe ran");
+      assert.equal(result.calls.some(c => isStop(c) || isRm(c) || (isRun(c) && c.argv.includes("-d"))), false,
+        "an unqualified physical mapping or failed reader cannot reach replacement effects");
+      assert.equal(result.calls.some(c => c.bin === "forbidden"), false, "GitHub, git, service and installer effects stay trapped");
+      assert.ok(result.calls.filter(c => c.bin === "az").every(c => c.argv.join(" ") === "acr login -n test-registry"),
+        "only the contained synthetic login transport may run before the image probe");
+      assert.equal((result.stdout + result.stderr).includes(fixture.root), false);
+      assert.equal(existsSync(join(fixture.root, "state/state/PAUSE")), false);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("private registry selection defaults and falsifiers forbid live effects: hostile paths remain single shell arguments", () => {
+  const fixture = privateRecyclerFixture();
+  try {
+    const selected = join(fixture.root, "private '$(touch forbidden-host-effect)' [opaque].yaml");
+    writeFileSync(selected, readFileSync(fixture.selected), { mode: 0o600 });
+    const result = fixture.run("private-good", true, { RMD_INSTANCE_REGISTRY: selected });
+    assert.equal(result.status, 0, result.stderr);
+    const launch = result.calls.find(c => isRun(c) && c.argv.includes("-d"))!;
+    assert.ok(launch.argv.includes(`type=bind,src=${selected},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`));
+    assert.equal(result.calls.some(c => c.bin === "forbidden"), false);
+    assert.equal(existsSync(join(REPO_ROOT, "forbidden-host-effect")), false);
+    assert.equal((result.stdout + result.stderr).includes(selected), false);
+    for (const invalid of ["private,alias.yaml", "private\nalias.yaml"]) {
+      const path = join(fixture.root, invalid); writeFileSync(path, readFileSync(fixture.selected));
+      const refused = fixture.run("private-good", true, { RMD_INSTANCE_REGISTRY: path });
+      assert.equal(refused.status, 2); assert.deepEqual(refused.calls, []);
+    }
   } finally { fixture.cleanup(); }
 });
 
