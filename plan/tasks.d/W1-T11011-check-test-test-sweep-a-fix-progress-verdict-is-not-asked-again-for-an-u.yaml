@@ -1,0 +1,53 @@
+- id: W1-T11011
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts cost 9.2 PR minute(s) across 1 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
+  risk: low
+  priority: 1.38
+  status: blocked
+  retirement: retired  # retired by rule 2 (cause stopped) of the operator's mechanical rulings (2026-10-21, W1-T10371): the symptom had 0 occurrence(s) across 7 day(s), never seen. Retired by the machine-filing judge, 2026-10-30T11:03:10.242Z
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts"
+  files:
+    - src/lib/fix-progress-judge.ts
+    - test/fix-lane/check-test-test-sweep-a-fix-progress-verdict-is-not-asked-again-for-an-u.test.ts
+  acceptance:
+    - claim: "a recorded check:test:test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts round, replayed through the real code path in src/lib/fix-progress-judge.ts, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11011: check:test:test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts cost 9.2 PR minute(s) (seven-day half-life) across 1 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/fix-progress-judge.ts: test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts imports it
+    - test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts: named by the failing check
+    - the rounds name a failing test: test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13177 (https://github.com/craigoley/remudero/pull/13177) at 2026-10-20T21:40:45.956Z: ci-log round — coverage-shard (5/8): test/review-finding-fix-prompt.test.ts; coverage-shard (7/8): test/sweep/a-fix-progress-verdict-is-not-asked-again-for-an-unchanged-input.test.ts
+        failing tests: W1-T5019: stale review finding is omitted from the fix prompt; W1-T5019: unresolved sweep criterion positions do not receive findings; W1-T5019: same-head review finding reaches the fix prompt, W1-T5019: stale review finding is omitted from the fix prompt, W1-T5019: unresolved sweep criterion positions do not receive findings; W1-T9502: the real fix rung reuses its ledger answer and names the reused event
+        log excerpt:
+          | ...
+          | not ok 2 - W1-T5019: stale review finding is omitted from the fix prompt
+          |   ---
+          |   duration_ms: 112.237846
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/review-finding-fix-prompt.test.ts:104:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     both unmet criteria are repaired in one worker pass
+          | 
+          |     0 !== 1
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.

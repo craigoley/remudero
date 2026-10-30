@@ -65,8 +65,7 @@ test("selected registry shadow intent survives actual trusted child transport", 
   writeFileSync(join(engine, "engine.json"), JSON.stringify({ ...f.spec.engine, builtAt: Date.now() }));
   const entry = pathToFileURL(join(REPO_ROOT, "src/run-child-main.ts")).href;
   const code = `import { runChildMain } from ${JSON.stringify(entry)};
-    const dir = process.argv[1];
-    process.exitCode = await runChildMain(['--run-dir', dir], { env: {}, loadRunPath: async () => ({}),
+    process.exitCode = await runChildMain(process.argv.slice(1), { env: {}, loadRunPath: async () => ({}),
       selectedRegistryRecord: (step, fields) => console.error(JSON.stringify({step,...fields})),
       runTask: async (taskId, options) => {
         if (options.selectedRegistryIntent?.kind !== 'shadow' || !options.selectedRegistryIntent.input.expectedDigest)
@@ -81,7 +80,7 @@ test("selected registry shadow intent survives actual trusted child transport", 
     } };
   const ports: SpawnRunChildPorts = { mainSha: async () => f.spec.engine.sha, engine: { isCurrent: () => true },
     launch: (_engine, args) => ({ cwd: REPO_ROOT, engineRoot: engine, kind: "tsx", reason: "fixture",
-      argv: ["--import", "tsx", "--input-type=module", "-e", code, args[1]!] }),
+      argv: ["--import", "tsx", "--input-type=module", "-e", code, "--", ...args] }),
     reserve: async () => ({ id: "fixture", bindRoot() {}, releaseOccupancy() {} }) as never,
     workerAdmissionHold: () => undefined, pollMs: 5, watch: false };
   setImmediate(() => { turned = true; });

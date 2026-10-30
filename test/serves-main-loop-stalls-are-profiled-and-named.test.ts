@@ -42,12 +42,10 @@ async function readyWithin(profiler: { ready(): Promise<boolean> }, timeoutMs = 
 let observedProfilerStart: Int32Array | undefined;
 let prematureNamedCalls = 0;
 
-/** The frame the stall runs: what the profile row must name. */
-function serveBusyFrame(): number {
+/** Recursion keeps the sampled work in this frame without an OSR loop surviving a profiler chunk restart. */
+function serveBusyFrame(depth = 256): number {
   if (observedProfilerStart && Atomics.load(observedProfilerStart, 0) !== 1) prematureNamedCalls++;
-  let x = 0;
-  for (let i = 0; i < 2e5; i++) x += (i * 31) % 7;
-  return x;
+  return depth === 0 ? 0 : (serveBusyFrame(depth - 1) * 31 + depth) % 7;
 }
 
 /** Hold serve's loop for `ms`. Array.from drives the calls in batches, so no frame of the test runs a loop long enough
@@ -62,7 +60,7 @@ function stallTheLoop(ms: number, profiling?: Int32Array): void {
     if (end === undefined && performance.now() > deadline) throw new Error("the real profiler never acknowledged sampling");
     // V8 can credit a frame OSR-compiled before Profiler.start to its caller. Keep the
     // sampled target cold during startup and during the disabled-profiler control.
-    if (profiling && end !== undefined) Array.from({ length: 50 }, serveBusyFrame);
+    if (profiling && end !== undefined) Array.from({ length: 50 }, () => serveBusyFrame());
   }
 }
 

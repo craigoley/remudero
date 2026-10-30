@@ -90,7 +90,7 @@ function ghShim(dir: string, headRefName: string, headSha: string): void {
     [
       "#!/bin/sh",
       'case "$*" in',
-      '  *"headRefName"*) printf \'{"headRefName":"%s","body":""}\\n\' ' + JSON.stringify(headRefName) + " ;;",
+      '  *"headRefName"*) echo ' + JSON.stringify(JSON.stringify({ headRefName, headRefOid: headSha, body: "" })) + " ;;",
       // W1-T2268: `waitForCiGreen` now reads REST (`gh api …`), never `gh pr view --json
       // statusCheckRollup`. The composed rollup's own check-runs read answers CI green.
       '  *"/check-runs"*) echo \'{"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}\' ;;',

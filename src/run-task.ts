@@ -370,6 +370,7 @@ import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOvers
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { queueJudgeGardenSpec, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
+import { redesignGardenSpec } from "./lib/redesign-gardener.js";
 import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
@@ -475,7 +476,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout", "review-replay", "queue-judge"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource", "flow", "flow-remedy", "fix-lane", "scout", "review-replay", "queue-judge", "redesign"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -26636,7 +26637,17 @@ export function reviewerCodeRecoveryFromLoadedModule(
 // builders while `daemonCommand` may shadow their names with a test injection below. Keeping the
 // live calls as `buildSweepHook(...)`/`buildSweepLightHook(...)` preserves the composition-root
 // contract that existing daemon wiring tests inspect.
-const daemonDefaultBuildSweepHook = buildSweepHook;
+// W1-T9114: the daemon's own sweep builder also installs the detached-work host its review path and its restart drain read
+// (src/lib/sweep.ts `installDetachedWorkHost`): mode from `sweep.runChild.mode` on the ledger evidence, the review kind as the one
+// an entry hosts (`runDetachedWork`, below). An injected builder (a test) installs nothing, so every kind stays in process there.
+const daemonDefaultBuildSweepHook: typeof buildSweepHook = (...args) => {
+  const [, repo, config, ledgerPath] = args;
+  installDetachedWorkHost(createDetachedWorkHost({
+    stateRoot: join(config.root, "state"), repoDir: args[16] ?? repoRoot, root: config.root, repo, log: args[6],
+    readLedger: () => readLedgerLines(ledgerPath),
+  }));
+  return buildSweepHook(...args);
+};
 const daemonDefaultBuildSweepLightHook = buildSweepLightHook;
 
 
@@ -27437,6 +27448,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       return gardenPass(backlogGardenSpec(d), d);
     }
     // W1-T9925: the queue judge re-ranks queued tasks by measured cost of delay through its own reviewed plan PR.
+    case "redesign": {
+      const d = deps("redesign", raiseDuplicate);
+      const judge = issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log });
+      return gardenPass(redesignGardenSpec(d, { judgeText: (prompt) => judge.judgeText(prompt, 0) }), d);
+    }
     case "queue-judge": {
       const d = deps("queue-judge", raiseDuplicate);
       return gardenPass(queueJudgeGardenSpec(d, queueJudgeRunTaskPorts({ owner, repo, repoRoot, stateDir, root: config.root, log })), d);
@@ -41852,7 +41868,9 @@ import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js"
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
-import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, runChildModeIsOn, spawnRunChild, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, runChildModeIsOn, spawnRunChild, type DetachedWorkSpec, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, readFixDispatchEnvelope, runFixDispatchChild, type FixDispatchChildPorts } from "./lib/sweep.js";
+import { classEstimate, classTypical } from "./lib/host-memory-learning.js";
 import { type RunChildMode } from "./lib/policy.js";
 import {
   escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
@@ -42877,6 +42895,132 @@ if (!readWorkerOptions && process.argv[1] && fileURLToPath(import.meta.url) === 
 }
 
 export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, retroCommand, initCommand, projectCommand };
+
+/**
+ * W1-T9114: the detached work a run child hosts (src/run-child-main.ts calls it for a spec that carries `work`). A review is the
+ * same `reviewCommand` call the sweep's in-process review makes, from the serializable inputs the spec holds: the PR number, the
+ * repository, the plan-filing flag and the review attempt id. A kind this entry does not host throws, which the child writes as a
+ * failed status through the closed failure union; an unknown kind is never read as success.
+ */
+type DetachedFixRuntimePorts = Partial<Pick<FixDispatchChildPorts, "hold" | "log" | "claimFixAdmission">> & {
+  dispatcher?: (plan: Plan) => ReturnType<FixDispatchChildPorts["dispatcher"]>;
+  /** The production builder's argument boundary: tests may replace its write effect after calling the real builder. */
+  buildEffects?: typeof buildSweepEffects;
+  readFixPressure?: SweepDeps["readFixPressure"];
+  planPath?: string;
+  planSnapshot?: (options: { allowStale?: boolean }) => SyncedPlan;
+  config?: Config;
+  github?: GitHub;
+  readPr?: (args: string[]) => Promise<unknown>;
+  runRetroSubprocess?: typeof runAutomatedRetroSubprocess;
+  reviewCommand?: typeof reviewCommand;
+};
+export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void }, ports: DetachedFixRuntimePorts = {}): Promise<RunResult> {
+  if (work.kind === "fix-dispatch") return runFixDispatchWork(work, ctx, ports);
+  if (work.kind === "retro") {
+    const decision = decodeAutomatedRetroDecision(JSON.stringify(work.inputs?.decision));
+    const log = ports.log ?? ((step: string, extra?: Record<string, unknown>) => {
+      appendLedger(ledgerPathFor(ports.config ?? loadConfig()), { run_id: ctx.runId, task_id: ctx.taskId, step, lane: "retro", ...extra });
+    });
+    ctx.onPhase?.("subprocess");
+    await buildRetroDaemonHooks({ config: ports.config, runSubprocess: ports.runRetroSubprocess }).runRetroTrigger(decision, log);
+    return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
+  }
+  if (work.kind !== "review" || work.prNumber === undefined) {
+    throw new Error(`the run child hosts no detached work of kind ${work.kind}${work.kind === "review" ? " without a PR number" : ""}`);
+  }
+  const inputs = work.inputs ?? {};
+  const code = await (ports.reviewCommand ?? reviewCommand)(String(work.prNumber), typeof inputs.repo === "string" ? ["--repo", inputs.repo] : [], {
+    executionMode: "semantic",
+    ...(typeof inputs.planOnlyFiling === "boolean" ? { planOnlyFiling: inputs.planOnlyFiling } : {}),
+    ...(typeof inputs.reviewAttemptId === "string" ? { reviewAttemptId: inputs.reviewAttemptId } : {}),
+  });
+  if (code !== 0) {
+    throw Object.assign(new Error(`detached review of PR #${work.prNumber} exited with code ${code}`), {
+      code: String(code), reasonClass: code === 2 ? "review_withheld" : "review_failed",
+    });
+  }
+  return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
+}
+
+/**
+ * W1-T9114: a fix dispatch as a run child's work. The decision envelope comes from the spec; the live dependencies are rebuilt HERE,
+ * the way `rmd sweep` builds them (config, ledger, the canonical plan, `buildSweepEffects` with the production progress judge), and
+ * `runFixDispatchChild` (src/lib/sweep.ts) rechecks the PR, the task and the fleet hold before it calls the sweep's own `dispatchFix`,
+ * whose branch claim is taken through the native helper in this process. Nothing here routes through `rmd fix` or `--requested`.
+ * A plan, a config or a PR read that fails throws: an unread reconstruction refuses and the child ends as a failed status.
+ */
+async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void }, ports: DetachedFixRuntimePorts): Promise<RunResult> {
+  const inputs = work.inputs ?? {};
+  // Every read is lazy: the child reads its envelope first, and an unreadable one refuses before any config, plan or PR is read.
+  const envelope = readFixDispatchEnvelope(inputs.envelope);
+  const target = envelope === undefined ? undefined : prUrlTarget(envelope.pr.prUrl);
+  if (envelope !== undefined && (target === undefined || target.number !== envelope.pr.prNumber ||
+      (work.prNumber !== undefined && target.number !== work.prNumber) ||
+      (work.headSha !== undefined && work.headSha !== envelope.pr.headSha) ||
+      (typeof inputs.repo === "string" && inputs.repo.toLowerCase() !== target.repo.toLowerCase()))) {
+    throw new Error("fix dispatch refused: the saved PR target does not match its child spec");
+  }
+  let configMemo: ReturnType<typeof loadConfig> | undefined;
+  const cfg = () => (configMemo ??= ports.config ?? loadConfig());
+  let selfMemo: ReturnType<typeof resolveOwnerRepo> | undefined;
+  const self = () => (selfMemo ??= resolveOwnerRepo());
+  const repoName = (): string => target?.repo ?? self().repo;
+  const ownerName = (): string => target?.owner ?? self().owner;
+  const ledgerPath = (): string => ledgerPathFor(cfg());
+  const log = (step: string, extra: Record<string, unknown> = {}): void => {
+    appendLedger(ledgerPath(), { run_id: ctx.runId, task_id: ctx.taskId, step, lane: "sweep-fix", ...extra });
+  };
+  let planMemo: ReturnType<typeof loadPlan> | undefined;
+  const planNow = (): Plan => {
+    if (planMemo) return planMemo;
+    const planPath = ports.planPath ?? (ownerName() === self().owner && repoName() === self().repo
+      ? join(repoRoot, "plan", "tasks.yaml") : join(cfg().root, "repos", repoName(), "plan", "tasks.yaml"));
+    const synced = syncPlanOrRefuse(planPath, { allowStale: false, log: ports.log ?? log, say: () => {}, planSnapshot: ports.planSnapshot });
+    if ("error" in synced) throw new Error(synced.error);
+    return planMemo = synced.plan;
+  };
+  let projection: Map<string, StatusProjection> | undefined;
+  await runFixDispatchChild(inputs, {
+    log: ports.log ?? log,
+    claimFixAdmission: ports.claimFixAdmission ?? ((pr) => createSweepFixAdmissionController({
+      surface: "full", queueDepth: 1, hostWorkerBudget: DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget,
+      activeWorkers: activeWorkerCount(), readActiveWorkers: activeWorkerCount, reviewReservations: 0,
+      readPressure: ports.readFixPressure ?? (() => productionFixPressure(DEFAULT_SWEEP_POLICY.memoryFloorMib, ledgerPath(), classEstimate("fix").estimateMib)),
+      readEstimate: classEstimate, readTypical: classTypical, readResidents: () => productionFixAdmissionResidents(cfg().root),
+      log: ports.log ?? log,
+    }).claim(pr)),
+    ...(ctx.onPhase === undefined ? {} : { onPhase: ctx.onPhase }),
+    hold: ports.hold ?? (() => {
+      const stopped = stopDetail(cfg().root);
+      if (stopped !== undefined) return `STOP: ${stopped}`;
+      const paused = checkSharedPause(cfg().root, realDeps().sharedPauseGit);
+      return paused === undefined ? undefined : `PAUSE: ${paused}`;
+    }),
+    readLivePr: async (prUrl) => {
+      const live = await (ports.readPr ?? ghJsonAsync)(["pr", "view", prUrl, "--json", "state,mergedAt,headRefOid"]) as
+        { state?: unknown; mergedAt?: unknown; headRefOid?: unknown } | undefined;
+      if (typeof live?.state !== "string") return undefined;
+      return { state: live.state, merged: typeof live.mergedAt === "string" && live.mergedAt !== "",
+        ...(typeof live.headRefOid === "string" ? { headSha: live.headRefOid } : {}) };
+    },
+    readTask: (taskId) => {
+      const plan = planNow();
+      const task = plan.byId.get(taskId);
+      if (task === undefined) return { found: false };
+      projection ??= projectPlan(plan, { ledgerPath: ledgerPath(), github: ports.github ?? buildBatchedGithub(ownerName(), repoName()) });
+      const status = projection.get(taskId);
+      if (!status || status.indeterminate) throw new Error(`task ${taskId}'s merge projection is unreadable`);
+      const digest = riskJudgePlanContextDigestFor(plan)({ taskId });
+      return { found: true, merged: status.merged,
+        retired: task.status === "blocked" && task.retirement !== undefined, ...(digest === undefined ? {} : { contextDigest: digest }) };
+    },
+    dispatcher: () => ports.dispatcher ? ports.dispatcher(planNow()) : (ports.buildEffects ?? buildSweepEffects)({ productionProgressJudge: true,
+        owner: ownerName(), repo: repoName(), config: cfg(), ledgerPath: ledgerPath(), runId: ctx.runId,
+        plan: planNow(), log, policy: DEFAULT_SWEEP_POLICY }),
+  });
+  return { taskId: ctx.taskId, runId: ctx.runId, merged: false, verdict: "no_pr", costUsd: 0 };
+}
 // Exported for a behavioral test of the drain gateway-targeting fix (W1-T53): drainCommand's
 // injectable deps (config/planPath/skipGitSync/githubFactory) let a test prove `--repo` scopes
 // the merged-status gateway to the NAMED repo, not a hardcoded literal — logic unchanged, export

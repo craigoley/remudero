@@ -99,24 +99,15 @@ import {
 } from "./verify-human-judge.js";
 
 /**
- * lib/measurement-cadence.ts — W1-T1259: runs `rule-efficacy`, `verdict-calibration` and
- * `autonomy-rate` on a cadence, host-side only (the ledger lives on the daemon host; CI can't
- * read it), reachable only through `src/run-task.ts`'s CLI dispatch. Pure decision-and-report
- * half: the daemon's poll loop calls `decideMeasurementCadence` through an injected hook, wired
- * live by `daemonCommand`.
+ * W1-T1259: host-side measurement cadence; CLI dispatch lives in `src/run-task.ts`.
+ * `daemonCommand` wires the poll loop's injected `decideMeasurementCadence` hook.
  *
- * INVARIANT: the default cadence writes nothing — `rule-efficacy` writes only through
- * `escalateRepeatingRules`, gated on `policy.escalate` (default off), always via
- * `updateProposalRegistry`. Every result carries `status: "measured" | "refused"`, never a bare
- * rate.
+ * INVARIANT: the default cadence writes nothing. Escalation is opt-in, via
+ * `escalateRepeatingRules` and `updateProposalRegistry`; results are measured or refused, never bare rates.
  *
- * W1-T3082: `verdict-calibration` now escalates too, the SAME shape — gated on `opts.escalate`,
- * always via `updateProposalRegistry`, one proposal per DRIFTED verdict class (see
- * `verdict-calibration.ts`'s `classifyVerdictDrift`/`escalateVerdictCalibrationDrift`), plus one
- * `verdict_calibration.drift`/`verdict_calibration.within_bands` ledger row per class per fire
- * when a caller supplies `opts.writeLedgerLine` (omitted, the pre-existing default, means no
- * ledger row at all — the same "opt-in, caller supplies it" shape `coverageImprovement` uses
- * below, so every pre-existing caller of this function stays byte-identical).
+ * W1-T3082: `classifyVerdictDrift`/`escalateVerdictCalibrationDrift` propose once per drifted class
+ * through `updateProposalRegistry` when `opts.escalate` is on. Per-class drift/within-bands rows
+ * also require caller-supplied `opts.writeLedgerLine`; omission writes no ledger rows.
  *
  * FALSIFIER: test/measurement-cadence.test.ts and the per-verb suites below. Why:
  * docs/forensics/measurement-cadence.md#module-header.
@@ -265,16 +256,11 @@ export interface VerdictCalibrationCadenceResult extends MeasurementCadenceVerbS
   blockedCiCount?: number;
   blocked_ci_share?: number | null;
   delta_vs_previous?: number | null;
-  /** W1-T3082 — true only when `policy.escalate` was on and at least one drift proposal was
-   *  actually drafted this run. Optional: absent on a fixture/mock built before this task (e.g.
-   *  test/measurement-cadence.test.ts's hand-built `runMeasurementCadence` stub), the same
-   *  optional-field compatibility shape as every other row added to this file after its first
-   *  ship. Same meaning as {@link RuleEfficacyCadenceResult.escalated}. */
+  /** W1-T3082: true only when escalation drafted a drift proposal. Optional for older fixtures;
+   *  same meaning as {@link RuleEfficacyCadenceResult.escalated}. */
   escalated?: boolean;
   escalatedProposalIds?: string[];
-  /** Verdict classes {@link import("./verdict-calibration.js").classifyVerdictDrift} judged
-   *  DRIFTED this run, whether or not `escalate` was on (a report-only run still measures drift;
-   *  it just never writes about it) — empty on a clean pass. */
+  /** Classes `classifyVerdictDrift` judged drifted, even in report-only mode; empty on a clean pass. */
   driftedClasses?: string[];
 }
 
@@ -363,16 +349,10 @@ export interface RevertRecallCadenceResult extends MeasurementCadenceVerbStatus 
   proposals: { entryId: string; sourcePr: number; revertingPr: number }[];
 }
 
-// ── The adoption report: a fourth verb (W1-T2266) ──────────────────────────────────────────────
-// Answers "did anything shipped ever get adopted" — a mechanism can be correct and never called,
-// read, or given a subject. Runs on the same cadence and producer as the three verbs above;
-// writes nothing of its own.
-//
-// INVARIANT: shapes 1-3 are live scans, discovered from source; shape 4 (a runtime gate with no
-// subject) has no generic query, so it is a DECLARED list whose size and last-edit date travel
-// with every report, keeping a stale list visible. Every finding carries its ship date, so a
-// backlog reads as a backlog, never a fresh failure. ADVISORY ONLY: never fails a check, blocks
-// a merge, files a task, or proposes deleting an unadopted mechanism.
+// W1-T2266: adoption report, on the same cadence; writes nothing itself.
+// INVARIANT: shapes 1-3 scan source; shape 4 declares predicates and reports list size/edit date
+// so staleness stays visible. Ship dates distinguish backlog from fresh failure.
+// Advisory only: never fails checks, blocks merges, files tasks or proposes deleting mechanisms.
 // Why: docs/forensics/measurement-cadence.md#the-adoption-report.
 
 export type AdoptionShape = "symbol-no-caller" | "field-no-writer" | "script-no-invoker" | "gate-no-subject";
@@ -1507,15 +1487,9 @@ export function mintProofDebtProposals(
   return { status: "backlog", mintedProposalIds, excludedOffenders };
 }
 
-/** Every field below the first three is optional on the TYPE only, for a pre-existing test
- *  double — {@link runMeasurementCadenceReport} itself never omits one. */
-/**
- * W1-T3226 — WHAT ONE PLAN-RECONCILE PASS FOUND, and whether it landed.
- *
- * `drift` is reported on EVERY cycle including zero, because a number nobody sees until it is
- * large is how 85 shards accumulated: the prioritised queue read 21 open when 20 of them were
- * already on main, and two of those were items an operator asked to start next.
- */
+/** Fields below the first three are optional for old test doubles; the real report includes all. */
+/** W1-T3226: report reconciliation drift every cycle, including zero, and whether it landed.
+ *  Hidden drift left merged shards queued; retain task ids so the count can be checked. */
 export interface PlanReconcileCadenceResult {
   /** Shards credited-merged by `reconcilePlan`'s own predicate but still `status: queued`. */
   drift: number;
@@ -1532,27 +1506,16 @@ export interface PlanReconcileCadenceResult {
 export interface PlanReconcileCadenceOpts {
   /** Every shard's id and current text, exactly as `reconcilePlan` takes them. */
   shards: ReadonlyArray<{ readonly taskId: string; readonly text: string }>;
-  /** `reconcilePlan`'s OWN credit predicate, passed through untouched. Widening it here would
-   *  flip uncredited work to merged, which removes a real task from the queue — strictly worse
-   *  than leaving it stale, and the one direction this task must not move. */
+  /** Pass `reconcilePlan`'s credit predicate unchanged: widening it removes real queued work. */
   isCreditedMerged: (taskId: string) => boolean | undefined;
   /** How much drift is worth a plan diff. Below it the cadence reports and lands nothing. */
   threshold: number;
-  /** Hands the rewritten shards to the caller's LANDING BRIDGE — never an in-place write. The
-   *  daemon's own checkout must stay clean: `checkCliFreshness` refuses a dirty tree, so writing
-   *  the plan where the daemon lives would break its self-sync. Absent = report only. */
+  /** Caller-owned landing bridge; absent = report only. Never dirty the daemon checkout:
+   *  `checkCliFreshness` would refuse it and break self-sync. */
   land?: (writes: ReadonlyArray<{ taskId: string; text: string }>) => void;
 }
 
-/**
- * ONE plan-reconcile pass, as a cadence rung.
- *
- * REPORTS EVERY CYCLE, LANDS ONLY ABOVE THE THRESHOLD. The count is cheap and belongs in the
- * report unconditionally; a plan diff is not free and should not fire for one stale shard.
- *
- * `reconcilePlan` ITSELF IS UNTOUCHED — its predicate, its skip categories and its output are
- * correct. This schedules it and nothing more.
- */
+/** Schedule `reconcilePlan` unchanged: report every cycle; land only at or above the threshold. */
 export function planReconcileCadence(opts: PlanReconcileCadenceOpts): PlanReconcileCadenceResult {
   const { writes } = reconcilePlan(opts.shards, opts.isCreditedMerged);
   const taskIds = writes.map((w) => w.taskId);
@@ -1870,33 +1833,21 @@ export interface MeasurementCadenceReportOpts {
   /** coverage-improvement's CI artifact reader + producer input. Optional for old tests; the
    *  daemon hook supplies it in production. */
   coverageImprovement?: Omit<CoverageImprovementCadenceOpts, "stateDir">;
-  /** hand-run-census's writer input (W1-T2697) — root, ledger path and run id, plus test seams.
-   *  Optional: omitted skips the census-and-propose pass entirely, the same opt-in shape
-   *  `coverageImprovement` above uses (both need a caller-supplied `run_id` for their own ledger
-   *  marker, so neither can run unconditionally off `stateDir` alone). */
+  /** W1-T2697: opt-in census writer; like `coverageImprovement`, needs a caller-supplied run id. */
   handRunCensus?: Omit<HandRunCensusCadenceOpts, "stateDir">;
   /** W1-T3271's async verify-human cadence result. Optional: omitted skips the row member. */
   verifyHuman?: VerifyHumanCadenceResult;
-  /** W1-T3082 — per-class revert-rate/follow-up-fix-rate ceilings {@link
-   *  import("./verdict-calibration.js").classifyVerdictDrift} judges the report against.
-   *  Optional; production reads `plan/policy.yaml`'s `verdictCalibration.driftBands`, tests and
-   *  every pre-existing caller default to {@link DEFAULT_DRIFT_BANDS}. */
+  /** W1-T3082: `classifyVerdictDrift`'s per-class rate ceilings; production uses policy's
+   *  `verdictCalibration.driftBands`, omitted defaults to {@link DEFAULT_DRIFT_BANDS}. */
   driftBands?: DriftBands;
-  /** W1-T3082 — the dedup key's `window` half (see `verdictCalibrationDriftProposalId`), so a
-   *  rerun inside the same window never re-raises the same class's proposal. Optional; defaults
-   *  to `opts.now`'s (or the wall clock's) UTC calendar day — the cadence fires 4x/day, so every
-   *  same-day fire shares one window and a NEW day raises a fresh proposal for a still-drifted
-   *  class rather than silently reusing a stale one. */
+  /** W1-T3082: `verdictCalibrationDriftProposalId` dedup window; defaults to the current UTC day.
+   *  Same-day fires share proposals; a new day can re-raise persistent drift. */
   driftWindow?: string;
   /** Injectable only for tests/determinism; production takes the real clock. Also seeds {@link
    *  MeasurementCadenceReportOpts.driftWindow}'s default. */
   now?: Date;
-  /** W1-T3082 — appends ONE ledger row per {@link
-   *  import("./verdict-calibration.js").verdictCalibrationDriftLedgerLines} entry, called only
-   *  when `opts.escalate` is true (the same write-gating every other producer in this file
-   *  follows). Optional and OMITTED BY DEFAULT: every pre-existing caller of this function never
-   *  supplied it, so it never ran before this task and stays a no-op for them now — the same
-   *  "opt-in, caller supplies it" shape `coverageImprovement`'s `writeLedgerLine` already uses. */
+  /** W1-T3082: one row per `verdictCalibrationDriftLedgerLines` entry, only with `opts.escalate`.
+   *  Omitted by default: no ledger writes, as with `coverageImprovement`. */
   writeLedgerLine?: (line: Record<string, unknown>) => void;
   /** W1-T4243: opt-in, like `coverageImprovement` — the rung runs only when the caller supplies the
    *  writer for its one `knowledge.measured` row. */
@@ -2625,17 +2576,10 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
         excludedMechanisms: [],
       };
 
-  // W1-T3518: record what this scan SAW, so a proposal whose finding is gone can retire itself.
-  //
-  // GATED ON `escalate`, like every other write in this module. An earlier draft of this was not,
-  // reasoning that a measurement is not an inbox write and a dry run's finding set is as true as a
-  // firing one's. That was wrong, and test/adoption-report-has-a-producer.test.ts is the ratified
-  // statement of why: `escalate: false` means the verb "writes nothing and files nothing" and
-  // "leaves the checkout and state dir byte-for-byte untouched". A report run must stay a report run.
-  //
-  // ALSO gated on the static scans having run: `runAdoptionReport` skips shapes 1-3 without a
-  // `checkoutDir`, and a record built from a scan that never looked would name zero findings and
-  // read as "everything is adopted".
+  // W1-T3518: record findings for self-retirement only with `escalate` and completed static scans.
+  // Without `checkoutDir`, shapes 1-3 were never scanned: zero must not imply everything is adopted.
+  // test/adoption-report-has-a-producer.test.ts pins report-only as "writes nothing and files nothing"
+  // and "leaves the checkout and state dir byte-for-byte untouched".
   const adoptionLatest = opts.escalate
     ? adoptionLatestRecord(adoptionReport, nowDate.toISOString(), opts.checkoutDir !== undefined)
     : undefined;
@@ -2885,12 +2829,8 @@ export function latestMeasurementRows(
   return { status: "ok", rows: rows.slice(0, Math.max(0, n)) };
 }
 
-// ── W1-T4567: the request-path reader ─────────────────────────────────────────────────────────
-// `latestMeasurementRows` answers the daemon's own cadence off the full union; GET
-// /v1/self-measurement called it per request and returned every verb's whole report. MEASURED
-// 2026-09-26 on the live gateway: 8,040,418 bytes in 2.6-3.0 s for ten rows, one report alone
-// 618 KB, every archive decompressed each time. The route reads through a rotation memo instead,
-// and a row carries each verb's SUMMARY; `?detail=<verb>` returns one report from the newest row.
+// W1-T4567: GET /v1/self-measurement uses a rotation memo and per-verb summaries; full-union
+// reports repeatedly decompressed archives and bloated responses. `?detail=<verb>` reads one report.
 
 /** PRIMARY CONTROL: a string field longer than this is a report, not a headline, and is left out of a summary. */
 export const MEASUREMENT_SUMMARY_MAX_STRING = 160;
@@ -3093,19 +3033,9 @@ export function ciLearningReportProposalId(firedAt: string): string {
   return `ci-learning-report:${firedAt}`;
 }
 
-/**
- * W1-T3327 — STAGE ONE PROPOSAL PER FIRING into the registry `rmd inbox` tiers and the console
- * renders, on the precedent `escalateRepeatingRules` (rule-efficacy.ts) sets for the same problem.
- *
- * WHY THE LEDGER ROW WAS NOT ENOUGH: it carries counts. A count says a firing happened; it does not
- * say the top cause was `ci-gate` across 26 pull requests, which records were filed, or that 30
- * more causes were excluded by the ceiling. MEASURED 2026-09-10: the daemon's stdout logs are 0
- * bytes and the container log for the 2026-09-09 firing carried no draft lines, so the drafts
- * themselves were unrecoverable.
- *
- * A BARREN FIRING STILL REPORTS. The condition that ran silently for two days was drafts minted and
- * nothing filed; a reporter that only spoke on success would hide exactly the case worth seeing.
- */
+/** W1-T3327: stage one firing report in the inbox/console registry, like `escalateRepeatingRules`.
+ *  Counts alone lost causes, filed ids and excluded drafts when logs held no draft details.
+ *  Report barren firings too: drafts minted with nothing filed must remain visible. */
 export function stageCiLearningReport(
   report: CiLearningFiringReport,
   registryPath: string,
@@ -3152,14 +3082,9 @@ export function ciLearningShardId(finding: Pick<CiFailurePair, "pr" | "gate">): 
   return `ci-learning:${finding.pr}:${finding.gate}`;
 }
 
-/**
- * The gate a {@link ciLearningShardId} names, or undefined for any other origin.
- *
- * The id carries the window's FIRST pull request, and that pull request changes every window. So
- * keying idempotency on the whole id re-filed one gate's lesson under a new number each time.
- * MEASURED 2026-09-29 over plan/tasks.d: 49 machine-filed lessons covered 9 gates, and 39 of them
- * were withdrawn by hand as duplicates.
- */
+/** The gate {@link ciLearningShardId} names, or undefined for another origin.
+ *  Dedup by gate: a window's changing first PR made whole-id dedup re-file existing lessons.
+ *  Evidence: 2026-09-29 plan/tasks.d audit, retained in the W1-T11007 review record. */
 export function ciLearningGateOf(findingId: string): string | undefined {
   return /^ci-learning:\d+:(.+)$/.exec(findingId)?.[1];
 }
@@ -3274,22 +3199,9 @@ export function mintCiLearningShards(
     .filter((p) => !heldGates.has(p.gate))
     .sort((a, b) => (a.pr !== b.pr ? a.pr - b.pr : a.gate.localeCompare(b.gate)));
 
-  /*
-   * W1-T3044 — COMPACT BY CAUSE, THEN CAP. The ceiling used to truncate a list of INSTANCES: one
-   * finding per (pull request, gate), first three win, the rest named and dropped.
-   *
-   * MEASURED over a real 14-day window: 119 findings across 36 pull requests but only 22 DISTINCT
-   * GATES. Truncating instances covered 3 of 119 — three per cent of what the window had to say,
-   * and which three was an artifact of pull-request number order. Grouping by the gate and ranking
-   * by how many pull requests it refused covers 65 of 119 from the SAME three-draft budget: the
-   * three causes were ci-gate (26), ci (20) and coverage-ratchet (19).
-   *
-   * A gate that refused twenty-six pull requests is one lesson, not twenty-six. Nothing is lost by
-   * grouping: each draft NAMES its pull requests and the union of the files their repairs touched,
-   * so the per-instance detail a lesson needs is carried rather than summarised away. The excluded
-   * list now names remaining CAUSES too, which is nineteen readable lines instead of a hundred and
-   * sixteen.
-   */
+  // W1-T3044: cluster by gate, rank by refused PR count, then cap causes, not instances.
+  // Capping instances hid repeated causes behind PR-number order. Each draft retains every PR
+  // and repair file; excludedFindings names remaining causes. Evidence: W1-T11007 review record.
   const clusters = new Map<
     string,
     { gate: string; prs: number[]; repairFileHits: Map<string, number>; firstId: string }
@@ -3298,10 +3210,8 @@ export function mintCiLearningShards(
     const existing = clusters.get(p.gate);
     const cluster = existing ?? { gate: p.gate, prs: [], repairFileHits: new Map<string, number>(), firstId: ciLearningShardId(p) };
     cluster.prs.push(p.pr);
-    // COUNTED PER REPAIR, not unioned. W1-T3051: a set answered "which files were touched at all",
-    // which over a 26-pull-request cluster is 66 files in no order — a reader learns nothing from
-    // it. The lesson is in WHICH file the repairs kept coming back to. Deduped within one repair so
-    // a pair listing a file twice cannot inflate its share.
+    // W1-T3051: count per repair to expose recurring files; a flat union hid them among 66 paths.
+    // Dedup within each repair so repeated paths cannot inflate their share.
     for (const f of new Set(p.repairFiles ?? [])) {
       cluster.repairFileHits.set(f, (cluster.repairFileHits.get(f) ?? 0) + 1);
     }
@@ -3335,14 +3245,10 @@ export function mintCiLearningShards(
         `same gate stops refusing for the same reason`,
       gate: c.gate,
       pr: c.prs[0],
-      // Every pull request in the cluster and every file their repairs touched: the per-instance
-      // detail a lesson is derived FROM, carried rather than summarised away.
+      // Retain every PR and repair file as the lesson's per-instance evidence.
       prs: [...c.prs],
       repairFiles: rankedFiles.map(([f]) => f),
-      // THE SUBJECT OF THE LESSON, when the repairs agree on one. A file the repairs returned to
-      // again and again is what this gate is really about; a file touched once is noise, so a
-      // single hit never qualifies. Empty when the repairs share nothing, which is itself the
-      // honest answer: this cluster has no single subject and a reader should not be handed one.
+      // Only recurring repair files qualify; empty means the cluster has no shared subject.
       dominantRepairFiles,
       action: classifyCiLearningAction(dominantRepairFiles),
       author_class: "machine",
@@ -3356,14 +3262,9 @@ export function mintCiLearningShards(
   return { status, drafts, excludedFindings, unreadableShas };
 }
 
-// ── W1-T2968: THE WRITER — a draft becomes a real plan record ─────────────────────────────────
-//
-// W1-T2959's criterion 2 says "one firing FILES at most the ceiling many records" while the rung
-// console-logged drafts and wrote nothing. LAW 5 IS THE WHOLE SAFETY ARGUMENT and it holds only
-// because the mark survives the FILE — see plan.ts's `author_class` parse line, which W1-T2959
-// omitted, leaving every on-disk record unmarked and `machineAuthorVerifyViolation` unfireable.
-// INVARIANT — VALIDATE BEFORE WRITING: every rendered record is parsed back and linted with the
-// repo's OWN linter, and a refusal is NAMED rather than written and retracted.
+// W1-T2968: file W1-T2959's bounded drafts; Law 5 requires `author_class` to survive plan.ts parsing.
+// Missing that mark left `machineAuthorVerifyViolation` unreachable on disk.
+// INVARIANT: parse back and lint every rendered record before writing; name refusals.
 
 /** The filesystem surface the filer needs — injected, so a test drives the whole writer with no
  *  real writes. The defaults are the one line each that only the on-disk test reaches. */
@@ -3415,12 +3316,8 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     // Unjudged until the machine-filing judge rules (operator ruling 2026-09-29); LAW 5's mark rides it.
     ...machineShardHeaderLines([lessonsFile], draft.prs.length, population),
     `  origin: ${q(draft.findingId)}`,
-    // W1-T3052 — THE WATERMARK, so the lesson can later be judged on its OUTCOME. The origin names
-    // only the cluster's FIRST pull request; efficacy needs the HIGHEST, because "did this gate
-    // refuse anything AFTER the lesson landed" is the one question that settles whether a filed
-    // lesson worked. Pull-request numbers are monotonic, so the highest is the watermark and needs
-    // no clock. Written as data, never prose: a reader that had to parse the note would be a second
-    // parser for a fact the record can simply carry.
+    // W1-T3052: store PRs as data; the highest monotonic PR is efficacy's clock-free watermark.
+    // The origin's first PR alone cannot distinguish refusals after the lesson landed.
     `  ci_learning_prs: [${draft.prs.join(", ")}]`,
     "  files:",
     `    - ${lessonsFile}`,
