@@ -51,3 +51,11 @@
   note: |
     Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-29 at priority 3.
     verify: human because the coverage run on the new runtime is demonstrated on the PR's hosted checks, not by a unit proof. A .github/workflows change, if one proves needed, routes the build to an operator.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares deploy/Dockerfile, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-30T01:16:06.662Z"
+    pin: "f5e245c4f4662f09611d4e8c26562ba402db578947b98d2e4617716687262d57"
