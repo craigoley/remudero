@@ -94,7 +94,10 @@ test("the daemon's ci-learning landing runs its git fetch of origin while a time
 
   assert.equal(f.marksRead(), "started\ndone\n", "the fetch ran through the slow upload-pack in a real child process");
   assert.ok(sawFetchRunning, "a tick landed while the fetch's child was alive: the sync git was never called for it");
-  assert.deepEqual(result, { filed: [], skipped: [], refused: [] });
+  const { git, ...filing } = result;
+  assert.deepEqual(filing, { filed: [], skipped: [], refused: [] });
+  assert.equal(git?.driver, "async");
+  assert.ok(git && git.calls > 0);
 });
 
 test("control: the sync ci-learning landing holds the loop for the whole git fetch of origin", async () => {
@@ -104,7 +107,10 @@ test("control: the sync ci-learning landing holds the loop for the whole git fet
 
   assert.equal(f.marksRead(), "started\ndone\n", "the fetch ran through the slow upload-pack in a real child process");
   assert.equal(sawFetchRunning, false, "no tick can land while execFileSync holds the thread");
-  assert.deepEqual(result, { filed: [], skipped: [], refused: [] });
+  const { git, ...filing } = result;
+  assert.deepEqual(filing, { filed: [], skipped: [], refused: [] });
+  assert.equal(git?.driver, "sync");
+  assert.ok(git && git.calls > 0);
 });
 
 test("the awaited ci-learning landing still skips a draft whose origin fetched origin/main already holds", async () => {
@@ -125,7 +131,10 @@ test("the awaited ci-learning landing still skips a draft whose origin fetched o
 
   const result = await landCiLearningShardsAsync([draft], f.clone.dir, f.deps);
 
-  assert.deepEqual(result, { filed: [], skipped: ["ci-learning:1:seed"], refused: [] }, "the yielded origin/main read still feeds idempotency");
+  const { git, ...filing } = result;
+  assert.deepEqual(filing, { filed: [], skipped: ["ci-learning:1:seed"], refused: [] }, "the yielded origin/main read still feeds idempotency");
+  assert.equal(git?.driver, "async");
+  assert.ok(git && git.calls > 0);
 });
 
 /** One draft the rung would land; its finding id is not on the fixture's main. */
