@@ -8,7 +8,7 @@
 // worker from its own module URL, which a bundle cannot load without tsx.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -152,17 +152,24 @@ test("W1-T8778: each switched spawn ledgers its entry kind and reason", async ()
   const garden = rows();
   gardenChildNodeArgv("plan", [], GARDEN_CHILD_HEAP_LIMIT_MB, { execArgv: [], entry: "" }, true, garden.log, root);
   gardenChildNodeArgv("backlog", [], GARDEN_CHILD_HEAP_LIMIT_MB, { execArgv: [], entry: "" }, true, garden.log, bare);
+  const computed = spawnedRows(garden.out)[0]!.extra.hash as { ms: number };
+  const bytesRead = [SOURCE, "package.json", "package-lock.json"]
+    .reduce((bytes, path) => bytes + statSync(join(root, path)).size, 0);
+  assert.ok(Number.isFinite(computed.ms) && computed.ms >= 0);
+  const noHash = { computed: 0, reused: 0, bytes_read: 0, ms: 0 };
   assert.deepEqual(spawnedRows(garden.out).map((r) => r.extra), [
-    { name: NAME, verb: "garden run plan", kind: "bundle", reason: "source-hash-match" },
-    { name: NAME, verb: "garden run backlog", kind: "tsx", reason: "no-manifest" },
+    { name: NAME, verb: "garden run plan", kind: "bundle", reason: "source-hash-match",
+      hash: { computed: 1, reused: 0, bytes_read: bytesRead, ms: computed.ms } },
+    { name: NAME, verb: "garden run backlog", kind: "tsx", reason: "no-manifest", hash: noHash },
   ]);
 
   const gate = rows();
   preopenGateLaunch(bare, gate.log, "/h/bin/rmd", root);
   preopenGateLaunch(root, gate.log, "/h/bin/rmd", bare);
   assert.deepEqual(spawnedRows(gate.out).map((r) => r.extra), [
-    { name: NAME, verb: "preflight --fast", kind: "bundle", reason: "source-hash-match" },
-    { name: NAME, verb: "preflight --fast", kind: "tsx", reason: "no-manifest" },
+    { name: NAME, verb: "preflight --fast", kind: "bundle", reason: "source-hash-match",
+      hash: { computed: 0, reused: 1, bytes_read: 0, ms: 0 } },
+    { name: NAME, verb: "preflight --fast", kind: "tsx", reason: "no-manifest", hash: noHash },
   ]);
 });
 
