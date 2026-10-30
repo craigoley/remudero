@@ -34,7 +34,8 @@ function designRound(heldForMs: number): Record<string, unknown>[] {
   ];
 }
 
-function fixture(t: { after: (fn: () => void) => void }, heldForMs: number, clock = { now: NOW }, design = false) {
+function fixture(t: { after: (fn: () => void) => void }, heldForMs: number, clock = { now: NOW }, design = false,
+  judge?: SweepDeps["fixProgressJudge"]) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}held-escalation-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "state"));
@@ -70,10 +71,10 @@ function fixture(t: { after: (fn: () => void) => void }, heldForMs: number, cloc
   });
   const deps: SweepDeps = {
     strikeLadder: effects.strikeLadder,
-    fixProgressJudge: async (input) => {
+    fixProgressJudge: judge ?? (async (input) => {
       judged.push(String(input.parkedReason));
       return { verdict: "change-approach", reason: "the same round stood down twice", approach: "publish the proof through the PR body" };
-    },
+    }),
     readTaskContractRevision: () => "contract-A",
     arm: () => { calls.push("arm"); },
     close: (candidate) => { calls.push("close"); closed.add(candidate.prNumber); },
@@ -142,4 +143,17 @@ test("a terminal design handoff nobody answered is rebuilt past its SLO, and hel
   const fresh = fixture(t, HELD_ESCALATION_SLO_MS - 10 * MIN, { now: NOW }, true);
   await fresh.sweep();
   assert.deepEqual(fresh.calls, ["escalate"]);
+});
+
+test("a ladder that holds past the SLO escalates once, records why, and never escalates twice", async (t) => {
+  const f = fixture(t, HELD_ESCALATION_SLO_MS + 10 * MIN, { now: NOW }, false, async () => { throw new Error("judge unreachable"); });
+  await f.sweep();
+  assert.deepEqual(f.calls, ["escalate"], "no verdict, so no close: the person is still asked once");
+  const first = f.rows.findLast(r => r.step === "sweep.disposed" && r.pr_number === PR)!;
+  assert.equal(typeof first.held_escalation_ladder, "string", "the ladder's hold reason is on the row");
+  await f.sweep();
+  assert.deepEqual(f.calls, ["escalate"], "the delivered escalation is not sent again while the ladder holds");
+  const second = f.rows.findLast(r => r.step === "sweep.disposed" && r.pr_number === PR)!;
+  assert.equal(second.acted, false);
+  assert.match(String(second.stand_down_reason), /escalated once for this head .*; ladder: /);
 });
