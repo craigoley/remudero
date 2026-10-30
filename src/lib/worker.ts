@@ -4694,17 +4694,21 @@ export class WorktreeNodeModulesRefusedError extends RmdError {
   constructor(
     readonly packageName: string,
     readonly worktreePath: string,
-    readonly nodeModulesSource: string,
+    readonly nodeModulesSource: string | undefined,
+    readonly outcome?: "no-source" | "failed",
   ) {
-    const sourceDir = dirname(nodeModulesSource);
+    const sourceDir = nodeModulesSource ? dirname(nodeModulesSource) : "no source";
     // GENERIC_EXIT_CODE: what a plain `extends Error` already resolved to through exitCodeFor.
     super(
       "git",
       GENERIC_EXIT_CODE,
-      `worktree ${worktreePath} refused before any worker runs: its package.json/package-lock.json hash differs from ` +
-        `${sourceDir}'s, the same package (${packageName}) whose node_modules it would link. Remedy: refresh the canonical ` +
+      (outcome
+        ? `worktree ${worktreePath} refused before any worker runs: node_modules provisioning returned ${outcome} ` +
+          `(source: ${nodeModulesSource ?? "none"}). Remedy: refresh the canonical `
+        : `worktree ${worktreePath} refused before any worker runs: its package.json/package-lock.json hash differs from ` +
+          `${sourceDir}'s, the same package (${packageName}) whose node_modules it would link. Remedy: refresh the canonical `) +
         "checkout (the install root is re-installed on the next freshness restart); never install inside the worktree",
-      { packageName, worktreePath, nodeModulesSource },
+      { packageName, worktreePath, nodeModulesSource, ...(outcome ? { outcome } : {}) },
     );
     this.name = "WorktreeNodeModulesRefusedError";
   }
@@ -4732,8 +4736,9 @@ function assertSamePackageInstallInputs(
   repoDir: string,
   worktreePath: string,
   log: ((step: string, extra?: Record<string, unknown>) => void) | undefined,
+  resolveSource = resolveNodeModulesSource,
 ): void {
-  const source = resolveNodeModulesSource(repoDir);
+  const source = resolveSource(repoDir);
   if (!source) return;
   const sourceDir = dirname(source);
   const worktreeName = readPackageName(worktreePath);
@@ -5054,7 +5059,7 @@ function provisionDependencyTree(repoDir: string, worktreePath: string, packageN
  * behaviour; a core worktree reads two names and returns. Never throws: any failure ledgers `deps.install_failed` and keeps
  * today's link, plus W1-T4193's `worktree.node_modules_cross_package` when the implement lane has not already written it. */
 function satelliteNodeModulesSource(repoDir: string, worktreePath: string, opts: WorktreeAddDepsArg): string | undefined {
-  const source = resolveNodeModulesSource(repoDir);
+  const source = (opts.resolveSource ?? resolveNodeModulesSource)(repoDir);
   if (!source || source === join(repoDir, "node_modules")) return undefined;
   const worktreeName = readPackageName(worktreePath);
   const sourceName = readPackageName(dirname(source));
@@ -5792,6 +5797,8 @@ export function worktreeAdd(
     /** W1-T4193: set ONLY by runTaskBody's implement path. Refuses a same-package lockfile mismatch before linking;
      * absent, every caller keeps the warn-and-link baseline byte-identically. */
     refuseSamePackageLockfileMismatch?: boolean;
+    /** Trusted install resolver, shared by the pre-link check and root provisioning. */
+    resolveSource?: (repoDir: string) => string | undefined;
     /** Trusted harness install context; a private fixture may supply its own install, never task data. */
     typecheckInstallRoot?: string;
     typecheckRename?: (from: string, to: string) => void;
@@ -5840,7 +5847,9 @@ export function worktreeAdd(
   logAddedWorktree(deps, branch, worktreePath, createdBase, localRefHead, ref, currency);
   execFileSync("git", ["-C", worktreePath, "config", "--worktree", "core.hooksPath", "hooks"]);
   const satelliteSource = prepareWorktreeDependencies(repoDir, worktreePath, deps);
-  linkWorktreeNodeModules(repoDir, worktreePath, satelliteSource ? { resolveSource: () => satelliteSource } : {});
+  const source = satelliteSource ?? (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
+  const outcome = linkWorktreeNodeModules(repoDir, worktreePath, { resolveSource: () => source });
+  recordWorktreeNodeModules(worktreePath, deps, outcome, source);
   finishWorktreeAdd(repoDir, worktreePath, deps);
   recordCanonicalCheckoutDrift(repoDir, ref, { warn: deps.warn });
 }
@@ -5877,10 +5886,24 @@ function prepareWorktreeDependencies(
   // …and give that hook the `commitlint` it resolves, or it rejects every commit made here. Must run AFTER the hooksPath line
   // and AFTER the worktree exists, and excluding FIRST keeps the link from ever being visible to git as an untracked file.
   exclude();
-  if (deps.refuseSamePackageLockfileMismatch) assertSamePackageInstallInputs(repoDir, worktreePath, deps.log);
+  if (deps.refuseSamePackageLockfileMismatch) assertSamePackageInstallInputs(repoDir, worktreePath, deps.log, deps.resolveSource);
   // A satellite on core's install root gets its OWN lockfile-keyed tree instead; every other worktree links exactly as
   // before, through the unchanged call below (W1-T4260).
   return satelliteNodeModulesSource(repoDir, worktreePath, deps);
+}
+
+function recordWorktreeNodeModules(
+  worktreePath: string,
+  deps: WorktreeAddDepsArg,
+  outcome: NodeModulesLinkOutcome,
+  source: string | undefined,
+): void {
+  deps.log?.("worktree.node_modules", { outcome, source: source ?? null });
+  if (deps.refuseSamePackageLockfileMismatch && (outcome === "no-source" || outcome === "failed") &&
+      existsSync(join(worktreePath, "package.json"))) {
+    const name = readPackageName(worktreePath);
+    throw new WorktreeNodeModulesRefusedError(name.kind === "named" ? name.name : name.kind, worktreePath, source, outcome);
+  }
 }
 
 function finishWorktreeAdd(repoDir: string, worktreePath: string, deps: WorktreeAddDepsArg): void {
@@ -6070,7 +6093,9 @@ export async function worktreeAddAsync(
       return commonDir;
     } });
   });
-  await provisionWorktreeNodeModules(repoDir, worktreePath, satelliteSource ? { resolveSource: () => satelliteSource } : {});
+  const source = satelliteSource ?? (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
+  const outcome = await provisionWorktreeNodeModules(repoDir, worktreePath, { resolveSource: () => source });
+  recordWorktreeNodeModules(worktreePath, deps, outcome, source);
   finishWorktreeAdd(repoDir, worktreePath, deps);
   let drift: CanonicalCheckoutDriftResult;
   try {
