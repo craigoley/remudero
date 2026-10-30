@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.09
   status: queued
@@ -40,3 +40,11 @@
 
     The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
     It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 6 occurrence(s) across 7 day(s), last seen 2026-10-28T05:57:42.630Z, and the record declares no privileged path"
+    judged_at: "2026-10-30T22:53:19.263Z"
+    pin: "ef062c9c8976579c6e677866c9f34877812bcf76adc74bb46d8ea354b41bdd6e"
