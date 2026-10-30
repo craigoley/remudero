@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 import { preflightSummaryPath, type PreflightSummary } from "./ci-parity.js";
-import { captureFeedback, type CaptureFeedbackOptions, type FeedbackEntry } from "./feedback.js";
+import { stageFeedbackCapture, type CaptureFeedbackOptions, type FeedbackEntry } from "./feedback.js";
 import { appendLedger, type LedgerLine } from "./ledger.js";
 import { resolveLedgerUnion, type LedgerGrepFsDeps, type LedgerUnionResult } from "./ledger-grep.js";
 
@@ -214,7 +215,9 @@ export function consumeSourceSizeFollowup(args: ConsumeSourceSizeFollowupArgs): 
   if (priorSignatures(union.matches).has(signature)) return { action: "noop", reason: "duplicate", signature };
 
   try {
-    const entry = (args.capture ?? captureFeedback)(args.root, {
+    const capture = args.capture ?? ((root: string, opts: CaptureFeedbackOptions) =>
+      stageFeedbackCapture(root, dirname(args.stateDir), opts).entry);
+    const entry = capture(args.root, {
       raw: buildSourceSizeFollowupFeedback(classified.hotspots),
       origin: "cli",
       land: args.land,

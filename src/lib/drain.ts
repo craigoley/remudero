@@ -1,11 +1,8 @@
 import { operatorReleaseContractChanged, qualifyReleaseEvidence, releaseContractPins, type ReleaseEvidence } from "./operator-release.js";
-/** `rmd drain` is a bounded, deterministic loop over the proven run-task machinery (WS-1): each pass
- *  resolves the next runnable task from the DAG, runs it through run-task, and repeats. It invents no
- *  orchestration — deps are plan.ts's ({@link unmetDependencies}), status is GitHub-derived
- *  (status.ts), headroom is headroom.ts (W1-T4), and no LLM decides anything.
- *  INVARIANT: the drain stops on any halting verdict, because a blocked task's dependents would build
- *  on missing work. {@link NON_HALTING_VERDICTS} names the six exceptions, {@link haltsDrain} is the
- *  one predicate both loops apply, and skip-and-continue lives in the daemon loop (W1-T46). */
+/** Bounded, deterministic DAG dispatch through run-task (WS-1). Dependencies use
+ *  {@link unmetDependencies}, status is GitHub-derived, and headroom uses headroom.ts (W1-T4).
+ *  INVARIANT: stop on halting verdicts so dependents cannot build on missing work. Both loops use
+ *  {@link haltsDrain} and the six {@link NON_HALTING_VERDICTS}; daemon skip-and-continue is W1-T46. */
 // Why: the stop-on-block rule and the argument behind it (W1-T46) — docs/forensics/drain.md.
 
 import type { RunResult } from "./run-result.js";
@@ -29,20 +26,17 @@ import { measuredDispatchValue, redealFanoutOver, stridePassInputs, type Dispatc
 /** A merged predicate — DERIVED FROM GITHUB in the real runner (status.ts). */
 export type MergedSet = (taskId: string) => boolean;
 
-/** W1-T2675 — which credit path (status.ts's `findMergedByHeadBranch` union) credited an
- *  already-merged task: a trailer, a `run-<taskId>-<epochMs>` head ref, or both. `"head-ref"` alone
- *  must be reportable, because a merge can carry zero trailers and still be credited (#1657). */
+/** W1-T2675: credit from status.ts's `findMergedByHeadBranch` union. Report head-ref-only
+ *  credit too: a merged PR can carry zero trailers (#1657). */
 export type CreditPath = "trailer" | "head-ref" | "both";
 
-/** The evidence behind an `"already-merged"` refusal: which path matched, and the PR it rode in on,
- *  so an operator sees "already shipped as #N (head-ref)" rather than a bare refusal. */
+/** Matched credit path and PR behind an `"already-merged"` refusal. */
 export interface AlreadyMergedCredit {
   path: CreditPath;
   prNumber: number;
 }
 
-/** Names the matched credit path from the SAME status projection that feeds `isMerged`. The
- *  projection's `merged` boolean remains the gate — this only labels a refusal that already fired. */
+/** Label an existing refusal from `isMerged`'s own projection; `merged` remains the gate. */
 export function alreadyMergedCreditFromProjection(
   projection: Partial<Pick<StatusProjection, "merged" | "source" | "prNumber">> | undefined,
 ): AlreadyMergedCredit | undefined {
@@ -53,16 +47,13 @@ export function alreadyMergedCreditFromProjection(
   return undefined;
 }
 
-/** The OPEN PR number for a task's most-recent PR, or undefined when it is merged, closed, or
- *  absent. Backs the in-flight dispatch-dedup guard (W1-T80, the #143/#145 duplicate-build race).
- *  Derived from status.ts's `deriveStatus` projection in the real runner, never a second read path. */
+/** Most-recent PR's number only while OPEN, from status.ts's `deriveStatus`, never a second read.
+ *  Backs in-flight dedup (W1-T80, #143/#145 duplicate-build race). */
 export type OpenPrCheck = (taskId: string) => number | undefined;
 
-/** Task ids with a `run-<id>-<epochMs>` branch on origin, parsed from ONE `git ls-remote --heads
- *  origin 'run-*'` call (W1-T534). INVARIANT: one sweep per pass, never one call per candidate. A
- *  line may be `<sha>\trefs/heads/<branch>`, a bare ref, or a bare branch, and an unparseable one is
- *  skipped so a malformed ref degrades to "not observed". Reuses `taskIdFromRunBranch` (status.ts),
- *  the one tested extractor for this shape. */
+/** W1-T534: parse run-task ids via status.ts's tested `taskIdFromRunBranch`.
+ *  INVARIANT: one `git ls-remote --heads origin 'run-*'` sweep per pass, never per candidate.
+ *  Accept sha-tab-ref, bare ref or branch; malformed lines mean "not observed". */
 // Why: the ref-sweep cost measurement and the anchoring argument (W1-T534) — docs/forensics/drain.md.
 export function runBranchTaskIds(lsRemoteOutput: string): ReadonlySet<string> {
   const ids = new Set<string>();
@@ -77,23 +68,16 @@ export function runBranchTaskIds(lsRemoteOutput: string): ReadonlySet<string> {
   return ids;
 }
 
-/** W1-T4002 — one parsed row from the SAME `git ls-remote --heads origin 'run-*'` output
- *  {@link runBranchTaskIds} reduces straight to a task-id set. This keeps the exact branch name
- *  and, when the line carried one, its head sha — the two fields the plan-only exception below
- *  must compare, because a bare task-id membership test cannot tell a real implementation branch
- *  apart from a proven plan-only filing that merely happens to share the id's spelling. `sha` is
- *  `undefined` for a bare-ref/bare-branch line (no tab), which can never match a receipt (see
- *  {@link planOnlyRunBranchReceipt}) and so never releases the guard — the same fail-toward-
- *  blocking posture {@link runBranchTaskIds} already has for an unparseable line. */
+/** W1-T4002: exact ref/sha from {@link runBranchTaskIds}'s same sweep. Task-id membership alone
+ *  cannot distinguish an implementation from a plan-only filing. A bare ref has no sha and
+ *  cannot release the guard through {@link planOnlyRunBranchReceipt}. */
 export interface PushedRunRef {
   taskId: string;
   ref: string;
   sha?: string;
 }
 
-/** Parses the raw `ls-remote` output into {@link PushedRunRef} rows, one per recognizable
- *  `run-<id>-<epochMs>` line. INVARIANT: same one-read-per-pass discipline as
- *  {@link runBranchTaskIds} — callers parse the SAME string both ways rather than reading twice. */
+/** Parse recognizable run refs; reuse {@link runBranchTaskIds}'s string, never read twice per pass. */
 export function parsePushedRunRefs(lsRemoteOutput: string): readonly PushedRunRef[] {
   const refs: PushedRunRef[] = [];
   for (const rawLine of lsRemoteOutput.split("\n")) {
@@ -109,34 +93,24 @@ export function parsePushedRunRefs(lsRemoteOutput: string): readonly PushedRunRe
   return refs;
 }
 
-/** W1-T4002 — an EXACT `run-<id>-<epochMs>` head ref + head sha that the SAME full sweep pass
- *  positively classified as a plan-only filing (`OpenPrView.isPlanFiling === true`, from a
- *  POSITIVE classification source — see sweep.ts's {@link planOnlyRunBranchReceipts} producer,
- *  never inferred here). Keyed by BOTH fields on purpose: a later push to the same branch name
- *  changes the sha and therefore loses the receipt, which is exactly the "a changed remote tip
- *  immediately loses that exception" invariant this task's design requires. */
+/** W1-T4002: exact ref/sha positively classified as plan-only by the same sweep pass
+ *  (`OpenPrView.isPlanFiling === true`; sweep.ts's {@link planOnlyRunBranchReceipts}).
+ *  Never infer classification here. A changed remote tip immediately loses the exception. */
 export interface PlanOnlyRunBranchReceipt {
   ref: string;
   sha: string;
   prNumber: number;
 }
 
-/** True only when `ref` exactly matches one of `receipts` on BOTH the branch name and the sha — a
- *  ref with no observed sha (a bare `ls-remote` line) never matches, and neither does a ref whose
- *  sha has moved on since the receipt was proven. This is the one-branch, exact-head admission the
- *  task's falsifier turns on and off. */
+/** Match both ref and sha: absent or changed sha never matches. The falsifier toggles this receipt. */
 export function planOnlyRunBranchReceipt(ref: PushedRunRef, receipts: readonly PlanOnlyRunBranchReceipt[]): boolean {
   if (ref.sha === undefined) return false;
   return receipts.some((r) => r.ref === ref.ref && r.sha === ref.sha);
 }
 
-/** W1-T4002 — true when task `taskId`'s raw run-branch guard must STAY BLOCKING: at least one of
- *  its currently observed refs (already filtered to `taskId` by the caller) has no matching
- *  {@link planOnlyRunBranchReceipt}. An empty `refs` array means nothing is pushed for this task at
- *  all, which is not this guard's concern (`false` — never blocking on nothing). A SECOND,
- *  unmatched ref for the same task id — the falsifier's "add a second unmatched run-W1-T999-*
- *  ref" case — keeps this `true` even when the first ref matches a receipt: the exception releases
- *  the exact matching tip, never every branch that merely shares the task's id. */
+/** W1-T4002: block if any ref (caller-filtered to this task) lacks a receipt or orphan release.
+ *  Empty refs never block. Falsifier: a second unmatched run-W1-T999-* ref keeps blocking even
+ *  when the first matches; an exception releases an exact tip, never a whole task id. */
 export function unmatchedRunRefsRemainBlocking(
   refs: readonly PushedRunRef[],
   receipts: readonly PlanOnlyRunBranchReceipt[],
@@ -149,10 +123,8 @@ export function unmatchedRunRefsRemainBlocking(
 /** Default grace before a no-PR run branch stops blocking: long past any single run's wall clock. */
 export const ORPHAN_RUN_BRANCH_GRACE_MS = 24 * 60 * 60 * 1000;
 
-/** The evidence an ORPHANED run ref is released on, read once per pass by the caller. Every field
- *  is data the caller already holds: the automatic branch reaper's persisted no-PR cache (branch
- *  name to the tip sha it PROVED had no pull request), this pass's clock reading, and the task ids
- *  holding a live in-flight lock. */
+/** Orphan release evidence, read once per pass: the reaper's proven no-PR ref/sha cache,
+ *  this pass's clock, and live in-flight task locks. */
 export interface OrphanRunBranchEvidence {
   noPrHeadShas: Readonly<Record<string, string>>;
   nowMs: number;
@@ -164,11 +136,9 @@ export interface OrphanRunBranchEvidence {
   requeuedAtMs?: (taskId: string) => number | undefined;
 }
 
-/** True when one pushed run ref is an ORPHAN that must stop blocking dispatch: its exact tip sha is
- *  the one the reaper proved has no PR (a re-push changes the sha and loses the release), the epoch
- *  its own name carries is older than the grace, and no live run holds the task's lock. Anything
- *  unproven (no sha, no cache row, a non-numeric epoch, no evidence at all) keeps blocking. The
- *  branch is never deleted, so its commits stay on origin; only the duplicate-build guard steps aside. */
+/** Release only a proven no-PR tip, without a live task lock, past grace or requeued since push.
+ *  Missing evidence/sha/cache or malformed epoch keeps blocking; re-push loses the sha proof.
+ *  The branch and its commits stay on origin; only the duplicate-build guard steps aside. */
 export function orphanRunBranchReleased(ref: PushedRunRef, orphan: OrphanRunBranchEvidence | undefined): boolean {
   if (orphan === undefined || ref.sha === undefined) return false;
   if (orphan.noPrHeadShas[ref.ref] !== ref.sha) return false;
@@ -189,12 +159,9 @@ function requeueReleasesRef(ref: PushedRunRef, epochMs: number, orphan: OrphanRu
   return requeuedAt !== undefined && Number.isFinite(requeuedAt) && epochMs <= requeuedAt;
 }
 
-/** W1-T4002 — the ONE decision {@link runDrain}, {@link runDrainLanes} AND daemon.ts's own
- *  dispatch-options builder all make for `hasPushedRunBranch(taskId)`: still blocked when a raw
- *  pushed branch exists for `taskId`, its PR is not CLOSED-AND-UNMERGED (W1-T1207's existing
- *  exclusion), and the plan-only exception above does not release every ref currently observed for
- *  it. Exported and shared rather than reimplemented per caller, so "daemon selection and bounded
- *  drain selection" (this task's own design note) cannot answer the same collision differently. */
+/** W1-T4002: shared `hasPushedRunBranch` decision for {@link runDrain}, {@link runDrainLanes}
+ *  and daemon selection. Block unless every observed ref is closed-unmerged (W1-T1207) or released
+ *  by an exact receipt/orphan proof, so daemon and bounded drain cannot disagree. */
 export function stillBlockedByPushedRunBranch(
   taskId: string,
   pushedRunBranches: ReadonlySet<string> | undefined,
@@ -210,12 +177,9 @@ export function stillBlockedByPushedRunBranch(
   return unmatchedRunRefsRemainBlocking(refsForTask, planOnlyReceipts, orphan);
 }
 
-/** W1-T4002 — ledgers the narrow released collision, once per matched ref, under a distinct
- *  `plan-filing-run-branch-exception` reason (the SAME reason daemon.ts's own dispatch-options
- *  builder names), so an operator can tell "a proven plan-only filing released this tip" from "no
- *  branch read happened" rather than reading a silent non-block. Called only for a task whose
- *  `stillBlockedByPushedRunBranch` answer is `false` AND which actually had a pushed ref — i.e. the
- *  exception, not an absent branch, is what released it. */
+/** W1-T4002: ledger each released collision using daemon's `plan-filing-run-branch-exception`
+ *  reason, distinguishing proven release from an absent read. Call only when pushed refs exist
+ *  and {@link stillBlockedByPushedRunBranch} returned false. */
 export function logPlanOnlyRunBranchException(
   log: (step: string, extra?: Record<string, unknown>) => void,
   taskId: string,
@@ -595,10 +559,8 @@ export interface IdleReasonBucket {
 
 export type IdleReasonTally = Record<DispatchFilterReason, IdleReasonBucket>;
 
-/** Accumulate the filter's declines so an idle daemon can say WHY it is idle. INVARIANT:
- *  FIRST-MATCH, not exhaustive — a task that is both already-merged and `verify != auto` counts only
- *  under `already-merged`, because that is what stopped it. Evaluating every condition would walk
- *  the graph on the hot path to report a reason that was not the blocking one. */
+/** Tally first-match declines only: an already-merged, non-auto task counts under already-merged.
+ *  Exhaustive evaluation would walk the graph on the hot path for reasons that did not block. */
 export function tallyDispatchFilters(): {
   onFiltered: (task: Task, reason: DispatchFilterReason) => void;
   snapshot: () => IdleReasonTally;
@@ -635,26 +597,17 @@ export function tallyDispatchFilters(): {
   };
 }
 
-/** The exact per-task eligibility chain {@link nextRunnable} and {@link runnableCandidates} both
- *  apply, factored out so the two can never drift: a task ineligible for solo dispatch is never
- *  offered as a concurrent candidate. Order matters and is preserved verbatim from `nextRunnable`'s
- *  original walk — see the inline comment on each guard. */
-/** W1-T988 — the BARE repo name, which is canonical here. Normalisation reduces a slug to its last
- *  path segment and never the reverse, because a task carries no owner to compare against. TRAP: a
- *  guard comparing raw strings would strand every task the moment an operator passed
- *  `--repo owner/name`, which `resolveDaemonTarget` documents as accepted input. */
+/** W1-T988: canonical bare repo name; tasks carry no owner to compare.
+ *  TRAP: raw-string comparison strands tasks for `--repo owner/name` (`resolveDaemonTarget`). */
 export function normalizeRepoName(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, "");
   const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
   return lastSegment.toLowerCase();
 }
 
-/** W1-T988 — does this task belong to the repo this daemon targets? A safety guard on a
- *  single-target daemon: not multi-repo support, not routing, not the second checkout those would
- *  need. The failure it closes is a plausible-looking pull request rather than an error — a foreign
- *  task handed to a worker whose worktree is a `remudero` checkout edits the wrong tree and opens a
- *  PR against the wrong repository, with nothing flagging it. INVARIANT: an absent target means NO
- *  GUARD, never refuse-all, because a guard that defaults to refusing stops the fleet. */
+/** W1-T988: single-target safety guard, not multi-repo routing. Foreign tasks would otherwise edit
+ *  the wrong checkout and open plausible PRs against the wrong repo. Absent target means no guard,
+ *  never refuse-all, which would stop the fleet. */
 // Why: the measured zero `repo` reads that made this reachable (W1-T988) — docs/forensics/drain.md.
 export function taskTargetsRepo(taskRepo: string | undefined, targetRepo: string | undefined): boolean {
   if (targetRepo === undefined || targetRepo.trim() === "") return true; // no target ⇒ no guard
@@ -662,6 +615,8 @@ export function taskTargetsRepo(taskRepo: string | undefined, targetRepo: string
   return normalizeRepoName(taskRepo) === normalizeRepoName(targetRepo);
 }
 
+/** Shared, ordered eligibility chain for {@link nextRunnable} and {@link runnableCandidates}.
+ *  Solo-ineligible tasks must never become concurrent candidates; guard order is load-bearing. */
 function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: NextRunnableOpts): boolean {
   const merged: import("./plan.js").MergedResolver = (task) => isMerged(task.id);
   // THE FORMERLY-SILENT DECLINES. `opts.onFiltered` is observation ONLY — every `return false`
@@ -808,12 +763,9 @@ function taskPreconditionHolds(task: Task, opts: NextRunnableOpts): boolean {
   return false;
 }
 
-/** Up to `limit` runnable tasks, packed disjointness-first ({@link packDisjointFirst}, W1-T476) over
- *  {@link dispatchOrder} — the multi-candidate generalization of {@link nextRunnable} for the
- *  concurrent dispatcher (W1-T171/W1-T172). `limit <= 0` yields an empty array. INVARIANT: it applies
- *  the EXACT chain {@link isDispatchEligible} applies. It does not decide overlap ADMISSION — that
- *  stays dispatch-overlap.ts's — but consults the same predicate to choose WHICH candidates to
- *  offer, so a disjoint set is not truncated away first. */
+/** W1-T171/W1-T172: up to `limit` candidates through {@link isDispatchEligible}; nonpositive yields [].
+ *  {@link packDisjointFirst} (W1-T476) packs {@link dispatchOrder} without truncating disjoint work.
+ *  Admission stays in dispatch-overlap.ts; selection consults its same overlap predicate. */
 export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts = {}): Task[] {
   if (limit <= 0) return [];
   const eligible = dispatchEligibleCandidates(plan, isMerged, opts);
@@ -853,14 +805,11 @@ export function runnableCandidateIds(plan: Plan, isMerged: MergedSet, opts: Next
   return new Set(dispatchEligibleCandidates(plan, isMerged, opts).map((task) => task.id));
 }
 
-/** W1-T476's greedy disjointness-first pack: fills up to `limit` slots from `eligible` (already in
- *  {@link dispatchOrder}), each slot preferring the earliest remaining candidate that stays
- *  `files:`-disjoint from everything collected and every `inFlight` task (W1-T8502) — checked via the
- *  real `partitionByFileOverlap`, never a re-derived glob comparison — and otherwise falling back to the
- *  next in dispatchOrder. An `inFlight` id is never collected.
- *  INVARIANT (determinism): the scan always takes the first match in `remaining`'s current order.
- *  INVARIANT (stability containment): with no two candidates pairwise disjoint, the result is
- *  byte-identical to plain truncation. The pack never reorders what it cannot improve. */
+/** W1-T476: fill up to `limit` slots, preferring the first remaining candidate disjoint from
+ *  collected and `inFlight` tasks (W1-T8502), using the real `partitionByFileOverlap`.
+ *  Never collect an in-flight id. Fall back to dispatchOrder when none is disjoint.
+ *  INVARIANTS: first-match determinism; with no pairwise-disjoint candidates, plain truncation
+ *  is preserved byte-for-byte. Never reorder what the pack cannot improve. */
 // Why: the measured 1/1/1 admissions plain truncation produced at lanes 2/3/4 — docs/forensics/drain.md.
 function packDisjointFirst(
   eligible: readonly Task[], limit: number, observedByTask: ObservedScopeByTask, inFlight: readonly Task[],
@@ -987,10 +936,9 @@ function backfillVerdict(
   return { ...withDuration, ...(startMs !== undefined ? { startMs } : {}) };
 }
 
-/** True iff `candidate`'s EFFECTIVE scope (declared `files:` unioned with `observedByTask`, W1-T2286)
- *  overlaps none of `collected`'s — one pairwise `partitionByFileOverlap` check per collected task,
- *  so an undeclared-scope task never passes once anything is collected. `observedByTask` must be the
- *  SAME map the caller later hands that partition; see {@link runnableCandidates}. */
+/** W1-T2286: pairwise effective-scope checks (declared + observed) via `partitionByFileOverlap`.
+ *  Undeclared scope cannot pass a nonempty collection. Use the downstream partition's same
+ *  `observedByTask` map; see {@link runnableCandidates}. */
 function isDisjointFromEvery(collected: readonly Task[], candidate: Task, observedByTask: ObservedScopeByTask): boolean {
   return collected.every((c) => partitionByFileOverlap([c, candidate], observedByTask).dispatch.length === 2);
 }
@@ -1030,22 +978,18 @@ export interface DrainOpts {
   max?: number;
   /** ≥ this % on any window ⇒ headroom_exhausted (default HEADROOM_LIMIT_PCT). */
   headroomLimitPct?: number;
-  /** A CURATED selection (W1-T140): an explicit ordered list of task ids. When present, dispatch
-   *  iterates exactly this list in this order, in place of {@link nextRunnable}'s DAG scan; an id it
-   *  omits never dispatches. An INPUT to the existing loop, not a reimplementation — build it with
-   *  {@link applyCuratedSelection} so `max` stays consistent with the selection's `depth`. */
+  /** W1-T140: dispatch only these ids, in this order, instead of {@link nextRunnable}'s DAG scan.
+   *  Build with {@link applyCuratedSelection} to keep `max` consistent with `depth`. */
   curated?: string[];
   /** W1-T172 PARALLEL DISPATCH — concurrent lanes per pass (`SweepPolicy.dispatchLanes`, one
    *  threshold home). Omitted or <= 1 runs {@link runDrain}'s single-task loop byte-for-byte. */
   laneCount?: number;
-  /** W1-T172: the queue governor's WIP ceiling (`SweepPolicy.wipLimit`, W1-T121), consulted alongside
-   *  `laneCount` on the multi-lane path. THE GOVERNOR IS THE CEILING, NOT A SUGGESTION: a pass never
-   *  dispatches past `min(laneCount, wipLimit - open count)`. Never consulted on the single-lane path. */
+  /** W1-T172/W1-T121: multi-lane ceiling from `SweepPolicy.wipLimit`.
+   *  Never exceed `min(laneCount, wipLimit - open count)`; unused on the single-lane path. */
   wipLimit?: number;
-  /** W1-T290: the headroom governor switch — the same posture `DaemonOpts.headroomEnabled` reads
-   *  (config.ts's `resolveHeadroomEnabled`, operator ruling fb-1784894405468-a4153e). INVARIANT: it
-   *  gates ONLY the unreadable-degraded ceiling below; the at/near-limit stop is unconditional on
-   *  both loops. Defaults to true, so an unconfigured caller is unchanged. */
+  /** W1-T290: default true, matching `DaemonOpts.headroomEnabled` / `resolveHeadroomEnabled`
+   *  (operator fb-1784894405468-a4153e). Gates only unreadable-degraded stops;
+   *  at/near-limit stops remain unconditional in both loops. */
   headroomEnabled?: boolean;
   /** W1-T290: CONSECUTIVE unreadable `/usage` reads tolerated before `headroom_degraded` (default
    *  {@link UNREADABLE_DEGRADED_LIMIT}, shared with the daemon). One good read resets the count. */
@@ -1069,29 +1013,24 @@ export function applyCuratedSelection(opts: DrainOpts, selection: CuratedSelecti
   return { ...opts, curated, max };
 }
 
-/** Default iteration cap — a sane bound, never infinite. W1-T253: it mirrors `plan/policy.yaml`'s
- *  `drain.max` but stays a LITERAL, because daemon.ts imports this module at the value level and its
- *  own header requires that it never touch the filesystem (Rule 16). The real CLI entries load
- *  `drain.max` and thread it in, so this constant is dead on that path (test/policy-consumers.test.ts). */
+/** W1-T253: finite fallback matching `plan/policy.yaml`'s `drain.max`. Keep literal: daemon.ts
+ *  imports this module and requires no filesystem I/O (Rule 16). CLI entries inject policy instead.
+ *  Falsifier: test/policy-consumers.test.ts. */
 export const DEFAULT_MAX = 10;
 
 export interface DrainSummary {
   attempted: string[];
   merged: string[];
-  /** Tasks that did NOT merge and did NOT halt the drain — see {@link NON_HALTING_VERDICTS}.
-   *  INVARIANT: separate from `merged` on purpose. A continued task's work is pushed but not merged,
-   *  so crediting it here would make its dependents dispatchable against work that has not landed.
-   *  Optional for diff hygiene only — every reader treats absent and empty the same. */
+  /** Non-merged, non-halting tasks ({@link NON_HALTING_VERDICTS}). Keep separate from `merged`:
+   *  continued work cannot satisfy dependents before landing. Readers treat absent as empty. */
   continued?: Array<{ taskId: string; verdict: string; prUrl?: string }>;
   stopReason: StopReason;
   /** Human detail: the blocked task + verdict, the reset time, the error, etc. */
   stopDetail?: string;
   /** Caller-only non-enumerable fatal reason for classification, including falsy throws. */
   error?: unknown;
-  /** How many candidates the FINAL selection declined as INDETERMINATE (W1-T119) — a gateway that
-   *  could not ANSWER, never a task that is genuinely ineligible. Reset each pass. A `no_runnable`
-   *  with this at 0 is a genuinely empty frontier; the same verdict with it non-zero is a fleet that
-   *  could not SEE. It is a number for `drainCommand`, and changes nothing about what is dispatched. */
+  /** W1-T119: final selection's indeterminate gateway reads, reset each pass. With `no_runnable`,
+   *  zero means empty frontier; nonzero means unreadable. Observation for `drainCommand` only. */
   indeterminateDeclines?: number;
   costUsd: number;
   resumeCommand: string;
@@ -1127,22 +1066,12 @@ export const SPAWNED_COMMAND_FAILED_RE = /^Command failed: /;
  *  keeps today's fatal path (test/daemon.test.ts "W1-T3165 ... auth refusals ... remain fatal"). */
 export const CREDENTIAL_REFUSAL_RE = /Bad credentials|HTTP 401|Authentication failed|could not read Username|Permission denied \(publickey\)/i;
 
-/**
- * W1-T5344 — ONE TASK'S DELIVERY FAILURE ENDS ITS LANE, NOT THE PROCESS. Measured 2026-09-25..10-02:
- * 47 daemon boots were exit 76 (pre-push hook refusals, PR-create 422s, commit-hook refusals,
- * `git rev-parse` fatals) and 6 were exit-1 crashes on `openPullRequestChecked`'s merge-base proof
- * refusal, and the same task ended the process again on the next boot.
- *
- * Two shapes, both PER TASK by construction: a spawned command's failure (`Command failed: `),
- * and pr-open.ts's `PrOpenRefusedError`, matched by its class name and `refusalClass` tag, never by
- * its prose — duck-typed like {@link isWorktreeNodeModulesRefusal}, because importing pr-open.ts
- * here closes a daemon → drain → pr-open → self-sync → daemon ring. NOT matched, so they
- * stay crashes: an in-process throw (a TypeError is rmd's own defect and recurs on every task,
- * W1-T2546 criterion 3), a non-Error value, and a credential refusal ({@link CREDENTIAL_REFUSAL_RE}).
- * Callers check their transient / spawn-infra / read-failure arms FIRST, so this never shadows a
- * backoff richer than a per-task park. Shared by `runDrainLanes` and the daemon's settle loop so
- * `rmd drain` and the daemon classify the same rejection the same way.
- */
+/** W1-T5344: end only the failed lane for `Command failed: ` or `PrOpenRefusedError`.
+ *  Repeated delivery-refusal crashes previously restarted the daemon on the same task.
+ *  Match PR refusals by name/tag, not prose; importing pr-open.ts creates a
+ *  daemon → drain → pr-open → self-sync → daemon cycle (cf. {@link isWorktreeNodeModulesRefusal}).
+ *  In-process defects (W1-T2546 criterion 3), non-Errors and {@link CREDENTIAL_REFUSAL_RE} stay fatal.
+ *  Callers check transient/spawn-infra/read-failure backoffs first. Shared with daemon settlement. */
 export function laneDeliveryFailure(err: unknown): LaneDeliveryFailure | undefined {
   if (isPrOpenRefusal(err)) return { failureClass: "pr_open_refused", firstLine: firstLineOf(err.message) };
   if (!(err instanceof Error) || !SPAWNED_COMMAND_FAILED_RE.test(err.message)) return undefined;
@@ -1174,23 +1103,15 @@ function firstLineOf(message: string): string {
   return line.length <= 240 ? line : `${line.slice(0, 239)}…`;
 }
 
-/** Verdicts that are NOT `merged` and yet must NOT stop the drain. The header justifies
- *  stop-on-block as "a blocked task's DEPENDENTS would build on missing work", and each member is
- *  here because that justification does not apply to it:
- *    - `blocked_ci`          — the work was pushed and the PR left open.
- *    - `awaiting_merge`      — the PR is already armed and green; GitHub has not materialized it.
- *    - `handed_off`          — the PR was opened and the runner yielded for source refresh; its
- *                              merge and review remain with the PR pipeline.
- *    - `no_pr`               — the task did not advance, so dependents face the state they started
- *                              from, and `unmetDependencies` protects them regardless.
- *    - `blocked_illformed`   — the linter refused BEFORE dispatch, at `costUsd: 0`.
- *    - `task_already_merged` — the task is DONE, so its dependents CAN build on it.
- *  INVARIANT: nothing is credited by being here. Membership means "keep going", never "this task is
- *  done" — `continued` is deliberately not `merged`, and the dependency filter is unchanged.
- *  Re-dispatch stays bounded by `isDispatchBreakerTripped` and `isLifetimeDispatchCapExceeded`
- *  (status.ts), and within a pass `excludeIds` never re-offers a continued task.
- *  `awaiting_merge` and `handed_off` are deliberately non-crediting: the next projection's
- *  material merge evidence is the only authority that can satisfy dependents. */
+/** Non-merged verdicts that keep the drain running without crediting completion:
+ *  `blocked_ci`: pushed, PR open; `awaiting_merge`: armed/green, awaiting material merge;
+ *  `handed_off`: PR opened, source-refresh yield, review/merge owned by the PR pipeline;
+ *  `no_pr`: no advance, still protected by `unmetDependencies`;
+ *  `blocked_illformed`: lint refusal before dispatch at zero cost; `task_already_merged`: done.
+ *  INVARIANT: membership never credits work. Keep `continued` separate from `merged` and require
+ *  the next projection's material merge evidence for dependents, including awaiting/handoff cases.
+ *  status.ts's `isDispatchBreakerTripped` / `isLifetimeDispatchCapExceeded` bound re-dispatch;
+ *  `excludeIds` prevents re-offering continued tasks within a pass. */
 // Why: the verdicts argued one by one, the reversal on `no_pr`, and the measured surrendered
 // budgets (W1-T388, W1-T392, W1-T393, W1-T24) — docs/forensics/drain.md.
 export const NON_HALTING_VERDICTS: ReadonlySet<string> = new Set([
@@ -1202,22 +1123,17 @@ export const NON_HALTING_VERDICTS: ReadonlySet<string> = new Set([
   "task_already_merged",
 ]);
 
-/** Should this result stop the drain? `merged` never does; a non-merged verdict does unless it is in
- *  {@link NON_HALTING_VERDICTS}. Extracted rather than inlined at the two loop sites so both decide
- *  with ONE predicate — a halt rule that differed between them would be invisible until a lane count
- *  changed, and those two paths drifting apart is a documented hazard in this file. */
+/** Shared halt rule: merged never halts; otherwise only {@link NON_HALTING_VERDICTS} continue.
+ *  One predicate prevents hidden behavior changes when lane count changes. */
 export function haltsDrain(result: { merged: boolean; verdict: string }): boolean {
   if (result.merged) return false;
   return !NON_HALTING_VERDICTS.has(result.verdict);
 }
 
-/** The `stopDetail` for a `no_runnable` stop: was the frontier READ AND EMPTY, or merely UNREADABLE?
- *  Both end the drain the same way and, until this existed, printed the same single word. A COUNT,
- *  NOT A SHARE: the drain loops wire no `onFiltered`, so there is no denominator, and {@link
- *  DispatchFilterReason} has no indeterminate bucket to supply one. INVARIANT: it always returns a
- *  sentence, including for zero. There is NO file-overlap arm, deliberately: the lanes loop's third
- *  `no_runnable` is unreachable with non-empty `candidates`, and a sentence for a population nothing
- *  can observe is a bound that fires on a healthy state. */
+/** Distinguish empty from unreadable frontier in `no_runnable` detail; always return a sentence.
+ *  Count, not share: loops wire no `onFiltered` denominator, nor does {@link DispatchFilterReason}
+ *  supply an indeterminate bucket. No overlap arm: the lanes loop's third `no_runnable` is
+ *  unreachable with nonempty candidates, so overlap would misdiagnose a healthy state. */
 export function noRunnableDetail(counts: { indeterminate: number }): string {
   if (counts.indeterminate > 0) {
     return `${counts.indeterminate} candidate(s) declined as INDETERMINATE: the frontier could not be READ (the GitHub gateway did not answer), so this is not evidence of an empty queue`;
@@ -1225,14 +1141,10 @@ export function noRunnableDetail(counts: { indeterminate: number }): string {
   return "frontier read cleanly: 0 candidates declined as indeterminate, so the queue is genuinely empty";
 }
 
-/** The `headroom_degraded` stop detail — what an operator reads when a drain surrenders its budget.
- *  TRAP: it does not claim the probe was unreadable, because this code cannot see that.
- *  `readUsageSnapshot` fails in two ways it keeps apart (`UsageProbeFailureStage` is
- *  `"spawn" | "parse"`) and both return undefined, so only one bit survives to here, and naming a
- *  stage over that bit would point an operator at a broken API when the fault may be a parser. So it
- *  names the row that DOES know: `usage.probe_failed`, written durably by `ledgerUsageProbeFailure`
- *  (run-task.ts). INVARIANT: one builder, two call sites, because a hand-copied sentence at each is
- *  the drift this repo argues against. FALSIFIER: test/headroom-degraded-message.test.ts. */
+/** Shared `headroom_degraded` detail for both loops. TRAP: `readUsageSnapshot` returns undefined
+ *  for both spawn and parse failures (`UsageProbeFailureStage`); naming either here misdiagnoses.
+ *  Point to `usage.probe_failed`, durably written by run-task.ts's `ledgerUsageProbeFailure`.
+ *  FALSIFIER: test/headroom-degraded-message.test.ts. */
 export function headroomDegradedDetail(consecutive: number, limit: number): string {
   return (
     `usage probe failed ${consecutive}x consecutively (limit ${limit}) — ` +
@@ -1324,6 +1236,10 @@ function nextCurated(
     if (isMerged(id)) continue;
     const t = plan.byId.get(id);
     if (!t) continue;
+    if (opts.isIndependentFailureBlocked?.(id)) {
+      opts.onFiltered?.(t, "blocked");
+      continue;
+    }
     if (!taskPreconditionHolds(t, opts)) continue;
     // Same indeterminate-read semantics as the natural path (W1-T119): a curation-panel selection
     // is still dispatch, and must not re-run work whose own GitHub read failed.
@@ -1379,19 +1295,10 @@ export interface PrefetchedLiveStates {
   timedOut: ReadonlySet<string>;
 }
 
-/**
- * W1-T5719 — read every in-flight candidate's live PR state CONCURRENTLY and OFF THE LOOP, before
- * the synchronous selectors rank anything. Selection used to call a synchronous reader once per
- * candidate (about 45 s of the 490 s freeze after the 10-04 19:09 boot); now the reads overlap, each
- * bounded by `timeoutMs`, and the loop stays responsive while they are in flight.
- *
- * INVARIANT: a read that times out, rejects, or throws is `undefined` — EXACTLY what a failed read
- * was before — and `isDispatchEligible` treats `undefined` as "still in flight, skip it". The failure
- * mode stays a skip, never a dispatch. Only tasks the plan holds an open PR for, and that are not
- * already merged, are read — the same population the per-candidate walk could ever have reached.
- * A synchronous reader still works (its value is simply awaited); it cannot be interrupted, but it
- * never could be.
- */
+/** W1-T5719: prefetch unmerged, open-PR candidates concurrently before synchronous selection.
+ *  Per-candidate synchronous reads previously froze the loop; each async read now has `timeoutMs`.
+ *  INVARIANT: timeout/rejection/throw yields undefined; `isDispatchEligible` skips unknown in-flight
+ *  work, never dispatches it. Synchronous readers remain supported but cannot be interrupted. */
 export async function prefetchLiveStates(
   plan: Plan,
   isMerged: MergedSet,
@@ -1464,12 +1371,9 @@ export interface RundownLine {
   escalation?: { issueUrl: string; class: string };
 }
 
-/** Build the post-drain rundown (W1-T141): one classified outcome line per `summary.attempted` task,
- *  in attempt order — the pull-view counterpart to digest.ts's push summary. A merged id classifies
- *  `"merged"`; a non-merged one classifies `"escalated"` when the ledger carries an
- *  `escalation.issue_opened` line naming it (escalate.ts), else `"blocked"`. Lookup is task-id-keyed,
- *  latest-wins — the same dedup key ops.ts and digest.ts use. `ledgerLines` defaults to none, so a
- *  caller with no ledger still gets a correct merged/blocked split. */
+/** W1-T141: attempt-ordered rundown, the pull counterpart to digest.ts's push summary.
+ *  Merged wins, then latest task-keyed `escalation.issue_opened` (as in ops.ts/digest.ts), else blocked.
+ *  Without ledger lines, retain the merged/blocked split. */
 export function buildRundown(summary: DrainSummary, ledgerLines: ReadonlyArray<Record<string, unknown>> = []): RundownLine[] {
   const merged = new Set(summary.merged);
   const escalationByTask = new Map<string, { issueUrl: string; class: string }>();
@@ -1514,10 +1418,8 @@ export interface DrainDeps extends TaskPreconditionOptions {
   buildDispatchValueContext?: (plan: Plan, isMerged: MergedSet) => DispatchValueContext | undefined;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: () => MergedSet;
-  /** W1-T3216 — the ledger's RAW lines, for {@link resolveReleasedIds}. A seam, not a file read:
-   *  this module has no `fs` import and keeps none, so every I/O stays the caller's (`drainCommand`
-   *  wires the real reader). ABSENT = today's behaviour exactly, an empty released set — a door
-   *  that is never opened, never a wall that comes down. */
+  /** W1-T3216: raw ledger lines for {@link resolveReleasedIds}; absent means no releases.
+   *  Keep I/O in the caller (`drainCommand`), never add an `fs` import here. */
   readLedgerLines?: () => readonly string[];
   /** W1-T10348 — the operator releases kept in state/operator-releases.json, where rotation cannot shed
    *  them. A seam like `readLedgerLines`; absent, only the ledger's rows release. */
@@ -1528,10 +1430,8 @@ export interface DrainDeps extends TaskPreconditionOptions {
   /** W1-T2675 — the credit-read-failed probe, resolved by the CALLER from the projection
    *  `refreshMerged` builds, exactly as `isOpenPr` is: this module never reads GitHub. Optional. */
   isCreditIndeterminate?: (taskId: string) => boolean;
-  /** W1-T2397 — the open-sibling OBSERVATION's two halves, forwarded verbatim to {@link
-   *  NextRunnableOpts.openSiblingBuildFor} / {@link NextRunnableOpts.onOpenSiblingBuild}. INVARIANT:
-   *  these are not `isOpenPr` and must not be folded into it — they are consulted only after a task
-   *  has been chosen and cannot change what is dispatched. */
+  /** W1-T2397: forward to {@link NextRunnableOpts.openSiblingBuildFor} / `onOpenSiblingBuild`.
+   *  Observation after selection only; never fold into `isOpenPr` or change dispatch. */
   openSiblingBuildFor?: NextRunnableOpts["openSiblingBuildFor"];
   onOpenSiblingBuild?: NextRunnableOpts["onOpenSiblingBuild"];
   /** W1-T177: an OPTIONAL fresh, live re-read of one candidate in-flight PR's GitHub state — see
@@ -1543,36 +1443,25 @@ export interface DrainDeps extends TaskPreconditionOptions {
   /** W1-T1035: an OPTIONAL fresh re-check of whether a just-observed MERGED PR credits the task it
    *  was opened for — see {@link NextRunnableOpts.isLiveMergeCredited} for the discrimination. */
   isLiveMergeCredited?: (taskId: string, prNumber: number) => boolean;
-  /** W1-T916/W1-T3722 — raw `git ls-remote --heads origin 'run-*'` output, read once for the
-   *  initial selection and refreshed after non-merged work, then parsed by {@link runBranchTaskIds}
-   *  into the closure {@link NextRunnableOpts.hasPushedRunBranch} consumes. INVARIANT: injected
-   *  rather than executed here, because THIS MODULE IS PURE. TRAP: it is a READER, not a predicate
-   *  — a predicate would satisfy the type while making the per-candidate call the design refuses.
-   *  Optional. */
+  /** W1-T916/W1-T3722: injected `git ls-remote --heads origin 'run-*'` output; this module stays pure.
+   *  Read initially and after non-merged work, then parse via {@link runBranchTaskIds} for
+   *  {@link NextRunnableOpts.hasPushedRunBranch}. TRAP: a predicate permits per-candidate I/O. */
   readPushedRunBranches?: () => string;
-  /** W1-T1207/W1-T3722: raw `pulls?state=closed` rows for the same run-branch sweep above — one
-   *  batched read for the initial selection and refreshed after non-merged work, parsed by
-   *  {@link closedUnmergedRunBranchRefs} into the set the
-   *  caller subtracts from `readPushedRunBranches`' blocking set. INVARIANT: this FAILS TOWARD STILL
-   *  BLOCKING, the opposite of `readPushedRunBranches`' own fail-open — a throw degrades to `""`, an
-   *  empty exclusion set, so every pushed branch keeps blocking. A false block delays one task; a
-   *  false dispatch races a live run. Optional. */
+  /** W1-T1207/W1-T3722: batched `pulls?state=closed` rows, refreshed with run branches and parsed by
+   *  {@link closedUnmergedRunBranchRefs}. Unlike the branch reader's fail-open, throws mean "":
+   *  no exclusions, all pushed refs still block. False blocks delay; false dispatch races live work. */
   // Why: the five operator-closed exclusions that motivated it (W1-T1207) — docs/forensics/drain.md.
   readClosedRunBranchPrs?: () => string;
-  /** W1-T4002 — the bounded set of CURRENT plan-only filing receipts the SAME full sweep pass this
-   *  selection is deciding for already proved, when a caller has one to offer — see sweep.ts's
-   *  `planOnlyRunBranchReceipts` for the producer and {@link unmatchedRunRefsRemainBlocking} for the
-   *  consumer. Read once per pass, alongside `readPushedRunBranches`, never per candidate. NO READER
-   *  WIRED (the plain `rmd drain` command runs no full sweep to draw one from) means every pushed run
-   *  branch keeps blocking exactly as before this task — never a silently permissive default. */
+  /** W1-T4002: current sweep's bounded `planOnlyRunBranchReceipts`, consumed by
+   *  {@link unmatchedRunRefsRemainBlocking}. Read once per pass with run branches, never per candidate.
+   *  Without a reader (plain `rmd drain` has no full sweep), pushed branches keep blocking. */
   readPlanOnlyRunBranchReceipts?: () => readonly PlanOnlyRunBranchReceipt[];
   /** The ORPHAN release's evidence ({@link orphanRunBranchReleased}), read with the branch sweep.
    *  Absent means no ref is released as an orphan, exactly the behaviour before it existed. */
   readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
-  /** W1-T2286: the same {@link ObservedScopeByTask} threaded to {@link
-   *  NextRunnableOpts.observedByTask} for the pack step AND to `partitionByFileOverlap`'s direct call
-   *  in {@link runDrainLanes} — one dependency read twice, so the pack and the partition never
-   *  disagree about a task's effective scope. Optional; both fall back to `NO_OBSERVED_SCOPE`. */
+  /** W1-T2286: share {@link ObservedScopeByTask} between {@link NextRunnableOpts.observedByTask}'s
+   *  pack and {@link runDrainLanes}' direct `partitionByFileOverlap`; both default to `NO_OBSERVED_SCOPE`.
+   *  Selection and admission must agree on effective scope. */
   observedByTask?: ObservedScopeByTask;
   /** The per-task dispatch CIRCUIT BREAKER (P29(ii)), re-derived from the ledger each call — the
    *  same freshness contract as `refreshMerged`/`isOpenPr`. Optional. */
@@ -2759,3 +2648,18 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   }
   return summary("max_reached", `${max} task(s)`);
 }
+
+/** W1-T10799: the types of ONE bounded native job for a managed target, owned beside the drain that runs it. */
+export type TargetJobStatus = "queued" | "admitted" | "ended" | "refused";
+/** The durable record of ONE job, keyed by the kick origin `ProductBuildService` mints for the request. */
+export interface TargetJobRecord {
+  origin: string; taskId: string; repo: string; status: TargetJobStatus;
+  /** How many times the drain was entered for this job; a replay never raises it past a dispatch that happened. */
+  attempts: number; updatedAt: string; reason?: string; stopReason?: string;
+  owner?: string; planRevision?: string; runId?: string;
+}
+/** `unreadable` is its own state: a record this process cannot read is never "no job", so it can never respend. */
+export type TargetJobRead = { state: "found"; record: TargetJobRecord } | { state: "absent" } | { state: "unreadable" };
+/** Who may run a target repository's task: this daemon natively, its own live instance, or nobody. */
+export type TargetJobAdmission =
+  | { state: "native"; owner: string } | { state: "own_instance"; instance: string } | { state: "not_enrolled" } | { state: "unreadable" };

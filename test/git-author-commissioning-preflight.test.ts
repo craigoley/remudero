@@ -66,6 +66,7 @@ const DOCKER_STUB = [
   '    d="$W/$name"; mkdir -p "$d/home"; : > "$d/env"; : > "$d/mounts"',
   '    for e in "${envs[@]}"; do',
   '      if [ -n "${STUB_RUN_ENV_DROP:-}" ] && [ "${e%%=*}" = "$STUB_RUN_ENV_DROP" ]; then continue; fi',
+  '      case "$e" in *=*) ;; *) [ "${!e+x}" ] || continue; e="$e=${!e}" ;; esac',
   "      printf '%s\\n' \"$e\" >> \"$d/env\"",
   "    done",
   "    for m in \"${mounts[@]}\"; do printf '%s\\t%s\\ttrue\\n' \"${m%%:*}\" \"${m#*:}\" >> \"$d/mounts\"; done",

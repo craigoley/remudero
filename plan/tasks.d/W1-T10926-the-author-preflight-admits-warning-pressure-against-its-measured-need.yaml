@@ -1,0 +1,71 @@
+- id: W1-T10926
+  title: "THE MAC AUTHOR PREFLIGHT REFUSES ON ANY macOS MEMORY-PRESSURE WARNING — four author runs on 2026-10-28 printed NOT_RUN with reasons [\"pressure:warning\"] while disk was above the measured reserve, and every one then passed rmd preflight --fast 28/28; the full author entry admits a warning against the run's own measured memory and swap need, and keeps refusing when the Mac really is starved"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  band_meaning: span
+  origin: "operator session 2026-10-28: four agents could not run the CLAUDE.md before-you-push author preflight on the operator's Mac"
+  plan_refs: [W1-T10765, W1-T7809]
+  files:
+    - scripts/lib/mac-author-admission.mjs
+    - test/infra/the-author-preflight-admits-warning-pressure-against-its-measured-need.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-28 on the Mac mini (16 GiB RAM), read at origin/main 170ef90ef.
+    - Four separate author runs printed `author preflight NOT_RUN` with reserveBasis measured-entry,
+      minimumFreeBytes 11274289152 and reasons ["pressure:warning"]. Workspace free was 12.4, 23.0 and 28.9 GB in
+      the three refusals whose JSON survived, all above that reserve. A fourth refused at measured-static-preflight
+      with the same reason. Each then passed `bin/rmd preflight --fast` 28/28. The refusal is MEMORY pressure, not
+      disk: the disk reserve was already sized to its measurement by W1-T10765.
+    - readMacAuthorAdmission (scripts/lib/mac-author-admission.mjs) pushes `pressure:<state>` for any
+      kern.memorystatus_vm_pressure_level other than 1 (normal), and the full author entry is "normal-only"
+      (readMacFocusedAdmission's own comment). Only the bounded focused runner (at most 4 files, 120 s) has a
+      measured exception under warning: three samples of free+inactive headroom, no new swap-out, and a swap-in
+      rate ceiling (judgeFocusedMacSamples).
+    - THE POPULATION THIS BOUND PROTECTS AGAINST HAS BEEN OBSERVED, so the bound is not simply a healthy-condition
+      bound and must not be removed:
+      - /Library/Logs/DiagnosticReports/JetsamEvent-2026-10-26-194859.ips: 182 processes killed with reason
+        "low-swap".
+      - JetsamEvent-2026-10-26-130344.ips: largestProcess "tsc", reason "per-process-limit".
+      - panic-full-2026-10-27-063743.0002.panic: "userspace watchdog timeout: no successful checkins from
+        WindowServer ... in 122 seconds". That is the 10-27 unexpected restart. Memory starvation is consistent
+        with it but NOT proven.
+      - At 13:20Z on 10-28 swap read 7.4 of 8 GiB used with 0.77 GiB free, while pressure read normal.
+    - So a single pressure flag both over-refuses (warning with room to spare) and under-protects (normal with swap
+      nearly exhausted, the low-swap jetsam reason).
+  design: |
+    1. MEASURE FIRST, as W1-T10765 did for disk. Record the full author preflight's peak memory need on the Mac
+       (summed RSS of its process tree and swap growth, sampled every 5 s) for a plan-only and an affected-narrow
+       selection. Put the numbers in the PR body and in a measured table beside MAC_AUTHOR_MEASURED_PEAK_BYTES. A
+       selection with no measured row keeps today's normal-only rule.
+    2. Under `pressure:warning` with a measured selection, the full author entry takes the focused runner's sampled
+       path, priced at the measured need instead of the focused budget. Admit only when every sample's
+       free+inactive headroom covers the measured need times a safety factor, swap free covers the measured swap
+       growth, no new swap-out occurs while sampling, and a fresh read after sampling still agrees.
+    3. `critical` and `unknown` pressure still refuse, as does a sampling failure.
+    4. ADD the swap-free check to the normal path too, from the same measurement, so a normal flag with swap nearly
+       full is refused. That is the low-swap condition jetsam acted on.
+    5. A refusal names the measured need, the observed headroom and swap free, and which check failed.
+  acceptance:
+    - claim: "a measured selection under warning pressure with ample headroom and swap is admitted"
+      proof: 'grep: test("W1-T10926: warning pressure is admitted when headroom and swap cover the measured need" in test/infra/the-author-preflight-admits-warning-pressure-against-its-measured-need.test.ts'
+    - claim: "a normal pressure reading with swap below the measured growth is refused"
+      proof: 'grep: test("W1-T10926: normal pressure with swap nearly exhausted is refused" in test/infra/the-author-preflight-admits-warning-pressure-against-its-measured-need.test.ts'
+    - claim: "critical, unknown, a new swap-out or an unmeasured selection still refuse, naming the failed check"
+      proof: 'grep: test("W1-T10926: critical, unknown, new swap-out or unmeasured selection still refuse" in test/infra/the-author-preflight-admits-warning-pressure-against-its-measured-need.test.ts'
+    - claim: "the full author entry has a measured memory need table"
+      proof: 'grep: MAC_AUTHOR_MEASURED_MEMORY_BYTES in scripts/lib/mac-author-admission.mjs'
+  falsifier: |
+    At base readMacAuthorAdmission returns not-run for any warning, so the first case fails.
+    - Drop `pressure:warning` from the reasons outright: the new swap-out and swap-free cases fail.
+    - Admit warning on one sample instead of the sampled series: the new swap-out case fails.
+    - Price the full run at the focused 1 GiB budget instead of its measured need: a fixture whose headroom covers
+      1 GiB but not the measured need is wrongly admitted, and that case fails.
+    GUARD that held at base and must still hold: test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts
+    and test/mac-author-admission.test.ts pass unchanged.

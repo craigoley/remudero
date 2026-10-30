@@ -7,6 +7,7 @@ import {
   DISTANCE_REFRESH_ROTATION_MS,
   ghUpdateBranchArgv,
 } from "#src/run-task.js";
+import { createDistanceProbeSequence, distanceRefreshProbeTargets } from "#src/lib/tick-read-worker.js";
 import {
   DEFAULT_SWEEP_POLICY,
   openPrsBehindMain,
@@ -343,6 +344,22 @@ test("distance refresh ledger rows name the commit distance for updated and decl
   assert.equal(errorOutcome?.behind_by, 52);
   assert.equal(errorOutcome?.update_reason, "distance");
   assert.equal(errorOutcome?.error, "branch update unavailable");
+});
+
+test("distance probes rotate by scheduler pass when wall-clock passes alias", () => {
+  const next = createDistanceProbeSequence();
+  const candidates = Array.from({ length: 9 }, (_, i) => pr({
+    prNumber: 4900 + i, headSha: `head${i}`, lastActivityAt: `2026-09-09T0${i}:00:00Z`,
+  }));
+  const visited = new Set<number>();
+  for (let pass = 0; pass < 3; pass++) {
+    const clockSelected = distanceRefreshProbeTargets(candidates, pass * 15 * 60_000);
+    assert.deepEqual(clockSelected.map((subject) => subject.prNumber), [4900, 4901, 4902]);
+    const selected = distanceRefreshProbeTargets(candidates, next());
+    assert.equal(selected.length, 3);
+    for (const subject of selected) visited.add(subject.prNumber);
+  }
+  assert.equal(visited.size, 9, "the three bounded passes cover the stable population");
 });
 
 test("the production distance reader compares a normalized-clean PR, rather than mistaking mergeability for graph freshness", () => {

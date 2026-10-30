@@ -1,0 +1,64 @@
+- id: W1-T10970
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts cost 10.9 PR minute(s) across 3 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high  # Shared selector changes affect census discovery across the repository.
+  band_meaning: span
+  priority: 1.32
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts"
+  files:
+    - scripts/diff-class.mjs
+    - test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts
+  design: |
+    Diagnose the recorded selector miss through its real failure path. Recognize repository-root clone helpers
+    imported through the declared #test/* package mapping, and retain controls for fixture remotes, invalid paths,
+    and unreadable or unsupported mappings. Preserve the other selector and CI gates and measure the original cause.
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts"
+      proof: "unit test: W1-T10970: repository clone helper aliases enter the census"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts cost 10.9 PR minute(s) (seven-day half-life) across 3 fix round(s) on 1 pull request(s).
+
+    CORRECTION (reproduced on PR #15046 head 7fd1ed0d): the failing selector case calls censusSuiteFiles from
+    scripts/diff-class.mjs; the PR migrated its repository-clone helper to #test/helpers/, which the relative-only
+    helper reader does not recognize. src/lib/tmp.ts supplies a prefix to a different fixture, not this failure.
+    The original machine attribution below is retained as historical evidence, not the approved owner.
+
+    WHERE IT COMES FROM:
+    - src/lib/tmp.ts: test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts imports it
+    - test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts: named by the failing check
+    - the rounds name a failing test: test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #15046 (https://github.com/craigoley/remudero/pull/15046) at 2026-10-29T03:42:25.217Z: ci-log round — ci-shard (8/8): test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts; clock-sweep-report (merge the shards, classify, deliver): unknown runner failure location
+        failing tests: W1-T4787: the selector reaches every whole-tree census suite the shadow record saw missed; W1-T9432: a renewed claim or a moving run branch keeps the claim; W1-T9106: the launcher applies the learned ceiling to the daemon verb only
+        log excerpt:
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-8.log" || : > "$FLAKE_RETRY_DIR/shard-8.log"
+          | not ok 408 - W1-T4787: the selector reaches every whole-tree census suite the shadow record saw missed
+          |   ---
+          |   duration_ms: 3645.539346
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts:1:1737'
+          |   failureType: 'testCodeFailure'
+          |   error: 'run 36525454210 (#7740, W1-T4754): test/a-gate-run-leaves-the-tracked-tree-clean.test.ts is in the census set'
+          |   code: 'ERR_ASSERTION'
+          |   name: 'Asserti
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-29T09:19:03.561Z"
+    pin: "44148e78946f6366411b5042608c1f465554bb9e26fe84d1be070de48c7dadbf"
+    operator_release_pin: "79c4188484df21cd20c8604bf7678c558e109a23454310048b719b0c4c67624d"

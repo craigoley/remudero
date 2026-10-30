@@ -1,15 +1,17 @@
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { acquireDrainLock, DrainLockError } from "./drain-lock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { updateProposalRegistry, type Proposal } from "./inbox.js";
 import { renderBakeoff, type BakeoffCandidate, type BakeoffRow } from "./inbox-bakeoff.js";
+import { readLedgerUnionRecordsSync } from "./ledger-grep.js";
 
 export interface DeployedModel {
   model: string;
   billing: BakeoffCandidate["billing"];
   efforts: readonly string[];
+  readinessDigest?: string;
 }
 export interface DeploymentBakeoffCandidate extends BakeoffCandidate {
   /** The deployment's pinned thinking level; the incumbent may omit it for legacy mounts. */
@@ -17,13 +19,14 @@ export interface DeploymentBakeoffCandidate extends BakeoffCandidate {
 }
 const key = (model: DeployedModel): string => `${model.billing}:${model.model}`;
 
-export function findUntrialedModels(deployed: readonly DeployedModel[], trialed: readonly string[]): DeployedModel[] {
-  const seen = new Set(trialed);
+export function findUntrialedModels(deployed: readonly DeployedModel[], trialed: readonly string[], digests: Readonly<Record<string, string>> = {}): DeployedModel[] {
+  const seen = new Set<string>();
+  const measured = new Set(trialed);
   return deployed.filter((model) => {
     const id = key(model);
     if (seen.has(id)) return false;
     seen.add(id);
-    return true;
+    return !measured.has(id) || !!(model.readinessDigest && digests[id] !== undefined && digests[id] !== model.readinessDigest);
   });
 }
 
@@ -34,7 +37,7 @@ export function deploymentCandidates(models: readonly DeployedModel[], incumbent
   })))];
 }
 
-interface TrialState { trialed: string[]; pending?: { id: string; models: string[]; proposal?: Proposal } }
+interface TrialState { trialed: string[]; readinessDigests?: Record<string, string>; pending?: { id: string; models: string[]; proposal?: Proposal } }
 
 export function readBakeoffTrialState(stateDir: string): TrialState {
   let raw: string;
@@ -45,6 +48,8 @@ export function readBakeoffTrialState(stateDir: string): TrialState {
   }
   const state = JSON.parse(raw) as TrialState;
   if (!Array.isArray(state.trialed) || state.trialed.some((id) => typeof id !== "string") ||
+    (state.readinessDigests !== undefined && (state.readinessDigests === null || typeof state.readinessDigests !== "object" ||
+      Array.isArray(state.readinessDigests) || Object.values(state.readinessDigests).some((digest) => typeof digest !== "string"))) ||
     (state.pending && (typeof state.pending.id !== "string" || !Array.isArray(state.pending.models) ||
       state.pending.models.some((id) => typeof id !== "string") ||
       (state.pending.proposal && (state.pending.proposal.id !== state.pending.id || typeof state.pending.proposal.summary !== "string"))))) {
@@ -57,7 +62,7 @@ export interface DeploymentBakeoffInput {
   stateDir: string;
   deployed: readonly DeployedModel[];
   incumbent: DeploymentBakeoffCandidate;
-  replay: (candidates: readonly DeploymentBakeoffCandidate[]) => Promise<BakeoffRow[]>;
+  replay?: (candidates: readonly DeploymentBakeoffCandidate[]) => Promise<BakeoffRow[]>;
 }
 
 /** Claim before spending: an abandoned sweep or a restart cannot buy a second trial. */
@@ -71,6 +76,7 @@ export async function runDeploymentBakeoff(input: DeploymentBakeoffInput): Promi
   }
   try {
     const path = join(input.stateDir, "bakeoff-trialed.json");
+    const missing = !existsSync(path);
     const state = readBakeoffTrialState(input.stateDir);
     const save = () => writeAtomic(path, JSON.stringify(state));
     const publish = (): Proposal => {
@@ -86,11 +92,35 @@ export async function runDeploymentBakeoff(input: DeploymentBakeoffInput): Promi
     };
     // Recover the report write independently of the paid replay.
     if (state.pending) return [publish()];
-    const models = findUntrialedModels(input.deployed, state.trialed);
+    if (!input.replay) return [];
+    if (missing) {
+      const history = readLedgerUnionRecordsSync(input.stateDir, { step: "inbox.bakeoff", refuseIncomplete: true });
+      if (!history.ok) throw new Error(`bake-off ledger history is unreadable; refusing to spend: ${history.unread.join(", ")}`);
+      for (const record of history.rows) {
+        const row = record as { step?: string; candidate?: string; model?: string; billing?: string };
+        if (row.step !== "inbox.bakeoff") continue;
+        if (typeof row.model === "string" && (row.billing === "cash" || row.billing === "subscription"))
+          state.trialed.push(`${row.billing}:${row.model}`);
+        for (const model of input.deployed) {
+          const legacy = `${model.billing}-${model.model}`;
+          if (row.billing === model.billing && (row.model === model.model || row.candidate === legacy ||
+            row.candidate?.startsWith(`${legacy}-`) || row.candidate?.startsWith(`${key(model)}:`))) state.trialed.push(key(model));
+        }
+      }
+    }
+    state.trialed = [...new Set(state.trialed)];
+    state.readinessDigests ??= {};
+    for (const model of input.deployed) {
+      if (state.trialed.includes(key(model)) && model.readinessDigest && state.readinessDigests[key(model)] === undefined)
+        state.readinessDigests[key(model)] = model.readinessDigest;
+    }
+    const models = findUntrialedModels(input.deployed, state.trialed, state.readinessDigests);
+    save();
     if (models.length === 0) return [];
     const ids = models.map(key);
-    const id = `bakeoff:${createHash("sha256").update(JSON.stringify(ids)).digest("hex").slice(0, 16)}`;
-    state.trialed.push(...ids);
+    const id = `bakeoff:${randomUUID()}`;
+    state.trialed = [...new Set([...state.trialed, ...ids])];
+    for (const model of models) if (model.readinessDigest) state.readinessDigests[key(model)] = model.readinessDigest;
     state.pending = { id, models: ids };
     save();
     let summary: string;

@@ -1,0 +1,30 @@
+id: retro41-gate-probe-native-evidence-20261029
+ts: 2026-10-29T01:29:36.657Z
+origin: cli
+status: new
+attachments: []
+proposal_pr: null
+contribution: null
+raw: |
+  Machine-authored bounded observation for governed triage, not an operator ruling, task credit or permission to change a guard or run production.
+
+  OBSERVED: Natural RETRO-1793232407283 attempt1 ended at2026-10-29T01:29:36.657Z with exit_class process_timeout, signal SIGTERM, elapsed_ms3621890, suite_count263, broad_suite_count752, changed_path_count2, has_summaryfalse and output_truncatedtrue. It acquired its slot in6ms. This is incomplete preflight evidence, not a completed263-suite test verdict or an OOM diagnosis. The marker remained2026-10-06T10:45:50.161Z.
+
+  lint-plan:fast returned status null in the tracked-tree gate probe.
+  The producer-retained872-byte stdout excerpt has ERR_ASSERTION, expectedtrue/actualfalse and stack test/a-gate-run-leaves-the-tracked-tree-clean.test.ts:120:12. Exact closed-signature extraction identifies lint-plan:fast ran (status null). The excerpt and full failed row were read with fixed byte/file/row limits and positive sweep/run controls; no raw prompt, credential or arbitrary error body is needed in this record.
+
+  READ: The actual retro base831985a97030885eb0b3d4bdfdc8d550aad147bf has runProbe using spawnSync with stdio ignore and timeout120000. The EVERY-step case discards the returned native object except status, then reports script ran (status null). At that source line the assertion is that the command produced an allowed native exit status. This does not identify tracked-tree mutation. It also cannot distinguish a timeout, signal or launch refusal because the caller drops signal and error.code. The existing lower capture-ceiling repair and real missing-executable control remain useful and must be preserved. Do not reintroduce retained stdout/stderr buffers to diagnose this.
+
+  NEXT: After current ownership reconciliation, make only this gate-probe assertion retain bounded native code/signal/refusal information. Use allowlisted typed evidence rather than raw output or arbitrary messages. Keep stdio ignore, the120000ms probe deadline, ordinary0/1 semantics, actual tracked-tree comparisons and positive mutation controls unchanged. Keep the one-hour retro backstop, source/dependency provenance, resource admission, slots and hosted gates unchanged. Diagnostics come before any decision about whether lint-plan:fast itself is slow, blocked or refused.
+
+  PROOFS: Drive the real native missing-executable result and a tiny private native timeout result through the same assertion formatter, and require their distinct typed causes to be retained. Preserve a real successful child emitting beyond the old capture ceiling. Literal removal of the diagnostic correction must fail its assertions; restoration must pass. These are bounded fixture controls, not a production retro, paid probe, new host allowance or permission to run the whole gate loop outside admission.
+
+  FALSIFIER: If current source/another open head already preserves these native fields in the EVERY-step assertion, supersede this observation. If the original refusal is not a timeout, retain and diagnose its actual native code rather than raising any deadline. No claim is made that this diagnostic alone repairs the retro's incomplete one-hour run or advances its marker. No skip, ignore, baseline/criteria edit, supervisor, projection, manual restart/retry, lease clearing or manual merge is requested.
+
+  RELATED OWNERS: W1-T2791 owns the original tracked-tree detector. W1-T10471/W1-T9856 concern other lint-plan CI observations, not this exact status-null evidence boundary. The dated all-open-head subject and source-path sweep found only the existing alias-import conversion on this test in PR15046; preserve that owner's work. Refresh exact ownership/heads before publication or implementation; this paragraph is not FREE assurance.
+
+
+  DATED SOURCE SCOPE: immutable main4815696fc8658e862291adb371e6364e814f492a and every inspected open-head plan tree
+  have the same50subjecthits in32records, with a per-headW2791positivecontrol. The sole
+  target-test own delta is the already inspected alias-only PR15046 patch. No Task id is minted
+  or credited; refresh exact ownership before publication.

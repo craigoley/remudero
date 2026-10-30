@@ -74,8 +74,8 @@ test("the flow gardener runs admission before it writes a drafted shard", (t) =>
   writeFileSync(join(root, "src", "lib", "sweep.ts"), "export {};\n");
   const now = Date.UTC(2026, 9, 6, 12);
   const records: LedgerRecord[] = [
-    { step: "sweep.disposed", pr_number: 1, ts: new Date(now - 2 * 3_600_000).toISOString(), blocker: "own-red", reason: "required checks red", blocker_owner: "NONE" },
-    { step: "sweep.disposed", pr_number: 1, ts: new Date(now).toISOString(), blocker: "own-red", reason: "required checks red", blocker_owner: "NONE" },
+    { step: "sweep.disposed", pr_number: 1, ts: new Date(now - 2 * 3_600_000).toISOString(), blocker: "own-red", reason: "required checks red", blocker_owner: "fix-lane" },
+    { step: "sweep.disposed", pr_number: 1, ts: new Date(now).toISOString(), blocker: "own-red", reason: "required checks red", blocker_owner: "fix-lane" },
   ];
   const sources: FlowGardenSources = {
     owner: "acme",
@@ -83,7 +83,8 @@ test("the flow gardener runs admission before it writes a drafted shard", (t) =>
     mintTaskId: () => "W1-T9001",
     ledgerRecords: () => records,
     planState: () => ({ tasks: [] }),
-    prOutcomes: () => new Map(),
+    // W1-T9597: an owned cause is filed when its owner failed to clear it (closed unmerged); a NONE owner escalates.
+    prOutcomes: () => new Map([[1, { state: "closed" as const, at: new Date(now).toISOString() }]]),
     ownerSearch: {
       filesContaining: () => [{ file: "src/lib/sweep.ts", hits: 1 }],
       fileExists: path => path === "src/lib/sweep.ts",

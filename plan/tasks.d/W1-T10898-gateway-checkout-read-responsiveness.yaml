@@ -1,0 +1,53 @@
+- id: W1-T10898
+  title: "A gateway checkout assessment keeps unrelated console reads responsive"
+  repo: remudero
+  depends_on: [W1-T10823]
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "console-followup:serve-local-read-latency-20261028"
+  files:
+    - src/lib/serve.ts
+    - test/the-gateway-reads-current-code.test.ts
+    - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts
+  acceptance:
+    - claim: "The actual default local Git subprocess can wait while an unrelated HTTP response and scheduled callback complete, and the assessment completes after its child is released"
+      proof: "unit test: W1-T10898: local checkout reads leave unrelated HTTP work responsive"
+    - claim: "Clean, dirty, behind, fetch-failed, guarded and unreadable checkout assessments retain their existing distinctions and decisions"
+      proof: "unit test: W1-T10898: asynchronous local reads preserve checkout decisions"
+    - claim: "A changed checkout identity or failed bounded child cannot publish a mixed or healthy assessment, and repeated reads remain bounded"
+      proof: "unit test: W1-T10898: raced or unavailable local reads stay explicitly unknown"
+    - claim: "Removing only the asynchronous default makes the real responsiveness boundary fail, while restoration preserves all existing reload and handoff tests"
+      proof: "unit test: W1-T10898: the default local child boundary has a discriminating responsiveness control"
+  rationale: |
+    The signed-in operator's Products page failed on deployed Console396fcd6a on October28. Five actual Vercel warnings at 02:10:00-02:10:01 report upstream response-header timeouts at 5000-5002ms, with the existing 5000ms bound. The tunnel independently observed those actual /v1/products requests reaching remudero-serve:4317 and being canceled. A local /v1/version read returned 200 in136ms; a Products read without the required operator identity correctly refused403 in9ms. Those controls do not establish successful protected Products reads.
+    Captured runtime.loop_stall_profile rows positively identify the serving hostname685b8f10164d and service process319241. A02:10:49 profile has18463ms event-loop lag and local assessGatewayCheckout/execFileSync frames; another has10167ms and status.readLedgerLines/incident-invariants/GC frames. The observed local Git frame is a verified blocking mechanism, not proof that it caused every timed-out request or every serving stall. Retain the independent incident-monitor and read-model candidates in the backlog.
+    At inspected producer02855f7 and filing baseb3eae3fcf, assessGatewayCheckout's fetch is asynchronous but its default local git closure calls execFileSync without a timeout. checkServiceFreshness then invokes that local closure synchronously on the serving loop. self-sync.ts already exports asyncGit and awaits local assessment in checkServiceFreshnessAsync. Reuse the existing asynchronous child mechanism rather than adding a second subprocess executor. The full shared freshness checker has different material-path and loaded-revision semantics; preserve the gateway's existing behavior instead of replacing its decisions blindly.
+    Subject audits at captured main efef4f666 and b3eae3fcf read all ten open heads plus main, with277 matching task records per head as the corpus control, and found no new equivalent task or open serve.ts source diff. W1-T10074's executable acceptance shipped a profiler, not this off-loop source correction; the daemon freshness task is a different caller. A private owner checkout was then discovered and is explicitly retained below; open-head absence is not global source freedom.
+  prompt: |
+    Keep the gateway freshness read off the serving event loop through its actual default subprocess path. Await local rev/status/count/diff reads serially as needed and carry their failed or unavailable results explicitly. Use existing cancellation, child-lifetime and output bounds; do not introduce an uncalibrated timeout or let an awaited wrapper hide synchronous child execution. Capture and recheck checkout identity when asynchronous steps could observe different revisions; a mixed assessment must not publish a healthy result or request a handoff based on invented evidence.
+    Preserve checkServiceFreshness's reentrancy and CI guards, supervised-generation behavior, dirty-tree refusal, unknown values, behind counts, target identity, reloadPlanAt, serveRestartRelevant and all existing handoff/drain decisions. This repair changes the responsiveness of the evidence read, not those policies. Keep the existing network fetch, request timeout, resource limits, provider/billing settings, access checks, mounts, service configuration and deployment workflow unchanged. A source merge is not runtime adoption or proof that Products works.
+    Extend the existing physical gateway suite. Test the actual default child path in a private real repository with a controlled executable/barrier, not only injected git fakes. While a local read is held, an unrelated HTTP request and scheduled callback must complete before that child is released. Arrange barrier release and server/child cleanup independently so the synchronous-base falsifier cannot strand a test. Retain all original assertions. Cover the existing guarded, clean-current, clean-behind, dirty, fetch-failed, missing-repository and malformed-count outcomes, plus an identity change between awaited reads and child failure. New imports use the maintained package aliases and root helper.
+    Remove only the asynchronous default and observe the responsiveness boundary fail; restore exactly and require the same control to pass. Commit before measuring coverage; positively prove each changed source is instrumented and reject a targeted zero in that source's own SF block. Run the actual joined census suites, full types, the canonical stored executable proofs, native author/resource admission, hosted test/coverage/security checks, genuine governed review and protected merge. Keep every failed receipt and distinguish focused tests from full qualification, merge, runtime adoption and signed-in acceptance.
+    Custody: Root completed W1-T10823 through source PR15071, API-verified merged at2026-10-28T14:30:27Z as3e54b1a1a55179b201a73073f60ece4590a68d40 from291ee614905a4f0a7d985b18f2fccc0ee6b806fe. The historical private source067059e0d44767c94f651c589493be192fb3e9f1 and all failed receipts remain preserved. This task still declares the real W1-T10823 dependency and normal file-overlap serialization on src/lib/serve.ts; scope filing15172 is not source credit. The new complete32-open-head plus main25339074163fdf244be798d48c8b0699510f294b subject/source audit found no equivalent new task or open serve-scope diff. The serving ancestry report is not proof that protected Products reads or signed-in C4 work. Do not modify the foreign checkout, branch, claim, validation or held Product case. Reconcile current source only after normal ownership and admission allow it. An isolated checkout is not a function-level overlap exemption. Existing Console and Wreckterra holds remain intact.
+  context:
+    - claim: "A blocked event-loop callback prevents unrelated requests from receiving service; asynchronous child execution addresses the observed synchronous local subprocess mechanism"
+      src: "https://nodejs.org/learn/asynchronous-work/dont-block-the-event-loop"
+    - claim: "The exact serving-process profiles and Vercel request warnings establish a bounded functional-read failure, while retaining separate monitor and read-model causes"
+      src: "products-functional-read-stall-finding-20261028.json; products-production-runtime-logs-20261028.json; products-actual-loop-stall-metadata-20261028.json"
+  note: "Reserved through the normal Core allocator as bce049c5574baeb28dc2c85dccd0171d2bf0d6f4; this is a private unjudged draft, not task publication or implementation credit. Shared-file custody and normal source dependency are explicit. No task-specific budget override. Field Trials and other owners' CI/Azure-memory work remain outside this task. October28 exact operator approval Actual user asynchronous reply call_65937f1f921b4248bcc8cde80468080c item0: add only test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts and tighten serve.ts raw-Git site allowance from5to4 because its blocking default site is removed. All scanner assertions, remaining ceilings and task behavior/scope otherwise stay unchanged. No new model call, gate waiver, service change or deployment."
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Direct operator reply Actual human asynchronous reply call_721bd4d721444e5aaac502ec389e1817 item0: Approve this exact operator release. This is operator approval of the prepared two-existing-file asynchronous local-Git responsiveness repair, not a model verdict."
+      - "The single approved native judgment timed out without a ruling; its exact assignment and timeout receipt are retained, with no retry or replacement model call. Preserve checkout, identity and handoff decisions, existing timeouts, budgets, permissions, providers, billing, services and every ownership, test, review, CI and protected-merge gate. No deployment or new operational authority."
+      - "Direct operator Actual user asynchronous reply call_65937f1f921b4248bcc8cde80468080c item0: Approve this test-only scope addition. October28 exact operator approval Actual user asynchronous reply call_65937f1f921b4248bcc8cde80468080c item0: add only test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts and tighten serve.ts raw-Git site allowance from5to4 because its blocking default site is removed. All scanner assertions, remaining ceilings and task behavior/scope otherwise stay unchanged. No new model call, gate waiver, service change or deployment."
+    judged_at: "2026-10-28T20:24:11.383Z"
+    pin: "94e3e5212168f81c14d3b99442ef04c9438bf2aa851cad70c4e827671601c3db"
+    operator_release_pin: "53be9e7a0b344bdde5a3e16768f8ba2e86477fda930d249f8108c01e061d8af4"

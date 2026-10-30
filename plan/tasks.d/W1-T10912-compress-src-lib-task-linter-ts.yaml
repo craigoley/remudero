@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -23,3 +23,13 @@
     Add the named regression in test/plan/compress-src-lib-task-linter-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed plan limits the remedy to comment compression and a regression test, requiring unchanged executable tokens, preserved behavioral assertions, and actual caller validation."
+      - "The rationale explicitly preserves owners, stops and deployment holds, and prohibits a new hard comment ceiling or release override."
+      - "This is a filing-time assessment with no diff supplied; the planned regression file is explicitly identified as new. The supplied gates report no adverse finding."
+    judged_at: "2026-10-29T13:50:08.442Z"
+    pin: "9abead337a33f9d94e7dc7ecc3aee726d4bd4b9cb71e75d843769684a437d61b"

@@ -1,0 +1,55 @@
+- id: W1-T10941
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts cost 12 PR minute(s) across 1 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.32
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts"
+  files:
+    - src/lib/clock.ts
+    - test/gardeners/check-test-test-an-inbox-gardener-retires-only-proven-terminal-asks-test.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts"
+      proof: "unit test: W1-T10941: check:test:test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts cost 12 PR minute(s) (seven-day half-life) across 1 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/clock.ts: test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts imports it
+    - test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts: named by the failing check
+    - the rounds name a failing test: test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13929 (https://github.com/craigoley/remudero/pull/13929) at 2026-10-24T09:55:01.063Z: ci-log round — test-slow-shard (1/2): test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts
+        failing tests: new operator input and source changes invalidate an in-flight retirement candidate
+        log excerpt:
+          | not ok 656 - new operator input and source changes invalidate an in-flight retirement candidate
+          |   ---
+          |   duration_ms: 95.014244
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts:19:13445'
+          |   failureType: 'hookFailed'
+          |   error: "ENOTEMPTY, Directory not empty: /tmp/rmd-why-me-Y0C6uH '/tmp/rmd-why-me-Y0C6uH'"
+          |   code: 'ENOTEMPTY'
+          |   stack: |-
+          |     rmSync (node:fs:1282:18)
+          |     <anonymous> (/home/runner/work/remudero/remudero/test/helpers/why-me-world.ts:23:69)
+          |     TestContext.<anonymous> (/home/runner/work/remudero/remudero/
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 1 occurrence(s) across 7 day(s), last seen 2026-10-24T09:55:01.063Z, and the record declares no privileged path"
+    judged_at: "2026-10-28T22:18:10.240Z"
+    pin: "036201d6d767a3cc25b6761f43d2c276aa98aabb76ebcc1ce25454540bffb0a8"

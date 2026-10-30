@@ -1,0 +1,149 @@
+- id: W1-T10829
+  title: Keep Daily activity collection inside its existing memory limit
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span
+  author_class: machine
+  origin: "cockpit-collection-memory: current serving worker repeatedly exhausts its unchanged heap during Daily collection, 2026-10-27"
+  status: queued
+  attempts: 0
+  priority: 1
+  budget_usd: 24
+  depends_on: [W1-T10562]
+  plan_refs: [W1-T10559, W1-T10562, W1-T10745]
+  files:
+    - src/lib/daily-progress-collector.ts
+    - test/console-api/read-model/daily-progress-projection.test.ts
+  rationale: >-
+    Authenticated live verification at serving source ed6b5c4c02533dd6008901aacf14585d2acc99c7
+    identified PID49671, fresh read-model status and held core/site/console leases. The maintained
+    durable reader still returns generation0, no days and no jobs. Native serve rows at
+    11:37:35, 11:46:34 and 11:54:00 UTC positively record ERR_WORKER_OUT_OF_MEMORY with the
+    daily-progress-collection cached-sources unit in flight. This is a specific failed feature
+    observation; concurrent work means the in-flight label alone is not a proven root cause.
+    The first collection includes seven civil days for late corrections; preserve that full
+    window and the existing targeted catch-up range. The earlier ~32h sample is a lower bound,
+    not a complete population or heap root-cause measurement. The activity reader currently asks the ledger union to retain exact raw replay lines for
+    all steps before selecting the small displayed activity population. It then retains only
+    projected event fields. Test that retention hypothesis before changing code. The shared
+    slow-lane heap is 1024 MiB and must remain unchanged. The dependency serializes this collector
+    path after the root-owned Effects integration; do not duplicate or overwrite that work.
+  design: >-
+    Reproduce the retention failure with the actual collector and gzip/plain/live ledger forms,
+    known valid displayed activity, replayed rows and large unrelated and selected-step payloads.
+    Use bounded compressed fixtures and an admitted child no larger than the existing slow-lane
+    heap. Keep the full source population, complete totals and every actual event; never solve
+    this by shortening history, truncating sources, inventing zeroes or raising memory/time limits.
+    If the hypothesis is confirmed, stream the native union without retaining its raw-row Set.
+    Use the existing onAcceptedRecord normalized raw record seam and fingerprintLedgerLine to
+    keep compact replay identities only for rows eligible for displayed activity. Preserve
+    exact raw replay accounting independently within each source root. Keep the existing
+    100000 selected replay-row ceiling BEFORE final semantic event reconciliation; raw key-order
+    variants and copies across the native and isolated roots must retain their old cap accounting.
+    Do not replace that guard with a 100000 unique projected-event ceiling. Preserve the exact
+    existing stable event identity bytes and complete gap/availability semantics.
+    The native reader catches exceptions from onAcceptedRecord as source-read gaps. That callback
+    must only hand off the current trimmed raw line; perform eligibility, hashing, compact replay
+    deduplication and the existing cap refusal in the consumer loop, outside that catch. A cap
+    refusal must reach the caller before any publication, never become a partial successful read.
+    Keep the reader's source filtering and malformed/torn-tail handling unchanged. Public reader
+    order is parse/malformed audit, source filters, replay dedupe, callback and yield; preserve
+    that ordering's evidence semantics. Nonselected valid rows may be counted for availability,
+    but must not acquire a retained raw payload or an unbounded replay-key inventory.
+    Preserve all original title, identity, timestamp, repository and attribution rules and the
+    merged Effects observation/deduplication behavior. Preserve unread-directory/archive/live,
+    malformed-row and optional-source gap reporting, ownership epoch cancellation, durable
+    publication and prior history. If another cause is measured, report it through the native
+    fix/scope path instead of broadening this repair. No ledger archive edits, new scheduler,
+    view activation, service restart/deploy, worker termination, ownership/claim reset, admission,
+    spending, scanner or review guard changes. Actual subsequent native collection, hourly due
+    clocks, civil-midnight closure and authenticated repository/consolidated reads remain separate
+    runtime readiness evidence; do not release Console holds on a fixture or source merge.
+  falsifier: >-
+    Restore raw ledger replay retention while keeping the production workload fixture: the
+    unchanged bounded child must fail and the repaired version must finish with the same
+    complete source/event population. Independently remove compact raw replay deduplication and
+    source-gap preservation and require their dedicated controls to fail. Prove the cap with more than 100000 distinct normalized raw key-order variants of one semantic event: it must still refuse before publication, as before. A missing child summary,
+    skipped physical file, OOM, absent positive event or shortened fixture is not a passing result.
+    The >100000-row guard scenario must observe the original cap exception at the collector caller
+    and unchanged prior publication; it must also catch an implementation that throws the cap
+    inside the reader callback and silently turns that refusal into a source gap. Use the same
+    bounded heap for the runtime child, literal repository aliases from a verified repository
+    execution context, and a private temporary root outside protected live/operator paths. Admit
+    the parent plus child footprint honestly through the maintained pool; do not fake a profile,
+    raise a heap/time allowance or hide a child peak. No system clock shift or fixture shortening.
+  acceptance:
+    - claim: Daily activity preserves the complete event population without retaining unrelated raw ledger rows
+      proof: 'unit test: Daily progress activity keeps full counts without retaining unrelated ledger rows'
+    - claim: Streamed activity preserves replay deduplication and unavailable or malformed source evidence
+      proof: 'unit test: Daily progress activity preserves replay deduplication and source gaps'
+    - claim: The production collection workload completes inside the unchanged slow-lane memory bound
+      proof: 'unit test: Daily progress collection stays inside the unchanged slow-lane heap'
+  note: >-
+    Native reservation refs/rmd-id/W1-T10829 belongs to codex/file-cockpit-runtime-followups-20261027.
+    Historical main/open-head sweeps are evidence of that earlier observation only. Refresh all
+    current open-head subjects and claims before filing. Effects PR14986 is now public; its
+    overlap remains explicit and serialized by its actual merged task credit. The authorized queue owner
+    confirmed no owned Daily OOM task, claim or PR and will not duplicate this repair. Original
+    observed failures and empty maintained-store read are retained in cockpit receipts.
+    Parked at verify human until the configured filing judge records a genuine ruling.
+  prompt: |
+    Implement only the two declared files under the unchanged task budget and guards.
+    
+    Reproduce the retention failure with the actual collector and gzip/plain/live ledger forms,
+    known valid displayed activity, replayed rows and large unrelated and selected-step payloads.
+    Use bounded compressed fixtures and an admitted child no larger than the existing slow-lane
+    heap. Keep the full source population, complete totals and every actual event; never solve
+    this by shortening history, truncating sources, inventing zeroes or raising memory/time limits.
+    If the hypothesis is confirmed, stream the native union without retaining its raw-row Set.
+    Use the existing onAcceptedRecord normalized raw record seam and fingerprintLedgerLine to
+    keep compact replay identities only for rows eligible for displayed activity. Preserve
+    exact raw replay accounting independently within each source root. Keep the existing
+    100000 selected replay-row ceiling BEFORE final semantic event reconciliation; raw key-order
+    variants and copies across the native and isolated roots must retain their old cap accounting.
+    Do not replace that guard with a 100000 unique projected-event ceiling. Preserve the exact
+    existing stable event identity bytes and complete gap/availability semantics.
+    The native reader catches exceptions from onAcceptedRecord as source-read gaps. That callback
+    must only hand off the current trimmed raw line; perform eligibility, hashing, compact replay
+    deduplication and the existing cap refusal in the consumer loop, outside that catch. A cap
+    refusal must reach the caller before any publication, never become a partial successful read.
+    Keep the reader's source filtering and malformed/torn-tail handling unchanged. Public reader
+    order is parse/malformed audit, source filters, replay dedupe, callback and yield; preserve
+    that ordering's evidence semantics. Nonselected valid rows may be counted for availability,
+    but must not acquire a retained raw payload or an unbounded replay-key inventory.
+    Preserve all original title, identity, timestamp, repository and attribution rules and the
+    merged Effects observation/deduplication behavior. Preserve unread-directory/archive/live,
+    malformed-row and optional-source gap reporting, ownership epoch cancellation, durable
+    publication and prior history. If another cause is measured, report it through the native
+    fix/scope path instead of broadening this repair. No ledger archive edits, new scheduler,
+    view activation, service restart/deploy, worker termination, ownership/claim reset, admission,
+    spending, scanner or review guard changes. Actual subsequent native collection, hourly due
+    clocks, civil-midnight closure and authenticated repository/consolidated reads remain separate
+    runtime readiness evidence; do not release Console holds on a fixture or source merge.
+    
+    Verification and falsifiers required before qualification:
+    Restore raw ledger replay retention while keeping the production workload fixture: the
+    unchanged bounded child must fail and the repaired version must finish with the same
+    complete source/event population. Independently remove compact raw replay deduplication and
+    source-gap preservation and require their dedicated controls to fail. Prove the cap with more than 100000 distinct normalized raw key-order variants of one semantic event: it must still refuse before publication, as before. A missing child summary,
+    skipped physical file, OOM, absent positive event or shortened fixture is not a passing result.
+    The >100000-row guard scenario must observe the original cap exception at the collector caller
+    and unchanged prior publication; it must also catch an implementation that throws the cap
+    inside the reader callback and silently turns that refusal into a source gap. Use the same
+    bounded heap for the runtime child, literal repository aliases from a verified repository
+    execution context, and a private temporary root outside protected live/operator paths. Admit
+    the parent plus child footprint honestly through the maintained pool; do not fake a profile,
+    raise a heap/time allowance or hide a child peak. No system clock shift or fixture shortening.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-28T11:23:37.041Z"
+    pin: "2e67a7847f51e4f92f18ee963afeedf7faff7d5695954dbc360f1bb803baa6dd"
+    operator_release_pin: "569f6a486b7924580ad1fe78adc5c0175cb63283ca03dc1fbf53309b6090f77d"

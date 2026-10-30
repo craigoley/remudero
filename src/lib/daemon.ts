@@ -1,19 +1,10 @@
 import type { ReleaseEvidence } from "./operator-release.js";
-/** lib/daemon.ts — the daemon's scheduler-loop core (W1-T12a).
- *
- * This is the headless, unit-testable half of W1-T12 (Daemonize). Launchd unit generation is W1-T12b
- * (lib/launchd.ts). Crash recovery's resume/clean split is W1-T12c (`reconstructOrphan`, below); its
- * batch driver `reconstructState` was retired as superseded by runRecoverability in
- * src/run-task.ts (W1-T361). Live commissioning is W1-T12d and is not here.
- *
- * Invariant: this module is pure. It never touches the filesystem, git, the network or a spawn. Every
- * side effect arrives through an injected dependency, so the loop is provable against a fake clock,
- * and locking belongs to the CLI wiring exactly as it does for `rmd drain`. It reuses drain.ts's
- * machinery rather than reimplementing it: where drain treats "nothing runnable" as a terminal stop,
- * this loop paces itself on the injected clock and keeps polling, because new work lands later. Each
- * non-merged verdict is reasoned about by `block-reason.ts` rather than halting the pass (W1-T46).
- *
- * Forensics for this file: docs/forensics/daemon.md. */
+/** Scheduler core (W1-T12a): headless loop; launchd lives in lib/launchd.ts (W1-T12b).
+ * Crash recovery's `reconstructOrphan` is W1-T12c; runRecoverability in src/run-task.ts
+ * superseded reconstructState (W1-T361). Live commissioning is W1-T12d.
+ * Invariant: no filesystem, git, network or spawn; inject effects and clocks, and lock in CLI wiring.
+ * Reuse drain.ts selection, but poll when idle; block-reason.ts handles non-merged verdicts (W1-T46).
+ * Forensics: docs/forensics/daemon.md. */
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
@@ -45,7 +36,7 @@ import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-revi
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
 import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
-import { runChildOutsideKill, type AdoptedRunChild, type RunChildHandle, type RunChildPending } from "./run-child.js";
+import { planSha, runChildOutsideKill, type AdoptedRunChild, type RunChildHandle, type RunChildPending } from "./run-child.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
@@ -75,6 +66,14 @@ import {
   type PriorityBackfillEstimates,
   type PriorityDeferral,
   type PriorityReservationRelease,
+  applyCuratedSelection,
+  type DrainOpts,
+  type DrainSummary,
+  type StopReason,
+  type TargetJobAdmission,
+  type TargetJobRead,
+  type TargetJobRecord,
+  type TargetJobStatus,
 } from "./drain.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 // Why: drain.ts already owns the overlap partition, so it is reused rather than re-derived (W1-T343).
@@ -135,7 +134,7 @@ import type { RetroTriggerDecision } from "./retro.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
 import type { OrphanSweepReport } from "./worker-containment.js";
 // Type-only — shapes the feedback-landing injection points below (W1-T530).
-import type { LandFeedbackResult } from "./feedback-landing.js";
+import type { FeedbackRefusal, LandFeedbackResult } from "./feedback-landing.js";
 // Type-only — github-posture.ts owns this shape; the real read lives in run-task.ts (W1-T1040).
 import type { GithubPostureFinding } from "./github-posture.js";
 // The Clock port (W1-T2897): declared in "../lib/clock" so every reachable-through-lib import
@@ -203,18 +202,10 @@ export function startDaemonSreLane(
 
 export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" | "stale" | "heap_pressure" | "idle_starved";
 
-/** Default idle-poll pace: check back once a minute while nothing is runnable. The literal stays
- *  here because this module never touches the filesystem; `daemonCommand` threads the policy value
- *  on every real invocation, so this is provably dead for the operating path (W1-T253).
- *
- *  W1-T2895: `daemon-health.ts` used to import this VALUE from here, which — paired with this
- *  file's own `import type { GhRateLimitBuckets }` from `daemon-health.ts` above (dependency-
- *  cruiser's `swc` parser counts a type-only edge the same as a value one for cycle detection) —
- *  closed a genuine two-module ring. `daemon-health.ts` now sources the value from the leaf module
- *  `poll-interval.ts` instead: that module restates this same literal and imports nothing, so it
- *  cannot itself close a cycle back here. This declaration is therefore unchanged (still the
- *  canonical, filesystem-free constant every other consumer of `daemon.js` imports), and the ring
- *  is cut on `daemon-health.ts`'s side, not by turning this export into a re-export. */
+/** Filesystem-free idle fallback; daemonCommand supplies the live policy value (W1-T253).
+ * daemon-health.ts uses the leaf poll-interval.ts instead: dependency-cruiser's swc parser counts
+ * even the type-only return edge here as a cycle. Keep this export canonical for its other callers
+ * rather than re-exporting it (W1-T2895). */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
 export type IntakeRungDecision =
@@ -459,7 +450,17 @@ export function restartWorkHistory(rawLines: readonly string[], nowMs: number): 
 /** The step a pre-PR handoff writes beside its verdict, and the daemon re-writes for a receipt the live ledger
  *  holds only as a verdict row: verdicts keep the newest 200, so a parked checkpoint aged out of resumption. */
 export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
-export const CHECKPOINT_HANDOFF_REASONS: ReadonlySet<string> = new Set(["freshness_yield", "quiet_worker_round_ended"]);
+/** W1-T10896: `orphaned-by-restart` is the boot sweep's verdict for a run its own daemon restarted under. */
+export const CHECKPOINT_HANDOFF_REASONS: ReadonlySet<string> = new Set(["freshness_yield", "quiet_worker_round_ended", "orphaned-by-restart"]);
+
+export interface WorkerBoundaryCheckpoint {
+  branch: string;
+  headSha: string;
+  resumePhase?: "preopen";
+}
+
+const checkpointPhase = (row: Record<string, unknown>): { resumePhase?: "preopen" } =>
+  row.reason === "orphaned-by-restart" || row.resume_phase === "preopen" ? { resumePhase: "preopen" } : {};
 
 /** A pre-PR handoff's exact pushed head is resumable; any later verdict replaces that receipt, except a failed
  *  restore, which consumed nothing (W1-T7806). A matching checkpoint drop consumes the receipt;
@@ -467,8 +468,8 @@ export const CHECKPOINT_HANDOFF_REASONS: ReadonlySet<string> = new Set(["freshne
  *  which run-task writes right after a worker-error verdict of the run that restored the checkpoint, re-pends
  *  the exact receipt that verdict consumed. A run refused before it could restore (a stale engine's lockfile,
  *  2026-10-17 W1-T9089) consumed nothing either; its verdict left the P1 run-branch-already-pushed for 5 h. */
-export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
-  const pending = new Map<string, { branch: string; headSha: string }>();
+export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, WorkerBoundaryCheckpoint> {
+  const pending = new Map<string, WorkerBoundaryCheckpoint>();
   const resumable = (taskId: string, branch: unknown, headSha: unknown): branch is string =>
     typeof branch === "string" && branch.startsWith(`run-${taskId}-`) && /^run-.+-[0-9]+$/.test(branch) &&
     typeof headSha === "string" && /^[a-f0-9]{40}$/.test(headSha);
@@ -482,7 +483,7 @@ export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<
       continue;
     }
     if (row.step === "implement.checkpoint_kept") {
-      if (resumable(row.task_id, row.source_branch, row.head_sha)) pending.set(row.task_id, { branch: row.source_branch, headSha: String(row.head_sha) });
+      if (resumable(row.task_id, row.source_branch, row.head_sha)) pending.set(row.task_id, { branch: row.source_branch, headSha: String(row.head_sha), ...checkpointPhase(row) });
       continue;
     }
     const receipt = row.step === HANDOFF_RECEIPT_STEP ? row.waiting_on !== "pr" && row.waiting_on !== "ci"
@@ -493,14 +494,14 @@ export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<
     if (row.step === "verdict" && typeof row.stage === "string" && PRE_RESTORE_RUN_VERDICT_STAGES.has(row.stage)) continue;
     pending.delete(row.task_id);
     if (receipt && resumable(row.task_id, row.branch, row.head_sha)) {
-      pending.set(row.task_id, { branch: row.branch, headSha: String(row.head_sha) });
+      pending.set(row.task_id, { branch: row.branch, headSha: String(row.head_sha), ...checkpointPhase(row) });
     }
   }
   return pending;
 }
 
 /** The pending receipts whose only live record is a verdict row — what the daemon re-writes at boot. */
-export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[string, { branch: string; headSha: string }]> {
+export function handoffReceiptsToCarry(rawLines: readonly string[]): Array<[string, WorkerBoundaryCheckpoint]> {
   const recorded = new Set<string>();
   for (const raw of rawLines) {
     if (!raw.includes(HANDOFF_RECEIPT_STEP)) continue;
@@ -572,14 +573,8 @@ export const DAEMON_EXIT_IDLE_STARVED = 78;
  *  and return. Forensics: docs/forensics/daemon.md. */
 export const HEAP_PRESSURE_RESTART_FRACTION = 0.75;
 
-/**
- * W1-T3335 — is the heap far enough along that restarting beats continuing? Pure, so the arm can be
- * falsified without allocating anything: the loop supplies the numbers and this decides.
- *
- * Returns the operator-facing detail when it is time to go, `undefined` when it is not. A
- * non-positive or non-finite limit answers `undefined` — an unreadable limit is NOT pressure, and
- * failing the other way would restart the daemon forever on a host whose V8 reported nothing.
- */
+/** W1-T3335: pure pressure decision; returns detail or undefined without allocating a test heap.
+ * Unreadable/non-positive limits are not pressure: treating them as such would restart forever. */
 export function heapPressureDetail(
   stats: { used_heap_size: number; heap_size_limit: number },
   fraction: number = HEAP_PRESSURE_RESTART_FRACTION,
@@ -628,75 +623,23 @@ export function daemonExitCode(stopReason: DaemonStopReason): number {
  *  {@link daemonExitCode} deliberately cannot see: the stop detail. A second function rather than a
  *  second parameter, because point-free callers would otherwise be handed an array index as a stop
  *  detail. Fail-closed: anything not positively transient stays `error` (W1-T2546). Forensics: docs/forensics/daemon.md. */
-/**
- * W1-T3310 — THIS REPO'S OWN PRE-PUSH GATE, REFUSING. `hooks/pre-push` prints this banner at the
- * start of a line and exits non-zero; the push then fails and the task cannot proceed.
- *
- * NARROW AND ANCHORED ON PURPOSE. A bare `/REFUSED/` would catch a worker echoing the word, and an
- * unanchored match would catch this file's own prose quoted in a task's output. The banner is stable
- * text emitted by a checked-in hook, which is the strongest thing available to match on.
- */
-/**
- * W1-T3319 — ONE TASK'S FAILURE, RECOGNISED STRUCTURALLY RATHER THAN BY A TOOL'S PROSE.
- *
- * `drain.ts`'s two worker-failure sites build `${taskId}: ${message}` — one wrapping
- * `deps.runOne` in a try/catch, one reporting a lane's recorded failure. The separate owned
- * admission/reporting-fault site includes a phase and may name `dispatch`, not a task.
- * That infrastructure failure must keep exit 1 rather than borrowing a worker's blocked code.
- * The worker prefix is a property of the EMITTER, not a guess about a tool's prose.
- *
- * THIS REPLACES W1-T3310's BANNER MATCH, which keyed on the pre-push hook's refusal text. That was
- * right about the case it saw and blind to the next one: the very next crash was a failed GitHub
- * check-runs read, which carries no such banner and exited 1 like all the rest. Matching the
- * emitter's own shape cannot drift when a tool rewords itself.
- *
- * EXPORTED FOR ITS OWN FIXTURE (negative-reachability-ratchet): a regex surface must be driven
- * directly with BOTH arms, because a pattern exercised only through a caller proves nothing about
- * where it STOPS — and stopping is the load-bearing arm here. If this matched an unprefixed detail,
- * a genuine crash would be reclassified as blocked and docker's budget would protect nothing.
- *
- * NARROW BY CONSTRUCTION, IN TWO WAYS, and the second was forced by an existing test rather than
- * chosen: the task-id prefix both worker sites emit, anchored at the start — not "anything with a colon" —
- * AND `Command failed: `, the shape a SPAWNED COMMAND's failure carries.
- *
- * WHY THE SECOND HALF EXISTS. W1-T2546's criterion 3 pins that an UNRECOGNISED failure still exits
- * as a crash, "so this can only ever NARROW what counts as one", and it drives that with
- * task-prefixed `TypeError` / `AssertionError` / `SyntaxError` details. A first draft of this rule
- * keyed on the task prefix alone and reclassified all three — which would have been wrong, not just
- * test-breaking: a TypeError inside `runOne` is a defect in RMD ITSELF and will recur on every task,
- * which is precisely the "meaningful regression" the operator's ruling still reserves a stop for.
- * A spawned command failing is the task's problem; the daemon's own code throwing is the daemon's.
- * All five measured fleet crashes are `Command failed:` — a push and a GitHub read — so the narrow
- * rule covers every observed case and leaves the crash budget pointed at real defects.
- */
+/** W1-T3310's old pre-push banner match was anchored to avoid matching quoted REFUSED prose.
+ * W1-T3319 below replaces it: GitHub read failures carried no hook banner. */
+/** W1-T3319: match drain.ts worker failures by the emitted task prefix AND `Command failed: `.
+ * Both worker-failure sites emit `${taskId}: ${message}`; admission/reporting faults include a phase
+ * and must keep exit 1. W1-T3310's banner match missed GitHub check-runs read failures.
+ * Exported for both-arm negative-reachability fixtures: an unprefixed error must remain fatal.
+ * W1-T2546 pins task-prefixed TypeError/AssertionError/SyntaxError as crashes: those indicate RMD
+ * defects, whereas spawned command failures belong to the task. The prefix alone is too broad. */
 export const PER_TASK_FAILURE_RE = /^W\d+-T[0-9A-Za-z]+: Command failed: /;
 
-/**
- * ONE TASK'S FAILURE IS NOT THE DAEMON'S CRASH — the fourth instance of one pattern (W1-T490's
- * stale restart, W1-T2537's blocked pass, W1-T2546's environmental refusal, W1-T3310's gate
- * refusal), and now the GENERAL case rather than another special one.
- *
- * MEASURED on the fleet host 2026-09-10: three `exited 1`, three `pre-push REFUSED`, three
- * `test-tier-manifest: 1 test file` — a 1:1:1 correspondence — against `RestartPolicy=on-failure:5`.
- * The daemon dispatched normally between each exit. At five, docker stops restarting and the fleet
- * stays down behind a green board.
- *
- * IT IS BLOCKED, NOT A FIFTH CODE: the task genuinely cannot proceed and must be reported, which is
- * exactly what {@link DAEMON_EXIT_BLOCKED} already means — and `deploy/entrypoint.sh` already
- * retries 76 on the right pause. A fifth code would need a matching entrypoint arm, and that file is
- * IMAGE-BAKED: it would sit inert until a rebuild while the fleet is one restart from stopping.
- *
- * THIS BOUNDS THE CRASH BUDGET, IT DOES NOT DELETE IT. Exits 75/76/77 each get a bounded
- * in-container retry (100 attempts) before falling through to the throttle and a real docker
- * restart. A genuinely broken daemon still reaches docker — after 100 bounded attempts instead of on
- * the first task that trips a tool. A new code would need a new meaning.
- *
- * ORDER IS LOAD-BEARING. The transient check runs FIRST and keeps precedence, so a push that failed
- * on a network fault or a rate limit is still environmental (77) even if a gate banner is somewhere
- * in the same buffer. Fail-closed is unchanged: text matching neither stays `error` → 1, because a
- * push can fail for reasons that ARE crashes — a dead credential, a non-fast-forward — and mapping
- * every push failure to 76 would hide a real credential outage as "blocked".
- */
+/** Task failures use blocked exit 76; daemon defects retain crash exit 1 (W1-T3310, W1-T3319).
+ * This extends stale/environmental/blocked handling (W1-T490, W1-T2537, W1-T2546): task gate
+ * refusals exhausted docker's on-failure:5 budget while dispatch otherwise worked (2026-09-10).
+ * Reuse deploy/entrypoint.sh's existing 76 arm; a new code needs an image rebuild to take effect.
+ * Exits 75/76/77 still reach docker after 100 bounded in-container retries; the crash budget remains.
+ * Order matters: transient classification runs first, so network/rate-limit failures stay 77 even
+ * with a gate banner. Unrecognised errors (including credentials/non-fast-forward) keep exit 1. */
 export function daemonExitCodeForSummary(summary: Pick<DaemonSummary, "stopReason" | "stopDetail">): number {
   if (summary.stopReason !== "error") return daemonExitCode(summary.stopReason);
   const detail = summary.stopDetail;
@@ -774,15 +717,9 @@ export function priorUnrecognisedResetStrings(lines: ReadonlyArray<Record<string
   return out;
 }
 
-/** W1-T3691 — reconstructs `StaleReviewerRecurrenceState` across a process restart from the
- *  ledger's own history: the process that requested a freshness restart over a stale
- *  reviewer-code sha is a NEW process by the time it boots again, and its own in-memory streak
- *  went with it -- this is the only place that fact survives (design (v)'s falsifier: "restart
- *  again on an unchanged sha and the fourth test fails"). Takes RAW lines, the same shape
- *  `DaemonDeps.readLedgerLines` (W1-T3216) already threads, so no second ledger-reading contract
- *  is needed. A torn/unparseable line is skipped, never fatal -- the same tolerance
- *  `readLedgerLines` itself documents. Scans the WHOLE ledger, same cost profile as
- *  `priorUnrecognisedResetStrings` above. */
+/** W1-T3691: rebuild stale-reviewer recurrence after restart from readLedgerLines (W1-T3216).
+ * A restart on unchanged code must retain its streak (design v's fourth-test falsifier).
+ * Scan the whole ledger like priorUnrecognisedResetStrings; skip torn rows without failing. */
 export function priorStaleReviewerRecurrenceState(rawLedgerLines: readonly string[]): StaleReviewerRecurrenceState | undefined {
   let requestedForSha: string | undefined;
   for (const raw of rawLedgerLines) {
@@ -1194,26 +1131,17 @@ function isPendingFreshness(read: DaemonFreshness | Promise<DaemonFreshness> | u
   return read instanceof Promise;
 }
 
-/** W1-T3618 — a sweep pass's OWN report of a freshness discovery {@link DaemonDeps.checkFreshness}
- *  cannot see: reviewer-code freshness is read inside the sweep's review path, once per pass and
- *  before the first PR's worktree materializes, never by this module. When that read is stale the
- *  pass materializes and spends nothing on any review for the rest of its run and carries the sha
- *  pair here so the tick's pre-admission freshness re-check (below) can end the cycle through the
- *  SAME `stopForFreshness` path a `checkFreshness`-driven stale reading already uses — never a
- *  second, independently-worded restart. Absent (or `reviewerCodeStale` omitted) is the ordinary
- *  case and changes nothing: every existing caller that returns `void` still satisfies this type. */
+/** W1-T3618: sweep reports reviewer-code freshness it alone reads before materializing reviews.
+ * A stale pass spends nothing on reviews and returns the sha pair for the tick's pre-admission
+ * re-check through stopForFreshness, never a separate restart path. Omitted/void changes nothing. */
 export interface SweepCycleOutcome {
   reviewerCodeStale?: { oldSha: string; newSha: string };
   /** W1-T9124 — the review-input identity of each open PR THIS pass read, so the tick can ask
    *  {@link staleBodyFindingsForTick} which of them were edited without a push. Absent changes nothing. */
   reviewInputViews?: readonly StaleBodyPrView[];
-  /** W1-T4002 — the bounded set of CURRENT plan-only filing receipts THIS pass's full sweep
-   *  positively proved (sweep.ts's `planOnlyRunBranchReceipts`, built from the SAME `OpenPrView[]`
-   *  the sweep already read — no second GitHub call). Consulted by the tick's OWN dispatch-options
-   *  builder below, in the SAME tick, so a raw pushed-run-branch guard can release the exact
-   *  matching tip a proven plan-only filing occupies rather than blocking the real implementation
-   *  forever. Absent/empty on a tick that ran no sweep (or proved no receipts) changes nothing:
-   *  every observed run branch keeps blocking exactly as it did before this task. */
+  /** W1-T4002: current full-sweep plan-only receipts from the same OpenPrView[]; no extra GitHub read.
+   * The tick releases only the exact proven pushed-run tip, avoiding a filing blocking implementation.
+   * Without a sweep or receipts, every observed run branch continues blocking. */
   planOnlyRunBranchReceipts?: readonly PlanOnlyRunBranchReceipt[];
 }
 
@@ -1458,6 +1386,7 @@ export interface DaemonDeps {
   /** Run ONE task through the existing run-task path (default = runTask). W1-T9089: a restart never reaches into a
    *  run; a child run is left running for the next boot to adopt and an in-process lane is awaited. */
   runOne: (taskId: string, options?: {
+    onRunCreated?: (runId: string) => void;
     onChild?: (child: RunChildHandle) => void;
     /** W1-T10000: the run waits for its child's memory admission; no child exists yet. */
     onChildPending?: (pending: RunChildPending) => void;
@@ -1597,6 +1526,13 @@ export interface DaemonDeps {
   /** Delete one kick marker (consumed-once) after the daemon dispatches or refuses it. W1-T10615: `repo` is the
    *  SAME repo the pending kick carried, so the clear names that exact marker, never a sibling repo's. */
   clearKick?: (taskId: string, repo?: string) => void;
+  /** W1-T10799: the repo-scoped kick markers for a MANAGED TARGET with no daemon of its own, which only the core daemon
+   *  may service. Never offered to {@link pendingKicks}' consumer, so a foreign marker cannot dispatch a core task. */
+  pendingTargetJobs?: () => Array<DaemonKick & { repo: string }>;
+  /** W1-T10799: runs ONE such job to its terminal verdict, through the maintained drain. The daemon passes its own deps so
+   *  the job meets every governor this daemon applies, and awaits it: one job occupies the one reserved lane. A `held` or
+   *  `resumed` outcome keeps the marker for a later tick; `ended` and `refused` closed it. */
+  runTargetJob?: (kick: DaemonKick & { repo: string }, daemonDeps: DaemonDeps, onDispatch?: () => void) => Promise<{ state: "ended" | "refused" | "held" | "resumed" }>;
   /** Read and delete the "drain now" marker, consumed once; a defined return means the operator
    *  asked for one immediate dispatch cycle. */
   consumeDrainNow?: () => { origin: string } | null;
@@ -1737,7 +1673,10 @@ export interface DaemonDeps {
    *  row. Every resulting task remains MARKED/PARKED (`author_class: machine`, `verify: human`);
    *  a throw is best-effort and the tick continues. */
   runCiLearningCadence?: () => Promise<
-    CiLearningCadenceRunResult & { filedCount: number; skippedCount: number; refusedCount: number }
+    CiLearningCadenceRunResult & {
+      filedCount: number; skippedCount: number; refusedCount: number;
+      carryRefusedCount?: number; carryRefused?: FeedbackRefusal[];
+    }
   >;
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
    * crosses first (policy data). An undefined return means there is nothing safe to evaluate — a corrupt marker, a
@@ -2235,26 +2174,11 @@ export function reportTickLag(deps: Pick<DaemonDeps, "readLoopTelemetry">, sampl
   reportLoopLag(sample, log);
 }
 
-/**
- * W1-T4041 — REPORT A TICK THAT CAME BACK LATE, AND NAME THE PHASE THAT WAS IN FORCE.
- *
- * On 2026-09-22 three lanes went silent TOGETHER for 34 minutes while the process stayed alive and
- * later continued: `daemon.alive` (13:05:54Z to 13:40:02Z), the inter-phase review clock (last row
- * 13:19:23.868Z) and the sweep (13:19:23Z to 13:40:53Z). They share exactly one property — all three
- * are timer-driven on this event loop. Every lane that could have reported the outage was frozen by
- * it, so absence of evidence was the only evidence, and reasoning from it produced two wrong root
- * causes before this one.
- *
- * THE THRESHOLD IS DERIVED, NOT PICKED: an overrun is reported only when the tick came back later
- * than one WHOLE interval past its due time, i.e. at least one tick was missed. That scales with
- * whatever interval the caller is running and needs no tuning.
- *
- * WHAT IT CANNOT DO, STATED RATHER THAN HIDDEN: a sampler on the blocked loop records nothing WHILE
- * the block is in force — it reports the lag it just suffered, on the first tick that runs after the
- * block clears. That is a real limit, and it is why this reports rather than gates.
- *
- * Swallows everything: observability must never be able to take down the loop it observes.
- */
+/** W1-T4041: report a late tick and the phase in force after a shared event-loop stall.
+ * Three timer-driven lanes froze together for 34 minutes on 2026-09-22; silence misled diagnosis.
+ * Report only when at least one whole interval was missed beyond the due time; no tuned threshold.
+ * A blocked-loop sampler cannot report during the block: this observes lag afterward, never gates.
+ * Swallow all errors so observability cannot take down the observed loop. */
 export function reportLoopLag(
   sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number; lastStepBeforeBlock?: string;
     /** W1-T5718: the longest synchronous spawn of the interval this lag closes (W1-T7745: its own interval's). */
@@ -2562,26 +2486,16 @@ async function sweepLightDuringRetro(
   }
 }
 
-/** The in-flight ticker — the one thing that runs while the daemon is blocked on unbounded awaited
- * work, and the only writer of the liveness row.
- *
- * Why a liveness row: every other daemon-prefixed step is written when a tick closes, so a daemon
- * inside a long dispatch was byte-identical to a dead one. Measured over 898 iterations, the gap to
- * the next daemon-prefixed row runs p50 2.4m and p90 39.5m. Both liveness readers select on the
- * PREFIX, so one row corrects the console, the health route and the off-machine heartbeat at once.
- *
- * Traps, all load-bearing: the row carries the poll interval because the console reads that field off
- * the winning line; it is logged before the light pass, so a pass that hangs cannot suppress it; and
- * the start condition stays coupled to the light-pass hook, because eight suites count waits as their
- * idle proxy. Disk headroom rides this same row (W1-T1082), and a supplied retrigger lets this ticker
- * re-fire the full pass on its own cadence (W1-T1272). Forensics: docs/forensics/daemon.md. */
-/** W1-T2981 — ONE in-flight ticker at a time, process-wide. Before the retro was detached only one
- *  rung could be blocked at once, so overlap was impossible by construction. A detached retro keeps
- *  its ticker while the tick proceeds into dispatch, which starts its own — and two tickers each run
- *  `sweepLight` on the poll cadence, doubling GitHub calls exactly when the fleet is busiest. This
- *  repo has already lost 90 minutes to a secondary rate limit, so unrelated contenders receive an
- *  inert stub. A same-tick dispatch is different: it takes over the retro runner atomically, without
- *  overlapping a light pass, and the retro handle loses stop authority. */
+/** In-flight ticker: the sole liveness-row writer during unbounded awaited work.
+ * Both liveness readers select the daemon prefix; without this row long dispatches looked dead
+ * (898 iterations: median gap 2.4m, p90 39.5m). Forensics: docs/forensics/daemon.md.
+ * Traps: include the console's poll interval; log BEFORE light pass so a hang cannot hide liveness;
+ * keep startup tied to the light-pass hook because eight suites use waits as their idle proxy.
+ * Disk headroom shares the row (W1-T1082); retrigger can re-fire the full pass (W1-T1272). */
+/** W1-T2981: one process-wide in-flight ticker; detached retro and dispatch otherwise double reads.
+ * Unrelated contenders get an inert stub (secondary rate limits previously cost 90 minutes).
+ * Same-tick dispatch atomically takes over retro's ticker without overlapping a light pass;
+ * the old retro handle then loses stop authority. */
 interface InFlightTickerOwner {
   active: boolean;
   generation: number;
@@ -2607,14 +2521,10 @@ let pausedReviewPass: Promise<void> | undefined;
 /** Process-wide, so a generation handed back to a sweep's hold is never issued to a later holder. */
 let inFlightTickerGenerations = 0;
 
-/** The most stale the account-headroom reading may be before the in-flight ticker takes its own. The
- * governor sampled on the loop whose duration it was meant to bound: the reading is written once per
- * iteration, after the pass carrying the largest spender, so sampling rate was inversely coupled to
- * spend. Measured 2026-09-01, gaps run median 158s but p95 4,400s and max 21,586s, and in one
- * 58-minute window the account went from 30% used to exhausted while the governor held its last
- * value. The cadence already existed and disk headroom already rode it. 300s bounds staleness rather
- * than setting a rate, so on a healthy fleet this fires never: BACKSTOP, not the primary control.
- * Policy data (rule 2). Forensics: docs/forensics/daemon.md. */
+/** BACKSTOP: refresh account headroom after 300s; policy data (rule 2).
+ * Sampling only after dispatch coupled staleness to spend: p95 gaps were 4,400s, max 21,586s;
+ * one 58-minute gap exhausted an account from 30% used (2026-09-01).
+ * Reuse the disk-headroom ticker; healthy fleets need no extra reads. Forensics: docs/forensics/daemon.md. */
 export const HEADROOM_SAMPLE_MAX_AGE_MS = 300_000;
 
 function startInFlightTicker(
@@ -3425,16 +3335,10 @@ async function drainImprovementActionHandoff(pump: ImprovementActionPump, boundM
   return { operation_id: operation ?? null, phase: operation === undefined ? "discovery" : "handoff" };
 }
 
-/**
- * W1-T4077 — THE CONSOLE'S "REVIEW NOW" / "FIX NOW", RUN ON THEIR OWN TIMER.
- *
- * These requests used to be read once per main-loop iteration and AWAITED there. Measured 2026-09-22: one
- * iteration began at 19:33 and the next after 20:16, so a nudge could wait ~43 minutes, and a fix nudge then held
- * dispatch for the length of a fix round. A timer fires during awaited work, so this pump starts a request within one
- * interval whatever the loop is doing, and never awaits it: each request runs detached, at most once at a time per
- * (action, PR). The marker is cleared when its run settles, exactly as before, so an unfinished request survives a
- * restart and is picked up again.
- */
+/** W1-T4077: timer-driven REVIEW NOW / FIX NOW, detached once per (action, PR).
+ * Reading requests only in the main loop delayed nudges ~43 minutes (2026-09-22), and awaiting
+ * fix held dispatch. Start within one interval during awaited work; clear markers only on settlement
+ * so unfinished requests survive restart. */
 export function startPrActionPump(
   deps: Pick<DaemonDeps, "pendingPrActions" | "runPrAction" | "clearPrAction">,
   intervalMs: number,
@@ -4109,7 +4013,8 @@ export async function runDaemon(
   // W1-T8676: the blocking runs whose release this process already ledgered, beside the projection's receipt.
   const ledgeredIndependentBlockReleases = new Set<string>();
   for (const [taskId, receipt] of handoffReceiptsToCarry(bootLedgerLines)) {
-    log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true });
+    log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true,
+      ...(receipt.resumePhase ? { resume_phase: receipt.resumePhase } : {}) });
   }
   let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(bootLedgerLines);
   const staleBodyReported = new Set<string>();
@@ -5264,6 +5169,8 @@ export async function runDaemon(
                 reason: result.snapshot.reason,
                 source_bytes: result.snapshot.pressure.sourceBytes,
                 checkpoint_bytes: result.checkpointBytes,
+                checkpoint_read_bytes: result.checkpointReadBytes,
+                checkpoint_written_bytes: result.checkpointWrittenBytes,
                 dimension_cardinality: result.snapshot.pressure.dimensionCardinality,
                 rebuilt_partitions: result.snapshot.pressure.rebuiltPartitions,
               });
@@ -5312,6 +5219,8 @@ export async function runDaemon(
                       filed: result.filedCount,
                       skipped: result.skippedCount,
                       refused: result.refusedCount,
+                      carry_refused: result.carryRefusedCount ?? 0,
+                      carry_refusals: result.carryRefused ?? [],
                       lesson_recurrences: result.lessonRecurrences,
                     });
                   })
@@ -6632,6 +6541,43 @@ export async function runDaemon(
       }
     }
 
+    // W1-T10799: a managed target with no daemon of its own runs ONE bounded job here, in the lane this daemon
+    // reserves for it. Core's own kick has priority, a busy lane or a zero enforced lane target defers the job
+    // explicitly, and a second request in the same tick defers behind the first: this adds no capacity.
+    if (!forcedNext && deps.pendingTargetJobs && deps.runTargetJob) {
+      let pending: Array<DaemonKick & { repo: string }>;
+      try { pending = deps.pendingTargetJobs(); }
+      catch (error) {
+        log("target_job.unknown", { reason: `durable jobs unreadable: ${String(error)}` });
+        ticks++;
+        await sleepUntilSweepWake(pollIntervalMs);
+        continue;
+      }
+      const [job, ...waiting] = pending;
+      if (job) {
+        const laneTarget = enforcedLaneTarget(children.size, tickQueueAdmission?.wipLimit);
+        const wipBudget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
+        if (children.size > 0 || laneTarget < 1 || wipBudget < 1) {
+          log("target_job.capacity_deferred", { task: job.taskId, origin: job.origin, repo: job.repo, in_flight: children.size });
+        } else {
+          for (const other of waiting) log("target_job.capacity_deferred", { task: other.taskId, origin: other.origin, repo: other.repo, reason: "lane reserved by another job" });
+          let closed = false;
+          let charged = false;
+          try { closed = ["ended", "refused"].includes((await deps.runTargetJob(job, deps, () => {
+            if (charged) throw new Error("target job already charged");
+            charged = true;
+            attempted.push(job.taskId);
+          })).state); }
+          catch (e) { log("target_job.error", { task: job.taskId, origin: job.origin, repo: job.repo, error: String((e as Error)?.message ?? e) }); }
+          if (closed) continue;
+        }
+        // Held, resumed or deferred: the marker stays, and the loop paces itself rather than re-reading it at once.
+        ticks++;
+        await sleepUntilSweepWake(pollIntervalMs);
+        continue;
+      }
+    }
+
     // W1-T4077: console PR actions are no longer read here — `startPrActionPump` runs them on their own timer,
     // detached, so a long iteration can neither delay a nudge nor be held by one.
 
@@ -7545,8 +7491,13 @@ export async function runDaemon(
     const phaseFaults: Array<{ phase: string; reason: unknown }> = [];
     const admittedWork = runLanePool(admitted, (id, task) => {
       const startedAtMs = preparedStartTimes.get(id)!;
+      const kick = forcedKick?.taskId === id ? forcedKick : undefined;
+      const bindRun = (runId: string) => {
+        if (kick) log("console.kick_dispatched", { task: id, origin: kick.origin, ...kickRepoField(kick), native_run_id: runId });
+      };
       // Preserve the current worker-boundary handoff; a reservation never preempts it.
-      return deps.runOne(id, { onChild: (child) => {
+      return deps.runOne(id, { onRunCreated: bindRun, onChild: (child) => {
+        bindRun(child.runId);
         childMode = true;
         children.set(child.runId, { ...child, taskId: id });
         batchChildren.set(task, child);
@@ -7954,4 +7905,126 @@ export function reconstructOrphan(
     prUrl: projection.prUrl,
     detail: `${orphan.taskId}: ${why} — orphaned worktree/branch is stale debris, safe to discard`,
   };
+}
+
+/**
+ * W1-T10799 — A MANAGED TARGET WITH NO DAEMON OF ITS OWN runs its one reviewed frontier task as ONE bounded
+ * job the CORE daemon owns. The narrow exception to {@link taskTargetsRepo}'s single-target guard: one job, one
+ * task, one lane, ended at that one dispatch's terminal verdict. It never makes the daemon a multi-repo
+ * scheduler, and it reuses the maintained drain, so every admission gate the drain applies still decides.
+ *
+ * PURE: every read and write is a seam the caller wires (the durable record, the registry, the plan sync, the
+ * dispatch claim, the drain's own deps), so this module keeps its no-filesystem contract.
+ */
+export interface BoundedTargetJobKick { taskId: string; origin: string; repo: string }
+export interface BoundedTargetJobPorts {
+  readJob: (origin: string) => TargetJobRead;
+  writeJob: (record: TargetJobRecord) => void;
+  admit: (repo: string) => TargetJobAdmission;
+  /** The target clone's plan, synced from origin/main through the existing plan-sync refusal. */
+  syncPlan: (owner: string, repo: string) => Promise<{ plan: Plan } | { error: string }>;
+  /** Whether the target's dispatch claim for the task is held; `undefined` is an unreadable remote, never "free". */
+  claimHeld: (taskId: string, repo: string) => Promise<boolean | undefined>;
+  /** The native receipts the CORE ledger holds for this job's origin (`readTargetExecution`). */
+  execution: (record: TargetJobRecord) => { state: string };
+  /** The maintained drain. `onDispatch` runs immediately before the drain's one `runOne` and may throw to refuse it. */
+  drain: (plan: Plan, opts: DrainOpts, onDispatch: () => void) => Promise<DrainSummary>;
+  clearKick: (taskId: string, repo: string) => void;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  nowIso: () => string;
+}
+/** `ended`/`refused` close the job and its marker; `held` and `resumed` keep both for a later tick. */
+export type BoundedTargetJobOutcome =
+  | { state: "ended" | "refused"; reason: string; replayed: boolean }
+  | { state: "held" | "resumed"; reason: string };
+
+/** The drain stop reasons that mean the core daemon's own governors declined, not that the task is unrunnable. */
+const CAPACITY_STOPS: ReadonlySet<StopReason> = new Set<StopReason>([
+  "headroom_exhausted", "headroom_degraded", "cost_governor_deferred", "queue_governor_deferred", "memory_governor_deferred",
+  "quiet_hours_deferred", "new_build_deferred", "wip_deferred", "stopped", "paused",
+]);
+
+export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: BoundedTargetJobPorts, baseOpts: DrainOpts = {}): Promise<BoundedTargetJobOutcome> {
+  const { taskId, origin, repo } = kick;
+  const fields = { task: taskId, origin, repo };
+  const base = (status: TargetJobStatus, prior?: TargetJobRecord, extra: Partial<TargetJobRecord> = {}): TargetJobRecord =>
+    ({ origin, taskId, repo, attempts: prior?.attempts ?? 0, ...extra, status, updatedAt: deps.nowIso() });
+  const held = (reason: string, step = "target_job.held"): BoundedTargetJobOutcome => { deps.log(step, { ...fields, reason }); return { state: "held", reason }; };
+  const close = (record: TargetJobRecord, reason: string, replayed: boolean): BoundedTargetJobOutcome => {
+    if (!replayed) deps.writeJob({ ...record, reason });
+    deps.clearKick(taskId, repo);
+    return { state: record.status as "ended" | "refused", reason, replayed };
+  };
+  const refuse = (prior: TargetJobRecord | undefined, reason: string): BoundedTargetJobOutcome => {
+    deps.log("console.kick_refused", { ...fields, reason });
+    return close(base("refused", prior), reason, false);
+  };
+
+  const read = deps.readJob(origin);
+  if (read.state === "unreadable") return held("job record unreadable", "target_job.unknown");
+  const prior = read.state === "found" ? read.record : undefined;
+  if (prior && (prior.taskId !== taskId || prior.repo.toLowerCase() !== repo.toLowerCase())) return held("job identity conflicts with request", "target_job.unknown");
+  // A closed job is reported, never re-run: the same origin never spends twice.
+  if (prior && (prior.status === "ended" || prior.status === "refused")) {
+    deps.log("target_job.replayed", { ...fields, status: prior.status });
+    return close(prior, prior.reason ?? prior.status, true);
+  }
+
+  const admission = deps.admit(repo);
+  if (admission.state === "unreadable") return held("registry or managed set unreadable", "target_job.unknown");
+  if (admission.state === "not_enrolled") return refuse(prior, "target is not an enrolled managed repository");
+  if (admission.state === "own_instance") return refuse(prior, `${admission.instance} drives this repository; its own kick path owns the task`);
+  if (prior?.owner && prior.owner.toLowerCase() !== admission.owner.toLowerCase()) return held("verified target owner changed", "target_job.unknown");
+
+  if (prior?.status === "admitted") {
+    // A restart or a lost response: recover from the durable record, the native receipts and the dispatch claim.
+    const seen = deps.execution(prior);
+    if (seen.state === "ended") return close({ ...prior, status: "ended", updatedAt: deps.nowIso() }, "terminal verdict recorded", false);
+    const claim = await deps.claimHeld(taskId, repo);
+    if (seen.state === "unknown") return held("native execution receipts unreadable", "target_job.unknown");
+    if (claim !== false || seen.state === "running") {
+      if (prior.reason !== "resumed") {
+        // `updatedAt` stays the dispatch time: the native receipts are correlated from it.
+        deps.writeJob({ ...prior, reason: "resumed" });
+        deps.log("target_job.resumed", { ...fields, claim: claim === undefined ? "unknown" : "held", execution: seen.state });
+      }
+      return { state: "resumed", reason: `dispatch already landed (${seen.state})` };
+    }
+    return held(`previous dispatch unresolved (${seen.state}); claim absent`, "target_job.unknown");
+  }
+
+  const synced = await deps.syncPlan(admission.owner, repo);
+  if ("error" in synced) return held(`target plan not synced: ${synced.error}`, "target_job.plan_unreadable");
+  const task = synced.plan.tasks.find((t) => t.id === taskId);
+  if (!task) return refuse(prior, "unknown task id");
+  if (task.repo.toLowerCase() !== repo.toLowerCase()) return refuse(prior, "task repository conflicts with verified target");
+  const identity = { owner: admission.owner, planRevision: planSha(synced.plan.tasks) };
+
+  // One task, depth 1, max 1, one lane: the job can never re-enter the target plan's other tasks.
+  const opts = applyCuratedSelection({ ...baseOpts, laneCount: 1, wipLimit: 1 }, { taskIds: [taskId], depth: 1 });
+  let dispatched = false;
+  let summary: DrainSummary;
+  try {
+    summary = await deps.drain(synced.plan, opts, () => {
+      // Durable BEFORE the spend, and the receipt only when the drain really starts the run.
+      if (dispatched) throw new Error("bounded job already dispatched");
+      deps.writeJob(base("admitted", prior, { ...identity, attempts: (prior?.attempts ?? 0) + 1 }));
+      dispatched = true;
+      deps.log("console.kick_dispatched", fields);
+    });
+  } catch (error) {
+    // A drain that threw is a failed read of the world, never a terminal verdict: the job stays open and its marker stays.
+    return held(`drain failed${dispatched ? " after dispatch" : ""}: ${String((error as Error)?.message ?? error)}`, "target_job.error");
+  }
+  if (dispatched) {
+    if (summary.stopReason === "error") return held("dispatch outcome unresolved", "target_job.unknown");
+    const dispatchedJob = deps.readJob(origin);
+    if (dispatchedJob.state !== "found") return held("dispatched job record unreadable", "target_job.unknown");
+    deps.log("target_job.ended", { ...fields, stop_reason: summary.stopReason });
+    return close({ ...dispatchedJob.record, status: "ended", updatedAt: deps.nowIso(), stopReason: summary.stopReason }, summary.stopReason, false);
+  }
+  if (CAPACITY_STOPS.has(summary.stopReason) || summary.stopReason === "error") {
+    return held(`${summary.stopReason}${summary.stopDetail ? `: ${summary.stopDetail}` : ""}`, "target_job.capacity_deferred");
+  }
+  return refuse(prior, `drain found the task not runnable (${summary.stopReason})`);
 }

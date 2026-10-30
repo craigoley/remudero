@@ -327,6 +327,8 @@ test("W1-T3542 criterion 2: a fired CI-learning daemon row names draft and landi
       filed: 2,
       skipped: 3,
       refused: 4,
+      carry_refused: 0,
+      carry_refusals: [],
       window_complete: true,
       unreadable_prs: 0,
       lesson_recurrences: { status: "unreadable" },

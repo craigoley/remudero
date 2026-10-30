@@ -1,0 +1,34 @@
+- id: W1-T10974
+  title: "Compress the 896 comment lines in src/lib/deployer.ts without changing executable code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "comment-compression:src/lib/deployer.ts"
+  files:
+    - src/lib/deployer.ts
+    - test/deploy/compress-src-lib-deployer-ts.test.ts
+  acceptance:
+    - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
+      proof: "unit test: W1-T10974: comment compression preserves executable code"
+  rationale: |
+    Observed 896 comment lines in src/lib/deployer.ts. This is maintenance debt, never a merge ceiling.
+    Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
+    Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.
+    Add the named regression in test/deploy/compress-src-lib-deployer-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
+    Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
+    Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares src/lib/deployer.ts, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-29T09:59:40.557Z"
+    pin: "e79ce491aef44d2f1d90a52b6f6e6581d6bbabf74093ec0303ce7391664959d2"
