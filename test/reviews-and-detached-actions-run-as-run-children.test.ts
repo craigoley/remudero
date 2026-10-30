@@ -998,9 +998,12 @@ const fixPr = (over: Partial<OpenPrView> = {}): OpenPrView => ({
   unmetCriteria: UNMET, priorStrikes: 0, lastActivityAt: "2026-10-05T22:00:00Z", headSha: FIX_HEAD, headRefName: FIX_BRANCH, autoMergeArmed: false, ...over,
 });
 
-async function proveFreshFixAdmissionAcrossRestart() {
-  const { runDetachedWork, buildSweepEffects } = await import("#src/run-task.js");
-  for (const admission of ["refused", "unreadable", "throws", "admitted"] as const) {
+type FixIdentityRead = "readable" | "missing-branch" | "empty-branch" | "missing-head" | "moved-head" | "throws";
+
+async function proveFreshFixAdmissionAcrossRestart(identity: FixIdentityRead = "readable") {
+  const { runDetachedWork, buildSweepEffects, runFixRung } = await import("#src/run-task.js");
+  const admissions = identity === "readable" ? ["refused", "unreadable", "throws", "admitted"] as const : ["admitted"] as const;
+  for (const admission of admissions) {
     const f = fixture();
     let nowMs = Date.parse("2026-10-12T12:00:00Z");
     const clock = clockFromMillisFn(() => nowMs);
@@ -1024,6 +1027,8 @@ async function proveFreshFixAdmissionAcrossRestart() {
       ] }];
       let planReads = 0;
       let dispatches = 0;
+      let headReads = 0;
+      let checkouts = 0;
       const dispatchControls: Array<Parameters<SweepDeps["dispatchFix"]>[3]> = [];
       let pressureReads = 0;
       let enteredRead!: () => void;
@@ -1049,12 +1054,41 @@ async function proveFreshFixAdmissionAcrossRestart() {
           assert.equal(args.owner, "foreign-owner", "the rebuilt sweep targets the saved PR owner after target.owner was dropped");
           assert.equal(args.repo, "remudero");
           assert.equal(args.plan.byId.get(FIX_TASK)?.risk, "high", "the real builder receives this child's fresh canonical plan");
-          const effects = buildSweepEffects(args);
+          const effects = buildSweepEffects({ ...args, nowMsImpl: clock.now,
+            ghLiveStateImpl: async () => ({ ok: true, state: "OPEN" }),
+            readJsonImpl: async (readArgs) => {
+              assert.deepEqual(readArgs, ["pr", "view", "https://github.com/foreign-owner/remudero/pull/9379",
+                "--json", "headRefName,headRefOid,body,files"]);
+              headReads++;
+              if (identity === "throws") throw new Error("head identity lookup unavailable");
+              return { ...(identity === "missing-branch" ? {} : { headRefName: identity === "empty-branch" ? "" : FIX_BRANCH }),
+                ...(identity === "missing-head" ? {} : { headRefOid: identity === "moved-head" ? "new-head" : FIX_HEAD }), body: "", files: [] };
+            },
+            registeredWorktreeOwnerImpl: () => undefined,
+            createFixRungWorktreeImpl: (_repo: string, path: string) => { checkouts++; mkdirSync(path, { recursive: true }); },
+            captureWorktreeSnapshotImpl: () => ({ headSha: FIX_HEAD, dirty: false }),
+            resolveTaskContractAtHeadImpl: async () => ({ criteria: UNMET, taskDeclaredFiles: task.files, taskRisk: "high", taskNarrative: {} }),
+            readPreservedOwnerPatchImpl: () => undefined,
+            readPackageScriptsImpl: () => ({}),
+            worktreeRemoveImpl: (_repo, path) => { rmSync(path, { recursive: true, force: true }); },
+            runFixRungImpl: async (opts: Parameters<typeof runFixRung>[0]) => {
+              assert.equal(opts.deps.branchClaim?.verify?.(), undefined, "the real native helper gave the child a verified branch claim");
+              assert.equal(opts.deps.branchClaim?.last().info.pid, process.pid);
+              await opts.deps.spawn({ cwd: opts.worktreePath, prompt: "fixture fix", config: opts.config,
+                settingsFile: opts.settingsFile, permissionMode: "bypassPermissions", maxBudgetUsd: opts.budgetUsd });
+            },
+            spawnImpl: async (worker) => {
+              dispatches++;
+              dispatchControls.push({ admissionSinceMs: worker.memoryAdmissionSinceMs, signal: worker.signal! });
+              worker.onMemoryAdmissionEnd?.();
+              return { text: "fixed", costUsd: 0, numTurns: 1, sessionId: "fixture", blocks: [], stderr: "",
+                subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
+                model: "fixture", effort: "low", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+                modelUsage: {}, compactionEvents: [], qualitySuspect: false };
+            },
+          });
           assert.equal(typeof effects.dispatchFix, "function", "the production sweep dispatcher was reconstructed");
-          return { ...effects, dispatchFix: (...args: Parameters<SweepDeps["dispatchFix"]>) => {
-            dispatches++;
-            dispatchControls.push(args[3]);
-          } };
+          return effects;
         },
       };
       const engine = detachedEngine(f);
@@ -1134,13 +1168,17 @@ async function proveFreshFixAdmissionAcrossRestart() {
         "the pre-restart admission timestamp survives the producer, disk spec and fresh adoption without a retry reset");
       writePlan("high");
       releaseRead();
-      assert.equal(await childDone, admission === "admitted" ? 0 : 1);
+      const succeeded = admission === "admitted" && identity === "readable";
+      assert.equal(await childDone, succeeded ? 0 : 1);
       const status = readStatus(children[1]!.dir);
       assert.ok(status.ok);
-      assert.equal(status.value.state, admission === "admitted" ? "done" : "failed");
+      assert.equal(status.value.state, succeeded ? "done" : "failed");
       assert.equal(planReads, 1);
-      assert.equal(dispatches, admission === "admitted" ? 1 : 0);
-      if (admission === "admitted") {
+      assert.equal(headReads, admission === "admitted" ? 1 : 0, "the real dispatcher reads its own head identity after admission");
+      assert.equal(checkouts, succeeded ? 1 : 0, "unread or changed identities refuse before the branch checkout");
+      assert.equal(existsSync(join(f.stateRoot, "inflight")), succeeded, "a refused identity never takes a fix-branch claim");
+      assert.equal(dispatches, succeeded ? 1 : 0);
+      if (succeeded) {
         assert.equal(dispatchControls[0]?.admissionSinceMs, admissionSinceMs,
           "the rebuilt dispatcher receives the original retry timestamp after the freshness restart");
         assert.equal(dispatchControls[0]?.signal.aborted, false, "the child owns a fresh, live signal");
@@ -1159,6 +1197,13 @@ async function proveFreshFixAdmissionAcrossRestart() {
         assert.equal(status.value.result, undefined, "a refused grant cannot become a success-shaped child result");
         assert.equal(f.rows.some(row => row.step === "sweep.fix.child_refused" && /admission refused/.test(String(row.reason))), true);
       }
+      if (identity !== "readable") {
+        assert.equal(status.value.result, undefined, "an unread identity cannot become a successful child");
+        assert.match(status.value.failure!.message, identity === "throws" ? /head identity lookup unavailable/ : /declined at the checkout claim/);
+        if (identity !== "throws") assert.equal(readLedgerLines(ledgerPathFor(ports.config)).some(row =>
+          row.step === "sweep.fix.checkout_claim_declined" && row.head_sha === FIX_HEAD &&
+          row.owner_recovery_reason === (identity === "moved-head" ? "head_identity_changed" : "head_identity_unreadable")), true);
+      }
     } finally {
       releaseRead?.();
       finishReview(result(FIX_TASK));
@@ -1171,6 +1216,12 @@ async function proveFreshFixAdmissionAcrossRestart() {
     }
   }
 }
+
+test("W1-T9114: unread identities in the real dispatcher refuse after restart instead of succeeding", async () => {
+  for (const identity of ["missing-branch", "empty-branch", "missing-head", "moved-head", "throws"] as const) {
+    await proveFreshFixAdmissionAcrossRestart(identity);
+  }
+});
 
 test("W1-T9114: a fix dispatch the sweep decides is spawned as a child before any claim and held by the registry", async () => {
   resetChildWork();

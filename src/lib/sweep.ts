@@ -3907,6 +3907,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         };
         log("sweep.fix.prepare_timing", { pr_number: pr.prNumber, stage: "head-lookup",
           elapsed_ms: performance.now() - headReadStarted, asynchronous: deps.ghJsonImpl === undefined });
+        // An unread identity is retryable evidence loss, not an uncreditable head or a successful child.
+        if (typeof headRef?.headRefName !== "string" || !headRef.headRefName.trim() ||
+            typeof headRef.headRefOid !== "string" || !headRef.headRefOid.trim()) {
+          return declineClaim({ pr_number: pr.prNumber, reason: "head_identity", owner_recovery_reason: "head_identity_unreadable" });
+        }
+        if (headRef.headRefOid !== pr.headSha) {
+          return declineClaim({ pr_number: pr.prNumber, reason: "head_identity", owner_recovery_reason: "head_identity_changed" });
+        }
         const realBranch = headRef.headRefName;
         const changedPaths = (headRef.files ?? []).map((f) => f.path);
         // impl-FY: a PR with no plan task is STILL repairable — see fixRungTaskFor. The rung used to
