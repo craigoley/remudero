@@ -49,3 +49,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The record shows one failing round on one PR, but supplies no root-cause diagnosis connecting that failure to the proposed ledger.ts and sweep.ts changes.; on the change's description/files alone, no diff was read — Acceptance requires preventing a fix round, while the remedy permits either prevention or self-healing without specifying the mechanism. The supplied evidence cannot verify whether this fixes the underlying failure or changes review dispatch policy; the escalation rule explicitly covers unverifiable findings."
+    judged_at: "2026-10-30T15:41:13.174Z"
+    pin: "fe8207705242d210c30ae452a9ce1cf74e54869a9f4fa438b0f4c2a361945834"
