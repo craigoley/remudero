@@ -1283,8 +1283,11 @@ export async function reconcileDepReviewHold(args: {
   const refresh = refreshFor(state, args.headSha).refresh;
   const bumps = parseDependabotBumpFacts(args.title, args.body)
     .map(b => ownRedBumpKey({ dependency: b.dependency, fromVersion: b.fromVersion, toVersion: b.toVersion }));
+  const ownRed = (state as DepReviewHoldState & { ownRed?: unknown }).ownRed;
+  const feedbackId = isOwnRedRecord(ownRed) && ownRed.headSha === args.headSha ? ownRed.feedbackId : undefined;
   const proposals = await Promise.all(readOwnRedProposals(join(dirname(args.statePath), OWN_RED_PROPOSALS_FILE))
-    .filter(p => p.prNumbers.includes(args.prNumber) && bumps.length > 0 && bumps.every(b => p.bumps.includes(b)))
+    .filter(p => (p.prNumbers.includes(args.prNumber) || p.feedbackId === feedbackId) &&
+      bumps.length > 0 && bumps.every(b => p.bumps.includes(b)))
     .sort((a, b) => a.feedbackId.localeCompare(b.feedbackId))
     .map(async p => ({ ...p, progress: await args.proposalProgress?.(p.feedbackId) ?? { evidence: "captured", terminal: false } })));
   const evidence: Partial<Record<HoldRemedyKind, { active: boolean; value: unknown }>> = {};

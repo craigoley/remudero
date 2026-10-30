@@ -12,8 +12,9 @@ function fixture(t: TestContext) {
   const ledger = join(root, "state", "ledger.ndjson");
   const statePath = join(dirname(ledger), "dep-review-holds", "craigoley", "remudero", "PR9818.json");
   let now = Date.now(), attempt = 1, head = "a".repeat(40), red = true;
+  let prNumber = 9818;
   let taskPrState = "OPEN", taskAttempt = 1, refreshAllowed = true;
-  const opened: string[] = [], closed: string[] = [];
+  const opened: string[] = [], closed: string[] = [], captured: string[] = [];
   const deps: DepReviewDeps = {
     root, config: { root, ledger } as never, clock: clockFromMillisFn(() => now),
     prDiff: () => "diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n",
@@ -24,29 +25,33 @@ function fixture(t: TestContext) {
     postStatus: (async () => ({ posted: true })) as DepReviewDeps["postStatus"], arm: () => "armed",
     prMutations: { comment: () => assert.fail("unexpected comment"), close: () => assert.fail("unexpected close"),
       updateBranch: async () => ({ ok: refreshAllowed, error: "refresh refused" }) },
-    captureMigrationFeedback: ({ id }) => ({ id }) as never,
+    captureMigrationFeedback: ({ id }) => { captured.push(id); return { id } as never; },
   };
   // A check's completion timestamp belongs to its attempt, not to a review pass.
   const started = now;
   deps.gh = (args) => args.includes("state,headRefOid,statusCheckRollup")
     ? { state: taskPrState, headRefOid: "repair-head", statusCheckRollup: [{ name: "ci-gate", checkRunId: taskAttempt }] }
-    : ({ number: 9818, url: "https://github.com/craigoley/remudero/pull/9818",
+    : ({ number: prNumber, url: `https://github.com/craigoley/remudero/pull/${prNumber}`,
     title: "build(deps): bump example from 1.0.0 to 1.0.1", body: "", headRefOid: head,
     author: { login: "app/dependabot" }, statusCheckRollup: [{ name: "ci-gate",
       conclusion: red ? "FAILURE" : "SUCCESS", checkRunId: attempt,
       externalId: `run:100:${attempt}:job:${attempt}`, completedAt: new Date(started + attempt).toISOString() }] });
-  const state = () => JSON.parse(readFileSync(statePath, "utf8"));
-  return { root, statePath, opened, closed, state,
-    task: () => writeFileSync(join(root, "plan", "tasks.yaml"), JSON.stringify([{
-      id: "W1-T1", title: "repair example", repo: "remudero", type: "implement", files: [],
-      origin: "feedback#fb-repair", depends_on: [], status: "queued", attempts: 0,
-    }])),
+  const state = (number = 9818) => JSON.parse(readFileSync(join(dirname(statePath), `PR${number}.json`), "utf8"));
+  return { root, statePath, opened, closed, captured, state,
+    task: (feedbackId = "fb-repair") => {
+      mkdirSync(join(root, "plan"), { recursive: true });
+      writeFileSync(join(root, "plan", "tasks.yaml"), JSON.stringify([{
+        id: "W1-T1", title: "repair example", repo: "remudero", type: "implement", files: [],
+        origin: `feedback#${feedbackId}`, depends_on: [], status: "queued", attempts: 0,
+      }]));
+    },
     taskEvent: (step: string, extra = {}) => appendFileSync(ledger, JSON.stringify({
       ts: new Date(now).toISOString(), task_id: "W1-T1", run_id: "repair-run", step, ...extra,
     }) + "\n"),
     taskPr: (state: string) => { taskPrState = state; }, taskRetry: () => { taskAttempt++; },
     refuseRefresh: () => { refreshAllowed = false; },
-    run: (...flags: string[]) => depReviewCommand("9818", ["--repo", "remudero", ...flags], deps),
+    run: (...flags: string[]) => depReviewCommand(String(prNumber), ["--repo", "remudero", ...flags], deps),
+    selectPr: (number: number) => { prNumber = number; },
     advance: (ms = 600_000) => { now += ms; }, retry: () => { attempt++; },
     recover: () => { red = false; }, failChecks: () => { red = true; }, newHead: () => { head = "b".repeat(40); },
     patch: (extra: object) => writeFileSync(statePath, JSON.stringify({ ...state(), ...extra })),
@@ -107,6 +112,47 @@ test("W1-T9818: a moving dependency hold is not escalated", async (t) => {
   await p.run();
   await p.run();
   assert.equal(p.opened.length, 1, "terminal proposal evidence releases the ask");
+
+  await t.test("a later PR folded into a running owned build tracks that build through termination", async (t) => {
+    const f = fixture(t);
+    const ownRed = () => f.run("--dependabot-own-red", "main-passes");
+    await ownRed();
+    await ownRed();
+    assert.equal(f.captured.length, 1, "the first PR captures a real shared proposal registry entry");
+    f.task(f.captured[0]);
+    f.taskEvent("run.start");
+    f.selectPr(9819);
+    f.newHead();
+    await ownRed();
+    await ownRed();
+    assert.equal(f.state(9819).ownRed.feedbackId, f.captured[0], "the later PR folds into the saved proposal");
+    assert.equal(f.captured.length, 1, "folding does not create another proposal");
+    assert.equal(f.opened.length, 0, "folding itself must hold the ask");
+    await f.run();
+    assert.equal(f.opened.length, 0, "the folded binding survives a pass without the own-red flag");
+    const initial = f.state(9819).progress.fingerprint;
+    f.advance(2 * 86_400_000);
+    f.taskEvent("pr.opened", { pr_url: "https://github.com/craigoley/remudero/pull/1" });
+    await f.run();
+    assert.notEqual(f.state(9819).progress.fingerprint, initial, "the folded PR observes its owned build's progress");
+    const building = f.state(9819).progress.fingerprint;
+    f.advance();
+    f.taskRetry();
+    await f.run();
+    assert.notEqual(f.state(9819).progress.fingerprint, building, "an owned-build check attempt is progress");
+    f.advance(2 * 86_400_000);
+    await f.run();
+    assert.equal(f.state(9819).progress.remedies.proposal.active, true);
+    assert.equal(f.opened.length, 0, "without recovered history an active folded build has no guessed timeout");
+    f.taskPr("MERGED");
+    await f.run();
+    assert.equal(f.opened.length, 0, "terminal evidence starts a fresh progress observation");
+    await f.run();
+    assert.equal(f.opened.length, 1, "a terminal build releases the folded PR's unchanged hold");
+    assert.match(f.opened[0], /proposal terminal/);
+    await f.run();
+    assert.equal(f.opened.length, 1, "the folded head still asks only once");
+  });
 });
 
 
