@@ -24364,8 +24364,9 @@ export function renderSweepSummary(s: SweepSummary): string {
 // DESIGN: {@link checkQueueGovernor} is consulted ONLY on the NEW-task dispatch path, NEVER by
 // `runSweep`, which drains already-open PRs at ANY depth. // Why: docs/forensics/sweep.md.
 
-/** W1-T4465 design (ii) — which of the three admission tiers a consultation fell into. */
-export type QueueGovernorTier = "under_limit" | "draining" | "growing";
+/** W1-T4465 design (ii) — which admission tier a consultation fell into. `focus` is W1-T11026's hold, answered by
+ *  the focus gardener's wrapper (focus-gardener.ts) over an admitting reading, never by {@link checkQueueGovernor}. */
+export type QueueGovernorTier = "under_limit" | "draining" | "growing" | "focus";
 
 /** W1-T4465 design (i)/(ii) — the ownership and flow observation {@link checkQueueGovernor}
  *  compares against its measured bound. Every field is OPTIONAL
