@@ -163,11 +163,17 @@ async function readWithDeadline(path: string, maxBytes: number, timeoutMs: numbe
 
 /** Selected schema is explicit: unsupported fields cannot masquerade as carried safety data. */
 function supportedFields(text: string, lifecycle: Map<string, Record<string, string>>): boolean {
+  let inInstances = false;
   let instance: Record<string, string> | undefined;
   return text.split(/\r?\n/).every((raw) => {
     const line = raw.replace(/\s+#.*$/, "").trimEnd();
     if (line.trim() === "" || line.trimStart().startsWith("#")) return true;
-    if (/^\S/.test(line)) return line === "instances:" || /^version:\s*1$/.test(line);
+    if (/^\S/.test(line)) {
+      inInstances = line === "instances:";
+      instance = undefined;
+      return inInstances || /^version:\s*1$/.test(line);
+    }
+    if (!inInstances) return true;
     const name = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
     if (name) { instance = {}; lifecycle.set(name[1], instance); }
     const field = /^ {4}([A-Za-z_]+):/.exec(line);

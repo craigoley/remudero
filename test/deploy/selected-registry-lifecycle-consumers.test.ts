@@ -108,6 +108,35 @@ test("selected lifecycle effects observe current immutable instance targets", as
   assert.ok(!JSON.stringify(f.rows).includes(f.root), "receipts must not publish operational paths");
 });
 
+test("selected lifecycle scanner ignores same-name targets after version ends the instance block", async t => {
+  const f = fixture(t);
+  const target = { instanceName: "owner", repository: "fixture/owner", stateRoot: f.stateRoot,
+    namespace: "host" as const, containerName: "owner-container" };
+  for (const suffix of [
+    `  owner:\n    state_dir: ${f.otherRoot}\n    container_name: other-container\n`,
+    `    state_dir: ${f.otherRoot}\n    container_name: other-container\n`,
+  ]) {
+    writeFileSync(f.selected, f.text() + "version: 1\n" + suffix);
+    const binding = await readSelectedInstanceRegistry({ cliPath: f.selected });
+    assert.equal(binding.kind, "ready");
+    if (binding.kind !== "ready") assert.fail("the real bounded reader must parse the fixture");
+    assert.equal(binding.binding.matchesLifecycleTarget!("owner", f.stateRoot, "owner-container"), true);
+    assert.equal(binding.binding.matchesLifecycleTarget!("owner", f.otherRoot, "other-container"), false);
+    const observer = createSelectedRegistryObserver(f.options)!;
+    t.after(() => observer.close());
+    let effects = 0;
+    assert.equal(await observeSelectedRegistry(observer, "deploy-recycle", target, () => ++effects), 1);
+    await observer.settled();
+    assert.equal(f.rows.at(-1)?.selected_state, "ready", "only the instance block binds the original target");
+    await observeSelectedRegistry(observer, "deploy-recycle", { ...target, stateRoot: f.otherRoot,
+      containerName: "other-container" }, () => ++effects);
+    await observer.settled();
+    assert.equal(effects, 2, "shadow observations preserve independent legacy effects");
+    assert.equal(f.rows.at(-1)?.selected_state, "unknown");
+    assert.equal(f.rows.at(-1)?.reason, "state_root_unverified");
+  }
+});
+
 test("selected lifecycle unknown preserves owner holds and legacy effects", async t => {
   const f = fixture(t);
   for (const flag of ["PAUSE", "STOP"]) writeFileSync(join(f.stateRoot, "state", flag), "owner hold");
