@@ -5634,7 +5634,7 @@ const args = process.argv.slice(2);
 const idx = args.indexOf("--json");
 const field = idx >= 0 ? args[idx + 1] : undefined;
 if (args[0] === "pr" && args[1] === "view" && field && field.startsWith("headRefName")) {
-  process.stdout.write(JSON.stringify({ headRefName: ${JSON.stringify(branch)}, body: "" }));
+  process.stdout.write(JSON.stringify({ headRefName: ${JSON.stringify(branch)}, headRefOid: "deadbeef", body: "" }));
 } else if (args[0] === "api" && typeof args[1] === "string" && /^repos\\/[^/]+\\/[^/]+\\/pulls\\/\\d+$/.test(args[1])) {
   const n = parseInt(fs.readFileSync(${JSON.stringify(counterFile)}, "utf8") || "0", 10);
   fs.writeFileSync(${JSON.stringify(counterFile)}, String(n + 1));

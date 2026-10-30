@@ -28,3 +28,11 @@
     - PR #10397: 0.95 PR-hours — the worker changed nothing []
     Previous remedy W1-T7748: src/run-task.ts, test/fix-lane-commit-refused-the-worker-changed-nothing.test.ts; did not fall: share of PR-hours 0.2% (9.994260833333339/5833.364996666704) before, 0.6% (42.219054722222225/6556.194641111101) after, over 14 day(s) each side. Take a structurally different remedy.
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The record requests a structurally different remedy based on recurrence and PR-hours, but supplies no root-cause finding or proposed mechanism; the remedy's scope cannot be verified from what is shown.; on the change's description/files alone, no diff was read — Acceptance checks for a test declaration with grep; that alone cannot verify the stated outcome that operator intervention is no longer needed."
+    judged_at: "2026-10-30T12:59:07.838Z"
+    pin: "b221a125d99a06d981959196bf5bf901c4733137f82b34f263284546e1097f11"

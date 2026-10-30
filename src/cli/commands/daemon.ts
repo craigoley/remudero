@@ -54,6 +54,7 @@ import { defaultListCandidates, defaultReadMarkers, killProcessGroup, sweepOrpha
 import { sweepStaleTempDirs } from "../../lib/tmp.js";
 import { sweepStaleWorkerScratch } from "../../lib/worker-scratch.js";
 import { daemonInstanceRegistryPath } from "../../lib/deployer.js";
+import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
@@ -1517,7 +1518,7 @@ export async function daemonCommand(
   // Without this line `deps.checkAutoTriage` is undefined and the whole rung is dead code, which is
   // exactly how #1066 merged: consumer wired, producer never.
   const autoTriageHooks = target.isSelf ? (deps.buildAutoTriageHooks ?? buildAutoTriageDaemonHooks)({ config, repairSnapshot: () => {
-    const generation = freshReadGeneration(tickReadGeneration, { consumer: "auto_triage_repair", log });
+    const generation = freshReadGeneration(tickReadGeneration, { consumer: "auto_triage_repair", log, maxAgeMs: DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS });
     if (!generation || generation.facts.openPrError) {
       log("auto_triage.repair_snapshot_unavailable", {
         reasonCode: tickReadGeneration === undefined ? "unpublished-generation" : !generation ? "stale-generation" : "open-pr-read-error",
