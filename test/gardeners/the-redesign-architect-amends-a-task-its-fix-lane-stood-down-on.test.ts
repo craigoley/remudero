@@ -75,10 +75,10 @@ function world(t: { after: (fn: () => void) => void }, opts: { rows?: Row[]; poi
     clock, plan,
     readShard: (rel) => readFileSync(join(root, rel), "utf8"),
     ledger: (steps, since) => rows.filter((r) => steps.includes(String(r.step)) && String(r.ts) >= since),
-    pathExists: (rel) => statSync(join(root, rel), { throwIfNoEntry: false })?.isFile() === true,
+    pathKind: (rel) => { const st = statSync(join(root, rel), { throwIfNoEntry: false }); return st === undefined ? "none" : st.isFile() ? "file" : "dir"; },
     judgeText: async (prompt) => { prompts.push(prompt); return answers.shift() ?? 'REDESIGN: {"verdict":"grill","reason":"no answer"}'; },
     // The production reader of this garden's state file, which every pass in these tests writes.
-    settled: () => buildRedesignSources(deps).settled(),
+    settled: () => buildRedesignSources(deps, { ledger: sources.ledger }).settled(),
   };
   const deps: GardenerDeps = {
     stateDir: join(root, "state"), repoRoot: root, clock, seed: 1,
@@ -131,6 +131,9 @@ test("a hold younger than an hour, or one the sweep no longer disposes, is left 
   const otherHead = world(t, { pointer: false, rows: [{ ...heldRow(NOW - 3 * 60 * MIN), head_sha: "0".repeat(40) },
     heldRow(NOW - 30 * MIN), heldRow(NOW - MIN)] });
   assert.equal(redesignCandidates(otherHead.sources as RedesignSources).length, 0, "a hold on an older head does not age this one");
+});
+
+test("a refusal pointer is the Architect's once no live PR of its task is inside its fix lane's hour", (t) => {
   // A task whose PR the sweep still disposes is that PR's to judge, so an aged pointer does not overrule a young hold.
   const youngWithPointer = world(t, { rows: [heldRow(NOW - 30 * MIN), heldRow(NOW - MIN)] });
   assert.equal(redesignCandidates(youngWithPointer.sources as RedesignSources).length, 0, "an aged pointer waits on a young hold");
@@ -141,11 +144,14 @@ test("a hold younger than an hour, or one the sweep no longer disposes, is left 
   assert.equal(redesignCandidates(fresh.sources as RedesignSources).length, 0, "a pointer younger than an hour waits");
   const unstamped = world(t, { stamp: "sometime" });
   assert.equal(redesignCandidates(unstamped.sources as RedesignSources).length, 0, "an unstamped pointer is not aged as old");
-  // A PR the sweep stopped disposing leaves its task to that PR's outcome: the pointer it left behind does not revive it.
-  const goneWithPointer = world(t, { rows: [heldRow(NOW - 10 * 60 * MIN), heldRow(NOW - 3 * 60 * MIN)] });
-  assert.equal(redesignCandidates(goneWithPointer.sources as RedesignSources).length, 0, "a gone PR's aged pointer is not asked");
   const aged = world(t, { stamp: iso(NOW - REDESIGN_AFTER_MS) });
   assert.equal(redesignCandidates(aged.sources as RedesignSources).length, 1);
+  // The pointer holds its task from dispatch until the record changes, so a PR that left the sweep leaves a frozen
+  // task: hours or a week later, nothing but an amendment moves it, and the answer is the same at both ages.
+  for (const lastSweptMs of [3 * 60 * MIN, 8 * 24 * 60 * MIN]) {
+    const gone = world(t, { rows: [heldRow(NOW - lastSweptMs - 60 * MIN), heldRow(NOW - lastSweptMs)] });
+    assert.equal(redesignCandidates(gone.sources as RedesignSources).length, 1, `a PR last swept ${lastSweptMs / MIN} min ago owns nothing`);
+  }
 });
 
 test("an amend is recorded by its landing: a failed filing re-asks, an open PR holds it, and a close declines it", async (t) => {
@@ -184,6 +190,22 @@ test("an amend is recorded by its landing: a failed filing re-asks, an open PR h
   assert.deepEqual(spec.candidates(inv, () => 0), [action]);
 });
 
+test("a landed amendment is not asked again after the framework releases its still-open PR at 24 h", async (t) => {
+  const w = world(t, { answers: [AMEND, AMEND] });
+  const ws = mkdtempSync(join(tmpdir(), "rmd-redesign-ws-"));
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  cpSync(join(w.root, "plan"), join(ws, "plan"), { recursive: true });
+  const at = (ms: number): GardenerDeps => ({ ...w.deps, openWorkspace: () => ({ root: ws, land: () => "https://example.test/pull/903", dispose: () => {} }),
+    prState: () => "open", clock: { now: () => ms, date: () => new Date(ms), iso: () => iso(ms) } });
+  await runGardenAsync(redesignGardenSpec(at(NOW), w.sources), at(NOW));
+  assert.equal(w.prompts.length, 1);
+  assert.ok(readGardenState(gardenStatePath(w.deps.stateDir, "redesign"), ["amend"]).pending);
+  await runGardenAsync(redesignGardenSpec(at(NOW + 26 * 60 * MIN), w.sources), at(NOW + 26 * 60 * MIN));
+  assert.equal(readGardenState(gardenStatePath(w.deps.stateDir, "redesign"), ["amend"]).pending, undefined, "the framework released it");
+  assert.equal(redesignCandidates(buildRedesignSources(at(NOW + 26 * 60 * MIN), w.sources)).length, 0, "its landing still holds the signature");
+  assert.equal(w.prompts.length, 1, "and no Architect is spawned for it again");
+});
+
 test("the pointer stamp is read only from the head refusal-amendment.ts writes", () => {
   assert.equal(POINTER_STAMP_RE.test(`  # refusal-amendment (W1-T1, run W1-T1-17, ${STAMP}): the worker refused`), true);
   assert.equal(POINTER_STAMP_RE.test(`  # refusal-amendment (W1-T1, ${STAMP}): the worker refused`), false, "no run, no stamp");
@@ -206,19 +228,21 @@ test("a GRILL answer lands nothing and the same evidence is not asked again", as
 test("rule 16 and the operator's grants are enforced in code, whatever the Architect answers", (t) => {
   const w = world(t);
   const task = parseTasksFromYaml(shard(), REL)[0]!;
-  const exists = w.sources.pathExists!;
+  const exists = w.sources.pathKind!;
   const edit = (over: object) => ({ filesAdd: [], proofs: [], amendment: "x", reason: "r", ...over });
   for (const path of [".github/workflows/ci.yml", "deploy/Dockerfile", "plan/policy.yaml", "scripts/coverage-ratchet.mjs", "src/lib/review.ts"]) {
-    assert.match(String(redesignEditRefusal(task, edit({ filesAdd: [path] }), () => true)), /operator-only grant/, path);
+    assert.match(String(redesignEditRefusal(task, edit({ filesAdd: [path] }), () => "file" as const)), /operator-only grant/, path);
   }
   assert.match(String(redesignEditRefusal(task, edit({ filesAdd: ["../escape.ts"] }), exists)), /not a plain repo path/);
   // Only the canonical spelling reaches the grant lists, so a spelling that resolves to a grant is refused, never passed.
   for (const path of ["./deploy/Dockerfile", "./src/lib/review.ts", "src//lib/review.ts", "src/lib/./review.ts", "src/lib/"]) {
-    assert.match(String(redesignEditRefusal(task, edit({ filesAdd: [path] }), () => true)), /not a plain repo path/, path);
+    assert.match(String(redesignEditRefusal(task, edit({ filesAdd: [path] }), () => "file" as const)), /not a plain repo path/, path);
   }
   assert.match(String(redesignEditRefusal(task, edit({ filesAdd: ["src/lib/invented.ts"] }), exists)), /not an existing file/);
   assert.match(String(redesignEditRefusal(task, edit({ filesAdd: ["src/cli"] }), exists)), /not an existing file/, "a directory grants nothing");
   assert.equal(redesignEditRefusal(task, edit({ filesAdd: ["test/new-one.test.ts"] }), exists), undefined, "a new test may be declared");
+  mkdirSync(join(w.root, "test", "gardeners"), { recursive: true });
+  assert.match(String(redesignEditRefusal(task, edit({ filesAdd: ["test/gardeners"] }), exists)), /not an existing file/, "an existing test directory is no new test");
   assert.match(String(redesignEditRefusal(task, edit({ proofs: [{ criterion: 2, proof: "unit test: x" }] }), exists)), /does not have/);
   assert.match(String(redesignEditRefusal(task, edit({ proofs: [{ criterion: 1, proof: "the test passes" }] }), exists)), /dialect prefix/);
   // A reason with newlines stays inside the amendment scalar, so it can never write a key of its own.
@@ -272,8 +296,9 @@ test("the production ledger reader reads the union and refuses an incomplete one
   const sources = buildRedesignSources(w.deps);
   assert.equal(sources.ledger(["sweep.disposed"], iso(NOW - 60 * MIN)).length, 1);
   assert.equal(sources.readShard(REL), shard());
-  assert.equal(sources.pathExists("src/cli/commands/fix.ts"), true);
-  assert.equal(sources.pathExists("src/cli/commands"), false, "a directory is not a file the task may declare");
+  assert.equal(sources.pathKind("src/cli/commands/fix.ts"), "file");
+  assert.equal(sources.pathKind("src/cli/commands"), "dir", "a directory is not a file the task may declare");
+  assert.equal(sources.pathKind("test/new-one.test.ts"), "none");
   // A live ledger that cannot be read is an incomplete corpus, never an empty one.
   rmSync(join(w.root, "state", "ledger.ndjson"));
   mkdirSync(join(w.root, "state", "ledger.ndjson"));

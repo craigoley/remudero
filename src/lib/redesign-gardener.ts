@@ -30,6 +30,7 @@ export type RedesignClass = "amend";
 export const REDESIGN_CLASSES: readonly RedesignClass[] = ["amend"];
 export const REDESIGN_NAME = "redesign";
 export const REDESIGN_JUDGED_STEP = "redesign.judged";
+const REDESIGN_SCORECARD_STEP = `${REDESIGN_NAME}.scorecard`;
 /** A hold younger than this is left to the fix lane's own next pass; an hour also bounds re-asking on a flapping hold. */
 export const REDESIGN_AFTER_MS = 60 * 60_000;
 /** BACKSTOP on spend: how many tasks one pass asks about. Each answer is one Architect spawn, and each landing is one
@@ -48,6 +49,7 @@ export const REDESIGN_MARKER_RE = /^ {2}# redesign: signature=([a-f0-9]{16})$/;
 const FORBIDDEN_PREFIXES = [".github/", "deploy/", "plan/", "state/", "hooks/"];
 
 type Row = Record<string, unknown>;
+export type PathKind = "file" | "dir" | "none";
 
 export interface RedesignEdit {
   filesAdd: string[];
@@ -82,11 +84,11 @@ export interface RedesignSources {
   readShard: (rel: string) => string;
   /** Rows of exactly the named steps since `sinceIso`. */
   ledger: (steps: readonly string[], sinceIso: string) => readonly Row[];
-  /** Whether the repo path is an existing FILE: a directory would grant every file under it. */
-  pathExists: (rel: string) => boolean;
+  /** What the repo path is: a directory would grant every file under it, so only a file or a new test is declared. */
+  pathKind: (rel: string) => PathKind;
   /** One tool-less Architect spawn. */
   judgeText: (prompt: string) => Promise<string>;
-  /** Signatures this garden's open PR carries or an operator's close declined: neither is asked again. */
+  /** Signatures a landed PR carried, an open PR carries, or an operator's close declined: none is asked again. */
   settled: () => ReadonlySet<string>;
 }
 
@@ -112,13 +114,14 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     const prior = newest.get(row.pr_number);
     if (prior === undefined || String(row.ts) >= String(prior.ts)) newest.set(row.pr_number, row);
   }
-  // A task with any PR history in the window is its PR's to judge, live or gone: its pointer counts only beside a
-  // qualifying hold, so a PR the sweep stopped disposing never revives a stale pointer.
-  const disposed = new Set<string>();
+  // A task whose PR the sweep still disposes is that PR's to judge: its pointer waits until the hold qualifies. A pointer
+  // holds its task from dispatch until the record changes (readWorkerRefusalHold), so once no live PR owns the task,
+  // nothing but an amendment moves it, and the pointer is the Architect's whatever became of an earlier PR.
+  const swept = new Set<string>();
   const qualified = new Set<string>();
   for (const row of newest.values()) {
     const at = Date.parse(String(row.ts));
-    if (typeof row.task_id === "string") disposed.add(row.task_id);
+    if (typeof row.task_id === "string" && Number.isFinite(at) && now - at <= SWEPT_RECENTLY_MS) swept.add(row.task_id);
     if (row.disposition !== "refused-escalate" || typeof row.reason !== "string" || !HOLD_REASON.test(row.reason) ||
         typeof row.task_id !== "string" || !Number.isFinite(at) || now - at > SWEPT_RECENTLY_MS) continue;
     // The hold is aged from the start of its unbroken run: walking back from the newest row, any other disposition, an
@@ -138,7 +141,7 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
   }
   for (const [id] of open) {
     const rel = plan.shards.get(id);
-    if (rel === undefined || (disposed.has(id) && !qualified.has(id))) continue;
+    if (rel === undefined || (swept.has(id) && !qualified.has(id))) continue;
     const pointer = POINTER.exec(sources.readShard(rel))?.[0];
     // The pointer's own stamp is when the lane stood down; a pointer younger than the fix lane's hour, or one with no
     // stamp to age, is not yet the Architect's.
@@ -210,14 +213,15 @@ export function parseRedesignAnswer(text: string): Parsed {
 }
 
 /** Rule 16 and the operator's grants, checked in code: the reason an edit is refused, or undefined. */
-export function redesignEditRefusal(task: Task, edit: RedesignEdit, pathExists: (rel: string) => boolean): string | undefined {
+export function redesignEditRefusal(task: Task, edit: RedesignEdit, pathKind: (rel: string) => PathKind): string | undefined {
   const instruments = INSTRUMENT_SURFACE.map((re) => new RegExp(re));
   for (const path of edit.filesAdd) {
     // Only the canonical spelling is compared against the grant lists: ./deploy/x or src//lib/x would slip a prefix match.
     if (path.startsWith("/") || posix.normalize(path) !== path || path.startsWith("./") || path.endsWith("/") ||
         path.split("/").includes("..") || path.includes("*") || !/^[\w./-]+$/.test(path)) return `files_add ${path} is not a plain repo path`;
     if (FORBIDDEN_PREFIXES.some((p) => path.startsWith(p)) || instruments.some((re) => re.test(path))) return `files_add ${path} is an operator-only grant`;
-    if (!pathExists(path) && !path.startsWith("test/")) return `files_add ${path} is not an existing file and is not a new test`;
+    const kind = pathKind(path);
+    if (kind !== "file" && !(kind === "none" && path.startsWith("test/"))) return `files_add ${path} is not an existing file and is not a new test`;
   }
   const criteria = task.acceptance ?? [];
   for (const { criterion, proof } of edit.proofs) {
@@ -286,7 +290,7 @@ export async function redesignInventory(sources: RedesignSources, deps: Gardener
     let outcome: RedesignInventory["outcomes"][number];
     if (parsed.verdict === "amend") {
       const dryRun = applyRedesignEdit(candidate.text, candidate.shard, parsed.edit, candidate.signature, "0000-00-00");
-      const refused = redesignEditRefusal(task, parsed.edit, sources.pathExists) ?? ("refused" in dryRun ? dryRun.refused : undefined);
+      const refused = redesignEditRefusal(task, parsed.edit, sources.pathKind) ?? ("refused" in dryRun ? dryRun.refused : undefined);
       outcome = refused === undefined
         ? { task_id: candidate.id, outcome: "amend", reason: parsed.edit.reason }
         : { task_id: candidate.id, outcome: "refused", reason: refused };
@@ -302,7 +306,7 @@ export async function redesignInventory(sources: RedesignSources, deps: Gardener
 }
 
 export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<RedesignSources> = {}): RedesignSources {
-  return {
+  const sources: Omit<RedesignSources, "settled"> = {
     clock: deps.clock ?? systemClock,
     plan: () => planInventory(deps.repoRoot, deps.stateDir),
     readShard: (rel) => readFileSync(join(deps.repoRoot, rel), "utf8"),
@@ -311,13 +315,23 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
       if (!read.ok) throw new Error(`redesign: incomplete ledger union: ${read.unread.join(", ")}`);
       return read.rows;
     },
-    pathExists: (rel) => statSync(join(deps.repoRoot, rel), { throwIfNoEntry: false })?.isFile() === true,
-    judgeText: () => Promise.reject(new Error("the redesign Architect's spawn is not wired")),
-    settled: () => {
-      const state = readGardenState(gardenStatePath(deps.stateDir, REDESIGN_NAME), REDESIGN_CLASSES);
-      return new Set([...(state.pending?.targets ?? []), ...(state.declinedTargets ?? [])].map((t) => t.target));
+    pathKind: (rel) => {
+      const stat = statSync(join(deps.repoRoot, rel), { throwIfNoEntry: false });
+      return stat === undefined ? "none" : stat.isFile() ? "file" : "dir";
     },
+    judgeText: () => Promise.reject(new Error("the redesign Architect's spawn is not wired")),
     ...overrides,
+  };
+  return {
+    ...sources,
+    settled: overrides.settled ?? (() => {
+      const state = readGardenState(gardenStatePath(deps.stateDir, REDESIGN_NAME), REDESIGN_CLASSES);
+      // The framework releases a decision pending after 24 h while its PR is still open, so a landing's own scorecard
+      // row, which only a filed PR carries a url on, is what keeps that PR's signatures from a second PR.
+      const landed = sources.ledger([REDESIGN_SCORECARD_STEP], fixedClock(0).iso())
+        .filter((r) => typeof r.pr_url === "string" && Array.isArray(r.signatures)).flatMap((r) => (r.signatures as unknown[]).map(String));
+      return new Set([...(state.pending?.targets ?? []), ...(state.declinedTargets ?? [])].map((t) => t.target).concat(landed));
+    }),
   };
 }
 
@@ -338,8 +352,8 @@ export function redesignGardenSpec(
     candidates: (i, _rng, declined = []) => i.actions.filter((a) => !declined.some((d) => d.target === a.signature)),
     pendingTargets: (plan) => plan.actions.map((a) => ({ class: "amend" as const, target: a.signature })),
     scorecard: (i, plan) => {
-      const card = { candidates: i.candidates, outcomes: i.outcomes, acting: plan.acting };
-      deps.log("redesign.scorecard", card);
+      const card = { candidates: i.candidates, outcomes: i.outcomes, acting: plan.acting, signatures: plan.actions.map((a) => a.signature) };
+      deps.log(REDESIGN_SCORECARD_STEP, card);
       return card;
     },
     apply: (ws, plan) => {
