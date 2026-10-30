@@ -6,7 +6,6 @@ import { checkCommitMessage, CONVENTIONAL_LIMITS } from "./commit-message.js";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
-import { TICK_READ_MAX_AGE_MS } from "./read-plane.js";
 import { checkRunsRestArgs, combinedStatusRestArgs, jobsForRunRestArgs, rollupFromRest, runsForHeadRestArgs, singlePrRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { planNodePin } from "../../scripts/node-pin-follows-the-image.mjs";
@@ -1757,6 +1756,13 @@ export interface DepReviewRepairSnapshot {
 /** PRIMARY CONTROL: the operator's stuck-PR horizon; it changes ordering, never admission or spend. */
 export const DEPENDABOT_STUCK_PR_AGE_MS = 60 * 60 * 1000;
 
+/** BACKSTOP: the oldest open-PR snapshot the repair ordering reads. The tick read's five minutes refused a HEALTHY
+ * pass: the daemon reaches its triage step a median 11.4 min (p90 16.2, max 35.2) after the read, so over
+ * 2026-10-23..30 the ordering applied 2 times in 98 and #15180's repair waited 30 h in FIFO. It reorders only,
+ * and only a PR the snapshot shows red past {@link DEPENDABOT_STUCK_PR_AGE_MS} whose registry record is bound
+ * to that same head, so a snapshot as old as the stuck horizon itself misorders at most one triage pass. */
+export const DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS = DEPENDABOT_STUCK_PR_AGE_MS;
+
 /** Reorder existing eligible feedback only. Registry, per-head repair state and a fresh OPEN
  * PR snapshot must agree; prose never grants priority. Unknown evidence preserves FIFO. */
 export async function prioritizeDepReviewRepairs(
@@ -1772,11 +1778,11 @@ export async function prioritizeDepReviewRepairs(
     return ordinary;
   }
   if (!Number.isFinite(nowMs) || !Number.isFinite(snapshot.asOfMs) ||
-      nowMs < snapshot.asOfMs || nowMs - snapshot.asOfMs > TICK_READ_MAX_AGE_MS ||
+      nowMs < snapshot.asOfMs || nowMs - snapshot.asOfMs > DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS ||
       !/^[\w.-]+$/.test(snapshot.owner) || !/^[\w.-]+$/.test(snapshot.repo)) {
     const reasonCode = !Number.isFinite(nowMs) || !Number.isFinite(snapshot.asOfMs) ? "clock-unreadable"
       : nowMs < snapshot.asOfMs ? "snapshot-future"
-      : nowMs - snapshot.asOfMs > TICK_READ_MAX_AGE_MS ? "snapshot-stale" : "repository-unreadable";
+      : nowMs - snapshot.asOfMs > DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS ? "snapshot-stale" : "repository-unreadable";
     recordEvent("auto_triage.repair_priority_unavailable", { reasonCode, candidate_count: candidates.length,
       snapshot_as_of_ms: snapshot.asOfMs, decision_at_ms: nowMs });
     return ordinary;
