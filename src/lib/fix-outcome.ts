@@ -1,5 +1,8 @@
 import { posix } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { BaseProbeOutcome, ImportClosureRead } from "./base-reproduction.js";
+import { censusWalksOf } from "./ci-parity.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export type FixOutcome =
   | { kind: "FIXED" | "BASE_RED" | "FLAKE" }
@@ -91,6 +94,8 @@ export interface RedAttributionInput {
   isHarnessPath: (path: string) => boolean;
   /** The {@link closureNeedle}s some file in the failing tests' closure names; undefined when unread. */
   namedInClosure: ReadonlySet<string> | undefined;
+  /** Each failing file's census walk prefixes; a missing entry means its head text was unread. */
+  censusWalks?: ReadonlyMap<string, readonly string[]> | undefined;
   /** A flake claim on this head was already refuted: the red reproduced on a rerun. */
   rerunReproduced?: boolean;
 }
@@ -116,11 +121,19 @@ export function redAttribution(input: RedAttributionInput): RedAttribution {
   const inClosure = new Set(failingTestFiles);
   for (const file of failingTestFiles) for (const dep of input.closure?.get(file) ?? []) inClosure.add(dep);
   const needleOf = (path: string) => inClosure.has(path) ? undefined : closureNeedle(path);
+  const censusReached = new Map<string, string[]>();
+  for (const file of failingTestFiles) {
+    const paths = input.changedPaths.filter((path) => input.censusWalks?.get(file)?.some((prefix) => path.startsWith(prefix)));
+    if (paths.length > 0) censusReached.set(file, paths);
+  }
   const reached = input.changedPaths.filter((path) => inClosure.has(path) || input.isHarnessPath(path) || !path.includes("/") ||
-    input.namedInClosure?.has(needleOf(path) ?? "") === true);
-  if (reached.length > 0) return answer("diff-reaches", `the PR changes ${reached.join(", ")}, which can reach the red`, reached);
+    input.namedInClosure?.has(needleOf(path) ?? "") === true || [...censusReached.values()].some((paths) => paths.includes(path)));
+  const censusReason = [...censusReached].map(([file, paths]) => `${file} walks ${paths.join(", ")}`).join("; ");
+  if (reached.length > 0) return answer("diff-reaches", `the PR changes ${reached.join(", ")}, which can reach the red${censusReason ? `; census ${censusReason}` : ""}`, reached);
   const unread = failingTestFiles.filter((file) => input.closure?.has(file) !== true);
   if (unread.length > 0) return answer("unknown", `no import closure for ${unread.join(", ")}`);
+  const unreadText = failingTestFiles.filter((file) => input.censusWalks?.has(file) !== true);
+  if (unreadText.length > 0) return answer("unknown", `head test text is unread for ${unreadText.join(", ")}`);
   if (input.namedInClosure === undefined && input.changedPaths.some((path) => needleOf(path) !== undefined)) {
     return answer("unknown", "whether the failing tests name the PR's test/ helpers or fixtures is unread");
   }
@@ -128,7 +141,7 @@ export function redAttribution(input: RedAttributionInput): RedAttribution {
   if (notPassing.length > 0) return answer("unknown", `no passing verdict at main for ${notPassing.join(", ")}`);
   if (input.rerunReproduced) return answer("unknown", "a rerun at this head already reproduced the red");
   return answer("diff-cannot-reach",
-    "the PR's diff touches no failing test, nothing they import, no CI harness path and no root file, and they pass at main");
+    "the PR's diff touches no failing test, nothing they import or walk, no CI harness path and no root file, and they pass at main");
 }
 
 /** The newest main verdict per file for `headSha`, from the sweep's (or a fix round's) `sweep.base_reproduction` rows. */
@@ -152,6 +165,8 @@ export interface RedAttributionReads {
   changedPaths: (mainSha: string, headSha: string) => readonly string[] | Promise<readonly string[]>;
   closure: ImportClosureRead;
   namedInClosure: (headSha: string, files: readonly string[], needles: readonly string[]) => ReadonlySet<string> | Promise<ReadonlySet<string>>;
+  /** Read a failing file at this head; undefined or a throw leaves its census membership unknown. */
+  readTestText?: (headSha: string, file: string) => string | undefined | Promise<string | undefined>;
 }
 
 const settle = async <T>(read: () => T | Promise<T>): Promise<T | undefined> => {
@@ -174,8 +189,15 @@ export async function readRedAttribution(reads: RedAttributionReads): Promise<Re
   const needles = [...new Set((changedPaths ?? []).filter((path) => !closureFiles.includes(path)).map(closureNeedle).filter((n) => n !== undefined))];
   const namedInClosure = needles.length === 0 ? new Set<string>() : closure === undefined ? undefined
     : await settle(() => reads.namedInClosure(headSha!, closureFiles, needles));
+  const readTestText = reads.readTestText ?? ((head: string, file: string) =>
+    hostWorktreeGitAsync(fileURLToPath(new URL("../../", import.meta.url)), ["show", `${head}:${file}`]));
+  const censusWalks = new Map<string, readonly string[]>();
+  if (changedPaths !== undefined) for (const file of failing) {
+    const text = await settle(() => readTestText(headSha!, file));
+    if (text !== undefined) censusWalks.set(file, censusWalksOf(file, text));
+  }
   return redAttribution({ failingTestFiles: failing, changedPaths, closure, baseOutcomes: baseOutcomesForHead(reads.ledger, headSha),
-    isHarnessPath: reads.isHarnessPath, namedInClosure, rerunReproduced: reads.rerunReproduced });
+    isHarnessPath: reads.isHarnessPath, namedInClosure, censusWalks, rerunReproduced: reads.rerunReproduced });
 }
 
 /** The `fix.scope_rerouted` row's fields: what the worker asked for, why it was rerouted, and its own diagnosis

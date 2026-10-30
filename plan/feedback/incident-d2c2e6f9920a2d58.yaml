@@ -1,0 +1,32 @@
+id: incident-d2c2e6f9920a2d58
+ts: 2026-10-30T02:23:53.285Z
+raw: >-
+  Incident d2c2e6f9920a: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  preventing dispatch requires changes outside the declared scope; no responsive
+  fix was saved
+
+  First seen: 2026-10-30T02:22:22.548Z
+
+  Last seen: 2026-10-30T02:22:22.548Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15404 escalated: already escalated (reason unreadable: no escalation of this PR at head 5ad3608 is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793320452557:1:1793326115312) — preventing dispatch requires changes outside the declared scope; no responsive fix was saved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#d2c2e6f9920a2d583e7dc0a30afcdb026074ecb94b8ea370893d8282494e0d27
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -23,7 +23,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { dispatchFixCatchOutcome, fixDispatchErrorClass } from "#src/run-task.js";
+// The classifiers' own module (run-task.ts only re-exports them), so this suite does not reach run-task.ts.
+import { dispatchFixCatchOutcome, fixDispatchErrorClass } from "#src/lib/sweep.js";
 
 // ── acceptance 1: the class is recorded structurally, not only in the free-text `error` prose ───
 

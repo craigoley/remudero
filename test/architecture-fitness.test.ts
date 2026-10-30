@@ -55,8 +55,18 @@ test("depcruise rejects an unsupported dependency-cruiser version with its diagn
   assert.equal(scan.signal, null, scan.stderr);
   assert.equal(scan.status, 1, scan.stderr);
   assert.equal(scan.stdout, "", "an incompatible version must not produce a successful scan report");
-  assert.match(scan.stderr,
-    /Error: Architecture integration requires dependency-cruiser 18\.6\.0; found 0\.0\.0-unsupported/);
+  const pinned = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).devDependencies["dependency-cruiser"];
+  assert.match(pinned, /^\d+\.\d+\.\d+$/, "package.json pins dependency-cruiser exactly");
+  assert.ok(scan.stderr.includes(`Error: Architecture integration requires dependency-cruiser ${pinned}; found 0.0.0-unsupported`), scan.stderr);
+});
+
+test("#15177: the architecture scan's version gate is package.json's exact pin, not a literal a bump cannot move", () => {
+  const config = readFileSync(configPath, "utf8");
+  assert.doesNotMatch(config, /version !== "\d+\.\d+\.\d+"/, "no hard-coded version comparison");
+  assert.match(config, /require\(join\(__dirname, "package\.json"\)\)\.devDependencies\?\.\["dependency-cruiser"\]/);
+  const installed = JSON.parse(readFileSync(join(REPO_ROOT, "node_modules", "dependency-cruiser", "package.json"), "utf8")).version;
+  const pinned = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).devDependencies["dependency-cruiser"];
+  assert.equal(installed, pinned, "the installed dependency-cruiser is the version package.json pins");
 });
 
 /** Runs the default architecture integration over the fixture's `src/`. Captures nonzero exits. */

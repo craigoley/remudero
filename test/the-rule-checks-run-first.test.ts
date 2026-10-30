@@ -48,7 +48,7 @@ test("the tree-derived rule-check runner executes one test file per child proces
   const code = runRuleSuites(REPO_ROOT, fakeRun as typeof spawnSync);
   assert.equal(code, 0);
   const suites = listRuleSuites(REPO_ROOT);
-  assert.equal(calls.length, suites.length, "one spawn per suite, sequential — never backgrounded or parallelised");
+  assert.equal(calls.length, suites.length, "one spawn per suite, sequential through an injected run (the concurrent runner is in test/ci/suites/the-rule-suites-run-concurrently.test.ts)");
 });
 
 test("W1-T4433: the rule-check population is derived from the tree", () => {

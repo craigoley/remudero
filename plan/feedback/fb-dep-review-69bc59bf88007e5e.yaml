@@ -126,10 +126,31 @@ raw: |-
   </details>
 attachments: []
 origin: repair#dep-review
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/15617
+summary:
+  headline: Land the bumps through an owned task branch
+  what_happened: "Dependabot PR #15180 proposes two dependency updates, but its
+    required checks fail while main’s newest run passes. The owned change must
+    include the same version moves, companion pin updates, and needed bumps from
+    #15177 and #15182; the superseded-by process will close those PRs."
+  decision: Approve an owned task branch that carries the required updates and
+    companion edits, and leave the Dependabot PRs untouched.
+  options:
+    - label: Approve owned change
+      consequence: Land the required bumps and companion edits together; Dependabot
+        PRs close through the superseded-by process.
+      intent: approve
+    - label: Decline these bumps
+      consequence: Keep the current dependency versions and leave the Dependabot
+        proposals open.
+      intent: decline
+    - label: Reframe the change
+      consequence: Narrow or revise the proposed version set before landing it on an
+        owned task branch.
+      intent: reframe
 expansion: null
 submission_key: dep-review:own-red:craigoley/remudero:@anthropic-ai/claude-agent-sdk@0.3.310,@anthropic-ai/claude-code@2.1.310,@modelcontextprotocol/sdk@1.32.2,@openai/codex@0.164.0,@swc/core@1.16.20,actions/setup-python@7.1.0,dependency-cruiser@18.7.0,github/codeql-action/analyze@4.39.1,github/codeql-action/init@4.39.1,github/codeql-action/upload-sarif@4.39.1,jscpd@5.4.2
 thread_id: null
+answered_by: null

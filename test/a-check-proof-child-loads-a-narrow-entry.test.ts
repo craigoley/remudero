@@ -1,13 +1,15 @@
 // @census-reads: src/ — the import graph walked from src/check-proof-main.ts
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { stripComments } from "#src/lib/test-impact-map.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { makeRuntimeFixture } from "#test/helpers/native-runtime-fixture.js";
+import { MAX_UNIX_SOCKET_PATH_BYTES, SHORT_PATH_ROOT } from "#src/lib/short-path-root.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const entry = resolve(root, "src/check-proof-main.ts");
@@ -38,17 +40,22 @@ test("W1-T7728: the narrow check-proof entry never imports the run-task module",
   assert.ok(visited.has(resolve(root, "src/lib/review.ts")), "positive control: the reviewer executor was traversed");
 });
 
-test("W1-T7728: the narrow entry and rmd check-proof agree on verdict and exit code", async () => {
+async function assertProofParity(runnerTmpdir: string) {
   const { checkProofChildArgv } = await import("#src/lib/check-proof.js");
   const fixture = gitRepo({ kind: "narrow-proof" });
+  let privateTmpdir: string | undefined;
   try {
+    const pipePath = join(runnerTmpdir, `tsx-${process.geteuid?.() ?? userInfo().username}`, `${process.pid}.pipe`);
+    if (Buffer.byteLength(pipePath) > MAX_UNIX_SOCKET_PATH_BYTES) {
+      privateTmpdir = mkdtempSync(join(SHORT_PATH_ROOT, "rmd-check-proof-"));
+    }
     writeFileSync(resolve(fixture.dir, "marker.txt"), "shared\n");
     fixture.git("add", "marker.txt");
     fixture.git("commit", "-qm", "base marker");
     writeFileSync(resolve(fixture.dir, "marker.txt"), "shared\nadded\n");
     fixture.git("add", "marker.txt");
     fixture.git("commit", "-qm", "head marker");
-    const env: NodeJS.ProcessEnv = { ...process.env, RMD_SELF_SYNC_DONE: "1" };
+    const env: NodeJS.ProcessEnv = { ...process.env, RMD_SELF_SYNC_DONE: "1", TMPDIR: privateTmpdir ?? runnerTmpdir };
     delete env.NODE_TEST_CONTEXT;
     for (const [pattern, code, verdict] of [["added", 0, "pass"], ["missing", 1, "fail"], ["shared", 5, "pass"]] as const) {
       const args = [`grep: ${pattern} in marker.txt`, "--base", "HEAD~1"];
@@ -68,7 +75,24 @@ test("W1-T7728: the narrow entry and rmd check-proof agree on verdict and exit c
       if (code === 5) assert.match(narrow.stdout, /discrimination: executed_stale/);
     }
   } finally {
+    if (privateTmpdir) rmSync(privateTmpdir, { recursive: true, force: true });
     fixture.cleanup();
+  }
+}
+
+test("W1-T7728: the narrow entry and rmd check-proof agree on verdict and exit code", async () => {
+  await assertProofParity(tmpdir());
+});
+
+test("W1-T9956: the check-proof CLI arm agrees under an over-long TMPDIR", async () => {
+  const scratch = mkdtempSync(join(SHORT_PATH_ROOT, "rmd-check-proof-long-"));
+  try {
+    const longTmpdir = join(scratch, "x".repeat(MAX_UNIX_SOCKET_PATH_BYTES));
+    mkdirSync(longTmpdir);
+    assert.ok(Buffer.byteLength(longTmpdir) > MAX_UNIX_SOCKET_PATH_BYTES);
+    await assertProofParity(longTmpdir);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 });
 

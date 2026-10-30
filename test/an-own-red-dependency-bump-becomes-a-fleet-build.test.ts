@@ -67,7 +67,7 @@ test("an exact-head aged dependency repair precedes 63 older incidents without c
     "an unrelated red PR without repair state cannot starve a positively verified repair");
   assert.deepEqual(await prioritizeDepReviewRepairs(candidates.slice(0, 63), root, snapshot, NOW), candidates.slice(0, 63),
     "a repair absent from the eligible set is never reintroduced");
-  for (const changed of [undefined, { ...snapshot, asOfMs: NOW - 300001 }, { ...snapshot, asOfMs: NOW + 1 },
+  for (const changed of [undefined, { ...snapshot, asOfMs: NOW - 3600001 }, { ...snapshot, asOfMs: NOW + 1 },
     { ...snapshot, prs: [] }, { ...snapshot, owner: "../other" }, { ...snapshot, asOfMs: Number.NaN },
     ...["green", "pending", "none"].map(checksState => ({ ...snapshot, prs: [{ ...snapshot.prs[0], checksState }] })),
     { ...snapshot, prs: [{ ...snapshot.prs[0], createdAt: new Date(NOW - 3599999).toISOString() }] },

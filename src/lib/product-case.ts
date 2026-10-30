@@ -13,7 +13,8 @@ import {
   type PlanHandoffPort, type PlanRepository, type ProductPlanObservation, type ProductPlanOperationCode,
 } from "./product-plan-operation.js";
 import { ProductIntentStore } from "./product-intent-store.js";
-import { productEvidenceOutcomeSchema, productIdSchema, productRequestIdSchema, productRunReceiptSchema, productTransitionSchema, productWriteSchema, type ProductRunReceipt, type StoredProduct } from "./product-intent.js";
+import { productEvidenceOutcomeSchema, productIdSchema, productRequestIdSchema, productEvidenceReceiptSchema, productPhoneReceiptSchema, productTransitionSchema, productWriteSchema, type ProductRunReceipt, type ProductEvidenceReceipt, type ProductDeployReceipt, type ProductPhoneReceipt, type StoredProduct } from "./product-intent.js";
+import { ProductDeploymentService, probeDeploymentUrl, type ProductDeploymentCode } from "./product-deployment.js";
 import { ghProductRepositoryProvider, productRepositoryCommandSchema, ProductRepositoryService, type ProductRepositoryCode } from "./product-repository.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { readLocalQualificationReceipt } from "./local-qualification-receipt.js";
@@ -31,6 +32,14 @@ const planCommandSchema = z.object({
   planEvidenceId: z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/),
   taskId: productBuildCommandSchema.shape.taskId, pullRequest: revision,
 }).strict();
+const deploymentObservationSchema = z.object({
+  productId: productIdSchema, expectedRevision: revision, expectedObjectiveRevision: revision,
+  operationId: z.string().regex(/^pdeploy_[a-f0-9]{64}$/),
+}).strict();
+const phoneObservationSchema = productPhoneReceiptSchema.pick({ deployEvidenceId: true, platform: true, browser: true,
+  deviceModel: true, scenarioId: true, outcome: true, observedAt: true }).extend({
+  productId: productIdSchema, expectedRevision: revision, expectedObjectiveRevision: revision,
+}).strict();
 export const productCaseCommandSchema = z.discriminatedUnion("action", [
   z.object({ version: z.literal(PRODUCT_CASE_VERSION), action: z.literal("import"),
     command: productWriteSchema.refine((value) => value.id === undefined && value.expectedRevision === 0) }).strict(),
@@ -39,16 +48,21 @@ export const productCaseCommandSchema = z.discriminatedUnion("action", [
   z.object({ version: z.literal(PRODUCT_CASE_VERSION), action: z.literal("plan"), command: planCommandSchema }).strict(),
   z.object({ version: z.literal(PRODUCT_CASE_VERSION), action: z.literal("build"), command: productBuildCommandSchema }).strict(),
   z.object({ version: z.literal(PRODUCT_CASE_VERSION), action: z.literal("propose"), command: productPlanProposalSchema }).strict(),
+  z.object({ version: z.literal(PRODUCT_CASE_VERSION), action: z.literal("observe-deployment"), command: deploymentObservationSchema }).strict(),
+  z.object({ version: z.literal(PRODUCT_CASE_VERSION), action: z.literal("observe-phone"), command: phoneObservationSchema }).strict(),
 ]);
 type PlanCommand = z.infer<typeof planCommandSchema>;
-type EvidenceReference = { id: string; reference: string; outcome?: StoredProduct["stageEvidence"][number]["outcome"]; receipt?: ProductRunReceipt; current?: boolean };
+type EvidenceReference = { id: string; reference: string; outcome?: StoredProduct["stageEvidence"][number]["outcome"]; receipt?: ProductEvidenceReceipt; current?: boolean };
+type PhoneEvidenceReference = { id: string; reference: string; outcome: ProductPhoneReceipt["outcome"] | "unknown";
+  platform: ProductPhoneReceipt["platform"] | null; provenance: "operator-attested" | "unverified"; current: boolean; receipt?: ProductPhoneReceipt };
 export interface ProductCaseReply {
   productId: string; revision: number; objectiveRevision: number; replayed: boolean;
-  evidence: Record<"source" | "local" | "hosted" | "review" | "merge" | "deploy" | "mobile", EvidenceReference[]>;
+  evidence: Record<"source" | "local" | "hosted" | "review" | "merge" | "deploy", EvidenceReference[]> & { mobile: PhoneEvidenceReference[] };
+  mobileCoverage: Record<ProductPhoneReceipt["platform"], ProductPhoneReceipt["outcome"] | "unverified">;
   build?: ProductBuildReceipt;
   planOperation?: ProductPlanObservation;
 }
-export type ProductCaseCode = ProductBuildCode | ProductRepositoryCode | ProductPlanOperationCode;
+export type ProductCaseCode = ProductBuildCode | ProductRepositoryCode | ProductPlanOperationCode | ProductDeploymentCode | "binding_not_found" | "operator_required" | "deployment_not_qualified";
 /** The plan-operation seams the served composition supplies; every default is the real one. */
 export interface ProductCaseOptions extends ProductBuildOptions {
   /** The maintained gateway port (`RatifyCliGateway`); without its owned runner a proposal refuses before journaling. */
@@ -64,6 +78,14 @@ class CaseFault extends RmdError {
   constructor(readonly code: ProductCaseCode) { super("usage", GENERIC_EXIT_CODE, `product case: ${code}`); }
 }
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const deploymentIdentity = (receipt: ProductDeployReceipt) => digest([
+  receipt.actor, receipt.productId, receipt.objectiveRevision, receipt.repository.id,
+  receipt.operationId, receipt.teamId, receipt.projectId, receipt.deploymentId,
+  receipt.target, receipt.commit, receipt.outcome,
+]);
+const deploymentEvidenceId = (product: StoredProduct, receipt: ProductDeployReceipt) =>
+  product.stageEvidence.find(item => item.receipt?.channel === "deploy" &&
+    deploymentIdentity(item.receipt) === deploymentIdentity(receipt))?.id ?? `case-deploy:${deploymentIdentity(receipt)}`;
 
 /** Resumable adoption case. Durable state and all external actions use the existing product mechanisms. */
 export class ProductCaseService {
@@ -104,6 +126,7 @@ export class ProductCaseService {
       const parsed = productCaseCommandSchema.safeParse(command);
       if (!parsed.success || Buffer.byteLength(JSON.stringify(parsed.data)) > PRODUCT_CASE_LIMITS.requestBytes) throw new CaseFault("invalid_input");
       const input = parsed.data;
+      if (input.action === "observe-phone" && !actor.startsWith("operator:")) throw new CaseFault("operator_required");
       let id: string;
       let replayed: boolean;
       let build: ProductBuildReceipt | undefined;
@@ -126,6 +149,11 @@ export class ProductCaseService {
           const proposed = await this.plans.execute(actor, input.command);
           if (!proposed.ok) throw new CaseFault(proposed.code);
           replayed = proposed.value.replayed; planOperation = proposed.value.observation;
+        } else if (input.action === "observe-deployment") {
+          const observed = await this.observeDeployment(actor, product, input.command);
+          replayed = observed.replayed; currentReceipts = observed.currentReceipts;
+        } else if (input.action === "observe-phone") {
+          replayed = this.observePhone(actor, product, input.command);
         } else {
           if (!product.repository) throw new CaseFault("repository_missing");
           const evidence = product.stageEvidence.find((item) => item.id === input.command.planEvidenceId && item.stage === "plan");
@@ -140,8 +168,14 @@ export class ProductCaseService {
         }
       }
       const product = this.read(actor, id);
+      const evidence = this.evidence(product, currentReceipts), mobile = evidence.mobile;
+      const mobileCoverage: ProductCaseReply["mobileCoverage"] = { ios: "unverified", android: "unverified" };
+      for (const item of mobile.filter(item => item.current).toSorted((a, b) =>
+        Date.parse(a.receipt!.observedAt) - Date.parse(b.receipt!.observedAt))) {
+        mobileCoverage[item.platform!] = item.receipt!.outcome;
+      }
       return { ok: true, value: { productId: id, revision: product.revision, objectiveRevision: product.objectiveRevision,
-        replayed, evidence: this.evidence(product, currentReceipts), ...(build ? { build } : {}), ...(planOperation ? { planOperation } : {}) } };
+        replayed, evidence, mobileCoverage, ...(build ? { build } : {}), ...(planOperation ? { planOperation } : {}) } };
     } catch (error) {
       return { ok: false, code: error instanceof CaseFault ? error.code : "unavailable" };
     }
@@ -203,13 +237,13 @@ export class ProductCaseService {
     requestId: string; productId: string; expectedRevision: number; expectedObjectiveRevision: number;
     repositoryId: number; channel: "local" | "hosted" | "deploy" | "mobile";
     observedAt: string; references: StoredProduct["stageEvidence"][number]["references"];
-    outcome?: StoredProduct["stageEvidence"][number]["outcome"]; receipt?: ProductRunReceipt;
+    outcome?: StoredProduct["stageEvidence"][number]["outcome"]; receipt?: ProductEvidenceReceipt;
   }) {
     const parsed = z.object({ requestId: productRequestIdSchema, productId: productIdSchema,
       expectedRevision: revision, expectedObjectiveRevision: revision, repositoryId: revision,
       channel: z.enum(["local", "hosted", "deploy", "mobile"]), observedAt: z.string().datetime(),
       references: productTransitionSchema.shape.stageEvidence.unwrap().element.shape.references.min(1),
-      outcome: productEvidenceOutcomeSchema.optional(), receipt: productRunReceiptSchema.optional(),
+      outcome: productEvidenceOutcomeSchema.optional(), receipt: productEvidenceReceiptSchema.optional(),
     }).strict().safeParse(input);
     if (!parsed.success) return { ok: false as const, code: "invalid_input" as const };
     const read = this.store.read(actor, parsed.data.productId);
@@ -218,7 +252,8 @@ export class ProductCaseService {
     const receipt = parsed.data.receipt;
     if (receipt && (receipt.actor !== actor || receipt.productId !== input.productId || receipt.repository.id !== input.repositoryId ||
       receipt.channel !== input.channel || receipt.objectiveRevision !== input.expectedObjectiveRevision)) return { ok: false as const, code: "invalid_input" as const };
-    const identity = receipt ? digest([input.productId, input.expectedObjectiveRevision, input.channel, receipt.operationId, receipt.runId, receipt.head, input.outcome]) : digest(parsed.data);
+    if (receipt?.channel === "deploy" && receipt.outcome !== input.outcome) return { ok: false as const, code: "invalid_input" as const };
+    const identity = receipt?.channel === "deploy" ? deploymentIdentity(receipt) : receipt?.channel === "mobile" ? digest(receipt) : receipt ? digest([input.productId, input.expectedObjectiveRevision, input.channel, receipt.operationId, receipt.runId, receipt.head, input.outcome]) : digest(parsed.data);
     const stage = parsed.data.channel === "deploy" || parsed.data.channel === "mobile" ? "deploy" : "build";
     if (read.value.stageEvidence.length >= 128 && !read.value.stageEvidence.some(item => item.id === `case-${input.channel}:${identity}`)) return { ok: false as const, code: "capacity" as const };
     return this.store.transition(actor, { version: "product-intent-v1", requestId: parsed.data.requestId, id: parsed.data.productId,
@@ -229,6 +264,157 @@ export class ProductCaseService {
     });
   }
 
+  private observePhone(actor: string, product: StoredProduct, input: z.infer<typeof phoneObservationSchema>): boolean {
+    const { expectedRevision, ...observation } = input;
+    const identity = digest([actor, observation]);
+    const id = `case-mobile:${identity}`, requestId = `case_phone_${identity}`;
+    for (let attempt = 0; ; attempt++) {
+      const current = attempt === 0 ? product : this.read(actor, product.id);
+      if (current.objectiveRevision !== input.expectedObjectiveRevision || expectedRevision > current.revision) throw new CaseFault("stale_revision");
+      const evidence = current.stageEvidence.find(item => item.id === input.deployEvidenceId);
+      const deploy = evidence?.receipt;
+      if (evidence?.stage !== "deploy" || evidence.outcome !== "succeeded" || evidence.objectiveRevision !== current.objectiveRevision ||
+        deploy?.channel !== "deploy" || deploy.outcome !== "succeeded" || deploy.actor !== actor || deploy.productId !== current.id ||
+        deploy.objectiveRevision !== current.objectiveRevision || deploy.repository.id !== current.repository?.id ||
+        deploy.repository.owner !== current.repository.owner || deploy.repository.name !== current.repository.name ||
+        !deploy.deploymentId || !deploy.target || !deploy.commit || !deploy.url) throw new CaseFault("deployment_not_qualified");
+      if (current.stageEvidence.some(item => item.id === id)) {
+        const durable = this.store.receipt(actor, requestId);
+        if (!durable.ok) throw new CaseFault(durable.code);
+        return true;
+      }
+      if (attempt === 0 && current.revision !== expectedRevision) throw new CaseFault("stale_revision");
+      const receipt: ProductPhoneReceipt = { channel: "mobile", actor, productId: current.id, objectiveRevision: current.objectiveRevision,
+        repository: deploy.repository, provenance: "operator-attested", source: "physical-phone-browser",
+        deployEvidenceId: input.deployEvidenceId, deploymentId: deploy.deploymentId, target: deploy.target, commit: deploy.commit, url: deploy.url,
+        platform: input.platform, browser: input.browser, deviceModel: input.deviceModel, scenarioId: input.scenarioId,
+        outcome: input.outcome, observedAt: input.observedAt };
+      const saved = this.store.transition(actor, { version: "product-intent-v1", requestId, id: current.id,
+        expectedRevision: current.revision, expectedObjectiveRevision: current.objectiveRevision,
+        stageEvidence: [{ id, stage: "deploy", objectiveRevision: current.objectiveRevision, observedAt: input.observedAt,
+          outcome: input.outcome === "passed" ? "succeeded" : input.outcome, receipt,
+          references: [{ label: "Operator-attested physical-phone browser observation", url: deploy.url }] }],
+      });
+      if (saved.ok) return saved.value.replayed;
+      if (saved.code !== "stale_revision" || attempt === 1) throw new CaseFault(saved.code);
+    }
+  }
+
+  private phoneEvidence(product: StoredProduct): PhoneEvidenceReference[] {
+    return product.stageEvidence.filter(item => item.id.startsWith("case-mobile:")).map(item => {
+      const receipt = item.receipt?.channel === "mobile" ? item.receipt : undefined;
+      return { id: item.id, reference: receipt?.url ?? item.references[0]?.url ?? "unverified",
+        outcome: receipt?.outcome ?? "unknown", platform: receipt?.platform ?? null,
+        provenance: receipt?.provenance ?? "unverified", ...(receipt ? { receipt } : {}),
+        current: Boolean(receipt && receipt.objectiveRevision === product.objectiveRevision && receipt.actor.startsWith("operator:") &&
+          receipt.productId === product.id && receipt.repository.id === product.repository?.id && item.objectiveRevision === product.objectiveRevision) };
+    });
+  }
+
+  private async observeDeployment(actor: string, product: StoredProduct, input: z.infer<typeof deploymentObservationSchema>): Promise<{ replayed: boolean; currentReceipts: Set<string> }> {
+    if (product.objectiveRevision !== input.expectedObjectiveRevision || input.expectedRevision > product.revision) throw new CaseFault("stale_revision");
+    const observation = await new ProductDeploymentService({ root: this.options.root, store: this.store }).observe(actor, product.id, input.operationId);
+    if (!observation.ok) throw new CaseFault(observation.code);
+    const binding = observation.binding;
+    const base = { channel: "deploy" as const, actor, productId: product.id, objectiveRevision: product.objectiveRevision,
+      operationId: binding.operationId, repository: binding.project.repository, projectId: binding.project.id, teamId: binding.project.teamId };
+    const receipts: ProductDeployReceipt[] = [];
+    for (const deployment of observation.deployments.toSorted((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))) {
+      if (deployment.projectId !== base.projectId) throw new CaseFault("project_conflict");
+      if (deployment.ownerId !== base.teamId) throw new CaseFault("team_mismatch");
+      if (deployment.gitSource.repoId !== base.repository.id) throw new CaseFault("repository_mismatch");
+      const receipt: ProductDeployReceipt = { ...base, deploymentId: deployment.id, target: deployment.target ?? "preview",
+        providerCreatedAt: deployment.createdAt,
+        commit: deployment.gitSource.sha, url: new URL(`https://${deployment.url}`).href, readyState: deployment.readyState,
+        servedStatus: null, outcome: "unknown", reason: "unrecognized deployment state" };
+      const source = await this.hostedSource(product, actor, deployment.gitSource.sha);
+      if (!source.accepted) {
+        receipt.outcome = source.unreadable ? "unknown" : "blocked"; receipt.reason = source.reason;
+      } else if (["ERROR", "CANCELED"].includes(deployment.readyState)) {
+        receipt.outcome = "failed"; receipt.reason = `provider deployment ${deployment.readyState}`;
+      } else if (["BUILDING", "QUEUED", "INITIALIZING"].includes(deployment.readyState)) {
+        receipt.outcome = "running"; receipt.reason = `provider deployment ${deployment.readyState}`;
+      } else if (deployment.readyState === "BLOCKED") {
+        receipt.outcome = "blocked"; receipt.reason = "provider deployment BLOCKED";
+      } else if (deployment.readyState === "READY") Object.assign(receipt, await probeDeploymentUrl(receipt.url!));
+      receipts.push(receipt);
+    }
+    if (!receipts.length) receipts.push({ ...base, deploymentId: null, target: null, providerCreatedAt: null, commit: null, url: null, readyState: null,
+      servedStatus: null, outcome: "unknown", reason: observation.reason ?? "no provider deployment observed" });
+    // Bind resumption to this revision and the complete admitted set, never merely one overlapping deployment.
+    const receiptSetDigest = digest(receipts.map(deploymentIdentity).sort());
+    const resumed = receipts.some(receipt => product.stageEvidence.some(item => item.id === deploymentEvidenceId(product, receipt) &&
+      item.receipt?.channel === "deploy" && item.receipt.observation?.expectedRevision === input.expectedRevision &&
+      item.receipt.observation.receiptSetDigest === receiptSetDigest));
+    if (product.revision !== input.expectedRevision && !resumed && receipts.some(receipt => !product.stageEvidence.some(item => item.id === deploymentEvidenceId(product, receipt)))) {
+      throw new CaseFault("stale_revision");
+    }
+    let replayed = true;
+    const currentReceipts = new Map<ProductDeployReceipt["target"], string>();
+    for (const receipt of receipts) {
+      receipt.observation = { expectedRevision: input.expectedRevision, receiptSetDigest };
+      const identity = deploymentIdentity(receipt);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const current = this.read(actor, product.id);
+        const id = deploymentEvidenceId(current, receipt);
+        currentReceipts.set(receipt.target, id);
+        if (current.objectiveRevision !== product.objectiveRevision || current.repository?.id !== base.repository.id) throw new CaseFault("stale_revision");
+        if (current.revision !== product.revision && receipt.outcome === "succeeded" && receipt.commit &&
+          !(await this.hostedSource(current, actor, receipt.commit)).accepted) throw new CaseFault("stale_revision");
+        if (current.stageEvidence.some(item => item.id === id)) break;
+        if (current.stageEvidence.length >= 128) throw new CaseFault("capacity");
+        const saved = this.recordEvidence(actor, { requestId: `case_${identity}`, productId: product.id,
+          expectedRevision: current.revision, expectedObjectiveRevision: product.objectiveRevision, repositoryId: base.repository.id,
+          channel: "deploy", outcome: receipt.outcome, receipt, observedAt: (this.options.clock ?? systemClock).iso(),
+          references: [{ label: receipt.reason.slice(0, 120), url: receipt.url ?? `https://vercel.com/${base.teamId}/${binding.project.name}` }] });
+        if (saved.ok) { replayed = replayed && saved.value.replayed; break; }
+        const latest = this.read(actor, product.id);
+        if (latest.objectiveRevision === product.objectiveRevision && latest.stageEvidence.some(item => item.id === id)) break;
+        if (saved.code !== "stale_revision" || attempt === 1) throw new CaseFault(saved.code);
+      }
+    }
+    return { replayed, currentReceipts: new Set(currentReceipts.values()) };
+  }
+
+  private async hostedSource(product: StoredProduct, actor: string, commit: string): Promise<{ accepted: boolean; unreadable?: boolean; reason: string }> {
+    let unavailable: string | undefined;
+    const tested = new Map<string, StoredProduct["stageEvidence"][number]>();
+    for (const item of product.stageEvidence) {
+      const receipt = item.receipt;
+      if (receipt?.channel === "hosted" && receipt.actor === actor && receipt.productId === product.id &&
+        receipt.repository.id === product.repository?.id && receipt.objectiveRevision === product.objectiveRevision && item.objectiveRevision === product.objectiveRevision) {
+        if (item.outcome === "succeeded" && receipt.review === "success" && receipt.contexts.length &&
+          receipt.contexts.every(context => context.conclusion === "success")) tested.set(`${receipt.operationId}:${receipt.runId}:${receipt.head}`, item);
+      }
+    }
+    for (const item of tested.values()) {
+      const receipt = item.receipt;
+      if (item.outcome !== "succeeded" || receipt?.channel !== "hosted" || receipt.review !== "success" ||
+        !receipt.contexts.length || receipt.contexts.some(context => context.conclusion !== "success")) continue;
+      const repo = product.repository!;
+      for (const ref of item.references) {
+        const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/([1-9][0-9]*)$/.exec(ref.url);
+        if (!match || `${match[1]}/${match[2]}`.toLowerCase() !== `${repo.owner}/${repo.name}`.toLowerCase()) continue;
+        try {
+          if (receipt.head !== commit) {
+            const pull = z.object({ number: revision, merged_at: z.string().datetime().nullable(), merge_commit_sha: z.string().nullable(), head: z.object({ sha: z.string() }),
+              base: z.object({ ref: z.string(), repo: z.object({ id: revision }) }) }).parse(JSON.parse(await (this.options.planText ?? ghTextAsync)(
+              ["api", `repos/${repo.owner}/${repo.name}/pulls/${match[3]}`], { timeout: 20_000, maxBuffer: 256 * 1024 })));
+            if (pull.merged_at === null || pull.number !== Number(match[3]) || pull.head.sha !== receipt.head || pull.base.repo.id !== repo.id ||
+              pull.base.ref !== repo.defaultBranch || pull.merge_commit_sha !== commit) continue;
+          }
+          // Outcome receipts replay in place; their append order cannot identify the current hosted result.
+          const current = await this.hosted(product, receipt.head, { pr_url: ref.url });
+          if (current.outcome === "succeeded") return { accepted: true, reason: receipt.head === commit ? "hosted-tested source" : "verified default-branch merge of hosted-tested source" };
+          if (current.outcome === "unknown") unavailable = current.reason;
+        } catch (error) {
+          unavailable = `hosted source merge unreadable: ${String(error).slice(0, 400)}`;
+        }
+      }
+    }
+    return { accepted: false, ...(unavailable ? { unreadable: true } : {}), reason: unavailable ?? "deployment source has no current-objective succeeded hosted receipt" };
+  }
+
   private async reconcile(actor: string, original: StoredProduct, build: ProductBuildReceipt, execution: ProductBuildExecution): Promise<Set<string>> {
     const current = new Set<string>();
     const native = execution.read;
@@ -236,8 +422,9 @@ export class ProductCaseService {
     const repository = { id: original.repository.id, owner: original.repository.owner, name: original.repository.name };
     const slug = `${repository.owner}/${repository.name}`;
     if (!("runId" in native)) {
-      const prior = original.stageEvidence.findLast(item => item.receipt?.operationId === build.operationId && item.objectiveRevision === build.objectiveRevision)?.receipt;
-      if (native.state !== "unknown" || !prior) return current;
+      const prior = original.stageEvidence.findLast(item => (item.receipt?.channel === "local" || item.receipt?.channel === "hosted") &&
+        item.receipt.operationId === build.operationId && item.objectiveRevision === build.objectiveRevision)?.receipt;
+      if (native.state !== "unknown" || !prior || (prior.channel !== "local" && prior.channel !== "hosted")) return current;
       const base = { actor, productId: original.id, objectiveRevision: build.objectiveRevision, repository,
         operationId: build.operationId, runId: prior.runId, taskId: build.taskId, head: "unknown", execution: "unknown" as const };
       const reference = `https://github.com/${slug}`;
@@ -363,14 +550,18 @@ export class ProductCaseService {
       review: plans.flatMap((item) => item.references.filter((ref) => ref.label.startsWith("Reviewed task ")).map((ref) => ({ id: item.id, reference: ref.url }))),
       merge: plans.flatMap((item) => item.references.filter((ref) => ref.label === "Plan merge").map((ref) => ({ id: item.id, reference: ref.url }))),
       local: this.recordedEvidence(product, "local", currentReceipts), hosted: this.recordedEvidence(product, "hosted", currentReceipts),
-      deploy: this.recordedEvidence(product, "deploy"), mobile: this.recordedEvidence(product, "mobile"),
+      deploy: this.recordedEvidence(product, "deploy", currentReceipts), mobile: this.phoneEvidence(product),
     };
   }
 
-  private recordedEvidence(product: StoredProduct, channel: "local" | "hosted" | "deploy" | "mobile", currentReceipts = new Set<string>()): EvidenceReference[] {
+  private recordedEvidence(product: StoredProduct, channel: "local" | "hosted" | "deploy", currentReceipts = new Set<string>()): EvidenceReference[] {
     const evidence = product.stageEvidence.filter(item => item.id.startsWith(`case-${channel}:`));
-    if (channel === "deploy" || channel === "mobile") return evidence.filter(item => item.outcome === "succeeded" && item.objectiveRevision === product.objectiveRevision)
-      .flatMap(item => item.references.map(ref => ({ id: item.id, reference: ref.url }))).slice(-128);
+    if (channel === "deploy") {
+      return evidence.flatMap(item => item.references.map(ref => ({ id: item.id, reference: ref.url,
+        outcome: item.receipt?.channel === "deploy" ? item.outcome : "unknown" as const,
+        ...(item.receipt ? { receipt: item.receipt } : {}),
+        current: Boolean(item.receipt?.channel === "deploy" && item.objectiveRevision === product.objectiveRevision && currentReceipts.has(item.id)) }))).slice(-128);
+    }
     return evidence.flatMap(item => item.references.map(ref => ({ id: item.id, reference: ref.url, outcome: item.receipt ? item.outcome : "unknown" as const,
       ...(item.receipt ? { receipt: item.receipt } : {}), current: Boolean(item.receipt && currentReceipts.has(item.id) && item.objectiveRevision === product.objectiveRevision) }))).slice(-128);
   }

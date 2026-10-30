@@ -1,0 +1,64 @@
+/**
+ * A DOCKER TAG BUMP PARSES ITS SEMVER LEVEL (#15176).
+ *
+ * Dependabot's `bump node from 24.21.0-bookworm-slim to 24.22.0-bookworm-slim` matched no version
+ * pair: the version pattern allowed one suffix segment, and a Docker tag carries two. The level
+ * read `unknown`, the review failed closed, and the PR waited for a person for over a day. A
+ * suffix may now have any number of segments, and a changed variant (bookworm → trixie) still
+ * fails closed, because equal numbers can hide a new base image.
+ */
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import { overallSemverLevel, parseDependabotBumpFacts } from "#src/lib/dep-review.js";
+
+const TITLE = "chore(deps): bump node from 24.21.0-bookworm-slim to 24.22.0-bookworm-slim in /deploy";
+const BODY = "Bumps node from 24.21.0-bookworm-slim to 24.22.0-bookworm-slim.\n";
+
+test("a Docker tag with a two-segment variant suffix parses as the numeric bump it is", () => {
+  assert.equal(overallSemverLevel(TITLE, BODY), "minor");
+  assert.equal(overallSemverLevel("chore(deps): bump node from 24.21.0-bookworm-slim to 24.21.1-bookworm-slim", ""), "patch");
+  assert.equal(overallSemverLevel("chore(deps): bump node from 24.21.0-bookworm-slim to 26.0.0-bookworm-slim", ""), "major");
+  const facts = parseDependabotBumpFacts(TITLE, BODY);
+  assert.deepEqual(facts.map((f) => [f.dependency, f.fromVersion, f.toVersion, f.level, f.targetMajor]),
+    [["node", "24.21.0-bookworm-slim", "24.22.0-bookworm-slim", "minor", 24]]);
+});
+
+test("a changed tag variant fails closed even when the numbers barely move, and a one-segment suffix keeps its old reading", () => {
+  assert.equal(overallSemverLevel("chore(deps): bump node from 24.21.0-bookworm-slim to 24.21.1-trixie-slim", ""), "major");
+  assert.equal(overallSemverLevel("chore(deps): bump python from 3.13.0-windowsservercore-ltsc2022 to 3.13.1-windowsservercore-ltsc2025", ""), "major");
+  assert.equal(overallSemverLevel("chore(deps): bump node from 24.21.0-alpine3.20 to 24.21.1-alpine3.21", ""), "major");
+  assert.equal(overallSemverLevel("chore(deps): bump python from 3.13.0-windowsservercore-ltsc2022 to 3.13.1-windowsservercore-ltsc2022", ""), "patch");
+  assert.equal(overallSemverLevel("chore(deps): bump x from 1.2.3-debian-11 to 1.2.4-debian-12", ""), "major");
+  assert.equal(overallSemverLevel("chore(deps): bump x from 1.2.3-debian-12 to 1.2.4-debian-12", ""), "patch");
+  assert.equal(overallSemverLevel("chore(deps): bump node from 24.21.0-ubuntu.22.04 to 24.21.0-ubuntu.24.04", ""), "major");
+  assert.equal(overallSemverLevel("chore(deps): bump x from 4.0.0-beta.1 to 4.0.0-beta.2", ""), "patch");
+  assert.equal(overallSemverLevel("chore(deps): bump x from 4.0.0-beta.2 to 4.0.0-rc.1", ""), "major");
+  assert.equal(overallSemverLevel("chore(deps): bump x from 1.2.3-bookworm-slim to 1.2.4-Bookworm-slim", ""), "major");
+  assert.equal(overallSemverLevel("chore(deps): bump node from 24.21.0-bookworm-slim to 24.21.1-bookworm-slim--trixie", ""), "major");
+  assert.equal(overallSemverLevel("chore(deps): bump x from 1.2.3 to 1.3.0", ""), "minor");
+  assert.equal(overallSemverLevel("chore(deps): bump x to the latest", ""), "unknown");
+});
+
+test("a Docker tag whose variant changes by any one character fails closed, whatever the variant's shape", () => {
+  const variants = ["bookworm-slim", "debian-11", "ubuntu.22.04", "windowsservercore-ltsc2022", "alpine3.20", "noble-20240801", "jammy-cuda12.4"];
+  // Each digit moves by one, each letter flips case and each separator swaps: a registry tag is an exact string.
+  const mutate = (ch: string) => /\d/.test(ch) ? String((Number(ch) + 1) % 10)
+    : /[a-z]/.test(ch) ? ch.toUpperCase() : ch === "-" ? "." : "-";
+  for (const variant of variants) {
+    for (let i = 0; i < variant.length; i++) {
+      const moved = variant.slice(0, i) + mutate(variant[i]) + variant.slice(i + 1);
+      const title = `chore(deps): bump x from 1.2.3-${variant} to 1.2.4-${moved}`;
+      assert.equal(overallSemverLevel(title, ""), "major", title);
+    }
+    assert.equal(overallSemverLevel(`chore(deps): bump x from 1.2.3-${variant} to 1.2.4-${variant}`, ""), "patch", variant);
+    // Structural edits: a segment appended after any separator, a doubled separator, the tail cut off.
+    const seps = [...variant].flatMap((ch, i) => (/[-.]/.test(ch) ? [i] : []));
+    const shapes = [`${variant}-trixie`, `${variant}--trixie`, `${variant}.1`, ...seps.map(i => variant.slice(0, i)),
+      ...seps.map(i => variant.slice(0, i + 1) + variant.slice(i))];
+    for (const moved of shapes) {
+      const title = `chore(deps): bump x from 1.2.3-${variant} to 1.2.4-${moved}`;
+      assert.ok(["major", "unknown"].includes(overallSemverLevel(title, "")), title);
+    }
+  }
+});

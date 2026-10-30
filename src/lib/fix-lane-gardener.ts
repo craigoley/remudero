@@ -412,9 +412,19 @@ export function defectEventsOf(records: readonly LedgerRecord[], now: number, so
         add(r, "fixed-still-red", `a FIXED push ${r.head_sha.slice(0, 9)} is still red on the next sweep${quote(fixed.done.worker_tail)}`, pr || fixed.pr);
       } else if (["awaiting-arm", "armed-idle", "operator-hold"].includes(String(r.blocker))) pushed.delete(r.head_sha);
     } else if (r.step === "automerge.arm_skipped" && pr > 0) {
-      const armed = [...rows].reverse().find(d => d.step === "sweep.disposed" && d.disposition === "mergeable" && d.acted === true &&
-        Number(d.pr_number) === pr && tsOf(d) <= tsOf(r) && tsOf(r) - tsOf(d) <= 10 * 60_000);
-      if (armed) add(r, "disposition-disagrees-with-arm", `the sweep disposed PR #${pr} as arming while the ledger shows ${String(r.step)}: ${String(r.reason ?? r.outcome ?? "")}`);
+      if (r.lane !== undefined && r.lane !== "sweep") continue;
+      const candidates = rows.filter(d => d.step === "sweep.disposed" && Number(d.pr_number) === pr &&
+        (r.head_sha === undefined || d.head_sha === undefined || d.head_sha === r.head_sha) &&
+        (r.run_id === undefined || d.run_id === undefined || d.run_id === r.run_id) &&
+        Math.abs(tsOf(r) - tsOf(d)) <= 10 * 60_000);
+      // The arm effect logs before its disposition. Prefer that pass's completed receipt;
+      // legacy rows without run identity can only correlate to the latest preceding receipt.
+      const disposed = candidates.find(d => typeof r.run_id === "string" && d.run_id === r.run_id && tsOf(d) >= tsOf(r)) ??
+        candidates.findLast(d => tsOf(d) <= tsOf(r));
+      if (disposed?.disposition === "mergeable" && disposed.acted === true && disposed.arm_armed !== false &&
+        (disposed.arm_outcome === undefined || disposed.arm_outcome === "armed" || disposed.arm_outcome === "direct-merged")) {
+        add(r, "disposition-disagrees-with-arm", `the sweep disposed PR #${pr} as arming while the ledger shows ${String(r.step)}: ${String(r.reason ?? r.outcome ?? "")}`);
+      }
     }
   }
   return events;

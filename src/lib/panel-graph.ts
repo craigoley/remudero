@@ -3202,6 +3202,7 @@ function readSlowLaneClassification(stateDir: string, registryPath: string): Thr
 }
 
 interface InboxRead {
+  persisted?: PersistedInbox;
   whyMeFeedback?: import("./inbox-why-me.js").WhyMeFeedback;
   snapshotKey?: string;
   attentionCensus?: import("./inbox-responder.js").AttentionCensus;
@@ -3487,10 +3488,26 @@ export function buildInboxThreadReadRoute(deps: PanelGraphDeps): Route {
     scope: "write",
     // W1-T404: LOW — a read mark; changes nothing but the unread flag.
     tier: "low",
-    handler: jsonAction(validateThreadRead, (input, _req, res) => {
+    handler: jsonAction(validateThreadRead, async (input, _req, res) => {
       const proposalId = proposalIdOfThread(input.threadId)!;
-      const item = operatorThreadItems(deps).find((candidate) => candidate.proposalId === proposalId);
-      if (!item) {
+      const classified = deps.inboxFromSlowLane ? await inboxRead(deps) : undefined;
+      const qualified = qualifyMaintainedInbox(deps);
+      if (qualified && "status" in qualified) { sendJson(res, qualified.status, qualified.body); return; }
+      // Bind bookkeeping to the exact maintained evidence captured above, including a source change during qualification.
+      if (deps.inboxFromSlowLane && (!classified || !qualified || classified.snapshotKey !== qualified.key)) {
+        sendJson(res, 503, { error: "inbox_snapshot_pending", detail: "The maintained Inbox evidence changed; retry after it is qualified." });
+        return;
+      }
+      if (deps.inboxFromSlowLane) {
+        const expected = deps.inboxSourceIdentity ?? deps.inboxAuditScope;
+        const captured = classified?.persisted?.snapshotScope;
+        if (!expected || captured?.instance !== expected.instance || captured.repository !== expected.repository || captured.root !== deps.inboxRoot) {
+          sendJson(res, 503, { error: "inbox_snapshot_pending", detail: "The maintained Inbox evidence has no matching source scope." });
+          return;
+        }
+      }
+      const item = operatorThreadItems(deps, undefined, classified).find((candidate) => candidate.proposalId === proposalId);
+      if (!item || deps.inboxFromSlowLane && item.state === "retired") {
         sendJson(res, 404, { error: "not_found", detail: "operator inbox thread is unavailable" });
         return;
       }
