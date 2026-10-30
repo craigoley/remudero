@@ -295,7 +295,7 @@ export interface components {
       references: (ProductResearchLink)[];
     };
     ProductRunReceipt: (ProductLocalRunReceipt) | (ProductHostedRunReceipt);
-    ProductEvidenceReceipt: (ProductLocalRunReceipt) | (ProductHostedRunReceipt) | (ProductDeployReceipt);
+    ProductEvidenceReceipt: (ProductLocalRunReceipt) | (ProductHostedRunReceipt) | (ProductDeployReceipt) | (ProductPhoneReceipt);
     ProductLocalRunReceipt: {
       channel: "local";
       actor: string;
@@ -385,6 +385,45 @@ export interface components {
         expectedRevision: ProductRevision;
         receiptSetDigest: string;
       };
+    };
+    /** An operator attestation of a physical phone browser observation, never automated device verification. */
+    ProductPhoneReceipt: {
+      channel: "mobile";
+      actor: string;
+      productId: ProductId;
+      objectiveRevision: ProductRevision;
+      repository: {
+        id: ProductRevision;
+        owner: string;
+        name: string;
+      };
+      provenance: "operator-attested";
+      source: "physical-phone-browser";
+      deployEvidenceId: string;
+      deploymentId: string;
+      target: "preview" | "production";
+      commit: string;
+      url: string;
+      platform: "ios" | "android";
+      browser: string;
+      deviceModel: string;
+      scenarioId: string;
+      outcome: "passed" | "failed" | "blocked";
+      observedAt: string;
+    };
+    ProductCasePhoneEvidence: ({
+      id: string;
+      reference: string;
+      outcome: "passed" | "failed" | "blocked" | "unknown";
+      platform: "ios" | "android" | null | null;
+      provenance: "operator-attested" | "unverified";
+      current: boolean;
+      receipt?: ProductPhoneReceipt;
+    })[];
+    /** Latest observed outcome per platform for the current objective; an absent platform is unverified. */
+    ProductPhoneCoverage: {
+      ios: "passed" | "failed" | "blocked" | "unverified";
+      android: "passed" | "failed" | "blocked" | "unverified";
     };
     ProductReceipt: {
       operationId: string;
@@ -762,7 +801,20 @@ export interface components {
       expectedObjectiveRevision: ProductRevision;
       operationId: string;
     };
-    /** At most 65536 raw bytes. Import an approved brief, adopt its existing repository, verify a merged reviewed plan, propose one native plan for the saved brief, request one guarded build, or observe provider deployments of a persisted project binding. Client evidence and verification fields are rejected. */
+    /** Requires an operator-session actor and a succeeded deploy receipt for this product, objective and repository. Deployment details are copied from that receipt. Repeating the same observation replays its durable receipt. */
+    ProductCasePhoneObservation: {
+      productId: ProductId;
+      expectedRevision: ProductRevision;
+      expectedObjectiveRevision: ProductRevision;
+      deployEvidenceId: string;
+      platform: "ios" | "android";
+      browser: string;
+      deviceModel: string;
+      scenarioId: string;
+      outcome: "passed" | "failed" | "blocked";
+      observedAt: string;
+    };
+    /** At most 65536 raw bytes. Import an approved brief, adopt its existing repository, verify a merged reviewed plan, propose one native plan for the saved brief, request one guarded build, observe provider deployments of a persisted project binding, or attest a physical-phone browser observation of a recorded deployment. Client deployment details and verification fields are rejected. */
     ProductCaseCommand: ({
       version: "product-case-v1";
       action: "import";
@@ -787,6 +839,10 @@ export interface components {
       version: "product-case-v1";
       action: "observe-deployment";
       command: ProductCaseDeploymentObservation;
+    }) | ({
+      version: "product-case-v1";
+      action: "observe-phone";
+      command: ProductCasePhoneObservation;
     });
     ProductCaseResponse: {
       version: "product-case-v1";
@@ -810,17 +866,15 @@ export interface components {
           reference: string;
         })[];
         deploy: ProductCaseDeployEvidence;
-        mobile: ({
-          id: string;
-          reference: string;
-        })[];
+        mobile: ProductCasePhoneEvidence;
       };
+      mobileCoverage: ProductPhoneCoverage;
       build?: ProductBuildReceipt;
       planOperation?: ProductPlanOperation;
     };
     ProductCaseError: {
       version: "product-case-v1";
-      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "concurrency_exceeded" | "fleet_halted" | "kick_failed" | "creation_denied" | "envelope_missing" | "handoff_unavailable" | "binding_not_found" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_not_found" | "project_conflict" | "not_configured";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "concurrency_exceeded" | "fleet_halted" | "kick_failed" | "creation_denied" | "envelope_missing" | "handoff_unavailable" | "binding_not_found" | "operator_required" | "deployment_not_qualified" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_not_found" | "project_conflict" | "not_configured";
     };
     /** At most 4096 raw request bytes. Names one task the target repository's own plan filed for the product's approved plan evidence. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
     ProductBuildCommand: {

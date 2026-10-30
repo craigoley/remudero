@@ -13,7 +13,7 @@ import {
   type PlanHandoffPort, type PlanRepository, type ProductPlanObservation, type ProductPlanOperationCode,
 } from "./product-plan-operation.js";
 import { ProductIntentStore } from "./product-intent-store.js";
-import { productEvidenceOutcomeSchema, productIdSchema, productRequestIdSchema, productEvidenceReceiptSchema, productTransitionSchema, productWriteSchema, type ProductRunReceipt, type ProductEvidenceReceipt, type ProductDeployReceipt, type StoredProduct } from "./product-intent.js";
+import { productEvidenceOutcomeSchema, productIdSchema, productRequestIdSchema, productEvidenceReceiptSchema, productPhoneReceiptSchema, productTransitionSchema, productWriteSchema, type ProductRunReceipt, type ProductEvidenceReceipt, type ProductDeployReceipt, type ProductPhoneReceipt, type StoredProduct } from "./product-intent.js";
 import { ProductDeploymentService, probeDeploymentUrl, type ProductDeploymentCode } from "./product-deployment.js";
 import { ghProductRepositoryProvider, productRepositoryCommandSchema, ProductRepositoryService, type ProductRepositoryCode } from "./product-repository.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -36,6 +36,10 @@ const deploymentObservationSchema = z.object({
   productId: productIdSchema, expectedRevision: revision, expectedObjectiveRevision: revision,
   operationId: z.string().regex(/^pdeploy_[a-f0-9]{64}$/),
 }).strict();
+const phoneObservationSchema = productPhoneReceiptSchema.pick({ deployEvidenceId: true, platform: true, browser: true,
+  deviceModel: true, scenarioId: true, outcome: true, observedAt: true }).extend({
+  productId: productIdSchema, expectedRevision: revision, expectedObjectiveRevision: revision,
+}).strict();
 export const productCaseCommandSchema = z.discriminatedUnion("action", [
   z.object({ version: z.literal(PRODUCT_CASE_VERSION), action: z.literal("import"),
     command: productWriteSchema.refine((value) => value.id === undefined && value.expectedRevision === 0) }).strict(),
@@ -45,16 +49,20 @@ export const productCaseCommandSchema = z.discriminatedUnion("action", [
   z.object({ version: z.literal(PRODUCT_CASE_VERSION), action: z.literal("build"), command: productBuildCommandSchema }).strict(),
   z.object({ version: z.literal(PRODUCT_CASE_VERSION), action: z.literal("propose"), command: productPlanProposalSchema }).strict(),
   z.object({ version: z.literal(PRODUCT_CASE_VERSION), action: z.literal("observe-deployment"), command: deploymentObservationSchema }).strict(),
+  z.object({ version: z.literal(PRODUCT_CASE_VERSION), action: z.literal("observe-phone"), command: phoneObservationSchema }).strict(),
 ]);
 type PlanCommand = z.infer<typeof planCommandSchema>;
 type EvidenceReference = { id: string; reference: string; outcome?: StoredProduct["stageEvidence"][number]["outcome"]; receipt?: ProductEvidenceReceipt; current?: boolean };
+type PhoneEvidenceReference = { id: string; reference: string; outcome: ProductPhoneReceipt["outcome"] | "unknown";
+  platform: ProductPhoneReceipt["platform"] | null; provenance: "operator-attested" | "unverified"; current: boolean; receipt?: ProductPhoneReceipt };
 export interface ProductCaseReply {
   productId: string; revision: number; objectiveRevision: number; replayed: boolean;
-  evidence: Record<"source" | "local" | "hosted" | "review" | "merge" | "deploy" | "mobile", EvidenceReference[]>;
+  evidence: Record<"source" | "local" | "hosted" | "review" | "merge" | "deploy", EvidenceReference[]> & { mobile: PhoneEvidenceReference[] };
+  mobileCoverage: Record<ProductPhoneReceipt["platform"], ProductPhoneReceipt["outcome"] | "unverified">;
   build?: ProductBuildReceipt;
   planOperation?: ProductPlanObservation;
 }
-export type ProductCaseCode = ProductBuildCode | ProductRepositoryCode | ProductPlanOperationCode | ProductDeploymentCode | "binding_not_found";
+export type ProductCaseCode = ProductBuildCode | ProductRepositoryCode | ProductPlanOperationCode | ProductDeploymentCode | "binding_not_found" | "operator_required" | "deployment_not_qualified";
 /** The plan-operation seams the served composition supplies; every default is the real one. */
 export interface ProductCaseOptions extends ProductBuildOptions {
   /** The maintained gateway port (`RatifyCliGateway`); without its owned runner a proposal refuses before journaling. */
@@ -118,6 +126,7 @@ export class ProductCaseService {
       const parsed = productCaseCommandSchema.safeParse(command);
       if (!parsed.success || Buffer.byteLength(JSON.stringify(parsed.data)) > PRODUCT_CASE_LIMITS.requestBytes) throw new CaseFault("invalid_input");
       const input = parsed.data;
+      if (input.action === "observe-phone" && !actor.startsWith("operator:")) throw new CaseFault("operator_required");
       let id: string;
       let replayed: boolean;
       let build: ProductBuildReceipt | undefined;
@@ -143,6 +152,8 @@ export class ProductCaseService {
         } else if (input.action === "observe-deployment") {
           const observed = await this.observeDeployment(actor, product, input.command);
           replayed = observed.replayed; currentReceipts = observed.currentReceipts;
+        } else if (input.action === "observe-phone") {
+          replayed = this.observePhone(actor, product, input.command);
         } else {
           if (!product.repository) throw new CaseFault("repository_missing");
           const evidence = product.stageEvidence.find((item) => item.id === input.command.planEvidenceId && item.stage === "plan");
@@ -157,8 +168,14 @@ export class ProductCaseService {
         }
       }
       const product = this.read(actor, id);
+      const evidence = this.evidence(product, currentReceipts), mobile = evidence.mobile;
+      const mobileCoverage: ProductCaseReply["mobileCoverage"] = { ios: "unverified", android: "unverified" };
+      for (const item of mobile.filter(item => item.current).toSorted((a, b) =>
+        Date.parse(a.receipt!.observedAt) - Date.parse(b.receipt!.observedAt))) {
+        mobileCoverage[item.platform!] = item.receipt!.outcome;
+      }
       return { ok: true, value: { productId: id, revision: product.revision, objectiveRevision: product.objectiveRevision,
-        replayed, evidence: this.evidence(product, currentReceipts), ...(build ? { build } : {}), ...(planOperation ? { planOperation } : {}) } };
+        replayed, evidence, mobileCoverage, ...(build ? { build } : {}), ...(planOperation ? { planOperation } : {}) } };
     } catch (error) {
       return { ok: false, code: error instanceof CaseFault ? error.code : "unavailable" };
     }
@@ -236,7 +253,7 @@ export class ProductCaseService {
     if (receipt && (receipt.actor !== actor || receipt.productId !== input.productId || receipt.repository.id !== input.repositoryId ||
       receipt.channel !== input.channel || receipt.objectiveRevision !== input.expectedObjectiveRevision)) return { ok: false as const, code: "invalid_input" as const };
     if (receipt?.channel === "deploy" && receipt.outcome !== input.outcome) return { ok: false as const, code: "invalid_input" as const };
-    const identity = receipt?.channel === "deploy" ? deploymentIdentity(receipt) : receipt ? digest([input.productId, input.expectedObjectiveRevision, input.channel, receipt.operationId, receipt.runId, receipt.head, input.outcome]) : digest(parsed.data);
+    const identity = receipt?.channel === "deploy" ? deploymentIdentity(receipt) : receipt?.channel === "mobile" ? digest(receipt) : receipt ? digest([input.productId, input.expectedObjectiveRevision, input.channel, receipt.operationId, receipt.runId, receipt.head, input.outcome]) : digest(parsed.data);
     const stage = parsed.data.channel === "deploy" || parsed.data.channel === "mobile" ? "deploy" : "build";
     if (read.value.stageEvidence.length >= 128 && !read.value.stageEvidence.some(item => item.id === `case-${input.channel}:${identity}`)) return { ok: false as const, code: "capacity" as const };
     return this.store.transition(actor, { version: "product-intent-v1", requestId: parsed.data.requestId, id: parsed.data.productId,
@@ -244,6 +261,53 @@ export class ProductCaseService {
       stageEvidence: [{ id: `case-${parsed.data.channel}:${identity}`, stage, outcome: parsed.data.outcome ?? "succeeded",
         objectiveRevision: parsed.data.expectedObjectiveRevision, observedAt: parsed.data.observedAt, references: parsed.data.references,
         ...(receipt ? { receipt } : {}) }],
+    });
+  }
+
+  private observePhone(actor: string, product: StoredProduct, input: z.infer<typeof phoneObservationSchema>): boolean {
+    const { expectedRevision, ...observation } = input;
+    const identity = digest([actor, observation]);
+    const id = `case-mobile:${identity}`, requestId = `case_phone_${identity}`;
+    for (let attempt = 0; ; attempt++) {
+      const current = attempt === 0 ? product : this.read(actor, product.id);
+      if (current.objectiveRevision !== input.expectedObjectiveRevision || expectedRevision > current.revision) throw new CaseFault("stale_revision");
+      const evidence = current.stageEvidence.find(item => item.id === input.deployEvidenceId);
+      const deploy = evidence?.receipt;
+      if (evidence?.stage !== "deploy" || evidence.outcome !== "succeeded" || evidence.objectiveRevision !== current.objectiveRevision ||
+        deploy?.channel !== "deploy" || deploy.outcome !== "succeeded" || deploy.actor !== actor || deploy.productId !== current.id ||
+        deploy.objectiveRevision !== current.objectiveRevision || deploy.repository.id !== current.repository?.id ||
+        deploy.repository.owner !== current.repository.owner || deploy.repository.name !== current.repository.name ||
+        !deploy.deploymentId || !deploy.target || !deploy.commit || !deploy.url) throw new CaseFault("deployment_not_qualified");
+      if (current.stageEvidence.some(item => item.id === id)) {
+        const durable = this.store.receipt(actor, requestId);
+        if (!durable.ok) throw new CaseFault(durable.code);
+        return true;
+      }
+      if (attempt === 0 && current.revision !== expectedRevision) throw new CaseFault("stale_revision");
+      const receipt: ProductPhoneReceipt = { channel: "mobile", actor, productId: current.id, objectiveRevision: current.objectiveRevision,
+        repository: deploy.repository, provenance: "operator-attested", source: "physical-phone-browser",
+        deployEvidenceId: input.deployEvidenceId, deploymentId: deploy.deploymentId, target: deploy.target, commit: deploy.commit, url: deploy.url,
+        platform: input.platform, browser: input.browser, deviceModel: input.deviceModel, scenarioId: input.scenarioId,
+        outcome: input.outcome, observedAt: input.observedAt };
+      const saved = this.store.transition(actor, { version: "product-intent-v1", requestId, id: current.id,
+        expectedRevision: current.revision, expectedObjectiveRevision: current.objectiveRevision,
+        stageEvidence: [{ id, stage: "deploy", objectiveRevision: current.objectiveRevision, observedAt: input.observedAt,
+          outcome: input.outcome === "passed" ? "succeeded" : input.outcome, receipt,
+          references: [{ label: "Operator-attested physical-phone browser observation", url: deploy.url }] }],
+      });
+      if (saved.ok) return saved.value.replayed;
+      if (saved.code !== "stale_revision" || attempt === 1) throw new CaseFault(saved.code);
+    }
+  }
+
+  private phoneEvidence(product: StoredProduct): PhoneEvidenceReference[] {
+    return product.stageEvidence.filter(item => item.id.startsWith("case-mobile:")).map(item => {
+      const receipt = item.receipt?.channel === "mobile" ? item.receipt : undefined;
+      return { id: item.id, reference: receipt?.url ?? item.references[0]?.url ?? "unverified",
+        outcome: receipt?.outcome ?? "unknown", platform: receipt?.platform ?? null,
+        provenance: receipt?.provenance ?? "unverified", ...(receipt ? { receipt } : {}),
+        current: Boolean(receipt && receipt.objectiveRevision === product.objectiveRevision && receipt.actor.startsWith("operator:") &&
+          receipt.productId === product.id && receipt.repository.id === product.repository?.id && item.objectiveRevision === product.objectiveRevision) };
     });
   }
 
@@ -358,8 +422,9 @@ export class ProductCaseService {
     const repository = { id: original.repository.id, owner: original.repository.owner, name: original.repository.name };
     const slug = `${repository.owner}/${repository.name}`;
     if (!("runId" in native)) {
-      const prior = original.stageEvidence.findLast(item => item.receipt?.operationId === build.operationId && item.objectiveRevision === build.objectiveRevision)?.receipt;
-      if (native.state !== "unknown" || !prior || prior.channel === "deploy") return current;
+      const prior = original.stageEvidence.findLast(item => (item.receipt?.channel === "local" || item.receipt?.channel === "hosted") &&
+        item.receipt.operationId === build.operationId && item.objectiveRevision === build.objectiveRevision)?.receipt;
+      if (native.state !== "unknown" || !prior || (prior.channel !== "local" && prior.channel !== "hosted")) return current;
       const base = { actor, productId: original.id, objectiveRevision: build.objectiveRevision, repository,
         operationId: build.operationId, runId: prior.runId, taskId: build.taskId, head: "unknown", execution: "unknown" as const };
       const reference = `https://github.com/${slug}`;
@@ -485,11 +550,11 @@ export class ProductCaseService {
       review: plans.flatMap((item) => item.references.filter((ref) => ref.label.startsWith("Reviewed task ")).map((ref) => ({ id: item.id, reference: ref.url }))),
       merge: plans.flatMap((item) => item.references.filter((ref) => ref.label === "Plan merge").map((ref) => ({ id: item.id, reference: ref.url }))),
       local: this.recordedEvidence(product, "local", currentReceipts), hosted: this.recordedEvidence(product, "hosted", currentReceipts),
-      deploy: this.recordedEvidence(product, "deploy", currentReceipts), mobile: this.recordedEvidence(product, "mobile"),
+      deploy: this.recordedEvidence(product, "deploy", currentReceipts), mobile: this.phoneEvidence(product),
     };
   }
 
-  private recordedEvidence(product: StoredProduct, channel: "local" | "hosted" | "deploy" | "mobile", currentReceipts = new Set<string>()): EvidenceReference[] {
+  private recordedEvidence(product: StoredProduct, channel: "local" | "hosted" | "deploy", currentReceipts = new Set<string>()): EvidenceReference[] {
     const evidence = product.stageEvidence.filter(item => item.id.startsWith(`case-${channel}:`));
     if (channel === "deploy") {
       return evidence.flatMap(item => item.references.map(ref => ({ id: item.id, reference: ref.url,
@@ -497,8 +562,6 @@ export class ProductCaseService {
         ...(item.receipt ? { receipt: item.receipt } : {}),
         current: Boolean(item.receipt?.channel === "deploy" && item.objectiveRevision === product.objectiveRevision && currentReceipts.has(item.id)) }))).slice(-128);
     }
-    if (channel === "mobile") return evidence.filter(item => item.outcome === "succeeded" && item.objectiveRevision === product.objectiveRevision)
-      .flatMap(item => item.references.map(ref => ({ id: item.id, reference: ref.url }))).slice(-128);
     return evidence.flatMap(item => item.references.map(ref => ({ id: item.id, reference: ref.url, outcome: item.receipt ? item.outcome : "unknown" as const,
       ...(item.receipt ? { receipt: item.receipt } : {}), current: Boolean(item.receipt && currentReceipts.has(item.id) && item.objectiveRevision === product.objectiveRevision) }))).slice(-128);
   }
