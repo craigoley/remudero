@@ -17,8 +17,9 @@ const { countCommentLines } = await import(COMMENT_LOAD_SCRIPT) as {
 
 // Snapshot: 70f5b3c4fa6ad2ed688b3b7edce8c6e9246aaf06:src/lib/ledger.ts (779 comment lines).
 // Fingerprint token kinds, raw literal contents and preceding line breaks (ASI), including types.
+// W1-T9818 deliberately registers dispatch retention for owned-build progress; review that token change.
 // Intentional future code edits must review this pre-compression fingerprint.
-const BEFORE_TOKENS_SHA256 = "306d418f8e01342c6d571406c142f33f01b7c9a77ccb5992ccee8b90894aae3c";
+const BEFORE_TOKENS_SHA256 = "0a0ace3e017b79915c98df7d483c51c6ea8f1d62b7c9207fc7ea711adeaa2a46";
 const BEFORE_COMMENT_LINES = 779;
 
 function executableTokens(source: string): Array<[SyntaxKind, string, boolean]> {
@@ -49,7 +50,7 @@ function emittedDigest(source: string): string {
   return createHash("sha256").update(code).digest("hex");
 }
 
-const BEFORE_EMITTED_SHA256 = "2ab339aaae4dc38d65ea05203273aa06c79e7b351fac6e54f5de725a6e11cd46";
+const BEFORE_EMITTED_SHA256 = "aa928235e9239efb1768cec6ddbdd527074cde71b639f982a34df84275c2de2d";
 
 test("W1-T10998: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/ledger.ts"), "utf8");
