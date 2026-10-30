@@ -12,6 +12,7 @@ import { basename, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
+import { systemClock } from "./clock.js";
 import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
 import { type EngineRef, listEngines, newestCurrentEngine, type NewestEngineOptions } from "./engine-tree.js";
 import { defaultInstance, type HostMemoryLedgerOptions } from "./host-memory-ledger.js";
@@ -81,7 +82,7 @@ function recordParentSettlement(
   writeStatus(dir, {
     schema: RUN_CHILD_SCHEMA, runId: spec.value.runId, engineSha: spec.value.engine.sha, entryKind,
     identity: pid === undefined ? { settledByParent: true } : { pid, startTicks: "unknown", containerGeneration: probe.generation() },
-    state: "aborted", phase: "parent-settled", heartbeatAt: Date.now(),
+    state: "aborted", phase: "parent-settled", heartbeatAt: systemClock.now(),
     failure: { class: "aborted", reasonClass: "parent-settled", message: reason },
   });
   return true;
