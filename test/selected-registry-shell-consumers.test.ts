@@ -74,15 +74,49 @@ esac
   const cases = join(f.root, "cases.json"); writeFileSync(cases, "{}\n");
   const env = { ...process.env, HOME: f.root, PATH: `${bin}:${process.env.PATH ?? ""}`,
     DOCKER_CALLS: calls, RMD_INSTANCE_REGISTRY: legacyRegistry, RMD_FIELD_TRIALS_CASE_FILES: cases };
-  const run = (args: string[] = [], script = join(REPO_ROOT, "deploy", "field-trials-refresh.sh"), shell = "bash") => {
+  const run = (args: string[] = [], script = join(REPO_ROOT, "deploy", "field-trials-refresh.sh"),
+    shell = "bash", extra: NodeJS.ProcessEnv = {}) => {
     writeFileSync(calls, "");
     const result = spawnSync(shell, [script, ...args],
-      { env, encoding: "utf8", timeout: 30_000 });
+      { env: { ...env, ...extra }, encoding: "utf8", timeout: 30_000 });
     assert.equal(result.error, undefined);
     return { status: result.status, stdout: result.stdout, stderr: result.stderr,
       calls: readFileSync(calls, "utf8").trim().split("\n") };
   };
   return { ...f, legacyRegistry, run };
+}
+
+/** Pin and unpack the real historical interpreter inside a disposable test namespace. */
+function bash32(t: { after(fn: () => void): void }) {
+  if (process.platform === "darwin") {
+    const shell = "/bin/bash";
+    const version = spawnSync(shell, ["-c", 'printf "%s" "$BASH_VERSION"'], { encoding: "utf8" });
+    assert.equal(version.status, 0, String(version.error ?? version.stderr));
+    assert.match(version.stdout, /^3\.2\./, "the native historical executable must really be Bash 3.2");
+    return { shell, env: {} as NodeJS.ProcessEnv, version: version.stdout };
+  }
+  assert.equal(`${process.platform}/${process.arch}`, "linux/x64",
+    "mixed-version qualification requires native macOS Bash 3.2 or the pinned Linux x64 fixture");
+  const root = mkdtempSync(join(tmpdir(), "rmd-bash32-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const packages = join(REPO_ROOT, "test/fixtures/bash-3.2-linux-amd64");
+  for (const [name, digest] of [
+    ["bash_3.2-5ubuntu1_amd64.deb", "fe15a51dc70b4b0d5ed0556c670ffdf5b0297bb509480f22336684ee156b1d30"],
+    ["libncurses5_6.1+20190803-1ubuntu1_amd64.deb", "56d3dc9fd3c23ee99965e9d234df3ea9d40a276a45a4ef66ba735830dac03fc5"],
+    ["libtinfo5_6.1+20190803-1ubuntu1_amd64.deb", "d7595f8592080f8172d02a5584093d0b04e035c8550246b6918b8d48233ccbe0"],
+  ]) {
+    const archive = join(packages, name);
+    assert.equal(createHash("sha256").update(readFileSync(archive)).digest("hex"), digest, name);
+    const extracted = spawnSync("dpkg-deb", ["-x", archive, root], { encoding: "utf8" });
+    assert.equal(extracted.status, 0, `${name}: ${extracted.error ?? extracted.stderr}`);
+  }
+  const shell = join(root, "bin/bash");
+  const libraryPath = join(root, "lib/x86_64-linux-gnu");
+  const env = { LD_LIBRARY_PATH: libraryPath };
+  const version = spawnSync(shell, ["-c", 'printf "%s" "$BASH_VERSION"'], { env, encoding: "utf8" });
+  assert.equal(version.status, 0, String(version.error ?? version.stderr));
+  assert.match(version.stdout, /^3\.2\./, "the historical executable must really be Bash 3.2");
+  return { shell, env, version: version.stdout };
 }
 
 test("selected shell shadow reaches real lifecycle and heartbeat consumers", async t => {
@@ -364,29 +398,53 @@ test("selected shell qualification preserves mixed version legacy effects", t =>
   assert.ok(install, "generated launcher must execute the older child, never just probe it");
   assert.ok(!install.args.includes("--selected-registry-shadow") && !install.args.includes(host.session));
   assert.match(readFileSync(join(host.output, "systemd/rmd-fleet.service"), "utf8"), /\[Service\]/);
-  const historical = process.env.RMD_TEST_HISTORICAL_BASH;
-  if (historical) {
-    const version = spawnSync(historical, ["-c", 'printf "%s" "$BASH_VERSION"'], { encoding: "utf8" });
-    assert.match(version.stdout, /^3\.2\./, "the historical control must really be Bash 3.2");
-    for (const script of [join(pinned, "deploy/field-trials-refresh.sh"), join(REPO_ROOT, "deploy/field-trials-refresh.sh")]) {
-      const result = f.run([], script, historical);
-      assert.equal(result.status, before.status, result.stderr);
-      assert.deepEqual(withoutVersionReceipt(result.calls, script),
-        withoutVersionReceipt(before.calls, join(REPO_ROOT, "deploy/field-trials-refresh.sh")));
-    }
-    const qualified32 = f.run(["--selected-registry-shadow", f.session], undefined, historical);
-    assert.equal(qualified32.status, before.status, qualified32.stderr);
-    assert.deepEqual(qualified32.calls, before.calls);
-    const h32 = registryShellFixture(t); h32.capture();
-    const install32 = h32.run(join(REPO_ROOT, "deploy/install-host-units.sh"),
-      ["--install", "--selected-registry-shadow", h32.session], {}, historical);
-    assert.equal(install32.status, 0, install32.stderr);
-    const boot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical);
-    assert.equal(boot32.status, 0, boot32.stdout + boot32.stderr);
-    assert.ok(h32.receipts().some(c => c.bin === "docker" && c.args[0] === "run"));
-    assert.ok(h32.rows().some(r => r.action === "launcher"));
-    t.diagnostic(`historical scripts and generated launcher executed with ${version.stdout}`);
-  } else t.diagnostic("Bash 3.2 UNVERIFIED here; set RMD_TEST_HISTORICAL_BASH for the historical execution control");
+  const historical = bash32(t);
+  for (const script of [join(pinned, "deploy/field-trials-refresh.sh"), join(REPO_ROOT, "deploy/field-trials-refresh.sh")]) {
+    const result = f.run([], script, historical.shell, historical.env);
+    assert.equal(result.status, before.status, result.stderr);
+    assert.equal(result.stdout, before.stdout);
+    assert.deepEqual(withoutVersionReceipt(result.calls, script),
+      withoutVersionReceipt(before.calls, join(REPO_ROOT, "deploy/field-trials-refresh.sh")));
+  }
+  const qualified32 = f.run(["--selected-registry-shadow", f.session], undefined,
+    historical.shell, historical.env);
+  assert.equal(qualified32.status, before.status, qualified32.stderr);
+  assert.equal(qualified32.stdout, before.stdout);
+  assert.deepEqual(qualified32.calls, before.calls);
+  const h32 = registryShellFixture(t); h32.capture();
+  const historicalBin = join(h32.root, "historical-bin"); mkdirSync(historicalBin);
+  symlinkSync(historical.shell, join(historicalBin, "bash"));
+  h32.env.PATH = `${historicalBin}:${h32.env.PATH}`;
+  h32.env.LD_LIBRARY_PATH = historical.env.LD_LIBRARY_PATH;
+  const oldDeploy32 = join(h32.root, "old-deploy"); mkdirSync(oldDeploy32);
+  for (const name of readdirSync(join(REPO_ROOT, "deploy"))) symlinkSync(
+    join(name === "install-host-units.sh" ? pinned : REPO_ROOT, "deploy", name), join(oldDeploy32, name));
+  const oldInstall32 = h32.run(join(oldDeploy32, "install-host-units.sh"), ["--install"], {}, historical.shell);
+  assert.equal(oldInstall32.status, 0, oldInstall32.stdout + oldInstall32.stderr);
+  const oldBoot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical.shell);
+  assert.equal(oldBoot32.status, 0, oldBoot32.stdout + oldBoot32.stderr);
+  const oldDocker32 = h32.receipts().filter(c => c.bin === "docker");
+  writeFileSync(join(h32.root, "calls.ndjson"), "");
+  const newInstall32 = h32.run(join(REPO_ROOT, "deploy/install-host-units.sh"), ["--install"], {}, historical.shell);
+  assert.equal(newInstall32.status, oldInstall32.status, newInstall32.stdout + newInstall32.stderr);
+  const newBoot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical.shell);
+  assert.equal(newBoot32.status, oldBoot32.status, newBoot32.stdout + newBoot32.stderr);
+  assert.equal(newBoot32.stdout, oldBoot32.stdout);
+  const newDocker32 = h32.receipts().filter(c => c.bin === "docker");
+  assert.deepEqual(newDocker32, oldDocker32,
+    "Bash 3.2 old and new installers and rendered launchers keep no-option Docker effects");
+  const qualifiedOffset = h32.receipts().length;
+  const install32 = h32.run(join(REPO_ROOT, "deploy/install-host-units.sh"),
+    ["--install", "--selected-registry-shadow", h32.session], {}, historical.shell);
+  assert.equal(install32.status, 0, install32.stderr);
+  const boot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical.shell);
+  assert.equal(boot32.status, oldBoot32.status, boot32.stdout + boot32.stderr);
+  assert.equal(boot32.stdout, oldBoot32.stdout);
+  assert.deepEqual(h32.receipts().slice(qualifiedOffset).filter(c => c.bin === "docker"), newDocker32,
+    "Bash 3.2 qualification leaves generated launcher Docker arguments and effects unchanged");
+  assert.ok(h32.receipts().some(c => c.bin === "docker" && c.args[0] === "run"));
+  assert.ok(h32.rows().some(r => r.action === "launcher"));
+  t.diagnostic(`old/new scripts and generated launchers executed with Bash ${historical.version}`);
 });
 
 test("selected shell defaults and failures remain shadow only without live effects: input matrix and healthy stop", t => {
