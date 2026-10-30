@@ -2685,7 +2685,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const clock = (): number => Date.now();
   const exec = o.execFile ?? ((cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }) =>
-    execFileSync(cmd, args, { encoding: "utf8", ...options }).toString());
+    execFileSync(cmd, args, { encoding: "utf8", ...options, timeout: 120_000, killSignal: "SIGKILL" }).toString());
   const drive = <R>(steps: DeploySteps<R>): R | Promise<R> => driveDeploySteps(steps, sensorExec !== undefined);
   const execSensor = (cmd: string, args: string[]) => deployStep(() => sensorExec ? sensorExec(cmd, args) : exec(cmd, args));
   function git(args: readonly string[]): string;

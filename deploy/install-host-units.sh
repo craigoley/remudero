@@ -1021,7 +1021,17 @@ watchdog_deploy_run() (
         }
         { line[$1] = $0; parent[$1] = $2 }
         END { tree(root) }
-      ' >&2 || true
+      ' | while read -r pid ppid stat comm; do
+        printf '%s %s %s %s\n' "$pid" "$ppid" "$stat" "$comm" >&2
+        for thread in /proc/"$pid"/task/*; do
+          [ -r "$thread/stat" ] || continue
+          printf 'rmd-relaunch: thread %s stat: ' "${thread##*/}" >&2
+          cat "$thread/stat" >&2 2>/dev/null || true
+          printf 'rmd-relaunch: thread %s wchan: ' "${thread##*/}" >&2
+          cat "$thread/wchan" >&2 2>/dev/null || true
+          printf '\n' >&2
+        done
+      done || true
     ) & observer=$!
   fi
   trap '[ -z "$observer" ] || { kill "$observer" 2>/dev/null || true; wait "$observer" 2>/dev/null || true; }' EXIT

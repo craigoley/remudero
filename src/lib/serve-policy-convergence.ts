@@ -329,7 +329,7 @@ export function runServePolicyCycle(
 /** The real serve seams, or none when this state root is not the registry's primary instance. */
 export function realServePolicyDeps(
   o: Pick<RealDeployOpts, "installPath" | "stateRoot">,
-  exec: (cmd: string, args: string[]) => string = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8" }),
+  exec: (cmd: string, args: string[]) => string = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL" }),
   issuesFor: (owner: string, repo: string) => IssueGateway = ghIssueGateway,
   budget: () => HostMemoryBudgetPolicy = () => loadHostMemoryBudgetPolicy(),
 ): Partial<Parameters<typeof runServePolicyCycle>[0]> {
