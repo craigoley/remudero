@@ -12,7 +12,7 @@ import { adoptRunChildren } from "#src/lib/run-child.js";
 import { childIdentity, readSpec, RUN_CHILD_SCHEMA, toRunChildFailure, writeSpec, writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
 import { loadPlan } from "#src/lib/plan.js";
 import type { RunResult } from "#src/lib/run-result.js";
-import { daemonCommand, ledgerPathFor, orphanSweepRunActive } from "#src/run-task.js";
+import { daemonCommand, ledgerPathFor, orphanSweepRunActive, runInChildWhenOn } from "#src/run-task.js";
 import { defaultInstance } from "#src/lib/host-memory-ledger.js";
 import { detachSweepAction } from "#src/lib/sweep.js";
 import {
@@ -54,6 +54,30 @@ function fixture() {
     settledRunIds: new Set(rows.filter((r) => r.step === "run_child.settled").map((r) => String(r.run_id))) }, { pollMs: 5, watch: false });
   return { root, stateRoot, rows, log, add, adopt, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+test("selected child admission fallback preserves shadow intent and owner holds", async t => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const text = (name = "fixture") => `instances:\n  ${name}:\n    github_repo: owner/repo\n    mode: shadow\n    state_dir: /private/registry-material-sentinel\n`;
+  const path = join(f.root, "private-selected.yaml"), other = join(f.root, "other.yaml");
+  writeFileSync(path, text()); writeFileSync(other, text("other"));
+  const settings = { mode: "shadow" as const, registryPath: path, instanceName: "fixture" };
+  const config = { root: f.root, selectedRegistryMode: settings } as Parameters<typeof runInChildWhenOn>[0]["config"];
+  const input: Parameters<typeof runInChildWhenOn>[0] = { taskId: "W1-T9796", config, repoDir: f.root,
+    allowStale: false, options: { owner: "human" }, planSync: async () => ({ plan: { tasks: [], byId: new Map() }, staleDispatch: false }),
+    log: f.log };
+  const receipts = () => f.rows.filter(row => row.step === "instance_registry.consumer_shadow_observed");
+  assert.equal(await runInChildWhenOn(input, { readMode: () => "on", spawn: async forwarded => {
+    assert.equal(forwarded.options.selectedRegistryIntent?.kind, "shadow");
+    assert.equal(forwarded.options.owner, "human");
+    writeFileSync(path, text("changed-during-admission")); settings.registryPath = other;
+    return { started: false, reason: "fixture startup failed" };
+  } }), undefined);
+  assert.equal(receipts().at(-1)?.selected_state, "unknown");
+  input.mayRunInProcess = () => false;
+  await assert.rejects(runInChildWhenOn(input, { readMode: () => "off" }), /cannot run in-process/);
+  assert.equal(receipts().at(-1)?.legacy_outcome, "threw");
+});
 
 test("W1-T9086: a boot adopts a live child before the boot gate", async () => {
   const f = fixture();

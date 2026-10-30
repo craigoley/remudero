@@ -6,7 +6,6 @@ import { pathToFileURL } from "node:url";
 import * as consumers from "#src/lib/selected-registry-consumers.js";
 import { parseSpec, readSpec, readStatus, RUN_CHILD_SCHEMA, writeSpec, type RunChildSpec } from "#src/lib/run-child-contract.js";
 import { adoptRunChildren, spawnRunChild, type SpawnRunChildInput, type SpawnRunChildPorts } from "#src/lib/run-child.js";
-import { runInChildWhenOn } from "#src/run-task.js";
 import { runChildMain, type RunChildMainPorts } from "#src/run-child-main.js";
 import { buildWorkerEnv } from "#src/lib/env.js";
 import { codexSpawnEnvForTest } from "#src/lib/worker-provider.js";
@@ -149,18 +148,4 @@ test("selected child defaults and recovery preserve shadow effects and owner hol
   delete f.spec.options.selectedRegistryIntent; writeSpec(f.dir, f.spec); f.rows.length = 0;
   assert.equal(await runChildMain(["--run-dir", f.dir], f.ports), 1);
   assert.deepEqual(receipts(f.rows), []);
-  const config = { root: f.root, selectedRegistryMode: f.settings } as Parameters<typeof runInChildWhenOn>[0]["config"];
-  const input: Parameters<typeof runInChildWhenOn>[0] = { taskId: f.spec.taskId, config, repoDir: f.root,
-    allowStale: false, options: { owner: "human" }, planSync: async () => ({ plan: { tasks: [], byId: new Map() }, staleDispatch: false }),
-    log: (step, fields) => { f.rows.push({ step, ...fields }); } };
-  assert.equal(await runInChildWhenOn(input, { readMode: () => "on", spawn: async forwarded => {
-    assert.equal(forwarded.options.selectedRegistryIntent?.kind, "shadow");
-    assert.equal(forwarded.options.owner, "human");
-    writeFileSync(f.path, text("changed-during-admission")); f.settings.registryPath = f.other;
-    return { started: false, reason: "fixture startup failed" };
-  } }), undefined);
-  assert.equal(receipts(f.rows).at(-1)?.selected_state, "unknown");
-  input.mayRunInProcess = () => false;
-  await assert.rejects(runInChildWhenOn(input, { readMode: () => "off" }), /cannot run in-process/);
-  assert.equal(receipts(f.rows).at(-1)?.legacy_outcome, "threw");
 });
