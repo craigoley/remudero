@@ -15,6 +15,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   buildRegistry,
@@ -22,8 +24,8 @@ import {
   UNKNOWN_COMMAND_EXIT_CODE,
   type CommandHandler,
   type CommandSpec,
-} from "../src/cli/registry.js";
-import { HANDLERS, USAGE as REAL_USAGE, main } from "../src/run-task.js";
+} from "#src/cli/registry.js";
+import { HANDLERS, USAGE as REAL_USAGE, main } from "#src/run-task.js";
 
 const USAGE = "usage:\n  rmd fake-verb   # a synthetic verb this test made up\n";
 
@@ -269,4 +271,41 @@ test("main dispatches unknown verbs through dispatchCommand and exits with its c
     if (savedToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = savedToken;
   }
+});
+
+test("main dispatches selected registry shadow capture and observation before freshness side effects", async t => {
+  const root = fs.mkdtempSync(join(tmpdir(), "rmd-shadow-dispatch-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const registry = join(root, "private-registry.yaml"), session = join(root, "session.json");
+  fs.writeFileSync(registry, "instances:\n  core:\n    github_repo: craigoley/remudero\n    mode: shadow\n", { mode: 0o600 });
+  class ExitCalled extends Error {
+    constructor(readonly code: number | undefined) { super(`process.exit(${code})`); }
+  }
+  t.mock.method(process, "exit", ((code?: number): never => { throw new ExitCalled(code); }) as typeof process.exit);
+  const printed: string[] = [];
+  t.mock.method(console, "log", (...args: unknown[]) => { printed.push(args.join(" ")); });
+  const savedArgv = process.argv;
+  const freshness = () => { assert.fail("shadow inspection must bypass freshness and legacy side effects"); };
+  const invoke = async (args: string[], code: number) => {
+    process.argv = ["node", "run-task.js", "inspect", "selected-registry-shadow", ...args];
+    await assert.rejects(main({ checkFreshness: freshness, checkServiceFreshness: freshness,
+      dispatch: () => { assert.fail("shadow inspection must use the real maintained registry"); } }),
+    (error: unknown) => error instanceof ExitCalled && error.code === code);
+  };
+  try {
+    await invoke(["--capture", "--session", session, "--registry", registry], 2);
+    assert.equal(fs.existsSync(session), false, "path presence cannot enable shadow qualification");
+    await invoke(["--shadow", "--capture", "--session", session, "--registry", registry], 0);
+    const pin = printed[0]!;
+    assert.match(pin, /^[a-f0-9]{64}$/);
+    assert.equal(JSON.parse(fs.readFileSync(session, "utf8")).initial, "ready");
+    await invoke(["--shadow", "--session", session, "--pin", pin, "--consumer", "heartbeat",
+      "--instance", "core", "--repository", "craigoley/remudero", "--namespace", "host"], 0);
+    const row = JSON.parse(fs.readFileSync(session + ".observations", "utf8"));
+    assert.equal(row.action, "heartbeat");
+    assert.equal(row.selected_state, "ready");
+    assert.equal(row.selected_outcome, "would-observe");
+    assert.equal(row.publication_permission, "not-granted");
+    assert.equal(printed.length, 1);
+  } finally { process.argv = savedArgv; }
 });

@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { selectedRegistryShadowMain } from "#src/selected-registry-shadow-main.js";
+import { selectedRegistryShadowChild } from "#src/lib/child-entry-argv.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Row = Record<string, unknown>;
@@ -141,4 +146,72 @@ test("selected shell defaults and failures remain shadow only without live effec
   finally { console.error = original; }
   assert.equal(errors.length, 1);
   assert.doesNotMatch(errors[0]!, /selected-private\.yaml|session\.json|relative-invalid-path/);
+});
+
+test("selected shell child default launches the maintained entry and captures the selected bytes", async t => {
+  const f = fixture(t);
+  assert.equal(await selectedRegistryShadowChild(REPO_ROOT,
+    ["--shadow", "--capture", "--registry", f.registry, "--session", f.session]), 0);
+  const session = JSON.parse(readFileSync(f.session, "utf8"));
+  assert.equal(session.initial, "ready");
+  assert.equal(session.input.cliPath, f.registry);
+  assert.equal(session.input.expectedDigest, createHash("sha256").update(f.text).digest("hex"));
+});
+
+for (const failure of ["synchronous", "asynchronous"] as const) {
+  test(`selected shell child reports ${failure} spawn failure without leaking the transport error`, async t => {
+    const f = fixture(t);
+    const errors: unknown[][] = [];
+    const calls: unknown[][] = [];
+    t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args); });
+    const spawn = t.mock.method(childProcess, "spawn", ((...args: unknown[]) => {
+      calls.push(args);
+      const error = new Error(`private-material-sentinel ${f.registry}`);
+      if (failure === "synchronous") throw error;
+      const child = new EventEmitter();
+      process.nextTick(() => child.emit("error", error));
+      return child;
+    }) as typeof childProcess.spawn);
+    syncBuiltinESMExports();
+    try {
+      assert.equal(await selectedRegistryShadowChild(REPO_ROOT,
+        ["--shadow", "--capture", "--session", f.session]), 1);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0]?.[0], process.execPath);
+      assert.deepEqual((calls[0]?.[1] as string[]).slice(-4), ["--shadow", "--capture", "--session", f.session]);
+      assert.deepEqual(calls[0]?.[2], { stdio: "inherit" });
+      assert.deepEqual(errors, [["instance_registry.shell_shadow_unrecorded", "child_launch_failed"]]);
+      assert.equal(existsSync(f.session), false);
+    } finally {
+      spawn.mock.restore();
+      syncBuiltinESMExports();
+    }
+  });
+}
+
+test("selected shell unsafe session closes its opened handle before reporting observer failure", async t => {
+  const f = fixture(t);
+  const pin = await capture(f.session, f.registry);
+  chmodSync(f.session, 0o644);
+  const realOpen = fsPromises.open;
+  let opened: Awaited<ReturnType<typeof realOpen>> | undefined;
+  const open = t.mock.method(fsPromises, "open", async (...args: Parameters<typeof realOpen>) => {
+    const handle = await realOpen(...args);
+    opened = handle;
+    return handle;
+  });
+  const errors: unknown[][] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args); });
+  syncBuiltinESMExports();
+  try {
+    assert.equal(await observe(f.session, pin, "heartbeat"), 1);
+    assert.ok(opened, "the unsafe file must have been opened before its metadata was rejected");
+    await assert.rejects(opened.stat(), { code: "EBADF" }, "the rejected session handle must be closed");
+    assert.deepEqual(errors, [["instance_registry.shell_shadow_unrecorded", "observer_or_sink_failed"]]);
+    assert.equal(existsSync(f.session + ".observations"), false);
+  } finally {
+    open.mock.restore();
+    syncBuiltinESMExports();
+    await opened?.close();
+  }
 });
