@@ -192,7 +192,8 @@ for (const failure of ["synchronous", "asynchronous"] as const) {
 test("selected shell unsafe session closes its opened handle before reporting observer failure", async t => {
   const f = fixture(t);
   const pin = await capture(f.session, f.registry);
-  chmodSync(f.session, 0o644);
+  rmSync(f.session);
+  mkdirSync(f.session);
   const realOpen = fsPromises.open;
   let opened: Awaited<ReturnType<typeof realOpen>> | undefined;
   const open = t.mock.method(fsPromises, "open", async (...args: Parameters<typeof realOpen>) => {
