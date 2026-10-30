@@ -15719,6 +15719,9 @@ export function fixRungInputsUnchanged(row: Record<string, unknown>, current: Fi
     row.read_body_sha256 !== current.bodySha256);
 }
 
+/** Operator ruling 2026-10-30: how long a PR may wait on an unanswered fix-lane escalation before the ladder acts. */
+export const HELD_ESCALATION_SLO_MS = 6 * 60 * 60_000;
+
 /** W1-T9999 — the ledger row a pass writes when it settles an orphaned fix seed. */
 export const FIX_SEED_ORPHANED_STEP = "sweep.fix.seed_orphaned";
 
@@ -15726,7 +15729,7 @@ export interface FixSeed { ts?: string; runId?: string }
 /** `orphaned`: the earlier run no longer owns a continuation; ordinary checkout/worker claims still gate redispatch. */
 export type FixSeedRead = { kind: "live" | "ended" | "orphaned" | "held"; seed: FixSeed; orphanReason?: "owner-run-ended";
   /** W1-T10339: `held` only — the stand-down that ended the rung while every input it read still stands. */
-  hold?: { site: string; reason: string } };
+  hold?: { site: string; reason: string; at?: string } };
 
 function continuationEndedAtEmptyBoot(
   lines: ReadonlyArray<Record<string, unknown>>, from: number, ownerRunId: string, taskId: string, runId: string,
@@ -15787,7 +15790,8 @@ export function fixSeedRead(
     // W1-T10339: a stand-down whose recorded inputs all still stand is a hold, not an ended rung.
     if (current !== undefined && end.standDown !== undefined && fixRungInputsUnchanged(end.standDown, current)) {
       return { kind: "held", seed, hold: { site: String(end.standDown.site ?? "unknown"),
-        reason: typeof end.standDown.reason === "string" ? end.standDown.reason : "no reason recorded" } };
+        reason: typeof end.standDown.reason === "string" ? end.standDown.reason : "no reason recorded",
+        ...(typeof end.standDown.ts === "string" ? { at: end.standDown.ts } : {}) } };
     }
     return { kind: "ended", seed };
   }
@@ -18528,7 +18532,8 @@ export async function runSweep(
   const ladderActedPrs = new Set<number>();
   // W1-T5690: the SLO clock's view of one PR — set only for a blocked-ambiguous PR whose blocker has
   // outlived BLOCKER_SLO_MS. `noOp` is the repeated-refusal hold, which enters the climb at rebuild.
-  interface SloContext { blocker: PrBlocker; owner: string; ageMs: number; noOp: boolean; strikeOwned: boolean }
+  // `held` (W1-T5690 extension, operator ruling 2026-10-30) names the escalation an unanswered refused-escalate PR waits on.
+  interface SloContext { blocker: PrBlocker; owner: string; ageMs: number; noOp: boolean; strikeOwned: boolean; held?: string }
   const applyStrikeLadder = async (pr: OpenPrView, slo?: SloContext): Promise<string> => {
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha };
     const record = (step: string, extra: Record<string, unknown>) => {
@@ -18622,7 +18627,7 @@ export async function runSweep(
           nowMs: now, rungHistory: history, unavailable: ["refresh"],
         }, buildFixProgressInput({ redClassNames: prRedClassNames(pr), pendingChecks: pr.pendingRequiredChecks, ciFailures: pr.ciFailures, reviewFailures: pr.reviewState === "failure" ? pr.unmetCriteria : undefined, taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
           currentRed: redCheckNames(pr), ledger: strikeLadderRows, operatorAnswer: pr.pendingAnswer?.constraint }),
-        deps.fixProgressJudge, record);
+        deps.fixProgressJudge, record, slo?.held);
         if (progress.rung === "none") return hold(progress.reason);
         decision = { rung: progress.rung, reason: progress.reason };
       }
@@ -18635,7 +18640,8 @@ export async function runSweep(
         }
         const refusals = fixRoundTally(strikeLadderRows, fixLedgerTaskIdFor(pr), pr.headSha).refusals;
         const note = capStrikeLadderNote(
-          `${reason}\nClosed PR: ${pr.prUrl}; head: ${pr.headSha}\n` +
+          `${reason}\n${slo?.held === undefined ? "" : `Unanswered escalation it was held on: ${slo.held}\n`}` +
+          `Closed PR: ${pr.prUrl}; head: ${pr.headSha}\n` +
           `Failing checks/tests: ${(pr.ciFailures ?? []).map(f => `${f.name}: ${firstFailingTestTitle(f.logTail) ?? "no failing title"}`).join("; ")}\n` +
           `Unmet claims: ${pr.unmetCriteria.map(c => `${c.claim}: ${c.reason}`).join("; ")}\n` +
           `Strike history: ${JSON.stringify(pr.strikeHistory ?? [])}\nfix.commit_refused: ${JSON.stringify(refusals)}`,
@@ -19857,7 +19863,9 @@ export async function runSweep(
     // W1-T10339: a PR with no task trailer is judged on its BODY, so the body is an input a stand-down read.
     const standDownBodySha = carriesTaskTrailer(pr) ? undefined : prBodyDigest(pr.body);
     let designReleasedByBody = false;
-    let standDownHold: { site: string; reason: string } | undefined;
+    let standDownHold: { site: string; reason: string; at?: string } | undefined;
+    let heldEscalationAt: string | undefined;
+    let heldEscalationDedup: string | undefined;
     if ((disposition === "conflicted" || disposition === "blocked-fixable") &&
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !fixDispatchHoldAtHead(pr, ledgerLines, existsSync, deps.fixOwnerReclaimableAtHold)) {
@@ -19904,7 +19912,10 @@ export async function runSweep(
               `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
             : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
           if (mainAdoption) designMainAdoptionSpent = true;
-          if (!amended && !mainAdoption) ruleBlockerByIndex.set(prIndex, "escalated");
+          if (!amended && !mainAdoption) {
+            ruleBlockerByIndex.set(prIndex, "escalated");
+            heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;
+          }
         }
       } else if (handoff.kind === "unavailable") {
         disposition = "wait";
@@ -19932,12 +19943,21 @@ export async function runSweep(
         held?.hold?.site === "rung.strike" && held.hold.reason === CONFLICT_REPAIR_HANDOFF_REASON;
       if (held?.kind === "held" && held.hold !== undefined && !conflictHandoff) {
         standDownHold = held.hold;
+        heldEscalationAt = held.hold.at;
         disposition = "refused-escalate";
         reason = `fix stood down at ${held.hold.site} and nothing it read has changed (head ${pr.headSha.slice(0, 7)}, task contract` +
           `${standDownBodySha === undefined ? "" : ", PR body"}) — no worker is dispatched until one does: ${held.hold.reason}`;
         ruleBlockerByIndex.set(prIndex, "escalated");
       }
     }
+    // Operator ruling 2026-10-30: a fix lane that escalated to a person and got no answer for HELD_ESCALATION_SLO_MS takes the
+    // ladder's rebuild rung (the fix-progress judge, then close and requeue with the findings as a note, or a digest) instead
+    // of re-escalating. The age is read off the hold's own row, so neither blocker bookkeeping nor a re-escalation resets it.
+    const heldAgeMs = heldEscalationAt === undefined ? NaN : now - Date.parse(heldEscalationAt);
+    const heldEscalationSlo: SloContext | undefined = deps.strikeLadder !== undefined && disposition === "refused-escalate" &&
+      !deps.dryRun && pr.isPlanFiling !== true && !(pr.pendingAnswer && !pr.pendingAnswer.spent) &&
+      Number.isFinite(heldAgeMs) && heldAgeMs >= HELD_ESCALATION_SLO_MS
+      ? { blocker: "escalated", owner: "NONE", ageMs: heldAgeMs, noOp: true, strikeOwned: false, held: reason } : undefined;
     byDisposition[disposition]++;
     const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue && !sloLadderDue;
     const contradictionKey = isContradictory ? contradictoryKey(pr, ledgerLines) : undefined;
@@ -20220,6 +20240,12 @@ export async function runSweep(
             ? `stand-down hold: ${reason} — escalated once for this head (${pr.headSha.slice(0, 7)}), no worker dispatched and no capacity spent`
             : `an escalation was already filed for this head (${pr.headSha.slice(0, 7)}) — the ` +
             `escalation is deduped, not skipped, and a new head re-earns its own`;
+        }
+        // An unanswered escalation past its SLO reaches the ladder in the action arm; the dedup still forbids a second issue.
+        if (alreadyDone && heldEscalationSlo !== undefined) {
+          heldEscalationDedup = dedupStandDownReason;
+          alreadyDone = false;
+          dedupStandDownReason = undefined;
         }
         break;
       case "dep-review":
@@ -21860,6 +21886,20 @@ export async function runSweep(
               break;
             }
             case "refused-escalate":
+              if (heldEscalationSlo) {
+                const ladder = await applyStrikeLadder(pr, heldEscalationSlo);
+                if (ladderActedPrs.has(pr.prNumber)) {
+                  standDownReason = ladder;
+                  reason = ladder;
+                  break;
+                }
+                extraDisposedFields = { ...extraDisposedFields, held_escalation_ladder: ladder };
+                if (heldEscalationDedup !== undefined) {
+                  acted = false;
+                  standDownReason = `${heldEscalationDedup}; ladder: ${ladder}`;
+                  break;
+                }
+              }
               try {
                 await deps.escalate(pr, reason, question!);
                 if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_escalation_outcome: "delivered" };
