@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { backlogLandingGuard } from "./backlog-gardener.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -32,7 +32,8 @@ export const REDESIGN_NAME = "redesign";
 export const REDESIGN_JUDGED_STEP = "redesign.judged";
 /** A hold younger than this is left to the fix lane's own next pass; an hour also bounds re-asking on a flapping hold. */
 export const REDESIGN_AFTER_MS = 60 * 60_000;
-/** How many tasks one pass asks about: each answer is one Architect spawn, and each landing is one plan PR to review. */
+/** BACKSTOP on spend: how many tasks one pass asks about. Each answer is one Architect spawn, and each landing is one
+ *  plan PR to review; the signature dedup is the primary control on re-asking. */
 export const REDESIGN_MAX_PER_PASS = 2;
 /** A held PR the sweep has not disposed for this long is no longer being swept (merged, closed or rebuilt). */
 const SWEPT_RECENTLY_MS = 2 * 60 * 60_000;
@@ -40,7 +41,8 @@ const EVIDENCE_WINDOW_MS = 7 * 24 * 60 * 60_000;
 const HOLD_REASON = /^(?:fix needs design at this exact head|fix stood down at )/;
 const POINTER = /^ {2}# refusal-amendment \(.*(?:\n {2}# {3}.*)*/m;
 const MARKER = (signature: string) => `  # redesign: signature=${signature}`;
-const MARKER_RE = /^ {2}# redesign: signature=([a-f0-9]{16})\b/gm;
+/** One shard line recording that the Architect already amended the task for this evidence signature. */
+export const REDESIGN_MARKER_RE = /^ {2}# redesign: signature=([a-f0-9]{16})$/;
 const FORBIDDEN_PREFIXES = [".github/", "deploy/", "plan/", "state/", "hooks/"];
 
 type Row = Record<string, unknown>;
@@ -104,7 +106,7 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     const pointer = POINTER.exec(sources.readShard(rel))?.[0];
     if (pointer !== undefined) add(id, `refusal-amendment pointer in the shard:\n${pointer.trim()}`);
   }
-  const rows = sources.ledger(["sweep.disposed", REDESIGN_JUDGED_STEP], new Date(now - EVIDENCE_WINDOW_MS).toISOString());
+  const rows = sources.ledger(["sweep.disposed", REDESIGN_JUDGED_STEP], fixedClock(now - EVIDENCE_WINDOW_MS).iso());
   const newest = new Map<number, Row>();
   for (const row of rows) {
     if (row.step !== "sweep.disposed" || typeof row.pr_number !== "number") continue;
@@ -126,7 +128,7 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     const shard = plan.shards.get(id)!;
     const text = sources.readShard(shard);
     const signature = signatureOf(id, lines);
-    const marked = [...text.matchAll(MARKER_RE)].some((m) => m[1] === signature);
+    const marked = text.split("\n").some((line) => REDESIGN_MARKER_RE.exec(line)?.[1] === signature);
     if (!marked && !judged.has(signature)) out.push({ id, shard, text, evidence: lines, signature });
   }
   return out.sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true }));

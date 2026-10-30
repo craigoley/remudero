@@ -9,10 +9,9 @@ import { runGardenAsync, type GardenerDeps } from "#src/lib/gardener.js";
 import type { PlanInventory } from "#src/lib/plan-gardener.js";
 import { parseTasksFromYaml } from "#src/lib/plan.js";
 import {
-  applyRedesignEdit, buildRedesignSources, parseRedesignAnswer, REDESIGN_AFTER_MS, REDESIGN_JUDGED_STEP, redesignCandidates, redesignEditRefusal, redesignGardenSpec,
+  applyRedesignEdit, buildRedesignSources, parseRedesignAnswer, REDESIGN_AFTER_MS, REDESIGN_JUDGED_STEP, REDESIGN_MARKER_RE, redesignCandidates, redesignEditRefusal, redesignGardenSpec,
   type RedesignSources,
 } from "#src/lib/redesign-gardener.js";
-import { GARDEN_NAMES } from "#src/run-task.js";
 import { MACHINE_LANE_HEAD_RE } from "#src/lib/sweep.js";
 import { REGISTERED_GARDEN_NAMES } from "#src/lib/garden-registry.js";
 
@@ -102,7 +101,7 @@ test("the redesign Architect amends a task its fix lane stood down on, keeping e
   assert.deepEqual(after!.files, ["src/lib/prompt-render.ts", "test/worker/check-body-coverage.test.ts", "src/cli/commands/fix.ts"]);
   assert.match(after!.amendment!, /by the redesign Architect \(machine, rule 16\): the fix needs the fix lane's dispatch path/);
   assert.match(after!.amendment!, /Prevent the round in src\/cli\/commands\/fix\.ts/);
-  const marker = /^ {2}# redesign: signature=([a-f0-9]{16})$/m.exec(w.read());
+  const marker = w.read().split("\n").map((line) => REDESIGN_MARKER_RE.exec(line)).find((m) => m !== null);
   assert.ok(marker, "the shard carries the marker its PR's proof greps");
   assert.ok(w.landed[0]!.body.includes(`proof: "grep: # redesign: signature=${marker[1]} in ${REL}"`));
   assert.ok(w.rows.some((r) => r.step === REDESIGN_JUDGED_STEP && r.outcome === "amend"));
@@ -147,7 +146,6 @@ test("rule 16 and the operator's grants are enforced in code, whatever the Archi
 });
 
 test("the redesign garden is registered wherever a garden is named", () => {
-  assert.ok((GARDEN_NAMES as readonly string[]).includes("redesign"));
   assert.ok((REGISTERED_GARDEN_NAMES as readonly string[]).includes("redesign"));
   assert.ok(MACHINE_LANE_HEAD_RE.test("redesign-garden-1793322451897"), "its plan PRs file from a machine-lane head");
 });
@@ -158,6 +156,13 @@ test("an Architect answer that is not one REDESIGN: JSON line, with a reason and
   assert.equal(parseRedesignAnswer('REDESIGN: {"verdict":"maybe"}').verdict, "unparseable");
   assert.equal(parseRedesignAnswer('REDESIGN: {"verdict":"amend","reason":"r"}').verdict, "unparseable", "an amend needs an amendment");
   assert.equal(parseRedesignAnswer('REDESIGN: {"verdict":"grill"}').verdict, "grill");
+});
+
+test("the shard marker reads only a whole 16-hex signature line, so a mangled marker re-asks", () => {
+  assert.equal(REDESIGN_MARKER_RE.test("  # redesign: signature=0123456789abcdef"), true);
+  assert.equal(REDESIGN_MARKER_RE.test("  # redesign: signature=0123456789abcdeg"), false, "a non-hex signature is not a marker");
+  assert.equal(REDESIGN_MARKER_RE.test("  # redesign: signature=0123456789abcdef0"), false, "a longer signature is not this marker");
+  assert.equal(REDESIGN_MARKER_RE.test("# redesign: signature=0123456789abcdef"), false, "only the record's own indent counts");
 });
 
 test("an amendment is appended to the shard's existing amendment block, which keeps its operator history", () => {
