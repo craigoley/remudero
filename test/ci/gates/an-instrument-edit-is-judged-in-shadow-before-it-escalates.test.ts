@@ -20,6 +20,7 @@ const additiveCensus = [
   "   \"startedAt\",",
   "+  \"registeredAt\",",
   "   \"endedAt\",",
+  "   \"closedAt\",",
 ].join("\n");
 
 const changedBaseline = [
@@ -48,6 +49,30 @@ test("W1-T11029 criterion 1: a changed line, a moved number, or a path the diff 
   ]);
   assert.match(j.reason, /census-precheck-parity-baseline\.json: removes or changes 1 line\(s\)/);
   assert.match(j.reason, /diff-class\.mjs: the worker's diff does not touch this path/);
+});
+
+test("W1-T11029 criterion 1: hunk lines resembling file headers count as edits", () => {
+  const changed = [
+    `diff --git a/${CENSUS} b/${CENSUS}`,
+    `--- a/${CENSUS}`,
+    `+++ b/${CENSUS}`,
+    "@@ -1 +1 @@",
+    "--- count;", // Removed source line: -- count;
+    "+console.log(count);",
+  ].join("\n");
+  const judgement = classifyInstrumentDiff(changed, [CENSUS]);
+  assert.equal(judgement.verdict, "would_escalate");
+  assert.deepEqual(judgement.paths.map((path) => [path.verdict, path.added, path.removed]), [["modifies", 1, 1]]);
+
+  const added = [
+    `diff --git a/${CENSUS} b/${CENSUS}`,
+    `--- a/${CENSUS}`,
+    `+++ b/${CENSUS}`,
+    "@@ -0,0 +1 @@",
+    "+++ count;", // Added source line: ++ count;
+  ].join("\n");
+  assert.deepEqual(classifyInstrumentDiff(added, [CENSUS]).paths.map((path) => [path.verdict, path.added, path.removed]),
+    [["additive", 1, 0]]);
 });
 
 test("W1-T11029 criterion 1: a deletion, a mode change, a rename or a binary diff is never additive", () => {

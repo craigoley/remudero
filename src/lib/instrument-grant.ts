@@ -46,21 +46,35 @@ interface FileDiff { path: string; added: number; removed: number; structural?: 
 function parseUnifiedDiff(diff: string): Map<string, FileDiff> {
   const files = new Map<string, FileDiff>();
   let current: FileDiff | undefined;
+  let oldLines = 0;
+  let newLines = 0;
   for (const line of diff.split("\n")) {
-    const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
-    if (header) {
-      current = { path: header[2]!, added: 0, removed: 0 };
-      files.set(current.path, current);
-      continue;
+    if (oldLines === 0 && newLines === 0) {
+      const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+      if (header) {
+        current = { path: header[2]!, added: 0, removed: 0 };
+        files.set(current.path, current);
+        continue;
+      }
     }
     if (!current) continue;
+    if (oldLines > 0 || newLines > 0) {
+      if (line.startsWith(" ")) { oldLines--; newLines--; }
+      else if (line.startsWith("+")) { current.added++; newLines--; }
+      else if (line.startsWith("-")) { current.removed++; oldLines--; }
+      // A "\ No newline at end of file" marker consumes neither side of the hunk.
+      continue;
+    }
+    const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
+    if (hunk) {
+      oldLines = hunk[1] === undefined ? 1 : Number(hunk[1]);
+      newLines = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      continue;
+    }
     if (/^deleted file mode /.test(line)) current.structural = "the file is deleted";
     else if (/^(old|new) mode /.test(line)) current.structural = "the file mode changes";
     else if (/^Binary files /.test(line)) current.structural = "the diff is binary";
     else if (/^rename (from|to) /.test(line)) current.structural = "the file is renamed";
-    else if (line.startsWith("+++ ") || line.startsWith("--- ")) continue;
-    else if (line.startsWith("+")) current.added++;
-    else if (line.startsWith("-")) current.removed++;
   }
   return files;
 }
