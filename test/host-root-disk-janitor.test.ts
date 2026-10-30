@@ -524,6 +524,8 @@ test("W1-T9985: a root pass under assumed foreign ownership reads only the fixtu
     const untrusted = join(fx.root, "untrusted.git");
     mkdirSync(untrusted);
     git(untrusted, "init", "--bare", "-b", "main");
+    const systemConfig = join(fx.root, "system.gitconfig");
+    writeFileSync(systemConfig, "[safe]\n\tdirectory = *\n");
     const probe = join(fx.root, "probe.sh");
     const scopes = join(fx.root, "trusted-origins.txt");
     // Ref enumeration requires repository setup; rev-parse --git-dir can bypass its ownership
@@ -542,6 +544,7 @@ test("W1-T9985: a root pass under assumed foreign ownership reads only the fixtu
     ].join("\n") + "\n");
     const r = run(fx, {
       BASH_ENV: probe, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1",
+      GIT_CONFIG_SYSTEM: systemConfig,
       RMD_CLEANUP_SCRATCH_ROOTS: fx.scratch, RMD_CLEANUP_TMP_ROOTS: "", RMD_CLEANUP_UID: "0",
     });
     assert.equal(r.status, 0, r.stderr + r.stdout);

@@ -92,7 +92,8 @@ export function fixture(): Fixture {
   const lsofList = join(root, "lsof.list");
   writeFileSync(lsofList, "");
   const gitconfig = join(root, "gitconfig");
-  writeFileSync(gitconfig, `[safe]\n\tdirectory = ${JSON.stringify(join(realpathSync(root), "origin.git"))}\n\tdirectory = ${JSON.stringify(join(realpathSync(root), "main", ".git"))}\n`);
+  // Reset system-level trust before admitting only this fixture's two origins.
+  writeFileSync(gitconfig, `[safe]\n\tdirectory =\n\tdirectory = ${JSON.stringify(join(realpathSync(root), "origin.git"))}\n\tdirectory = ${JSON.stringify(join(realpathSync(root), "main", ".git"))}\n`);
 
   // The probes that differ between GNU/Linux and macOS come through here, never a platform skip.
   const df = join(bin, "df");
