@@ -685,19 +685,23 @@ test("W1-T10347: an explicit edit command keeps action words in its payload as f
 
 
 // W1-T10880: private HTTP fixtures exercise read bookkeeping, never a live operator decision.
-async function maintainedReadMarkFixture(t: { after(fn: () => void): void }): Promise<Fixture> {
+async function maintainedReadMarkFixture(t: { after(fn: () => void): void }, source: "instance" | "core" = "instance"): Promise<Fixture> {
   const f = fixture();
   t.after(() => rmSync(f.root, { recursive: true, force: true }));
   writeFileSync(f.ledgerPath, "");
-  f.deps.inboxSourceIdentity = { instance: "console", repository: "fixture/console", root: f.root,
+  if (source === "instance") f.deps.inboxSourceIdentity = { instance: "console", repository: "fixture/console", root: f.root,
     inboxRoot: f.root, planPath: f.deps.planPath, ledgerPath: f.ledgerPath };
-  f.deps.inboxAuditScope = { instance: "console", repository: "fixture/console" };
+  f.deps.inboxAuditScope = { instance: source === "core" ? "core" : "console", repository: "fixture/console" };
   const store = { threadStorePath: inboxThreadStorePath(f.root) };
   appendThreadMessage(inboxThreadIdentity(RULING), "reply", "First private fixture message", store);
   appendThreadMessage(inboxThreadIdentity(RULING), "reply", "Second private fixture message", store);
   await refreshInboxClassification(f.deps, {});
   const snapshot = readPersistedInbox(f.stateDir);
   assert.ok(snapshot?.snapshotKey, "the real producer wrote a keyed maintained classification");
+  assert.equal(snapshot.snapshotScope?.instance, f.deps.inboxAuditScope.instance);
+  assert.equal(snapshot.snapshotScope?.repository, "fixture/console");
+  assert.equal(snapshot.snapshotScope?.root, f.root);
+  if (source === "core") assert.equal(snapshot.sourceIdentity, undefined, "core supplies audit scope without source identity");
   assert.ok(snapshot.classifications.some(item => item.proposalId === RULING && item.state !== "retired"));
   // The request has its own cold classifier memo; setup work cannot mask a hot-path call.
   f.deps = { ...f.deps, inboxFromSlowLane: true };
@@ -752,33 +756,59 @@ async function withReadMarkHttp<T>(f: Fixture, fn: (post: (body: unknown, token?
 }
 
 test("read marks use the configured maintained Inbox snapshot without classification", async (t) => {
-  const f = await maintainedReadMarkFixture(t), id = inboxThreadId(RULING);
-  await withReadMarkHttp(f, async post => {
-    const calls = forbidReadMarkClassification(f);
-    assert.equal((await post({ threadId: id, seq: 1 })).status, 200);
-    assert.equal(readReadMarks(readMarksPath(f.stateDir))[id], 1);
-    assert.equal((await post({ threadId: id, seq: 2 })).status, 200);
-    const before = readFileSync(readMarksPath(f.stateDir), "utf8");
-    assert.equal((await post({ threadId: id, seq: 2 })).status, 200, "the current mark is idempotent");
-    assert.equal((await post({ threadId: id, seq: 1 })).status, 200, "an older mark cannot move it backwards");
-    assert.equal(readReadMarks(readMarksPath(f.stateDir))[id], 2);
-    assert.equal(readFileSync(readMarksPath(f.stateDir), "utf8"), before);
-    assert.deepEqual(calls, { plan: 0, github: 0 }, "the cold request invokes neither classifier-plan nor GitHub dependencies");
+  for (const source of ["instance", "core"] as const) await t.test(source, async t => {
+    const f = await maintainedReadMarkFixture(t, source), id = inboxThreadId(RULING);
+    await withReadMarkHttp(f, async post => {
+      const calls = forbidReadMarkClassification(f);
+      assert.equal((await post({ threadId: id, seq: 1 })).status, 200);
+      assert.equal(readReadMarks(readMarksPath(f.stateDir))[id], 1);
+      assert.equal((await post({ threadId: id, seq: 2 })).status, 200);
+      const before = readFileSync(readMarksPath(f.stateDir), "utf8");
+      assert.equal((await post({ threadId: id, seq: 2 })).status, 200, "the current mark is idempotent");
+      assert.equal((await post({ threadId: id, seq: 1 })).status, 200, "an older mark cannot move it backwards");
+      assert.equal(readReadMarks(readMarksPath(f.stateDir))[id], 2);
+      assert.equal(readFileSync(readMarksPath(f.stateDir), "utf8"), before);
+      assert.deepEqual(calls, { plan: 0, github: 0 }, "the cold request invokes neither classifier-plan nor GitHub dependencies");
+    });
   });
 });
 
 test("read marks refuse unavailable maintained evidence and preserve legacy safeguards", async (t) => {
-  const cases = ["missing", "malformed", "foreign", "stale", "future", "plan-stale", "plan-unavailable",
+  const cases = ["missing", "malformed", "foreign", "foreign-core-repository", "foreign-core-instance", "foreign-core-root", "incomplete-core-scope", "stale", "future", "plan-stale", "plan-unavailable",
     "retired", "unknown-thread", "fleet-item", "seq-ahead", "invalid-seq", "corrupt-thread-store", "read-credential", "no-credential",
     "snapshot-changed", "snapshot-appeared"] as const;
   for (const kind of cases) await t.test(kind, async t => {
-    const f = await maintainedReadMarkFixture(t), path = persistedInboxPath(f.stateDir);
+    const core = kind === "foreign-core-repository" || kind === "foreign-core-instance" || kind === "foreign-core-root" || kind === "incomplete-core-scope";
+    const f = await maintainedReadMarkFixture(t, core ? "core" : "instance"), path = persistedInboxPath(f.stateDir);
     const body = { threadId: inboxThreadId(RULING), seq: 1 };
     let status = 503, token: string | null = WRITE;
     if (kind === "missing") unlinkSync(path);
     if (kind === "malformed") writeFileSync(path, "{broken private fixture");
     if (kind === "foreign") await rewriteReadMarkSnapshot(f, content => {
       assert.ok(content.sourceIdentity); content.sourceIdentity.repository = "fixture/foreign";
+    });
+    if (kind === "foreign-core-repository") await rewriteReadMarkSnapshot(f, content => {
+      assert.equal(content.sourceIdentity, undefined); assert.ok(content.snapshotScope);
+      content.snapshotScope.repository = "fixture/foreign";
+    });
+    if (kind === "foreign-core-repository") {
+      const registryPath = join(f.stateDir, "inbox-proposals.json");
+      const registry = JSON.parse(readFileSync(registryPath, "utf8"));
+      registry.proposals = registry.proposals.filter((item: { id: string }) => item.id !== RULING);
+      writeFileSync(registryPath, JSON.stringify(registry));
+      assert.equal(registry.proposals.some((item: { id: string }) => item.id === RULING), false,
+        "the read mark targets a thread present only in the foreign maintained snapshot");
+    }
+    if (kind === "foreign-core-instance") await rewriteReadMarkSnapshot(f, content => {
+      assert.equal(content.sourceIdentity, undefined); assert.ok(content.snapshotScope);
+      content.snapshotScope.instance = "foreign";
+    });
+    if (kind === "foreign-core-root") await rewriteReadMarkSnapshot(f, content => {
+      assert.equal(content.sourceIdentity, undefined); assert.ok(content.snapshotScope);
+      content.snapshotScope.root = `${f.root}-foreign`;
+    });
+    if (kind === "incomplete-core-scope") await rewriteReadMarkSnapshot(f, content => {
+      assert.equal(content.sourceIdentity, undefined); content.snapshotScope = { root: f.root };
     });
     if (kind === "stale") await rewriteReadMarkSnapshot(f, () => {}, Date.now() - 11 * 60_000);
     if (kind === "future") await rewriteReadMarkSnapshot(f, () => {}, Date.now() + 60_000);

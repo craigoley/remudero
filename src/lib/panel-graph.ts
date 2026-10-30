@@ -3200,6 +3200,7 @@ function readSlowLaneClassification(stateDir: string, registryPath: string): Thr
 }
 
 interface InboxRead {
+  persisted?: PersistedInbox;
   whyMeFeedback?: import("./inbox-why-me.js").WhyMeFeedback;
   snapshotKey?: string;
   attentionCensus?: import("./inbox-responder.js").AttentionCensus;
@@ -3494,6 +3495,14 @@ export function buildInboxThreadReadRoute(deps: PanelGraphDeps): Route {
       if (deps.inboxFromSlowLane && (!classified || !qualified || classified.snapshotKey !== qualified.key)) {
         sendJson(res, 503, { error: "inbox_snapshot_pending", detail: "The maintained Inbox evidence changed; retry after it is qualified." });
         return;
+      }
+      if (deps.inboxFromSlowLane) {
+        const expected = deps.inboxSourceIdentity ?? deps.inboxAuditScope;
+        const captured = classified?.persisted?.snapshotScope;
+        if (!expected || captured?.instance !== expected.instance || captured.repository !== expected.repository || captured.root !== deps.inboxRoot) {
+          sendJson(res, 503, { error: "inbox_snapshot_pending", detail: "The maintained Inbox evidence has no matching source scope." });
+          return;
+        }
       }
       const item = operatorThreadItems(deps, undefined, classified).find((candidate) => candidate.proposalId === proposalId);
       if (!item || deps.inboxFromSlowLane && item.state === "retired") {
