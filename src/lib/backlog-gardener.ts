@@ -34,6 +34,8 @@ export interface BacklogEvidence {
   /** A build of this task changed only tests and its filed proof already passed at the merge base. */
   satisfiedByMain?: SatisfiedByMain;
   classValue?: { mean: number; attempts: number };
+  /** Still-open PRs that the task's origin feedback names: the stall the task exists to clear. */
+  heldPrs?: number[];
   signature: string;
 }
 /** What `pr.open_satisfied_by_main` recorded: a build that found nothing to change on main. */
@@ -60,10 +62,18 @@ export interface BacklogSources {
   proofsHolding: (plan: PlanInventory) => ReadonlySet<string>;
   /** Complete OPEN backlog proposals, read only by the daemon async inventory. */
   openDecisions?: () => Promise<readonly OpenBacklogDecision[]>;
+  /** The repository's OPEN PR numbers, read only by the daemon async inventory with its open decisions. */
+  openPrs?: () => Promise<OpenPrs>;
   /** Tasks a build showed main already satisfies, from `pr.open_satisfied_by_main` rows. */
   satisfiedByMain?: () => ReadonlyMap<string, SatisfiedByMain>;
   /** Whether every acceptance proof the task filed holds on main; default {@link ownProofsHoldOnMain}. */
   ownProofsHold?: (task: Task, shard: string | undefined) => boolean;
+}
+
+/** One complete read of the repository's open PRs: its `owner/repo` and every open PR number. */
+export interface OpenPrs {
+  repo: string;
+  numbers: ReadonlySet<number>;
 }
 
 export interface OpenBacklogDecision {
@@ -78,6 +88,14 @@ export async function readOpenBacklogDecisions(root: string, ports: {
   origin?: (root: string, args: string[]) => Promise<string>;
   pages?: (args: string[]) => Promise<unknown>;
 } = {}): Promise<OpenBacklogDecision[]> {
+  return (await readOpenBacklogState(root, ports)).decisions;
+}
+
+/** One open-PR read serves both the open decisions and the open PRs a task's origin feedback names. */
+export async function readOpenBacklogState(root: string, ports: {
+  origin?: (root: string, args: string[]) => Promise<string>;
+  pages?: (args: string[]) => Promise<unknown>;
+} = {}): Promise<{ decisions: OpenBacklogDecision[]; openPrs: OpenPrs }> {
   const remote = await (ports.origin ?? hostWorktreeGitAsync)(root, ["remote", "get-url", "origin"]);
   const repo = parseOwnerRepoFromRemoteUrl(remote.trim());
   if (!repo) throw new Error("backlog gardener: origin does not identify a GitHub repository");
@@ -86,12 +104,14 @@ export async function readOpenBacklogDecisions(root: string, ports: {
     throw new Error("backlog gardener: open-PR pages unreadable");
   }
   const decisions: OpenBacklogDecision[] = [];
+  const numbers = new Set<number>();
   for (const page of pages) for (const pr of page) {
     if (!pr || typeof pr !== "object" || !Number.isSafeInteger(pr.number) || pr.number < 1 ||
         typeof pr.head?.ref !== "string" || typeof pr.head?.sha !== "string" || !/^[a-f0-9]{40}$/.test(pr.head.sha) ||
         !(typeof pr.body === "string" || pr.body === null)) {
       throw new Error("backlog gardener: open-PR ownership unreadable");
     }
+    numbers.add(pr.number);
     if (!/^backlog-garden-\d+$/.test(pr.head.ref)) continue;
     if (pr.body === null || !pr.body.includes("The backlog gardener (W1-T4941) proposes these plan-only changes.")) {
       throw new Error("backlog gardener: open backlog decision body unreadable");
@@ -102,7 +122,27 @@ export async function readOpenBacklogDecisions(root: string, ports: {
       decisions.push({ target: match[1]!, decision: match[2]!, prNumber: pr.number, headSha: pr.head.sha });
     }
   }
-  return decisions;
+  return { decisions, openPrs: { repo: `${repo.owner}/${repo.repo}`, numbers } };
+}
+
+/**
+ * The PRs a task's origin feedback names: the `/pull/<n>` URLs of this repository in `plan/feedback/<id>.yaml`.
+ * A bare `#<n>` never counts: a feedback record quotes upstream text (a Dependabot body's release notes) whose
+ * issue numbers no line shape separates from this repository's. Every dep-review record carries its own PR's
+ * URL, which is all a band needs. 2026-10-30: W1-T11003 (origin
+ * `feedback#fb-dep-review-69bc59bf88007e5e`) was banded 4, "no observed live symptom", while the three
+ * Dependabot PRs its feedback named had sat open for two days waiting on it. A task with no feedback origin,
+ * or no feedback record, names none.
+ */
+export function originFeedbackPrs(repoRoot: string, task: Task, repo: string): number[] {
+  const id = /^feedback#(fb-[A-Za-z0-9_-]+)$/.exec(task.origin ?? "")?.[1];
+  if (id === undefined) return [];
+  const path = join(repoRoot, "plan", "feedback", `${id}.yaml`);
+  if (!existsSync(path)) return [];
+  const text = readFileSync(path, "utf8");
+  const named = new Set<number>();
+  for (const m of text.matchAll(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)\b/g)) if (m[1]!.toLowerCase() === repo.toLowerCase()) named.add(Number(m[2]));
+  return [...named].sort((a, b) => a - b);
 }
 
 const backlogDecision = (action: BacklogAction): string => action.disposition.kind === "band"
@@ -185,6 +225,7 @@ export function backlogEvidence(
   proofsHold: boolean,
   satisfiedByMain?: SatisfiedByMain,
   ownProofsHold: () => boolean = () => false,
+  heldPrs: readonly number[] = [],
 ): BacklogEvidence {
   const since = now.getTime() - 24 * 3_600_000;
   const previousSince = since - 24 * 3_600_000;
@@ -211,7 +252,7 @@ export function backlogEvidence(
   const overtaken = overtakenBy(task, history, ownProofsHold);
   const classValue = [...rows].reverse().find((r) => r.step === BACKLOG_CLASS_VALUE_STEP && r.task_class === deriveTaskClass(task) && typeof r.mean === "number" && typeof r.attempts === "number");
   const value = classValue ? { mean: classValue.mean as number, attempts: classValue.attempts as number } : undefined;
-  const facts = { fanout: fanout.get(task.id) ?? 0, symptoms, missingFiles, presentFiles, missingSymbols, presentSymbols, overtaken, proofsHold, ...(satisfiedByMain ? { satisfiedByMain } : {}), classValue: value };
+  const facts = { fanout: fanout.get(task.id) ?? 0, symptoms, missingFiles, presentFiles, missingSymbols, presentSymbols, overtaken, proofsHold, ...(satisfiedByMain ? { satisfiedByMain } : {}), classValue: value, ...(heldPrs.length > 0 ? { heldPrs: [...heldPrs] } : {}) };
   return { ...facts, signature: evidenceHash(facts) };
 }
 
@@ -220,12 +261,13 @@ export function judgeBacklog(e: BacklogEvidence): { disposition: BacklogDisposit
   if (e.satisfiedByMain) return { disposition: { kind: "retire", retirement: "closed" }, reason: `Its build on ${e.satisfiedByMain.branch} (${e.satisfiedByMain.headSha.slice(0, 12)}) changed only tests (${e.satisfiedByMain.files.join(", ")}) and its filed proof already passed at the merge base: main ships the behaviour.` };
   if (e.proofsHold) return { disposition: { kind: "retire", retirement: "closed" }, reason: "Acceptance proofs now hold on main and did not at filing." };
   if (e.overtaken) return { disposition: { kind: "retire", retirement: "withdrawn" }, reason: `Merged commit ${e.overtaken.sha} covered its declared surface: ${e.overtaken.files.join(", ")}, and every acceptance proof it filed holds on main.` };
+  if (e.heldPrs?.length) return { disposition: { kind: "band", band: 2 }, reason: `Its origin feedback names ${e.heldPrs.length} still-open PR(s) waiting on it: ${e.heldPrs.map((n) => `#${n}`).join(", ")}.` };
   if (e.fanout > 0 || e.symptoms.some((s) => s.recent > 0 && s.recent >= 2 * s.previousDay)) return { disposition: { kind: "band", band: 2 }, reason: e.fanout > 0 ? `Unblocks ${e.fanout} open dependent(s).` : "Its cited symptom is growing against the previous day." };
   if (e.symptoms.some((s) => s.recent > 0)) return { disposition: { kind: "band", band: 3 }, reason: "Its cited symptom remains live." };
   return { disposition: { kind: "band", band: 4 }, reason: "No observed live symptom or open dependent; the task remains valid." };
 }
 
-export function backlogInventory(sources: BacklogSources, include: (action: BacklogAction) => boolean = () => true): BacklogInventory {
+export function backlogInventory(sources: BacklogSources, include: (action: BacklogAction) => boolean = () => true, openPrs?: OpenPrs): BacklogInventory {
   const plan = sources.plan();
   const now = sources.clock.date();
   const mergeBudget = Math.max(0, Math.floor(sources.mergedLastDay()));
@@ -267,7 +309,8 @@ export function backlogInventory(sources: BacklogSources, include: (action: Back
   for (const { task, marker } of eligible) {
     if (examined >= mergeBudget) break;
     const ownProofsHold = () => (sources.ownProofsHold ?? ((t, shard) => ownProofsHoldOnMain(sources.repoRoot, t, shard)))(task, plan.shards.get(task.id));
-    const evidence = backlogEvidence(task, sources.repoRoot, fanout, rows, history, now, sources.fileExists, proofsHolding.has(task.id), satisfied.get(task.id), ownProofsHold);
+    const held = openPrs === undefined ? [] : originFeedbackPrs(sources.repoRoot, task, openPrs.repo).filter((n) => openPrs.numbers.has(n));
+    const evidence = backlogEvidence(task, sources.repoRoot, fanout, rows, history, now, sources.fileExists, proofsHolding.has(task.id), satisfied.get(task.id), ownProofsHold, held);
     const judged = judgeBacklog(evidence);
     // A new evidence sample is not a new placement decision. In particular, rolling ledger
     // counts change every day even while the chosen band remains the same.
@@ -285,7 +328,7 @@ export function backlogInventory(sources: BacklogSources, include: (action: Back
 
 function describe(e: BacklogEvidence): string {
   const symptoms = e.symptoms.length ? e.symptoms.map((s) => `${s.step}: ${s.recent} in trailing day, ${s.earlier} earlier`).join("; ") : "no ledger step cited";
-  return `fanout=${e.fanout}; symptoms=${symptoms}; files present=${e.presentFiles.join(", ") || "none"}; missing=${e.missingFiles.join(", ") || "none"}; symbols present=${e.presentSymbols.join(", ") || "none"}; missing=${e.missingSymbols.join(", ") || "none"}; merged surface=${e.overtaken?.sha ?? "none"}; proofs=${e.proofsHold ? "hold" : "not proven"}; satisfied by main=${e.satisfiedByMain ? `${e.satisfiedByMain.branch} changed only ${e.satisfiedByMain.files.join(", ")}` : "no"}; class value=${e.classValue ? `${e.classValue.mean} over ${e.classValue.attempts} attempts` : "unavailable"}`;
+  return `fanout=${e.fanout}; symptoms=${symptoms}; files present=${e.presentFiles.join(", ") || "none"}; missing=${e.missingFiles.join(", ") || "none"}; symbols present=${e.presentSymbols.join(", ") || "none"}; missing=${e.missingSymbols.join(", ") || "none"}; merged surface=${e.overtaken?.sha ?? "none"}; proofs=${e.proofsHold ? "hold" : "not proven"}; satisfied by main=${e.satisfiedByMain ? `${e.satisfiedByMain.branch} changed only ${e.satisfiedByMain.files.join(", ")}` : "no"}; class value=${e.classValue ? `${e.classValue.mean} over ${e.classValue.attempts} attempts` : "unavailable"}${e.heldPrs?.length ? `; held open PRs=${e.heldPrs.map((n) => `#${n}`).join(", ")}` : ""}`;
 }
 
 export function applyBacklogActions(root: string, shards: ReadonlyMap<string, string>, actions: readonly BacklogAction[], now?: Date): string[] {
@@ -391,12 +434,15 @@ export function backlogGardenSpec(
     cheapFingerprint: () => `${planCheapFingerprint(deps.repoRoot, deps.stateDir)}:${gardenLedgerBucket(deps.clock ?? systemClock)}`,
     inventory: () => backlogInventory(sources),
     inventoryAsync: async () => {
-      const open = await (sources.openDecisions ?? (() => readOpenBacklogDecisions(deps.repoRoot)))();
+      const state = sources.openDecisions === undefined && sources.openPrs === undefined
+        ? await readOpenBacklogState(deps.repoRoot)
+        : { decisions: await (sources.openDecisions ?? (() => readOpenBacklogDecisions(deps.repoRoot)))(), openPrs: await sources.openPrs?.() };
+      const open = state.decisions;
       return backlogInventory(sources, action => {
         const decisions = open.filter(pr => pr.target === action.target && pr.decision === backlogDecision(action));
         if (decisions.length > 0) deps.log("backlog.open_decision_deferred", { decisions });
         return decisions.length === 0;
-      });
+      }, state.openPrs);
     },
     fingerprint: (i) => i.candidates.map((a) => `${a.target}:${a.evidence.signature}`).join("|") + `:${i.mergeBudget}`,
     unfinished: (i) => i.candidates.length > 0,
