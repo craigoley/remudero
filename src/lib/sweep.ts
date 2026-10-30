@@ -258,6 +258,7 @@ import {
   NEEDS_HUMAN_LABEL,
   buildEscalationJudgePrompt,
   escalationCause,
+  escalationHeadSha,
   fixEscalationDedupKey,
   matchDuplicateEscalation,
   openEscalationStandDownReason,
@@ -606,11 +607,8 @@ function assessReviewReuse(
  * {@link buildEscalationReconcileCandidates} resolves `PR-<n>` directly: synthetic ids must
  * round-trip, or an enumerable orphan becomes invisible.
  */
-/** The stalled-stage reason as an escalation SUMMARY: its age and episode start dropped. A stalled-stage
- *  escalation dedups on its exact title (`headDedup: "independent"`), and the title carried "for 32 minutes" and
- *  "since <ts>", so each pass that re-escalated the same (PR, blocker, diagnosis) after a restart or a re-read
- *  episode opened a NEW issue: #11698 and #11720 for #11679, same head and contract, 85 minutes apart. The full
- *  reason, with its age and start, stays in the issue's detail. Any other reason is returned unchanged. */
+/** Drop a stalled reason's moving age and episode start. The identity reader also drops its
+ *  diagnosis; the full reason stays in the issue detail. Any other reason is returned unchanged. */
 export function stalledStageEscalationSummary(reason: string): string {
   // An ownerless stall reads "(owner: none)" where an owned one reads "(BACKSTOP <n>)", and a held repair appends
   // its withheld minutes: both kept the title moving, so #15368 got four issues for one head and cause (#15403,
@@ -619,6 +617,13 @@ export function stalledStageEscalationSummary(reason: string): string {
   return reason
     .replace(/^(PR stage stalled: .+?) for \d+ minutes \((?:BACKSTOP \d+|owner: none)\); since [^;]*;/, "$1;")
     .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
+}
+
+/** Read the stable PR/blocker portion from current or legacy stalled-issue titles. */
+function stalledStageEscalationIdentity(text: string): string | undefined {
+  const start = text.indexOf("PR stage stalled: ");
+  if (start < 0) return undefined;
+  return stalledStageEscalationSummary(text.slice(start)).split("; DIAGNOSIS:", 1)[0];
 }
 
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
@@ -3629,6 +3634,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // the thing") — a capped, green, unreviewable PR needs an operator to look at it and either
       // override the cap or merge it by hand; nothing downstream can move it further on its own.
       const cls: EscalationClass = reason.startsWith("PR stage stalled:") || isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
+      const stallIdentity = reason.startsWith("PR stage stalled:") ? stalledStageEscalationIdentity(reason) : undefined;
+      const issues = issuesImpl ?? ghIssueGatewayAsync(owner, repo);
+      // All stalled stages share cause `stage-stall`; narrow by blocker before the gateway's
+      // existing PR/head matching. Keep older heads visible to the gateway's supersession cleanup.
+      const escalationIssues: AsyncIssueGateway = stallIdentity !== undefined && issues.listOpen
+        ? { ...issues, listOpen: async (label) => (await issues.listOpen!(label)).filter(issue => {
+          const head = escalationHeadSha(issue.body);
+          return (head !== undefined && head !== pr.headSha) ||
+            stalledStageEscalationIdentity(issue.title ?? "") === stallIdentity;
+        }) }
+        : issues;
       const file = async (context: string): Promise<void> => { await escalateAsync(
         {
           class: cls,
@@ -3645,19 +3661,19 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           // fix-rung-exhaustion issue named, `escalate()` appends here instead of
           // opening a sibling — the #412/#413-shaped duplicate this task fixes.
           headSha: pr.headSha,
-          ...(reason.startsWith("PR stage stalled:") || reason === "review failing with no actionable unmet criteria (contradictory) — escalating"
+          ...(reason === "review failing with no actionable unmet criteria (contradictory) — escalating"
             ? { headDedup: "independent" as const }
             : {}),
           cause: question.cause ?? escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
           ...contractRevisionFor(pr),
-          summary: `PR ${pr.prUrl} needs a clarification — ${stalledStageEscalationSummary(reason)}`,
+          summary: `PR ${pr.prUrl} needs a clarification — ${stallIdentity ?? stalledStageEscalationSummary(reason)}`,
           detail:
             `${context}The CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new rung) reconciled open PR #${pr.prNumber} ` +
             `to BLOCKED-AMBIGUOUS: ${reason}.\n\n${question.question}`,
           options: question.resolutions.map((r) => ({ label: r.label, detail: r.detail })),
           recommendation: question.resolutions[0].label,
         },
-        { issues: issuesImpl ?? ghIssueGatewayAsync(owner, repo), ledgerPath, runId },
+        { issues: escalationIssues, ledgerPath, runId },
       ); };
       if (pr.mergeState !== "dirty") return file("");
       return readMainCommit().then((main) => file(conflictEscalationContext(pr, main?.sha)));
