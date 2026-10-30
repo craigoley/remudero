@@ -676,8 +676,14 @@ def lsof_stderr_unexplained(stderr, path):
     DeviceFS, a session's private disk image); that says nothing about `path` unless the
     mount lies inside or above it.
     """
+    unrelated_mount = False
     for line in stderr.splitlines():
-        if not line.strip() or LSOF_CANT_STAT_DETAIL.match(line):
+        if not line.strip():
+            unrelated_mount = False
+            continue
+        if LSOF_CANT_STAT_DETAIL.match(line):
+            if not unrelated_mount:
+                return True
             continue
         mount = LSOF_CANT_STAT.match(line)
         if not mount:
@@ -685,6 +691,7 @@ def lsof_stderr_unexplained(stderr, path):
         mounted = Path(mount.group(1))
         if mounted.is_relative_to(path) or Path(path).is_relative_to(mounted):
             return True
+        unrelated_mount = True
     return False
 
 
