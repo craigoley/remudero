@@ -4,8 +4,8 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `ci-judge`, field `servedModel`.
 
-  Coverage: 7/37 joined worker calls (18.9%) in the trailing 7-day window; below
-  the field's 90.0% floor — a chronic gap no baseline excuses.
+  Coverage: 106/478 joined worker calls (22.2%) in the trailing 7-day window;
+  below the field's 90.0% floor — a chronic gap no baseline excuses.
 
   First seen: 2026-10-08T16:51:25.889Z.
 
@@ -14,13 +14,90 @@ raw: >-
   lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
   reads), or record why this lane legitimately lacks it. The evidence-coverage
   gardener updates this entry in place while the gap persists.
+
+  Evidence coverage reopened 2026-10-29T17:59:07.863Z: 22.2% (106/478); window
+  2026-10-22T17:59:07.863Z through 2026-10-29T17:59:07.863Z; overrides rejected.
 attachments: []
 origin: cli
-status: rejected
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/15643
+summary:
+  headline: Restore or justify missing served model evidence
+  what_happened: The `ci-judge` lane records `servedModel` for only 106 of 478
+    worker calls (22.2%) in the latest seven-day window, below the 90% floor.
+    The gap has persisted since October 8 and reopened October 29; overrides
+    were rejected.
+  decision: Restore `servedModel` at the lane’s ledger write site, or document why
+    this lane legitimately lacks the field.
+  options:
+    - label: Restore the field
+      consequence: Record `servedModel` for `ci-judge` worker calls and close the
+        coverage gap.
+      intent: approve
+    - label: Document the exception
+      consequence: Record why `ci-judge` legitimately does not provide `servedModel`.
+      intent: reframe
 expansion: null
 submission_key: null
 thread_id: null
 answered_by: null
+evidence_coverage_last_reopened: "22.2"
+evidence_coverage_revision:
+  version: 1
+  mainSha: cfa32ee06fa43b109da3f8e49f5de664990a38c5
+  expectedRecord: >
+    id: evidence-coverage-ci-judge-served-model
+
+    ts: 2026-10-08T16:51:28.736Z
+
+    raw: >-
+      Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+      `ci-judge`, field `servedModel`.
+
+      Coverage: 7/37 joined worker calls (18.9%) in the trailing 7-day window; below
+      the field's 90.0% floor — a chronic gap no baseline excuses.
+
+      First seen: 2026-10-08T16:51:25.889Z.
+
+
+      This follow-up never gates a PR or blocks work. Restore the field at the
+      lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+      reads), or record why this lane legitimately lacks it. The evidence-coverage
+      gardener updates this entry in place while the gap persists.
+    attachments: []
+
+    origin: cli
+
+    status: rejected
+
+    reply_to: null
+
+    proposal_pr: null
+
+    summary: null
+
+    expansion: null
+
+    submission_key: null
+
+    thread_id: null
+
+    answered_by: null
+  expectedPlan:
+    plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+    plan/tasks.d: e3c8eaa6813cf0e890d1f94323ce0d0b87be8a05
+  measurement:
+    lane: ci-judge
+    field: servedModel
+    observed: 106
+    denominator: 478
+    floor: 0.9
+    at: 2026-10-29T17:59:07.863Z
+    since: 2026-10-22T17:59:07.863Z
+    line: "Coverage: 106/478 joined worker calls (22.2%) in the trailing 7-day
+      window; below the field's 90.0% floor — a chronic gap no baseline
+      excuses."
+  closure:
+    eligible: true
+    reason: rejected with a measured gap

@@ -46,9 +46,27 @@ scratch_root() { printf '%s' "${RMD_SCRATCH_ROOT:-/mnt/scratch}"; }
 # A TEST PROCESS NEVER RESOLVES THE HOST'S REAL SCRATCH ROOT. W1-T5631's dead switch lives in the
 # suite's --import setup, so a run without it (a bare `node --import tsx --test <file>` on the host)
 # still read the real switch and mkdir'd ~70 fixture state dirs (recycle-state-*, state-root, ...)
-# under /mnt/scratch/rmd. Under the node test runner only an explicit RMD_SCRATCH_ROOT is used.
-scratch_root_refused() { [ -n "${NODE_TEST_CONTEXT:-}" ] && [ -z "${RMD_SCRATCH_ROOT:-}" ]; }
-SCRATCH_REFUSED_NOTE="NOT USED — a test process (NODE_TEST_CONTEXT) never uses the host's /mnt/scratch; set RMD_SCRATCH_ROOT"
+# under /mnt/scratch/rmd. Hand-built child envs lose NODE_TEST_CONTEXT, so temporary state paths
+# also require an explicit root. An rmd-* ancestor identifies a fixture outside the OS temp root;
+# the state dir's own name is excluded (real instances include rmd-state2 and rmd-site-state).
+scratch_root_refused() {
+  [ -z "${RMD_SCRATCH_ROOT:-}" ] || return 1
+  [ -z "${NODE_TEST_CONTEXT:-}" ] || return 0
+  local state_dir="${1:-}" temp_root
+  state_dir="${state_dir%/}"
+  [ -n "${state_dir}" ] || return 1
+  if [ -d "${state_dir}" ]; then
+    state_dir="$(cd "${state_dir}" && pwd -P)" || return 0
+  fi
+  for temp_root in /tmp /var/tmp /private/tmp /var/folders /private/var/folders "${TMPDIR:-}" "${TMP:-}" "${TEMP:-}"; do
+    [ -n "${temp_root}" ] || continue
+    temp_root="${temp_root%/}"
+    case "${state_dir}" in "${temp_root}"|"${temp_root}/"*) return 0 ;; esac
+  done
+  case "${state_dir}" in */rmd-*/*) return 0 ;; esac
+  return 1
+}
+SCRATCH_REFUSED_NOTE="NOT USED — a test process (NODE_TEST_CONTEXT) or temporary state dir never uses the host's /mnt/scratch; set RMD_SCRATCH_ROOT"
 
 # True when the scratch root is itself a mounted filesystem: a bare directory at that path sits on
 # the 29 GB OS disk, and worktrees there would fill it.
@@ -108,7 +126,7 @@ scratch_base_for() {
     SCRATCH_NOTE="off (RMD_SCRATCH=${RMD_SCRATCH:-auto}, no ${RMD_SCRATCH_SWITCH:-/etc/remudero/scratch-mounts.on}): worktrees, tmp, coverage, repos and the read model stay on the state disk"
     return 1
   fi
-  if scratch_root_refused; then
+  if scratch_root_refused "${state_dir}"; then
     SCRATCH_NOTE="${SCRATCH_REFUSED_NOTE}"
     return 1
   fi
@@ -329,6 +347,10 @@ scratch_restore() {
     return 0
   fi
   for state_dir in "$@"; do
+    if scratch_root_refused "${state_dir}"; then
+      echo "scratch-mounts: ${SCRATCH_REFUSED_NOTE}; nothing restored for ${state_dir}"
+      continue
+    fi
     manifest="${state_dir}/${SCRATCH_MANIFEST_NAME}"
     [ -r "${manifest}" ] || { echo "scratch-mounts: no ${manifest}; nothing to restore for it"; continue; }
     owner="$(stat -c '%u:%g' "${manifest}" 2>/dev/null || stat -f '%u:%g' "${manifest}")"

@@ -1,0 +1,29 @@
+id: incident-c7fa281aff2b1441
+ts: 2026-10-30T01:32:48.270Z
+raw: >-
+  Incident c7fa281aff2b: intervention
+  own-red:fix-lane:task-contract-amended-under-this-termina
+
+  First seen: 2026-10-30T01:27:55.702Z
+
+  Last seen: 2026-10-30T01:32:21.049Z
+
+  Count: 5, burn: 5.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#13313@0c29a1e70 actor=cao825 cause=own-red:fix-lane:task-contract-amended-under-this-termina — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#c7fa281aff2b144190f253055dc6a4d79ce88fe1eea4c4f74f28c005978f3242
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
