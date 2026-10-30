@@ -14,6 +14,9 @@
   files:
     - src/lib/test-impact-map.ts
     - test/ci/suites/a-generator-with-function-typed-parameters-lexes.test.ts
+  # refusal-amendment (W1-T10740, run W1-T10740-1793318639618, 2026-10-30T00:55:58.843Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: The reported lexer failure is already repaired at HEAD, so another implementation cannot demonstrate the required behavior change against this base.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   note: |
