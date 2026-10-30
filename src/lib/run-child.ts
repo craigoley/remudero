@@ -31,6 +31,7 @@ import {
   type RunChildEntryKind, type RunChildFailureClass, type RunChildProbe, type RunChildSpec, type RunChildSpecOptions, type RunChildStatus,
 } from "./run-child-contract.js";
 import { waitingStarts } from "./host-memory-admission.js";
+import { copySelectedRegistryIntent, qualifySelectedRegistryIntent } from "./selected-registry-consumers.js";
 import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservation.js";
 import type { RunResult } from "./run-result.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -285,6 +286,8 @@ const failureClassOf = (value: unknown): RunChildFailureClass | "ok" => (value =
  * until their tasks land, and the row says so.
  */
 export async function startRunChildProbe(input: RunChildProbeInput, seams: RunChildProbePorts = {}): Promise<RunChildProbeOutcome> {
+  const options = { ...input.options };
+  if (options.selectedRegistryIntent !== undefined) options.selectedRegistryIntent = copySelectedRegistryIntent(options.selectedRegistryIntent);
   const log: Log = (step, extra) => {
     try {
       input.log(step, extra);
@@ -305,6 +308,7 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
   }
   const effective = runChildEffectiveMode(mode);
   if (effective.mode === "off") return { started: false, reason: "mode off" };
+  options.selectedRegistryIntent = await qualifySelectedRegistryIntent(options.selectedRegistryIntent);
   let reservation: LearnedReservation | undefined;
   const runId = `probe-${sanitiseId(input.taskId)}-${clock()}-${randomBytes(2).toString("hex")}`;
   try {
@@ -338,7 +342,7 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
     writeSpec(dir, {
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
       engine: { sourceHash: engine.sourceHash, sha: engine.sha }, planSnapshotPath: snapshot.path,
-      reservationId: reservation.id ?? "", options: input.options,
+      reservationId: reservation.id ?? "", options,
       ...(input.work ? { work: input.work } : {}),
     } as RunChildSpec);
     const child = (seams.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], { cwd: options.cwd, stdio: ["ignore", "ignore", "pipe"] })))(
@@ -662,6 +666,8 @@ const defaultRunChildSpawn: NonNullable<SpawnRunChildPorts["spawn"]> = (command,
  * NEVER rejects: a child that cannot be started returns `started: false` and ledgers `run_child.fallback`.
  */
 export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunChildPorts = {}): Promise<RunChildLaunch> {
+  const options = { ...input.options };
+  if (options.selectedRegistryIntent !== undefined) options.selectedRegistryIntent = copySelectedRegistryIntent(options.selectedRegistryIntent);
   const clock = ports.clock ?? Date.now;
   const log: Log = (step, extra) => {
     try {
@@ -683,6 +689,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
   let engineSha = "";
   const nodeArgs = childHeapPolicyArgs();
   try {
+    options.selectedRegistryIntent = await qualifySelectedRegistryIntent(options.selectedRegistryIntent);
     if (listEngines(input.stateRoot).length === 0) return unavailable("no engine tree has been built yet");
     const mainSha = (await (ports.mainSha ?? mainTipSha)(input.repoDir)).trim();
     const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...ports.engine });
@@ -720,7 +727,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     writeSpec(dir, {
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
       engine: { sourceHash: engine.sourceHash, sha: engine.sha }, planSnapshotPath: snapshot.path,
-      reservationId: reservation.id ?? "", options: input.options,
+      reservationId: reservation.id ?? "", options,
       ...(input.work ? { work: input.work } : {}),
     } as RunChildSpec);
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
@@ -1235,6 +1242,7 @@ export interface DetachedWorkHostInput {
   readMode?: () => RunChildMode;
   spawn?: typeof spawnRunChild;
   probe?: typeof startRunChildProbe;
+  selectedRegistryIntent?: RunChildSpecOptions["selectedRegistryIntent"];
 }
 
 /**
@@ -1244,6 +1252,8 @@ export interface DetachedWorkHostInput {
  * measured drain cost say so; a child that cannot start is `undefined`, and the review runs in process as before.
  */
 export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWorkChildHost {
+  const intent = copySelectedRegistryIntent(input.selectedRegistryIntent);
+  const options = (): RunChildSpecOptions => ({ selectedRegistryIntent: intent });
   const mode = (): DetachedWorkMode => detachedWorkModeNow(input.stateRoot, input.readMode);
   let probing = false;
   return {
@@ -1261,7 +1271,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
           probing = true;
           void (input.probe ?? startRunChildProbe)({
             taskId: `review-PR${pr.prNumber}`, stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-            plan: Promise.resolve({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+            plan: Promise.resolve({ plan: { tasks: [] } }), options: options(), log: input.log, work,
           }, { readMode: () => "shadow" }).finally(() => { probing = false; });
         }
         return undefined;
@@ -1273,7 +1283,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       if (placement.placement !== "child") return undefined;
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "review", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
       });
       if (!launch.started) return undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
@@ -1288,7 +1298,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey, inputs: { repo: input.repo, envelope } };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "sweep-fix", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
@@ -1302,7 +1312,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = { kind: "retro", inputs: { decision } };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: "DAEMON", lane: "retro", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: {}, log: input.log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log: input.log, work,
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };

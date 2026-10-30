@@ -6,6 +6,9 @@ import { type FixProgressJudge, type FixProgressVerdict } from "../../lib/fix-pr
 import { type BranchUpdateRecorder } from "../../lib/branch-update.js";
 import { retryWhileLockBusy } from "../../lib/lock-busy-retry.js";
 import { retryPollRead } from "../../lib/poll-read-retry.js";
+import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, selectedRegistryObserverFromIntent, withSelectedRegistryContext,
+  copySelectedRegistryIntent, observeSelectedRegistry, selectedRegistryObserverInContext, hasQualifiedSelectedRegistryRunContext,
+  type SelectedRegistryIntent } from "../../lib/selected-registry-consumers.js";
 import { recyclePauseDetail } from "../../lib/recycle-yield.js";
 import { execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { rm as rmAsync } from "node:fs/promises";
@@ -1042,6 +1045,7 @@ export interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   preopenGate?: (worktreePath: string) => Promise<PreopenGateResult>;
   instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   selectedModeFileIO?: RegistryFileIO;
+  selectedRegistryIntent?: SelectedRegistryIntent;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
   claimReserver?: DispatchClaimReserverAsync;
@@ -4414,6 +4418,7 @@ export async function runTask(
     implementScopeAmendmentState?: RunTaskBodyOptions["implementScopeAmendmentState"];
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
     selectedModeFileIO?: RegistryFileIO;
+    selectedRegistryIntent?: SelectedRegistryIntent;
     pairedTrial?: Partial<PairedTrialInput>;
     pairedTrialHost?: "daemon";
     /** W1-T5115: the daemon's git credential socket, handed to every spawn below. Only the daemon passes it — a direct
@@ -4426,6 +4431,8 @@ export async function runTask(
   } = {},
   host: RunTaskCommandHost,
 ): Promise<RunResult> {
+  opts = { ...opts };
+  const execute = async (): Promise<RunResult> => {
   const {
     BRANCH_NAME_CONTRACT_PART,
     syncPlanOrRefuse,
@@ -5067,8 +5074,29 @@ export async function runTask(
         ctx.plan = plan;
       },
     };
-    return await runTaskBody(ctx, host);
+    return await observeSelectedRegistry(selectedRegistryObserverInContext(), "run-task-resume", { repository: `${owner}/${task.repo}` },
+      () => runTaskBody(ctx, host));
   });
+  };
+  if (hasQualifiedSelectedRegistryRunContext()) {
+    return execute();
+  }
+  const config = opts.config ?? loadConfig();
+  const intent = await qualifySelectedRegistryIntent(Object.hasOwn(opts, "selectedRegistryIntent")
+    ? opts.selectedRegistryIntent : captureSelectedRegistryIntent({ settings: config.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY } }));
+  let runId: string | undefined;
+  const onRunCreated = opts.onRunCreated;
+  const observer = selectedRegistryObserverFromIntent(intent, (step, fields) => {
+    if (runId === undefined) throw new Error("run identity unavailable for selected observation");
+    return appendLedger(ledgerPathFor(config), { run_id: runId, task_id: taskId, step, ...fields });
+  });
+  opts = { ...opts, config, selectedRegistryIntent: intent, onRunCreated: id => { runId = id; onRunCreated?.(id); } };
+  return withSelectedRegistryContext(observer, async () => {
+    try {
+      return await observeSelectedRegistry(observer, "run-task-resume", {}, () =>
+        execute());
+    } finally { await observer?.settled(); }
+  }, { qualifiedRun: true });
 }
 
 /** The initial run uses the same branch lease as the cold fix lane; unknown owners never get reclaimed. */
@@ -5353,8 +5381,12 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
 
   // Hold the instance mode for the run so a registry edit cannot flip its deferred arm decision.
   const shadowInstance = instanceMode(`${owner}/${task.repo}`, (opts.instanceRegistryTextImpl ?? readInstanceRegistryText)(repoRoot)) === "shadow";
-  const selectedModeQualification = createSelectedModeQualification(config.selectedRegistryMode, `${owner}/${task.repo}`,
-    { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME }, log, opts.selectedModeFileIO);
+  const registryIntent = copySelectedRegistryIntent(opts.selectedRegistryIntent);
+  const selectedModeQualification = registryIntent?.kind === "unknown" ? undefined : registryIntent?.kind === "shadow"
+    ? createSelectedModeQualification({ mode: "shadow", instanceName: registryIntent.instanceName }, `${owner}/${task.repo}`,
+      { ...registryIntent.input, instanceName: registryIntent.instanceName }, log, opts.selectedModeFileIO)
+    : createSelectedModeQualification(Object.hasOwn(opts, "selectedRegistryIntent") ? undefined : config.selectedRegistryMode, `${owner}/${task.repo}`,
+      { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME }, log, opts.selectedModeFileIO);
 
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
@@ -8318,13 +8350,14 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     }
     const shadowArmDecision = resolveShadowInstanceArmPermission(shadowInstance);
     const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
-    const armOutcome = await observeSelectedMode<ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused">(
+    const armOutcome = await observeSelectedRegistry(selectedRegistryObserverInContext(), "run-task-resume", { repository: `${owner}/${task.repo}` },
+      () => observeSelectedMode<ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused">(
       selectedModeQualification, "run-arm", async () => !shadowArmDecision.armed
       ? "shadow-instance-refused"
       : wipeTestArmDecision.armed
         ? await armAutoMergeAtOpenAsync(prUrl,
           realArmDepsAsync(() => config, selectedModeQualification), irreversible)
-        : "no-merge-boundary-refused", prUrl);
+        : "no-merge-boundary-refused", prUrl));
     // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
     // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
     // population (the "run-task" lane, the deferred arm every normal implement-task PR takes).

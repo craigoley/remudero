@@ -1313,7 +1313,7 @@ import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
-import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -26686,6 +26686,7 @@ const daemonDefaultBuildSweepHook: typeof buildSweepHook = (...args) => {
   installDetachedWorkHost(createDetachedWorkHost({
     stateRoot: join(config.root, "state"), repoDir: args[16] ?? repoRoot, root: config.root, repo, log: args[6],
     readLedger: () => readLedgerLines(ledgerPath),
+    selectedRegistryIntent: selectedRegistryIntentForConfig(config),
   }));
   return buildSweepHook(...args);
 };
@@ -27956,12 +27957,30 @@ export interface RunInChildInput {
   onPending?: (pending: RunChildPending) => void;
   /** W1-T10000: asked before the run stays in-process; `false` ends the lane with a {@link TaskAdmissionError}. */
   mayRunInProcess?: (reason: string) => boolean;
+  onSelectedRegistryIntent?: (intent: RunChildSpecOptions["selectedRegistryIntent"]) => void;
 }
 
 /** W1-T9085: under `sweep.runChild.mode: on` the run's settling promise from a detached child, else `undefined` (stays in-process; ledgered). */
 export async function runInChildWhenOn(
   input: RunInChildInput,
   seams: { readMode?: () => RunChildMode; evidence?: () => RunChildModeEvidence; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
+): Promise<RunChildHandle | undefined> {
+  const options = { ...input.options };
+  const intent = await qualifySelectedRegistryIntent(Object.hasOwn(options, "selectedRegistryIntent")
+    ? options.selectedRegistryIntent : selectedRegistryIntentForConfig(input.config));
+  options.selectedRegistryIntent = intent;
+  input.onSelectedRegistryIntent?.(intent);
+  const observer = selectedRegistryObserverFromIntent(intent, input.log);
+  return withSelectedRegistryContext(observer, async () => {
+    try {
+      return await observeSelectedRegistry(observer, "run-child-dispatch", {}, () => runInChildWithIntent({ ...input, options }, seams));
+    } finally { await observer?.settled(); }
+  });
+}
+
+async function runInChildWithIntent(
+  input: RunInChildInput,
+  seams: { readMode?: () => RunChildMode; evidence?: () => RunChildModeEvidence; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts },
 ): Promise<RunChildHandle | undefined> {
   const mode = runChildModeIsOn(seams.readMode, seams.evidence);
   const inProcess = (reason: string): undefined => {

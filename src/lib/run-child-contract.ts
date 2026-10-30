@@ -18,11 +18,12 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { GhJsonUnreadableResponseError } from "./github-transport.js";
 import { defaultGeneration, defaultProbe, type ContainerGeneration, type ProbeResult } from "./host-memory-ledger.js";
 import { TaskAdmissionError } from "./plan.js";
+import { copySelectedRegistryIntent, type SelectedRegistryIntent } from "./selected-registry-consumers.js";
 import type { RunResult } from "./run-result.js";
 
 /** The contract's schema version. The schema only grows within a major: a reader refuses an unknown major and
  *  ignores unknown minor fields. */
-export const RUN_CHILD_SCHEMA = { major: 1, minor: 1 } as const;
+export const RUN_CHILD_SCHEMA = { major: 1, minor: 2 } as const;
 
 export interface RunChildSchema {
   major: number;
@@ -37,6 +38,8 @@ export interface RunChildSpecOptions {
   skipGitSync?: boolean;
   handOffAtPrOpen?: boolean;
   pairedTrialHost?: "daemon";
+  /** Trusted orchestration input only; never worker options or public status. */
+  selectedRegistryIntent?: SelectedRegistryIntent;
 }
 
 export interface RunChildSpec {
@@ -189,6 +192,7 @@ function parseOptions(v: unknown): RunChildSpecOptions | undefined {
     if (v.pairedTrialHost !== "daemon") return undefined;
     out.pairedTrialHost = "daemon";
   }
+  if (v.selectedRegistryIntent !== undefined) out.selectedRegistryIntent = copySelectedRegistryIntent(v.selectedRegistryIntent);
   return out;
 }
 
