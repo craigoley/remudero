@@ -38,16 +38,16 @@ export function readBoundedFileTail(path: string, maxBytes: number): FileTail {
       result.text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buf.subarray(start));
       result.state = offset > 0 ? "truncated" : "complete";
     } catch (error) {
-      result.state = "malformed";
-      result.reason = reasonOf(error);
+      result = { ...result, state: "malformed", reason: reasonOf(error) };
     }
   } catch (error) {
-    result.state = fd === undefined && (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "absent" : "unreadable";
-    result.reason = reasonOf(error);
+    result = { ...result,
+      state: fd === undefined && (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "absent" : "unreadable",
+      reason: reasonOf(error) };
   } finally {
     if (fd !== undefined) {
       try { fs.closeSync(fd); }
-      catch (error) { result.state = "unreadable"; result.reason = reasonOf(error); }
+      catch (error) { result = { ...result, state: "unreadable", reason: reasonOf(error) }; }
     }
   }
   return result;
@@ -82,7 +82,8 @@ export class BoundedOutput {
       this.append(prefix);
       this.append(text);
     } catch (error) {
-      this.failure = reasonOf(error);
+      const reason = reasonOf(error);
+      this.failure = reason;
       this.chunks = [];
     }
   }

@@ -35,12 +35,18 @@ test("bounded report states distinguish absent, unreadable, malformed and empty"
   const dir = mkdtempSync(join(tmpdir(), "rmd-bounded-states-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, "report");
-  assert.equal(readBoundedFileTail(path, 12).state, "absent");
+  const absent = readBoundedFileTail(path, 12);
+  assert.equal(absent.state, "absent");
+  assert.match(absent.reason!, /ENOENT/);
   const unreadable = readBoundedFileTail(dir, 12);
   assert.equal(unreadable.state, "unreadable");
   assert.ok(unreadable.reason);
   writeFileSync(path, Buffer.from([0xc3, 0x28]));
-  assert.equal(readBoundedFileTail(path, 12).state, "malformed");
+  const malformed = readBoundedFileTail(path, 12);
+  assert.equal(malformed.state, "malformed");
+  assert.ok(malformed.reason);
+  assert.equal(malformed.bytesRead, 2);
+  assert.equal(malformed.text, "");
   writeFileSync(path, "");
   assert.equal(readBoundedFileTail(path, 12).state, "complete");
   assert.throws(() => readBoundedFileTail(path, -1), /byte bound/);
@@ -65,7 +71,10 @@ test("bounded report short reads and close failures never claim completeness", (
   partial.mock.restore();
   const close = fs.closeSync;
   t.mock.method(fs, "closeSync", (fd: number) => { close(fd); throw new Error("close failed"); });
-  assert.match(readBoundedFileTail(path, 100).reason!, /close failed/);
+  const closed = readBoundedFileTail(path, 100);
+  assert.equal(closed.state, "unreadable");
+  assert.match(closed.reason!, /close failed/);
+  assert.equal(closed.bytesRead, Buffer.byteLength("complete report"));
 });
 
 test("bounded output spills, preserves small chunks and reports write and cleanup failures", (t) => {
@@ -88,7 +97,10 @@ test("bounded output spills, preserves small chunks and reports write and cleanu
   const failed = new BoundedOutput(1);
   failed.push("large");
   failed.push("ignored");
-  assert.match(failed.finish().evidence.reason!, /disk full/);
+  const failedOutput = failed.finish();
+  assert.equal(failedOutput.evidence.state, "unreadable");
+  assert.match(failedOutput.evidence.reason!, /disk full/);
+  assert.deepEqual(failedOutput.chunks, []);
   write.mock.restore();
   const create = t.mock.method(fs, "mkdtempSync", () => { throw new Error("scratch refused"); });
   const noScratch = new BoundedOutput(0);
