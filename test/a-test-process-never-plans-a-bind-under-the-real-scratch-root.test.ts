@@ -20,9 +20,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const LIB = join(import.meta.dirname, "..", "deploy", "scratch-mounts.sh");
+const LIB = join(REPO_ROOT, "deploy", "scratch-mounts.sh");
 const REAL_ROOT = "/mnt/scratch";
 
 interface LeakyHost {
@@ -89,9 +90,9 @@ test("a test naming its own RMD_SCRATCH_ROOT still plans its binds, and producti
   const prod = { ...host.env };
   delete prod.NODE_TEST_CONTEXT;
   prod.NODE_V8_COVERAGE = ""; // blanked, not deleted: child_process re-injects a deleted one
-  const real = plan(prod, host.state);
+  const real = plan(prod, "/mnt/rmd/rmd-state2");
   assert.equal(real.status, 0, real.note);
-  assert.ok(real.args.some((a) => a.startsWith(`${REAL_ROOT}/rmd/recycle-state-`)), JSON.stringify(real.args));
+  assert.ok(real.args.some((a) => a.startsWith(`${REAL_ROOT}/rmd/rmd-state2/`)), JSON.stringify(real.args));
   assert.deepEqual(readdirSync(host.fixtureScratch), [], "planning creates nothing");
 });
 
