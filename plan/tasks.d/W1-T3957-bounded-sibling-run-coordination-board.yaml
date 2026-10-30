@@ -17,9 +17,9 @@
     - test/coordination-board-scope.test.ts
     - test/coordination-board-lifecycle.test.ts
     - test/coordination-board-redaction.test.ts
-  priority: 4
+  priority: 5  # queue-judge-2026-10-30: No dependents or incidents, lower priority to reflect low delay cost.
   status: queued
-  # backlog gardener: band=4 evidence=f9195f4bfbbd33bd
+  # queue judge: priority=5 evidence=6d81dac76a276106
   attempts: 0
   rationale: |
     Kilo Swarm gives child sessions a shared board for findings and handoffs, while Agent Manager
