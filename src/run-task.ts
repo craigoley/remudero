@@ -1312,7 +1312,7 @@ import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
-import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, selectedRegistryObserverInContext, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSelectedRegistry, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -11189,8 +11189,7 @@ export async function repairCensusRefusedPush(input: {
 }
 
 export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
-  return observeSelectedRegistry(selectedRegistryObserverInContext(), "run-task-resume", {}, () =>
-    runTaskBodyFromModule(ctx, runTaskCommandHost()));
+  return runTaskBodyFromModule(ctx, runTaskCommandHost());
 }
 
 /**

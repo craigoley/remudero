@@ -1793,8 +1793,10 @@ export async function daemonCommand(
           childModeTracker.record(dispatchMode?.decision, log);
           childContract(dispatchMode?.decision);
           // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
+          let selectedRegistryIntent: import("../../lib/run-child-contract.js").RunChildSpecOptions["selectedRegistryIntent"];
           const inChild = await runInChildWhenOn({
             taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log: childLog, planSync: planSyncCoalescer.sync,
+            onSelectedRegistryIntent: (intent: typeof selectedRegistryIntent) => { selectedRegistryIntent = intent; },
             onPending: runOptions?.onChildPending, mayRunInProcess: runOptions?.mayRunInProcess,
           }, { readMode: childPolicy, evidence: childModeTracker.evidence });
           if (inChild) {
@@ -1805,9 +1807,10 @@ export async function daemonCommand(
           const admittedPlan = createAdmittedPlanSlot();
           void startRunChildProbe({
             taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log: childLog,
-            options: childOptions,
+            options: { ...childOptions, selectedRegistryIntent },
           }, dispatchMode ? { readMode: () => dispatchMode.mode } : {});
           return runTaskFn(taskId, {
+            selectedRegistryIntent,
             planPath: target.planPath,
             config,
             allowStale,
