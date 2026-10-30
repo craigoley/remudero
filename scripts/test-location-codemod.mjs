@@ -139,7 +139,11 @@ export function stringLiteralMask(text) {
           i += point.length;
         }
         const word = text.slice(start, i);
-        if (word === "function") functionExpressionPending = ["=", "(", "[", ",", ":", "return", "=>", "&", "|", "?"].includes(prev);
+        if (word === "function") {
+          const expressionHeads = ["=", "(", "[", ",", ":", "return", "=>", "&", "|", "?"];
+          functionExpressionPending = expressionHeads.includes(prev)
+            || (prev === "async" && expressionHeads.includes(beforePrev));
+        }
         // Once a for-in or for-of separator is consumed, a name on its right may be a template tag.
         const bindingEnd = IDENT_PART.test(Array.from(prev).at(-1) ?? "") || [")", "]", "}"].includes(prev);
         const loopOperator = (word === "of" || word === "in") && atLoopLevel
@@ -179,7 +183,8 @@ export function stringLiteralMask(text) {
       if (c === "[") brackets += 1;
       else if (c === "]") brackets -= 1;
       if (c === "(") {
-        const functionParams = prev === "function" || (beforePrev === "function" && functionExpressionPending);
+        const functionParams = prev === "function" || functionExpressionPending;
+        if (functionParams) functionExpressionPending = false;
         parens.push(prev === "for" || (prev === "await" && beforePrev === "for")
           ? { separator: true, depth, brackets } : functionParams ? { functionParams: true } : null);
       } else if (c === ")") closedFunctionParams = parens.pop()?.functionParams === true;

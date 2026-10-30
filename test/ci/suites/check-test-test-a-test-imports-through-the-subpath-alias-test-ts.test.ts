@@ -84,6 +84,33 @@ test("named function tags after logical operators preserve raw values through th
   }
 });
 
+test("named async and generator tags preserve raw fixture text", async () => {
+  const raw = fixtureImport("./fixture.js");
+  const cases = [
+    { expression: "async function named(parts) { return String.raw(parts); }", read: async (value: Promise<string>) => value },
+    { expression: "function* named(parts) { yield String.raw(parts); }", read: async (value: Generator<string>) => value.next().value },
+    { expression: "async function* named(parts) { yield String.raw(parts); }", read: async (value: AsyncGenerator<string>) => (await value.next()).value },
+  ];
+  for (const { expression, read } of cases) {
+    for (const prefix of ["", "true && "]) {
+      const source = `const tagged = ${prefix}${expression}\`` + raw + "`; tagged;";
+      assert.equal(await read(runInNewContext(source)), raw, "control: the tag observes the original raw text");
+      assert.equal(census(source).status, 0, "control: the census sees the tagged import");
+      const result = rewriteSource(source, "test/ci/suites/fixture.test.ts");
+      assert.equal(await read(runInNewContext(result.text)), raw, `${prefix}${expression}`);
+      assert.equal(result.text, source);
+      assert.equal(result.rewritten, 0);
+      assert.equal(result.unresolved.length, 1);
+      assert.match(result.unresolved[0], /raw spelling/);
+    }
+    const declaration = `${expression} const value = \`` + raw + "`; value;";
+    const ordinary = rewriteSource(declaration, "test/ci/suites/fixture.test.ts");
+    assert.equal(ordinary.rewritten, 1, `${expression} must not tag a later template`);
+    assert.deepEqual(ordinary.unresolved, []);
+    assert.equal(runInNewContext(ordinary.text), raw);
+  }
+});
+
 test("W1-T10822: check:test:test/a-test-imports-through-the-subpath-alias.test.ts is prevented, not retried", () => {
   assertRegularForRawPreservation();
   const source = fixtures();
