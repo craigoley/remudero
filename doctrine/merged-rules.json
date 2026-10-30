@@ -134,8 +134,9 @@
     ]
   },
   {
-    "canonicalId": "a-retitle-alone-re-runs-the-title-lint-pr-title-lint-yml-fires-o",
+    "canonicalId": "a-retitle-re-lints-itself-on-user-app-edits-github-token-edits-n",
     "aliasIds": [
+      "a-retitle-alone-re-runs-the-title-lint-pr-title-lint-yml-fires-o",
       "a-corrected-pr-title-is-observed-by-a-re-run-not-only-by-a-new-s",
       "doctrine/ci-and-merging/a-corrected-pr-title-is-observed-by-a-re-run-not-only-by-a.md",
       "doctrine/ci-and-merging/title-needs-a-re-run.md",
