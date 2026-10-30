@@ -76,6 +76,8 @@ export interface SelectedRegistryBinding {
   readonly instances: readonly Readonly<RegistryInstance>[];
   readonly publicationPermission: "not-granted";
   publicProjection(): RegistryProjection;
+  /** Private byte-bound host comparison; never infers a container mount from a matching name. */
+  matchesLifecycleTarget?(name: string, stateRoot: string, containerName?: string): boolean;
   recheck(signal?: AbortSignal): Promise<RegistryRecheck>;
 }
 export type SelectedRegistryRead = { kind: "legacy" } | Unknown | Refused
@@ -160,12 +162,18 @@ async function readWithDeadline(path: string, maxBytes: number, timeoutMs: numbe
 }
 
 /** Selected schema is explicit: unsupported fields cannot masquerade as carried safety data. */
-function supportedFields(text: string): boolean {
+function supportedFields(text: string, lifecycle: Map<string, Record<string, string>>): boolean {
+  let instance: Record<string, string> | undefined;
   return text.split(/\r?\n/).every((raw) => {
     const line = raw.replace(/\s+#.*$/, "").trimEnd();
     if (line.trim() === "" || line.trimStart().startsWith("#")) return true;
     if (/^\S/.test(line)) return line === "instances:" || /^version:\s*1$/.test(line);
+    const name = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
+    if (name) { instance = {}; lifecycle.set(name[1], instance); }
     const field = /^ {4}([A-Za-z_]+):/.exec(line);
+    if (instance && field && (field[1] === "state_dir" || field[1] === "container_name")) {
+      instance[field[1]] = line.slice(line.indexOf(":") + 1).trim();
+    }
     return field === null || FIELDS.has(field[1]);
   });
 }
@@ -204,11 +212,17 @@ export async function readSelectedInstanceRegistry(input: RegistrySelectionInput
     // Existing parser messages include source values. This contract exposes only the stable outcome.
     return { kind: "unknown", reason: "malformed" };
   }
-  if (!supportedFields(text)) return { kind: "refused", reason: "unsupported_field" };
+  const lifecycle = new Map<string, Record<string, string>>();
+  if (!supportedFields(text, lifecycle)) return { kind: "refused", reason: "unsupported_field" };
   const instances = Object.freeze(parsed.instances.map(instance => Object.freeze({ ...instance })));
   const binding: SelectedRegistryBinding = Object.freeze({
     source, contractVersion, capabilities, digest, instances, publicationPermission: "not-granted" as const,
     publicProjection: () => projectRegistry({ instances: instances.map(instance => ({ ...instance })) }),
+    matchesLifecycleTarget: (name: string, stateRoot: string, containerName?: string) => {
+      const row = lifecycle.get(name);
+      return row !== undefined && row.state_dir === stateRoot && stateRoot.startsWith("/")
+        && (containerName === undefined || row.container_name === containerName);
+    },
     recheck: async (signal?: AbortSignal): Promise<RegistryRecheck> => {
       const current = await readSelectedInstanceRegistry({ cliPath: path, contractVersion, maxBytes, timeoutMs, signal }, io);
       if (current.kind === "ready") return { kind: current.binding.digest === digest ? "unchanged" : "changed" };

@@ -38,6 +38,8 @@ import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
 import { createHash } from "node:crypto";
 import { fixedClock } from "./clock.js";
+import { createSelectedRegistryObserver, observeSelectedRegistry, selectedRegistryObserverInContext,
+  type SelectedRegistryConsumerOptions } from "./selected-registry-consumers.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import {
   DEPLOY_RESTART_PRESSURE_STEP,
@@ -2489,6 +2491,7 @@ export function requestDeploy(stateRoot: string, reason: string | undefined): vo
 // ── Real, injected side effects ─────────────────────────────────────────────────
 
 export interface RealDeployOpts {
+  selectedRegistryObservation?: SelectedRegistryConsumerOptions;
   /** The daemon's git checkout to fast-forward (its install path / repoRoot). */
   installPath: string;
   /** `<config.root>` (holds state/). */
@@ -2682,7 +2685,10 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
   [K in DeploySensorName]?: (...args: Parameters<NonNullable<DeployDeps[K]>>) =>
     ReturnType<NonNullable<DeployDeps[K]>> | Promise<ReturnType<NonNullable<DeployDeps[K]>>>;
 } {
+  o = { ...o };
   const ledgerPath = deployLedgerPath(o.stateRoot);
+  const selectedObserver = o.selectedRegistryObservation === undefined ? selectedRegistryObserverInContext()
+    : createSelectedRegistryObserver(o.selectedRegistryObservation);
   const clock = (): number => Date.now();
   const exec = o.execFile ?? ((cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }) =>
     execFileSync(cmd, args, { encoding: "utf8", ...options }).toString());
@@ -2729,7 +2735,8 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
   const isBinaryAbsent = (err: unknown): boolean =>
     typeof err === "object" && err !== null && (err as { code?: unknown }).code === "ENOENT";
   const kickstartDaemon = () => {
-    exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.daemonLabel}`]);
+    observeSelectedRegistry(selectedObserver, "deploy-restart", lifecycleTarget,
+      () => exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.daemonLabel}`]), true);
   };
   const launchctlBackend: RestartBackend = {
     name: "launchctl",
@@ -2777,6 +2784,8 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
       }
     })();
   const inflightDir = join(o.stateRoot, "state", "inflight");
+  const lifecycleTarget = Object.freeze({ instanceName: recycleInstance, stateRoot: o.stateRoot,
+    containerName: imageShaContainer, namespace: "host" as const });
   const readLedgerText = (): string => readFileSync(ledgerPath, "utf8");
   /** W1-T8138: derive the drain wait from the ledger and the in-flight locks, and ledger what it read. */
   const deriveWaitFromState = (): DerivedDrainWait | undefined => {
@@ -2832,7 +2841,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
     describe: () =>
       `${recycleContainerScript}${recycleInstance ? ` --instance ${recycleInstance}` : ""} ` +
       `(pause, drain, pull and replace the ${o.daemonLabel} container)`,
-    restart: () => {
+    restart: () => observeSelectedRegistry(selectedObserver, "deploy-recycle", lifecycleTarget, () => {
       // W1-T3732 — NAME THE INSTANCE. `recycle-container.sh` REFUSES an unscoped invocation whenever
       // the registry declares instances (W1-T3596), and this call site passed nothing — so every
       // automated restart on this fleet was a refusal. MEASURED 2026-09-17T13:07:36Z:
@@ -2851,7 +2860,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
         return;
       }
       exec("bash", script, options);
-    },
+    }, true),
   };
 
   return {
@@ -3112,7 +3121,7 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
       git(["merge", "--ff-only", "origin/main"]);
     },
     resetHard: (ref) => {
-      git(["reset", "--hard", ref]);
+      observeSelectedRegistry(selectedObserver, "deploy-rollback", lifecycleTarget, () => git(["reset", "--hard", ref]), true);
     },
     probeIdle: () => {
       // ALL THREE READS DISCRIMINATE a true zero from a read that did not happen; see
@@ -3165,7 +3174,8 @@ export function realDeployDeps(o: RealDeployOpts, sensorExec?: DeploySensorExec)
     kickstartConsole: () => {
       // The SAME mechanism as the daemon kickstart below — one way to restart a service,
       // only the label differs. Both labels live in the same gui/<uid> domain.
-      exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.serveLabel}`]);
+      observeSelectedRegistry(selectedObserver, "deploy-restart", lifecycleTarget,
+        () => exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.serveLabel}`]), true);
     },
     // Mirrors `consolePid` below — same launchctl query, same domain, only the label differs. A
     // job that is loaded but not running reports no PID, which is precisely the corpse state.

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 
 import { daemonInstanceRows, instanceForStateRoot } from "./deployer.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
+import { observeSelectedRegistrySync, selectedRegistryObserverInContext } from "./selected-registry-consumers.js";
 
 /**
  * W1-T7727 — WHICH INSTANCE A `rmd pause` OR `rmd resume` ACTS ON.
@@ -41,6 +42,14 @@ export interface PauseTargetInput {
 const INSTANCE_NAME = /^[A-Za-z0-9_-]+$/;
 
 export function resolvePauseTarget(input: PauseTargetInput): PauseTargetResolution {
+  const result = resolveLegacyPauseTarget(input);
+  return observeSelectedRegistrySync(selectedRegistryObserverInContext(), "pause-target", {
+    instanceName: result.ok ? result.target.instance : undefined,
+    stateRoot: result.ok ? result.target.root : input.configRoot, namespace: "host",
+  }, () => result);
+}
+
+function resolveLegacyPauseTarget(input: PauseTargetInput): PauseTargetResolution {
   const refuse = (why: string): PauseTargetResolution => ({ ok: false, refusal: `${why} — nothing was changed` });
   const dirExists = input.dirExists ?? existsSync;
   if (input.instance !== undefined && !INSTANCE_NAME.test(input.instance)) {
