@@ -137,6 +137,40 @@ for (const change of ["head", "blocker", "closed"] as const) {
   });
 }
 
+for (const repoLength of [43, 100] as const) {
+  for (const producer of ["legacy", "current"] as const) {
+    for (const change of ["diagnosis", "head", "blocker", "closed", "pr"] as const) {
+      test(`${producer} question with a ${repoLength}-character repository handles a changed ${change}`, async t => {
+        const f = fixture(t);
+        f.pr.prUrl = `https://github.com/craigoley/${"remudero".padEnd(repoLength, "-")}/pull/${f.pr.prNumber}`;
+        if (producer === "legacy") f.legacyIssue("unknown signature", "awaiting-review");
+        else await f.escalate("unknown signature", "awaiting-review");
+        const original = f.created[0];
+        assert.ok(original.title!.endsWith("…"), original.title);
+        assert.ok(!original.title!.includes("awaiting-review"), "control: the title lost the blocker");
+        if (change === "closed") original.open = false;
+        const diagnosis = "repeat: own-red; DIAGNOSIS: a new remedy\nwith more evidence";
+        const view = change === "head" ? { ...f.pr, headSha: "new-head" }
+          : change === "pr" ? { ...f.pr, prNumber: 15521, prUrl: f.pr.prUrl.replace("/15520", "/15521") }
+          : f.pr;
+        await f.escalate(diagnosis, change === "blocker" ? "own-red" : "awaiting-review", view);
+        const sameIdentity = change === "diagnosis";
+        assert.equal(f.created.length, sameIdentity ? 1 : 2);
+        assert.equal(f.comments.length, sameIdentity ? 1 : 0);
+        assert.deepEqual(f.rows().filter(row => row.step === "escalation.deduped").map(row => row.issue_url),
+          sameIdentity ? [original.url] : []);
+        if (sameIdentity) {
+          assert.equal(f.comments[0].url, original.url);
+          assert.ok(f.comments[0].body.includes(diagnosis));
+        } else {
+          assert.equal(f.created[1].open, true);
+          assert.ok(f.created[1].body!.includes(diagnosis));
+        }
+      });
+    }
+  }
+}
+
 test("a moved head opens a new stalled question even when its diagnosis is unchanged", async t => {
   const f = fixture(t);
   await f.escalate("unknown signature");

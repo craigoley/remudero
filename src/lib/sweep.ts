@@ -619,11 +619,9 @@ export function stalledStageEscalationSummary(reason: string): string {
     .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
 }
 
-/** Read through the blocker, before the semicolon: a legacy title may clip its diagnosis marker. */
+/** Read a complete PR/blocker identity from a title or the unabridged reason in its body. */
 function stalledStageEscalationIdentity(text: string): string | undefined {
-  const start = text.indexOf("PR stage stalled: ");
-  if (start < 0) return undefined;
-  return stalledStageEscalationSummary(text.slice(start)).split(";", 1)[0];
+  return /(PR stage stalled: #\d+ \S+ — [a-z-]+)(?=;| for \d+ minutes \(|$)/.exec(text)?.[1];
 }
 
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
@@ -3641,8 +3639,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const escalationIssues: AsyncIssueGateway = stallIdentity !== undefined && issues.listOpen
         ? { ...issues, listOpen: async (label) => (await issues.listOpen!(label)).filter(issue => {
           const head = escalationHeadSha(issue.body);
+          const identityText = issue.title?.endsWith("…") ? issue.body : issue.title;
           return (head !== undefined && head !== pr.headSha) ||
-            stalledStageEscalationIdentity(issue.title ?? "") === stallIdentity;
+            stalledStageEscalationIdentity(identityText ?? "") === stallIdentity;
         }) }
         : issues;
       const file = async (context: string): Promise<void> => { await escalateAsync(
