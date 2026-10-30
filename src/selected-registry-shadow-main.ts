@@ -142,5 +142,5 @@ export async function selectedRegistryShadowMain(argv: readonly string[], env: N
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  process.exitCode = await selectedRegistryShadowMain(process.argv.slice(2));
+  void selectedRegistryShadowMain(process.argv.slice(2)).then(code => { process.exitCode = code; });
 }
