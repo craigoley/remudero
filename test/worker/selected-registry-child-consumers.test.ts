@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { once, EventEmitter } from "node:events";
 import { createServer } from "node:net";
+import { createRequire } from "node:module";
 import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { test, type TestContext } from "node:test";
+import { after, before, test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import * as consumers from "#src/lib/selected-registry-consumers.js";
 import { parseSpec, readSpec, readStatus, RUN_CHILD_SCHEMA, writeSpec, type RunChildSpec } from "#src/lib/run-child-contract.js";
@@ -18,6 +19,22 @@ import { readLedgerLines } from "#src/lib/status.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+const { buildChildEntries } = createRequire(import.meta.url)("#scripts/build-child-entries.mjs") as {
+  buildChildEntries(options: { root: string; outDir: string; entries: { name: string; source: string }[]; workers: string[] }): Promise<unknown>;
+};
+let bundleRoot: string | undefined;
+let childBundle: string;
+before(async () => {
+  bundleRoot = makeTempDir("selected-child-bundle");
+  symlinkSync(realpathSync(join(REPO_ROOT, "node_modules")), join(bundleRoot, "node_modules"), "dir");
+  const outDir = join(bundleRoot, "dist", "child-entries");
+  // Build the current real entry once, before case deadlines: repeated full tsx graph loads contend in flake-screen.
+  await buildChildEntries({ root: REPO_ROOT, outDir,
+    entries: [{ name: "run-child", source: "src/run-child-main.ts" }], workers: [] });
+  childBundle = join(outDir, "run-child.mjs");
+}, { timeout: 240_000 });
+after(() => { if (bundleRoot) rmSync(bundleRoot, { recursive: true, force: true }); });
 
 type Row = Record<string, unknown>;
 const text = (name = "fixture") => `instances:\n  ${name}:\n    github_repo: owner/repo\n    mode: shadow\n    state_dir: /private/registry-material-sentinel\n`;
@@ -96,15 +113,16 @@ test("selected registry shadow intent survives actual trusted child transport - 
   const probing = startRunChildProbe({ taskId: f.spec.taskId, root: f.root, stateRoot: state, repoDir: f.root,
     options: f.spec.options, plan, log: (step, fields) => { f.rows.push({ step, ...fields }); } }, {
     readMode: () => "shadow", mainSha: async () => f.spec.engine.sha, engine: { isCurrent: () => true },
-    launch: (_engine, args) => ({ cwd: REPO_ROOT, engineRoot: engine, kind: "tsx", reason: "real probe entry",
-      argv: ["--import", "tsx", join(REPO_ROOT, "src/run-child-main.ts"), ...args] }),
+    launch: (_engine, args) => ({ cwd: REPO_ROOT, engineRoot: engine, kind: "bundle", reason: "real probe entry",
+      argv: [childBundle, ...args] }),
     reserve: () => ({ id: "fixture", bindRoot() {}, releaseOccupancy() {} }) as never,
-    timeoutMs: 20_000, sampleMs: 10,
+    timeoutMs: 20_000,
   });
   f.spec.options.selectedRegistryIntent = consumers.captureSelectedRegistryIntent({ settings: { ...f.settings, registryPath: f.other } });
   release({ plan: { tasks: [] } });
   const outcome = await probing; assert.ok(outcome.started);
-  assert.equal(outcome.row.contract, "ok");
+  assert.equal(outcome.row.contract, "ok", JSON.stringify(outcome.row));
+  assert.equal(outcome.row.entry_kind, "bundle");
   const spec = readSpec(join(state, "runs", String(outcome.row.run_id))); assert.ok(spec.ok);
   const intent = spec.value.options.selectedRegistryIntent; assert.ok(intent?.kind === "shadow");
   assert.equal(intent.input.configuredPath, f.path); assert.ok(intent.input.expectedDigest);
@@ -286,8 +304,8 @@ test("selected child defaults and recovery preserve shadow effects and owner hol
   t.after(() => clearInterval(responsive));
   const ports: SpawnRunChildPorts = {
     mainSha: async () => f.spec.engine.sha, engine: { isCurrent: () => true },
-    launch: (_engine, args) => ({ cwd: REPO_ROOT, engineRoot: engine, kind: "tsx", reason: "real default entry",
-      argv: ["--import", "tsx", join(REPO_ROOT, "src/run-child-main.ts"), ...args] }),
+    launch: (_engine, args) => ({ cwd: REPO_ROOT, engineRoot: engine, kind: "bundle", reason: "real default entry",
+      argv: [childBundle, ...args] }),
     env: { PATH: process.env.PATH, HOME: f.root, NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT,
       RMD_TEST_LIVE_DENY_ROOT: process.env.RMD_TEST_LIVE_DENY_ROOT },
     reserve: async () => ({ id: "fixture", bindRoot() {}, releaseOccupancy() { released++; } }) as never,
@@ -303,6 +321,7 @@ test("selected child defaults and recovery preserve shadow effects and owner hol
     const settled = await Promise.allSettled([child.settled]);
     assert.equal(settled[0]!.status, "rejected", "real runTask rejects a task absent from its admitted plan");
     const status = readStatus(child.dir); assert.ok(status.ok);
+    assert.equal(status.value.entryKind, "bundle");
     assert.equal(status.value.state, "failed");
     assert.equal(status.value.failure?.class, "terminal_error");
     assert.equal(status.value.failure?.message, `no task with id '${f.spec.taskId}' in plan`);
