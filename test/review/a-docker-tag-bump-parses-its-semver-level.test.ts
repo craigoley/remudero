@@ -35,6 +35,7 @@ test("a changed tag variant fails closed even when the numbers barely move, and 
   assert.equal(overallSemverLevel("chore(deps): bump x from 4.0.0-beta.1 to 4.0.0-beta.2", ""), "patch");
   assert.equal(overallSemverLevel("chore(deps): bump x from 4.0.0-beta.2 to 4.0.0-rc.1", ""), "major");
   assert.equal(overallSemverLevel("chore(deps): bump x from 1.2.3-bookworm-slim to 1.2.4-Bookworm-slim", ""), "major");
+  assert.equal(overallSemverLevel("chore(deps): bump node from 24.21.0-bookworm-slim to 24.21.1-bookworm-slim--trixie", ""), "major");
   assert.equal(overallSemverLevel("chore(deps): bump x from 1.2.3 to 1.3.0", ""), "minor");
   assert.equal(overallSemverLevel("chore(deps): bump x to the latest", ""), "unknown");
 });
@@ -51,5 +52,13 @@ test("a Docker tag whose variant changes by any one character fails closed, what
       assert.equal(overallSemverLevel(title, ""), "major", title);
     }
     assert.equal(overallSemverLevel(`chore(deps): bump x from 1.2.3-${variant} to 1.2.4-${variant}`, ""), "patch", variant);
+    // Structural edits: a segment appended after any separator, a doubled separator, the tail cut off.
+    const seps = [...variant].flatMap((ch, i) => (/[-.]/.test(ch) ? [i] : []));
+    const shapes = [`${variant}-trixie`, `${variant}--trixie`, `${variant}.1`, ...seps.map(i => variant.slice(0, i)),
+      ...seps.map(i => variant.slice(0, i + 1) + variant.slice(i))];
+    for (const moved of shapes) {
+      const title = `chore(deps): bump x from 1.2.3-${variant} to 1.2.4-${moved}`;
+      assert.ok(["major", "unknown"].includes(overallSemverLevel(title, "")), title);
+    }
   }
 });

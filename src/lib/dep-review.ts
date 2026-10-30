@@ -94,7 +94,12 @@ function versionVariant(v: string): string | undefined {
 
 const PRE_RELEASE_COUNTER = /^(alpha|beta|rc|pre|preview|next|canary|dev)[.-]?\d+$/i;
 
+/** A whole version token, as a registry tag is one string: numbers, then at most one suffix of tag characters. A token the
+ *  parse cannot read whole (`bookworm-slim--trixie` once lost its tail and read as a patch) is unknown, never a guess. */
+const WHOLE_VERSION_TOKEN = /^v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z][0-9A-Za-z._+-]*)?$/;
+
 function bumpLevel(from: string, to: string): SemverLevel {
+  if (!WHOLE_VERSION_TOKEN.test(from.trim()) || !WHOLE_VERSION_TOKEN.test(to.trim())) return "unknown";
   const a = parseVersion(from);
   const b = parseVersion(to);
   if (!a || !b) return "unknown";
@@ -106,9 +111,10 @@ function bumpLevel(from: string, to: string): SemverLevel {
   return "patch";
 }
 
-// A version may carry several suffix segments, as a Docker tag does (`24.22.0-bookworm-slim`, #15176), and never
-// takes a sentence's closing period.
-const FROM_TO_RE = /\bfrom\s+v?(\d+(?:\.\d+){1,3}(?:[-+]\w+(?:\.\w+)*)*)\s+to\s+v?(\d+(?:\.\d+){1,3}(?:[-+]\w+(?:\.\w+)*)*)/gi;
+// A version is the WHOLE whitespace-delimited token, so a Docker tag's suffix segments (`24.22.0-bookworm-slim`, #15176)
+// are never cut short; it never takes a sentence's closing punctuation. bumpLevel then refuses a token it cannot read whole.
+const VERSION_TOKEN = String.raw`v?(\d\S*?)(?=[.,;:)]*(?:\s|$))`;
+const FROM_TO_RE = new RegExp(String.raw`\bfrom\s+${VERSION_TOKEN}\s+to\s+${VERSION_TOKEN}`, "gi");
 
 /**
  * Parse every `from X to Y` version pair out of one text block. Dependabot emits
@@ -135,7 +141,7 @@ const DEPENDABOT_SUMMARY_LINE_RE = /^\s*(?:Updates|Bumps)\b/i;
  *  Not "structurally total": it legitimately does not match an unprefixed line, and that no-op is
  *  the arm the fixture exists to pin. */
 export const CONVENTIONAL_TITLE_PREFIX_RE = /^\s*[a-z][\w-]*(?:\([\w./-]+\))?!?:\s*/i;
-const DEPENDENCY_VERSION = String.raw`v?(\d+(?:\.\d+){1,3}(?:[-+]\w+(?:\.\w+)*)*)`;
+const DEPENDENCY_VERSION = VERSION_TOKEN;
 
 export interface DepReviewBumpFact {
   dependency: string;
