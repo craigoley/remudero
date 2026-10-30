@@ -24,3 +24,11 @@
     Add the named regression in test/deploy/compress-deploy-host-update-sh.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares deploy/host-update.sh, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-30T07:33:04.958Z"
+    pin: "d0b77264ff5453c5e6b7fa2c47fcd295fec7b1888fb2d515fe8de2f5bed06c03"
