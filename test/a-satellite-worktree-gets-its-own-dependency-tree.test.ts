@@ -28,6 +28,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
   utimesSync,
@@ -52,7 +53,7 @@ import { gitRepo } from "./helpers/git-repo.js";
 
 /** The install root `resolveNodeModulesSource` falls back to: this checkout, package "remudero". */
 const INSTALL_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const INSTALL_ROOT_NM = join(INSTALL_ROOT, "node_modules");
+const INSTALL_ROOT_NM = realpathSync(join(INSTALL_ROOT, "node_modules"));
 
 type LogLine = { step: string } & Record<string, unknown>;
 type AddDeps = NonNullable<Parameters<typeof worktreeAdd>[4]>;
@@ -201,7 +202,7 @@ test("W1-T4260: a failed install falls back to the install root link and is neve
     assert.equal(failed?.package, "remudero-console");
     assert.equal(failed?.stage, "install");
     assert.match(String(failed?.reason), /simulated: npm ci exited 1/);
-    assert.equal(failed?.fallback, INSTALL_ROOT_NM);
+    assert.equal(realpathSync(String(failed?.fallback)), INSTALL_ROOT_NM);
     const cross = stepOf(r.logs, "worktree.node_modules_cross_package");
     assert.equal(cross?.worktree_package, "remudero-console", "the cross-link is ledgered as W1-T4193 names it");
     assert.equal(cross?.node_modules_package, "remudero");
@@ -229,7 +230,10 @@ test("W1-T4260: a core worktree is unchanged", (t) => {
     assert.equal(calls, 0, "never installs");
     assert.equal(existsSync(join(root, "deps")), false, "never creates a deps root");
     assert.deepEqual(r.logs.map((l) => l.step).filter((s) => s.startsWith("deps.")), [], "no deps.* line");
-    assert.deepEqual(r.logs.map((l) => l.step), ["worktree.add"], "the ledger is exactly today's");
+    assert.deepEqual(r.logs.map((l) => l.step), ["worktree.add", "worktree.node_modules"], "the root link is ledgered");
+    const rootLink = stepOf(r.logs, "worktree.node_modules");
+    assert.equal(rootLink?.outcome, "linked-lockfile-mismatch");
+    assert.equal(realpathSync(String(rootLink?.source)), INSTALL_ROOT_NM);
     assert.equal(execFileSync("git", ["-C", r.wt, "status", "--porcelain"], { encoding: "utf8" }), "", "a clean tree");
 
     // A satellite whose OWN clone carries node_modules keeps linking it, byte-identically too.
@@ -243,6 +247,9 @@ test("W1-T4260: a core worktree is unchanged", (t) => {
     assert.equal(readlinkSync(join(o.wt, "node_modules")), join(own, "node_modules"));
     assert.equal(calls, 0);
     assert.equal(existsSync(join(root, "deps")), false);
+    assert.deepEqual(stepOf(o.logs, "worktree.node_modules"), {
+      step: "worktree.node_modules", outcome: "linked", source: join(own, "node_modules"),
+    });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
