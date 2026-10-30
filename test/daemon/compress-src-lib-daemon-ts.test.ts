@@ -23,25 +23,26 @@ function executableDigest(source: string): string {
 }
 
 const BEFORE_COMMENTS = 2085;
-const BEFORE_EXECUTABLE = "5a83fb86134f230d0e78f95c5fd1b417d65be444a231261e8f7b63820beeef0a";
+// W1-T9819 intentionally adds ended-run evidence; refresh code snapshots, retaining comment ceilings.
+const EXPECTED_EXECUTABLE = "395efc78fd6af0f8a01c91670ab7801af651684a92e1d37a27f84b2bae08d9be";
 
 function emittedDigest(source: string): string {
   const { code } = transformSync(source, { loader: "ts", format: "esm", legalComments: "none" });
   return createHash("sha256").update(code).digest("hex");
 }
 
-const BEFORE_EMITTED = "98c01bda5c0c4e6298572ffb633c6f0f1e3d722ffd23202f92d2bfbfa47e2247";
+const EXPECTED_EMITTED = "4831fdc63eba6ea903fc370ea77fde702c2f5dd272684e77c0ef34c305947265";
 
 test("W1-T10871: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/daemon.ts"), "utf8");
   // W1-T9912 intentionally adds these two cohort ledger fields after the compression baseline.
-  // Remove only that exact addition when comparing the older executable code.
+  // Remove only that exact addition when comparing the W1-T9819 executable snapshot.
   const cohortFields = "                due_because: result.dueBecause,\n                pass_ms: result.passMs,\n";
   assert.equal(source.split(cohortFields).length, 2, "the cohort fields occur once in the daemon row");
   const baselineSource = source.replace(cohortFields, "");
-  assert.equal(executableDigest(baselineSource), BEFORE_EXECUTABLE, "all other non-comment code lines remain unchanged");
+  assert.equal(executableDigest(baselineSource), EXPECTED_EXECUTABLE, "all other non-comment code lines match the accepted snapshot");
   // Independently catch ASI changes and whitespace inside multiline string/template literals.
-  assert.equal(emittedDigest(baselineSource), BEFORE_EMITTED, "other emitted JavaScript remains unchanged");
+  assert.equal(emittedDigest(baselineSource), EXPECTED_EMITTED, "other emitted JavaScript matches the accepted snapshot");
   const { comments } = countCommentLines(source, "src/lib/daemon.ts");
   assert.ok(comments < BEFORE_COMMENTS, `comments must decrease from the measured ${BEFORE_COMMENTS}; got ${comments}`);
 });

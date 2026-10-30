@@ -1,3 +1,5 @@
+import { settledSpansByClass } from "./cost-anomaly.js";
+import type { LedgerRecord } from "./retro.js";
 import type { ReleaseEvidence } from "./operator-release.js";
 /** Scheduler core (W1-T12a): headless loop; launchd lives in lib/launchd.ts (W1-T12b).
  * Crash recovery's `reconstructOrphan` is W1-T12c; runRecoverability in src/run-task.ts
@@ -498,6 +500,28 @@ export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<
     }
   }
   return pending;
+}
+
+/** W1-T9819: fold existing boot/settle rows, never read the ledger in a selection pass. */
+export function endedRunBranchEvidence(rawLines: readonly string[]): {
+  endedRunIds: Set<string>; longestSettledRunMs?: number;
+} {
+  const endedRunIds = new Set<string>();
+  const records: LedgerRecord[] = [];
+  for (const raw of rawLines) {
+    let row: LedgerRecord;
+    try { row = JSON.parse(raw); } catch (error) { /* a torn row proves no ended run */ continue; }
+    if (!row || typeof row.run_id !== "string" || row.run_id === "") continue;
+    if (row.step === "verdict") endedRunIds.add(row.run_id);
+    if (row.step === "run.start" || row.step === "verdict") records.push(row);
+  }
+  let longestSettledRunMs: number | undefined;
+  for (const { spansMs } of settledSpansByClass(records).values()) {
+    for (const ms of spansMs) {
+      if (longestSettledRunMs === undefined || ms > longestSettledRunMs) longestSettledRunMs = ms;
+    }
+  }
+  return { endedRunIds, longestSettledRunMs };
 }
 
 /** The pending receipts whose only live record is a verdict row — what the daemon re-writes at boot. */
@@ -1909,6 +1933,7 @@ export function runBranchDispatchOpts(
   { ids, refs, orphanEvidence, readClosedUnmerged }: RunBranchState,
   receipts: readonly PlanOnlyRunBranchReceipt[],
   log: (step: string, extra?: Record<string, unknown>) => void,
+  reportedRefs: Set<string> = new Set(),
 ): Pick<NextRunnableOpts, "hasPushedRunBranch" | "onSkipRunBranch"> {
   if (!ids) return {};
   return {
@@ -1921,7 +1946,7 @@ export function runBranchDispatchOpts(
       // W1-T9482: the closed-unmerged exclusion drain.ts's arms apply, read only for a task that holds a ref.
       const closedUnmerged = refsForTask.length > 0 ? readClosedUnmerged?.() : undefined;
       const stillBlocked = stillBlockedByPushedRunBranch(id, ids, closedUnmerged, refs, receipts, orphanEvidence);
-      if (!stillBlocked && refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, receipts, orphanEvidence);
+      if (!stillBlocked && refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, receipts, orphanEvidence, reportedRefs);
       return stillBlocked;
     },
     // Rides the existing skip row with its own reason: no new step, and deliberately not the stood-down
@@ -3993,6 +4018,18 @@ export async function runDaemon(
   // W1-T9632: the union holds the live file too, so ONE source seeds the learner and no live row counts twice.
   for (const ms of settledSweepDurations(sweepSeedSource === "ledger_union" ? restartHistoryLines : bootLedgerLines)) recordSettledSweep(sweepBound, ms);
   sweepBound.seededFrom = sweepSeedSource;
+  const endedRunEvidence = endedRunBranchEvidence(bootLedgerLines);
+  const restartSpan = endedRunBranchEvidence(restartHistoryLines).longestSettledRunMs;
+  if (restartSpan !== undefined && (endedRunEvidence.longestSettledRunMs === undefined ||
+    restartSpan > endedRunEvidence.longestSettledRunMs)) endedRunEvidence.longestSettledRunMs = restartSpan;
+  const reportedRunBranchReleases = new Set<string>();
+  const readRunBranchEvidence = (): OrphanRunBranchEvidence | undefined => {
+    const evidence = deps.readOrphanRunBranchEvidence?.();
+    return evidence === undefined ? undefined : withRequeueReceipts({ ...evidence,
+      endedRunIds: endedRunEvidence.endedRunIds,
+      longestSettledRunMs: endedRunEvidence.longestSettledRunMs ?? evidence.longestSettledRunMs,
+    }, deps.readLedgerLines);
+  };
   const resumableHandoffs = pendingWorkerBoundaryHandoffs(bootLedgerLines);
   // W1-T8676: a settled run may have written or consumed its task's receipt; re-fold that task's rows so the next
   // pass's run-branch guard reads it. A failed read keeps the entry it had.
@@ -4006,7 +4043,14 @@ export async function runDaemon(
       return;
     }
     const needle = JSON.stringify(taskId);
-    const receipt = pendingWorkerBoundaryHandoffs(rows.filter((raw) => raw.includes(needle))).get(taskId);
+    const taskRows = rows.filter((raw) => raw.includes(needle));
+    const settled = endedRunBranchEvidence(taskRows);
+    for (const runId of settled.endedRunIds) endedRunEvidence.endedRunIds.add(runId);
+    if (settled.longestSettledRunMs !== undefined && (endedRunEvidence.longestSettledRunMs === undefined ||
+      settled.longestSettledRunMs > endedRunEvidence.longestSettledRunMs)) {
+      endedRunEvidence.longestSettledRunMs = settled.longestSettledRunMs;
+    }
+    const receipt = pendingWorkerBoundaryHandoffs(taskRows).get(taskId);
     if (receipt) resumableHandoffs.set(taskId, receipt);
     else resumableHandoffs.delete(taskId);
   };
@@ -6622,7 +6666,7 @@ export async function runDaemon(
       // `SweepCycleOutcome.planOnlyRunBranchReceipts`'s doc for why no second GitHub read happens.
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
       const runBranchStateThisTick = runBranchStateFrom(
-        tickRunBranchListing, withRequeueReceipts(deps.readOrphanRunBranchEvidence?.(), deps.readLedgerLines), resumableHandoffs,
+        tickRunBranchListing, readRunBranchEvidence(), resumableHandoffs,
         lazyClosedUnmerged(deps.readClosedRunBranchPrs),
       );
       const dispatchOpts: NextRunnableOpts = {
@@ -6664,7 +6708,7 @@ export async function runDaemon(
       observedByTask: deps.observedByTask,
       // The argument W1-T534 declared and nothing supplied — see `DrainDeps` for why the reader is
       // injected and the parse hoisted (W1-T916).
-      ...runBranchDispatchOpts(runBranchStateThisTick, planOnlyReceiptsThisTick, log),
+      ...runBranchDispatchOpts(runBranchStateThisTick, planOnlyReceiptsThisTick, log, reportedRunBranchReleases),
       onFiltered: releasedFilteredLogger(tickReleases, releasedFilteredNamed, idleReasons.onFiltered, log),
       // W1-T10348: the daemon's selector never had a released set, so every released verify:human task
       // was filed under verify-not-auto. The lane refill inherits it through its spread of this literal.
@@ -7258,12 +7302,12 @@ export async function runDaemon(
             laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
           });
           const runBranchState = runBranchStateFrom(
-            runBranchListing, withRequeueReceipts(deps.readOrphanRunBranchEvidence?.(), deps.readLedgerLines), resumableHandoffs,
+            runBranchListing, readRunBranchEvidence(), resumableHandoffs,
             lazyClosedUnmerged(deps.readClosedRunBranchPrs),
           );
           const selection = captureDispatchFrontier(snapshot.plan, {
             ...dispatchOpts,
-            ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
+            ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log, reportedRunBranchReleases),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
             // Re-read at each refill: a lane that settled since the tick began may have written or spent a receipt.
             resumableTaskIds: new Set(resumableHandoffs.keys()),

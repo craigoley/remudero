@@ -28,10 +28,11 @@ function snapshot(source: string) {
 test("W1-T10971: comment compression preserves executable code", () => {
   // Pre-compression source: 1343a5d5ded2dc84b3139b17b886ee5a38328725.
   // Comparison evidence for this edit, not a policy ceiling.
+  // W1-T9819 intentionally changes orphan release; refresh code snapshots, retaining comment ceilings.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/drain.ts"), "utf8"));
-  assert.equal(actual.tokenCount, 15803);
-  assert.equal(actual.tokenDigest, "88fc44b3c93b49d45a9a2e8fc4e07e6ef25a02eb51616db933d3736baad2f243");
-  assert.equal(actual.astDigest, "d02b98239cb41c89a063a3f388efb9c304bc3ae6709091ccb69165d4a133c9b0");
+  assert.equal(actual.tokenCount, 15940);
+  assert.equal(actual.tokenDigest, "b391d189981002edd0f3264a972910264023c9d694c3802232be167a5c3319cd");
+  assert.equal(actual.astDigest, "5466e9b5fbfeeef6dbd203001ab901f368f3852a2d9ba1b4c13e047e7f132858");
   assert.ok(actual.commentLines < 919, "comment lines must decrease from the pre-compression source");
   assert.ok(actual.commentBytes < 82854, "comment bytes must decrease; rewrapping alone is insufficient");
 
