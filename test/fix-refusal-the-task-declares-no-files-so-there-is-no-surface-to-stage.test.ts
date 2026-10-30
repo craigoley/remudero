@@ -73,19 +73,26 @@ async function fixRound(t: TestContext, options: {
   return { outcome, rows, calls, stagedSurface };
 }
 
-test("W1-T5377: fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage is prevented, not retried", async (t) => {
-  for (const options of [{ files: [], inherited: [] }, {}, { unreadableDiff: true }]) {
+test("W1-T5377: an empty-scope fix reaches the harness commit", async (t) => {
+  for (const options of [{ files: [], inherited: [] }, {}]) {
     await t.test(JSON.stringify(options), async (t) => {
       const { outcome, rows, calls } = await fixRound(t, options);
-      assert.equal(outcome.outcome, "stood_down");
-      assert.equal(outcome.strikes, 0);
-      assert.equal(outcome.retriggers, 0);
-      assert.match(outcome.standDownReason ?? "", /no surface to stage/);
-      assert.deepEqual(calls, { spawn: 0, push: 0, account: 0, review: 0, ci: 0, commit: 0 });
-      assert.equal(rows.some((row) => row.step === "fix.dispatch" || row.step === "fix.commit_refused"), false);
-      assert.equal(rows.find((row) => row.step === "fix.stood_down")?.site, "rung.empty_commit_surface");
+      assert.equal(outcome.outcome, "fixed");
+      assert.equal(calls.spawn, 1);
+      assert.equal(calls.commit, 1);
+      assert.equal(calls.push, 1);
+      assert.equal(rows.some((row) => row.step === "fix.commit_refused"), false);
     });
   }
+});
+
+test("an unreadable empty-scope PR diff still refuses before dispatch", async (t) => {
+  const { outcome, rows, calls } = await fixRound(t, { unreadableDiff: true });
+  assert.equal(outcome.outcome, "stood_down");
+  assert.equal(outcome.strikes, 0);
+  assert.match(outcome.standDownReason ?? "", /no surface to stage/);
+  assert.deepEqual(calls, { spawn: 0, push: 0, account: 0, review: 0, ci: 0, commit: 0 });
+  assert.equal(rows.find((row) => row.step === "fix.stood_down")?.site, "rung.empty_commit_surface");
 });
 
 for (const options of [{ files: ["src/run-task.ts"], inherited: [] }, { files: [], inherited: ["docs/repair.md"] }]) {

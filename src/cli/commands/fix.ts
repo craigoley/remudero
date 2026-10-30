@@ -3976,7 +3976,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           ...(unfiledGrant?.paths ?? []),
         ])];
     // A proof-repair round with no test path to stage still runs: it may end in a PROOF_AMENDMENT instead of an edit.
-    if (fixHarnessOwnsGit && fixDeclaredPaths.length === 0 && !proofRepairRound) {
+    // An empty filed scope still admits bounded test repairs and registered generated artifacts
+    // through the harness commit. Let that commit inspect the actual edits before refusing.
+    if (fixHarnessOwnsGit && fixDeclaredPaths.length === 0 && !proofRepairRound && !admitFixTests) {
       const reason = "the fix has no surface to stage — declare task files or restore the PR diff before dispatch";
       deps.log("fix.stood_down", { site: "rung.empty_commit_surface", strike: attempt, reason });
       deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
