@@ -1,4 +1,5 @@
 // @source-text-subject: historical worker.ts comment compression preserves its pre-compression code.
+// @census-reads: none — the source text is an embedded immutable historical fixture.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
