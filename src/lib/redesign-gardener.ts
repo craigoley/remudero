@@ -5,7 +5,7 @@ import { join, posix } from "node:path";
 import { backlogLandingGuard } from "./backlog-gardener.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
+import { gardenStatePath, readGardenState, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { parseTasksFromYaml, type Task } from "./plan.js";
 import { planInventory, type PlanInventory } from "./plan-gardener.js";
@@ -86,6 +86,8 @@ export interface RedesignSources {
   pathExists: (rel: string) => boolean;
   /** One tool-less Architect spawn. */
   judgeText: (prompt: string) => Promise<string>;
+  /** Signatures this garden's open PR carries or an operator's close declined: neither is asked again. */
+  settled: () => ReadonlySet<string>;
 }
 
 const signatureOf = (id: string, evidence: readonly string[]): string =>
@@ -110,12 +112,13 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     const prior = newest.get(row.pr_number);
     if (prior === undefined || String(row.ts) >= String(prior.ts)) newest.set(row.pr_number, row);
   }
-  // A task with a PR the sweep still disposes is the PR's to judge: its pointer counts only once that hold qualifies.
-  const swept = new Set<string>();
+  // A task with any PR history in the window is its PR's to judge, live or gone: its pointer counts only beside a
+  // qualifying hold, so a PR the sweep stopped disposing never revives a stale pointer.
+  const disposed = new Set<string>();
   const qualified = new Set<string>();
   for (const row of newest.values()) {
     const at = Date.parse(String(row.ts));
-    if (typeof row.task_id === "string" && Number.isFinite(at) && now - at <= SWEPT_RECENTLY_MS) swept.add(row.task_id);
+    if (typeof row.task_id === "string") disposed.add(row.task_id);
     if (row.disposition !== "refused-escalate" || typeof row.reason !== "string" || !HOLD_REASON.test(row.reason) ||
         typeof row.task_id !== "string" || !Number.isFinite(at) || now - at > SWEPT_RECENTLY_MS) continue;
     // The hold is aged from the start of its unbroken run: walking back from the newest row, any other disposition, an
@@ -135,7 +138,7 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
   }
   for (const [id] of open) {
     const rel = plan.shards.get(id);
-    if (rel === undefined || (swept.has(id) && !qualified.has(id))) continue;
+    if (rel === undefined || (disposed.has(id) && !qualified.has(id))) continue;
     const pointer = POINTER.exec(sources.readShard(rel))?.[0];
     // The pointer's own stamp is when the lane stood down; a pointer younger than the fix lane's hour, or one with no
     // stamp to age, is not yet the Architect's.
@@ -146,13 +149,16 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
   }
   // A verdict is never windowed: an unchanged pointer is the same evidence a week later, and is not asked again.
   const judged = new Set(sources.ledger([REDESIGN_JUDGED_STEP], fixedClock(0).iso()).map((r) => String(r.signature)));
+  // An amend is recorded by its landing, not by its answer: the open PR holds it, a merge marks the shard, a close
+  // declines it, and a filing that failed leaves it free to be asked again.
+  const settled = sources.settled();
   const out: RedesignCandidate[] = [];
   for (const [id, lines] of evidence) {
     const shard = plan.shards.get(id)!;
     const text = sources.readShard(shard);
     const signature = signatureOf(id, lines);
     const marked = text.split("\n").some((line) => REDESIGN_MARKER_RE.exec(line)?.[1] === signature);
-    if (!marked && !judged.has(signature)) out.push({ id, shard, text, evidence: lines, signature });
+    if (!marked && !judged.has(signature) && !settled.has(signature)) out.push({ id, shard, text, evidence: lines, signature });
   }
   return out.sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true }));
 }
@@ -307,6 +313,10 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
     },
     pathExists: (rel) => statSync(join(deps.repoRoot, rel), { throwIfNoEntry: false })?.isFile() === true,
     judgeText: () => Promise.reject(new Error("the redesign Architect's spawn is not wired")),
+    settled: () => {
+      const state = readGardenState(gardenStatePath(deps.stateDir, REDESIGN_NAME), REDESIGN_CLASSES);
+      return new Set([...(state.pending?.targets ?? []), ...(state.declinedTargets ?? [])].map((t) => t.target));
+    },
     ...overrides,
   };
 }
@@ -325,7 +335,8 @@ export function redesignGardenSpec(
     inventoryAsync: () => redesignInventory(sources, deps),
     fingerprint: (i) => i.actions.map((a) => a.signature).join(",") || "none",
     unfinished: (i) => i.actions.length > 0,
-    candidates: (i) => i.actions,
+    candidates: (i, _rng, declined = []) => i.actions.filter((a) => !declined.some((d) => d.target === a.signature)),
+    pendingTargets: (plan) => plan.actions.map((a) => ({ class: "amend" as const, target: a.signature })),
     scorecard: (i, plan) => {
       const card = { candidates: i.candidates, outcomes: i.outcomes, acting: plan.acting };
       deps.log("redesign.scorecard", card);
@@ -340,7 +351,6 @@ export function redesignGardenSpec(
         if ("refused" in edited) { deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "refused", reason: edited.refused, signature: action.signature }); continue; }
         writeAtomic(abs, edited.text);
         landed.push(action);
-        deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "amend", reason: action.reason, signature: action.signature });
       }
       if (landed.length === 0) return undefined;
       return {

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import type { Clock } from "#src/lib/clock.js";
-import { runGardenAsync, type GardenerDeps } from "#src/lib/gardener.js";
+import { gardenStatePath, readGardenState, runGardenAsync, type GardenerDeps } from "#src/lib/gardener.js";
 import type { PlanInventory } from "#src/lib/plan-gardener.js";
 import { parseTasksFromYaml } from "#src/lib/plan.js";
 import {
@@ -77,6 +77,8 @@ function world(t: { after: (fn: () => void) => void }, opts: { rows?: Row[]; poi
     ledger: (steps, since) => rows.filter((r) => steps.includes(String(r.step)) && String(r.ts) >= since),
     pathExists: (rel) => statSync(join(root, rel), { throwIfNoEntry: false })?.isFile() === true,
     judgeText: async (prompt) => { prompts.push(prompt); return answers.shift() ?? 'REDESIGN: {"verdict":"grill","reason":"no answer"}'; },
+    // The production reader of this garden's state file, which every pass in these tests writes.
+    settled: () => buildRedesignSources(deps).settled(),
   };
   const deps: GardenerDeps = {
     stateDir: join(root, "state"), repoRoot: root, clock, seed: 1,
@@ -105,7 +107,9 @@ test("the redesign Architect amends a task its fix lane stood down on, keeping e
   const marker = w.read().split("\n").map((line) => REDESIGN_MARKER_RE.exec(line)).find((m) => m !== null);
   assert.ok(marker, "the shard carries the marker its PR's proof greps");
   assert.ok(w.landed[0]!.body.includes(`proof: "grep: # redesign: signature=${marker[1]} in ${REL}"`));
-  assert.ok(w.rows.some((r) => r.step === REDESIGN_JUDGED_STEP && r.outcome === "amend"));
+  assert.ok(!w.rows.some((r) => r.step === REDESIGN_JUDGED_STEP && r.outcome === "amend"), "an answer is not a landing");
+  assert.deepEqual(readGardenState(gardenStatePath(w.deps.stateDir, "redesign"), ["amend"]).pending?.targets,
+    [{ class: "amend", target: marker[1] }], "the open PR carries the signature it amends");
   // The same evidence is never asked about again.
   assert.equal(redesignCandidates({ ...(w.sources as RedesignSources) }).length, 0);
 });
@@ -137,8 +141,47 @@ test("a hold younger than an hour, or one the sweep no longer disposes, is left 
   assert.equal(redesignCandidates(fresh.sources as RedesignSources).length, 0, "a pointer younger than an hour waits");
   const unstamped = world(t, { stamp: "sometime" });
   assert.equal(redesignCandidates(unstamped.sources as RedesignSources).length, 0, "an unstamped pointer is not aged as old");
+  // A PR the sweep stopped disposing leaves its task to that PR's outcome: the pointer it left behind does not revive it.
+  const goneWithPointer = world(t, { rows: [heldRow(NOW - 10 * 60 * MIN), heldRow(NOW - 3 * 60 * MIN)] });
+  assert.equal(redesignCandidates(goneWithPointer.sources as RedesignSources).length, 0, "a gone PR's aged pointer is not asked");
   const aged = world(t, { stamp: iso(NOW - REDESIGN_AFTER_MS) });
   assert.equal(redesignCandidates(aged.sources as RedesignSources).length, 1);
+});
+
+test("an amend is recorded by its landing: a failed filing re-asks, an open PR holds it, and a close declines it", async (t) => {
+  const w = world(t, { answers: [AMEND, AMEND] });
+  // The landing edits a disposable checkout, as production's does, so only a merge marks the live shard.
+  const ws = mkdtempSync(join(tmpdir(), "rmd-redesign-ws-"));
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  cpSync(join(w.root, "plan"), join(ws, "plan"), { recursive: true });
+  let land = (): string => { throw new Error("gh pr create died"); };
+  let state: "open" | "closed" = "open";
+  const deps: GardenerDeps = { ...w.deps, openWorkspace: () => ({ root: ws, land: () => land(), dispose: () => {} }), prState: () => state };
+  await runGardenAsync(redesignGardenSpec(deps, w.sources), deps);
+  assert.equal(w.prompts.length, 1);
+  assert.ok(!w.rows.some((r) => r.step === REDESIGN_JUDGED_STEP), "a filing that failed records no verdict");
+  assert.equal(redesignCandidates(buildRedesignSources(deps, w.sources)).length, 1, "the signature is asked again after the backoff");
+  cpSync(join(w.root, "plan"), join(ws, "plan"), { recursive: true });
+  land = () => "https://example.test/pull/902";
+  const later = { ...deps, clock: { now: () => NOW + 60 * MIN, date: () => new Date(NOW + 60 * MIN), iso: () => iso(NOW + 60 * MIN) } };
+  await runGardenAsync(redesignGardenSpec(later, w.sources), later);
+  assert.equal(w.prompts.length, 2, "the retry asks once more");
+  assert.equal(w.landed.length, 0, "the landing went to the disposable checkout's port, not the fixture's");
+  assert.equal(redesignCandidates(buildRedesignSources(deps, w.sources)).length, 0, "the open PR holds its signature");
+  assert.ok(!w.rows.some((r) => r.step === REDESIGN_JUDGED_STEP), "the open PR, not a verdict, holds it");
+  state = "closed";
+  await runGardenAsync(redesignGardenSpec(later, w.sources), later);
+  const after = readGardenState(gardenStatePath(deps.stateDir, "redesign"), ["amend"]);
+  assert.equal(after.pending, undefined);
+  assert.equal(after.declinedTargets?.length, 1, "the close declines the signature");
+  assert.equal(redesignCandidates(buildRedesignSources(deps, w.sources)).length, 0, "a declined signature is not asked again");
+  assert.equal(w.prompts.length, 2);
+  // The framework hands candidates its declined list too; an action whose signature was declined never acts.
+  const action = { class: "amend" as const, target: ID, reason: "r", shard: REL, signature: after.declinedTargets![0]!.target, edit: { reason: "r", filesAdd: [], proofs: [], amendment: "a" } };
+  const spec = redesignGardenSpec(deps, w.sources);
+  const inv = { candidates: 1, actions: [action], outcomes: [] };
+  assert.deepEqual(spec.candidates(inv, () => 0, after.declinedTargets), []);
+  assert.deepEqual(spec.candidates(inv, () => 0), [action]);
 });
 
 test("the pointer stamp is read only from the head refusal-amendment.ts writes", () => {
