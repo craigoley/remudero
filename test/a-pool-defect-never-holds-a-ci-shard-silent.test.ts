@@ -225,6 +225,7 @@ test("unit test: a slow-tier run reports every test before exiting with leaked h
     let calls = 0;
     const status = tiers.main(["--root", root, "--run", "slow"], {
       log: (line) => log.push(line),
+      env: {},
       spawn: (cmd, args, opts) => {
         calls++;
         assert.ok(args.includes(`--test-timeout=${tiers.SLOW_TIER_TEST_TIMEOUT_MS}`), args.join(" "));
@@ -252,6 +253,20 @@ test("unit test: a slow-tier run reports every test before exiting with leaked h
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("unit test: a slow-tier child setup works when stdout has no handle", () => {
+  const setupArg = tiers.slowTierHangBoundArgs!().find((arg) => arg.startsWith("--import=data:"));
+  assert.ok(setupArg, "the slow-tier child receives its stdout setup");
+  const run = spawnSync(process.execPath, [setupArg, "-e", 'process.stderr.write("setup completed\\n")'], {
+    env: { ...nestedEnv(), NODE_TEST_CONTEXT: "child-v8" },
+    stdio: ["ignore", "ignore", "pipe"],
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.equal(run.signal, null, run.stderr);
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stderr, "setup completed\n");
 });
 
 test("unit test: a slow-tier timeout names a hung test and exits despite its leaked interval", () => {
