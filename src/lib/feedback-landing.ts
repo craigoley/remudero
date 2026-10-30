@@ -81,6 +81,7 @@ export interface CiLearningFilingResult {
   filed: CiLearningFiledShard[];
   skipped: string[];
   refused: { findingId: string; reason: string }[];
+  git?: LandingGitMeter;
   /** W1-T9753: paths the landing refused to carry forward because main changed them too. */
   carryRefused?: FeedbackRefusal[];
 }
@@ -2195,7 +2196,8 @@ export function landCiLearningShards(
   checkoutRoot: string,
   deps: LandCiLearningShardsOptions,
 ): CiLearningFilingResult {
-  return driveLanding(ciLearningLandingSteps(drafts, checkoutRoot, deps), syncPreflightOf(checkoutRoot, deps));
+  const git = newGitMeter("sync");
+  return { ...driveLanding(ciLearningLandingSteps(drafts, checkoutRoot, deps), syncPreflightOf(checkoutRoot, deps), git), git };
 }
 
 export interface LandCiLearningShardsAsyncOptions extends Omit<LandCiLearningShardsOptions, "planPrPreflight"> {
@@ -2210,7 +2212,9 @@ export async function landCiLearningShardsAsync(
 ): Promise<CiLearningFilingResult> {
   const { planPrPreflight, ...landOpts } = deps;
   const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(checkoutRoot, sha, pr, { log: deps.log }));
-  return driveLandingAsync(ciLearningLandingSteps(drafts, checkoutRoot, { ...landOpts, ...asyncSeamsOf(checkoutRoot, landOpts) }), preflight);
+  const git = newGitMeter("async");
+  const result = await driveLandingAsync(ciLearningLandingSteps(drafts, checkoutRoot, { ...landOpts, ...asyncSeamsOf(checkoutRoot, landOpts) }), preflight, git);
+  return { ...result, git };
 }
 
 function* ciLearningLandingSteps(
