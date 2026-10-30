@@ -23,27 +23,27 @@ function executableDigest(source: string): string {
 }
 
 const BEFORE_COMMENTS = 2085;
-// Refreshed at 6aa3094dd12209442ffee296bf1132c27e63f02d for W1-T9114's child placement,
-// adoption, drain reporting and retro handoff. The original comment-reduction threshold stays fixed.
-const EXPECTED_EXECUTABLE = "19b221e5427367fc8106cc77d640dfe02998ca306d8157a8815c2191ff5d27c7";
+// Regenerated from the merged W1-T9114 child placement, adoption, drain and retro work plus
+// W1-T9819's ended-run evidence. The original comment-reduction threshold stays fixed.
+const EXPECTED_EXECUTABLE = "5b915668601f6edfdb7b31057849fc4a5d3aa7b0b3caff6c017487f322db5c25";
 
 function emittedDigest(source: string): string {
   const { code } = transformSync(source, { loader: "ts", format: "esm", legalComments: "none" });
   return createHash("sha256").update(code).digest("hex");
 }
 
-const EXPECTED_EMITTED = "8be41929a68c9f1e328e990100037fccf49e7d942cf1a8c76641ffda42943f96";
+const EXPECTED_EMITTED = "70c948681d4787399914a515e50a2566d3b00f18a11de3f2c9ea41ed5a831a1d";
 
 test("W1-T10871: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/daemon.ts"), "utf8");
   // W1-T9912 intentionally adds these two cohort ledger fields after the compression baseline.
-  // Remove only that exact addition when comparing the older executable code.
+  // Remove only that exact addition when comparing the merged executable snapshot.
   const cohortFields = "                due_because: result.dueBecause,\n                pass_ms: result.passMs,\n";
   assert.equal(source.split(cohortFields).length, 2, "the cohort fields occur once in the daemon row");
   const baselineSource = source.replace(cohortFields, "");
-  assert.equal(executableDigest(baselineSource), EXPECTED_EXECUTABLE, "all other non-comment code lines remain unchanged");
+  assert.equal(executableDigest(baselineSource), EXPECTED_EXECUTABLE, "all other non-comment code lines match the accepted snapshot");
   // Independently catch ASI changes and whitespace inside multiline string/template literals.
-  assert.equal(emittedDigest(baselineSource), EXPECTED_EMITTED, "other emitted JavaScript remains unchanged");
+  assert.equal(emittedDigest(baselineSource), EXPECTED_EMITTED, "other emitted JavaScript matches the accepted snapshot");
   const { comments } = countCommentLines(source, "src/lib/daemon.ts");
   assert.ok(comments < BEFORE_COMMENTS, `comments must decrease from the measured ${BEFORE_COMMENTS}; got ${comments}`);
 });
