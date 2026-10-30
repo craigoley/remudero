@@ -1,3 +1,4 @@
+import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/legacy-host-launch.js";
 /**
  * test/one-gateway-serves-every-instance.test.ts — W1-T4228.
  *
@@ -377,15 +378,14 @@ test("the shared gateway launch mounts each registered instance's state read-onl
   );
   const code = join(base, "serve-code");
   mkdirSync(code, { recursive: true });
-  const result = spawnSync("bash", [join(REPO_ROOT, "deploy", "serve-container.sh"), "--dry-run"], {
+  const result = spawnSync("bash", [legacyHostScript(base, join(REPO_ROOT, "deploy", "serve-container.sh"), registry), "--dry-run"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...withoutRegistrySelection(process.env),
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       GH_TOKEN: "test-token",
       RMD_STATE_DIR: coreState,
-      RMD_INSTANCE_REGISTRY: registry,
       RMD_SERVE_REPO_DIR: code,
       RMD_SERVE_DOCKER_NETWORK: "rmd-test-net",
       RMD_SERVE_DOCKERENV_PATH: join(base, "no-dockerenv"),

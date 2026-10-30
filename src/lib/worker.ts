@@ -18,9 +18,13 @@ import { ensureWorktreeConfigEnabledAsync } from "./worktree-config.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -41,6 +45,8 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { recordedWorktreeGitDir } from "./worktree-git.js";
+import { resolveTestSlotDir } from "./test-slot.js";
 import { performance } from "node:perf_hooks";
 import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SDKUserMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -92,7 +98,8 @@ import {
 } from "./routing-experiments.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { assertLiveSpawnAllowed } from "./spawn-guard.js";
-import { validateWorkerSettingsFile } from "./settings.js";
+import { validateWorkerSettings, validateWorkerSettingsFile } from "./settings.js";
+import { assertInstanceRegistryWorkerEnvironment, captureInstanceRegistryRuntimeFile, InstanceRegistryRuntimeError, runtimeInstanceRegistryPrivateFile } from "./instance-registry-selection.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 // W1-T2777: share ensureInstallFresh's hash primitive; parallel implementations drift. See lib/install-hash.ts.
@@ -1154,7 +1161,7 @@ export interface SpawnWorkerArgs {
     now?: () => number;
   };
   /** Restrict built-in tools; `sandboxIntent` marks the exact-head disposable reviewer, and
-   * `sandboxReadRoots` is ignored outside that intent. Claude interprets only `tools`;
+   * `sandboxReadRoots` is ignored outside that intent. Unselected Claude interprets only `tools`;
    * Codex also uses the intent to choose its sandbox permission profile. */
   tools?: string[];
   /**
@@ -2354,6 +2361,22 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
 }
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
+  const privateRegistry = runtimeInstanceRegistryPrivateFile();
+  const selectedRealHome = privateRegistry === undefined ? undefined : process.env.HOME ?? homedir();
+  if (privateRegistry !== undefined) {
+    try { args = { ...args, config: { ...(args.config ?? loadConfig()) },
+      ...(args.env === undefined ? {} : { env: { ...args.env } }),
+      ...(args.tools === undefined ? {} : { tools: [...args.tools] }),
+      ...(args.disallowedTools === undefined ? {} : { disallowedTools: [...args.disallowedTools] }),
+      ...(args.sandboxReadRoots === undefined ? {} : { sandboxReadRoots: [...args.sandboxReadRoots] }),
+      ...(args.egress === undefined ? {} : { egress: { ...args.egress } }) }; }
+    catch { throw new InstanceRegistryRuntimeError("worker_arguments_unqualified"); }
+    assertInstanceRegistryWorkerEnvironment(args.env);
+  }
+  const selectedPolicy = privateRegistry === undefined ? undefined : await captureInstanceRegistryRuntimeFile(args.settingsFile);
+  const privateSettings = selectedPolicy === undefined ? undefined
+    : privateRegistryWorkerSettings(selectedPolicy.text, privateRegistry!, selectedPolicy.canonicalPath);
+  if (selectedPolicy && args.resumeSessionId) throw new InstanceRegistryRuntimeError("worker_resume_not_qualified");
   validateWorkerMcpIsolation(args);
   if (args.promptFor) {
     const promptFor = args.promptFor;
@@ -2409,11 +2432,11 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // Validate-before-spawn guard, enforced at the spawn boundary rather than by caller convention. TRAP: `claude -p` SILENTLY
   // IGNORES an invalid settings file and drops containment, so it is validated against the pinned SandboxSettingsSchema
   // first, throwing on the first bad key (WS-0 FF10a).
-  validateWorkerSettingsFile(args.settingsFile);
+  if (selectedPolicy === undefined) validateWorkerSettingsFile(args.settingsFile);
 
   // Capture process-global HOME before the first await. Test harnesses and embedders may vary it between concurrent calls;
   // one worker's advisory status read must not switch another's home.
-  const realHome = process.env.HOME ?? homedir();
+  const realHome = selectedRealHome ?? process.env.HOME ?? homedir();
   const config = args.config ?? loadConfig();
   // W1-T7094: the COUNTERFACTUAL host-memory verdict, taken once the start is committed (slot claimed, reservation open,
   // settings validated). Synchronous, bounded and non-throwing, and its outcome is deliberately unread: admit, defer and
@@ -3198,10 +3221,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // rather than being silently dropped.
     const options: Options = {
       cwd: args.cwd,
-      permissionMode: args.permissionMode,
+      permissionMode: selectedPolicy && args.permissionMode !== "plan" ? DENY_FLOOR_FALLBACK_MODE : args.permissionMode,
       pathToClaudeCodeExecutable: claudeBin,
       env: childEnv,
-      settings: args.settingsFile,
+      settings: (privateSettings as Options["settings"]) ?? args.settingsFile,
       settingSources: WORKER_SETTING_SOURCES, // real value: settingSources: [] (see WORKER_SPAWN_ISOLATION above)
       // Run the CLI DETACHED into its own process group and session, so teardown reaches every descendant — including one
       // outliving the CLI's own exit — with a single group signal. This REPLACES the SDK's default local spawn, so
@@ -3311,13 +3334,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     let unregisterRunningWorker: (() => void) | undefined;
     let egressProxy: Awaited<ReturnType<NonNullable<NonNullable<SpawnWorkerArgs["egress"]>["startProxy"]>>> | undefined;
     let egressUnenforced: string | undefined;
+    let privatePolicyArtifact: PrivateRegistryWorkerPolicyArtifact | undefined, queryFailure: unknown;
     try {
       // W1-T1289: a private broker per spawn, started and verified BEFORE the query and closed on every exit path.
       const egressMode = args.egress?.mode ?? workerEgressMode(process.env.RMD_WORKER_EGRESS);
       if (egressMode !== "off") {
         try {
           (args.egress?.checkVersion ?? assertWorkerEgressEnforcerVersion)(claudeBin);
-          const policy = JSON.parse(fs.readFileSync(args.settingsFile, "utf8")) as { sandbox?: { network?: Record<string, unknown> } };
+          const policy = (privateSettings ?? JSON.parse(fs.readFileSync(args.settingsFile, "utf8"))) as { sandbox?: { network?: Record<string, unknown> } };
           egressProxy = await (args.egress?.startProxy ?? startWorkerEgressProxy)(policy);
           await verifyWorkerEgressProxy(egressProxy, diagnostic => {
             egressUnenforced = egressUnenforced ? `${egressUnenforced}; ${diagnostic}` : diagnostic;
@@ -3338,6 +3362,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // W1-T9489: EVERY Claude spawn is strict with an explicit server map (knowledge-only with ruleLookup, else none), so
       // the shared config dir's claude.ai connectors can never attach to a worker running under bypassPermissions.
       const boundaryServers = applyWorkerMcpBoundary(options);
+      if (selectedPolicy) {
+        await selectedPolicy.recheck();
+        // File settings avoid inline argv disclosure; public-only scopes also avoid the SDK's
+        // model-visible sandbox instructions naming the private inputs.
+        const scope = privateRegistryWorkerPublicScope(args, childEnv, privateRegistry!, workerHome, selectedPolicy.canonicalPath);
+        privatePolicyArtifact = createPrivateRegistryWorkerPolicy(options.settings, privateRegistry!, workerHome, scope);
+        options.settings = privatePolicyArtifact.path;
+      }
       const liveQuery = runQuery({ prompt: execution.prompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
@@ -3399,6 +3431,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         : undefined;
       return result;
     } catch (err) {
+      queryFailure = err;
       if (measurement) abandonProviderWindowMeasurement(measurement);
       // Runs on EVERY thrown error but only REPLACES it when the watchdog tripped; any other transport failure passes through
       // unchanged. Replacing rather than adding a second reject means run-task.ts checks ONE type instead of re-deriving "was
@@ -3410,7 +3443,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       unchainSignal?.();
       // Unconditional: no exit path may leave a handle for a later answer to steer into a dead session (W1-T4673).
       unregisterRunningWorker?.();
-      await egressProxy?.close();
+      try { await egressProxy?.close(); }
+      finally { if (privatePolicyArtifact) retirePrivateRegistryWorkerPolicy(privatePolicyArtifact, queryFailure); }
     }
   } finally {
     // Reap THIS spawn's per-spawn home on every exit path, including a thrown error or a transport failure — the withTempDir
@@ -4141,10 +4175,176 @@ export function renderWorkerSettings(opts: {
   const rendered = template.split("${HOOKS_DIR}").join(opts.hooksDir);
   // Validate JSON before writing so a bad substitution fails loud. TRAP: a settings file that fails validation is SILENTLY
   // ignored by `claude -p`.
-  JSON.parse(rendered);
+  try {
+    const parsed: unknown = JSON.parse(rendered);
+    if (runtimeInstanceRegistryPrivateFile() !== undefined) validateWorkerSettings(parsed);
+  } catch (error) {
+    if (runtimeInstanceRegistryPrivateFile() !== undefined) throw new InstanceRegistryRuntimeError("worker_policy_unqualified");
+    throw error;
+  }
   mkdirSync(join(opts.outPath, ".."), { recursive: true });
   writeFileSync(opts.outPath, rendered, { mode: 0o600 });
   return opts.outPath;
+}
+
+interface PrivateRegistryWorkerPolicyArtifact { path: string; text: string; dev: number; ino: number }
+interface PrivateRegistryWorkerPublicScope { read: string[]; write: string[]; metadata: string[]; edits: string[]; denyRead: string[]; denyWrite: string[] }
+
+/** Model-visible regions use already-public ancestors or standard OS roots, never a private filename. Not authority. */
+export function privateRegistryDenyRegions(inputs: readonly string[], publicRoots: readonly string[]): string[] {
+  const inside = (path: string, root: string): boolean => path === root || path.startsWith(root + sep);
+  if (publicRoots.some(path => typeof path !== "string" || !isAbsolute(path) || path === "/")
+    || inputs.some(path => typeof path !== "string" || !isAbsolute(path) || /[\r\n\0]/.test(path))) {
+    throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+  }
+  const standardRoots = new Set(["/home", "/Users", "/root", "/private", "/var", "/tmp", "/run", "/mnt", "/Volumes", "/media", "/srv", "/opt", "/data", "/workspace", "/workspaces", "/app"]);
+  const regions = inputs.filter(path => !publicRoots.some(root => inside(path, root))).map(path => {
+    const ancestors = publicRoots.map(root => {
+      let parent = dirname(path);
+      while (parent !== "/" && !inside(root, parent)) parent = dirname(parent);
+      return parent;
+    }).filter(parent => parent !== "/").sort((a, b) => b.length - a.length);
+    const region = ancestors[0] ?? sep + path.split(sep)[1];
+    if (!ancestors.length && !standardRoots.has(region)) throw new InstanceRegistryRuntimeError("worker_scope_region_unqualified");
+    return region;
+  });
+  return [...new Set(regions)];
+}
+
+function privateRegistryWorkerPublicScope(args: SpawnWorkerArgs, env: Record<string, string>, selected: string, workerHome: string, policyFile: string): PrivateRegistryWorkerPublicScope {
+  try {
+    const canonical = (target: string, missingLeaf = false): string => {
+      if (!isAbsolute(target)) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+      let path: string;
+      if (missingLeaf && !existsSync(target)) path = join(realpathSync(dirname(target)), basename(target));
+      else path = realpathSync(target);
+      if (/[\r\n\0*?\[\]{}()]/.test(path)) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+      return path;
+    };
+    const directory = (target: string): string => {
+      const path = canonical(target);
+      if (!lstatSync(path).isDirectory()) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+      return path;
+    };
+    const cwd = directory(args.cwd), home = directory(workerHome), temp = directory(env.TMPDIR ?? "/tmp");
+    if (directory(env.HOME ?? "") !== home) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+    const readOnly = args.sandboxIntent === "disposable-review" || args.permissionMode === "plan" || codexReadOnly(args);
+    const read = new Set([cwd, home, temp]), write = new Set<string>(readOnly ? [home, temp] : [cwd, home, temp]), metadata: string[] = [];
+    const readOnlyRoots = new Set<string>(readOnly ? [cwd] : []);
+    for (const target of ["/bin", "/usr", "/lib", "/lib64", "/sbin", "/System/Library", "/Library/Apple", "/opt/homebrew", "/dev/null", "/dev/urandom", "/etc/ssl/certs", "/etc/resolv.conf", "/etc/hosts"]) {
+      if (existsSync(target)) read.add(canonical(target));
+    }
+    read.add(directory(dirname(process.execPath)));
+    if (existsSync(join(cwd, "node_modules"))) read.add(directory(join(cwd, "node_modules")));
+    if (args.sandboxIntent === "disposable-review") {
+      if ((args.sandboxReadRoots?.length ?? 0) > 16) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+      for (const target of args.sandboxReadRoots ?? []) { const root = directory(target); read.add(root); readOnlyRoots.add(root); }
+    }
+    const recorded = recordedWorktreeGitDir(cwd);
+    if (recorded !== null) {
+      const gitDir = directory(recorded); metadata.push(gitDir);
+      const commonFile = join(gitDir, "commondir");
+      if (existsSync(commonFile)) {
+        const relative = readFileSync(commonFile, "utf8").trim();
+        if (!relative || relative.length > 4096 || relative.includes("\0")) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+        metadata.push(directory(resolve(gitDir, relative)));
+      }
+      for (const target of metadata) { read.add(target); if (!readOnly) write.add(target); else readOnlyRoots.add(target); }
+    }
+    if (!readOnly && !process.env.NODE_TEST_CONTEXT) {
+      const slot = canonical(resolveTestSlotDir(env).dir, true); read.add(slot); write.add(slot);
+    }
+    // A positive worker scope is public only if it cannot contain the selected physical input.
+    if ([...read].some(path => selected === path || selected.startsWith(path + sep))) {
+      throw new InstanceRegistryRuntimeError("worker_scope_contains_private_file");
+    }
+    if ([home, temp].some(path => [...readOnlyRoots].some(root => path === root || path.startsWith(root + sep)))) {
+      throw new InstanceRegistryRuntimeError("worker_scope_readonly_scratch_overlap");
+    }
+    return { read: [...read], write: [...write], metadata,
+      denyRead: privateRegistryDenyRegions([selected, policyFile], [...read]), denyWrite: [...readOnlyRoots],
+      edits: !readOnly && ["bypassPermissions", "acceptEdits"].includes(args.permissionMode) ? [cwd] : [] };
+  } catch (error) {
+    if (error instanceof InstanceRegistryRuntimeError) throw error;
+    throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+  }
+}
+function createPrivateRegistryWorkerPolicy(input: unknown, selected: string, workerHome: string, scope: PrivateRegistryWorkerPublicScope): PrivateRegistryWorkerPolicyArtifact {
+  try {
+    const path = join(realpathSync(workerHome), `.rmd-policy-${randomUUID()}.json`);
+    const text = JSON.stringify(privateRegistryWorkerSettings(input, selected, path, scope));
+    if (Buffer.byteLength(text) > 65536) throw new InstanceRegistryRuntimeError("worker_policy_unqualified");
+    writeFileSync(path, text, { flag: "wx", mode: 0o600 });
+    const identity = lstatSync(path);
+    return { path, text, dev: identity.dev, ino: identity.ino };
+  } catch (error) {
+    // No broad/inline fallback: unavailable private policy has unknown containment and diagnostics stay redacted.
+    if (error instanceof InstanceRegistryRuntimeError) throw error;
+    throw new InstanceRegistryRuntimeError("worker_policy_unavailable");
+  }
+}
+function retirePrivateRegistryWorkerPolicy(artifact: PrivateRegistryWorkerPolicyArtifact, cause: unknown): void {
+  try {
+    const fd = openSync(artifact.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    try {
+      const current = fstatSync(fd);
+      if (!current.isFile() || current.nlink !== 1 || current.dev !== artifact.dev || current.ino !== artifact.ino
+        || current.size !== Buffer.byteLength(artifact.text) || readFileSync(fd, "utf8") !== artifact.text) {
+        throw new Error("invocation policy identity changed");
+      }
+    } finally { closeSync(fd); }
+    rmSync(artifact.path);
+  } catch {
+    // An absent/replaced/unreadable policy is not falsely certified as cleaned up. Preserve the original failure.
+    const error = new InstanceRegistryRuntimeError("worker_policy_cleanup_unknown");
+    if (cause !== undefined) error.cause = cause;
+    throw error;
+  }
+}
+
+function privateRegistryWorkerSettings(input: unknown, selected: string, policyPath: string, scope?: PrivateRegistryWorkerPublicScope): Record<string, unknown> {
+  try {
+  const paths = [selected, policyPath];
+  if (paths.some(path => !isAbsolute(path) || /[\r\n\0*?\[\]{}()]/.test(path))) {
+    throw new InstanceRegistryRuntimeError("worker_policy_path_unqualified");
+  }
+  const parsed: unknown = typeof input === "string" ? JSON.parse(input) : input;
+  validateWorkerSettings(parsed);
+  const serialized = JSON.stringify(parsed);
+  if (paths.some(path => serialized.includes(JSON.stringify(path).slice(1, -1)))) {
+    throw new InstanceRegistryRuntimeError("worker_policy_contains_private_source");
+  }
+  const policy = structuredClone(parsed) as { sandbox: { filesystem?: Record<string, unknown> }; permissions?: Record<string, unknown> };
+  const filesystem = policy.sandbox.filesystem ?? {};
+  const permissions = policy.permissions ?? {};
+  const list = (value: unknown): string[] => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || value.some(row => typeof row !== "string")) throw new InstanceRegistryRuntimeError("worker_policy_rules_unqualified");
+    return value;
+  };
+  const denyRead = list(filesystem.denyRead), denyWrite = list(filesystem.denyWrite), deny = list(permissions.deny);
+  if (list(permissions.allow).length > 0 || list(filesystem.allowRead).length > 0 || list(filesystem.allowWrite).length > 0) {
+    throw new InstanceRegistryRuntimeError("worker_policy_rules_unqualified");
+  }
+  if (scope) {
+    policy.sandbox.filesystem = { ...filesystem, denyRead: [...new Set([...denyRead, ...scope.denyRead])],
+      allowRead: scope.read.slice(), allowWrite: scope.write.slice(),
+      denyWrite: [...new Set([...denyWrite, ...scope.denyWrite, policyPath,
+        ...scope.metadata.flatMap(root => ["config", "config.worktree", "commondir", "gitdir", "hooks", "worktrees/*/config.worktree", "worktrees/*/commondir", "worktrees/*/gitdir"].map(path => join(root, path)))])] };
+    policy.permissions = { ...permissions, deny: [...new Set([...deny, `Edit(/${policyPath})`, ...scope.denyWrite.map(path => `Edit(/${path}/**)`)])],
+      allow: [...scope.read.map(path => `Read(/${path}/**)`), ...scope.edits.map(path => `Edit(/${path}/**)`)] };
+  }
+  validateWorkerSettings(policy);
+  const freeze = (value: unknown): void => {
+    if (value !== null && typeof value === "object") { Object.values(value).forEach(freeze); Object.freeze(value); }
+  };
+  freeze(policy);
+  return policy;
+  } catch (error) {
+    // Schema/parser diagnostics can contain private paths or values; selected workers receive only the stable refusal.
+    if (error instanceof InstanceRegistryRuntimeError) throw error;
+    throw new InstanceRegistryRuntimeError("worker_policy_unqualified");
+  }
 }
 
 // ── Worker output-contract parsers ────────────────────────────────────────

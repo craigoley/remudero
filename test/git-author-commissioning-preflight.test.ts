@@ -1,3 +1,4 @@
+import { legacyHostScript } from "#test/helpers/legacy-host-launch.js";
 // W1-T6160, criterion 2: `--commission-git-author` refuses an invalid author pair, and an unknown,
 // ambiguous or mismatched target, BEFORE any pause, pull, stop, removal or identity write — and a
 // refusal leaves the sibling instance exactly as it was. Each refusal names the input that failed,
@@ -189,7 +190,7 @@ function seedContainer(fx: Fixture, inst: Instance, env: string[], persisted?: [
 
 function recycle(fx: Fixture, args: string[], env: Record<string, string> = {}, scripts = { recycler: RECYCLER, entrypoint: ENTRYPOINT }): Run {
   writeFileSync(join(fx.rec, "calls"), "");
-  const r = spawnSync("bash", [scripts.recycler, ...args], {
+  const r = spawnSync("bash", [legacyHostScript(fx.root, scripts.recycler, fx.registry), ...args], {
     encoding: "utf8",
     timeout: 120_000,
     env: {
@@ -199,7 +200,6 @@ function recycle(fx: Fixture, args: string[], env: Record<string, string> = {}, 
       STUB_WORLD: fx.world,
       STUB_REC: fx.rec,
       STUB_ENTRYPOINT: scripts.entrypoint,
-      RMD_INSTANCE_REGISTRY: fx.registry,
       RMD_RECYCLE_DOCKERENV_PATH: join(fx.root, "no-such-dockerenv"),
       RMD_RECYCLE_WAIT_S: "1",
       RMD_RECYCLE_POLL_S: "1",

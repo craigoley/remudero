@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { withInstanceRegistryRuntime, trustedInstanceRegistryLaunchPacket } from "#src/lib/instance-registry-selection.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
 
 /**
@@ -156,9 +158,10 @@ function bashCaseEchoLines(byMode: Record<string, string[]>, defaultLines: strin
 function writeStubs(dir: string): void {
   const docker = [
     "#!/usr/bin/env bash",
-    'rec() { printf "%s" "docker" >> "$STUB_REC/calls"; for a in "$@"; do printf "\\t%s" "$a" >> "$STUB_REC/calls"; done; printf "\\n" >> "$STUB_REC/calls"; }',
+    'rec() { printf "%s" "docker" >> "$STUB_REC/calls"; for a in "$@"; do a="${a//$\'\\n\'/ }"; printf "\\t%s" "$a" >> "$STUB_REC/calls"; done; printf "\\n" >> "$STUB_REC/calls"; }',
     'rec "$@"',
     'case "$1" in',
+    '  context) case "$STUB_MODE" in private-remote) echo "ssh://unqualified.example.invalid" ;; *) echo "unix:///fixture/docker.sock" ;; esac; exit 0 ;;',
     "  image)",
     '    if [ "$2" = "inspect" ]; then',
     "      shift 2",
@@ -190,11 +193,13 @@ function writeStubs(dir: string): void {
     '        if [ -d "${RMD_CODEX_DIR:-}" ]; then printf \'%s\\t%s\\ttrue\\n\' "$RMD_CODEX_DIR" /home/node/.codex; fi',
     '        if [ -d "${RMD_CONTAINER_CONFIG_DIR:-}" ]; then printf \'%s\\t%s\\ttrue\\n\' "$RMD_CONTAINER_CONFIG_DIR" /home/node/.config/remudero; fi',
     '        if [ -n "${STUB_EXTRA_MOUNTS:-}" ]; then printf \'%s\\n\' "$STUB_EXTRA_MOUNTS"; fi',
+    '        if [ "$STUB_MODE" = private-good ]; then printf \'%s\\t%s\\tfalse\\n\' "$RMD_INSTANCE_REGISTRY" /home/node/.config/remudero/selected-registry.yaml; fi',
     "        exit 0 ;;",
     "      *Config.Image*)",
     '        echo "test-registry/remudero:old"',
     "        exit 0 ;;",
     "      *Config.Env*)",
+    '        if [ -n "${STUB_PREVIOUS_ENV:-}" ]; then cat "$STUB_PREVIOUS_ENV"; exit 0; fi',
     ...bashCaseEchoLines(CONTAINER_ENV_BY_MODE, containerEnvLines()).map((l) => `  ${l}`),
     "        exit 0 ;;",
     "      *.Image}}*)",
@@ -215,15 +220,19 @@ function writeStubs(dir: string): void {
     // this format's behaviour before this task (docker inspect succeeds, prints nothing).
     '        case "$STUB_MODE" in',
     '          dead-pid-live-container|live-pid-live-container) [ "$1" = "376f1b205ffa" ] && echo true ;;',
+    '          private-*) echo true ;;',
     "        esac",
     "        exit 0 ;;",
+    '      *NetworkSettings.Networks*) echo yes; exit 0 ;;',
     "    esac",
     "    exit 0 ;;",
     "  pull)",
+    '    if [ "$STUB_MODE" = private-revised ]; then printf "\\n# changed after capture\\n" >> "$RMD_INSTANCE_REGISTRY"; fi',
     '    case "$STUB_MODE" in',
     '      pull-fail) echo "unauthorized: authentication required" >&2; exit 1 ;;',
     "    esac",
     '    echo "Status: Downloaded newer image"; exit 0 ;;',
+    '  logs) echo "listening on http://0.0.0.0:4317"; exit 0 ;;',
     "  exec)",
     "    shift",
     '    while [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; do shift; done',
@@ -257,8 +266,20 @@ function writeStubs(dir: string): void {
     "    esac",
     "    exit 0 ;;",
     // W1-T4197: this mode models an operator replacing the recycle's PAUSE with their own mid-run.
-    '  stop) [ "$STUB_MODE" = pause-swapped ] && printf \'%s\' \'{"reason":"operator hold","requestedAt":"2026-10-01T00:00:00.000Z"}\' > "$RMD_STATE_DIR/state/PAUSE"; exit 0 ;;',
-    '  rm|run) [ "$1" = "rm" ] && [ "$STUB_MODE" = rm-hang ] && sleep 10; exit 0 ;;',
+    '  stop) [ "$STUB_MODE" = pause-swapped ] && printf \'%s\' \'{"reason":"operator hold","requestedAt":"2026-10-01T00:00:00.000Z"}\' > "$RMD_STATE_DIR/state/PAUSE"; if [ "$STUB_MODE" = private-final-revised ]; then printf "\\n# revised after qualification\\n" >> "$RMD_INSTANCE_REGISTRY"; fi; exit 0 ;;',
+    '  run) case "$*" in *selected-registry-capability-*)',
+    '    case "$STUB_MODE" in private-old-image|private-probe-fail) exit 2 ;; private-marker-only) echo selected-registry-capability-v1; exit 0 ;; esac',
+    '    source_file="$RMD_INSTANCE_REGISTRY"',
+    '    case "$STUB_MODE" in private-alias|private-replaced|private-lost-binding) cp "$source_file" "$STUB_REC/same-bytes.yaml"; source_file="$STUB_REC/same-bytes.yaml" ;; esac',
+    '    if [ "$STUB_MODE" = private-replaced ]; then mv "$source_file" "$RMD_INSTANCE_REGISTRY"; source_file="$RMD_INSTANCE_REGISTRY"; fi',
+    '    code="${!#}"',
+    '    while [ "$#" -gt 0 ]; do if [ "$1" = -e ]; then shift; case "$1" in RMD_INSTANCE_*) export "$1" ;; esac; fi; shift; done',
+    '    export RMD_INSTANCE_REGISTRY="$source_file"',
+    '    if [ "$STUB_MODE" = private-lost-binding ]; then unset RMD_INSTANCE_REGISTRY_FILE_BINDING; fi',
+    '    cd "$STUB_READER_ROOT" || exit 2',
+    '    exec node --import tsx --import ./test/setup/tmp-hygiene.ts --input-type=module -e "$code"',
+    '    ;; esac; exit 0 ;;',
+    '  rm) [ "$STUB_MODE" = rm-hang ] && sleep 10; exit 0 ;;',
     "esac",
     "exit 0",
     "",
@@ -285,10 +306,13 @@ interface RunOpts {
   extraEnv?: Record<string, string>;
   instanceRoot?: string;
   shellPath?: string;
+  unsetDockerHost?: boolean;
+  unselectedRegistry?: boolean;
+  forbidHostEffects?: boolean;
 }
 
 function runRecycle(mode: string, opts: RunOpts = {}): Run {
-  if (opts.scriptPath) cpSync(join(REPO_ROOT, "deploy", "acr-login.sh"), join(dirname(opts.scriptPath), "acr-login.sh"));
+  if (opts.scriptPath && dirname(opts.scriptPath) !== dirname(SCRIPT)) cpSync(join(REPO_ROOT, "deploy", "acr-login.sh"), join(dirname(opts.scriptPath), "acr-login.sh"));
   const dir = mkdtempSync(join(tmpdir(), "recycle-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "recycle-rec-"));
   const state = opts.stateDir ?? mkdtempSync(join(tmpdir(), "recycle-state-"));
@@ -309,48 +333,62 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
   writeFileSync(cashKeyPath, `${durableCashKey}\n`, { mode: 0o600 });
   chmodSync(cashKeyPath, 0o600);
   writeStubs(dir);
-  const r = spawnSync(opts.shellPath ?? "bash", [opts.scriptPath ?? SCRIPT, ...(opts.args ?? [])], {
-    encoding: "utf8",
-    cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      PATH: `${dir}:${process.env.PATH ?? ""}`,
-      STUB_REC: rec,
-      STUB_MODE: mode,
-      RMD_STATE_DIR: state,
-      RMD_CLAUDE_DIR: claudeDir,
-      RMD_CODEX_DIR: join(providerRuntime, "absent-codex"),
-      RMD_CONTAINER_CONFIG_DIR: containerConfigDir,
-      RMD_RECYCLE_WAIT_S: "1",
-      RMD_RECYCLE_POLL_S: "1",
-      // W1-T2555: this suite drives docker orchestration (stop/rm/run, locks, drift), never the
-      // STATE_DIR-is-a-checkout predicate itself — that predicate has its own dedicated suite,
-      // test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts. Every fixture directory
-      // here is a fresh mkdtemp with no state/ or remudero/.git inside it, so without this opt-in
-      // every test below would now hit the NEW refusal before reaching the behaviour it means to
-      // exercise. Passing it here is the "operator's own word" the new check requires — this suite
-      // is intentionally always running the first-boot path.
-      RMD_RECYCLE_FIRST_BOOT: "1",
-      GH_TOKEN: "",
-      // App auth is a CREDENTIAL as of this PR, and these fixtures spread `...process.env`, so an
-      // ambient `GH_APP_*` trio makes the script stop refusing and exit 0 — silently converting
-      // every negative control below into a vacuous pass. The daemon container really does carry
-      // all three, which is where the reviewer executes proofs: MEASURED there, this suite went
-      // 26/26 on main to 25/26 on this branch, and the checkout suite 12/12 to 11/12, while both
-      // stayed green on a host and on CI (neither sets them). Neutralise them exactly as GH_TOKEN
-      // above already is, so the credential inputs are the fixture's to state, never the runner's.
-      GH_APP_ID: "",
-      GH_APP_INSTALLATION_ID: "",
-      GH_APP_PRIVATE_KEY_PATH: "",
-      RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
-      // Points at a path that (almost certainly) does not exist, so section 1's guard does not fire
-      // merely because the TEST RUNNER itself is sandboxed inside a container — that is a fact about
-      // this suite's own environment, not about the script under test. The dedicated guard test below
-      // overrides this deliberately to point at a real file.
-      RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "recycle-container-test-no-such-dockerenv-marker"),
-      ...opts.extraEnv,
-    },
-  });
+  if (opts.forbidHostEffects) for (const bin of ["git", "systemctl", "sudo", "install-host-units.sh"]) {
+    writeFileSync(join(dir, bin), '#!/usr/bin/env bash\nprintf "forbidden\\t%s\\n" "$0" >> "$STUB_REC/calls"\nexit 97\n', { mode: 0o755 });
+  }
+  const github = opts.forbidHostEffects ? ghShim([{ when: "", exit: 97 }]) : undefined;
+  let r;
+  try {
+    r = spawnSync(opts.shellPath ?? "bash", [opts.scriptPath ?? SCRIPT, ...(opts.args ?? [])], {
+      encoding: "utf8",
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        PATH: `${dir}:${github ? `${github.dir}:` : ""}${process.env.PATH ?? ""}`,
+        STUB_REC: rec,
+        STUB_MODE: mode,
+        STUB_READER_ROOT: REPO_ROOT,
+        RMD_STATE_DIR: state,
+        RMD_CLAUDE_DIR: claudeDir,
+        RMD_CODEX_DIR: join(providerRuntime, "absent-codex"),
+        RMD_CONTAINER_CONFIG_DIR: containerConfigDir,
+        RMD_RECYCLE_WAIT_S: "1",
+        RMD_RECYCLE_POLL_S: "1",
+        // W1-T2555: this suite drives docker orchestration (stop/rm/run, locks, drift), never the
+        // STATE_DIR-is-a-checkout predicate itself — that predicate has its own dedicated suite,
+        // test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts. Every fixture directory
+        // here is a fresh mkdtemp with no state/ or remudero/.git inside it, so without this opt-in
+        // every test below would now hit the NEW refusal before reaching the behaviour it means to
+        // exercise. Passing it here is the "operator's own word" the new check requires — this suite
+        // is intentionally always running the first-boot path.
+        RMD_RECYCLE_FIRST_BOOT: "1",
+        GH_TOKEN: "",
+        // App auth is a CREDENTIAL as of this PR, and these fixtures spread `...process.env`, so an
+        // ambient `GH_APP_*` trio makes the script stop refusing and exit 0 — silently converting
+        // every negative control below into a vacuous pass. The daemon container really does carry
+        // all three, which is where the reviewer executes proofs: MEASURED there, this suite went
+        // 26/26 on main to 25/26 on this branch, and the checkout suite 12/12 to 11/12, while both
+        // stayed green on a host and on CI (neither sets them). Neutralise them exactly as GH_TOKEN
+        // above already is, so the credential inputs are the fixture's to state, never the runner's.
+        GH_APP_ID: "",
+        GH_APP_INSTALLATION_ID: "",
+        GH_APP_PRIVATE_KEY_PATH: "",
+        RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
+        // Points at a path that (almost certainly) does not exist, so section 1's guard does not fire
+        // merely because the TEST RUNNER itself is sandboxed inside a container — that is a fact about
+        // this suite's own environment, not about the script under test. The dedicated guard test below
+        // overrides this deliberately to point at a real file.
+        RMD_RECYCLE_DOCKERENV_PATH: join(tmpdir(), "recycle-container-test-no-such-dockerenv-marker"),
+        ...opts.extraEnv,
+        ...(opts.unsetDockerHost ? { DOCKER_HOST: undefined } : {}),
+        ...(opts.unselectedRegistry ? { RMD_INSTANCE_REGISTRY: undefined, RMD_INSTANCE_REGISTRY_DIGEST: undefined,
+          RMD_INSTANCE_REGISTRY_LAUNCH_BINDING: undefined } : {}),
+      },
+    });
+    assert.deepEqual(github?.calls() ?? [], [], "unexpected GitHub invocation in a host-effect-free fixture");
+  } finally {
+    if (github) rmSync(github.dir, { recursive: true, force: true });
+  }
   let calls: Call[] = [];
   try {
     calls = readFileSync(join(rec, "calls"), "utf8")
@@ -371,7 +409,407 @@ const isStop = (c: Call) => c.bin === "docker" && c.argv[0] === "stop";
 const isRm = (c: Call) => c.bin === "docker" && c.argv[0] === "rm";
 const isRun = (c: Call) => c.bin === "docker" && c.argv[0] === "run";
 
+test("selected registry shared launcher import defines guards without running a recycle", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}registry-library-`));
+  const scriptPath = join(root, "import.sh");
+  try {
+    writeFileSync(scriptPath, `source ${JSON.stringify(SCRIPT)}\ndeclare -F selected_registry_init\n`);
+    const result = runRecycle("good", { scriptPath });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.calls, [], "importing the shared guard must not inspect or mutate a live transport");
+    assert.match(result.stdout, /selected_registry_init/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("selected private recycler refuses unknown input before any transport or public fallback", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}private-recycle-binding-`));
+  const scriptPath = join(root, "deploy", "recycle-container.sh"), prior = process.env.RMD_INSTANCE_REGISTRY;
+  try {
+    for (const dir of ["deploy", ".remudero", "state", "claude", "codex", "config"]) mkdirSync(join(root, dir));
+    writeFileSync(scriptPath, readFileSync(SCRIPT));
+    writeFileSync(join(root, "config", "config.json"), JSON.stringify({ workerProviders: { enabled: ["openweight"], cashFallbackWhenBlocked: true }, dailyCapUsd: 25 }));
+    writeFileSync(join(root, ".remudero", "daemon-instances.yaml"), ["instances:", "  fixture:",
+      "    repo: remudero", "    github_repo: owner/remudero", `    state_dir: ${join(root, "state")}`,
+      "    container_name: remudero-fixture", "    image: test-registry.azurecr.io/remudero:latest",
+      `    claude_dir: ${join(root, "claude")}`, `    codex_dir: ${join(root, "codex")}`,
+      `    container_config_dir: ${join(root, "config")}`, ""].join("\n"));
+    delete process.env.RMD_INSTANCE_REGISTRY;
+    const opts = { scriptPath, args: ["--instance", "fixture"], stateDir: join(root, "state") };
+    const control = runRecycle("good", opts);
+    assert.equal(control.status, 0, control.stderr);
+    assert.ok(control.calls.some(isRun), "healthy unselected public input must reach the contained Docker transport");
+    const fragment = join(root, "fragment.yaml");
+    writeFileSync(fragment, "  fixture:\n    repo: remudero\n");
+    for (const selected of ["", "relative.yaml", join(root, "missing.yaml"), fragment]) {
+      const result = runRecycle("good", { ...opts, extraEnv: { RMD_INSTANCE_REGISTRY: selected } });
+      assert.equal(result.status, 2, result.stderr);
+      assert.match(result.stderr, /selected registry unavailable/);
+      assert.deepEqual(result.calls, [], "unknown selection must not consult or mutate Docker/Azure state");
+    }
+  } finally {
+    if (prior === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = prior;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── ACCEPTANCE 1: no captured credential refuses before mutating anything ───────────────────────
+
+function privateRecyclerFixture(extra: string[] = []) {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-launch-`));
+  for (const dir of ["state", "claude", "codex", "config"]) mkdirSync(join(root, dir));
+  writeFileSync(join(root, "config/config.json"), JSON.stringify({ workerProviders: { enabled: ["openweight"], cashFallbackWhenBlocked: true }, dailyCapUsd: 25 }));
+  const selected = join(root, "private.yaml");
+  writeFileSync(selected, ["instances:", "  fixture:", "    repo: remudero", "    github_repo: owner/remudero", "    mode: shadow",
+    `    state_dir: ${join(root, "state")}`, "    container_name: remudero-private-fixture", "    image: test-registry.azurecr.io/remudero:latest",
+    `    claude_dir: ${join(root, "claude")}`, `    codex_dir: ${join(root, "codex")}`, `    container_config_dir: ${join(root, "config")}`,
+    ...extra.map(field => `    ${field}`), ""].join("\n"), { mode: 0o600 });
+  const runs: Run[] = [];
+  return { root, selected, run(mode: string, serve = false, extraEnv: Record<string, string> = {}, dryRun = false) {
+    const result = runRecycle(mode, { ...(serve ? { scriptPath: join(REPO_ROOT, "deploy/serve-container.sh") } : {}),
+      args: ["--instance", "fixture", ...(serve ? ["--replace"] : []), ...(dryRun ? ["--dry-run"] : [])], stateDir: join(root, "state"), unsetDockerHost: true,
+      forbidHostEffects: true,
+      extraEnv: { RMD_INSTANCE_REGISTRY: selected, RMD_RECYCLE_HOST_LOCK: join(root, "own-recycle.lock"),
+        ...(serve ? { RMD_SERVE_DOCKERENV_PATH: join(root, "no-container-marker"), RMD_SERVE_PORT: "4317",
+          RMD_SERVE_REPO_DIR: join(root, "serve-repo"), RMD_SERVE_BANNER_WAIT_S: "1", RMD_SERVE_BANNER_POLL_S: "1",
+          GH_TOKEN: "private-fixture-not-a-token", RMD_SERVE_REPLACE_ADMISSION: "" } : {}), ...extraEnv } });
+    runs.push(result); return result;
+  }, cleanup() {
+    for (const run of runs) for (const path of [run.fixtureRecordingDir, run.fixtureStubDir]) rmSync(path, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  } };
+}
+
+
+test("private registry selection reaches real host and daemon readers: recorded readonly mount and image reader", async () => {
+  const fixture = privateRecyclerFixture();
+  try {
+    const result = fixture.run("private-good");
+    assert.equal(result.status, 0, result.stderr);
+    const probe = result.calls.findIndex(c => isRun(c) && c.argv.some(a => a.includes("selected-registry-capability-")));
+    const stop = result.calls.findIndex(isStop);
+    assert.ok(probe >= 0 && stop > probe, "a healthy contained image-reader control must precede any stop");
+    const launch = result.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
+    assert.ok(launch, "the positive control reaches the actual final launch argument assembly");
+    assert.ok(launch.argv.includes(`type=bind,src=${fixture.selected},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`));
+    assert.ok(launch.argv.includes("RMD_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"));
+    assert.ok(launch.argv.some(a => /^RMD_INSTANCE_REGISTRY_DIGEST=[a-f0-9]{64}$/.test(a)));
+    const packet = await withInstanceRegistryRuntime(() => trustedInstanceRegistryLaunchPacket(),
+      { envPath: fixture.selected, instanceName: "fixture" });
+    assert.ok(launch.argv.includes(`RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet.split("\n")[4]}`),
+      "the daemon adoption receives the original physical identity, not just equal bytes");
+    assert.equal(launch.argv.includes(`type=bind,src=${fixture.root},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`), false);
+  } finally { fixture.cleanup(); }
+});
+
+test("private registry selection preserves legacy and refuses unknown selected inputs: two consecutive selected launches", () => {
+  const fixture = privateRecyclerFixture(["gh_app_id: 123", "gh_app_installation_id: 456",
+    "gh_app_private_key_path: /home/node/.claude/synthetic-app.pem"]);
+  writeFileSync(join(fixture.root, "claude", "synthetic-app.pem"), "synthetic fixture key\n", { mode: 0o600 });
+  try {
+    const first = fixture.run("private-good");
+    assert.equal(first.status, 0, first.stderr);
+    const launch = first.calls.find(c => isRun(c) && c.argv.includes("-d"))!;
+    const env = [...IMAGE_ENV_LINES, ...launch.argv.flatMap((arg, i) => {
+      if (arg !== "-e") return [];
+      const value = launch.argv[i + 1]!;
+      return [value.includes("=") ? value : `${value}=${DECLARED_RUNTIME_FIXTURE[value] ?? ""}`];
+    })];
+    assert.ok(env.some(line => line.startsWith("RMD_INSTANCE_REGISTRY_FILE_BINDING=")));
+    const previousEnv = join(fixture.root, "previous-env");
+    writeFileSync(previousEnv, env.join("\n") + "\n");
+    const second = fixture.run("private-good", false, { STUB_PREVIOUS_ENV: previousEnv });
+    assert.equal(second.status, 0, second.stderr);
+    const secondLaunch = second.calls.find(c => isRun(c) && c.argv.includes("-d"))!;
+    assert.ok(secondLaunch, "the next recycle must accept its own generated runtime contract");
+    assert.deepEqual(secondLaunch.argv, launch.argv, "unchanged selected evidence renders identical replacement arguments");
+    writeFileSync(previousEnv, env.join("\n") + "\nRMD_INSTANCE_REGISTRY_UNDECLARED=unknown\n");
+    const refused = fixture.run("private-good", false, { STUB_PREVIOUS_ENV: previousEnv });
+    assert.equal(refused.status, 1);
+    assert.equal(refused.calls.some(isStop), false, "recognizing the binding must not admit arbitrary selected runtime names");
+  } finally { fixture.cleanup(); }
+});
+
+test("selected private recycler refuses unsupported image remote namespace and revised binding before stop", () => {
+  for (const mode of ["private-old-image", "private-remote", "private-revised"]) {
+    const fixture = privateRecyclerFixture();
+    try {
+      const result = fixture.run(mode);
+      assert.notEqual(result.status, 0, mode);
+      assert.equal(result.calls.some(isStop), false, `${mode} must leave the outgoing worker container untouched`);
+      assert.equal(result.calls.some(isRm), false);
+      assert.equal(result.calls.some(c => isRun(c) && c.argv.includes("-d")), false);
+      assert.equal(existsSync(join(fixture.root, "state/state/PAUSE")), false, "a preflight refusal leaves no automation pause");
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("private registry selection defaults and falsifiers forbid live effects: real serve assembly", async () => {
+  const fixture = privateRecyclerFixture();
+  try {
+    const result = fixture.run("private-good", true);
+    assert.equal(result.status, 0, result.stderr);
+    const probe = result.calls.findIndex(c => isRun(c) && c.argv.some(a => a.includes("selected-registry-capability-")));
+    assert.ok(probe >= 0 && result.calls.findIndex(isStop) > probe);
+    const launch = result.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
+    assert.ok(launch.argv.includes(`type=bind,src=${fixture.selected},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`));
+    assert.ok(launch.argv.includes("RMD_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"));
+    assert.ok(launch.argv.includes("sha256:PULLEDID"), "the launched image must be the immutable qualified image, not a moving tag");
+    const packet = await withInstanceRegistryRuntime(() => trustedInstanceRegistryLaunchPacket(),
+      { envPath: fixture.selected, instanceName: "fixture" });
+    assert.ok(launch.argv.includes(`RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet.split("\n")[4]}`));
+  } finally { fixture.cleanup(); }
+});
+
+test("private registry selection defaults and falsifiers forbid live effects: final launch binding survives the stop wait", () => {
+  for (const serve of [false, true]) {
+    const fixture = privateRecyclerFixture();
+    try {
+      const result = fixture.run("private-final-revised", serve);
+      assert.equal(result.status, 2, result.stderr);
+      assert.ok(result.calls.some(isStop), "the synthetic revision occurs after image qualification at the recorded stop");
+      assert.equal(result.calls.some(c => isRun(c) && c.argv.includes("-d")), false,
+        "the final binding check must refuse the original argument snapshot after the wait");
+      assert.equal(result.calls.some(c => c.bin === "forbidden"), false);
+      assert.equal((result.stdout + result.stderr).includes(fixture.root), false);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+// Delete actual production mechanisms in isolated copies, then run frozen behavioral proofs.
+test("private registry selection defaults and falsifiers forbid live effects: recorded independent production deletions", { timeout: 600000 }, t => {
+  const prefix = "private registry selection defaults and falsifiers forbid live effects";
+  const cases = [
+    { name: "default selection", source: "src/lib/instance-mode.ts", suite: "test/shadow-instance-safety.test.ts",
+      title: prefix, deletion: '  const selected = runtimeInstanceRegistryText();\n  if (selected !== undefined) return selected;\n',
+      failure: "the actual default reads selected bytes" },
+    { name: "daemon final binding", source: "src/lib/instance-mode.ts", suite: "test/shadow-instance-safety.test.ts",
+      title: "selected runtime changed binding is rechecked at the real final arm observer seam",
+      deletion: "  if (runtimeInstanceRegistryText() !== undefined) await assertInstanceRegistryRuntimeCurrent();\n",
+      failure: "Missing expected rejection" },
+    { name: "recycler launch forwarding", source: "deploy/recycle-container.sh", suite: "test/recycle-container.test.ts",
+      title: "private registry selection reaches real host and daemon readers: recorded readonly mount and image reader",
+      deletion: '  "${SELECTED_REGISTRY_LAUNCH_ARGS[@]+"${SELECTED_REGISTRY_LAUNCH_ARGS[@]}"}"\n',
+      failure: "launch.argv.includes" },
+    { name: "serve launch forwarding", source: "deploy/serve-container.sh", suite: "test/recycle-container.test.ts",
+      title: `${prefix}: real serve assembly`,
+      deletion: '  "${SELECTED_REGISTRY_LAUNCH_ARGS[@]+"${SELECTED_REGISTRY_LAUNCH_ARGS[@]}"}"\n',
+      failure: "launch.argv.includes" },
+    { name: "recycler final binding", source: "deploy/recycle-container.sh", suite: "test/recycle-container.test.ts",
+      title: `${prefix}: final launch binding survives the stop wait`,
+      deletion: 'selected_registry_recheck\nselected_registry_mounts "${DOCKER_RUN_ARGS[@]}"',
+      replacement: 'selected_registry_mounts "${DOCKER_RUN_ARGS[@]}"', failure: "ERR_ASSERTION" },
+    { name: "serve final binding", source: "deploy/serve-container.sh", suite: "test/recycle-container.test.ts",
+      title: `${prefix}: final launch binding survives the stop wait`,
+      deletion: 'if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then selected_registry_recheck; fi\n',
+      failure: "ERR_ASSERTION" },
+  ];
+  const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+  for (const control of cases) {
+    const sandbox = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}registry-deletion-`));
+    try {
+      for (const dir of ["src", "deploy", "test/helpers", "test/setup"]) {
+        cpSync(join(REPO_ROOT, dir), join(sandbox, dir), { recursive: true });
+      }
+      for (const file of ["package.json", "tsconfig.json", "test/shadow-instance-safety.test.ts", "test/recycle-container.test.ts"]) {
+        cpSync(join(REPO_ROOT, file), join(sandbox, file));
+      }
+      for (const dir of ["node_modules", "scripts", "packages", "plan", "settings"]) symlinkSync(join(REPO_ROOT, dir), join(sandbox, dir), "dir");
+      const scratch = join(sandbox, "scratch");
+      mkdirSync(scratch);
+      const sourcePath = join(sandbox, control.source), suitePath = join(sandbox, control.suite);
+      const original = readFileSync(sourcePath), frozenSuite = readFileSync(suitePath);
+      const originalDigest = digest(original), suiteDigest = digest(frozenSuite);
+      const text = original.toString("utf8");
+      assert.equal(text.split(control.deletion).length, 2, `${control.name}: exactly one production deletion target`);
+      const removed = Buffer.from(text.replace(control.deletion, control.replacement ?? ""));
+      assert.notEqual(digest(removed), originalDigest);
+      assert.equal(readFileSync(join(REPO_ROOT, control.source)).equals(original), true);
+      const invoke = (phase: "intact" | "deleted" | "restored") => {
+        assert.equal(readFileSync(suitePath).equals(frozenSuite), true, "assertions stay byte identical across all three phases");
+        const pattern = `^${control.title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+        const args = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
+          "--test-name-pattern", pattern, control.suite];
+        const result = spawnSync(process.execPath, args, { cwd: sandbox, encoding: "utf8", timeout: 60000,
+          maxBuffer: 4 * 1024 * 1024, env: { ...process.env, TMPDIR: scratch, NODE_TEST_CONTEXT: undefined } });
+        const tap = result.stdout + result.stderr;
+        t.diagnostic(JSON.stringify({ control: control.name, phase, source: control.source,
+          sourceDigest: digest(readFileSync(sourcePath)), suiteDigest, args, status: result.status,
+          signal: result.signal, error: result.error?.message, tap }));
+        assert.equal(result.error, undefined, `${control.name}/${phase}: setup or capacity is not a behavioral result`);
+        assert.equal(result.signal, null, tap);
+        assert.match(tap, /^# tests 1$/m, `${control.name}/${phase}: the frozen title must really execute`);
+        assert.ok(tap.includes(`- ${control.title}`), tap);
+        if (phase === "deleted") {
+          assert.equal(result.status, 1, tap);
+          assert.match(tap, /^# fail 1$/m);
+          assert.match(tap, /ERR_ASSERTION/, "a loader or missing fixture failure cannot kill a deletion");
+          assert.ok(tap.includes(control.failure), tap);
+        } else {
+          assert.equal(result.status, 0, tap);
+          assert.match(tap, /^# fail 0$/m);
+          assert.match(tap, /^# pass 1$/m);
+        }
+      };
+      invoke("intact");
+      try {
+        writeFileSync(sourcePath, removed);
+        invoke("deleted");
+      } finally {
+        writeFileSync(sourcePath, original);
+        assert.equal(readFileSync(sourcePath).equals(original), true, "restore the exact source bytes, including on failure");
+      }
+      invoke("restored");
+      assert.equal(digest(readFileSync(sourcePath)), originalDigest);
+      assert.equal(readFileSync(join(REPO_ROOT, control.source)).equals(original), true, "the current head is never mutated");
+    } finally { rmSync(sandbox, { recursive: true, force: true }); }
+  }
+});
+
+test("private registry selection defaults and falsifiers forbid live effects: real image identity and catches", () => {
+  for (const serve of [false, true]) for (const mode of ["private-alias", "private-replaced", "private-lost-binding", "private-marker-only", "private-probe-fail"]) {
+    const fixture = privateRecyclerFixture();
+    try {
+      const result = fixture.run(mode, serve);
+      assert.equal(result.status, 2, `${mode}: ${result.stderr}`);
+      assert.ok(result.calls.some(c => isRun(c) && c.argv.includes("--rm")), "the real bounded probe ran");
+      assert.equal(result.calls.some(c => isStop(c) || isRm(c) || (isRun(c) && c.argv.includes("-d"))), false,
+        "an unqualified physical mapping or failed reader cannot reach replacement effects");
+      assert.equal(result.calls.some(c => c.bin === "forbidden"), false, "GitHub, git, service and installer effects stay trapped");
+      assert.ok(result.calls.filter(c => c.bin === "az").every(c => c.argv.join(" ") === "acr login -n test-registry"),
+        "only the contained synthetic login transport may run before the image probe");
+      assert.equal((result.stdout + result.stderr).includes(fixture.root), false);
+      assert.equal(existsSync(join(fixture.root, "state/state/PAUSE")), false);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("private registry selection defaults and falsifiers forbid live effects: hostile paths remain single shell arguments", () => {
+  const fixture = privateRecyclerFixture();
+  try {
+    const selected = join(fixture.root, "private '$(touch forbidden-host-effect)' [opaque].yaml");
+    writeFileSync(selected, readFileSync(fixture.selected), { mode: 0o600 });
+    const result = fixture.run("private-good", true, { RMD_INSTANCE_REGISTRY: selected });
+    assert.equal(result.status, 0, result.stderr);
+    const launch = result.calls.find(c => isRun(c) && c.argv.includes("-d"))!;
+    assert.ok(launch.argv.includes(`type=bind,src=${selected},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`));
+    assert.equal(result.calls.some(c => c.bin === "forbidden"), false);
+    assert.equal(existsSync(join(REPO_ROOT, "forbidden-host-effect")), false);
+    assert.equal((result.stdout + result.stderr).includes(selected), false);
+    for (const invalid of ["private,alias.yaml", "private\nalias.yaml"]) {
+      const path = join(fixture.root, invalid); writeFileSync(path, readFileSync(fixture.selected));
+      const refused = fixture.run("private-good", true, { RMD_INSTANCE_REGISTRY: path });
+      assert.equal(refused.status, 2); assert.deepEqual(refused.calls, []);
+    }
+  } finally { fixture.cleanup(); }
+});
+
+test("selected private serve refuses missing capability namespace or explicit selection before stop", () => {
+  for (const mode of ["private-old-image", "private-remote", "private-revised", "private-empty"]) {
+    const fixture = privateRecyclerFixture();
+    try {
+      const result = fixture.run(mode, true, mode === "private-empty" ? { RMD_INSTANCE_REGISTRY: "" } : {});
+      assert.notEqual(result.status, 0, mode);
+      assert.equal(result.calls.some(isStop), false, mode);
+      assert.equal(result.calls.some(isRm), false);
+      assert.equal(result.calls.some(c => isRun(c) && c.argv.includes("-d")), false);
+      if (mode === "private-empty") {
+        assert.deepEqual(result.calls, []); assert.match(result.stderr, /selected registry unavailable/);
+      }
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("selected private launcher diagnostics hide operational values including dry-run arguments", () => {
+  for (const [serve, dryRun] of [[false, false], [true, false], [true, true]]) {
+    const fixture = privateRecyclerFixture();
+    try {
+      const result = fixture.run("private-good", serve, {}, dryRun);
+      assert.equal(result.status, 0, result.stderr);
+      const publicOutput = result.stdout + result.stderr;
+      for (const privateValue of [fixture.root, "remudero-private-fixture", "test-registry.azurecr.io/remudero:latest"]) {
+        assert.equal(publicOutput.includes(privateValue), false, "public diagnostics are not a private-file disclosure channel");
+      }
+      assert.match(publicOutput, /selected.*(lifecycle|registry)/);
+      if (dryRun) assert.equal(result.calls.some(c => isStop(c) || (isRun(c) && c.argv.includes("-d"))), false);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("selected private file is refused when a broad runtime mount would expose a second path", () => {
+  for (const serve of [false, true]) {
+    const fixture = privateRecyclerFixture();
+    try {
+      const alias = join(fixture.root, "state", "other-private-path.yaml");
+      writeFileSync(alias, readFileSync(fixture.selected), { mode: 0o600 });
+      const result = fixture.run("private-good", serve, { RMD_INSTANCE_REGISTRY: alias });
+      assert.notEqual(result.status, 0);
+      assert.equal(result.calls.some(isStop), false, "the exact-file denial must not be bypassable through a preexisting broad state mount");
+      assert.equal(result.calls.some(c => isRun(c) && c.argv.includes("-d")), false);
+      assert.equal((result.stdout + result.stderr).includes(fixture.root), false);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("selected private recycler preserves configured app and heap fields after image qualification", () => {
+  const fixture = privateRecyclerFixture(["gh_app_id: 4648213", "gh_app_installation_id: 155256285",
+    "gh_app_private_key_path: /home/node/.claude/rmd-app.pem", "max_old_space_mb: 4096"]);
+  try {
+    const result = fixture.run("private-good");
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(runEnvValues(result, "GH_APP_ID"), ["4648213"]);
+    assert.deepEqual(runEnvValues(result, "GH_APP_INSTALLATION_ID"), ["155256285"]);
+    assert.deepEqual(runEnvValues(result, "GH_APP_PRIVATE_KEY_PATH"), ["/home/node/.claude/rmd-app.pem"]);
+    assert.deepEqual(runEnvValues(result, "NODE_OPTIONS"), ["--max-old-space-size=4096 --max-semi-space-size=16"]);
+    assert.deepEqual(runEnvValues(result, "RMD_SHADOW_MODE"), [], "reading existing mode does not authorize activation");
+  } finally { fixture.cleanup(); }
+});
+
+test("selected private shared guards cover mount aliases unknown syntax and diagnostic completion", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-shared-guards-`));
+  const selected = join(root, "private.yaml"), safe = join(root, "safe"), alias = join(root, "alias");
+  mkdirSync(safe); writeFileSync(selected, "synthetic-private-canary\n", { mode: 0o600 });
+  symlinkSync(root, alias, "dir");
+  const run = (command: string, args: string[], input = "") => spawnSync("bash", ["-c",
+    'source "$1"; SELECTED_REGISTRY_ACTIVE=1; SELECTED_REGISTRY_CALLER=fixture; SELECTED_REGISTRY_HOST_FILE="$2"; ' +
+      'SELECTED_REGISTRY_CONTAINER_FILE=/private-selected.yaml; SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION=fixture-end-frame; shift 2; ' + command,
+    "fixture", SCRIPT, selected, ...args], { cwd: REPO_ROOT, encoding: "utf8", input, timeout: 10000 });
+  try {
+    const healthy = run('selected_registry_mounts "$@"', ["-v", `${safe}:/safe`, "--mount", `type=bind,src=${selected},dst=/private-selected.yaml,readonly`]);
+    assert.equal(healthy.status, 0, healthy.stderr);
+    for (const mounts of [["-v", `${root}:/broad`], ["-v", `${alias}:/symlinked-broad`], ["-v", `${selected}:/second-name:ro`],
+      ["-v", "named-volume:/other"], ["-v"], ["--mount", "type=volume,src=named,dst=/other"]]) {
+      const result = run('selected_registry_mounts "$@"', mounts);
+      assert.equal(result.status, 2, JSON.stringify(mounts));
+      assert.match(result.stderr, /mount_alias_unknown/);
+      assert.equal((result.stdout + result.stderr).includes(root), false);
+    }
+    const complete = run("selected_registry_diagnostic_filter", [], "synthetic-private-canary\nfixture-end-frame\nafter-completion-private\n");
+    assert.equal(complete.status, 0, complete.stderr);
+    assert.match(complete.stdout, /private details withheld/);
+    assert.doesNotMatch(complete.stdout, /synthetic-private-canary|fixture-end-frame|after-completion-private/);
+    const missing = run("selected_registry_diagnostic_filter", [], "synthetic-private-canary\n");
+    assert.equal(missing.status, 2, "EOF without the owned completion frame is not a certified diagnostic stream");
+    const unavailable = run("TMPDIR=/nonexistent/selected-diagnostic-fixture; selected_registry_diagnostics", []);
+    assert.equal(unavailable.status, 2);
+    assert.match(unavailable.stderr, /diagnostics unavailable; no operation started/);
+    assert.equal((unavailable.stdout + unavailable.stderr).includes(root), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("private registry selection preserves owner holds and private-safe boundaries: independent host pause and stop", () => {
+  const fixture = privateRecyclerFixture(), state = join(fixture.root, "state", "state");
+  mkdirSync(state);
+  const pause = JSON.stringify({ reason: "owner hold", pid: 4242, host: "owner" });
+  writeFileSync(join(state, "PAUSE"), pause); writeFileSync(join(state, "STOP"), "owner STOP remains authoritative\n");
+  try {
+    const result = fixture.run("private-good");
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(state, "PAUSE"), "utf8"), pause);
+    assert.equal(readFileSync(join(state, "STOP"), "utf8"), "owner STOP remains authoritative\n");
+    assert.equal((result.stdout + result.stderr).includes(fixture.root), false);
+    assert.deepEqual(runEnvValues(result, "RMD_SHADOW_MODE"), []);
+  } finally { fixture.cleanup(); }
+});
 
 test("W1-T1010: a recycle with no captured credential refuses before mutating", () => {
   const run = runRecycle("no-token");
@@ -1211,10 +1649,20 @@ function runInstance(extra: string[], mode = "good", opts: RunOpts = {}): Run {
   const root = opts.instanceRoot ?? mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-instance-`));
   const dirs = { state: join(root, "state"), claude: join(root, "claude"), codex: join(root, "codex"), config: join(root, "config") };
   for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
-  const registry = join(root, "daemon-instances.yaml");
+  // These pre-existing tests exercise the unselected public grammar and exact legacy lifecycle.
+  // Private selection now has independent image/identity checks, covered by the selected fixtures above.
+  const scriptPath = opts.scriptPath ?? join(root, "deploy", "recycle-container.sh");
+  const scriptRoot = join(dirname(scriptPath), "..");
+  assert.notEqual(resolve(scriptRoot), resolve(REPO_ROOT), "never write a fixture registry into the maintained checkout");
+  mkdirSync(dirname(scriptPath), { recursive: true });
+  if (!opts.scriptPath) cpSync(join(REPO_ROOT, "deploy"), dirname(scriptPath), { recursive: true });
+  mkdirSync(join(scriptRoot, ".remudero"), { recursive: true });
+  const registry = join(scriptRoot, ".remudero", "daemon-instances.yaml");
   const record = [
+    "instances:",
     "  fixture:",
     "    repo: remudero",
+    "    github_repo: owner/remudero",
     `    state_dir: ${dirs.state}`,
     "    container_name: remudero-fixture",
     "    image: test-registry.azurecr.io/remudero:latest",
@@ -1226,16 +1674,18 @@ function runInstance(extra: string[], mode = "good", opts: RunOpts = {}): Run {
   writeFileSync(registry, `${record.join("\n")}\n`);
   return runRecycle(mode, {
     ...opts,
+    scriptPath,
+    unselectedRegistry: true,
     args: ["--instance", "fixture"],
     stateDir: dirs.state,
-    extraEnv: { RMD_INSTANCE_REGISTRY: registry, RMD_CLAUDE_DIR: dirs.claude, RMD_CODEX_DIR: dirs.codex, RMD_CONTAINER_CONFIG_DIR: dirs.config,
+    extraEnv: { RMD_CLAUDE_DIR: dirs.claude, RMD_CODEX_DIR: dirs.codex, RMD_CONTAINER_CONFIG_DIR: dirs.config,
       RMD_RECYCLE_HOST_LOCK: join(root, "host-recycle.lock"), RMD_RECYCLE_LOCK_WAIT_S: "2", ...opts.extraEnv },
   });
 }
 
 /** The `-e NAME=VALUE` values the `docker run` was given for NAME, in order. */
 function runEnvValues(run: Run, name: string): string[] {
-  const argv = run.calls.find(isRun)?.argv ?? [];
+  const argv = run.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)?.argv ?? [];
   return argv.flatMap((a, i) => (argv[i - 1] === "-e" && a.startsWith(`${name}=`) ? [a.slice(name.length + 1)] : []));
 }
 
@@ -1439,4 +1889,67 @@ test("lifecycle mode grammar falsifiers exercise the real script arms: recycler"
   }
   writeFileSync(script, source);
   assert.equal(modeRecycle(t, ["mode: live"], { scriptPath: script }).status, 0);
+});
+
+test("selected diagnostic stream healthy completion remains private and closes its owned files", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-diagnostic-control-`));
+  const scratch = join(root, "tmp"), bin = join(root, "bin"), effects = join(root, "forbidden-effects");
+  mkdirSync(scratch); mkdirSync(bin);
+  for (const name of ["docker", "az", "systemctl", "sudo", "git", "ssh", "curl"]) {
+    writeFileSync(join(bin, name), '#!/bin/sh\nprintf "FORBIDDEN_EXTERNAL_EFFECT\\n" >> "$DIAGNOSTIC_FORBIDDEN_LOG"\nexit 97\n', { mode: 0o700 });
+  }
+  let closed = false;
+  try {
+    const result = spawnSync("bash", ["-c", [
+      'source "$1"',
+      "SELECTED_REGISTRY_ACTIVE=1; SELECTED_REGISTRY_CALLER=fixture",
+      "selected_registry_diagnostics",
+      "( selected_registry_cleanup_diagnostics 0 )",
+      '[ -d "${SELECTED_REGISTRY_DIAGNOSTIC_DIR}" ] || exit 98',
+      "printf 'synthetic-private-diagnostic-canary\\n'",
+      "selected_registry_finish_diagnostics 0",
+    ].join("\n"), "fixture", SCRIPT], {
+      cwd: REPO_ROOT, encoding: "utf8", timeout: 10000,
+      env: { ...process.env, HOME: root, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`, DIAGNOSTIC_FORBIDDEN_LOG: effects },
+    });
+    closed = result.status !== null && result.signal === null && result.error === undefined;
+    assert.equal(closed, true, "a fixture that did not close retains its private directory");
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout + result.stderr, /private details withheld/);
+    assert.doesNotMatch(result.stdout + result.stderr, /synthetic-private-diagnostic-canary/);
+    assert.equal(existsSync(effects), false, "loading and completing diagnostics invokes no external effect");
+    assert.deepEqual(readdirSync(scratch), [], "real completion removes the owned FIFO and directory");
+  } finally { if (closed) rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const [title, failSetup] of [
+  ["selected diagnostic EXIT cleanup removes a directory allocated by a failing mktemp command", 'mktemp() { command mktemp "$@"; return 91; }'],
+  ["selected diagnostic EXIT cleanup removes its directory after FIFO creation fails", 'mkfifo() { return 91; }'],
+  ["selected diagnostic EXIT cleanup closes descriptors when completion identity is unavailable", 'node() { return 91; }'],
+] as const) test(title, () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-diagnostic-failed-allocation-`));
+  const scratch = join(root, "tmp"), bin = join(root, "bin"), effects = join(root, "forbidden-effects");
+  mkdirSync(scratch); mkdirSync(bin);
+  for (const name of ["docker", "az", "systemctl", "sudo", "git", "ssh", "curl"]) {
+    writeFileSync(join(bin, name), '#!/bin/sh\nprintf "FORBIDDEN_EXTERNAL_EFFECT\\n" >> "$DIAGNOSTIC_FORBIDDEN_LOG"\nexit 97\n', { mode: 0o700 });
+  }
+  let closed = false;
+  try {
+    const result = spawnSync("bash", ["-c", [
+      'source "$1"',
+      "SELECTED_REGISTRY_ACTIVE=1; SELECTED_REGISTRY_CALLER=fixture",
+      // Exercise the real setup arm; refused setup starts no lifecycle operation.
+      failSetup,
+      "if selected_registry_diagnostics; then exit 99; else exit 2; fi",
+    ].join("\n"), "fixture", SCRIPT], {
+      cwd: REPO_ROOT, encoding: "utf8", timeout: 10000,
+      env: { ...process.env, HOME: root, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`, DIAGNOSTIC_FORBIDDEN_LOG: effects },
+    });
+    closed = result.status !== null && result.signal === null && result.error === undefined;
+    assert.equal(closed, true, "a fixture that did not close retains its private directory");
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /diagnostics unavailable; no operation started/);
+    assert.equal(existsSync(effects), false, "an allocation refusal starts no external operation");
+    assert.deepEqual(readdirSync(scratch), [], "EXIT cleanup owns an allocation even before a filter PID exists");
+  } finally { if (closed) rmSync(root, { recursive: true, force: true }); }
 });

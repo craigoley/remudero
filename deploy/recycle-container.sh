@@ -1,4 +1,287 @@
 #!/usr/bin/env bash
+# Shared selected-registry guards only when sourced; ordinary execution still reaches the full lifecycle below.
+selected_registry_refuse() {
+  local reason="${1:-reader_unavailable}"
+  case "$reason" in ""|*[!a-z_]*) reason=reader_unavailable ;; esac
+  echo "${SELECTED_REGISTRY_CALLER:-launcher}: REFUSING -- selected registry unavailable (${reason})." >&2
+  return 2
+}
+selected_registry_packet() (
+  cd "${SELECTED_REGISTRY_READER_ROOT}" || exit 2
+  export RMD_INSTANCE_REGISTRY="${SELECTED_REGISTRY_INPUT}"
+  if [ -n "${SELECTED_REGISTRY_DIGEST}" ]; then export RMD_INSTANCE_REGISTRY_DIGEST="${SELECTED_REGISTRY_DIGEST}"; fi
+  node --import tsx --input-type=module -e '
+    const {pathToFileURL}=await import("node:url");
+    try {
+      const m=await import(pathToFileURL(process.argv[1]).href);
+      await m.withInstanceRegistryRuntime(()=>process.stdout.write(m.trustedInstanceRegistryLaunchPacket()),
+        {envPath:process.env.RMD_INSTANCE_REGISTRY,instanceName:process.argv[2],expectedDigest:process.env.RMD_INSTANCE_REGISTRY_DIGEST});
+    } catch(error) {
+      const reason=error?.details?.reason;
+      process.stdout.write(typeof reason==="string" && /^[a-z_]+$/.test(reason) ? reason : "reader_unavailable");
+      process.exitCode=2;
+    }
+  ' "${SELECTED_REGISTRY_READER_ROOT}/src/lib/instance-registry-selection.ts" "${SELECTED_REGISTRY_NAME}" 2>/dev/null
+)
+selected_registry_recheck() {
+  [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
+  local current
+  if ! current="$(selected_registry_packet)"; then selected_registry_refuse "$current"; return 2; fi
+  if [ "$(printf '%s\n' "$current" | sed -n '1,5p')" != "$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '1,5p')" ]; then
+    selected_registry_refuse revision_changed; return 2
+  fi
+}
+selected_registry_init() {
+  SELECTED_REGISTRY_READER_ROOT="$1"
+  SELECTED_REGISTRY_NAME="$2"
+  SELECTED_REGISTRY_CALLER="$3"
+  SELECTED_REGISTRY_ACTIVE=0
+  SELECTED_REGISTRY_INPUT="${RMD_INSTANCE_REGISTRY-}"
+  SELECTED_REGISTRY_DIGEST="${RMD_INSTANCE_REGISTRY_DIGEST-}"
+  SELECTED_REGISTRY_PACKET=""
+  SELECTED_REGISTRY_TEXT=""
+  SELECTED_REGISTRY_HOST_FILE=""
+  SELECTED_REGISTRY_CONTAINER_FILE="/home/node/.config/remudero/selected-registry.yaml"
+  SELECTED_REGISTRY_LAUNCH_ARGS=()
+  if [ "${RMD_INSTANCE_REGISTRY+x}" = x ]; then
+    SELECTED_REGISTRY_ACTIVE=1
+    [ -n "${SELECTED_REGISTRY_NAME}" ] || { selected_registry_refuse instance_missing; return 2; }
+    if [ "${RMD_INSTANCE_REGISTRY_DIGEST+x}" = x ] && { [ "${#SELECTED_REGISTRY_DIGEST}" -ne 64 ] || [[ "${SELECTED_REGISTRY_DIGEST}" == *[!a-f0-9]* ]]; }; then
+      selected_registry_refuse invalid_digest; return 2
+    fi
+    if ! SELECTED_REGISTRY_PACKET="$(selected_registry_packet)"; then selected_registry_refuse "${SELECTED_REGISTRY_PACKET}"; return 2; fi
+    if [ "${#SELECTED_REGISTRY_PACKET}" -gt 400000 ] || [ "$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '1p')" != rmd-private-registry-v1 ]; then
+      selected_registry_refuse unsupported_reader; return 2
+    fi
+    SELECTED_REGISTRY_HOST_FILE="$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '2p')"
+    SELECTED_REGISTRY_DIGEST="$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '3p')"
+    if [ "${RMD_INSTANCE_REGISTRY_LAUNCH_BINDING+x}" = x ] && [ "${RMD_INSTANCE_REGISTRY_LAUNCH_BINDING}" != "$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '4p')" ]; then
+      selected_registry_refuse revision_changed; return 2
+    fi
+    if ! SELECTED_REGISTRY_TEXT="$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '6p' | node -e 'process.stdout.write(Buffer.from(require("node:fs").readFileSync(0,"utf8").trim(),"base64"))')"; then
+      selected_registry_refuse packet_unreadable; return 2
+    fi
+    SELECTED_REGISTRY_LAUNCH_ARGS=(--mount "type=bind,src=${SELECTED_REGISTRY_HOST_FILE},dst=${SELECTED_REGISTRY_CONTAINER_FILE},readonly"
+      -e "RMD_INSTANCE_REGISTRY=${SELECTED_REGISTRY_CONTAINER_FILE}" -e "RMD_INSTANCE_REGISTRY_DIGEST=${SELECTED_REGISTRY_DIGEST}"
+      -e "RMD_INSTANCE_REGISTRY_FILE_BINDING=$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '5p')"
+      -e "RMD_INSTANCE_NAME=${SELECTED_REGISTRY_NAME}")
+  fi
+}
+selected_registry_docker_read() {
+  node --input-type=module -e '
+    const {execFile}=await import("node:child_process");
+    execFile("docker",process.argv.slice(1),{timeout:10000,killSignal:"SIGKILL",maxBuffer:65536},(error,out)=>{
+      if(error) process.exitCode=2; else process.stdout.write(out);
+    });
+  ' "$@" 2>/dev/null
+}
+selected_registry_mounts() {
+  [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
+  if ! node --input-type=module -e '
+    import {realpath} from "node:fs/promises"; import {dirname,resolve,isAbsolute,relative} from "node:path";
+    const [selected,destination,...args]=process.argv.slice(1), timer=setTimeout(()=>process.exit(2),5000);
+    const canonical=async p=>{try{return await realpath(p);}catch(error){
+      if(error.code!=="ENOENT"||dirname(p)===p) throw error;
+      return resolve(await canonical(dirname(p)),relative(dirname(p),p));
+    }};
+    try {
+      if(args.length>1024) throw Error(); const file=await realpath(selected);
+      for(let i=0;i<args.length;i++){
+        let source,target;
+        if(args[i]==="-v"||args[i]==="--volume"){
+          const parts=args[++i]?.split(":"); if(!parts||parts.length<2||parts.length>3) throw Error();
+          [source,target]=parts;
+        } else if(args[i]==="--mount"){
+          const fields=Object.fromEntries(args[++i]?.split(",").map(p=>{const j=p.indexOf("=");return j<0?[p,""]:[p.slice(0,j),p.slice(j+1)];})??[]);
+          if(fields.type!=="bind") throw Error(); source=fields.src??fields.source; target=fields.dst??fields.destination??fields.target;
+          if(source===selected&&target===destination&&Object.hasOwn(fields,"readonly")) continue;
+        } else continue;
+        if(!source||!target||!isAbsolute(source)) throw Error();
+        const root=await canonical(source), rel=relative(root,file);
+        if(rel===""||(!rel.startsWith("../")&&rel!==".."&&!isAbsolute(rel))) throw Error();
+      }
+    } catch {process.exitCode=2;} finally {clearTimeout(timer);}
+  ' "${SELECTED_REGISTRY_HOST_FILE}" "${SELECTED_REGISTRY_CONTAINER_FILE}" "$@" 2>/dev/null; then
+    selected_registry_refuse mount_alias_unknown; return 2
+  fi
+}
+selected_registry_planned_mounts() {
+  [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
+  if [ "${SELECTED_REGISTRY_CALLER}" = recycle-container ]; then
+    local -a planned
+    planned=("${SELECTED_REGISTRY_BROAD_MOUNT_ARGS[@]}")
+    if [ -f "${SCRIPT_DIR:-}/codex-sessions-mount.sh" ]; then
+      . "${SCRIPT_DIR}/codex-sessions-mount.sh"
+      if codex_sessions_plan "${STATE_DIR}"; then planned+=("${CODEX_SESSIONS_ARGS[@]}"); fi
+    fi
+    if command -v scratch_plan >/dev/null 2>&1 && scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}"; then
+      planned+=("${SCRATCH_ARGS[@]}")
+    fi
+    selected_registry_mounts "${planned[@]}"
+  else
+    selected_registry_mounts "${SELECTED_REGISTRY_BROAD_MOUNT_ARGS[@]}"
+  fi
+}
+selected_registry_image() {
+  [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
+  local endpoint probe image="$1"
+  selected_registry_recheck || return 2
+  selected_registry_planned_mounts || return 2
+  if [ "${DOCKER_HOST+x}" = x ]; then
+    endpoint="${DOCKER_HOST}"
+  elif ! endpoint="$(selected_registry_docker_read context inspect --format '{{.Endpoints.docker.Host}}')"; then
+    selected_registry_refuse namespace_unknown; return 2
+  fi
+  case "$endpoint" in unix:///*) : ;; *) selected_registry_refuse namespace_unknown; return 2 ;; esac
+  if ! probe="$(selected_registry_docker_read run --rm --network none --pull never --user 1000:1000 \
+    "${SELECTED_REGISTRY_LAUNCH_ARGS[@]}" --entrypoint node -w /app "$image" --import tsx --input-type=module -e '
+      try {
+        const m=await import("./src/lib/instance-registry-selection.ts");
+        if(m.INSTANCE_REGISTRY_FILE_BINDING_VERSION!==1) throw Error();
+        await m.withInstanceRegistryRuntime(async()=>{
+          const packet=m.trustedInstanceRegistryLaunchPacket(); await m.assertInstanceRegistryRuntimeCurrent();
+          process.stdout.write("selected-registry-capability-v2\n"+packet.split("\n")[4]);
+        });
+      } catch { process.exitCode=2; }
+    ')"; then
+    selected_registry_refuse image_reader_unknown; return 2
+  fi
+  [ "$probe" = "$(printf 'selected-registry-capability-v2\n%s' "$(printf '%s\n' "${SELECTED_REGISTRY_PACKET}" | sed -n '5p')")" ] || {
+    selected_registry_refuse image_reader_unknown; return 2;
+  }
+  selected_registry_recheck
+}
+selected_registry_diagnostic_filter() {
+  node --input-type=module -e '
+    const caller=process.argv[1], completion=process.argv[2]; let pending="", count=0, completed=false;
+    const reasons=new Set(["missing","not_regular","oversized","revision_changed","lstat_failed","open_failed","stat_failed",
+      "read_failed","close_failed","cancelled","timeout","invalid_encoding","malformed","digest_mismatch","file_identity_unqualified",
+      "invalid_path","invalid_bounds","invalid_digest","invalid_file_binding","unsupported_contract","unsupported_capability","unsupported_field",
+      "instance_missing","invalid_instance","target_missing_or_mismatched","unsupported_mount_path","reader_unavailable",
+      "unsupported_reader","packet_unreadable","namespace_unknown","image_reader_unknown","mount_alias_unknown"]);
+    const emit=line=>{ if(count++<64) process.stdout.write(caller+": "+line+"\n"); };
+    const line=text=>{
+      const reason=/REFUSING -- selected registry unavailable \(([a-z_]+)\)[.]$/.exec(text)?.[1];
+      if(reason && reasons.has(reason)) emit("REFUSING -- selected registry unavailable ("+reason+").");
+      else if(text.includes("REFUSING")||text.includes("FAILED")) emit("selected lifecycle reported refusal/failure (private details withheld).");
+      else if(text.includes("--dry-run")) emit("selected lifecycle dry-run; image capability and live effects NOT RUN.");
+      else if(text.trim()) emit("selected lifecycle diagnostic (private details withheld).");
+    };
+    for await(const chunk of process.stdin){pending+=chunk.toString("utf8");let end;
+      while((end=pending.indexOf("\n"))>=0){const text=pending.slice(0,end);pending=pending.slice(end+1);
+        if(text===completion){completed=true;break;} line(text);}
+      if(completed) break;
+      if(pending.length>8192){pending="";emit("selected lifecycle oversized diagnostic withheld.");}
+    }
+    if(!completed){if(pending) line(pending);process.exitCode=2;}
+  ' "${SELECTED_REGISTRY_CALLER}" "${SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION}" 2>/dev/null
+}
+selected_registry_cleanup_diagnostics() {
+  local status="${1:-$?}" failed=0
+  [ "${SELECTED_REGISTRY_ACTIVE:-0}" = 1 ] || return 0
+  [ "${BASH_SUBSHELL}" = "${SELECTED_REGISTRY_DIAGNOSTIC_OWNER}" ] || return 0
+  if [ "${SELECTED_REGISTRY_CALLER}" = recycle-container ] && declare -F commission_on_exit >/dev/null; then
+    if [ "${SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED:-0}" = 1 ]; then commission_on_exit;
+    else commission_on_exit >/dev/null 2>&1; fi
+  fi
+  if [ -n "${SELECTED_REGISTRY_DIAGNOSTIC_PID:-}" ]; then
+    if [ "${SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED:-0}" = 1 ]; then
+      selected_registry_finish_diagnostics "$status"
+    else
+      # Only our unreaped filter can exist here; no lifecycle operation has begun.
+      kill "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" 2>/dev/null || true
+      wait "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" 2>/dev/null || true
+      SELECTED_REGISTRY_DIAGNOSTIC_PID=""
+    fi
+  fi
+  if [ "${SELECTED_REGISTRY_DIAGNOSTIC_SAVED_FDS:-0}" = 1 ]; then
+    exec 3>&- 4>&-
+    SELECTED_REGISTRY_DIAGNOSTIC_SAVED_FDS=0
+  fi
+  if [ -n "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO:-}" ] && [ -p "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" ] &&
+     [ ! -L "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" ]; then
+    rm -f "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" 2>/dev/null || failed=1
+  fi
+  if [ -n "${SELECTED_REGISTRY_DIAGNOSTIC_DIR:-}" ]; then
+    # This also owns an allocation returned by mktemp before that command fails.
+    if rmdir "${SELECTED_REGISTRY_DIAGNOSTIC_DIR}" 2>/dev/null; then
+      SELECTED_REGISTRY_DIAGNOSTIC_DIR=""
+      SELECTED_REGISTRY_DIAGNOSTIC_FIFO=""
+    else failed=1; fi
+  fi
+  if [ "$failed" = 1 ]; then
+    echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostic cleanup incomplete; outcome unknown." >&2
+    [ "$status" -ne 0 ] || exit 2
+  fi
+}
+selected_registry_diagnostics() {
+  [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ] || return 0
+  SELECTED_REGISTRY_DIAGNOSTIC_OWNER="${BASH_SUBSHELL}"
+  SELECTED_REGISTRY_DIAGNOSTIC_DIR=""
+  SELECTED_REGISTRY_DIAGNOSTIC_FIFO=""
+  SELECTED_REGISTRY_DIAGNOSTIC_PID=""
+  SELECTED_REGISTRY_DIAGNOSTIC_SAVED_FDS=0
+  SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED=0
+  trap selected_registry_cleanup_diagnostics EXIT
+  exec 3>&1 4>&2
+  SELECTED_REGISTRY_DIAGNOSTIC_SAVED_FDS=1
+  if ! SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')" 2>/dev/null; then
+    echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
+    selected_registry_cleanup_diagnostics 2
+    return 2
+  fi
+  # Only the public streams are projected. Captured protocol bytes and explicit file redirects remain unchanged.
+  if ! SELECTED_REGISTRY_DIAGNOSTIC_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/rmd-selected-diagnostics.XXXXXX")" 2>/dev/null; then
+    echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
+    selected_registry_cleanup_diagnostics 2
+    return 2
+  fi
+  SELECTED_REGISTRY_DIAGNOSTIC_FIFO="${SELECTED_REGISTRY_DIAGNOSTIC_DIR}/stream"
+  if ! (umask 077; mkfifo "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}") 2>/dev/null; then
+    echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
+    selected_registry_cleanup_diagnostics 2
+    return 2
+  fi
+  selected_registry_diagnostic_filter < "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" >&4 &
+  SELECTED_REGISTRY_DIAGNOSTIC_PID=$!
+  if ! { exec > "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}"; } 2>/dev/null; then
+    echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; no operation started." >&4
+    selected_registry_cleanup_diagnostics 2
+    return 2
+  fi
+  SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED=1
+  exec 2>&1
+}
+selected_registry_finish_diagnostics() {
+  local status="$1" failed=0
+  [ -n "${SELECTED_REGISTRY_DIAGNOSTIC_PID:-}" ] || return 0
+  [ "${BASH_SUBSHELL}" = "${SELECTED_REGISTRY_DIAGNOSTIC_OWNER}" ] || return 0
+  [ "${SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED:-0}" = 1 ] || return 0
+  # Complete the owned stream explicitly; inherited writer descriptors are not an EOF protocol.
+  printf '\n%s\n' "${SELECTED_REGISTRY_DIAGNOSTIC_COMPLETION}" || failed=1
+  exec 1>&3 2>&4
+  exec 3>&- 4>&-
+  SELECTED_REGISTRY_DIAGNOSTIC_SAVED_FDS=0
+  SELECTED_REGISTRY_DIAGNOSTIC_REDIRECTED=0
+  wait "${SELECTED_REGISTRY_DIAGNOSTIC_PID}" 2>/dev/null || failed=1
+  SELECTED_REGISTRY_DIAGNOSTIC_PID=""
+  if [ -p "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" ]; then
+    rm -f "${SELECTED_REGISTRY_DIAGNOSTIC_FIFO}" 2>/dev/null || failed=1
+    if rmdir "${SELECTED_REGISTRY_DIAGNOSTIC_DIR}" 2>/dev/null; then
+      SELECTED_REGISTRY_DIAGNOSTIC_DIR=""
+      SELECTED_REGISTRY_DIAGNOSTIC_FIFO=""
+    else failed=1; fi
+  else
+    failed=1
+  fi
+  if [ "$failed" = 1 ]; then
+    echo "${SELECTED_REGISTRY_CALLER}: selected lifecycle diagnostics unavailable; outcome unknown." >&2
+    [ "$status" -ne 0 ] || exit 2
+  fi
+  printf '%s: selected lifecycle command exited %s; no release or activation permission is implied.\n' "${SELECTED_REGISTRY_CALLER}" "$status"
+}
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then return 0; fi
+
 # recycle-container — replace the running remudero-daemon container with a freshly pulled image.
 #
 # WHY THIS EXISTS. Until now the recycle was seven steps that lived only in chat, and skipping any
@@ -274,6 +557,8 @@ trap 'record_recycle_invocation exit; commission_on_exit' EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 DEFAULT_INSTANCE_REGISTRY="${SCRIPT_DIR%/deploy}/.remudero/daemon-instances.yaml"
+selected_registry_init "${SCRIPT_DIR%/deploy}" "${INSTANCE_NAME}" recycle-container
+selected_registry_diagnostics
 
 validate_instance_name() {
   case "$1" in
@@ -324,12 +609,16 @@ list_instance_names() {
 if [ -n "$INSTANCE_NAME" ]; then
   validate_instance_name "$INSTANCE_NAME"
   COMMISSION_TARGET="$INSTANCE_NAME"
-  INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY:-$DEFAULT_INSTANCE_REGISTRY}"
+  INSTANCE_REGISTRY="${RMD_INSTANCE_REGISTRY-$DEFAULT_INSTANCE_REGISTRY}"
   if [ ! -r "$INSTANCE_REGISTRY" ]; then
     echo "recycle-container: REFUSING -- instance registry '${INSTANCE_REGISTRY}' is not readable." >&2
     exit 2
   fi
-  record="$(read_instance_registry "$INSTANCE_REGISTRY" "$INSTANCE_NAME")"
+  if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+    record="$(read_instance_registry /dev/stdin "$INSTANCE_NAME" <<< "${SELECTED_REGISTRY_TEXT}")"
+  else
+    record="$(read_instance_registry "$INSTANCE_REGISTRY" "$INSTANCE_NAME")"
+  fi
   if [ -z "$record" ]; then
     echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' is not declared in ${INSTANCE_REGISTRY}." >&2
     exit 2
@@ -463,6 +752,8 @@ if [ -d "${CONTAINER_CONFIG_DIR}" ]; then
 else
   echo "recycle-container: NOTE — no container config directory at ${CONTAINER_CONFIG_DIR}; recycling without a Remudero config mount" >&2
 fi
+SELECTED_REGISTRY_BROAD_MOUNT_ARGS=(-v "${STATE_DIR}:${STATE_MOUNT_DEST}" -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
+  "${CODEX_MOUNT_ARGS[@]+"${CODEX_MOUNT_ARGS[@]}"}" "${CONTAINER_CONFIG_MOUNT_ARGS[@]+"${CONTAINER_CONFIG_MOUNT_ARGS[@]}"}")
 
 # Resolve the reusable provider-runtime verifier before any lifecycle action. The PWD fallback is
 # load-bearing for a copied script (the mutation fixtures exercise that supported test shape); an
@@ -489,6 +780,9 @@ if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
 fi
 if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
   RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${CONTAINER_CONFIG_DIR}" "${CONTAINER_CONFIG_MOUNT_DEST}" rw)
+fi
+if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+  RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${SELECTED_REGISTRY_HOST_FILE}" "${SELECTED_REGISTRY_CONTAINER_FILE}" ro)
 fi
 DAEMON_REPO="${RMD_DAEMON_REPO:-remudero}"
 
@@ -955,6 +1249,9 @@ CAPTURED_SOURCE_get() { local ref="CAPTURED_SOURCE__$1"; printf '%s' "${!ref-}";
 # policy's build args set it at every launch, so it is never captured and carrying it is not drift.
 is_declared_runtime_var() {
   local needle="$1" candidate
+  if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+    case "$needle" in RMD_INSTANCE_REGISTRY|RMD_INSTANCE_REGISTRY_DIGEST|RMD_INSTANCE_REGISTRY_FILE_BINDING) return 0 ;; esac
+  fi
   for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}" RMD_INSTANCE_NAME GLIBC_TUNABLES; do
     [ "${candidate}" = "${needle}" ] && return 0
   done
@@ -1409,6 +1706,7 @@ recycle_cleanup_tmp() {
   [ -n "${COMMISSION_PROBE_FILE}" ] && rm -f "${COMMISSION_PROBE_FILE}"
   release_host_recycle_lock
   commission_on_exit
+  selected_registry_cleanup_diagnostics "${exit_status}"
   return 0
 }
 # W1-T6160: the cleanup also emits the commissioning receipt (a no-op unless --commission-git-author).
@@ -1508,6 +1806,7 @@ if [ -z "${PULLED_IMAGE_ID}" ]; then
   exit 1
 fi
 echo "recycle-container: pulled image id ${PULLED_IMAGE_ID}"
+selected_registry_image "${PULLED_IMAGE_ID}"
 
 COMMISSION_PHASE="drain"
 
@@ -2431,6 +2730,7 @@ record_recycled_cadence_child() {
 # THE PAUSE MUST COME OFF BEFORE THE START, never after: the new container reads the SAME bind
 # mount, so a pause left in place would make it come up paused with no dispatch — this marker is a
 # file in shared state, not process state, and the new container has no memory of who set it.
+selected_registry_image "${PULLED_IMAGE_ID}"
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   # W1-T5281: from here a signal leaves PAUSE engaged — the stop may land even if this script does not.
   RECYCLE_SIGNAL_PHASE="stopping"
@@ -2507,6 +2807,7 @@ DOCKER_RUN_ARGS=(
   --security-opt systempaths=unconfined
   --user 1000:1000
   "${RUN_ENV_ARGS[@]}"
+  "${SELECTED_REGISTRY_LAUNCH_ARGS[@]+"${SELECTED_REGISTRY_LAUNCH_ARGS[@]}"}"
   -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
   -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
 )
@@ -2529,10 +2830,14 @@ fi
 # /home/node/Remudero, which matches no registry state_dir (those are host paths), so the daemon
 # could not tell which instance it was and the SRE lane never started on core. A recycle run with
 # --instance holds the name; the legacy no-instance path has none to give and adds nothing.
-if [ -n "${INSTANCE_NAME}" ]; then
+if [ -n "${INSTANCE_NAME}" ] && [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ]; then
   DOCKER_RUN_ARGS+=(-e "RMD_INSTANCE_NAME=${INSTANCE_NAME}")
 fi
-DOCKER_RUN_ARGS+=("${REF}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
+LAUNCH_IMAGE="${REF}"
+if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then LAUNCH_IMAGE="${PULLED_IMAGE_ID}"; fi
+DOCKER_RUN_ARGS+=("${LAUNCH_IMAGE}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
+selected_registry_recheck
+selected_registry_mounts "${DOCKER_RUN_ARGS[@]}"
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
 
 # ── 7. PROVE IT — THE STARTED CONTAINER'S IMAGE MUST BE THE DIGEST JUST PULLED ──────────────────

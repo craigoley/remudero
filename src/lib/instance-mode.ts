@@ -5,10 +5,13 @@ export type { SelectedModeSettings } from "./config-schema.js";
 import { daemonInstanceRegistryPath } from "./deployer.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
 import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO,
+  runtimeInstanceRegistryText, runtimeInstanceRegistryMode, assertInstanceRegistryRuntimeCurrent,
   type RegistrySelectionInput, type SelectedRegistryBinding } from "./instance-registry-selection.js";
 
 /** A missing or malformed registry never invents a shadow declaration. */
 export function instanceMode(ownerRepo: string, registryText: string | undefined): "shadow" | "live" {
+  const selected = runtimeInstanceRegistryMode(ownerRepo);
+  if (selected !== undefined) return selected;
   if (registryText === undefined) return "live";
   try {
     const registry = parseInstanceRegistry(registryText);
@@ -22,6 +25,8 @@ export function instanceMode(ownerRepo: string, registryText: string | undefined
 
 /** A missing or unreadable registry is unknown text, which resolves to live above. */
 export function readInstanceRegistryText(repoRoot: string): string | undefined {
+  const selected = runtimeInstanceRegistryText();
+  if (selected !== undefined) return selected;
   try {
     return readFileSync(daemonInstanceRegistryPath(repoRoot), "utf8");
   } catch {
@@ -184,5 +189,6 @@ export function createSelectedModeQualification(
 export async function observeSelectedMode<T>(
   qualification: SelectedModeQualification | undefined, action: SelectedModeAction, operation: () => T | Promise<T>, prUrl?: string,
 ): Promise<T> {
+  if (runtimeInstanceRegistryText() !== undefined) await assertInstanceRegistryRuntimeCurrent();
   return qualification === undefined ? operation() : qualification.observe(action, operation, prUrl);
 }

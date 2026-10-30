@@ -1,3 +1,4 @@
+import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/legacy-host-launch.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -58,14 +59,14 @@ exit 0
     codex_dir: ${join(root, "absent-codex")}
     container_config_dir: ${join(root, "absent-config")}
 `);
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLS: calls,
+  const env = { ...withoutRegistrySelection(process.env), PATH: `${bin}:${process.env.PATH}`, CALLS: calls,
     FIXTURE_STATE: state, FIXTURE_CLAUDE: claude, FIXTURE_KEY: key,
-    RMD_INSTANCE_REGISTRY: registry, RMD_UNIT_DIR: join(root, "units"), RMD_BIN_DIR: bin,
+    RMD_UNIT_DIR: join(root, "units"), RMD_BIN_DIR: bin,
     RMD_RECYCLE_DOCKERENV_PATH: join(root, "no-dockerenv"), RMD_RECYCLE_WAIT_S: "1",
     RMD_RECYCLE_POLL_S: "1", RMD_RECYCLE_SKIP_RECLAIM: "1", GH_TOKEN: "",
     GH_APP_ID: "", GH_APP_INSTALLATION_ID: "", GH_APP_PRIVATE_KEY_PATH: "" };
   const run = (script: string, args: string[] = [], extra: Record<string, string> = {}) =>
-    spawnSync("bash", [script, ...args], { encoding: "utf8", timeout: 30000, env: { ...env, ...extra } });
+    spawnSync("bash", [script.startsWith("deploy/") ? legacyHostScript(root, script, registry) : script, ...args], { encoding: "utf8", timeout: 30000, env: { ...env, ...extra } });
   return { root, state, key, registry, launcher, env, run, calls: () => existsSync(calls) ? readFileSync(calls, "utf8") : "" };
 }
 

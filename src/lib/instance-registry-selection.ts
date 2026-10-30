@@ -5,8 +5,9 @@
  * wait, not every OS request. Late operations still close their own handle.
  */
 import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute } from "node:path";
 import { RmdError } from "./errors.js";
 import { SELECTED_INSTANCE_REGISTRY_FIELDS, parseInstanceRegistry, projectRegistry, type RegistryInstance, type RegistryProjection } from "./instance-registry.js";
@@ -32,6 +33,7 @@ export interface RegistryFileStamp {
   ino: number;
   mtimeMs: number;
   ctimeMs: number;
+  nlink?: number;
 }
 export interface RegistryFileHandle {
   stat(): Promise<RegistryFileStamp>;
@@ -42,12 +44,20 @@ export interface RegistryFileHandle {
 export interface RegistryFileIO {
   lstat(path: string): Promise<RegistryFileStamp>;
   open(path: string): Promise<RegistryFileHandle>;
+  canonicalPath?(path: string): Promise<string>;
+}
+interface RegistryBytes {
+  kind: "bytes";
+  bytes: Buffer;
+  identity: Readonly<RegistryFileStamp>;
+  canonicalPath?: string;
 }
 const stamp = (s: Awaited<ReturnType<typeof lstat>>): RegistryFileStamp => ({
   regular: s.isFile(), size: Number(s.size), dev: Number(s.dev), ino: Number(s.ino),
-  mtimeMs: Number(s.mtimeMs), ctimeMs: Number(s.ctimeMs),
+  mtimeMs: Number(s.mtimeMs), ctimeMs: Number(s.ctimeMs), nlink: Number(s.nlink),
 });
 export const registryFileIO: RegistryFileIO = {
+  canonicalPath: realpath,
   lstat: async (path) => stamp(await lstat(path)),
   open: async (path) => {
     // NONBLOCK keeps an intervening FIFO from blocking open; NOFOLLOW refuses a symlink race.
@@ -62,7 +72,7 @@ export const registryFileIO: RegistryFileIO = {
 
 type UnknownReason = "missing" | "not_regular" | "oversized" | "revision_changed"
   | "lstat_failed" | "open_failed" | "stat_failed" | "read_failed" | "close_failed"
-  | "cancelled" | "timeout" | "invalid_encoding" | "malformed" | "digest_mismatch";
+  | "cancelled" | "timeout" | "invalid_encoding" | "malformed" | "digest_mismatch" | "file_identity_unqualified";
 type RefusalReason = "invalid_path" | "invalid_bounds" | "invalid_digest"
   | "unsupported_contract" | "unsupported_capability" | "unsupported_field";
 type Unknown = { kind: "unknown"; reason: UnknownReason };
@@ -89,7 +99,7 @@ class ReadRefusal extends RmdError {
 }
 function sameStamp(a: RegistryFileStamp, b: RegistryFileStamp): boolean {
   return a.dev === b.dev && a.ino === b.ino && a.size === b.size
-    && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+    && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs && a.nlink === b.nlink;
 }
 function requireFile(s: RegistryFileStamp, maxBytes: number): void {
   if (!s.regular) throw new ReadRefusal("not_regular");
@@ -99,10 +109,10 @@ function requireActive(signal: AbortSignal): void {
   if (signal.aborted) throw new ReadRefusal("cancelled");
 }
 
-async function readBounded(path: string, maxBytes: number, signal: AbortSignal, io: RegistryFileIO): Promise<{ kind: "bytes"; bytes: Buffer } | Unknown> {
+async function readBounded(path: string, maxBytes: number, signal: AbortSignal, io: RegistryFileIO, physicalIdentity: boolean): Promise<RegistryBytes | Unknown> {
   let handle: RegistryFileHandle | undefined;
   let phase: UnknownReason = "lstat_failed";
-  let result: { kind: "bytes"; bytes: Buffer } | Unknown;
+  let result: RegistryBytes | Unknown;
   try {
     requireActive(signal);
     const before = await io.lstat(path); requireFile(before, maxBytes);
@@ -125,7 +135,19 @@ async function readBounded(path: string, maxBytes: number, signal: AbortSignal, 
     const after = await handle.stat(), current = await io.lstat(path);
     requireFile(after, maxBytes); requireFile(current, maxBytes);
     if (length !== opened.size || !sameStamp(opened, after) || !sameStamp(after, current)) throw new ReadRefusal("revision_changed");
-    result = { kind: "bytes", bytes: bytes.subarray(0, length) };
+    let canonicalPath: string | undefined;
+    if (physicalIdentity) {
+      phase = "file_identity_unqualified";
+      canonicalPath = await io.canonicalPath?.(path);
+      requireActive(signal);
+      if (!canonicalPath || !isAbsolute(canonicalPath) || after.nlink !== 1
+        || !Number.isSafeInteger(after.dev) || !Number.isSafeInteger(after.ino)
+        || !Number.isFinite(after.mtimeMs) || !Number.isFinite(after.ctimeMs)) throw new ReadRefusal(phase);
+      const physical = await io.lstat(canonicalPath);
+      requireActive(signal); requireFile(physical, maxBytes);
+      if (!sameStamp(after, physical)) throw new ReadRefusal("revision_changed");
+    }
+    result = { kind: "bytes", bytes: bytes.subarray(0, length), identity: Object.freeze({ ...after }), canonicalPath };
   } catch (error) {
     // Unknown I/O is not absence or a healthy fallback; never surface OS messages/private paths.
     result = { kind: "unknown", reason: error instanceof ReadRefusal ? error.reason
@@ -142,7 +164,7 @@ async function readBounded(path: string, maxBytes: number, signal: AbortSignal, 
   return result!;
 }
 
-async function readWithDeadline(path: string, maxBytes: number, timeoutMs: number, external: AbortSignal | undefined, io: RegistryFileIO): Promise<{ kind: "bytes"; bytes: Buffer } | Unknown> {
+async function readWithDeadline(path: string, maxBytes: number, timeoutMs: number, external: AbortSignal | undefined, io: RegistryFileIO, physicalIdentity: boolean): Promise<RegistryBytes | Unknown> {
   if (external?.aborted) return { kind: "unknown", reason: "cancelled" };
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
@@ -153,7 +175,7 @@ async function readWithDeadline(path: string, maxBytes: number, timeoutMs: numbe
     external?.addEventListener("abort", onAbort, { once: true });
   });
   try {
-    return await Promise.race([readBounded(path, maxBytes, controller.signal, io), stopped]);
+    return await Promise.race([readBounded(path, maxBytes, controller.signal, io, physicalIdentity), stopped]);
   } finally {
     clearTimeout(timer!); external?.removeEventListener("abort", onAbort!);
   }
@@ -171,7 +193,7 @@ function supportedFields(text: string): boolean {
 }
 
 /** True absence is explicit; an empty/invalid higher-precedence value is never skipped. */
-export async function readSelectedInstanceRegistry(input: RegistrySelectionInput, io: RegistryFileIO = registryFileIO): Promise<SelectedRegistryRead> {
+export async function readSelectedInstanceRegistry(input: RegistrySelectionInput, io: RegistryFileIO = registryFileIO, physicalIdentity = false): Promise<SelectedRegistryRead> {
   const source = input.cliPath !== undefined ? "cli" : input.envPath !== undefined ? "environment"
     : input.configuredPath !== undefined ? "configuration" : undefined;
   if (source === undefined) return { kind: "legacy" };
@@ -187,7 +209,7 @@ export async function readSelectedInstanceRegistry(input: RegistrySelectionInput
   if (expectedDigest !== undefined && !/^[a-f0-9]{64}$/.test(expectedDigest)) return { kind: "refused", reason: "invalid_digest" };
   // Copy every selected value before the first await; caller mutation cannot retarget this read.
   const capabilities = Object.freeze([...CAPABILITIES]);
-  const bytes = await readWithDeadline(path, maxBytes, timeoutMs, input.signal, io);
+  const bytes = await readWithDeadline(path, maxBytes, timeoutMs, input.signal, io, physicalIdentity);
   if (bytes.kind === "unknown") return bytes;
   const digest = createHash("sha256").update(bytes.bytes).digest("hex");
   if (expectedDigest !== undefined && digest !== expectedDigest) return { kind: "unknown", reason: "digest_mismatch" };
@@ -216,5 +238,179 @@ export async function readSelectedInstanceRegistry(input: RegistrySelectionInput
       return current as Unknown | Refused;
     },
   });
+  trustedRegistryBytes.set(binding, { path, text, identity: bytes.identity, canonicalPath: bytes.canonicalPath, io, maxBytes, timeoutMs, contractVersion });
   return { kind: "ready", binding };
+}
+
+interface TrustedRegistryBytes {
+  readonly path: string;
+  readonly text: string;
+  readonly identity: Readonly<RegistryFileStamp>;
+  readonly canonicalPath?: string;
+  readonly io: RegistryFileIO;
+  readonly maxBytes: number;
+  readonly timeoutMs: number;
+  readonly contractVersion: number;
+}
+const trustedRegistryBytes = new WeakMap<SelectedRegistryBinding, TrustedRegistryBytes>();
+export const INSTANCE_REGISTRY_FILE_BINDING_VERSION = 1;
+export interface InstanceRegistryRuntimeInput extends RegistrySelectionInput {
+  instanceName?: string;
+  expectedFileBinding?: string;
+}
+interface InstanceRegistryRuntime {
+  readonly binding?: SelectedRegistryBinding;
+  readonly instanceName?: string;
+  readonly canonicalPath?: string;
+  active: boolean;
+}
+const runtimeRegistry = new AsyncLocalStorage<InstanceRegistryRuntime>();
+
+export class InstanceRegistryRuntimeError extends RmdError {
+  constructor(reason: string) { super("registry", 2, `selected instance registry unavailable (${reason})`, { reason }); }
+}
+
+function selectedRuntime(): InstanceRegistryRuntime | undefined {
+  const current = runtimeRegistry.getStore();
+  if (current?.binding === undefined) return undefined;
+  if (!current.active) throw new InstanceRegistryRuntimeError("invocation_closed");
+  return current;
+}
+
+/** Trusted invocation scope only. No private path or raw lifecycle bytes are serialized on a binding. */
+export async function withInstanceRegistryRuntime<T>(
+  operation: () => T | Promise<T>,
+  input: InstanceRegistryRuntimeInput = { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME,
+    expectedDigest: process.env.RMD_INSTANCE_REGISTRY_DIGEST, expectedFileBinding: process.env.RMD_INSTANCE_REGISTRY_FILE_BINDING },
+  io: RegistryFileIO = registryFileIO,
+): Promise<T> {
+  let snapshot: InstanceRegistryRuntimeInput, stableIO: RegistryFileIO;
+  try {
+    snapshot = { ...input, ...(input.requiredCapabilities === undefined ? {} : { requiredCapabilities: [...input.requiredCapabilities] }) };
+    const lstat = io.lstat.bind(io), open = io.open.bind(io);
+    stableIO = Object.freeze({ lstat, canonicalPath: io.canonicalPath?.bind(io), open: async (path: string) => {
+      const handle = await open(path);
+      return Object.freeze({ stat: handle.stat.bind(handle), read: handle.read.bind(handle), close: handle.close.bind(handle) });
+    } });
+  } catch {
+    // Unreadable input or transport cannot establish a selected runtime, never a legacy fallback.
+    throw new InstanceRegistryRuntimeError("input_unreadable");
+  }
+  const read = await readSelectedInstanceRegistry(snapshot, stableIO, true);
+  if (read.kind !== "ready" && read.kind !== "legacy") throw new InstanceRegistryRuntimeError(read.reason);
+  if (read.kind === "ready" && snapshot.instanceName !== undefined && (typeof snapshot.instanceName !== "string" || !/^[A-Za-z0-9_-]+$/.test(snapshot.instanceName))) {
+    throw new InstanceRegistryRuntimeError("invalid_instance");
+  }
+  const scope: InstanceRegistryRuntime = { active: true,
+    ...(read.kind === "ready" ? { binding: read.binding, instanceName: snapshot.instanceName,
+      canonicalPath: trustedRegistryBytes.get(read.binding)!.canonicalPath } : {}) };
+  try { return await runtimeRegistry.run(scope, () => {
+    if (snapshot.expectedFileBinding !== undefined) {
+      if (typeof snapshot.expectedFileBinding !== "string" || !/^[a-f0-9]{64}$/.test(snapshot.expectedFileBinding)) {
+        throw new InstanceRegistryRuntimeError("invalid_file_binding");
+      }
+      if (trustedInstanceRegistryLaunchPacket().split("\n")[4] !== snapshot.expectedFileBinding) {
+        throw new InstanceRegistryRuntimeError("revision_changed");
+      }
+    }
+    return operation();
+  }); }
+  finally { scope.active = false; }
+}
+
+export function instanceRegistryRuntimePresent(): boolean { return runtimeRegistry.getStore() !== undefined; }
+
+/** Trusted harness input only: never forward this value to worker env, prompt, argv or diagnostics. */
+export function runtimeInstanceRegistryPrivateFile(): string | undefined { return selectedRuntime()?.canonicalPath; }
+
+export function runtimeInstanceRegistryInstanceName(): string | undefined { return selectedRuntime()?.instanceName; }
+
+export function assertInstanceRegistryWorkerEnvironment(env: Readonly<Record<string, string>> | undefined): void {
+  const selected = runtimeInstanceRegistryPrivateFile();
+  if (selected === undefined || env === undefined) return;
+  if (Object.entries(env).some(([key, value]) => typeof value !== "string"
+    || key.startsWith("RMD_INSTANCE_REGISTRY") || value.includes(selected))) {
+    throw new InstanceRegistryRuntimeError("worker_environment_private_source");
+  }
+}
+
+export function runtimeInstanceRegistryDigest(): string | undefined { return selectedRuntime()?.binding?.digest; }
+
+/** Explicit trusted launcher channel, never a public projection, diagnostic or untrusted worker input. */
+export function trustedInstanceRegistryLaunchPacket(target?: string): string {
+  const scope = selectedRuntime();
+  const instance = target ?? scope?.instanceName;
+  if (scope === undefined) throw new InstanceRegistryRuntimeError("instance_missing");
+  if (scope.binding === undefined) throw new InstanceRegistryRuntimeError("instance_missing");
+  if (instance === undefined || instance.length === 0) throw new InstanceRegistryRuntimeError("instance_missing");
+  if (!/^[A-Za-z0-9_-]+$/.test(instance) || (scope.instanceName !== undefined && scope.instanceName !== instance)) {
+    throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
+  }
+  const rows = scope.binding.instances.filter(row => row.name === instance && row.live);
+  if (rows.length !== 1) throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
+  const original = trustedRegistryBytes.get(scope.binding)!;
+  if (!original.canonicalPath || /[\r\n,]/.test(original.canonicalPath)) throw new InstanceRegistryRuntimeError("unsupported_mount_path");
+  const identity = { stamp: original.identity, digest: scope.binding.digest, instance };
+  const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  return ["rmd-private-registry-v1", original.canonicalPath, scope.binding.digest,
+    digest({ ...identity, path: original.canonicalPath }), digest(identity), Buffer.from(original.text).toString("base64")].join("\n");
+}
+
+export function runtimeInstanceRegistryText(): string | undefined {
+  const scope = selectedRuntime();
+  return scope?.binding === undefined ? undefined : trustedRegistryBytes.get(scope.binding)!.text;
+}
+
+export function runtimeInstanceRegistryMode(ownerRepo: string): "shadow" | "live" | undefined {
+  const scope = selectedRuntime();
+  if (scope?.binding === undefined) return undefined;
+  if (typeof ownerRepo !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(ownerRepo)) {
+    throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
+  }
+  const matches = scope.binding.instances.filter(row => row.repo.toLowerCase() === ownerRepo.toLowerCase()
+    && (scope.instanceName === undefined || row.name === scope.instanceName));
+  if (matches.length !== 1 || !matches[0]!.live) throw new InstanceRegistryRuntimeError("target_missing_or_mismatched");
+  return matches[0]!.mode ?? "live";
+}
+
+/** The initial identity is retained; equal bytes at a replacement inode are still a revised runtime input. */
+export async function assertInstanceRegistryRuntimeCurrent(): Promise<void> {
+  const scope = selectedRuntime();
+  if (scope?.binding === undefined) return;
+  const original = trustedRegistryBytes.get(scope.binding)!;
+  const read = await readSelectedInstanceRegistry({ cliPath: original.path, expectedDigest: scope.binding.digest,
+    contractVersion: original.contractVersion, maxBytes: original.maxBytes, timeoutMs: original.timeoutMs }, original.io, true);
+  if (read.kind !== "ready") throw new InstanceRegistryRuntimeError(read.kind === "legacy" ? "selection_missing" : read.reason);
+  const current = trustedRegistryBytes.get(read.binding)!;
+  if (!sameStamp(original.identity, current.identity) || current.canonicalPath !== scope.canonicalPath) {
+    throw new InstanceRegistryRuntimeError("revision_changed");
+  }
+  if (!scope.active) throw new InstanceRegistryRuntimeError("invocation_closed");
+}
+
+/** A trusted harness policy snapshot, never a worker permission or a serialized registry binding. */
+export async function captureInstanceRegistryRuntimeFile(path: string): Promise<{
+  readonly canonicalPath: string; readonly text: string; recheck(): Promise<void>;
+}> {
+  const scope = selectedRuntime();
+  if (!scope || typeof path !== "string" || !isAbsolute(path) || path.includes("\0")) throw new InstanceRegistryRuntimeError("worker_policy_input_unqualified");
+  await assertInstanceRegistryRuntimeCurrent();
+  const original = await readWithDeadline(path, 64 * 1024, 1500, undefined, registryFileIO, true);
+  if (original.kind !== "bytes") throw new InstanceRegistryRuntimeError(`worker_policy_${original.reason}`);
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(original.bytes); }
+  catch {
+    // Invalid policy bytes are unknown containment, never a lossy replacement-character policy.
+    throw new InstanceRegistryRuntimeError("worker_policy_invalid_encoding");
+  }
+  if (!scope.active) throw new InstanceRegistryRuntimeError("invocation_closed");
+  return Object.freeze({ canonicalPath: original.canonicalPath!, text, recheck: async () => {
+    if (selectedRuntime() !== scope) throw new InstanceRegistryRuntimeError("worker_policy_invocation_changed");
+    await assertInstanceRegistryRuntimeCurrent();
+    const current = await readWithDeadline(path, 64 * 1024, 1500, undefined, registryFileIO, true);
+    if (current.kind !== "bytes") throw new InstanceRegistryRuntimeError(`worker_policy_${current.reason}`);
+    if (!sameStamp(original.identity, current.identity) || original.canonicalPath !== current.canonicalPath
+      || !original.bytes.equals(current.bytes)) throw new InstanceRegistryRuntimeError("worker_policy_revision_changed");
+    if (!scope.active) throw new InstanceRegistryRuntimeError("invocation_closed");
+  } });
 }

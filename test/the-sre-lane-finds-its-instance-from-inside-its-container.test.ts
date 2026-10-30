@@ -1,3 +1,4 @@
+import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/legacy-host-launch.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -44,7 +45,7 @@ function withInstanceName(t: TestContext, value: string | undefined): void {
 
 /** Boot `rmd daemon` on a temp root the registry does NOT name (as inside a container), and return
  *  the gardens it hands the loop and the `sre_lane.*` rows it ledgered. */
-async function startContainerisedDaemon(t: TestContext, instanceName: string): Promise<{ gardens: unknown[]; laneRows: Array<Record<string, unknown>> }> {
+async function startContainerisedDaemon(t: TestContext, instanceName: string, onRun?: () => void): Promise<{ gardens: unknown[]; laneRows: Array<Record<string, unknown>> }> {
   const home = mkdtempSync(join(tmpdir(), "rmd-w1t9500-"));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
@@ -83,6 +84,7 @@ async function startContainerisedDaemon(t: TestContext, instanceName: string): P
   await runTask.daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
     gardenPassSpawn: async () => 0,
     runDaemon: async (_plan, d) => {
+      onRun?.();
       gardens = (d as { gardens?: unknown[] }).gardens ?? [];
       return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
     },
@@ -136,12 +138,10 @@ test("W1-T9500: an unknown instance name disables the lane by name", async (t) =
   // The name is never silently dropped for the state-root match, even when the root WOULD match.
   const hostRoot = resolveSreLaneInstance({ stateRoot: "/home/craigoleyagent/rmd-state2", registryPath: REPO_REGISTRY, env: { RMD_INSTANCE_NAME: "nonesuch" } });
   assert.equal(hostRoot.resolved, false, "a wrong name is a misconfiguration to surface, not a reason to guess");
-  // And the daemon ledgers it on start.
-  const { gardens, laneRows } = await startContainerisedDaemon(t, "nonesuch");
-  assert.equal(gardens.length, REGISTERED_GARDEN_NAMES.length, "no SRE starter for an unknown instance");
-  assert.equal(laneRows.length, 1);
-  assert.equal(laneRows[0].step, "sre_lane.disabled");
-  assert.match(String(laneRows[0].reason), /RMD_INSTANCE_NAME 'nonesuch' names no instance/);
+  // Explicit selection refuses the unknown binding before the daemon or any lane can run.
+  let daemonRuns = 0;
+  await assert.rejects(startContainerisedDaemon(t, "nonesuch", () => daemonRuns++), /target_missing_or_mismatched/);
+  assert.equal(daemonRuns, 0);
 });
 
 // ── the creator names the instance: deploy/recycle-container.sh ─────────────────────────────────
@@ -224,11 +224,11 @@ function recycle(t: TestContext, opts: { instance?: string; containerEnv?: strin
     `    container_config_dir: ${dirs.config}`,
     "",
   ].join("\n"));
-  const r = spawnSync("bash", [RECYCLE, ...(opts.instance === undefined ? [] : ["--instance", opts.instance])], {
+  const r = spawnSync("bash", [legacyHostScript(root, RECYCLE, registry), ...(opts.instance === undefined ? [] : ["--instance", opts.instance])], {
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
-      ...process.env,
+      ...withoutRegistrySelection(process.env),
       PATH: `${dirs.bin}:${process.env.PATH ?? ""}`,
       STUB_REC: dirs.rec,
       STUB_CONTAINER_ENV: opts.containerEnv ?? "",
@@ -236,7 +236,6 @@ function recycle(t: TestContext, opts: { instance?: string; containerEnv?: strin
       RMD_CLAUDE_DIR: dirs.claude,
       RMD_CODEX_DIR: dirs.codex,
       RMD_CONTAINER_CONFIG_DIR: dirs.config,
-      RMD_INSTANCE_REGISTRY: registry,
       RMD_OPENWEIGHT_API_KEY_PATH: cashKeyPath,
       RMD_RECYCLE_FIRST_BOOT: "1",
       GH_TOKEN: "",

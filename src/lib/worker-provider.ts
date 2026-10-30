@@ -5,7 +5,7 @@ import { CASH_RESPONSES_DEPLOYMENTS, CashResponsesConversation } from "./cash-re
 import { randomUUID } from "node:crypto";
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
-import { constants as fsConstants, accessSync, appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { constants as fsConstants, accessSync, appendFileSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { prepareWorkerNativeCache } from "./worker-native-cache.js";
@@ -43,6 +43,7 @@ import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { makeTempDir, withTempDir } from "./tmp.js";
+import { assertInstanceRegistryRuntimeCurrent, assertInstanceRegistryWorkerEnvironment, runtimeInstanceRegistryPrivateFile, InstanceRegistryRuntimeError } from "./instance-registry-selection.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
@@ -2932,7 +2933,12 @@ export function codexTestSlotArgs(env: NodeJS.ProcessEnv = process.env): string[
   return args;
 }
 
-function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">, nativeCacheRoot?: string): string[] {
+interface PrivateRegistryCodexProfile {
+  name: string;
+  overrides: readonly string[];
+}
+
+function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">, privateProfile?: PrivateRegistryCodexProfile, nativeCacheRoot?: string): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
   // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
   if (!model) throw new Error("refusing a Codex spawn with no model: the account default would run unreviewed");
@@ -2949,7 +2955,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     [":tmpdir", "write"],
     ...disposableReadRoots.map((root) => [root, "read"]),
   ].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(",");
-  const disposableReviewProfile = disposableReview
+  const disposableReviewProfile = disposableReview && privateProfile === undefined
     ? [
         "--enable", "network_proxy",
         "-c", 'default_permissions="rmd_review"',
@@ -2963,6 +2969,8 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
     "--ignore-user-config",
     ...codexPreToolUseProfile(args.settingsFile),
     ...disposableReviewProfile,
+    ...(privateProfile === undefined ? [] : ["--profile", privateProfile.name, "--strict-config", ...privateProfile.overrides,
+      ...(disposableReview ? ["--enable", "network_proxy"] : [])]),
     // W1-T2754: Codex refuses to start when its `-C` cwd is neither a git repository nor a
     // configured trusted directory — "Not inside a trusted directory and --skip-git-repo-check
     // was not specified." — and it does so by EXITING 0 WITH NO OUTPUT, so the caller sees an
@@ -3006,8 +3014,8 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   return [
     "exec",
     ...shared,
-    ...(disposableReview ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
-    ...(readOnly || disposableReview ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
+    ...(disposableReview || privateProfile !== undefined ? [] : ["--sandbox", readOnly ? "read-only" : "workspace-write"]),
+    ...(readOnly || disposableReview || privateProfile !== undefined ? [] : ["-c", "sandbox_workspace_write.network_access=true"]),
     // Writers only: a reader or review runs no typecheck that needs the host slot.
     ...(readOnly || disposableReview ? [] : codexTestSlotArgs()),
     ...(nativeCacheRoot === undefined ? [] : ["--add-dir", nativeCacheRoot]),
@@ -3016,11 +3024,117 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   ];
 }
 
+async function withPrivateRegistryCodexProfile<T>(
+  args: CodexSpawnArgs, config: Config, selected: string, operation: (profile: PrivateRegistryCodexProfile) => Promise<T>,
+  nativeCacheRoot?: string,
+): Promise<T> {
+  await assertInstanceRegistryRuntimeCurrent();
+  // A saved session may carry older permissions. Never silently resume it with unqualified private access.
+  if (args.resumeSessionId) throw new InstanceRegistryRuntimeError("worker_resume_not_qualified");
+  const name = `rmd_registry_${randomUUID().replaceAll("-", "")}`;
+  let path: string, text: string, identity: { dev: number; ino: number }, profile: PrivateRegistryCodexProfile;
+  let fd: number | undefined;
+  try {
+    // An exclusive invocation file only: do not create a home, copy credentials or edit base configuration.
+    path = join(realpathSync(codexHome(config)), `${name}.config.toml`);
+    const review = args.sandboxIntent === "disposable-review", readOnly = codexReadOnly(args);
+    const directory = (target: string): string => {
+      if (!isAbsolute(target)) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+      const canonical = realpathSync(target);
+      if (!lstatSync(canonical).isDirectory()) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+      return canonical;
+    };
+    const cwd = directory(args.cwd), roots = new Set<string>([cwd]);
+    if (process.platform === "darwin") roots.add(directory("/System/Library"));
+    const slotPath = !readOnly && !review && !process.env.NODE_TEST_CONTEXT ? process.env[TEST_SLOT_DIR_ENV] : undefined;
+    const slotRoot = slotPath === undefined || slotPath === "" ? undefined : directory(slotPath);
+    if (slotRoot !== undefined) roots.add(slotRoot);
+    if (review) for (const root of args.sandboxReadRoots ?? []) roots.add(directory(root));
+    if (existsSync(join(cwd, "node_modules"))) roots.add(directory(join(cwd, "node_modules")));
+    const recordedGit = recordedWorktreeGitDir(cwd);
+    if (recordedGit !== null) {
+      const gitDir = directory(recordedGit); roots.add(gitDir);
+      const common = join(gitDir, "commondir");
+      if (existsSync(common)) {
+        const relativeCommon = readFileSync(common, "utf8").trim();
+        if (relativeCommon.length === 0 || relativeCommon.length > 4096 || relativeCommon.includes("\0")) {
+          throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+        }
+        roots.add(directory(resolve(gitDir, relativeCommon)));
+      }
+    }
+    // A positive public read scope must never include the selected source or its invocation artifact.
+    // The file-backed profile alone was insufficient in a real exec tool call; the same public-only
+    // policy is therefore also supplied through supported CLI overrides. Neither surface names private paths.
+    // --add-dir also expands :workspace_roots. Its verified cache grant must remain disjoint
+    // from both private inputs, even though the public-only profile never names those inputs.
+    const grantRoots = nativeCacheRoot === undefined ? [...roots] : [...roots, directory(nativeCacheRoot)];
+    if (grantRoots.some(root => isWithin(root, selected) || isWithin(root, path))) {
+      throw new InstanceRegistryRuntimeError("worker_scope_contains_private_file");
+    }
+    const filesystem = new Map<string, string>([[":root", "deny"], [":minimal", "read"],
+      [":workspace_roots", readOnly ? "read" : "write"], [":slash_tmp", "deny"], [":tmpdir", readOnly ? "read" : "write"],
+      ...[...roots].filter(root => root !== cwd && root !== slotRoot).map(root => [root, "read"] as [string, string])]);
+    text = `default_permissions=${JSON.stringify(name)}\n[permissions.${name}]\nextends="${readOnly ? ":read-only" : ":workspace"}"\n`
+      + `[permissions.${name}.network]\nenabled=${review || !readOnly}\n[permissions.${name}.filesystem]\n`
+      + [...filesystem].map(([target, access]) => `${JSON.stringify(target)}=${JSON.stringify(access)}`).join("\n") + "\n";
+    const inline = [...filesystem].map(([target, access]) => `${JSON.stringify(target)}=${JSON.stringify(access)}`).join(",");
+    profile = { name, overrides: ["-c", `default_permissions=${JSON.stringify(name)}`,
+      "-c", `permissions.${name}.extends=${JSON.stringify(readOnly ? ":read-only" : ":workspace")}`,
+      "-c", `permissions.${name}.filesystem={${inline}}`, "-c", `permissions.${name}.network.enabled=${review || !readOnly}`] };
+    fd = openSync(path, "wx+", 0o600);
+    writeFileSync(fd, text);
+    identity = fstatSync(fd);
+  } catch (error) {
+    if (fd !== undefined) closeSync(fd);
+    // Unavailable private profile is unknown containment, never a fallback to broad workspace reads.
+    if (error instanceof InstanceRegistryRuntimeError) throw error;
+    throw new InstanceRegistryRuntimeError("worker_profile_unavailable");
+  }
+  let operationFailed = false, originalError: unknown;
+  try { await assertInstanceRegistryRuntimeCurrent(); return await operation(profile); }
+  catch (error) { operationFailed = true; originalError = error; throw error; }
+  finally {
+    try {
+      // Read only the exclusive creation handle; a pathname replacement cannot redirect this read.
+      const current = fstatSync(fd!), binding = lstatSync(path);
+      const contents = Buffer.alloc(Buffer.byteLength(text));
+      if (!current.isFile() || current.nlink !== 1 || current.dev !== identity.dev || current.ino !== identity.ino
+        || !binding.isFile() || binding.dev !== identity.dev || binding.ino !== identity.ino
+        || current.size !== contents.length || readSync(fd!, contents, 0, contents.length, 0) !== contents.length
+        || contents.toString("utf8") !== text) {
+        throw new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
+      }
+      rmSync(path);
+    } catch {
+      // Missing/replaced/unreadable evidence is not certified cleanup. Retain any original failure as cause.
+      const error = new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
+      if (operationFailed) error.cause = originalError;
+      throw error;
+    } finally { closeSync(fd!); }
+  }
+}
+
 export async function spawnCodexWorker(
   args: CodexSpawnArgs,
   config: Config,
   selection?: Pick<ProviderCapacity, "model" | "effort">,
 ): Promise<CodexWorkerResult> {
+  const selected = runtimeInstanceRegistryPrivateFile();
+  if (selected !== undefined) {
+    // Snapshot before withTempDir or the fresh-source read yields. Signals and callbacks retain their
+    // identity; caller-owned data cannot change the permission intent, child environment or prompt later.
+    args = { ...args, tools: args.tools?.slice(), cashTools: args.cashTools?.slice(),
+      sandboxReadRoots: args.sandboxReadRoots?.slice(), env: args.env && { ...args.env },
+      containment: args.containment && { ...args.containment }, clockBound: args.clockBound && { ...args.clockBound } };
+    try { config = structuredClone(config); }
+    catch {
+      // An uncopyable selected invocation has unknown isolation, not permission to use mutable inputs.
+      throw new InstanceRegistryRuntimeError("worker_arguments_unqualified");
+    }
+    selection = selection && { ...selection };
+    assertInstanceRegistryWorkerEnvironment(args.env);
+  }
   return withTempDir("codex-worker", async (privateTmpDir) => {
     // The native-cache namespace and its `--add-dir` write grant exist only for a writer whose cwd the
     // hardened Git adapter POSITIVELY verifies as a worktree. Anything else gets neither the setting,
@@ -3028,7 +3142,9 @@ export async function spawnCodexWorker(
     const nativeCacheRoot = process.platform !== "win32" && !codexReadOnly(args) && args.sandboxIntent !== "disposable-review" &&
       await verifiedGitWorktree(args.cwd)
       ? prepareWorkerNativeCache() : undefined;
-    return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, nativeCacheRoot);
+    if (selected === undefined) return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, undefined, nativeCacheRoot);
+    return withPrivateRegistryCodexProfile(args, config, selected, profile =>
+      spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, profile, nativeCacheRoot), nativeCacheRoot);
   });
 }
 
@@ -3600,6 +3716,7 @@ async function cashRequestJson<T>(input: {
   try {
     for (;;) {
       checkActive();
+      if (runtimeInstanceRegistryPrivateFile() !== undefined) await assertInstanceRegistryRuntimeCurrent();
       const attempt = input.next(checkActive);
       checkActive();
       try {
@@ -4145,6 +4262,38 @@ export interface OpenWeightSpawnArgs {
     request: ExternalEffectRequest;
     onReconciled?: (result: ExternalEffectResult) => void | Promise<void>;
   };
+}
+
+interface PrivateRegistryCashInvocation {
+  args: OpenWeightSpawnArgs;
+  config: Config;
+  selection: Pick<OpenWeightModelSelection, "model" | "effort">;
+}
+
+async function privateRegistryCashInvocation(
+  args: OpenWeightSpawnArgs, config: Config, selection: PrivateRegistryCashInvocation["selection"],
+): Promise<PrivateRegistryCashInvocation> {
+  const selected = runtimeInstanceRegistryPrivateFile()!;
+  try {
+    args = { ...args, tools: args.tools?.slice(), env: args.env && { ...args.env },
+      workerEnv: args.workerEnv && { ...args.workerEnv } };
+    config = structuredClone(config); selection = { ...selection };
+    assertInstanceRegistryWorkerEnvironment(args.workerEnv);
+    const roots = [args.cwd, args.workerHome];
+    if (args.tools?.includes("RunCheck")) roots.push(...["/usr", "/lib", "/lib64", "/bin", "/usr/local"].filter(existsSync));
+    for (const root of roots) {
+      if (!isAbsolute(root)) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+      const path = realpathSync(root);
+      if (!lstatSync(path).isDirectory()) throw new InstanceRegistryRuntimeError("worker_scope_unqualified");
+      if (isWithin(path, selected)) throw new InstanceRegistryRuntimeError("worker_scope_contains_private_file");
+    }
+  } catch (error) {
+    // Unknown argument or mount scope cannot authorize private input in the in-process tool loop.
+    if (error instanceof InstanceRegistryRuntimeError) throw error;
+    throw new InstanceRegistryRuntimeError("worker_arguments_unqualified");
+  }
+  await assertInstanceRegistryRuntimeCurrent();
+  return { args, config, selection };
 }
 
 /**
@@ -4767,6 +4916,7 @@ async function executeOpenWeightTool(
   runCheck: ((input: OpenWeightCheckInput) => string | Promise<string>) | undefined,
   ledger: OpenWeightRunCheckLedger,
 ): Promise<unknown> {
+  if (runtimeInstanceRegistryPrivateFile() !== undefined) await assertInstanceRegistryRuntimeCurrent();
   switch (name) {
     case "read_file":
       return { content: readFileSync(openWeightContainedPath(cwd, args.path), "utf8") };
@@ -5137,6 +5287,7 @@ export async function spawnFoundryClaudeWorker(
   config: Config,
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
+  if (runtimeInstanceRegistryPrivateFile() !== undefined) ({ args, config, selection } = await privateRegistryCashInvocation(args, config, selection));
   const label = selection.model === "claude-haiku-5-5" ? "Haiku" : selection.model === "claude-sonnet-5-5" ? "Sonnet" : "Opus";
   const toolLineage = createWorkerToolLineage({ provider: "cash-claude", root: config.root, runId: args.runId, taskId: args.taskId });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
@@ -5331,6 +5482,7 @@ export async function spawnOpenWeightWorker(
   selection: Pick<OpenWeightModelSelection, "model" | "effort">,
 ): Promise<OpenWeightWorkerResult> {
   if (isFoundryClaudeDeployment(selection.model)) return spawnFoundryClaudeWorker(args, config, selection);
+  if (runtimeInstanceRegistryPrivateFile() !== undefined) ({ args, config, selection } = await privateRegistryCashInvocation(args, config, selection));
   const usesResponses = CASH_RESPONSES_DEPLOYMENTS[selection.model] !== undefined;
   const toolLineage = createWorkerToolLineage({ provider: usesResponses ? "cash-responses" : "cash-chat",
     root: config.root, runId: args.runId, taskId: args.taskId });
@@ -5534,6 +5686,9 @@ export async function spawnOpenWeightWorker(
         args.streamObserver?.({ kind: "tool-executing", tsMs: clock.now(), text: `[tool_use: ${name}]` });
         let content: string;
         let toolFailed = false;
+        if (name === CASH_WEB_SEARCH_FUNCTION.name && runtimeInstanceRegistryPrivateFile() !== undefined) {
+          await assertInstanceRegistryRuntimeCurrent();
+        }
         try {
           // `web_search` is the one declared tool this process does not execute: the daemon brokers
           // it against a different API, with its own credential, and returns a document only when
@@ -5728,6 +5883,7 @@ async function spawnCodexWorkerInPrivateTemp(
   config: Config,
   privateTmpDir: string,
   selection?: Pick<ProviderCapacity, "model" | "effort">,
+  privateProfile?: PrivateRegistryCodexProfile,
   nativeCacheRoot?: string,
 ): Promise<CodexWorkerResult> {
   const bin = resolveCodexBin(config);
@@ -5765,7 +5921,7 @@ async function spawnCodexWorkerInPrivateTemp(
   };
   const childEnv = { ...codexSpawnEnv(config, args, nativeCacheRoot), TMPDIR: privateTmpDir };
   const contained = spawn(
-    { command: bin, args: codexExecArgs(args, config, selection, nativeCacheRoot), cwd: args.cwd, env: childEnv },
+    { command: bin, args: codexExecArgs(args, config, selection, privateProfile, nativeCacheRoot), cwd: args.cwd, env: childEnv },
     (chunk) => {
       if (outputLimit || timedOut) return;
       // W1-T8203: stderr past its bound is truncated (head + tail), never a teardown and never a verdict.

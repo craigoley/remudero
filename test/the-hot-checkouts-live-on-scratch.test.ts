@@ -1,3 +1,4 @@
+import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/legacy-host-launch.js";
 /**
  * W1-T9617 — THE HOT CHECKOUTS LIVE ON SCRATCH. Behind their own switch (RMD_SCRATCH_CHECKOUTS, the
  * file /etc/remudero/scratch-checkouts.on), each build daemon's own checkout is bound from
@@ -55,7 +56,7 @@ function host(t: { after: (fn: () => void) => void }, opts: { checkouts?: boolea
 }
 
 function lib(h: Host, script: string, args: string[] = [], env: Record<string, string> = {}): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync("bash", ["-c", `. "${LIB}"; ${script}`, "lib", ...args], { encoding: "utf8", env: { ...process.env, ...h.env, ...env } });
+  const r = spawnSync("bash", ["-c", `. "${LIB}"; ${script}`, "lib", ...args], { encoding: "utf8", env: { ...withoutRegistrySelection(process.env), ...h.env, ...env } });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
@@ -100,10 +101,10 @@ function revive(h: Host): { status: number | null; out: string; dockerRun: strin
   chmodSync(join(stubs, "findmnt"), 0o755);
   writeFileSync(join(h.state, "state", "ledger.ndjson"), '{"step":"seed"}\n');
   const units = { RMD_UNIT_DIR: join(h.root, "systemd"), RMD_BIN_DIR: join(h.root, "sbin"), RMD_LAUNCHER_PATH: join(h.root, "rmd-relaunch.sh"), RMD_REVIVAL_LOG: join(h.root, "revivals.log"), RMD_NODE_MAX_OLD_SPACE_MB: "8192", RMD_STATE_DIR: h.state };
-  const installed = spawnSync("bash", [join(REPO_ROOT, "deploy", "install-host-units.sh"), "--install"], { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, ...units } });
+  const installed = spawnSync("bash", [join(REPO_ROOT, "deploy", "install-host-units.sh"), "--install"], { cwd: REPO_ROOT, encoding: "utf8", env: { ...withoutRegistrySelection(process.env), ...units } });
   assert.equal(installed.status, 0, installed.stderr);
   rmSync(join(h.root, "docker.log"), { force: true });
-  const r = spawnSync("bash", [join(h.root, "rmd-relaunch.sh")], { encoding: "utf8", env: { ...process.env, ...h.env, PATH: `${stubs}:${process.env.PATH ?? ""}` } });
+  const r = spawnSync("bash", [join(h.root, "rmd-relaunch.sh")], { encoding: "utf8", env: { ...withoutRegistrySelection(process.env), ...h.env, PATH: `${stubs}:${process.env.PATH ?? ""}` } });
   const log = existsSync(join(h.root, "docker.log")) ? readFileSync(join(h.root, "docker.log"), "utf8") : "";
   return { status: r.status, out: `${r.stdout}${r.stderr}`, dockerRun: log.split("\n").find((l) => l.startsWith("docker run")) ?? "" };
 }
@@ -117,7 +118,7 @@ function dryRunServe(h: Host, env: Record<string, string> = {}): { status: numbe
     cwd: REPO_ROOT,
     encoding: "utf8",
     env: {
-      ...process.env, ...h.env,
+      ...withoutRegistrySelection(process.env), ...h.env,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       HOME: h.root,
       GH_TOKEN: "test-token",
@@ -152,7 +153,7 @@ test("W1-T9617: with the switch on the daemon checkout mount source is under the
   // W1-T6110's drift reading, from the same plan: flipping the switch is what recycles each daemon.
   const exec = (cmd: string, args: string[]): string => cmd === "docker"
     ? JSON.stringify({ Mounts: [{ Source: h.state, Destination: "/home/node/Remudero", RW: true }], Env: [] })
-    : execFileSync(cmd, args, { encoding: "utf8", env: { ...process.env, ...h.env } });
+    : execFileSync(cmd, args, { encoding: "utf8", env: { ...withoutRegistrySelection(process.env), ...h.env } });
   const drift = readMountPlanDrift(exec, REPO_ROOT, h.state, "remudero-daemon") ?? [];
   assert.deepEqual(drift.find((d) => d.target === CHECKOUT_DEST), { target: CHECKOUT_DEST, expected: checkout, actual: undefined });
 });
@@ -204,11 +205,11 @@ test("W1-T9617: with the switch off the scratch plan is unchanged", (t) => {
   const env = todaysArgs(h, "remudero-daemon").filter((a, i, all) => all[i - 1] === "-e");
   const exec = (cmd: string, args: string[]): string => cmd === "docker"
     ? JSON.stringify({ Mounts: [{ Source: h.state, Destination: "/home/node/Remudero", RW: true }, ...live], Env: env })
-    : execFileSync(cmd, args, { encoding: "utf8", env: { ...process.env, ...h.env } });
+    : execFileSync(cmd, args, { encoding: "utf8", env: { ...withoutRegistrySelection(process.env), ...h.env } });
   assert.deepEqual(readMountPlanDrift(exec, REPO_ROOT, h.state, "remudero-daemon"), [], "a merge recycles nothing");
 
   // A test process never reads the host's real switch file: only an explicit path turns it on.
-  const hostSwitch = { ...process.env, ...h.env, NODE_TEST_CONTEXT: "child-v8" } as NodeJS.ProcessEnv;
+  const hostSwitch = { ...withoutRegistrySelection(process.env), ...h.env, NODE_TEST_CONTEXT: "child-v8" } as NodeJS.ProcessEnv;
   delete hostSwitch.RMD_SCRATCH_CHECKOUTS_SWITCH;
   delete hostSwitch.RMD_SCRATCH_CHECKOUTS;
   assert.equal(spawnSync("bash", ["-c", `. "${LIB}"; scratch_checkouts_enabled`], { env: hostSwitch }).status, 1);
@@ -229,7 +230,7 @@ test("W1-T9617: a boot with the scratch checkout missing re-creates it and the r
   rmSync(join(h.scratch, "rmd"), { recursive: true, force: true });
 
   // 1. docker's ExecStartPre re-creates it, empty.
-  const restored = spawnSync("bash", [LIB, "--restore", h.state], { encoding: "utf8", env: { ...process.env, ...h.env } });
+  const restored = spawnSync("bash", [LIB, "--restore", h.state], { encoding: "utf8", env: { ...withoutRegistrySelection(process.env), ...h.env } });
   assert.equal(restored.status, 0, restored.stderr);
   assert.deepEqual(readdirSync(checkout), [], "re-created empty, as a bind the entrypoint can clone into");
 
@@ -316,10 +317,10 @@ test("W1-T9617: host consumers resolve the live checkout and the cleanup protect
   const render = join(h.root, "render");
   const installed = spawnSync("bash", [join(REPO_ROOT, "deploy", "install-host-units.sh"), "--install"], {
     cwd: REPO_ROOT, encoding: "utf8",
-    env: { ...process.env, RMD_STATE_DIR: h.state, RMD_UNIT_DIR: join(render, "systemd"), RMD_BIN_DIR: join(render, "bin"), RMD_LAUNCHER_PATH: join(render, "rmd-relaunch.sh"), RMD_REVIVAL_LOG: join(render, "revivals.log"), RMD_NODE_MAX_OLD_SPACE_MB: "8192" },
+    env: { ...withoutRegistrySelection(process.env), RMD_STATE_DIR: h.state, RMD_UNIT_DIR: join(render, "systemd"), RMD_BIN_DIR: join(render, "bin"), RMD_LAUNCHER_PATH: join(render, "rmd-relaunch.sh"), RMD_REVIVAL_LOG: join(render, "revivals.log"), RMD_NODE_MAX_OLD_SPACE_MB: "8192" },
   });
   assert.equal(installed.status, 0, installed.stderr);
-  const tick = spawnSync("bash", [join(render, "rmd-relaunch.sh")], { encoding: "utf8", env: { ...process.env, ...h.env, PATH: `${tickStubs}:${process.env.PATH ?? ""}` } });
+  const tick = spawnSync("bash", [join(render, "rmd-relaunch.sh")], { encoding: "utf8", env: { ...withoutRegistrySelection(process.env), ...h.env, PATH: `${tickStubs}:${process.env.PATH ?? ""}` } });
   assert.equal(tick.status, 0, tick.stdout + tick.stderr);
   const liveLog = existsSync(join(h.root, "live.log")) ? readFileSync(join(h.root, "live.log"), "utf8") : "";
   assert.match(liveLog, /progress-watchdog/, "the verdict comes from the live checkout");
@@ -328,7 +329,7 @@ test("W1-T9617: host consumers resolve the live checkout and the cleanup protect
 
   // A cold re-clone in progress: no bin/rmd yet, so the tick skips by name and does not fail.
   rmSync(join(scratchCheckout, "bin"), { recursive: true, force: true });
-  const cold = spawnSync("bash", [join(render, "rmd-relaunch.sh")], { encoding: "utf8", env: { ...process.env, ...h.env, PATH: `${tickStubs}:${process.env.PATH ?? ""}` } });
+  const cold = spawnSync("bash", [join(render, "rmd-relaunch.sh")], { encoding: "utf8", env: { ...withoutRegistrySelection(process.env), ...h.env, PATH: `${tickStubs}:${process.env.PATH ?? ""}` } });
   assert.equal(cold.status, 0, cold.stdout + cold.stderr);
   assert.match(cold.stdout, new RegExp(`its checkout ${scratchCheckout} has no bin/rmd yet`));
   assert.equal(existsSync(join(h.root, "stale.log")), false);
@@ -344,7 +345,7 @@ test("W1-T9617: host consumers resolve the live checkout and the cleanup protect
   chmodSync(join(reclaimStubs, "docker"), 0o755);
   const reclaim = spawnSync("bash", [join(REPO_ROOT, "deploy", "host-update.sh"), "--reclaim-only", "--dry-run"], {
     cwd: REPO_ROOT, encoding: "utf8",
-    env: { ...process.env, ...h.env, HOME: h.root, PATH: `${reclaimStubs}:${process.env.PATH ?? ""}`, RMD_STATE_DIR: h.state, RMD_OP_DIR: join(h.root, "no-op-dir") },
+    env: { ...withoutRegistrySelection(process.env), ...h.env, HOME: h.root, PATH: `${reclaimStubs}:${process.env.PATH ?? ""}`, RMD_STATE_DIR: h.state, RMD_OP_DIR: join(h.root, "no-op-dir") },
   });
   assert.match(reclaim.stdout + reclaim.stderr, new RegExp(`git reclaim \\(DRY RUN\\) — ${scratchCheckout}: would`), reclaim.stdout + reclaim.stderr);
 
@@ -513,7 +514,7 @@ function recycle(h: Host, stateDir: string): RecycleRun {
   chmodSync(join(dir, "docker"), 0o755);
   chmodSync(join(dir, "az"), 0o755);
   const env: NodeJS.ProcessEnv = {
-    ...process.env, ...h.env,
+    ...withoutRegistrySelection(process.env), ...h.env,
     PATH: `${dir}:${process.env.PATH ?? ""}`,
     HOME: dir,
     RMD_STATE_DIR: stateDir,
@@ -521,7 +522,6 @@ function recycle(h: Host, stateDir: string): RecycleRun {
     RMD_CODEX_DIR: join(dir, "absent-codex"),
     RMD_CONTAINER_CONFIG_DIR: join(dir, "absent-config"),
     RMD_OPENWEIGHT_API_KEY_PATH: join(dir, "absent-key"),
-    RMD_INSTANCE_REGISTRY: join(dir, "absent-registry.yaml"),
     RMD_RECYCLE_WAIT_S: "1",
     RMD_RECYCLE_POLL_S: "1",
     RMD_RECYCLE_SKIP_RECLAIM: "1",
@@ -532,7 +532,7 @@ function recycle(h: Host, stateDir: string): RecycleRun {
     GH_APP_PRIVATE_KEY_PATH: "",
   };
   delete env.RMD_RECYCLE_FIRST_BOOT;
-  const r = spawnSync("bash", [join(REPO_ROOT, "deploy", "recycle-container.sh")], { cwd: REPO_ROOT, encoding: "utf8", env, timeout: 120_000 });
+  const r = spawnSync("bash", [legacyHostScript(dir, join(REPO_ROOT, "deploy", "recycle-container.sh"))], { cwd: REPO_ROOT, encoding: "utf8", env, timeout: 120_000 });
   const calls = existsSync(rec) ? readFileSync(rec, "utf8").split("\n") : [];
   rmSync(dir, { recursive: true, force: true });
   return { status: r.status, out: `${r.stdout}${r.stderr}`, dockerRun: calls.find((l) => l.startsWith("run ")) ?? "" };

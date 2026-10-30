@@ -31,10 +31,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { codexSpawnEnvForTest } from "../src/lib/worker-provider.js";
-import { WORKER_HOME_RC_FILES, materializeWorkerHome, perRunWorkerHomeDir } from "../src/lib/worker-home.js";
-import { billingMode } from "../src/lib/env.js";
-import type { Config } from "../src/lib/config.js";
+import { codexSpawnEnvForTest } from "#src/lib/worker-provider.js";
+import { WORKER_HOME_RC_FILES, materializeWorkerHome, perRunWorkerHomeDir } from "#src/lib/worker-home.js";
+import { billingMode } from "#src/lib/env.js";
+import type { Config } from "#src/lib/config.js";
+
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const SENTINEL = "sk-ant-LEAKCANARY-W1T2800-deadbeef";
 
@@ -248,8 +250,8 @@ test("W1-T2800: HOME is required on the Codex spawn path — there is no process
   }
 });
 
-test("W1-T2800: the Claude spawn contract is unchanged, and Codex home cleanup wraps every local failure", () => {
-  const source = readFileSync(join(process.cwd(), "src/lib/worker.ts"), "utf8");
+test("W1-T2800: the Claude spawn contract is unchanged, and Codex home cleanup wraps every local failure (unselected legacy options; selected policy remains bounded)", () => {
+  const source = readFileSync(join(REPO_ROOT, "src/lib/worker.ts"), "utf8");
   const executionPrompt = source.indexOf("execution.prompt = withWorkspaceCleanup(execution.prompt);");
   const childEnv = source.indexOf("const childEnv = buildWorkerEnv(args.env ?? {}, process.env");
   const markers = source.indexOf("Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)))");
@@ -265,10 +267,10 @@ test("W1-T2800: the Claude spawn contract is unchanged, and Codex home cleanup w
 
   const optionsBlock = source.slice(options, source.indexOf("if (execution.resumeSessionId)", options));
   assert.match(optionsBlock, /cwd: args\.cwd/);
-  assert.match(optionsBlock, /permissionMode: args\.permissionMode/);
+  assert.match(optionsBlock, /permissionMode: selectedPolicy && args\.permissionMode !== "plan" \? DENY_FLOOR_FALLBACK_MODE : args\.permissionMode/);
   assert.match(optionsBlock, /pathToClaudeCodeExecutable: claudeBin/);
   assert.match(optionsBlock, /env: childEnv/);
-  assert.match(optionsBlock, /settings: args\.settingsFile/);
+  assert.match(optionsBlock, /settings: \(privateSettings as Options\["settings"\]\) \?\? args\.settingsFile/);
   assert.match(optionsBlock, /settingSources: \[\]/);
   assert.match(optionsBlock, /spawnClaudeCodeProcess: buildContainedSpawnFn\(/);
 
