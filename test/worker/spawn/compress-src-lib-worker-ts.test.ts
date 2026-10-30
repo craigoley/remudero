@@ -14,10 +14,11 @@ const { countCommentLines } = await import(COMMENT_LOAD_SCRIPT) as {
   countCommentLines: (text: string, path: string) => { comments: number; code: number };
 };
 
-// Snapshot at 3b28ef9e3, before compression: 2,018 comment lines (the filing measured 2,008).
+// Comment baseline at 3b28ef9e3, before compression: 2,018 lines (the filing measured 2,008).
 // Fingerprint token kinds, raw literal contents and preceding line breaks (ASI), including types.
-// Intentional future code edits must review this pre-compression fingerprint.
-const BEFORE_TOKENS_SHA256 = "72db6076a400b40434b831299e52b4ace83e910d641d124a7bffc9424758148a";
+// W1-T9855's reviewed root-provisioning and refusal edits changed the executable fingerprint.
+// Intentional future code edits must review this hash before updating it.
+const REVIEWED_TOKENS_SHA256 = "a736fd2c4405b38979a029cef1b69f3658d622b60d4f73c0bf7ab60caa79de40";
 const BEFORE_COMMENT_LINES = 2018;
 
 function executableTokens(source: string): Array<[SyntaxKind, string, boolean]> {
@@ -46,8 +47,8 @@ function executableTokens(source: string): Array<[SyntaxKind, string, boolean]> 
 test("W1-T10879: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/worker.ts"), "utf8");
   const tokens = executableTokens(source);
-  assert.equal(createHash("sha256").update(JSON.stringify(tokens)).digest("hex"), BEFORE_TOKENS_SHA256,
-    "all pre-compression executable tokens, literals and line-break boundaries must remain unchanged");
+  assert.equal(createHash("sha256").update(JSON.stringify(tokens)).digest("hex"), REVIEWED_TOKENS_SHA256,
+    "reviewed executable tokens, literals and line-break boundaries must remain unchanged");
   const { comments } = countCommentLines(source, "src/lib/worker.ts");
   assert.ok(comments < BEFORE_COMMENT_LINES,
     `expected a real reduction from ${BEFORE_COMMENT_LINES} comment lines, observed ${comments}`);

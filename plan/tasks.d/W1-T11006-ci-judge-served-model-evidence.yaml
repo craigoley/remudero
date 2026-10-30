@@ -1,0 +1,63 @@
+- id: W1-T11006
+  title: "Audit ci-judge served-model evidence and prove model or reason retention through its production receipt path"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: feedback#evidence-coverage-ci-judge-served-model
+  plan_refs: ["§7B", "W1-T4650", "W1-T4707", "W1-T8374", "W1-T8947", "W1-T9109", "W1-T10272"]
+  files:
+    - src/lib/ci-escalation-judge.ts
+    - src/lib/benchmark-run.ts
+    - test/ci/parity/ci-judge-served-model-evidence.test.ts
+  rationale: |
+    The captured feedback reports 106/478 joined ci-judge calls (22.2%) with servedModel
+    for 2026-10-22T17:59:07.863Z through 2026-10-29T17:59:07.863Z, below the 90% floor.
+    This is the feedback's measurement, not a fresh ledger audit by intake.
+    productionCiJudgePorts in ci-escalation-judge.ts uses benchmarkNonDispatchSpawn;
+    benchmark-run.ts already retains served_model and served_model_reason, while
+    benchmark-evidence.ts observes only a nonempty terminal.servedModel. The percentage
+    alone therefore proves neither field loss nor a particular provider mix.
+    W1-T4650/W1-T4707 settle named provider unreportability; W1-T8374/W1-T8947 own
+    shared coverage-reader classification, and W1-T9109 covers ci-judge cost only.
+    Rule 19 / #588: high risk because one integration test must cross the production
+    judge, receipt wrapper and evidence reader; separate subsystem tests cannot prove retention.
+  design: |
+    Audit the complete retained ledger union for the reported window and a fresh window.
+    State source freshness and coverage of live, plain rotated and compressed rotated forms;
+    disclose unavailable history rather than claiming to reproduce the old denominator.
+    Count actual models, recognized provider-unreportable reasons, unexplained omissions and
+    failed attempts separately, with a retained-model positive control and assignment joins.
+    Diagnose the affected population before changing production code.
+    Drive productionCiJudgePorts.judge through the real benchmarkNonDispatchSpawn receipt
+    wrapper using a controlled worker, private ledger sink and isolated configuration.
+    Cover a returned model different from the request, recognized provider unreportability,
+    a failed WorkerResult retaining its evidence, and a thrown worker. Read the resulting
+    rows through the benchmark evidence reader and preserve each attempt's assignment join.
+    Actual identity must remain observed; a reason must survive without becoming invented
+    identity. A thrown worker must leave honest failed evidence, never a guessed model.
+    Repair a demonstrated loss only at the judge/receipt boundary. If the audited rows
+    already preserve legitimate reasons, deliver the measured explanation in the PR and
+    executable regression coverage without manufacturing a production behavior change.
+    Keep shared coverage-reader classification with W1-T8374/W1-T8947 and coordinate any
+    benchmark-run edits with W1-T9109. Do not change routing, billing, the gardener, the
+    90% floor or advisory-only behavior; do not add overrides or infer identity from requests.
+    Import repository modules through aliases and use the shared repository-root helper.
+    The primary subject is ci-escalation-judge; confirm the ci/parity placement with
+    rmd test-place from final imports before implementation and amend the proof if needed.
+  acceptance:
+    - claim: "The ci-judge production spawn-to-receipt-to-evidence integration preserves actual model identity and assignment joins, retains named unreportability without fabricating identity, and covers failed results and thrown workers"
+      proof: "unit test: test/ci/parity/ci-judge-served-model-evidence.test.ts"
+  falsifier: |
+    A controlled response names a model different from the request, and another carries only
+    the recognized provider reason. Dropping either retained field or echoing the request must
+    fail the corresponding assertions. If a production repair is warranted, remove that repair
+    and rerun identical test bytes, then restore it and retain both complete test summaries.
+    A test passing on unchanged production establishes regression coverage, not a repaired loss.
+  priority: 4
+  status: queued
+  attempts: 0
