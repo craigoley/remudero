@@ -96,8 +96,8 @@ ids and moved paths alias in
   `mergeable_state: dirty` — check mergeability before waiting on CI.** → doctrine/ci-and-merging/conflicting-pr-zero-checks.md
 - **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close
   the ours-side block yourself; esbuild says only `Unexpected end of file`.** → doctrine/ci-and-merging/close-the-ours-side-block.md
-- **A RETITLE ALONE re-runs the title lint — `pr-title-lint.yml` fires on `edited`; push no sha to
-  clear a title red, nor a stale-red `ci-gate` (it self-clears).** → doctrine/ci-and-merging/edit-relints-the-title.md
+- **A RETITLE RE-LINTS ITSELF on user/App edits; `GITHUB_TOKEN` edits need a re-run. Stale-red
+  `ci-gate` self-clears.** → doctrine/ci-and-merging/edit-relints-the-title.md
 - **Never add an advisory ignore, scanner exclusion or gate loosening without the operator's explicit
   yes; read ALL comments on another session's PR before pushing to it.** → doctrine/ci-and-merging/no-unapproved-waivers.md
 - **A BAKED-path merge (`deploy/Dockerfile`, `deploy/entrypoint.sh`) ships itself by auto ACR build +
