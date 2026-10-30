@@ -95,7 +95,11 @@ export const SLOW_TIER_TEST_TIMEOUT_MS = 180_000;
 
 /** The node flags that bound a slow-tier run: a fixed per-test timeout and an exit once every test has finished. */
 export function slowTierHangBoundArgs() {
-  return [`--test-timeout=${SLOW_TIER_TEST_TIMEOUT_MS}`, "--test-force-exit"];
+  // Node 24 force-exits file children before their asynchronous result pipe drains. The v8
+  // reporter uses stdout; blocking writes preserve its final results and per-file summary.
+  const childSetup = 'if (process.env.NODE_TEST_CONTEXT === "child-v8") process.stdout._handle.setBlocking(true);';
+  return [`--test-timeout=${SLOW_TIER_TEST_TIMEOUT_MS}`, "--test-force-exit",
+    `--import=data:text/javascript,${encodeURIComponent(childSetup)}`];
 }
 
 /** A materially different observation is worth naming before it is applied to the next proposal.

@@ -15,16 +15,15 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
-import * as noLiveRemote from "./setup/no-live-remote.js";
-import { LIVE_WRITE_SENTINEL_TOKEN } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { finishJudgedRun } from "./helpers/judged-pool-run.js";
-
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+import * as noLiveRemote from "#test/setup/no-live-remote.js";
+import { LIVE_WRITE_SENTINEL_TOKEN } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type RunOpts = { pool: boolean; quiet?: boolean; role: string };
 const pool = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "pure-test-pool.mjs")).href)) as {
@@ -40,7 +39,7 @@ const tiers = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "test-tier-
   fastTierHangBoundArgs?: (manifest: unknown) => string[];
   SLOW_TIER_TEST_TIMEOUT_MS?: number;
   slowTierHangBoundArgs?: () => string[];
-  main: (argv: string[], opts: { spawn: (cmd: string, args: string[], o?: unknown) => { status: number | null }; env?: NodeJS.ProcessEnv }) => number;
+  main: (argv: string[], opts: { spawn: (cmd: string, args: string[], o?: unknown) => { status: number | null }; env?: NodeJS.ProcessEnv; log?: (line: string) => void }) => number;
 };
 const setup = noLiveRemote as unknown as {
   runsTestFilesInThisProcess?: (execArgv?: readonly string[]) => boolean;
@@ -200,11 +199,85 @@ test("unit test: a fast-tier run carries a per-test timeout scaled from the tier
 test("unit test: a slow-tier run carries a fixed per-test timeout well above its longest measured test", () => {
   assert.equal(typeof tiers.slowTierHangBoundArgs, "function");
   const limit = tiers.SLOW_TIER_TEST_TIMEOUT_MS!;
-  assert.deepEqual(tiers.slowTierHangBoundArgs!(), [`--test-timeout=${limit}`, "--test-force-exit"]);
+  const args = tiers.slowTierHangBoundArgs!();
+  assert.ok(args.includes(`--test-timeout=${limit}`), args.join(" "));
+  assert.ok(args.includes("--test-force-exit"), "a timed-out test's leaked handles cannot hold the shard");
   // 71 s was the longest top-level slow-tier test measured on 2026-10-28; a bound under 2x that kills honest work.
   assert.ok(limit >= 2 * 71_000, `slow-tier limit ${limit}ms leaves too little headroom`);
   // The 35-minute shard ceiling must still leave room for a late hang to fail by name.
   assert.ok(limit <= 5 * 60_000, `slow-tier limit ${limit}ms cannot fire before the shard is cancelled`);
+});
+
+test("unit test: a slow-tier run reports every test before exiting with leaked handles", () => {
+  const root = scratchDir("slow-results");
+  try {
+    mkdirSync(join(root, "test"));
+    mkdirSync(join(root, "scripts"));
+    writeFileSync(join(root, "test", "slow.test.ts"), [
+      'import test from "node:test";',
+      'setInterval(() => {}, 1000);',
+      'for (let i = 0; i < 1000; i++) test(`result ${i}`, () => {});',
+      "",
+    ].join("\n"));
+    writeFileSync(join(root, "scripts", "test-tier-manifest.json"),
+      JSON.stringify({ thresholdMs: 5000, files: { "test/slow.test.ts": 9000 } }));
+    const log: string[] = [];
+    let calls = 0;
+    const status = tiers.main(["--root", root, "--run", "slow"], {
+      log: (line) => log.push(line),
+      spawn: (cmd, args, opts) => {
+        calls++;
+        assert.ok(args.includes(`--test-timeout=${tiers.SLOW_TIER_TEST_TIMEOUT_MS}`), args.join(" "));
+        const run = spawnSync(cmd, args.map((arg) =>
+          arg === "./test/setup/tmp-hygiene.ts" ? join(REPO_ROOT, arg) :
+            arg === "test/slow.test.ts" ? join(root, arg) : arg), {
+          ...(opts as { env: NodeJS.ProcessEnv }),
+          cwd: REPO_ROOT,
+          env: nestedEnv((opts as { env: NodeJS.ProcessEnv }).env),
+          stdio: "pipe",
+          encoding: "utf8",
+          timeout: 30_000,
+        });
+        assert.equal(run.signal, null, run.stdout + run.stderr);
+        assert.equal(run.status, 0, run.stdout + run.stderr);
+        assert.match(run.stdout, /ok 1000 - result 999/);
+        assert.match(run.stdout, /# tests 1000/);
+        assert.match(run.stdout, /# fail 0/);
+        return run;
+      },
+    });
+    assert.equal(calls, 1, "execute the slow-tier child rather than manufacturing its tally");
+    assert.equal(status, 0, log.join("\n"));
+    assert.ok(log.some((line) => line.includes("1/1 file(s) reported, # tests 1000, # fail 0")), log.join("\n"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("unit test: a slow-tier timeout names a hung test and exits despite its leaked interval", () => {
+  const dir = scratchDir("slow-hung");
+  const hung = join(dir, "hung.test.mjs");
+  writeFileSync(hung, [
+    'import test from "node:test";',
+    'test("explicit timeout survives", { timeout: 5000 }, async () => { await new Promise(r => setTimeout(r, 800)); });',
+    'test("slow test never settles", async () => { setInterval(() => {}, 1000); await new Promise(() => {}); });',
+    "",
+  ].join("\n"));
+  try {
+    // Shorten only the production timeout so this regression does not take three minutes.
+    const args = tiers.slowTierHangBoundArgs!().map((arg) => arg.startsWith("--test-timeout=") ? "--test-timeout=480" : arg);
+    const run = spawnSync(process.execPath, ["--test", "--test-reporter=tap", ...args, hung], {
+      cwd: dir, encoding: "utf8", env: nestedEnv(), timeout: 30_000,
+    });
+    assert.equal(run.signal, null, run.stdout + run.stderr);
+    assert.notEqual(run.status, 0, "a hung slow test must fail");
+    assert.match(run.stdout, /ok 1 - explicit timeout survives/);
+    assert.match(run.stdout, /not ok 2 - slow test never settles/);
+    assert.match(run.stdout, /test timed out after 480ms/);
+    assert.match(run.stdout, /# tests 2/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a hung test under the fast-tier bound fails BY NAME and the run ends, in a pool and per file", () => {
