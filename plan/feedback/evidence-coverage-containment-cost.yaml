@@ -19,10 +19,23 @@ raw: >-
   2026-10-22T17:59:07.863Z through 2026-10-29T17:59:07.863Z; overrides rejected.
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/15580
+summary:
+  headline: Restore or explain containment cost evidence
+  what_happened: Only 215 of 843 joined worker calls (25.5%) recorded the `cost`
+    field over the past seven days, below the 90% floor. The gap has persisted
+    since September 28 and reopened October 29; overrides were rejected.
+  decision: Restore `cost` evidence at the containment ledger write site, or
+    document why the lane legitimately lacks it.
+  options:
+    - label: Restore evidence
+      consequence: Record the field on containment ledger writes and let the gardener
+        update coverage.
+    - label: Document the gap
+      consequence: Record why containment legitimately lacks cost evidence; coverage
+        remains below the floor.
 expansion: null
 submission_key: null
 thread_id: null

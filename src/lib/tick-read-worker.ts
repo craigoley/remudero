@@ -1,18 +1,12 @@
 import { hydrateDependencyMainIdentitiesSteps } from "./dependency-main-identity.js";
 /**
- * lib/tick-read-worker.ts — W1-T9722: the daemon's read-plane worker starts here, not from src/run-task.ts.
- *
- * W1-T4075 moved the daemon's tick reads onto a worker thread, but handed startReadPlane run-task.ts's own URL,
- * so the worker isolate loaded the whole CLI (758 modules, 97.9 MiB heapUsed under tsx, offline) to run one
- * producer. createTickReadProducer and the declarations only it uses MOVED here byte-for-byte; run-task.ts
- * imports back what it still calls and re-exports the rest, so every import path keeps working.
- *
- * This module is the worker's entry: its top level installs the producer in a read-plane worker and does
- * nothing anywhere else. It must never import src/run-task.ts, directly or through another module
- * (test/the-read-plane-worker-starts-from-a-narrow-entry.test.ts walks its static import graph).
- * scripts/build-child-entries.mjs lists it in WORKER_ENTRIES, so startTickReadWorker starts a current
- * bundle under plain node (startWorker, W1-T8777/W1-T9370) and the .ts source under tsx on every doubt.
- * The worker's first row, `read_plane.worker_started`, says which it ran and what its isolate holds.
+ * W1-T9722/W1-T4075: narrow entry for the daemon's read-plane worker; run-task.ts re-exports its API.
+ * Only a read-plane worker installs the producer at top level. Never import src/run-task.ts,
+ * even transitively: it loads the whole CLI into the isolate. Graph and real-worker falsifier:
+ * test/the-read-plane-worker-starts-from-a-narrow-entry.test.ts.
+ * WORKER_ENTRIES in scripts/build-child-entries.mjs includes this module. startWorker chooses a
+ * current bundle under node, otherwise .ts under tsx (W1-T8777/W1-T9370).
+ * `read_plane.worker_started` records the chosen entry and isolate footprint.
  */
 import { relative } from "node:path";
 import { boundChildByLoopTime } from "./loop-bounded-child.js";
@@ -95,12 +89,9 @@ export function* openPrsWithPostedIdsSteps(owner: string, repo: string, fetch: G
 }
 
 /**
- * Extract the generator name a failing check's OWN log names as its fix — every generator this
- * class covers fails with the IDENTICAL `Run 'npm run <name>' and commit the result.` sentence
- * (see this section's own header doc for where that was grepped, not assumed). `undefined` when
- * the log names no such sentence, which is the ordinary case for the vast majority of CI failures
- * (a real test failure, a lint error, a type error) — that absence is exactly what keeps this
- * class bounded to what it targets (rationale (5a)), never a widening net.
+ * Extract only a generator explicitly prescribed by the failing check's own log:
+ * `Run 'npm run <name>' and commit the result.` Otherwise return undefined, keeping ordinary
+ * test, lint and type failures outside this deterministic repair class (rationale (5a)).
  */
 export function remedyGeneratorNamedInLog(logTail: string): string | undefined {
   const m = /Run 'npm run ([\w:@./-]+)' and commit the result\.?/.exec(logTail ?? "");
@@ -108,13 +99,9 @@ export function remedyGeneratorNamedInLog(logTail: string): string | undefined {
 }
 
 /**
- * W1-T2733 — HOW MANY DISTINCT REMEDY LINES ARE CARRIED FORWARD FROM OUTSIDE THE TAIL.
- * BACKSTOP, not the primary control: deduplication is what actually stops a repetitive log growing
- * the fix prompt (one remedy repeated 3,000 times retains ONCE), and this catches only the residue
- * that dedupe cannot — a log naming many DISTINCT generators, which no honest CI run does. Small
- * because {@link allCiFailuresAreGeneratorFixable} needs one remedy per failing check, not a
- * catalogue; a job naming more than this is not a case the deterministic rung should be reasoning
- * about at all.
+ * W1-T2733: BACKSTOP on distinct remedies retained from outside the tail; deduplication is the
+ * primary control against repetitive logs. {@link allCiFailuresAreGeneratorFixable} needs one
+ * remedy per failing check; a larger catalogue is outside the deterministic rung's remit.
  */
 export const MAX_RETAINED_REMEDY_LINES = 5;
 
@@ -126,24 +113,10 @@ export const RETAINED_REMEDY_HEADER = "--- generator remedy line(s) retained fro
 export const UNTASKED_REVIEW_BUDGET_USD = 15;
 
 /**
- * W1-T3084 — THE ONE RULE BOTH RUNGS APPLY. `sweep.ts:1347` declines any candidate whose
- * `creditIsImplementation !== true`; `defaultCreditedMergedIds` used to filter on `.merged` alone,
- * so the verb that WRITES `status: merged` into the plan was strictly more permissive than the
- * read-only rung auditing it. MEASURED 2026-09-07 by running the real verb both ways on the real
- * plan: 1036 shards flipped as shipped, 953 with this rule — 83 apart.
- *
- * BOTH NON-TRUE VALUES DECLINE: `undefined` (the merge subject fell outside the scanned window, so
- * nothing is known) and `false` (a filing earned the credit). Reading `undefined` as a credit is
- * how #4461 was closed against a `chore(plan)`.
- *
- * `=== true` RATHER THAN A TRUTHY TEST, and honestly: for `boolean | undefined` the two are
- * behaviourally IDENTICAL, so this is a statement of intent, not a behavioural guard — a mutation
- * to `!!c.creditIsImplementation` passes every test here, which was measured, not assumed. It is
- * written this way to match sweep.ts:1347's `!== true` exactly, so a reader comparing the two rungs
- * sees one rule and not two spellings of it.
- *
- * Exported as a PREDICATE rather than inlined so a test can drive all three values directly: the
- * function below reads config, a ledger and GitHub, and none of that is the rule under test.
+ * W1-T3084: reconciliation requires a merge and positive implementation/build evidence.
+ * False or unknown evidence alone cannot credit a filing (#4461); align destructive consumers
+ * with sweep.ts. Explicit `=== true` states intent, not a stronger guard than truthiness for
+ * boolean | undefined. Export the predicate so tests can drive all three values without I/O.
  */
 export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementation?: boolean; creditHasBuildDiff?: boolean; creditHasOtherBuildMerge?: boolean }): boolean {
   return c.merged === true && (c.creditIsImplementation === true || c.creditHasBuildDiff === true || c.creditHasOtherBuildMerge === true);
@@ -165,11 +138,8 @@ export interface BoardItemEscalationInfo {
   openedAt?: string;
 }
 
-/** W1-T2465: the SAME `board-review:stale:<ref>` / `board-review:escalation:<ref>` shape
- *  `board-review.ts` mints and `lib/inbox.ts`'s `deriveLegacyReferent` parses — duplicated here
- *  deliberately rather than imported, the same "a deliberate, small duplication rather than a
- *  cross-layer import" precedent `board-review.ts`'s own header sets, because importing either
- *  of those (pure-module / registry) modules back from this reader would be a cycle. */
+/** W1-T2465: match board-review.ts's `board-review:stale:<ref>` / `board-review:escalation:<ref>`
+ *  origins and inbox.ts's deriveLegacyReferent. Duplicate the pattern to avoid an import cycle. */
 const BOARD_REVIEW_PROPOSAL_ORIGIN_PATTERN = /^board-review:(?:stale|escalation):.+$/;
 
 export function boardItemsFromOpenPrs(
@@ -215,19 +185,10 @@ export interface BoardReviewItemsIo {
 export const syncBoardReviewOpenPrs = (o: string, r: string): OpenPrRest[] => fetchOpenPrsRest(o, r, ghJson);
 
 /**
- * The board-review rung's ONE real read — the injected edge, exactly the role
- * {@link buildOpenPrViews} plays for the sweep.
- *
- * ONE LIST CALL PLUS THE ROLLUPS IT ALREADY CARRIES. `fetchOpenPrsRest` hydrates
- * `statusCheckRollup` per PR itself, so the red arm costs nothing this read was not already
- * paying. It runs on EVERY daemon tick's check, not only on a fire (W1-T5481 measured 30-98 s each,
- * 1+2N synchronous `gh` calls), so the daemon prefetches it off the loop instead.
- *
- * NEVER THROWS, and that is a deliberate fail direction: a GitHub outage must degrade this rung
- * to "no items, therefore no fire", never take out the daemon tick that hosts it. An empty list
- * makes {@link decideBoardReviewTrigger} answer `fire: false`, which is the same thing a healthy
- * empty board says — acceptable here precisely because this rung only ever REPORTS, so a missed
- * report costs one period, whereas a thrown tick costs the loop.
+ * Board-review's real read, analogous to {@link buildOpenPrViews}. Reuse fetchOpenPrsRest's
+ * rollups; the daemon prefetches this per-tick read off the loop (W1-T5481).
+ * Never throw: an outage yields no items and decideBoardReviewTrigger's `fire: false`.
+ * This report-only rung may miss one period rather than take down the daemon tick.
  */
 export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo = {}): BoardItem[] {
   try {
@@ -242,10 +203,8 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
         { ledgerPath: ledgerPathFor(config), github: buildBatchedGithub(owner, repo) },
         join(config.root, "state", "status.json"),
       );
-      // W1-T2453: carry the SAME entries' `escalationTitle`/`escalationIssueUrl`/
-      // `escalationUnverified` through — they are already on `p`, one line above, so naming the
-      // escalation in `boardItemsFromOpenPrs` costs no second read. W1-T2466: `escalationOpenedAt`
-      // rides the same join, for the same reason.
+      // W1-T2453/W1-T2466: reuse the projection's escalation title, URL, verification and openedAt;
+      // boardItemsFromOpenPrs needs no second read.
       escalations = new Map(
         [...proj.values()]
           .filter((p) => p.needsHuman && p.prNumber !== undefined)
@@ -259,12 +218,8 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
             },
           ] as const),
       );
-      // W1-T2465: the SAME projection's `taskId`, joined to the plan it was already built from,
-      // answers "was this PR's task born from a board-review proposal" with no second read.
-      // `plan.byId?.get(...)` is deliberately optional — a plan shape without an index (or a
-      // task the plan no longer carries) yields `undefined` here, never a throw, so this arm
-      // fails toward NOT-SELF-PRODUCED rather than taking the whole read (escalations included)
-      // down with it.
+      // W1-T2465: join the projection's taskId to its own plan without another read.
+      // Missing index/task means not-self-produced; never lose escalations to a throw here.
       originByPrNumber = new Map(
         [...proj.values()]
           .filter((p) => p.prNumber !== undefined)
@@ -277,13 +232,8 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
     }
     return boardItemsFromOpenPrs(prs, io.now?.() ?? systemClock.date(), escalations, originByPrNumber);
   } catch {
-    // AN OUTAGE YIELDS NO ITEMS, AND THAT IS THE CHOSEN FAIL DIRECTION, not an oversight. An
-    // empty board makes `decideBoardReviewTrigger` answer `fire: false`, which is the same thing
-    // a genuinely healthy empty board says — acceptable ONLY because this rung exclusively
-    // REPORTS: the cost of the confusion is one missed report, bounded by `minIntervalMinutes`,
-    // whereas letting the throw escape would cost the daemon tick that hosts it. The distinction
-    // is not lost to the operator either: `check` returns its reason and the tick ledgers
-    // `board_review.skipped` with it.
+    // Report-only fail direction: no items means fire:false, costing at most one report period
+    // (minIntervalMinutes). `check` returns the reason for the tick's board_review.skipped row.
     return [];
   }
 }
@@ -466,25 +416,19 @@ export function createTickReadProducer(options: TickReadOptions, io: {
 // re-exported below.
 
 /**
- * W1-T1212 — the required-context → workflow-file map the stale-gate discriminator draws on.
- * Branch protection names exactly two required contexts today (`ghRequiredStatusCheckContexts`,
- * status.ts): `remudero-review` (never a member here — it is a commit status carrying the review
- * verdict, not a check run defined by a workflow file at all, and `checksStateFromRollup`
- * already excludes it from `ciFailures` for the same reason) and `ci-gate`, whose own workflow
- * file is the ONE #2477 fixed (the recon this task cites verbatim). A failing check name this
- * map does not carry produces NO stale-gate signal — fail toward "don't fire," never a guess at
- * a file that may not exist. Widening this to a general check-name → workflow-file resolver is a
- * separate, out-of-scope shard (design note (vi) names none of that in scope).
+ * W1-T1212/#2477: explicit required-context → workflow-file map for the stale-gate discriminator.
+ * remudero-review is a commit status, not a workflow check; checksStateFromRollup excludes it too.
+ * Unmapped names produce no stale-gate signal. Never guess a workflow or broaden this resolver
+ * beyond the filed scope (design note (vi)).
  */
 const STALE_GATE_WORKFLOW_FILE: Readonly<Record<string, string>> = {
   "ci-gate": ".github/workflows/ci-gate.yml",
 };
 
 /**
- * W1-T1212 — one file's git blob sha at one ref (`gh api repos/<o>/<r>/contents/<path>?ref=<ref>`,
- * the single-contents-read design note (i) calls for). `undefined` on ANY failure (missing file,
- * bad ref, `gh` unreachable) — never thrown, so a read this lane cannot complete simply
- * contributes no stale-gate evidence rather than aborting the whole sweep pass.
+ * W1-T1212 (design i): read one blob SHA at one ref through the contents API.
+ * Missing file, bad ref or transport failure yields undefined: no stale-gate evidence,
+ * never an aborted sweep pass.
  */
 function blobShaAtRef(owner: string, repo: string, path: string, ref: string): string | undefined {
   try {
@@ -500,12 +444,9 @@ function blobShaAtRef(owner: string, repo: string, path: string, ref: string): s
 }
 
 /**
- * W1-T1212 — THE READ HALF OF THE DISCRIMINATOR (design note i): for one red PR, which of its
- * OWN currently-failing checks (a subset of {@link OpenPrView.ciFailures}) are defined by a
- * workflow file whose blob sha differs between this PR's OWN merge ref (`pull/<n>/merge` — the
- * SAME ref `pull_request` itself evaluates, frozen at this PR's last `synchronize`, per the
- * recon this task cites) and `main` RIGHT NOW. A name with no {@link STALE_GATE_WORKFLOW_FILE}
- * entry, or whose blob read fails on either ref, contributes nothing — fail toward "not stale."
+ * W1-T1212 (design i): compare a red PR's failing-check workflows at its own pull/<n>/merge ref
+ * (the pull_request evaluation frozen at synchronize) against current main. Unmapped checks or
+ * failed reads on either ref contribute nothing: fail toward not stale.
  */
 function staleGateFailureNames(owner: string, repo: string, pr: OpenPrView): string[] {
   const out: string[] = [];
@@ -705,14 +646,9 @@ export function reviewStateFromRollup(rollup: RollupCheck[] | undefined): OpenPr
 }
 
 /**
- * W1-T2299 — {@link OpenPrView.reviewVerdictPostedAt}'s producer: when the CURRENT `remudero-review`
- * rollup entry started, off the SAME entry {@link reviewStateFromRollup} above already finds (no
- * extra request). For the commit-status shape `remudero-review` is actually posted as (see
- * lib/review.ts's `postStatus`, `repos/.../statuses/...`), this is the status's own `created_at` —
- * `RestRollupEntry.startedAt`'s own doc (lib/open-prs-rest.ts) names exactly this mapping ("a
- * status context's mapped from createdAt"). `undefined` when the rollup carries no matching entry
- * or that entry has no dateable start — the same "cannot date it" case {@link OpenPrView.reviewVerdictPostedAt}'s
- * own doc says reads as NOT superseded (fail closed).
+ * W1-T2299: produce OpenPrView.reviewVerdictPostedAt from the current remudero-review rollup,
+ * reusing reviewStateFromRollup's entry. open-prs-rest.ts maps the commit status's created_at to
+ * startedAt (review.ts's postStatus). Missing/undateable evidence means not superseded, fail closed.
  */
 export function reviewVerdictPostedAtFromRollup(rollup: RollupCheck[] | undefined): string | undefined {
   const r = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
@@ -779,19 +715,10 @@ export function reviewAttemptsForInput(
 }
 
 /**
- * WRITTEN AS TWO DIRECT `.step ===` COMPARISONS ON PURPOSE, not as a `Set.has()` over a `typeof`
- * guard. `test/ledger-rotation.test.ts` derives the expected `DECISION_RELEVANT_LEDGER_STEPS`
- * membership by scanning consumer source for `/\.step\s*(?:===|!==)\s*["']…["']/`, so this shape
- * makes the dependency VISIBLE to the very check that exists to find it. Both steps are already in
- * that set (`ledger.ts:337`), which stops rotation from erasing the historical-head evidence used
- * to explain an orphaned status. The retry bound itself is produced separately by
- * {@link reviewAttemptsForInput} and counts only completed postings for the exact current input.
- *
- * The first draft guarded with a `typeof` check against the step field and CI caught it: the
- * scanner read that guard's own type literal as a step name and failed. That was a false positive,
- * but the honest fix is to write the comparison the scanner can read rather than to phrase around
- * it. NOTE the scanner does not strip comments, so prose here must avoid the compared-literal shape
- * too — this very paragraph failed the check once for describing it verbatim.
+ * Keep direct step comparisons: test/ledger-rotation.test.ts scans these to enforce
+ * DECISION_RELEVANT_LEDGER_STEPS membership and retain historical-head evidence.
+ * A typeof guard misled that scanner; it also reads comments, so avoid compared-literal prose.
+ * reviewAttemptsForInput separately bounds retries using completed postings for the current input.
  */
 function isReviewPostedStep(step: unknown): boolean {
   return step === "review.posted" || step === "review.post_refused";
@@ -846,24 +773,12 @@ interface ReviewOrphanFacts {
  * Why: docs/forensics/tick-read-worker.md#revieworphansfor
  */
 /**
- * CAPPED-ARM-ESCALATION — is the arm refusal for this exact head TERMINAL?
- *
- * PURE, AND EXPORTED SO A TEST CAN REACH IT. `buildOpenPrViews`, the only caller, is not evaluated
- * by any unit test here, so a branch written inline there would be untestable added lines — the
- * same reason `cashDivertSpawnFields` and `harnessCommitForShellLessWorker` live where they do.
- *
- * DERIVED FROM THE SAME TWO READS `decideSweepArm` (lib/sweep.ts) MAKES, deliberately: this value
- * exists to warn that arming will refuse, so deriving it from different facts than the refusal
- * itself would let the warning and the behaviour drift apart.
- *
- * THE THREE ANSWERS, and why the middle one is not a boolean:
- *   - `true`   capped, non-plan-only, no override at this head. Nothing re-judges a fixed head into
- *              an uncapped verdict, so the refusal is permanent until a new head or an override.
- *   - `false`  a verdict IS recoverable and WILL arm — uncapped, plan-only (the W1-T205 carve-out
- *              arms with no override), or already overridden.
- *   - `undefined` NO verdict recoverable at all. Not "fine" and not "terminal": `decideSweepArm`
- *              ARMS on this absence ("no evidence to refuse on"), so there is nothing to warn
- *              about, and a rotated or unreadable ledger cannot manufacture an escalation.
+ * Capped-arm warning, derived from decideSweepArm's same two reads to prevent drift.
+ * Pure/exported so tests can reach it without buildOpenPrViews.
+ * true: capped, non-plan-only, no override; terminal until a new head or override.
+ * false: uncapped, overridden, or plan-only (W1-T205 permits arming without override).
+ * undefined: no recoverable verdict. decideSweepArm arms on absence; a rotated/unreadable ledger
+ * must never manufacture an escalation.
  */
 export function terminalArmRefusal(
   ledger: Array<Record<string, unknown>>,
@@ -1621,23 +1536,13 @@ function* ciFailuresSteps(
 }
 
 /**
- * W1-T1223 (design i) — the real gateway's producer for {@link OpenPrView.cancelledRequiredChecks},
- * mirroring how {@link fetchCiFailures} is the real gateway's producer for `ciFailures`: both name
- * off the SAME `cancelledRequiredCheckNames` predicate lib/sweep.ts owns, so this producer and
- * `checksStateFromRollup`'s red verdict can never drift into disagreeing about which check is
- * cancelled. `jobId` uses the SAME URL-or-external-id resolver `fetchCiFailures` reads —
- * best-effort, `undefined` when neither carries a job id, so
- * `requeueCheck`'s real wiring degrades to a named no-op rather than guessing a re-queue target.
- * Posted gates use `externalId` when GitHub rewrites their URL to /runs/<check-run-id>.
- *
- * W1-T2283 — `requiredContexts` is READ (still the one precondition — see
- * {@link cancelledRequiredCheckNames}'s own doc) but no longer narrows WHICH cancelled check gets
- * named: `ci-gate`, the ONE name branch protection on this repo actually declares required, is a
- * downstream aggregator that reports FAILURE — never CANCELLED — when a sibling it depends on
- * (`coverage-ratchet`, itself not a declared-required context) is cancelled. Narrowing to
- * `requiredContexts` before testing for CANCELLED therefore named nothing on both measured
- * incidents (#2794, #2841); this producer now agrees with {@link fetchCiFailures}, which already
- * reads CANCELLED off this same rollup with no such narrowing.
+ * W1-T1223 (design i): produce OpenPrView.cancelledRequiredChecks using sweep.ts's shared
+ * cancelledRequiredCheckNames, agreeing with fetchCiFailures/checksStateFromRollup.
+ * Resolve jobId from URL or externalId (posted URLs may become /runs/<check-run-id>);
+ * unresolved means a named requeueCheck no-op, never a guessed target.
+ * W1-T2283 (#2794/#2841): requiredContexts must be readable but must not narrow cancellations.
+ * ci-gate reports FAILURE when a non-required sibling such as coverage-ratchet is CANCELLED;
+ * filtering by required context first would hide that cancellation.
  */
 export function cancelledRequiredChecks(
   rollup: RollupCheck[] | undefined,
@@ -2462,21 +2367,12 @@ export function* openPrViewSteps(
             semanticRisk: DEFAULT_RISK, semanticBudgetUsd: UNTASKED_REVIEW_BUDGET_USD,
           });
     const reviewAttempts = reviewAttemptsForInput(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest);
-    // Every task-id-less review is written under `PR-<n>` by reviewCommand/runReview, and the
-    // escalation + synthetic fix-task paths use that exact identity too. W1-T456 originally
-    // read it back only for positively marked plan filings. That left ordinary agent-authored
-    // PRs blind to their own structured review evidence: PR #3559 carried four executed-fail
-    // `unmet_criteria` values under `PR-3559`, yet the sweep manufactured `[]`, escalated
-    // "criteria unrecoverable", and never dispatched the already-supported synthetic fix rung.
-    // Read the identity the producer actually wrote for every PR; an absent row still returns
-    // `[]`, and this does not invent a creditable plan task or widen `criteriaRecoverable`.
+    // W1-T456/#3559: taskless reviewCommand/runReview rows use PR-<n>, as do escalation/fix tasks.
+    // Read that key for every PR, not only plan filings, or executed-fail unmet_criteria vanish.
+    // Absent rows still yield []; this creates no plan credit or wider criteriaRecoverable.
     const unmetKey = reviewLedgerKey;
-    // W1-T913: the SAME synthetic `PR-<n>` fallback `reviewCommand`/`runReview` already key every
-    // `review.pending_posted`/`review.posted` ledger line with (task.id there, `taskId ?? PR-<n>`
-    // here) — never a second, independently-derived key. Only consulted when the LIVE rollup
-    // itself reads "pending" (never speculatively), and only trusted when the ledger's own
-    // `head_sha` still matches the CURRENT head — an older pending record surviving under a
-    // superseded head must never be read as dating the head observed right now.
+    // W1-T913: reuse reviewCommand/runReview's PR-<n> fallback. Consult pending rows only when
+    // the live rollup is pending, and date only a row matching the current head_sha.
     const pendingRecord = reviewState === "pending" ? lastPendingReviewStatusFromLedger(ledger, unmetKey, pr.url) : undefined;
     const currentPendingRecord = pendingRecord?.headSha === pr.headRefOid ? pendingRecord : undefined;
     const reviewPendingSince = currentPendingRecord?.postedAt;
@@ -2754,23 +2650,12 @@ type MergeLogReadOptions = {
 };
 
 /**
- * W1-T3067 — every merge commit's CHANGED PATHS on `origin/main`, keyed by the PR number a squash
- * merge puts in `(#N)`. ONE local git invocation per pass. This is the producer the plan-only DIFF
- * refusal needs: a merged PR's merge commit is on `origin/main` by definition, so this answers for
- * exactly the population credit is derived over, and it answers for FREE.
- *
- * ⚠ WITHOUT THIS THE REFUSAL IS INERT. `DeriveDeps.mergedPathsByPr` defaults to absent, and absent
- * means the pre-W1-T3067 shortcut decides — which is what credited #3195, a `chore(plan)` on its
- * own run branch, and cost the validated build in #4461.
- *
- * ⚠ BEST-EFFORT, AND AN EMPTY MAP IS THE SAFE ANSWER: a failed or truncated read leaves every PR
- * without an entry, which restores exactly today's behaviour rather than refusing anything. A
- * transient git failure must never be able to uncredit the plan.
- *
- * `root: undefined` (W1-T3873) — {@link creditEvidenceRootFor} could not prove a checkout for the
- * requested `owner/repo`, so there is nothing local left to scan. Same empty-map answer as an
- * unreadable root, and for the same reason: absence must never manufacture a refusal, only decline
- * to grant one.
+ * W1-T3067: one local git read per pass maps origin/main merge paths by squash subject's (#N).
+ * Supplies DeriveDeps.mergedPathsByPr's plan-only diff refusal; absent evidence left #3195's
+ * chore(plan) creditable and cost #4461's validated build.
+ * Failed/truncated reads return an empty map, preserving the existing shortcut: a transient
+ * failure must not uncredit the plan. W1-T3873: undefined root means creditEvidenceRootFor
+ * could not prove this owner/repo's checkout; likewise return no evidence, never a refusal.
  */
 export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PATHS_SCAN_LIMIT, opts: MergeLogReadOptions = {}): Map<number, string[]> {
   const byPr = new Map<number, string[]>();
@@ -2808,17 +2693,11 @@ export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PAT
 }
 
 /**
- * W1-T3063 — `origin/main`'s merge subjects, keyed by the PR number a squash merge puts in
- * `(#N)`. ONE local git invocation per sweep pass; no network, no per-candidate cost.
- *
- * ⚠ BEST-EFFORT, AND AN EMPTY MAP IS THE SAFE ANSWER. A failed or truncated read leaves every
- * candidate's subject undefined, which {@link creditSubjectIsImplementation} reports as unknown and
- * every destructive consumer declines on. The failure mode is a PR that stays open one pass longer,
- * never one that closes on evidence nobody read.
- *
- * `root: undefined` (W1-T3873) — same meaning and same empty-map answer as
- * {@link readMergedPathsByPr}'s own: {@link creditEvidenceRootFor} found nothing provably rooted in
- * the requested `owner/repo`.
+ * W1-T3063: one local read per pass maps origin/main merge subjects by squash PR number (#N).
+ * Failed/truncated reads leave subjects unknown; creditSubjectIsImplementation and destructive
+ * consumers decline, keeping a PR open another pass rather than closing without evidence.
+ * W1-T3873: undefined root means creditEvidenceRootFor proved no owner/repo checkout;
+ * return an empty map, as readMergedPathsByPr does.
  */
 function readMergeSubjectsByPr(root: string | undefined, opts: MergeLogReadOptions = {}): Map<number, string> {
   const byPr = new Map<number, string>();
@@ -2876,26 +2755,13 @@ function resolveMergeLogReadOptions(root: string | undefined): MergeLogReadOptio
 }
 
 /**
- * W1-T3873 — THE GIT-EVIDENCE ROOT BOTH READERS BELOW MUST SCAN for a credit pass over
- * `owner/repo`: the engine `repoRoot` for a SELF target (the checkout this process already runs
- * from), or that target's OWN already-synced checkout otherwise — `join(configRoot, "repos",
- * repo)`, the SAME expression `daemonCommand`'s `targetCheckoutRoot` already resolves for
- * cross-target COMMIT-TRAILER credit (W1-T3779, this file). Before this, `readMergedPathsByPr`
- * and `readMergeSubjectsByPr` were always handed the bare `repoRoot` module constant, so a target
- * repository's PR number was answered by the ENGINE repo's merge of the same number, or by
- * nothing — see this task's rationale for the two ways that reads wrong.
- *
- * PROVES the checkout belongs to `owner/repo` before handing it back, the same way
- * {@link buildCommitTrailerIndex} (lib/status.ts) proves a foreign checkout: comparing that
- * checkout's `git remote.origin.url` against the requested slug. A missing, foreign or unreadable
- * checkout returns `undefined` — a genuine ABSENCE, never a fallback to the engine's own history.
- * A failed `loadConfig()` (no fleet config yet) degrades the same way: `undefined`, never a throw
- * that could take out the whole credit pass over one config read.
- *
- * `undefined` back at the two readers means "no entry for ANY PR" — the SAME safe "no opinion"
- * a failed `git log` already yields today (both readers' own best-effort catch). It can only
- * WITHHOLD a credit that would otherwise have been answered from foreign evidence; it can never
- * manufacture one (design clause (iii), this task).
+ * W1-T3873: root readMergedPathsByPr/readMergeSubjectsByPr in the requested owner/repo.
+ * Self uses repoRoot; other targets use join(configRoot, "repos", repo), matching daemonCommand's
+ * targetCheckoutRoot and W1-T3779 trailer credit. Never answer a target's PR from engine history.
+ * Like buildCommitTrailerIndex, verify remote.origin.url against the requested slug first.
+ * Missing/foreign/unreadable checkout or failed loadConfig yields undefined, never an engine
+ * fallback or throw. Both readers interpret this as no evidence for any PR: withhold credit,
+ * never manufacture it (design iii). Falsifier: test/cross-target-credit-evidence.test.ts.
  */
 export function creditEvidenceRootFor(
   owner: string,
@@ -3095,17 +2961,9 @@ export function buildCreditCandidates(
  * this cycle, never a false "zero open"), the same best-effort contract as buildCreditCandidates.
  */
 /**
- * What the escalation reconciler's INTAKE saw, so `total: 0` stops being ambiguous.
- *
- * `sweep.escalation_reconcile.summary` logs `total` = `candidates.length`, counted AFTER the open
- * issues have been turned into candidates — so `total: 0` reads identically whether nothing was
- * open or everything open was dropped. That ambiguity cost a full recon: an operator saw `total: 0`
- * beside three open needs-human issues and reasonably concluded the reconciler was broken. It was
- * not — they had been closed minutes earlier, one of them BY the reconciler. But the defective
- * reading was REAL as recently as the same afternoon: between 16:00 and 17:48, two issues were open
- * and labelled while 23 of 24 summaries reported `total: 0` (fixed by PR #1084).
- *
- * `issuesSeen: 3, total: 0` is the signature of that defect. The old line could not express it.
+ * Reconciler intake counts disambiguate an empty queue from dropped candidates (#1084).
+ * sweep.escalation_reconcile.summary's total is candidates.length after filtering;
+ * `issuesSeen: 3, total: 0` exposes issues that were read but produced no candidates.
  */
 export interface EscalationIntake {
   /** Issues the query returned, taken one statement after the read and before the candidate loop. */
@@ -3198,15 +3056,9 @@ export function buildEscalationReconcileCandidates(
     log?.("sweep.escalation_reconcile.list_failed", { error: String((e as Error)?.message ?? e) });
     return []; // a failed read is "do nothing this cycle", never a confident "zero open needs-human"
   }
-  // WHERE `issuesSeen` IS TAKEN, and why HERE. This is the list as the gateway returned it and as
-  // the loop below is about to consume it — one statement after the read, before the loop, before
-  // any per-issue derivation. Every drop the summary's ambiguity is about happens in that loop, so
-  // `issuesSeen - total` counts exactly those drops and nothing else.
-  //
-  // Deliberately NOT the raw REST row count. `parseLabelledIssuesRest` already drops rows carrying
-  // `pull_request` (escalate.ts:160-173) — an intended filter, not a defect — so counting rows
-  // would make `issuesSeen > total` on a healthy pass whenever a PR happens to carry the label,
-  // i.e. a false alarm in the one field added to stop false alarms.
+  // Count gateway issues before candidate filtering: issuesSeen - total measures only those drops.
+  // Raw REST rows include pull_request entries parseLabelledIssuesRest intentionally removes;
+  // counting those would falsely report lost issues on a healthy pass (#1084).
   const intake: EscalationIntake = { issuesSeen: open.length, droppedNoTaskTrailer: 0, droppedNoReferent: 0 };
   // W1-T3067 — THE SECOND DESTRUCTIVE CONSUMER, wired for the same reason as the first. This
   // builder reads `proj.merged` and feeds the closer that CLOSES a needs-human issue; a credit
@@ -3233,31 +3085,13 @@ export function buildEscalationReconcileCandidates(
       continue; // no named task — leave untouched (human territory)
     }
     const task = plan.byId.get(taskId);
-    // SYNTHETIC PR REFERENT. An escalation for an untrailered operator-lane PR names it `PR-<n>`
-    // (see the clarification rung's `escalate`, above) — a real, resolvable referent that is
-    // simply not a PLAN TASK, so `plan.byId` misses it by construction and the `!task` guard below
-    // would drop it forever. That is exactly how 53 issues became unretirable.
-    //
-    // Resolving it needs no plan entry: the PR NUMBER is the referent, and the SAME batched
-    // gateway `deriveStatus` is about to use already answers merged/closed for a bare number via
-    // `prByRef`. So this derives the identical `derived` shape from the number and hands the
-    // reconciler a candidate it can actually close — the round trip the synthetic id is only
-    // worth minting if it completes.
-    //
-    // FAIL-SOFT, matching `deriveStatus`'s own polarity: a gateway that CANNOT answer yields
-    // `indeterminate`, never a confident "not merged" — the closer already refuses to act on an
-    // indeterminate referent, so an unreadable PR leaves its issue open rather than closing it on
-    // a read failure.
+    // Synthetic PR-<n> referents lack plan entries; dropping them left 53 issues unretirable.
+    // Reuse the batched gateway's prByRef to resolve merged/closed by number, as deriveStatus does.
+    // Unreadable PRs stay indeterminate and keep their issues open; never close on a read failure.
     if (!task) {
       const synthetic = /^PR-(\d+)$/.exec(taskId);
-      // impl-DY: an id the plan does not own and that was NOT minted in the `PR-<n>` shape still names its
-      // referent — `renderIssueBody` writes the PR as a full URL into the issue text. Read it back rather
-      // than dropping the issue forever. This is the operator's own framing ("the system should be able to
-      // determine that those are already handled") and it is the last remaining way an escalation becomes
-      // permanently unretirable: `TRIAGE-fb-1784732687221-3be743` (PR #707, merged 2026-07-24) and
-      // `TRIAGE-fb-1784917146019-88250d` (PR #775, merged 2026-07-25) survived a hand-cleanup of 55 siblings
-      // for exactly this reason. Title is the fallback source — every escalation title carries the PR URL too,
-      // so a body that was edited (or truncated by a gateway) still resolves.
+      // impl-DY (#707/#775): unknown non-PR-<n> ids can still resolve through renderIssueBody's PR URL.
+      // Fall back to the title URL if an edited/truncated body lost it; never strand the receipt.
       const bodyReferent = synthetic ? undefined : prReferentFromIssueText(issue.body) ?? prReferentFromIssueText(issue.title);
       if (!synthetic && bodyReferent === undefined) {
         intake.droppedNoReferent++;
@@ -3285,12 +3119,8 @@ export function buildEscalationReconcileCandidates(
     const implementationEvidence = reconcileImplementationEvidence(taskId, proj, deps.github, mergeSubjects);
     const implementationGuardedMerged =
       proj.merged && (proj.source !== "head-branch" || implementationEvidence === true);
-    // W1-T162: a referent whose PR CLOSED WITHOUT MERGING is also terminal — superseded or
-    // abandoned, no longer a live blocker — distinct from an open/blocked-pending-fix PR.
-    // deriveStatus's `prState` carries the raw GitHub state through unchanged (status.ts's
-    // `fromPrState` only ever sets `status: "blocked"` for a raw "closed" state, so checking
-    // `prState` directly here is the same signal, made explicit rather than inferred from
-    // `status`). Mutually exclusive with `merged` by construction (fromPrState never sets both).
+    // W1-T162: closed without merging is terminal too (superseded/abandoned), unlike open blockers.
+    // Use deriveStatus's raw prState; fromPrState makes closed and merged mutually exclusive.
     const closedWithoutMerge = !proj.merged && proj.prState?.toUpperCase() === "CLOSED";
     candidates.push({
       issueUrl: issue.url,

@@ -2,12 +2,10 @@ import { execFileSync } from "node:child_process";
 import { ghExec, ghExecFile, ghTextAsync } from "./github-transport.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, createNonBlockingGhCallPacer, parseGhRateLimitHeaders, splitGhHeaderBlock, type GhRateLimitReading } from "./github-transport.js";
 import type { WarmRefreshOutcome, WarmRefreshTelemetry } from "./github-refresh-pacer.js";
-// W1-T2440: the pre-warm walk runs on its own OS thread (`runPrewarmWorker`), so the `execFileSync` below stays
-// synchronous without parking the process serving `/v1/status`. That worker loads THIS module a second time;
-// `isMainThread`/`workerData` gate the worker-only branch near `buildBatchedGithub`.
+// W1-T2440: `runPrewarmWorker` isolates synchronous reads from `/v1/status`; this module loads twice.
+// `isMainThread`/`workerData` gate the worker branch near `buildBatchedGithub`.
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
-// Default export, never named bindings: those are non-configurable, so a spy cannot intercept one. Every call
-// is a property access AT CALL TIME, never destructured. Why: W1-T115's proof shape — docs/forensics/status.md
+// Use default-export property access at call time: named bindings defeat spies (W1-T115; docs/forensics/status.md).
 import fs from "node:fs";
 import { readFileSync as nodeReadFileSync } from "node:fs";
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
@@ -47,18 +45,15 @@ import { DEFAULT_LIVENESS_BOUND_MS, infrastructureRefusal, lifetimeInfrastructur
 import { startWorker } from "./child-entry-argv.js";
 
 /**
- * Derived task status (MASTER-PLAN v2.1). Merge-state is DERIVED FROM GITHUB, never written back to
- * plan/tasks.yaml, whose `status:` is decorative; the truth is cached to state/status.json.
- *
- * Precedence, highest first: `correction.provenance` (DECLARED, SUPREME); (a) `pr.opened`; (b) an explicit
- * `pr:` field; (b2) `manual.completed`; (c) a merged PR with the anchored `Remudero-Task:` trailer. First rung
- * to resolve a MERGED PR wins. INVARIANT: an open-PR ledger claim is the WEAKEST evidence here, so every rung
- * is checked for a merged credit before one may stand (W1-T116).
- * Why: the W1-T1 149x storm and the W1-T20c false-credit class set this order — docs/forensics/status.md
+ * Derive merge-state from GitHub; cache in state/status.json, never plan/tasks.yaml's decorative `status:`.
+ * Precedence (MASTER-PLAN v2.1): `correction.provenance`; (a) `pr.opened`; (b) `pr:`;
+ * (b2) `manual.completed`; (c) anchored `Remudero-Task:` trailer. First merged credit wins.
+ * Check every rung for merged credit before accepting an open-PR ledger claim (W1-T116).
+ * Order prevents the W1-T1 149x storm and W1-T20c false credits; docs/forensics/status.md.
  */
 
-/** The precedence sources, plus `none` for no evidence and `throttled` for a read that FAILED — never conflated
- *  (W1-T119, W1-T1029). Why: a false `source: "none"` mis-filed W1-T116 as not-merged */
+/** Never conflate absent evidence (`none`) with failed reads (`throttled`): W1-T119/W1-T1029;
+ *  false `none` mis-filed W1-T116 as not-merged. */
 export type StatusSource =
   | "ledger"
   | "pr-field"
@@ -69,10 +64,8 @@ export type StatusSource =
   | "none"
   | "throttled";
 
-/** The CLASSIFIED reason a `gh` read failed (W1-T119; buffer overflow from the error `code`, W1-T181). Unknown
- *  still counts as UNAVAILABLE — absence is the costly conclusion. `not_yet_collected` (W1-T3925) is NOT a
- *  failure: it marks a cold console-read cache that has never finished a first live read, so a caller can tell
- *  "still collecting" apart from "the read broke" instead of both fabricating the same "transport" cause. */
+/** Failed-read classification (W1-T119; overflow uses error `code`, W1-T181). Unknown means unavailable.
+ *  `not_yet_collected` marks a cold cache, not a transport failure (W1-T3925). */
 export type GhFailureReason = "rate_limit" | "auth" | "transport" | "buffer_overflow" | "unknown" | "not_yet_collected";
 
 /** The states {@link GitHub.readFailed}/{@link GitHub.readFailureReason} cannot express (W1-T2219): a boolean
@@ -80,9 +73,8 @@ export type GhFailureReason = "rate_limit" | "auth" | "transport" | "buffer_over
 export type GhReadState = "not_attempted" | "in_flight" | "ok" | "failed";
 
 /**
- * Classify a failed `gh` invocation's status, stderr and Node error `code`. Pure, and exported so both gateways
- * and the tests share ONE rule. THE TRAP: a `maxBuffer` overflow has no stderr — Node kills the child first —
- * so it is detected from `code === "ENOBUFS"`, checked FIRST. Why: as "unknown" it hid the 2026-07-20 outage
+ * Shared pure failure classifier. Check ENOBUFS first: Node kills an overflowing child before stderr exists.
+ * Classifying it as unknown hid the 2026-07-20 outage.
  */
 export function classifyGhFailure(
   status: number | null | undefined,
@@ -90,8 +82,7 @@ export function classifyGhFailure(
   code?: string | null,
 ): GhFailureReason {
   if (code === "ENOBUFS") return "buffer_overflow";
-  // A KILLED-ON-TIMEOUT CHILD CARRIES NO STDERR either: MEASURED, `execFileSync` past its `timeout` throws
-  // ETIMEDOUT with empty stderr. "transport", a call that never returned being network-class (W1-T181).
+  // Timeout also has empty stderr; ETIMEDOUT is transport failure (W1-T181).
   if (code === "ETIMEDOUT") return "transport";
   const text = String(stderr ?? "");
   if (/rate limit|quota|secondary rate limit/i.test(text)) return "rate_limit";
@@ -109,10 +100,9 @@ export function isGhRateLimitError(err: unknown): boolean {
 }
 
 /**
- * Wall-clock ceiling on ONE `gh` invocation, for every gateway here. WHAT HAS NO BOUND BLOCKS THE WHOLE DAEMON:
- * these calls are synchronous, a hang is not an error, and nothing is logged. Sized so it cannot fire on a
- * healthy call and sits inside the poll interval. FAIL-SOFT: callers already degrade on the kill's throw.
- * Why: an unbounded sweep ran 10:57-11:54 — docs/forensics/status.md
+ * Bound each synchronous `gh` call: an unlogged hang blocks the daemon. Fits inside the poll interval
+ * without killing healthy calls; callers degrade on timeout. Unbounded sweep: 10:57-11:54,
+ * docs/forensics/status.md.
  */
 export const GH_CALL_TIMEOUT_MS = DEFAULT_GH_CALL_TIMEOUT_MS;
 
@@ -125,8 +115,7 @@ export interface PrRef {
   mergedAt?: string;
   /** The PR's title (W1-T184) — a DECORATION, never a precedence input; omitted ⇒ the bare number and url. */
   title?: string;
-  /** The head branch ref (W1-T256), riding the one list fetch so rung (c2) re-asserts ownership with no second
-   *  call. Omitted ⇒ the branch is treated as unowned. */
+  /** W1-T256: same list fetch; rung (c2) rechecks ownership. Omitted means unowned. */
   headRefName?: string;
   /** The exact current head commit, same board fetch (W1-T2727). Omitted means unknown, never an exact match. */
   headRefOid?: string;
@@ -134,8 +123,7 @@ export interface PrRef {
   body?: string;
 }
 
-/** The four IN-FLIGHT run phases the ledger's own `step` names distinguish (MASTER-PLAN §7/§9, W1-T155) — never
- *  invented vocabulary; each maps 1:1 onto a real run-task.ts step. */
+/** Ledger phases, each mapping to a run-task.ts step (MASTER-PLAN §7/§9, W1-T155). */
 export type Phase = "recon" | "implement" | "review" | "fix-rung";
 
 /** A bounded operator-facing description of the worker currently attached to a task. Raw
@@ -160,8 +148,7 @@ export interface WorkerTelemetry {
   };
   lastEventAt?: string;
   lastEventKind?: WorkerActivityKind;
-  /** Dispatch start to the first observed stream event; this is a measured startup signal, not
-   *  an invented queue duration. */
+  /** Measured dispatch-start to first stream event; not queue duration. */
   firstSignalAt?: string;
   firstSignalLatencyMs?: number;
 }
@@ -169,13 +156,12 @@ export interface WorkerTelemetry {
 /** One task's projected merge-state, derived from GitHub (never from yaml). */
 export interface StatusProjection {
   taskId: string;
-  /** W1-T2392 — A MERGED BUILD NOBODY CREDITED: not merged, yet a merged PR touching `src/` names this task in
-   *  prose. A WARN, never a block — see {@link uncreditedBuildWarning}. */
+  /** W1-T2392: merged src/ PR names this uncredited task in prose. Warning, never block; {@link uncreditedBuildWarning}. */
   uncreditedBuild?: UncreditedBuildWarning;
   /** W1-T2397 — AN OPEN, UNMERGED BUILD ON ANOTHER BRANCH. A REPORT ONLY: see {@link openSiblingBuild}. */
   openSiblingBuild?: OpenSiblingBuild;
-  /** Derived label, DELIBERATELY within {@link TaskStatus}'s closed set, which daemon.ts's `reconstructOrphan`
-   *  and openapi/daemon.yaml depend on. The finer taxonomy rides the sparse fields below (W1-T155). */
+  /** Keep {@link TaskStatus}'s closed set for daemon.ts `reconstructOrphan` and openapi/daemon.yaml;
+   *  finer taxonomy uses sparse fields (W1-T155). */
   status: TaskStatus;
   /** The single fact dependency-gating cares about: has this task landed? */
   merged: boolean;
@@ -186,24 +172,21 @@ export interface StatusProjection {
   prState?: string;
   /** LEGIBILITY (P16 / W1-T69): trailer hits REJECTED by rung (c), with reasons, so a false trailer is VISIBLE. */
   rejected_candidates?: Array<{ pr: string; reason: string }>;
-  /** CURRENT phase of an in-flight run (W1-T155). A fresh `run.start` resets the scan to `recon`, so an earlier
-   *  run's phase never leaks in — the named falsifier. */
+  /** W1-T155: current phase; fresh `run.start` resets to `recon`, preventing earlier-run leakage. */
   phase?: Phase;
   /** ISO-8601 timestamp of the in-flight run's `run.start` ledger line. Present iff `phase` is. */
   startedAt?: string;
   /** Milliseconds since `startedAt`, as of THIS derivation (`deps.now()`) — re-derived fresh, never cached. */
   elapsedMs?: number;
-  /** W1-T944: the run's CURRENT `worker.state`, off the SAME scan `phase` came from, and only once the run has
-   *  emitted such a row — absent renders "state unknown", not a healthy default. */
+  /** W1-T944: current `worker.state` from the phase scan; absent until emitted, renders "state unknown". */
   workerState?: WorkerState;
   /** `ts` of the row that moved the run INTO its current `workerState`. Present ONLY while that state is quiet. */
   workerStateSince?: string;
   /** Structured worker telemetry from the bounded `worker.activity` ledger rows. Present only
    *  while the current run is in flight, just like `phase` and `workerState`. */
   workerTelemetry?: WorkerTelemetry;
-  /** PROCESS-UNEVIDENCED (W1-T1240): the running decoration rests ONLY on an open PR — no ledger heartbeat, no
-   *  live lock. Marks "NOT EVIDENCED", never "dead". Why: W1-T314 rendered `running, 10h25m, $27.75` ten hours
-   *  after its run was refused */
+  /** W1-T1240: open-PR-only liveness, without heartbeat/lock, means "NOT EVIDENCED", never "dead".
+   *  Trap: W1-T314 showed `running, 10h25m, $27.75` ten hours after refusal. */
   processUnevidenced?: true;
   /** W1-T2970 — an operator ruling SUBTRACTED this task's credit, with the reason that ruling gave.
    *  Present only when a row refused the pairing; its absence means no override applied. */
@@ -219,16 +202,13 @@ export interface StatusProjection {
   escalationIssueUrl?: string;
   /** The escalation's one-line ask (W1-T182) — the live issue's title, off the same batched gateway. */
   escalationTitle?: string;
-  /** The live issue state could NOT be confirmed OPEN. FAIL-CLOSED (W1-T182): an unreadable state KEEPS the
-   *  row — the opposite direction from W1-T181's merged-count boundary. */
+  /** W1-T182: unconfirmed issue state keeps the row; opposite W1-T181's merged-count fail-closed direction. */
   escalationUnverified?: true;
-  /** `ts` of the escalation's own `escalation.issue_opened` line (W1-T159). "How long has this needed a human"
-   *  MUST use this, never `startedAt`: they name different events. */
+  /** W1-T159: age human need from `escalation.issue_opened`'s `ts`, never the run's `startedAt`. */
   escalationOpenedAt?: string;
   /** The current OPEN PR already has auto-merge armed, observed via the SAME batched fetch (W1-T155). */
   armedAwaitingMerge?: true;
-  /** INDETERMINATE (W1-T119): `source: "throttled"` — the read FAILED rather than resolving to "no evidence".
-   *  A caller gating dispatch MUST treat this as DO NOT ACT. */
+  /** W1-T119: failed read (`source: "throttled"`), not absent evidence. Dispatch must not act. */
   indeterminate?: true;
   /** The CLASSIFIED reason behind an `indeterminate` projection (W1-T119) — throttle, auth-expiry or outage. */
   unavailableReason?: GhFailureReason;
@@ -242,10 +222,8 @@ export interface StatusProjection {
   /** W1-T485: NOT merged, yet one of this task's own proof symbols shipped to a declared path under ANOTHER
    *  task's trailer. AN OBSERVATION, NEVER A VERDICT: `merged`/`status`/`source` are untouched beside it. */
   supersededBy?: SupersessionEvidence;
-  /** W1-T507: filed `verify: human` and not merged — the exclusion from machine dispatch, made visible to a
-   *  person. Set by {@link deriveStatus} itself, a pure function of this call's own resolved state, which keeps
-   *  every caller DERIVATION-EQUIVALENT. Why: `needsHuman` here would render an affordance with nothing to
-   *  click */
+  /** W1-T507: unmerged `verify: human` excludes machine dispatch; {@link deriveStatus} sets it for all callers.
+   *  Using `needsHuman` instead would render an affordance with nothing to click. */
   verifyHumanPending?: true;
   /** W1-T951 DELIVERABLE B: this MERGED task's credit rests on EXACTLY ONE path, one of them a branch ref
    *  GitHub deletes on merge. Why: 18 ids were credited by head-branch alone */
@@ -259,40 +237,32 @@ export interface GitHub {
   prByRef(ref: string | number): PrRef | null;
   /** Find a MERGED PR whose body contains `Remudero-Task: <taskId>`. null if none. */
   findMergedByTrailer(taskId: string): PrRef | null;
-  /** EVERY merged PR carrying `taskId`'s anchored trailer, newest-first (W1-T441) — the candidates {@link
-   *  findMergedByTrailer} discards by returning only the first, the CLOSE path manufacturing duplicates that
-   *  displace the implementation. null on a FAILED read, [] on a genuine miss.
-   *  Why: 16 of 496 trailered ids have more than one PR — docs/forensics/status.md */
+  /** W1-T441: all anchored-trailer matches, newest-first; null on failure, [] on miss.
+   *  {@link findMergedByTrailer}'s first-only result let CLOSE duplicates displace implementations:
+   *  16/496 trailered ids had multiple PRs; docs/forensics/status.md. */
   findMergedByTrailerAll?(taskId: string): PrRef[] | null;
-  /** CORROBORATION for an empty {@link findMergedByTrailer} (W1-T256): merged PRs whose HEAD BRANCH is this
-   *  task's run prefix — deterministic, NOT the body index, where an exit-0 EMPTY result is INDETERMINATE.
-   *  Callers RE-ASSERT ownership; null on FAILURE, distinct from [].
-   *  Why: one body-index miss caused four spurious re-dispatches */
+  /** W1-T256: corroborate empty {@link findMergedByTrailer} by run-prefix head, rechecking ownership.
+   *  Body-index exit-0 empty is indeterminate; one miss caused four redispatches. null on failure, [] on miss. */
   findMergedByHeadBranch?(taskId: string): PrRef[] | null;
   /** BATCHED form of {@link findMergedByHeadBranch} (W1-T257): ONE list read carrying every merged PR's head
    *  ref, matched CLIENT-SIDE. On the STRUCTURED ref, NEVER the body index. null on FAILURE. */
   listMergedHeadBranches?(): PrRef[] | null;
-  /** W1-T3763 — capture ONE merged-row snapshot as an exact anchored-trailer lookup. Calling the returned
-   *  function never re-enters the board index, so one `projectPlan` pass cannot let a 15-second cache expire
-   *  and restart its own merged-board read while it derives every task. `null` means that snapshot could not be
-   *  read; an absent method preserves the per-task gateway path for non-batched implementations. The lookup
-   *  keeps the existing body-first, commit-trailer-fallback precedence. */
+  /** W1-T3763: exact anchored-trailer lookup over one snapshot, body first then commit fallback.
+   *  Never re-enter the board index: expiry mid-`projectPlan` otherwise restarts the 15-second cache's read.
+   *  null means unreadable; absent method preserves non-batched per-task lookup. */
   mergedTrailerLookup?(): ((taskId: string) => PrRef | null) | null;
-  /** The OPEN twin of {@link listMergedHeadBranches} (W1-T377): rung (a) is the only other route to an OPEN
-   *  association and it reads the ledger, so a task whose `pr.opened` never landed is otherwise invisible.
-   *  null on FAILURE, never []. Why: a run rebuilt its own work — docs/forensics/status.md */
+  /** W1-T377: open twin of {@link listMergedHeadBranches}; sees PRs whose ledger `pr.opened` never landed.
+   *  null on failure, never []; trap: a run rebuilt its own work, docs/forensics/status.md. */
   listOpenHeadBranches?(): PrRef[] | null;
   /** The PR's head branch name, or undefined when unresolvable. Backs rung (c)'s ownership-assert (P16). */
   headRefName(prUrl: string): string | undefined;
   /** The PR's raw body text, or undefined when unresolvable. Backs rung (c)'s anchored-trailer verify (P16). */
   prBody(prUrl: string): string | undefined;
-  /** W1-T2387 — DOES THE COMMIT SURFACE CARRY THIS TASK'S ANCHORED TRAILER FOR THIS PR? The SECOND anchored
-   *  surface, off the SAME memoised index. NOT A RELAXATION of {@link creditsByAnchoredTrailer}: the index
-   *  extracts an exact anchored line and refuses every token the run-id grammar rejects. FAILS CLOSED. */
+  /** W1-T2387: second anchored surface from the same memoized index; exact lines, run-id grammar, fail closed.
+   *  Preserves {@link creditsByAnchoredTrailer}'s strictness. */
   creditedByCommitTrailer?(taskId: string, prUrl: string): boolean;
-  /** The PR's changed-file paths, or `undefined` when unresolvable. Backs rung (c)'s PLAN-ONLY refusal
-   *  (W1-T413). `undefined` MEANS UNAVAILABLE AND KEEPS TODAY'S ANSWER, never "no files": an absent head cannot
-   *  be evidence FOR a credit, whereas WITHDRAWING one would re-dispatch finished work. */
+  /** W1-T413: changed paths for rung (c)'s plan-only refusal. undefined means unavailable, not no files:
+   *  retain today's answer; absent heads cannot add credit, but withdrawing credit redispatches finished work. */
   changedFiles?(prUrl: string): string[] | undefined;
   /** Qualified merged-head evidence, or named unknown; this read never schedules GitHub work. */
   changedFileEvidence?(prUrl: string): ChangedFileEvidence;
@@ -304,9 +274,8 @@ export interface GitHub {
   /** OPTIONAL (W1-T154): force this gateway's fetch NOW rather than lazily, so serve boot never pays a cold
    *  fetch on the request path. Omitted ⇒ a no-op. */
   warm?(): void;
-  /** OPTIONAL (W1-T4771): from now on this gateway NEVER shells gh on the calling thread. A due read is
-   *  handed to the background walk and the last-held fact is served stale; a fact never held reads as
-   *  not-yet-collected. Called once by serve for its own gateway; the daemon and the CLI never call it. */
+  /** W1-T4771: serve calls once; never shell gh on the caller thread thereafter. Background refresh serves
+   *  held facts stale, missing facts not-yet-collected. Daemon/CLI never call this. */
   serveOffLoop?(): void;
   /** OPTIONAL (W1-T4771): how old the OLDEST held PR fact is, in ms, or `undefined` when none is held yet.
    *  Lets a caller serving a stale fact say how stale. */
@@ -318,9 +287,8 @@ export interface GitHub {
   /** OPTIONAL: the last settled warm walk's cost and quota reading, for the keep-warm pacer (github-refresh-pacer.ts). */
   warmTelemetry?(): WarmRefreshTelemetry;
   seedBoardSnapshot?(cache: BoardSnapshotCache): void;
-  /** A read this gateway attempted actually FAILED, as against succeeding empty, so it defers rather than
-   *  reading as a confirmed not-merged (W1-T119). NEVER FORCES A FETCH (W1-T2219): the STICKY verdict of the
-   *  most recently COMPLETED attempt. Why: asking used to PERFORM the read */
+  /** W1-T119: failed differs from successful-empty, so defer. W1-T2219: sticky last completed verdict;
+   *  never fetch here (asking used to perform the read). */
   readFailed?(): boolean;
   /** The CLASSIFIED reason the most recent failed read failed (W1-T119); consulted only after `readFailed()`,
    *  absent ⇒ `"unknown"`. NEVER FORCES A FETCH. Scoped to the PR channel; the issue channel has its own. */
@@ -328,19 +296,15 @@ export interface GitHub {
   /** W1-T2219: the state the failure pair cannot express — see {@link GhReadState}. Never forces a fetch, and
    *  sits beside the pair rather than in place of it. */
   readState?(): GhReadState;
-  /** The most recent read SUCCEEDED but only PARTIALLY, hitting {@link BOARD_MAX_PAGES} (W1-T415). A THIRD
-   *  accessor: collapsing a FAILED fetch into a PARTIAL one recreates the conflation W1-T119 prevents.
-   *  Truncation only OMITS rows, so the deferral sits in `readFailed()`'s arm, never upstream of a credit. */
+  /** W1-T415: successful but partial ({@link BOARD_MAX_PAGES}); distinct from W1-T119 failure.
+   *  Truncation only omits rows: defer in `readFailed()`'s arm, never before credit. */
   readTruncated?(): boolean;
   readBoardCoverage?(): { openTruncated: boolean; closedFloor?: string };
-  /** R-24 (docs/audits/recon-2026-09-05.md): DROP THE FAILURE VERDICTS LEFT BY EARLIER ATTEMPTS, AND NOTHING
-   *  ELSE. THE TRAP: a FAILED fetch replaces its half with an EMPTY one and stamps it (the W1-T181 pairing), so
-   *  a half is dropped exactly when its verdict is. The delta caches are NOT touched.
-   *  Why: the measured cold-walk cost is in docs/forensics/status.md */
+  /** R-24: clear only prior failure verdicts and their halves (failed fetches stamp empty halves, W1-T181).
+   *  Keep delta caches. docs/audits/recon-2026-09-05.md; cold-walk cost: docs/forensics/status.md. */
   resetFailureFlags?(): void;
-  /** Resolve an escalation issue's LIVE state and title by url (W1-T182). THE FAIL-SOFT DIRECTION INVERTS every
-   *  other optional method here: omitted, or `null`, means "cannot confirm this is closed", so the escalation
-   *  stays `needsHuman`, marked unverified. */
+  /** W1-T182: live issue state/title. Omitted/null cannot confirm closure: keep `needsHuman`, unverified.
+   *  Fail-soft direction is inverted relative to other optional methods. */
   issueByUrl?(url: string): { state: string; title?: string } | null;
   /** The most recent {@link issueByUrl} read genuinely FAILED — scoped to the independent issue fetch, so the
    *  two flags never conflate a PR outage with an issue-read outage. */
@@ -395,21 +359,10 @@ export interface DeriveDeps {
    *  when this cycle's read failed and no rung resolved anything fresh, so a fetch failure never
    *  regresses a credited task to `queued`. Omitted ⇒ pre-W1-T179 behaviour. */
   previousProjection?: (taskId: string) => StatusProjection | undefined;
-  /**
-   * OPT-IN INCREMENTAL PASS: return a prior projection for a task whose inputs cannot have moved
-   * since it was derived, and {@link projectPlan} reuses it instead of re-deriving.
-   *
-   * WHY IT EXISTS. `projectPlan` re-derives EVERY task on every call, and its one board caller
-   * runs on a 3s console poll. MEASURED 2026-09-15 on the live plan: 1,792 tasks, 1.44s a pass
-   * warm — while the ledger touched 1 distinct task id in a 3s window, 2 in 60s and 17 in 20
-   * minutes. The pass was re-deriving 1,792 tasks to reflect a change in one.
-   *
-   * WHOLLY THE CALLER'S RISK TO TAKE, WHICH IS WHY IT IS OPTIONAL AND ABSENT BY DEFAULT: only a
-   * caller that can name what a projection depends on may answer this, and returning a
-   * projection whose inputs DID move is a silently stale board — the failure this whole module
-   * is written to avoid. `undefined` always means "derive it", so a caller that cannot decide
-   * says nothing and pays the full pass, exactly as every caller does today.
-   */
+  /** Opt-in reuse by {@link projectPlan}, only when the caller proves all inputs unchanged.
+   *  Absent by default; `undefined` always means derive. Incorrect reuse silently stales the board.
+   *  Motivation, 2026-09-15: 1,792 tasks took 1.44s warm per 3s poll; distinct changed tasks:
+   *  1 in 3s, 2 in 60s, 17 in 20 minutes. */
   reuseProjection?: (task: Task) => StatusProjection | undefined;
   /** BATCHED rung (c2) corroboration (W1-T257): a per-task lookup into the index
    *  {@link projectPlan} fetches ONCE and shares. [] when the batch succeeded with no such branch,
@@ -486,18 +439,11 @@ export interface DeriveDeps {
   writeCreditStore?: (store: CreditStore) => void;
 }
 
-/**
- * `board.ts`'s dependency shape, defined here (not there) as of W1-T2895: `task-card.ts` needs
- * only the TYPE, and it already imports `status.ts` for `projectPlan`/`readLedgerLines` — so
- * defining {@link BoardDeps} beside the {@link DeriveDeps} it extends means `task-card.ts` never
- * needs an `import type` from `board.ts` at all. That single-edge cycle (`board.ts` ->
- * `status-board.ts` -> `task-card.ts` -> `board.ts`) was the one ring `npm run cycle-ratchet`
- * still reported after this task's six named single-symbol moves cut the other twelve —
- * dependency-cruiser's `swc` parser (required for this repo's TypeScript version; see
- * `.dependency-cruiser.cjs`) does not distinguish `import type` from a value import when
- * detecting cycles, so the edge counted as circular exactly like any other. `board.ts` re-exports
- * this name unchanged for its own (many) internal uses.
- */
+/** W1-T2895: keep {@link BoardDeps} beside {@link DeriveDeps}; board.ts re-exports it unchanged.
+ *  task-card.ts already imports status.ts for `projectPlan`/`readLedgerLines`; importing this type
+ *  from board.ts closes board.ts -> status-board.ts -> task-card.ts -> board.ts.
+ *  `.dependency-cruiser.cjs`'s required swc parser counts type edges: cycle-ratchet still found
+ *  this ring after six symbol moves removed twelve others. */
 export interface BoardDeps extends DeriveDeps {
   plan: Plan;
 }
@@ -1540,21 +1486,12 @@ export function isMergeCreditLine(line: Record<string, unknown>): boolean {
   return line.step === "verdict.merged" || (line.step === "verdict" && line.verdict === "merged");
 }
 
-/**
- * W1-T2425 — THE PRIOR COUNT THIS PROCESS DID NOT LIVE THROUGH. The breaker's regression guard compares against
- * an in-memory Map rebuilt PER INVOCATION, so a rotation plus a daemon RESTART was never covered: a new process
- * reads a shortened live file as forward progress. TWO KEYS, DELIBERATELY: the reset lines key on `task_id`,
- * but a refusal row is written by the DAEMON and carries the refused task elsewhere. The step literal is INLINE
- * on purpose — the rotation test scans consumer sources TEXTUALLY, so a symbol would blind that gate.
- * Why: W1-T1279 was refused every tick for 84 hours, then a restart let a fresh process dispatch
- *
- * W1-T4691 — A HALTED TASK IS FORWARD PROGRESS TOO, WHEN AN OPERATOR SAYS SO. `dispatch.breaker_released`
- * (`rmd release`) is the ONLY reset a task with no new owned PR can ever produce — the breaker itself would
- * otherwise never re-open, because the trip survives a compaction (W1-T2425's own invariant) and a task the
- * breaker refuses to dispatch can never open the `pr.opened` line that resets it any other way. It joins the
- * SAME reset arm as `pr.opened`/a merge credit, deliberately: it is an explicit, attributable operator row,
- * never an inference, so the archive-reading approach W1-T2425's tests forbid stays forbidden.
- */
+/** W1-T2425: seed the prior count across rotation plus restart; per-invocation Maps miss that case.
+ *  Trap: W1-T1279 stayed refused for 84 hours, then a restart mistook the shortened ledger for progress.
+ *  Resets use `task_id`; daemon refusals carry the task elsewhere. Keep both keys and inline step
+ *  literals: the rotation test scans consumer text, so replacing literals with symbols blinds it.
+ *  W1-T4691: attributable `dispatch.breaker_released` (`rmd release`) joins PR/merge resets without
+ *  archive reads. A halted task cannot open a new PR; without this reset it could never resume. */
 export function seedCountFromCircuitBreak(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -1597,16 +1534,9 @@ export interface OrphanDetectionOpts {
   livenessBoundMs?: number;
 }
 
-/** THE LEDGER'S OWN "now": the newest parseable `ts` anywhere in `lines`, never the wall clock.
- *  DELIBERATE, not a shortcut — {@link orphanedRunIds} must stay a PURE function of the ledger it is
- *  handed (this file's whole-suite convention: every sibling counter here takes no clock at all),
- *  and a live fleet ledger keeps receiving rows from OTHER tasks continuously, so "how much newer
- *  activity has this ledger seen since this run started" is a self-contained, deterministic proxy
- *  for elapsed time — needing no injected clock in production and no wall-clock read in a test.
- *  Absent when NOTHING in `lines` carries a parseable `ts` — a caller with no notion of "now" gets
- *  no orphans, never a false one. Callers that evaluate multiple tasks over one ledger supply a
- *  {@link LedgerIndex}; caching the array identity here would make a later appended ledger row
- *  invisible to this exported pure reader. */
+/** Ledger "now": newest parseable `ts`, never wall time; keeps {@link orphanedRunIds} pure like sibling counters.
+ *  Other tasks' activity supplies elapsed time. No parseable timestamp means no orphans.
+ *  Multi-task callers supply {@link LedgerIndex}; caching array identity here would hide appended rows. */
 function latestLedgerTsMs(lines: ReadonlyArray<Record<string, unknown>>): number | undefined {
   let max: number | undefined;
   for (const line of lines) {
@@ -1617,27 +1547,14 @@ function latestLedgerTsMs(lines: ReadonlyArray<Record<string, unknown>>): number
   return max;
 }
 
-/**
- * W1-T3523 — THE ORPHAN AS A FIRST-CLASS READING. Every `run_id` for `taskId` whose ONLY run-produced
- * ledger row is its own `run.start` — MEASURED on the live ledger 2026-09-13: 97 of 203 dispatched
- * runs (47%) carry no other row at all, the container-recycle shape (`deploy/recycle-container.sh`
- * `docker stop`s a worker whose liveness probe is process-only, so a killed worker never gets to
- * write anything past its own start). This needs no new writer and no schema change: every row this
- * reads has always been on the ledger, for a ledger written before this predicate existed — derived
- * entirely {@link latestLedgerTsMs} "from the rows already present" (design (i)'s own words).
- *
- * STALE, NOT MERELY QUIET (the falsifier's own demand): a `run.start` ten seconds behind the
- * ledger's own newest activity is a run STILL RUNNING, not a corpse, so a run_id only qualifies once
- * {@link DEFAULT_LIVENESS_BOUND_MS} has passed since its `run.start` — the SAME bound
- * {@link deriveStatus}'s in-flight branch already trusts to tell a live run from a stale one,
- * applied here across every HISTORICAL run_id rather than only the newest.
- *
- * A run_id this repo cannot even NAME, or cannot AGE, is never orphaned: a `run.start` with no
- * `run_id` (every fixture predating W1-T2423's per-run tracking), no parseable `ts`, or a ledger
- * with no parseable `ts` ANYWHERE to measure elapsed time against, falls back to "unknown stays
- * counted" — the same fail-closed default {@link dispatchesWithoutNewOwnedPr} has always applied to
- * a run with no verdict, so a malformed row can never buy a task extra dispatches.
- */
+/** W1-T3523: orphaned historical run_ids have only their own `run.start` and exceed
+ *  {@link DEFAULT_LIVENESS_BOUND_MS}, the same bound {@link deriveStatus} uses. Quiet is not stale:
+ *  a start ten seconds behind ledger "now" still counts as running.
+ *  Derive from existing rows via {@link latestLedgerTsMs}; no writer/schema change needed.
+ *  Missing run_id (pre-W1-T2423), start timestamp, or ledger "now" means unknown stays counted
+ *  by {@link dispatchesWithoutNewOwnedPr}; malformed rows never buy extra dispatches.
+ *  Evidence, 2026-09-13: 97/203 runs (47%) had only a start. deploy/recycle-container.sh's
+ *  `docker stop` kills process-probed workers before they can write another row. */
 export function orphanedRunIds(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -1651,23 +1568,14 @@ export function orphanedRunIds(
   return provenOrphanRunIds(indexedTaskRows(lines, taskId, index), nowMs, livenessBoundMs, taskId);
 }
 
-/**
- * How many `run.start` lines exist for `taskId` SINCE its most recent FORWARD-PROGRESS line — P29(ii)'s
- * "dispatches with no NEW owned PR". A merge resets the streak as well as a `pr.opened` ({@link
- * isMergeCreditLine}): the PR line is written only for an `ownsBranch` head, so a slug-branch PR left the task
- * MERGED to the backfill and MAKING NO PROGRESS here at once. A "succeeds every time" loop is {@link
- * dispatchesEver}'s remit. Why: docs/forensics/status.md#second-pass-2026-09-06
- *
- * W1-T3523 WIDENS THE EXCLUSION ALONGSIDE W1-T2423's PREFLIGHT-REFUSAL ONE: a `run.start` whose run_id is
- * {@link orphanedRunIds} — infrastructure killed the worker before it wrote anything else — is likewise
- * excluded, because it is evidence about the HOST, not about the task, and an orphan must never cost the task
- * the same dispatch budget a real no-PR attempt does. A run.start with any other run-produced row is not an orphan; only
- * the infrastructure refusal verdicts above can exclude such a run. An unrecognised failing verdict counts.
- *
- * W1-T4691: `dispatch.breaker_released` (`rmd release`) resets this streak exactly like `pr.opened` or a
- * merge credit — the ONE reset a task the breaker has already halted can still receive, since it needs no
- * new owned PR to produce it. See {@link seedCountFromCircuitBreak}'s doc for the cross-restart half.
- */
+/** P29(ii): starts since the latest owned `pr.opened` or {@link isMergeCreditLine} reset.
+ *  Merge resets prevent slug-branch tasks reading merged to backfill but stalled here;
+ *  docs/forensics/status.md#second-pass-2026-09-06. Successful loops belong to {@link dispatchesEver}.
+ *  Exclude W1-T2423 preflight refusals and W1-T3523 {@link orphanedRunIds}: host death must not
+ *  spend task budget. Any other run-produced row defeats orphan status; only recognized infrastructure
+ *  refusals can then exclude it. Unrecognized failures count.
+ *  W1-T4691: attributable `dispatch.breaker_released` resets halted tasks without a new PR;
+ *  {@link seedCountFromCircuitBreak} handles the cross-restart half. */
 interface DispatchStreakTally {
   count: number;
   excludedDispatches: number;
@@ -1875,19 +1783,10 @@ export function isLifetimeDispatchCapExceeded(
   return effectiveLifetimeDispatches(lifetimeDispatchTally(lines, taskId, index)) >= maxLifetimeDispatches;
 }
 
-/**
- * BACKSTOP (W1-T1266's declaration discipline): this fires only once repeated infrastructure death
- * has ALREADY happened, never as the normal-path control on ordinary dispatch — that role stays
- * {@link DEFAULT_MAX_TASK_DISPATCHES}'s.
- *
- * W1-T3523 design (iii) — BOUND ORPHANS SEPARATELY, so repeated infrastructure death is visible AS
- * infrastructure death rather than silently ignored (design's own falsifier: "a change that only
- * stops counting, with nothing taking its place, converts a wrong escalation into a silent infinite
- * redispatch — strictly worse, because nothing reports it"). Sized the same as
- * {@link DEFAULT_MAX_TASK_DISPATCHES} — the six tasks measured 2026-09-13 each carried EXACTLY 5
- * orphans — but named and tracked separately, because a task's worker dying five times running is a
- * claim about the HOST, never about the task, and the two must stay tellable-apart.
- */
+/** W1-T1266 BACKSTOP, W1-T3523 design (iii): report repeated host death separately from task stalls;
+ *  ignoring orphans without a replacement bound would silently redispatch forever (design falsifier).
+ *  Ordinary dispatch control stays {@link DEFAULT_MAX_TASK_DISPATCHES}'s. Same size, separate meaning:
+ *  all six tasks measured 2026-09-13 had exactly five orphans, evidence about the host, not the task. */
 export const DEFAULT_MAX_TASK_ORPHANED_DISPATCHES = 5;
 
 /** WHAT {@link isOrphanFaultTripped} SAW — {@link DispatchBreakerDetail}'s host-fault sibling. `reason` is
@@ -2180,34 +2079,13 @@ export function taskIdFromRunBranch(head: string | undefined): string | undefine
   return namesATask(m[1]) ? m[1] : undefined;
 }
 
-/**
- * Could this capture BE a task id, or is it an id with something stapled on?
- *
- * NOT a whitelist of id formats, deliberately. Anchoring on `W<n>-T<n>` — the only shape the plan
- * currently mints — rejected the synthetic ids this repo's own fixtures use (`A`, `D`) and broke
- * four suites, including the in-flight guard that stops a second dispatch onto a pushed branch.
- * That failure was the useful one: it says the rule must be about the SHAPE OF THE SUFFIX, not
- * about which workstream letters are in fashion. A second attempt — requiring a hyphen-free-or-
- * canonical shape — was ALSO wrong: it rejected `TRIAGE-fb-<id>-<hex>`, a real id the auto-triage
- * lane mints for its own runs, and broke that lane's in-flight guard too.
- *
- * So a capture with NO hyphen cannot be carrying a suffix and is taken as given, which keeps every
- * synthetic and future id working. A capture WITH hyphens is tested for a STAPLED-ON suffix, not for
- * looking canonical: `W1-T3030-build` strips to `W1-T3030`, which IS a whole task id, so the capture
- * names no task; `TRIAGE-fb-1785792135748-755f93` strips to `TRIAGE-fb-1785792135748`, which is NOT,
- * so the capture is taken as the id itself.
- */
+/** Reject a stapled-on suffix, not unfamiliar id formats. Hyphen-free ids are accepted.
+ *  Canonical-only validation rejected fixture ids `A`/`D` and broke four suites, including the
+ *  pushed-branch in-flight guard; hyphen-free-or-canonical also broke auto-triage's guard.
+ *  Strip a trailing word: `W1-T3030-build` leaves a whole id and is rejected;
+ *  `TRIAGE-fb-1785792135748-755f93` leaves a non-id and is accepted. */
 function namesATask(capture: string): boolean {
-  // THE TEST IS "IS THIS AN ID WITH SOMETHING STAPLED ON", NOT "DOES THIS LOOK LIKE AN ID", and
-  // three failures taught that. A whitelist of id formats rejected the synthetic ids the fixtures
-  // use (`A`, `D`) and broke the in-flight dispatch guard; adding letter suffixes was still wrong
-  // for `W1-T12a`; and requiring a hyphen-free-or-canonical shape rejected `TRIAGE-fb-<id>-<hex>`,
-  // which IS a real task id — the auto-triage lane mints it — and broke that lane's own guard.
-  //
-  // So the rule targets the defect directly: strip a trailing `-<word>` and ask whether what
-  // remains is already a whole task id. `W1-T3030-build` leaves `W1-T3030`, which is — so the
-  // branch carries an id plus a suffix and names no task. `TRIAGE-fb-1785792135748-755f93` leaves
-  // `TRIAGE-fb-1785792135748`, which is not, so the capture is the id itself and is taken as given.
+  // Letter-suffix ids such as `W1-T12a` also remain valid; do not replace suffix detection with a whitelist.
   const suffixed = /^(.+)-[A-Za-z][A-Za-z0-9]*$/.exec(capture);
   if (suffixed && TASK_ID_SHAPE.test(suffixed[1])) return false;
   return true;
@@ -3643,26 +3521,14 @@ export function independentBlockReleasesFrom(
   return releases;
 }
 
-/** The latest durable independent-failure block if no later dispatch superseded it.
- *
- * `blocked_illformed` is a zero-cost admission refusal: run-task returns it before an inflight
- * lock or worker can exist. Older daemons recorded that refusal through the same ledger step as a
- * paid independent failure, so recognize that exact historical verdict without rewriting or
- * concealing the row. Unknown or absent verdicts deliberately remain durable: only the proven
- * pre-dispatch refusal is re-admittable.
- *
- * W1-T3979: `blocked_inflight` is a live scheduling DEFERRAL, not a failure — it means a real
- * worker was already running when this dispatch was contested, never that the task itself did
- * anything wrong. An OLDER daemon (before this task) durably recorded that contention through the
- * same `dispatch.blocked_independent` step; that row is retained here for forensics but, like
- * `blocked_illformed`, must never durably exclude the task once the live lock it describes has
- * released. daemon.ts (the producer, after this task) no longer writes this row for a fresh
- * `blocked_inflight` result at all — this arm only re-admits a HISTORICAL row from before that fix.
- *
- * W1-T3978: a shell-less implement can leave a producer-owned refusal after substantive edits.
- * That exact terminal class gets one pending retry marker. The marker makes the task eligible
- * until the retry's `run.start`; after that start the marker is spent, so a second refusal stays
- * blocked. Ordinary `no_pr` rows never enter this state machine. W1-T7533: see {@link independentFailureLatch}. */
+/** Latest durable independent-failure block, unless superseded by dispatch.
+ *  Historical `blocked_illformed` is zero-cost, before lock/worker creation; keep the row but readmit.
+ *  Unknown/absent verdicts remain durable: only proven pre-dispatch refusals qualify.
+ *  W1-T3979: historical `blocked_inflight` records scheduling contention with a real worker, not task failure.
+ *  Keep that row but never exclude after its lock releases; daemon.ts no longer writes fresh instances.
+ *  W1-T3978: producer-owned refusal after substantive shell-less edits gets one pending retry marker,
+ *  spent at retry `run.start`; a second refusal stays blocked. Ordinary `no_pr` never enters this machine.
+ *  W1-T7533: see {@link independentFailureLatch}. */
 export function latestIndependentFailureBlock(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -4152,18 +4018,11 @@ function prNumberFromSquashSubject(subject: string): number | undefined {
   return m ? Number(m[1]) : undefined;
 }
 
-/**
- * W1-T2387 — THE SECOND TRAILER SURFACE, AS AN INDEX: the commit trailer is MACHINE-written, the PR-body one
- * HAND-written, and the merged search read only the latter. A UNION, NEVER A COMPARISON — consulted only after
- * the body surface answers EMPTY, so it can only ADD credit. NO NEW FETCH. `null` on a failed read, never [].
- *
- * ⚠ THE SURFACE DEPENDS ON A REPO SETTING THIS FILE OTHERWISE NEVER NAMES (W1-T2447):
- * `squash_merge_commit_message`, an admin-only UI toggle with no commit, review or ledger row. MEASURED as
- * `COMMIT_MESSAGES`, the ONLY reason the amended trailer survives the squash; the other legal value `PR_BODY`
- * discards the branch commits, so flipping to it stops every FUTURE squash carrying a trailer and the index
- * stops growing while looking as healthy as today. FALSIFIER:
- * `test/commit-trailer-surface-squash-setting.test.ts`. Why: docs/forensics/status.md
- */
+/** W1-T2387: union machine-written commit trailers after hand-written body trailers miss; add credit only,
+ *  never compare surfaces or fetch again. Failed read returns null, never [].
+ *  W1-T2447: admin-only `squash_merge_commit_message` must remain `COMMIT_MESSAGES` for trailers to survive.
+ *  `PR_BODY` discards branch commits, silently stopping future index growth without a commit/review/ledger row.
+ *  Falsifier: test/commit-trailer-surface-squash-setting.test.ts; docs/forensics/status.md. */
 export function buildCommitTrailerIndex(opts: {
   /** `owner/repo`, only ever used to render the {@link PrRef} url — never to fetch anything. */
   slug: string;
