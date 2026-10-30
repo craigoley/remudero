@@ -6,7 +6,7 @@ import { fixedClock } from "./clock.js";
 import { sameHost } from "./host-identity.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
 import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./live-write-guard.js";
-import { hostWorktreeGit } from "./worktree-git.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import { parse as parseYaml } from "yaml";
 import { observeFeedbackAdmission } from "./authority.js";
 import type { FeedbackAdmissionContext } from "./contributor-admission.js";
@@ -667,6 +667,48 @@ export interface AutoTriagePolicy {
   maxPerDay: number;
 }
 
+export const AUTO_TRIAGE_FAILURE_STEPS = [
+  "auto_triage.run_failed", "pr.opened", "triage.grill_opened", "triage.relint_refused", "verdict",
+] as const;
+
+/** Consecutive failed fires since a triage end or the entry's last content commit. */
+export function failedFireBackoff(
+  rows: readonly Record<string, unknown>[], feedbackId: string, minIntervalMinutes: number,
+  now: Date, contentChangedAt?: string,
+): { failures: number; backedOff: boolean; retryAtMs?: number } {
+  const changedMs = Date.parse(contentChangedAt ?? "");
+  let lastEnd = Number.NEGATIVE_INFINITY;
+  const failures: number[] = [];
+  for (const row of rows) {
+    const ts = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+    if (!Number.isFinite(ts)) continue;
+    if (row.step === "auto_triage.run_failed" && row.feedback === feedbackId) {
+      if (!Number.isFinite(changedMs) || ts >= changedMs) failures.push(ts);
+    } else if (row.task_id === `TRIAGE-${feedbackId}` &&
+      (row.step === "pr.opened" || row.step === "triage.grill_opened" || row.step === "triage.relint_refused" || row.step === "verdict")) {
+      lastEnd = Math.max(lastEnd, ts);
+    }
+  }
+  const consecutive = failures.filter((ts) => ts > lastEnd);
+  if (consecutive.length === 0) return { failures: 0, backedOff: false };
+  const newest = consecutive.reduce((latest, ts) => Math.max(latest, ts));
+  const retryAtMs = newest + minIntervalMinutes * 60_000 * 2 ** consecutive.length;
+  return { failures: consecutive.length, backedOff: now.getTime() < retryAtMs, retryAtMs };
+}
+
+/** Unreadable main history retains the failure history; security refusals still propagate. */
+export async function feedbackChangedAtOnMain(root: string, feedbackId: string): Promise<string | undefined> {
+  try {
+    const ts = (await hostWorktreeGitAsync(root,
+      ["log", "-1", "--format=%cI", "origin/main", "--", `plan/feedback/${feedbackId}.yaml`],
+      { timeout: 10_000 })).trim();
+    return Number.isFinite(Date.parse(ts)) ? ts : undefined;
+  } catch (error) {
+    if (error !== null && typeof error === "object" && ("status" in error || "code" in error)) return undefined;
+    throw error;
+  }
+}
+
 export interface AutoTriageInputs {
   policy: AutoTriagePolicy;
   /**
@@ -703,6 +745,8 @@ export interface AutoTriageInputs {
    * lane's own claim decide. Never an empty set standing in for "unknown".
    */
   heldCandidates?: readonly string[];
+  /** Candidate id → re-offer timestamp in ms; undefined means history was unreadable. */
+  backedOffCandidates?: ReadonlyMap<string, number>;
 }
 
 export type AutoTriageDecision =
@@ -774,21 +818,36 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
       : `the backlog's own depth reached ${i.candidates.length} at status: new while neither lane signal tripped ` +
         `(oldest waiting ${((i.oldestCandidateAgeMs ?? 0) / DAY_MS).toFixed(1)}d)`;
   const heldSet = new Set(i.heldCandidates ?? []);
-  const target = i.candidates.find((c) => !heldSet.has(c));
+  const backedOff = i.candidates.filter((c) => i.backedOffCandidates?.has(c));
+  const backedOffSet = new Set(backedOff);
+  const target = i.candidates.find((c) => !heldSet.has(c) && !backedOffSet.has(c));
   if (target === undefined) {
+    if (backedOff.length > 0) {
+      const soonest = Math.min(...backedOff.map((c) => i.backedOffCandidates!.get(c)!));
+      const date = new Date(soonest);
+      const retry = Number.isFinite(date.getTime()) ? date.toISOString() : "beyond the representable date range";
+      return { fire: false, reason: `${backedOff.length} candidate(s) in failed-fire backoff; soonest re-offer ${retry}; ` +
+        `${i.candidates.filter((c) => heldSet.has(c)).length} held by a live claim — nothing to fire on` };
+    }
     return {
       fire: false,
       reason: `every one of the ${i.candidates.length} candidate(s) at status: new is held by a live triage claim — nothing to fire on`,
     };
   }
-  const passedOver = i.candidates.indexOf(target);
+  const skipped = i.candidates.slice(0, i.candidates.indexOf(target));
+  const heldCount = skipped.filter((c) => heldSet.has(c)).length;
+  const failed = skipped.filter((c) => i.backedOffCandidates?.has(c));
+  const passedOver = [
+    ...(heldCount ? [`${heldCount} held by a live claim`] : []),
+    ...failed.map((c) => `${c} in failed-fire backoff`),
+  ];
   return {
     fire: true,
     feedbackId: target,
     reason:
-      passedOver === 0
+      passedOver.length === 0
         ? `${trigger}, under both bounds, oldest entry at status: new`
-        : `${trigger}, under both bounds, oldest unclaimed entry at status: new (passed over ${passedOver} held by a live claim)`,
+        : `${trigger}, under both bounds, oldest eligible entry at status: new (passed over ${passedOver.join(", ")})`,
   };
 }
 
