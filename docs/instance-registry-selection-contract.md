@@ -264,6 +264,15 @@ Generated installer/recycler forwarding first checks the known child's bounded a
 header. An older child without this grammar receives its original arguments and no
 private selection; missing child evidence remains unknown. Capability checking never
 executes an older heartbeat or field-trial script as a probe.
+The generated healthy watchdog also carries the session and pin into `deploy-run`
+when that trusted CLI supports the handoff. The supervisor snapshots the two argv
+values and uses its existing subprocess seams for the recycler (including its
+derived drain-wait wrapper) and independent serve replacement. Only those exact
+checkout child paths with both option cases in their bounded headers receive the
+private arguments. Other subprocesses retain their original argv and environment.
+Children recheck the original pin at their own effects, including after image pulls;
+neither a revised session nor revised selection is recaptured into fresh authority.
+Child failure status and refusal evidence survive transport redaction.
 An installer elevated by sudo runs only its observer back as sudo's original numeric
 caller. Session and parent ownership checks still run as that caller; root gets no
 ownership exemption. Explicit selected environment input travels only on this trusted

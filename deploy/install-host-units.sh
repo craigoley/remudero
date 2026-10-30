@@ -1484,11 +1484,16 @@ $(render_serve_memory_tuning)
       refresh_deploy_code '${CONTAINER_NAME}' || deploy_code_busy_handoff '${CONTAINER_NAME}' || exit 0
     fi
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
+    DEPLOY_SHADOW_ARGS=()
+    if [ -n "\${registry_shadow_session:-}" ] && [ -r "\$DAEMON_CODE/src/run-task.ts" ] && \\
+        grep -F -- 'selectedRegistryLifecycleExec(' "\$DAEMON_CODE/src/run-task.ts" >/dev/null; then
+      DEPLOY_SHADOW_ARGS=(\${registry_shadow_forward[@]+"\${registry_shadow_forward[@]}"})
+    fi
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.
     if watchdog_deploy_out="\$(cd "\$DAEMON_CODE" && \\
       RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
-      watchdog_deploy_run "\$DAEMON_CODE/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR")"; then
+      watchdog_deploy_run "\$DAEMON_CODE/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR" \${DEPLOY_SHADOW_ARGS[@]+"\${DEPLOY_SHADOW_ARGS[@]}"})"; then
       printf '%s\\n' "\$watchdog_deploy_out"
       host_alert_clear deploy-run-problem
       # Exit zero also means deferred: cache only the supervisor's confirmed up-to-date result.

@@ -1316,7 +1316,7 @@ import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
-import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+import { captureSelectedRegistryIntent, selectedRegistryLifecycleExec, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
@@ -28225,7 +28225,7 @@ async function deployCommand(rest: string[]): Promise<number> {
  */
 async function deployRunCommand(rest: string[]): Promise<number> {
   markLedgerProcessActor("host_automation");
-  const badArg = unknownArgError("deploy-run", rest, ["--state-root"], ["--dry-run", "--image-drift-only"]);
+  const badArg = unknownArgError("deploy-run", rest, ["--state-root", "--selected-registry-shadow", "--selected-registry-pin"], ["--dry-run", "--image-drift-only"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -28260,8 +28260,12 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     return 0;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const lifecycleExec = selectedRegistryLifecycleExec(assessment.installRoot, {
+    session: flagValue(rest, "--selected-registry-shadow"), pin: flagValue(rest, "--selected-registry-pin"),
+  });
   const deps = {
     ...realDeps().deployFor({
+      execFile: lifecycleExec,
       installPath: assessment.installRoot,
       stateRoot: effectiveConfig.root,
       daemonLabel: DAEMON_LABEL,
@@ -28296,7 +28300,7 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
-  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root }) }, {
+  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root }, lifecycleExec) }, {
     dryRun: rest.includes("--dry-run"),
     imageDriftOnly: rest.includes("--image-drift-only"),
   });

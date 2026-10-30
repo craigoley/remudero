@@ -4,7 +4,7 @@ import childProcess from "node:child_process";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { selectedRegistryShadowMain } from "#src/selected-registry-shadow-main.js";
 import { selectedRegistryShadowChild } from "#src/lib/child-entry-argv.js";
+import { selectedRegistryLifecycleExec } from "#src/lib/selected-registry-consumers.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { registryShellFixture } from "#test/helpers/registry-shell-fixture.js";
@@ -126,6 +127,163 @@ function bash32(t: { after(fn: () => void): void }) {
   assert.match(version.stdout, /^3\.2\./, "the historical executable must really be Bash 3.2");
   return { shell, env, version: version.stdout };
 }
+
+function supervisorFixture(t: { after(fn: () => void): void }) {
+  const f = registryShellFixture(t), pin = f.capture();
+  writeFileSync(f.legacy, `instances:\n  core:\n    repo: remudero\n    github_repo: craigoley/remudero\n    state_dir: ${f.state}\n    container_name: remudero-daemon\n    primary: true\n    image: fixture.azurecr.io/remudero:latest\n    claude_dir: ${f.env.RMD_CLAUDE_DIR}\n    codex_dir: ${f.env.RMD_CODEX_DIR}\n    container_config_dir: ${f.env.RMD_CONTAINER_CONFIG_DIR}\n`);
+  mkdirSync(join(f.state, "daemon-install/.remudero"));
+  writeFileSync(join(f.state, "daemon-install/.remudero/daemon-instances.yaml"), readFileSync(f.legacy));
+  assert.equal(f.install().status, 0);
+  mkdirSync(join(f.state, "remudero/bin"));
+  symlinkSync(join(REPO_ROOT, "src"), join(f.state, "remudero/src"));
+  writeFileSync(join(f.state, "remudero/bin/rmd"), `#!${process.execPath}
+const fs = require('node:fs'), cp = require('node:child_process');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.FIXTURE_CALLS, JSON.stringify({bin:'rmd', args}) + '\\n');
+if (args[0] !== 'deploy-run') { console.log('{"state":"HEALTHY","action":"none"}'); process.exit(0); }
+const r = cp.spawnSync(process.execPath, ['--import', ${JSON.stringify(join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"))},
+  ${JSON.stringify(join(REPO_ROOT, "src/run-task.ts"))}, ...args, '--repo-root', ${JSON.stringify(join(f.state, "daemon-install"))}],
+  {stdio:'inherit', env:process.env});
+process.exit(r.status ?? 99);
+`, { mode: 0o700 });
+  writeFileSync(join(f.state, "state/DEPLOY_REQUESTED"), "fixture\n");
+  const docker = join(f.root, "transports/docker"), source = readFileSync(docker, "utf8");
+  writeFileSync(docker, source.replaceAll("sha256:fixture", "sha256:" + "a".repeat(64)).replace('if (bin === "docker") {', `if (bin === "docker") {
+  if (args[0] === 'top') { out('PID PPID COMMAND\\n1 0 node daemon'); process.exit(0); }
+  if (args[0] === 'inspect' && args.join(' ').includes('Config.Env')) { out('GH_TOKEN=fixture-token'); process.exit(0); }
+  if (args[0] === 'inspect' && args.join(' ').includes('Config.Image')) { out('fixture.azurecr.io/remudero:latest'); process.exit(0); }
+  if (args[0] === 'inspect' && args.join(' ').includes('.Id')) { out('fixture-id'); process.exit(0); }
+  if (args[0] === 'inspect' && args.join(' ').includes('.State.Restarting')) { out('true false'); process.exit(0); }
+  if (args[0] === 'inspect' && args.includes('remudero-serve') && args.join(' ').includes('.Image')) {
+    out('sha256:' + (fs.existsSync(e.FIXTURE_SERVE_STARTED) ? 'a' : 'b').repeat(64)); process.exit(0);
+  }
+  if (args[0] === 'run' && !args.includes('--entrypoint')) {
+    if (args.includes('remudero-serve')) fs.writeFileSync(e.FIXTURE_SERVE_STARTED, 'started');
+    else fs.appendFileSync(path.join(e.RMD_STATE_DIR, 'state/ledger.ndjson'), JSON.stringify({step:'daemon.boot', ts:new Date().toISOString(), head_sha:'a'.repeat(40)}) + '\\n');
+  }
+`));
+  const git = join(f.root, "transports/git");
+  writeFileSync(git, readFileSync(git, "utf8").replace('if (bin === "git") {', `if (bin === "git") {
+  if (args.includes('fetch') && e.FIXTURE_MUTATE === 'session' && !fs.existsSync(e.FIXTURE_SESSION_CHANGED)) {
+    fs.appendFileSync(e.FIXTURE_SESSION, ' '); fs.writeFileSync(e.FIXTURE_SESSION_CHANGED, 'changed');
+  }
+`));
+  f.env.RMD_RECYCLE_DOCKERENV_PATH = join(f.root, "no-dockerenv");
+  f.env.RMD_RECYCLE_HOST_LOCK = join(f.root, "recycle.lock");
+  f.env.RMD_RECYCLE_WAIT_S = "1";
+  f.env.RMD_RECYCLE_POLL_S = "1";
+  f.env.FIXTURE_SERVE_STARTED = join(f.root, "serve-started");
+  f.env.FIXTURE_SESSION = f.session;
+  f.env.FIXTURE_SESSION_CHANGED = join(f.root, "session-changed");
+  f.env.RMD_SERVE_ADMIT_MEMINFO_PATH = f.env.RMD_MEMINFO;
+  f.env.RMD_SERVE_ADMIT_VMSTAT_PATH = join(f.root, "vmstat");
+  f.env.RMD_SERVE_ADMIT_PSI_PATH = join(f.root, "psi");
+  writeFileSync(f.env.RMD_SERVE_ADMIT_VMSTAT_PATH, "pswpin 0\n");
+  writeFileSync(f.env.RMD_SERVE_ADMIT_PSI_PATH, "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n");
+  return { ...f, pin };
+}
+
+test("selected shell shadow reaches real lifecycle and heartbeat consumers: generated deploy-run supervisor", t => {
+  const f = supervisorFixture(t);
+  const historical = bash32(t), historicalBin = join(f.root, "historical-bin"); mkdirSync(historicalBin);
+  symlinkSync(historical.shell, join(historicalBin, "bash"));
+  f.env.PATH = `${historicalBin}:${f.env.PATH}`;
+  Object.assign(f.env, historical.env);
+  const offset = f.rows().length;
+  const launch = f.run(join(f.output, "launcher"), [], { FIXTURE_RUNNING: "1" }, historical.shell);
+  assert.equal(launch.status, 0, launch.stdout + launch.stderr);
+  assert.match(launch.stdout, /asking the supervisor/);
+  const call = f.receipts().find(c => c.bin === "rmd" && c.args[0] === "deploy-run");
+  assert.ok(call, launch.stdout + launch.stderr);
+  assert.deepEqual(call.args.slice(-4), ["--selected-registry-shadow", f.session, "--selected-registry-pin", f.pin]);
+  assert.ok(f.rows().slice(offset).some(r => r.action === "recycle"), launch.stdout + launch.stderr);
+  for (const name of ["remudero-daemon", "remudero-serve"]) {
+    assert.ok(f.receipts().some(c => c.bin === "docker" && c.args[0] === "run" && c.args.includes(name)), launch.stdout + launch.stderr);
+  }
+  assert.ok(f.rows().slice(offset).some(r => r.action === "serve"), launch.stdout + launch.stderr);
+});
+
+for (const mutation of ["pull", "session"] as const) {
+test(`selected shell revisions invalidate generated child and heartbeat observations: deploy-run children after ${mutation}`, t => {
+  const f = supervisorFixture(t), offset = f.rows().length;
+  const launch = f.run(join(f.output, "launcher"), [], { FIXTURE_RUNNING: "1", FIXTURE_MUTATE: mutation });
+  assert.equal(launch.status, 0, launch.stdout + launch.stderr);
+  for (const action of ["recycle", "serve"]) {
+    const rows = f.rows().slice(offset).filter(r => r.action === action);
+    assert.ok(rows.length >= 2, `${action}: ${launch.stdout + launch.stderr}`);
+    assert.equal(rows.at(-1)?.reason, mutation === "session" ? "session_changed" : "digest_mismatch", action);
+    assert.equal(rows.at(-1)?.selected_outcome, "would-refuse", action);
+  }
+  assert.equal(readFileSync(f.session, "utf8").endsWith(" "), mutation === "session");
+  assert.equal(createHash("sha256").update(readFileSync(f.session, "utf8").trimEnd()).digest("hex"), f.pin);
+  const workerCalls = f.receipts().filter(c => c.bin === "docker" && c.args[0] === "run");
+  assert.ok(workerCalls.some(c => c.args.includes("remudero-daemon")));
+  assert.ok(workerCalls.some(c => c.args.includes("remudero-serve")));
+  for (const secret of [f.session, f.selected, f.pin]) {
+    assert.ok(!JSON.stringify(workerCalls).includes(secret));
+    assert.ok(!(launch.stdout + launch.stderr).includes(secret));
+  }
+});
+}
+
+test("selected shell defaults and failures remain shadow only without live effects: supervisor transports", t => {
+  const f = fixture(t), deploy = join(f.root, "deploy"); mkdirSync(deploy);
+  const recycler = join(deploy, "recycle-container.sh"), serve = join(deploy, "serve-container.sh");
+  const header = "# --selected-registry-shadow)\n# --selected-registry-pin)\n";
+  const body = "printf '%s\\n' \"$@\"\n";
+  writeFileSync(recycler, header + body); writeFileSync(serve, header + body);
+  const binding = { session: f.session, pin: "a".repeat(64) };
+  const exec = selectedRegistryLifecycleExec(f.root, binding);
+  binding.session = "changed after capture";
+  const expected = ["--selected-registry-shadow", f.session, "--selected-registry-pin", binding.pin];
+  assert.deepEqual(exec("bash", [recycler, "--instance", "core"]).trim().split("\n"), ["--instance", "core", ...expected]);
+  assert.deepEqual(exec("bash", ["-c", 'shift; exec bash "$@"', "recycle-wait", "15", recycler]).trim().split("\n"), expected);
+  assert.deepEqual(exec("env", ["RMD_STATE_DIR=fixture", "bash", serve, "--replace"]).trim().split("\n"), ["--replace", ...expected]);
+  const legacy = selectedRegistryLifecycleExec(f.root, {});
+  assert.equal(legacy("bash", [recycler, "--instance", "core"]), "--instance\ncore\n");
+  assert.equal(selectedRegistryLifecycleExec(f.root, { pin: binding.pin })("bash", [recycler, "--instance", "core"]), "--instance\ncore\n");
+  assert.equal(selectedRegistryLifecycleExec(f.root, { session: f.session })("bash", [recycler, "--instance", "core"]), "--instance\ncore\n");
+  assert.equal(exec(process.execPath, ["-e", "console.log(process.argv.slice(1).join(','))", recycler]), recycler + "\n",
+    "a matching path in an unrelated command never admits the private transport");
+  const other = join(f.root, "other/deploy"); mkdirSync(other, { recursive: true });
+  const otherRecycler = join(other, "recycle-container.sh"); writeFileSync(otherRecycler, header + body);
+  assert.equal(exec("bash", [otherRecycler, "--instance", "core"]), "--instance\ncore\n",
+    "the same child name in another checkout is outside this binding");
+  writeFileSync(recycler, "# --selected-registry-shadow)\n" + body);
+  assert.equal(exec("bash", [recycler, "--instance", "core"]), "--instance\ncore\n", "both transport options must be supported");
+  writeFileSync(recycler, body);
+  assert.equal(exec("bash", [recycler, "--instance", "core"]), "--instance\ncore\n", "old grammar keeps legacy argv");
+  rmSync(recycler); symlinkSync(serve, recycler);
+  const errors: unknown[][] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args); });
+  assert.equal(exec("bash", [recycler, "--instance", "core"]), "--instance\ncore\n", "unadmitted file symlink stays legacy");
+  rmSync(recycler); mkdirSync(recycler);
+  assert.throws(() => exec("bash", [recycler]));
+  rmSync(recycler, { recursive: true });
+  assert.throws(() => exec("bash", [recycler]));
+  assert.equal(errors.length, 3, "header failures have an explicit unrecorded diagnostic");
+  writeFileSync(recycler, header + `printf '%s\\n' "$*" >&2\nprintf '%s\\n' "$*"\nexit 75\n`);
+  assert.throws(() => exec("bash", [recycler]), (error: unknown) => {
+    const failure = error as Error & { status: number; stdout: string; stderr: string };
+    assert.equal(failure.status, 75, "serve admission/refusal status must survive redaction");
+    for (const value of [failure.message, failure.stdout, failure.stderr]) {
+      assert.ok(!value.includes(f.session) && !value.includes(binding.pin));
+    }
+    return true;
+  });
+  assert.throws(() => exec("bash", [recycler], { env: { PATH: join(f.root, "absent-bin") } }),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT", "a real spawn refusal retains its OS code");
+  const read = t.mock.method(fs, "readSync", () => { throw "private read error"; });
+  const spawn = t.mock.method(childProcess, "execFileSync", () => "legacy");
+  syncBuiltinESMExports();
+  try { assert.equal(exec("bash", [recycler]), "legacy"); }
+  finally { read.mock.restore(); spawn.mock.restore(); syncBuiltinESMExports(); }
+  const failure = t.mock.method(childProcess, "spawnSync", () => { throw null; });
+  syncBuiltinESMExports();
+  try { assert.throws(() => exec("bash", [recycler]), /trusted lifecycle child failed/); }
+  finally { failure.mock.restore(); syncBuiltinESMExports(); }
+  assert.ok(!JSON.stringify(errors).includes(f.session));
+});
 
 test("selected shell shadow reaches real lifecycle and heartbeat consumers", async t => {
   const f = registryShellFixture(t), pin = f.capture();
