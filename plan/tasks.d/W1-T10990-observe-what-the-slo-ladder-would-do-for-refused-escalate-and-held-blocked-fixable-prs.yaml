@@ -1,0 +1,47 @@
+- id: W1-T10990
+  title: Observe what the W1-T5690 SLO ladder would do if refused-escalate PRs, and blocked-fixable PRs held past the SLO at one head, were eligible, before any change to its entry gate
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: recon
+  verify: human
+  risk: low
+  origin: operator-session#slo-ladder-recon-2026-10-29
+  plan_refs:
+    - W1-T5690
+    - W1-T10945
+  files:
+    - docs/recon/slo-ladder-replay-over-refused-escalate-and-held-blocked-fixable-prs.md
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The report replays the ledger over two windows: 2026-10-22T19:29:02Z to 2026-10-29T19:29:02Z (the window of the 2026-10-29 recon) and the seven days before this task is built. For every PR that sat in refused-escalate, or in blocked-fixable at one head past BLOCKER_SLO_MS, it gives one row: the PR, task, head, disposition, blocker, owner and age, the rung decideSloRung would take, any lifetime-cap or one-per-UTC-day cap hit, and whether requeueable would be true (head author is the fleet App, head branch acceptable, not a plan filing)"
+      proof: "demonstration: the operator reads the report and sees one row per eligible PR and head in each window, with the newest ledger ts read and the file count per ledger form"
+    - claim: The report reruns the same replay with today's entry gate (blocked-ambiguous only) as its positive control, and reproduces the recon's counts for the first window. It also states which PRs would have been closed and requeued, which would only have been refreshed, and which would have been digested
+      proof: "demonstration: the operator reads the report and sees the control's counts beside the recon's (6 blocked-ambiguous PRs past 45 min, 2 sweep.slo_rung rows, both refresh, and 0 sweep.strike_ladder.requeued rows), and the per-rung totals for the widened gate"
+    - claim: For each PR the widened gate would close, the report says what actually happened to it (merged, closed by hand, or still open) and how long it waited, so the cost of a close-and-rebuild can be weighed against the stall it would have ended
+      proof: "demonstration: the operator reads the report and sees the outcome and wait for every PR the widened gate would close"
+    - claim: The report recommends whether to widen the gate, and for which dispositions, or recommends no change, with the evidence for it. It changes no code, configuration or ledger
+      proof: "demonstration: the operator reads the report and sees one recommendation with its evidence, and the PR diff touches only the report"
+  rationale: |
+    OBSERVED in the operator's 2026-10-29 recon (ledger read to 2026-10-29T19:28:34Z; 714 gz archives, 0 rotated plain files and the live file). Both strikeLadderDue and sloLadderDue in src/lib/sweep.ts require disposition === "blocked-ambiguous", so applyStrikeLadder never sees a PR in any other disposition.
+    OBSERVED, 2026-10-22T19:29:02Z to 2026-10-29T19:29:02Z, distinct PRs with a sweep.disposed row older than 45 minutes: 6 in blocked-ambiguous, 24 in refused-escalate and 132 in blocked-fixable. For 2026-10-08T12Z to 2026-10-15T12Z the same counts were 20, 10 and 91.
+    OBSERVED: in the recon window sweep.slo_rung was written twice, both rung refresh (#14793 at 2026-10-28T00:47:42.334Z, #15034 at 2026-10-28T07:58:04.699Z). All-time there are 48 refresh rows, 1 digest row and 0 rebuild rows. fix.progress_judged with site rebuild was written 0 times in the window and 6 times ever, the last at 2026-10-15T20:28:23.973Z. The last sweep.strike_ladder.requeued (the ladder's close) was 2026-10-15T20:28:23.973Z (#12051 and #12078).
+    OBSERVED: none of the 6 blocked-ambiguous PRs was closed by the ladder. #13629, #14817 and #14824 merged; #14168 and #15034 were closed by hand by the operator; #14793 is open. #15034 took a refresh rung, then sat in refused-escalate ("fix needs design at this exact head") at its new head, where the ladder cannot reach it.
+    INFERRED, not established: the stalled population moved out of blocked-ambiguous into refused-escalate and long-held blocked-fixable, so the ladder's entry gate, not its rung logic, keeps it idle. A recurrence count is a class signal, not a diagnosis (doctrine: recurrence is a class signal), so this task measures what a widened gate would do before any change. Some refused-escalate PRs are held for an operator decision, and some blocked-fixable PRs are hand-built operator branches that are not requeueable; the replay must show both rather than assume them away.
+  falsifier: |
+    If, with the widened gate, the replay closes no PR that the fleet did not later merge or that the operator did not close by hand, or if every PR it would close was already moving (a new head within the SLO after the close point), widening the gate would add churn without ending a stall, and the report recommends no change.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-29 as an observation proposal at priority normal (2).
+    Read-only: no change to sloLadderDue, strikeLadderDue, decideSloRung, BLOCKER_SLO_MS or any cap is authorized by this task. Any change is a separate filing.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "The filed scope authorizes one report only and explicitly prohibits changes to code, configuration, ledger, ladder gates, or caps; any implementation requires a separate filing."
+      - "Acceptance requires two replay windows, a positive control, ledger coverage counts and freshness, per-head eligibility and cap checks, and actual PR outcomes, providing a concrete verification plan."
+      - "The operator-filed observation proposal follows the stated practice of measuring projected effects before changing behavior; its recommendation does not authorize closures, requeues, or policy changes."
+      - "the judge said proceed, but W1-T10990: at verify: auto it fails lint (proof-dialect)"
+    judged_at: "2026-10-29T23:35:53.439Z"
+    pin: "82ed7ad303dd895d7d18ae03cf5d51bfeae2df3f9b68f8180b20364904270c44"

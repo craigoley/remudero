@@ -87,7 +87,7 @@ module.exports = {
 };
 
 /**
- * Repository integration for dependency-cruiser 18.6.0's extraction lifecycle.
+ * Repository integration for dependency-cruiser's extraction lifecycle, at the exact version package.json pins.
  * Its ordinary extractor keeps every AST until the entire traversal finishes.
  * Run that extractor once per file (depth one), retaining only its root record;
  * follow every resolved edge here, then analyze the COMPLETE graph once. This
@@ -106,8 +106,15 @@ async function scanArchitecture() {
   });
   const root = dirname(findPackageJSON("dependency-cruiser", pathToFileURL(__filename)));
   const version = require(join(root, "package.json")).version;
-  if (version !== "18.6.0") {
-    throw new Error(`Architecture integration requires dependency-cruiser 18.6.0; found ${version}`);
+  // The pin is package.json's, so a Dependabot bump that moves it and the lockfile together is scanned by the
+  // new version, and this file's suite (heap bound, native-graph controls) decides whether its internals still
+  // fit. A literal here turned every such bump red by construction (#15177, 18.6.0 -> 18.7.0).
+  const pinned = require(join(__dirname, "package.json")).devDependencies?.["dependency-cruiser"];
+  if (typeof pinned !== "string" || !/^\d+\.\d+\.\d+$/.test(pinned)) {
+    throw new Error(`Architecture integration needs an exact dependency-cruiser pin in package.json; found ${pinned}`);
+  }
+  if (version !== pinned) {
+    throw new Error(`Architecture integration requires dependency-cruiser ${pinned}; found ${version}`);
   }
   // dependency-cruiser swallows a missing SWC binding and silently uses Acorn.
   // Load the configured parser explicitly so that cannot produce a green scan.

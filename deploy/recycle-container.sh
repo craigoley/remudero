@@ -2112,6 +2112,41 @@ pid_ledger_activity() {
     }' || true
 }
 
+# Resolve before the drain reads holders, without preparing the next container's mounts.
+# The running bind wins over switch changes; unreadable binds/plans retain the state-dir fallback.
+resolve_holder_worktrees_dir() {
+  local mounts src dest rest
+  HOLDER_WORKTREES_DIR="${STATE_DIR}/worktrees"
+  HOLDER_WORKTREES_DEST="${STATE_MOUNT_DEST}/worktrees"
+  mounts="$(docker inspect --format '{{range .Mounts}}{{printf "%s\t%s\t%t\n" .Source .Destination .RW}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null)" || mounts=""
+  while IFS=$'\t' read -r src dest rest; do
+    if [ "${dest}" = "${HOLDER_WORKTREES_DEST}" ] && [ -d "${src}" ] && [ -r "${src}" ] && [ -x "${src}" ]; then
+      HOLDER_WORKTREES_DIR="${src%/}"
+      HOLDER_WORKTREES_DEST="${dest}"
+      return 0
+    fi
+  done <<LIVE_WORKTREE_MOUNTS
+${mounts}
+LIVE_WORKTREE_MOUNTS
+  # Command substitution isolates scratch_plan's globals from the replacement launch.
+  mounts="$(if declare -F scratch_plan >/dev/null && scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}"; then
+    printf '%s\n' "${SCRATCH_BINDS}"
+  fi)" 2>/dev/null || mounts=""
+  while IFS=$'\t' read -r src dest; do
+    if [ "${dest}" = "${HOLDER_WORKTREES_DEST}" ] && [ -d "${src}" ] && [ -r "${src}" ] && [ -x "${src}" ]; then
+      HOLDER_WORKTREES_DIR="${src%/}"
+      HOLDER_WORKTREES_DEST="${dest}"
+      return 0
+    fi
+  done <<PLANNED_WORKTREE_MOUNTS
+${mounts}
+PLANNED_WORKTREE_MOUNTS
+  return 0
+}
+resolve_holder_worktrees_dir
+HOLDER_WORKTREES_NOTE=""
+[ "${HOLDER_WORKTREES_DIR}" = "${STATE_DIR}/worktrees" ] || HOLDER_WORKTREES_NOTE="  worktrees: ${HOLDER_WORKTREES_DIR}"
+
 # The worktree(s) a lock's holder was using: checked out at the claimed branch for a
 # `fix-branch--<owner>--<repo>--<branch>` claim, or named `run-|sweep-<taskId>-*` for a task lock.
 #
@@ -2124,10 +2159,13 @@ pid_ledger_activity() {
 holder_worktrees() {
   local key d gitdir ref found=""
   key="$(basename "$1" .lock)"
-  for d in "${STATE_DIR}/worktrees"/*; do
+  for d in "${HOLDER_WORKTREES_DIR}"/*; do
     [ -f "${d}/.git" ] || continue
     gitdir="$(sed -n 's/^gitdir: //p' "${d}/.git" 2>/dev/null | head -1 || true)"
-    case "${gitdir}" in "${STATE_MOUNT_DEST}"/*) gitdir="${STATE_DIR}${gitdir#"${STATE_MOUNT_DEST}"}" ;; esac
+    case "${gitdir}" in
+      "${HOLDER_WORKTREES_DEST}"/*) gitdir="${HOLDER_WORKTREES_DIR}${gitdir#"${HOLDER_WORKTREES_DEST}"}" ;;
+      "${STATE_MOUNT_DEST}"/*) gitdir="${STATE_DIR}${gitdir#"${STATE_MOUNT_DEST}"}" ;;
+    esac
     ref=""
     if [ -n "${gitdir}" ] && [ -f "${gitdir}/HEAD" ]; then
       ref="$(sed -n 's#^ref: refs/heads/##p' "${gitdir}/HEAD" 2>/dev/null | head -1 | sed 's#[/\\]#__#g' || true)"
@@ -2138,7 +2176,7 @@ holder_worktrees() {
     esac
     found="${found}worktree: ${d}"$'\n'
   done
-  [ -n "${found}" ] || found="worktree: none found under ${STATE_DIR}/worktrees for ${key}"$'\n'
+  [ -n "${found}" ] || found="worktree: none found under ${HOLDER_WORKTREES_DIR} for ${key}"$'\n'
   printf '%s' "${found}"
 }
 
@@ -2152,8 +2190,8 @@ worker_lane() {
     [ -e "${f}" ] || continue
     while IFS= read -r tree; do
       tree="${tree#worktree: }"
-      case "${tree}" in "${STATE_DIR}/worktrees/"*) : ;; *) continue ;; esac
-      tree="${STATE_MOUNT_DEST}${tree#"${STATE_DIR}"}"
+      case "${tree}" in "${HOLDER_WORKTREES_DIR}/"*) : ;; *) continue ;; esac
+      tree="${HOLDER_WORKTREES_DEST}${tree#"${HOLDER_WORKTREES_DIR}"}"
       case "${cwd}" in
         "${tree}"|"${tree}"/*) basename "${f}" .lock; return 0 ;;
       esac
@@ -2395,7 +2433,7 @@ while :; do
   while read -r wpid wage wlane wargs; do
     [ -n "${wpid:-}" ] || continue
     if [ "${wlane}" != "lane-less" ]; then
-      busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane ${wlane}  ${wargs}"$'\n'
+      busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane ${wlane}  ${wargs}${HOLDER_WORKTREES_NOTE}"$'\n'
       continue
     fi
     case "${FROZEN_DAEMON_CHILDREN}" in *" ${wpid} "*) continue ;; esac
@@ -2403,14 +2441,14 @@ while :; do
       *sweep-fix-settings-*) : ;;
       *)
         lane_less_busy=$((lane_less_busy + 1))
-        busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane-less  ${wargs}"$'\n'
+        busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane-less  ${wargs}${HOLDER_WORKTREES_NOTE}"$'\n'
         continue ;;
     esac
     if [ "${wage}" -ge "${HUNG_WORKER_AGE_S}" ] 2>/dev/null; then
       lane_less_hung="${lane_less_hung}${wpid} ${wage}"$'\n'
     else
       lane_less_busy=$((lane_less_busy + 1))
-      busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane-less  ${wargs}"$'\n'
+      busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane-less  ${wargs}${HOLDER_WORKTREES_NOTE}"$'\n'
     fi
   done <<WORKERS
 ${worker_snapshot}

@@ -1382,6 +1382,7 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
   const key = ciFrictionCauseKey(price.cause);
   const origin = ciFrictionRungOrigin(key, rung);
   const testPath = newTestPath(ciFrictionShardStem(key), [owner.files[0]!], "ci-friction-gardener");
+  const census = key === "fix_refusal:census-precheck";
   // The shared machine-filing path (operator ruling 2026-09-29): the header, verify and risk are its.
   return renderMachineShard({
     taskId,
@@ -1393,18 +1394,25 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
     costPopulation: priced.map((p) => p.minutes),
     acceptance: [
       // The build must pass the named regression; a declaration alone is not repair evidence.
-      { claim: key === "fix_refusal:census-precheck"
+      // A claim a review can judge from the diff: one recorded round through the owner path. "No longer spends a
+      // fix round" promised the after-window outcome, which only the gardener's measurement can show, so reviews
+      // judged every proof of it non-responsive and the fleet parked the PR on a design question.
+      { claim: census
         ? `the diagnosed census runner failure owned by ${owner.files[0]!} is prevented or self-healed while healthy branch findings still refuse publication`
-        : `the harness no longer spends a fix round on ${key}`, proof: `unit test: ${ciFrictionRemedyTestTitle(taskId, key)}` },
+        : `a recorded ${key} round, replayed through the real code path in ${owner.files[0]!}, is prevented or self-healed without dispatching a fix round`,
+        proof: `unit test: ${ciFrictionRemedyTestTitle(taskId, key)}` },
     ],
     note: `Filed by the ci-friction gardener (W1-T4435) at rung ${rung}. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures ${key}'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung ${rung + 1}.` +
-      (key === "fix_refusal:census-precheck" ? " The regression must execute the diagnosed failure through the real owner path and retain a control that a healthy branch finding is still refused; class-wide cost observations and after-window measurement remain unchanged." : ""),
-    rationale: [...ciFrictionDraftRationale(draft, key), ...(key === "fix_refusal:census-precheck" ? [
-      "",
+      (census ? " The regression must execute the diagnosed failure through the real owner path and retain a control that a healthy branch finding is still refused; class-wide cost observations and after-window measurement remain unchanged."
+        : " The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."),
+    rationale: [...ciFrictionDraftRationale(draft, key), "", ...(census ? [
       "The regression must execute the diagnosed failure through the real owner path, not assert a reporter label or text.",
       "It must retain a control that a healthy branch finding is still refused by the existing predicate.",
       "The class-wide cost observations and after-window measurement remain unchanged; the healthy predicate is not a repair target.",
-    ] : [])],
+    ] : [
+      "The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.",
+      "It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.",
+    ])],
   }).text;
 }
 

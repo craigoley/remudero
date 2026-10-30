@@ -83,17 +83,9 @@ interface CodexSpawnArgs {
   /** The validated worker policy whose PreToolUse floor is translated onto the Codex CLI. */
   settingsFile: string;
   resumeSessionId?: string;
-  /**
-   * W1-T2800 — THE REDIRECTED PER-SPAWN WORKER HOME, threaded EXPLICITLY rather than left to
-   * `args.env` ordering. `spawnWorker` establishes it (`perRunWorkerHomeDir` +
-   * `materializeWorkerHome`) before provider selection commits, so the Codex branch can no longer
-   * return past the redirection the Claude path has had since W1-T18.
-   *
-   * WHY EXPLICIT: `codexSpawnEnv` assigned `env.HOME` first and then copied `args.env` over it, so
-   * an `args.env.HOME` would HAPPEN to win. That is an implicit ordering dependency, and the
-   * design forbids it becoming the mechanism — a later reorder of those two statements would
-   * silently restore the leak with no test failing.
-   */
+  /** W1-T2800: `spawnWorker` establishes this redirected home before provider selection
+   * (`perRunWorkerHomeDir` + `materializeWorkerHome`, as Claude has since W1-T18).
+   * Pass it explicitly: relying on `args.env.HOME` copy order silently restores the leak on reorder. */
   workerHome: string;
   /** W1-T2800 — `workerZdotdir(config)`, the SAME value the Claude path passes, so a directly
    *  invoked zsh cannot reach the operator's zdotdir (W1-T1C compinit contamination). */
@@ -263,17 +255,12 @@ export interface CodexModelDecision {
   preferenceBypass?: CodexModelPreferenceBypassReason;
   /** Task-stable overlap assignment, attached only when both versions were eligible. */
   switchback?: SwitchbackAssignment;
-  /** The Claude model this Codex request was routed FOR, e.g. `"claude-opus-5"` — carried here (rather than left to the
-   *  caller to re-thread) so a spawn served under {@link capabilityFallbackReason} is attributable to the exact lane that
-   *  silently downgraded (W1-T3097). */
+  /** W1-T3097: original Claude model, e.g. `"claude-opus-5"`, for attributing
+   * {@link capabilityFallbackReason} to the lane that downgraded. */
   requestedModel?: string;
-  /**
-   * Present ONLY when `.remudero/mounts.yaml`'s capability table could not be loaded at all — see
-   * {@link resolveCodexCapability}. A capability table that loaded fine and simply has no row for `requestedModel` is a
-   * DIFFERENT, documented event (the "balanced" default) and leaves this field absent. Distinguishing the two means an arm
-   * built from `served_model` is no longer poisoned by an artefact of a failed file read that looks like a policy decision
-   * (W1-T3097).
-   */
+  /** W1-T3097: present ONLY for an unreadable capability table; see {@link resolveCodexCapability}.
+   * A loaded table with no model row uses the documented "balanced" default without a reason.
+   * Keep read failure distinct from policy when attributing `served_model`. */
   capabilityFallbackReason?: CodexCapabilityFallbackReason;
   /** W1-T3958: the routing-pool-v1 receipt, present only when the read was given a pool. */
   routingPool?: RoutingPoolDecision;
@@ -355,13 +342,9 @@ export function finishProviderWindowMeasurement(
   return providerWindowConsumption(measurement.before, after);
 }
 
-/**
- * Measure one provider's largest percentage-point burn across windows whose reset identity stayed
- * stable for the whole observation. A changed/absent reset is not comparable, and a regressed
- * counter is refused rather than turned into a negative consumption credit. This function does
- * attribution only between two already-captured readings; callers must separately prove that no
- * same-provider work overlapped the observation before attaching the result to one worker.
- */
+/** Largest percentage-point burn across reset-stable windows. Changed/absent resets are incomparable;
+ * regressed counters are refused, never negative credits. Callers must separately exclude overlapping
+ * same-provider work before attributing these captured readings to one worker. */
 export function providerWindowConsumption(
   before: ProviderCapacity,
   after: ProviderCapacity,
@@ -369,16 +352,9 @@ export function providerWindowConsumption(
   if (before.provider !== after.provider) {
     return { provider: before.provider, percentConsumed: null, reason: "provider-mismatch" };
   }
-  // W1-T2828: refuse a CROSS-ACCOUNT subtraction.
-  //
-  // TRAP: what protects this today is incidental, not designed. A window is comparable only when
-  // name AND resetsAt match exactly, so a mid-spawn account switch usually lands in
-  // no-reset-stable-window or counter-regressed. Two accounts whose weekly windows share a reset
-  // timestamp would match, and the delta between them would be attributed to one worker's spend.
-  //
-  // Only a KNOWN mismatch refuses. One reading without a label cannot establish that the accounts
-  // differ, and refusing there would stop attributing ordinary spend on every host that has run
-  // fine without a label for months.
+  // W1-T2828: refuse known cross-account subtraction. TRAP: name + resetsAt can match across
+  // accounts sharing a weekly reset, falsely attributing their delta to one worker.
+  // An absent label proves no mismatch; unlabeled hosts must still attribute ordinary spend.
   if (
     before.accountLabel !== undefined &&
     after.accountLabel !== undefined &&
@@ -435,13 +411,9 @@ export class ProviderCapacityBlockedError extends Error {
   }
 }
 
-/**
- * W1-T3718: WHY A SUBSCRIPTION REFUSED. `full` answered the probe and has no headroom above the
- * reserve; `cannot-be-asked` never gave a readable answer. MEASURED 2026-09-17: "claude=capacity
- * unreadable" and a 10s probe budget that fired after 174s both reached the operator as absence of
- * headroom -- an infrastructure fault dressed as a budget decision. Only `full` argues for paying
- * for a fallback, so the two are never folded together.
- */
+/** W1-T3718: `full` answered without reserve headroom; `cannot-be-asked` gave no readable answer.
+ * The 2026-09-17 unreadable/174s probe failures masqueraded as budget exhaustion. Keep them apart:
+ * only `full` argues for paying for fallback. */
 export type ProviderRefusalCondition = "full" | "cannot-be-asked";
 
 export function providerRefusalCondition(capacity: ProviderCapacity): ProviderRefusalCondition {
@@ -515,17 +487,10 @@ export function providerEligibility(capacity: ProviderCapacity, reservePercent: 
   return { eligible: false, reason: "below-reserve", headroomPercent };
 }
 
-/**
- * W1-T4617: EVERY ROUTING DECISION IS A MICRO-EXPERIMENT, SO IT RECORDS ITS PROBABILITY.
- *
- * The auction used to pick with a module-level golden-ratio counter: deterministic, correlated with
- * the order (and so the time of day) spawns arrived, and with no selection probability anyone could
- * weight an outcome by. It now draws ONE uniform value from a PRNG seeded by hashing
- * `(task id, attempt, decision point)` -- the repo's own FNV-1a {@link seedOf} into its mulberry32
- * {@link seededRandom} -- over the SAME `(headroom - reserve)^2` weights. The draw is independent of
- * the weights and of the clock, so each provider's expected share is exactly its normalised weight,
- * and the same inputs always reproduce the same draw.
- */
+/** W1-T4617: record selection probability for outcome weighting. One uniform draw uses FNV-1a
+ * {@link seedOf} + mulberry32 {@link seededRandom}, keyed by `(task id, attempt, decision point)`.
+ * Unlike the old arrival-correlated golden-ratio counter, it is clock/weight independent and
+ * reproducible; expected shares equal normalized `(headroom - reserve)^2` weights. */
 export const ROUTING_DRAW_METHOD = "fnv1a-mulberry32/v1";
 
 /** What a draw is keyed on. `unit: "task"` means every attempt of the task shares it (an experiment arm). */
@@ -734,17 +699,10 @@ export function selectionPropensity(input: {
   };
 }
 
-/**
- * W1-T4670: allocate the live window's model-upgrade budget across `candidates` — the tasks
- * currently queued — spending it where predicted gain per window share is largest
- * ({@link allocateUpgrades}, upgrade-allocation.ts). ADDITIVE ONLY: the configured mounts table's
- * fixed per-role tier and {@link selectWorkerProvider}'s own auction stay the live spawn path
- * exactly as they are today; this exposes the AutoQuantize-style decision to a future caller
- * without acting on it. Design point (ii) gates actually spending on it behind the offline
- * replay winning ({@link import("./upgrade-allocation.js").replayUpgradeAllocationPolicy}) — an
- * empty `candidates` array (the default until an operator wires a real queue snapshot through)
- * costs nothing and upgrades nothing.
- */
+/** W1-T4670: expose {@link allocateUpgrades} for queued candidates by predicted gain/window share.
+ * ADDITIVE ONLY: mounts' per-role tiers and {@link selectWorkerProvider}'s auction remain live.
+ * Spending requires a winning offline {@link import("./upgrade-allocation.js").replayUpgradeAllocationPolicy}
+ * (design point ii); default empty candidates cost nothing and upgrade nothing until operator wiring. */
 export function queuedUpgradeAllocation(
   candidates: readonly UpgradeCandidateTask[],
   liveWindow: LiveUpgradeWindow,
@@ -811,15 +769,9 @@ interface CodexResetCreditsBlock {
   credits?: Array<{ id?: unknown; status?: unknown; expiresAt?: unknown }> | null;
 }
 
-/**
- * Non-sensitive reset readiness: how many manual resets are available, and the EARLIEST expiry
- * when the detail is readable.
- *
- * THREE STATES, KEPT APART. Absent block or unreadable count => `undefined`, which the status
- * projection renders as a missing field: the operator learns nothing was measured. A readable
- * count with no usable expiry => the count alone, never a synthesised `0` or an invented date —
- * a `0` would positively claim "no reset available", which is a different and wrong fact.
- */
+/** Non-sensitive reset count and earliest readable expiry. Absent block/unreadable count yields
+ * `undefined` (unmeasured); a readable count without expiry stays count-only. Never invent a date
+ * or synthesize 0: that would falsely claim no reset is available. */
 export function parseResetCredits(block: unknown): { availableCount: number; earliestExpiresAt?: number } | undefined {
   if (!block || typeof block !== "object") return undefined;
   const raw = block as CodexResetCreditsBlock;
@@ -848,13 +800,8 @@ interface CodexModelListResult {
   nextCursor?: string | null;
 }
 
-/**
- * Last-resort Codex candidates (W1-T2573), used ONLY when `.remudero/mounts.yaml`'s
- * `capabilities` axis is unavailable — the routing table failed to load, or a caller (e.g. a
- * unit test) omitted it. Real routing always resolves through {@link CapabilityLadder.codex}
- * (mounts.ts); this is a documented degenerate fallback, not the primary source of truth, so a
- * missing routing table degrades no further than it always has rather than blocking dispatch.
- */
+/** W1-T2573: last-resort candidates ONLY when mounts' capabilities are unavailable/omitted.
+ * Real routing uses {@link CapabilityLadder.codex}; missing data preserves fail-soft dispatch. */
 const FALLBACK_CODEX_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
   balanced: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
@@ -887,15 +834,8 @@ function isCodexModelTier(value: unknown): value is CodexModelTier {
   return value === "economy" || value === "balanced" || value === "frontier";
 }
 
-/**
- * Resolve the requested Claude model's capability (W1-T2573): a TABLE LOOKUP against
- * `.remudero/mounts.yaml`'s `capabilities.claude` map (src/lib/mounts.ts), never a substring
- * match on the model name. A model with no declared capability — or no capability data at all —
- * resolves to "balanced", the SAME degenerate default the old substring function fell through to
- * for "everything else"; here it is an explicit, documented fallback rather than the silent
- * result of an `.includes()` miss, and any model this table DOES declare (including one whose
- * name carries neither "haiku" nor "opus") resolves correctly regardless of its spelling.
- */
+/** W1-T2573: look up mounts' `capabilities.claude`, never infer tiers from model-name substrings.
+ * Undeclared models or absent data explicitly default to "balanced", preserving legacy fallback. */
 export function codexCapabilityForRequestedModel(
   capabilities: CapabilityLadder | undefined,
   requestedModel: string | undefined,
@@ -916,14 +856,9 @@ export interface CodexCapabilityResolution {
   fallbackReason?: CodexCapabilityFallbackReason;
 }
 
-/**
- * THE SEAM `codexCapabilityForRequestedModel` collapses (W1-T3097): an UNREADABLE capability table
- * (`capabilities === undefined`, `.remudero/mounts.yaml` failed to load anywhere it was searched) and a genuinely UNMAPPED
- * model both resolve to the tier "balanced" there, indistinguishably. This wraps the same lookup and adds the ONE bit that
- * tells them apart — `fallbackReason` is present only for the former — while leaving `codexCapabilityForRequestedModel`
- * itself untouched (existing callers that only need the tier keep working byte-for-byte). Both cases still return a usable
- * capability; this never throws and never blocks dispatch (design point (ii), fail-soft stays fail-soft).
- */
+/** W1-T3097: wrap `codexCapabilityForRequestedModel` with a reason ONLY for an unreadable table.
+ * Unmapped models also default to "balanced" but carry no reason. Both remain usable: never throw
+ * or block dispatch (design point ii); tier-only callers retain the original lookup. */
 export function resolveCodexCapability(
   capabilities: CapabilityLadder | undefined,
   requestedModel: string | undefined,
@@ -932,15 +867,9 @@ export function resolveCodexCapability(
   return capabilities === undefined ? { tier, fallbackReason: "capability-table-unavailable" } : { tier };
 }
 
-/**
- * Resolve the ordered Codex candidate models for a (capability, effort) pair — the table lookup
- * that replaces the old tier function's dropped-effort selection (W1-T2573, rationale point 2).
- * `requestedEffort` now genuinely changes which candidates are preferred: whenever the table
- * declares different rows for two efforts under the same capability, a `sonnet/high` mount and a
- * `sonnet/medium` mount resolve DIFFERENT candidate lists — they are not the same Codex request.
- * An effort the table has no row for falls back to "medium"; capability data unavailable at all
- * falls back to {@link FALLBACK_CODEX_MODELS}.
- */
+/** W1-T2573, rationale 2: ordered candidates depend on BOTH capability and effort (e.g. sonnet/high
+ * versus sonnet/medium). Missing effort rows use "medium"; absent capability data uses
+ * {@link FALLBACK_CODEX_MODELS}. */
 export function codexCandidatesForCapability(
   capabilities: CapabilityLadder | undefined,
   tier: CodexModelTier,
@@ -952,24 +881,13 @@ export function codexCandidatesForCapability(
   return row ?? FALLBACK_CODEX_MODELS[tier];
 }
 
-/** Last-resort data for a missing capability table. Real open-weight routing resolves the table
- * below; this keeps a malformed optional table from changing the existing fail-soft contract. */
-/**
- * The code-side default when mounts declares no `capabilities.cash` table. It must name the
- * SAME leading deployment as that table (W1-T3598): if the two disagreed, a checkout with no table
- * would silently route the DEARER deployment while the configured fleet routed the cheaper one, and
- * nothing would report the divergence. test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
- * asserts the two agree.
- *
- * FRONTIER NO LONGER NAMES ONE DEPLOYMENT (W1-T3689). gpt-oss-120b alone left frontier
- * single-candidate -- the same shape that had already gone wrong for `codex.balanced.low` -- so
- * gpt-5.6-luna now leads it (measured 2026-09-16), taking gpt-5-mini's place outright: cheaper on both axes
- * and 0 reasoning tokens where mini spent 64 of 76. gpt-5.6-terra TRAILS as the escalation, at 10x
- * luna, reached only when luna is unavailable. ECONOMY AND BALANCED KEEP their measured
- * per-task leads from W1-T3614, while Luna is retained as the explicit cash-squeeze candidate. The
- * squeeze selector promotes it only after the subscription auction blocks; routine cash work keeps
- * its measured OSS/nano order.
- */
+/** Fail-soft default for absent/malformed mounts' `capabilities.cash`. W1-T3598 requires the same
+ * leading deployment as the table; test/the-trial-deployment-is-the-cheaper-compliant-one.test.ts
+ * checks parity so missing data cannot silently select a dearer deployment.
+ * W1-T3689 (2026-09-16): frontier uses Luna then Terra (10x Luna), avoiding the single-candidate
+ * trap seen in codex.balanced.low. Luna replaced mini: cheaper on both axes, 0 versus 64/76 reasoning
+ * tokens. Economy/balanced retain W1-T3614's measured OSS/nano leads; promote Luna for cash squeeze
+ * only after the subscription auction blocks. */
 // W1-T3614: economy leads with gpt-oss-120b and balanced with gpt-5-nano, MIRRORING
 // .remudero/mounts.yaml exactly -- a checkout with no mounts table must not silently prefer a
 // different deployment from one with it, which test/the-trial-deployment-is-the-cheaper-compliant-one
@@ -1006,29 +924,12 @@ export function openWeightCandidatesForCapability(
   return (requestedEffort && byEffort[requestedEffort]) || byEffort.medium || FALLBACK_OPENWEIGHT_MODELS[tier];
 }
 
-/**
- * THE CONTEXT WINDOW IS A PROPERTY OF THE DEPLOYMENT, exactly as price and temperature are.
- *
- * It is the third row of the same table discipline, and it arrived last for a measurable reason:
- * price and temperature announce themselves with an HTTP 400 on the FIRST request, while an
- * oversized prompt fails only on the requests that happen to be large, so the gap read as
- * flakiness rather than as a missing lookup.
- *
- * MEASURED 2026-09-15 from state/openweight-allowance.json: 32 of 96 LARGE nano requests never
- * settled -- exactly 33% -- while all 8 small requests settled, with the failures spread uniformly
- * across each concurrency triple (12/10/10) rather than clustered. That is a window edge, not a
- * transport fault. gpt-oss-120b announces the same wall outright:
- *   HTTP 400: The input (259242 tokens) is longer than the model's context length (131072)
- *
- * TREATED AS A TOTAL, AND COMPARED AGAINST PROMPT + {@link OPENWEIGHT_MAX_COMPLETION_TOKENS}.
- * gpt-oss-120b's 131,072 is a total context; gpt-5-nano publishes 272,000 as an INPUT ceiling.
- * Requiring room for the completion in both cases can only refuse a request that would have fit,
- * never admit one that would not -- the safe direction, and the same asymmetry
- * {@link OPENWEIGHT_PRICES} reasons about.
- *
- * A deployment with no row here is REFUSED rather than assumed to fit, because the alternative is
- * to discover the answer by spending a full reservation on a request that cannot succeed.
- */
+/** Context belongs to the deployment, like price/temperature. Large-only failures can look flaky:
+ * state/openweight-allowance.json (2026-09-15) showed 32/96 large nano requests unsettled (12/10/10
+ * across concurrency triples), versus 0/8 small; OSS explicitly rejected 259242 > 131072 tokens.
+ * Compare prompt + {@link OPENWEIGHT_MAX_COMPLETION_TOKENS} against a TOTAL: OSS's 131,072 is total,
+ * nano's 272,000 is input-only. Reserving completion room in both may over-refuse but never over-admit
+ * (as with {@link OPENWEIGHT_PRICES}). Refuse missing rows before spending on impossible requests. */
 export interface OpenWeightContextWindow {
   readonly totalTokens: number;
   readonly readAt: string;
@@ -1054,28 +955,12 @@ export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightConte
   "gpt-6.1-terra": { totalTokens: 922_000, readAt: "2026-10-27" },
 };
 
-/**
- * Bytes per token, used ONLY to decide which deployment can hold a request -- never to price one.
- *
- * DERIVED, NOT ASSUMED. Inverting the live allowance file on nano's $0.05/1M input and the fixed
- * 5,000-token output ceiling: a $0.0547 reservation is 1,054,000 request bytes, and the $0.0142 it
- * settled to bounds the real prompt between 244,000 tokens (if the completion used the full
- * ceiling) and 284,000 (if it used none) -- so 3.71 to 4.32 bytes per token over this corpus. 4.0
- * is the middle of that measured band and the usual English/code heuristic.
- *
- * THIS GATE IS COARSE, AND SAYING SO IS THE POINT. Its reliable job is separating deployments that
- * differ by MULTIPLES: gpt-oss-120b's 131,072 against gpt-5-nano's 272,000 is a 2x gap, and no
- * plausible ratio confuses a 260K-token prompt for one that fits gpt-oss. It CANNOT resolve a thin
- * margin. inbox_draft runs at ~4% under nano's window, which is inside this constant's own error
- * band, so the residual edge failures there are not something a better divisor fixes -- the fix for
- * that lane is a smaller prompt, not a sharper estimate.
- *
- * A DELIBERATELY CONSERVATIVE RATIO WAS TRIED AND REJECTED, on measurement. At 3.5 the estimate for
- * the same body is 301,143 tokens, which exceeds every declared window, so the gate refused the
- * WHOLE inbox_draft lane -- turning a 33% wire failure into a 100% local refusal and pushing the
- * lane back onto the subscription. Over-refusing is not the safe direction when the safe-looking
- * error deletes the routing this exists to enable.
- */
+/** Fit-only bytes/token estimate, NEVER pricing. Nano's $0.05/1M input, 5,000 output ceiling,
+ * $0.0547 reservation (1,054,000 bytes) and $0.0142 settlement bound the prompt at 244K–284K tokens:
+ * 3.71–4.32 bytes/token, centered near 4.0. This separates OSS's 131,072 from nano's 272,000 window,
+ * but cannot resolve inbox_draft's ~4% margin: shrink that prompt instead.
+ * Falsifier: 3.5 estimated 301,143 tokens, refusing every window and turning 33% wire failure into
+ * 100% local refusal. Over-refusal that eliminates this routing is not the safe direction. */
 export const OPENWEIGHT_BYTES_PER_TOKEN = 4.0;
 
 /** The conservative token estimate the fit gate reasons about. */
@@ -1306,18 +1191,9 @@ export interface OpenWeightModelSelection {
   capability: CodexModelTier;
   /** Present only when the fit gate ran, so a ledger row can distinguish "held" from "not checked". */
   estimatedTokens?: number;
-  /**
-   * THE REST OF THE LADDER, in order, after {@link model} — every remaining candidate that also
-   * holds the context. The selector already walks the ladder for CONTEXT FIT; it never walked it
-   * for FAILURE, so one unusable deployment killed the run outright.
-   *
-   * MEASURED over the live ledger: 22,356 `openweight_error` runs, 21,942 of them (98%) on a
-   * single deployment, across three days — while two other candidates sat configured in the same
-   * row and were never tried.
-   *
-   * EMPTY IS THE NORMAL CASE and means exactly "no alternative holds this prompt", not "no
-   * alternative exists" — the context gate has already removed any that cannot.
-   */
+  /** Remaining context-fitting candidates after {@link model}, in ladder order, for failure fallback.
+   * Live evidence: 21,942/22,356 errors (98%, three days) hit one deployment while two peers went
+   * untried. Empty means no alternative FITS this prompt, not that none is configured. */
   alternatives: readonly string[];
   /** W1-T10856: candidates skipped pre-transport because the learned per-minute limit could not hold the request. */
   capacityShortfalls?: readonly CapacityShortfall[];
@@ -1341,25 +1217,10 @@ export interface OpenWeightSelectionOptions {
   bakeoffDeployment?: string;
 }
 
-/**
- * Resolve and validate a deployment before it can enter an Azure URL.
- *
- * WHAT CHANGED, AND WHY IT IS THE SAME RULE THE LADDER ALREADY ENCODED. This used to take the
- * FIRST SYNTACTICALLY VALID id and find out on the wire whether it could hold the request. The
- * ladder compensated by hand: `economy` leads gpt-oss-120b and `balanced` leads gpt-5-nano, and
- * the comment on {@link FALLBACK_OPENWEIGHT_MODELS} says exactly why -- "a 259,181-token
- * inbox_draft favours nano 2.83x while a 446-token escalation judgement favours gpt-oss 2.40x".
- * That is a SIZE-DEPENDENT routing decision written into two static row orders, because the
- * selector could not see the prompt.
- *
- * So `promptBytes` is not a new policy; it is the input that policy always needed. Row order still
- * expresses the operator's MEASURED cost ranking within a tier -- it is not re-derived here, and
- * this function never reorders it. The window check only SKIPS a candidate that provably cannot
- * hold the request, which makes the first surviving candidate the cheapest one that fits.
- *
- * `promptBytes: undefined` means the caller genuinely does not know the size. The gate is then
- * SKIPPED rather than guessed, and selection behaves exactly as it did before.
- */
+/** Validate before a deployment enters an Azure URL. Preserve the operator's measured cost order;
+ * skip only candidates that cannot hold the prompt, never re-rank. Size explains the original rows:
+ * 259,181-token inbox_draft favored nano 2.83x; 446-token escalation favored OSS 2.40x.
+ * Undefined `promptBytes` means unknown size: skip the fit gate rather than guess. */
 export function selectOpenWeightModel(
   capabilities: CapabilityLadder | undefined,
   requestedModel: string | undefined,
@@ -1755,20 +1616,10 @@ interface CodexRuntimeFailure extends ProviderCapacity {
   failureKind: "timeout" | "terminal" | "starved";
 }
 
-/**
- * How late a deadline may fire before it is read as THIS PROCESS stalling rather than the
- * app-server being slow. A healthy loop delivers a timer within milliseconds of its deadline.
- *
- * WHY THE DISTINCTION IS LOAD-BEARING (W1-T3690). Node runs timers in the timers phase, which
- * precedes the poll phase that delivers a child's stdout. If the main thread is blocked when the
- * deadline passes, the timer callback runs on the NEXT free tick BEFORE any queued stdout is
- * read -- so a child that answered in 300ms is recorded as "timed out after 10000ms; unfinished:
- * initialize". MEASURED on the fleet 2026-09-16 inside the daemon's own container: a free loop
- * replies in 366ms; a loop blocked 12s produces that exact string with a WALL TIME of 12000ms
- * against a 10000ms deadline. The overrun is the only signal that separates the two, and the
- * consequence of confusing them is severe: codex reads unreadable, the capacity auction gives it
- * zero allocation, and every lane silently migrates onto the Claude subscription.
- */
+/** W1-T3690: deadline lateness distinguishes a blocked daemon from a slow app-server. Node's timers
+ * run before queued stdout, so blocking can time out an already-answered probe. Fleet 2026-09-16:
+ * free loop 366ms; 12s block yielded "timed out after 10000ms; unfinished: initialize" at 12000ms.
+ * Misclassification makes Codex unreadable, gives it zero allocation and shifts every lane to Claude. */
 const CODEX_DEADLINE_OVERRUN_MS = 1_000;
 const CODEX_OVERDUE_STDOUT_GRACE_MS = 1_000;
 
