@@ -5,9 +5,9 @@ import test, { type TestContext } from "node:test";
 import { isSpawnInfraBlockedError } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { WorktreeNodeModulesRefusedError, worktreeAdd, worktreeAddAsync } from "#src/lib/worker.js";
-import { runTask } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { runTask } from "#test/helpers/run-task-test.js";
 
 const adders = [worktreeAddAsync, worktreeAdd];
 type Row = [string, Record<string, unknown> | undefined];
