@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { SCRIPT, age, fixture, git, repos, run, scratchDir, type Fixture } from "./helpers/host-cleanup-fixture.js";
@@ -511,6 +511,44 @@ test("a root pass proves publication without fetching objects or invoking runuse
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.equal(existsSync(runuserLog), false, "fresh remote advertisement needs no object fetch");
   assert.equal(existsSync(unit), false, r.stdout);
+});
+
+test("W1-T9985: a root pass under assumed foreign ownership reads only the fixture origin it trusts", () => {
+  const fx = fixture();
+  try {
+    repos(fx);
+    const unit = scratchDir(fx, "trusted-unit", false);
+    const repo = join(unit, "repo");
+    git(fx.root, "clone", "--quiet", join(fx.root, "origin.git"), repo);
+    age(unit);
+    const untrusted = join(fx.root, "untrusted.git");
+    mkdirSync(untrusted);
+    git(untrusted, "init", "--bare", "-b", "main");
+    const probe = join(fx.root, "probe.sh");
+    const scopes = join(fx.root, "trusted-origins.txt");
+    writeFileSync(probe, [
+      "#!/bin/bash",
+      "unset BASH_ENV",
+      `git config --global --get-all safe.directory > '${scopes}' || exit 10`,
+      `git -C '${fx.root}' ls-remote '${join(fx.root, "origin.git")}' HEAD || exit 11`,
+      `git -C '${fx.root}' ls-remote '${join(fx.root, "main")}' HEAD || exit 12`,
+      `if git -C '${fx.root}' ls-remote '${untrusted}' HEAD; then exit 13; fi`,
+      ":",
+    ].join("\n") + "\n");
+    const r = run(fx, {
+      BASH_ENV: probe, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1",
+      RMD_CLEANUP_SCRATCH_ROOTS: fx.scratch, RMD_CLEANUP_TMP_ROOTS: "", RMD_CLEANUP_UID: "0",
+    });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.deepEqual(readFileSync(scopes, "utf8").trim().split("\n"), [
+      join(realpathSync(fx.root), "origin.git"), join(realpathSync(fx.root), "main", ".git"),
+    ]);
+    assert.match(r.stderr, /detected dubious ownership/, "a sibling origin remains untrusted");
+    assert.equal(existsSync(unit), false, r.stdout);
+    assert.doesNotMatch(r.stdout, /publication-unverified/);
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true });
+  }
 });
 
 test("a lock the running identity cannot write is still acquired and still excludes", () => {

@@ -91,6 +91,8 @@ export function fixture(): Fixture {
   for (const d of [home, scratch, rootfs, bin]) mkdirSync(d, { recursive: true });
   const lsofList = join(root, "lsof.list");
   writeFileSync(lsofList, "");
+  const gitconfig = join(root, "gitconfig");
+  writeFileSync(gitconfig, `[safe]\n\tdirectory = ${JSON.stringify(join(realpathSync(root), "origin.git"))}\n\tdirectory = ${JSON.stringify(join(realpathSync(root), "main", ".git"))}\n`);
 
   // The probes that differ between GNU/Linux and macOS come through here, never a platform skip.
   const df = join(bin, "df");
@@ -111,6 +113,7 @@ export function fixture(): Fixture {
     root, home, scratch, archive, rootfs, lsofList,
     flock: port ?? "flock",
     env: {
+      GIT_CONFIG_GLOBAL: gitconfig,
       ...(port === undefined ? {} : { RMD_CLEANUP_FLOCK: port }),
       RMD_CLEANUP_HOME: home,
       RMD_CLEANUP_SCRATCH_ROOTS: "",
