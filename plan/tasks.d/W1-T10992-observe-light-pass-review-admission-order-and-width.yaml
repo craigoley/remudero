@@ -38,3 +38,14 @@
   note: |
     Reserved with rmd next-task-id from the operator checkout for this filing branch. Filed by operator decision 2026-10-29 as an observation proposal at priority normal (2).
     Read-only: no change to selectReviewAdmissions, refillFreedLanes, effectiveReviewWidth or reviewAdmissionBound is authorized by this task. Any change is a separate filing.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "The filed scope authorizes only one recon report and explicitly excludes changes to code, configuration, ledger or review admission policy; any implementation requires a separate filing."
+      - "Acceptance requires a seven-day replay, a named positive control, corpus coverage counts, newest ledger timestamp and disclosure of unavailable measures, providing a concrete verification contract."
+      - "The operator explicitly authorized this bounded observation proposal; its recommendation is evidence gathering before any policy change, consistent with the stated measure-before-repair practice."
+      - "the judge said proceed, but W1-T10992: at verify: auto it fails lint (proof-dialect)"
+    judged_at: "2026-10-30T01:16:06.662Z"
+    pin: "793686f48e7ad241fe0e0777348082b81bf9ca32a403a12c870e023a55b55fce"
