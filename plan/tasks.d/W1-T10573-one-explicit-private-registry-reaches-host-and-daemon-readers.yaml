@@ -3,9 +3,9 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   author_class: machine
-  principles: {tdd: strict}
+  principles: { tdd: strict }
   risk: high
   band_meaning: span
   budget_usd: 12.00
@@ -29,13 +29,13 @@
     protection is qualified or the operator separately approves the exact release;
     this task does not authorize an image/recycle release or live cutover. A necessary
     out-of-scope source edit requires a normally merged companion amendment first.
-  plan_refs: [W1-T4227, W1-T9435, W1-T9559, W1-T9571, W1-T9572, W1-T9793, W1-T9794, W1-T9795, W1-T9796]
+  plan_refs: [ W1-T4227, W1-T9435, W1-T9559, W1-T9571, W1-T9572, W1-T9793, W1-T9794, W1-T9795, W1-T9796 ]
   context:
     - claim: Docker bind sources belong to the daemon host; readonly is explicit and default --mount refuses a missing source rather than creating a directory
       src: https://docs.docker.com/engine/storage/bind-mounts/
     - claim: The maintained default mode reader currently reads the repository-layout default and collapses unreadable legacy text to undefined
       src: https://github.com/craigoley/remudero/blob/c8b43c9fff993c98dff0971e5b83ddb0a4057af9/src/lib/instance-mode.ts
-  files: [src/lib/deployer.ts, src/lib/instance-mode.ts, src/lib/config-schema.ts, deploy/recycle-container.sh, deploy/serve-container.sh, test/deployer.test.ts, test/shadow-instance-safety.test.ts, test/recycle-container.test.ts, test/serve-launch-uniformity.test.ts, test/env-var-registry.test.ts, docs/instance-registry-selection-contract.md, src/lib/instance-registry-selection.ts, src/cli/commands/daemon.ts, src/cli/commands/run-task-verb.ts, src/run-task.ts, src/lib/worker-provider.ts, src/lib/worker.ts, test/one-registry-for-the-fleet.test.ts, src/lib/baked-runtime-inputs.ts, .github/workflows/acr-build.yml, deploy/install-host-units.sh, test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts, test/deploy-scripts-use-mktemp.test.ts, test/codex-worker-home-redirection.test.ts, test/helpers/gh-shim.ts, test/the-gh-shim-answers-its-routes-verbatim.test.ts, test/a-changed-serve-policy-reaches-the-running-console.test.ts, test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts, test/a-second-instance-serves-its-own-gateway.test.ts, test/an-app-key-mount-survives-instance-isolation.test.ts, test/deploy/the-daemon-carries-the-eastus-cash-key.test.ts, test/emissions.test.ts, test/git-author-commissioning-failures.test.ts, test/git-author-commissioning-preflight.test.ts, test/git-author-commissioning-preservation.test.ts, test/git-author-commissioning.test.ts, test/multi-instance-daemon-lifecycle-registry.test.ts, test/one-gateway-serves-every-instance.test.ts, test/recycle-capture-falls-back-to-the-shell.test.ts, test/the-hot-checkouts-live-on-scratch.test.ts, test/the-sre-lane-finds-its-instance-from-inside-its-container.test.ts, test/worker/spawn/compress-src-lib-worker-ts.test.ts]
+  files: [ src/lib/deployer.ts, src/lib/instance-mode.ts, src/lib/config-schema.ts, deploy/recycle-container.sh, deploy/serve-container.sh, test/deployer.test.ts, test/shadow-instance-safety.test.ts, test/recycle-container.test.ts, test/serve-launch-uniformity.test.ts, test/env-var-registry.test.ts, docs/instance-registry-selection-contract.md, src/lib/instance-registry-selection.ts, src/cli/commands/daemon.ts, src/cli/commands/run-task-verb.ts, src/run-task.ts, src/lib/worker-provider.ts, src/lib/worker.ts, test/one-registry-for-the-fleet.test.ts, src/lib/baked-runtime-inputs.ts, .github/workflows/acr-build.yml, deploy/install-host-units.sh, test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts, test/deploy-scripts-use-mktemp.test.ts, test/codex-worker-home-redirection.test.ts, test/helpers/gh-shim.ts, test/the-gh-shim-answers-its-routes-verbatim.test.ts, test/a-changed-serve-policy-reaches-the-running-console.test.ts, test/a-recycle-refuses-a-state-dir-that-is-not-a-checkout.test.ts, test/a-second-instance-serves-its-own-gateway.test.ts, test/an-app-key-mount-survives-instance-isolation.test.ts, test/deploy/the-daemon-carries-the-eastus-cash-key.test.ts, test/emissions.test.ts, test/git-author-commissioning-failures.test.ts, test/git-author-commissioning-preflight.test.ts, test/git-author-commissioning-preservation.test.ts, test/git-author-commissioning.test.ts, test/multi-instance-daemon-lifecycle-registry.test.ts, test/one-gateway-serves-every-instance.test.ts, test/recycle-capture-falls-back-to-the-shell.test.ts, test/the-hot-checkouts-live-on-scratch.test.ts, test/the-sre-lane-finds-its-instance-from-inside-its-container.test.ts, test/worker/spawn/compress-src-lib-worker-ts.test.ts, "src/lib/serve.ts" ]
   rationale: |
     The operator approved this exact eleven-existing-file scope, USD 12, high/span,
     and four behavioral proofs for normal automated filing and dormant source work.
@@ -153,14 +153,3 @@
     immutable capture/recheck: in-flight mutation fails. Private-data leakage and
     owner-hold cases remain independently load-bearing. Restore exact committed source
     and complete verified-file TAP and mapped coverage; do not waive any hosted gate.
-  risk_ruling:
-    verdict: operator
-    action: proceed
-    confidence: 1
-    reasons:
-      - "Operator explicitly approved exactly twenty-six existing paths, USD 12/high/span and four behavioral proofs for dormant source-only compatibility; legacy defaults, opt-in SHADOW and owner override preserved. No live selection, automatic image/recycle release, worker stop, schedule, gate waiver or cutover is authorized."
-      - "Operator explicitly approved the fifteen-existing-test-path companion,41files total,unchanged USD12/high/span and all four behavioral proofs on2026-10-29. Normal amendment merge precedes out-of-scope edits; normal ownership and every gate remain. No new VM/spending,worker stop,schedule or private cutover."
-      - "Operator explicitly approved three test paths,44files total,unchanged USD12/high/span and all four W10573 proofs on2026-10-29. Preserve original W10879 token/comment baselines against its exact normally shipped historical fixture; no skip or baseline widening. Normal amendment merge precedes test/fixture changes and operator adoption of the earlier out-of-scope helper. Existing native owner and all gates retained; no new source-author allowance,VM/spending,worker stop,schedule or private cutover."
-      - "Existing-path refinement within operator-approved maximum44: actual repair uses42existing files. Move identical legacy launcher helpers into already-scoped gh-shim.ts and embed the same exact historical gzip in the approved compression test, avoiding both unnecessary new output paths. Original token/comment baselines,budget,authority and four proofs unchanged. W10879 overlap retained. Failed scope44 author retained; no additional validation job or source change is inferred."
-    judged_at: "2026-10-29T21:57:10.599079+00:00"
-    pin: "0b9be0ef971b4e3dd8f090ad0ae00ff3b4ce67d9fe7a9aa9334bce520c0a53b6"
