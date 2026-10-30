@@ -57,9 +57,9 @@ override, human/service scopes and normal review/CI/security remain independent.
 An observation sink failure cannot substitute its error for the operation's
 result or original exception. Publication permission is always not-granted.
 
-This does not qualify deployment, serve, pause/resume, heartbeat or every child
-process; those consumers still need separate compatibility and recovery evidence
-before private staging or selection. Isolated source/tests do not require a
+These run/sweep observations do not qualify every child process; shell and heartbeat
+qualification is separately opted in as described below. Private staging or selection
+still needs compatibility and recovery evidence. Isolated source/tests do not require a
 worker stop. Live compatible replacement requires separately approved affected
 instance draining; incompatible shared state, claims, credentials or config
 requires an approved full affected-writer stop, all workers only if all are
@@ -234,3 +234,57 @@ affected paths/mounts/consumers, current owner holds, durable drain evidence,
 bounded abort criteria and a tested rollback to the retained compatible tuple.
 An unreadable writer census refuses promotion, not the writer's existence.
 Never clear another owner's hold or reclaim a contested claim.
+
+### Shell lifecycle and heartbeat qualification
+
+W1-T9795 adds the explicit `--selected-registry-shadow /absolute/private/session.json`
+option to install-host-units, recycle-container, serve-container, host-update,
+field-trials-refresh and fleet-heartbeat. The session's existing parent must be an
+owned mode-0700 directory. The session and its `.observations` sibling are mode 0600,
+regular single-link files opened without following symlinks. Observations stop at
+64 KiB; failure records a fixed diagnostic and the original shell effect continues.
+
+Only this option enables observations. `RMD_INSTANCE_REGISTRY` alone retains its
+existing legacy meaning. Capture preserves absence and explicit empty/invalid input
+separately, uses the maintained bounded reader and pins its digest and capabilities.
+Failed initial selection stays unknown. Existing sessions are never refreshed into
+healthy authority. A separate session digest travels through trusted launcher and
+installer/recycler child arguments as `--selected-registry-pin`; changing the session
+or selected bytes invalidates later observations. This option is not exported to
+workers or added to container environment/mount allowlists.
+Generated installer/recycler forwarding first checks the known child's bounded argv
+header. An older child without this grammar receives its original arguments and no
+private selection; missing child evidence remains unknown. Capability checking never
+executes an older heartbeat or field-trial script as a probe.
+
+The maintained CLI dispatch is `rmd inspect selected-registry-shadow --shadow
+--capture --session /absolute/private/session.json`. It prints only the session pin.
+Observations use `--shadow --session <file> --pin <pin> --consumer <name>` with optional
+`--instance`, `--repository`, `--namespace` and private `--identity` arguments. The
+narrow source entry uses the same function; shells launch it through the maintained
+child-entry bundle/tsx resolver with the shared store disabled. It avoids CLI housekeeping, credentials,
+GitHub, state-root discovery and self-update. Capture optionally accepts `--registry`,
+`--contract-version` and `--require-capability`; these retain the shared reader's
+grammar, capabilities, byte limits and deadlines rather than adding a YAML parser.
+
+Each receipt describes an attempted boundary, not a successful effect. Installer
+writes, generated launch attempts, recycler/serve launches, host-update, field-trial
+Docker operations and later heartbeat measurements recheck the pin. Shell outcomes,
+Docker arguments and heartbeat publication retain their independent legacy behavior,
+including STOP and other healthy traps. Observation and sink failures never gate them.
+The default heartbeat remains Bash and Git; missing Node/tsx affects only explicitly
+requested qualification and cannot suppress the beat.
+
+Host name/repository matching is supported. Container/repository-relative mappings
+are unknown, and host state/container tuples are hashed as actual target evidence,
+never represented as a certified namespace mapping (`mapping_state: unknown`). Same
+names cannot borrow a different repository or a revised registry's evidence. Public
+heartbeat payloads and worker arguments receive no session, selected path, raw bytes,
+state roots or credentials from this adapter. A digest grants no release consent:
+every receipt carries `publication_permission: not-granted`.
+
+Disposable transport fixtures exercise the real scripts, generated launcher and CLI.
+This is source qualification only: merging can reach existing automatic image/code
+update paths, but does not enable the option, install a schedule, activate admission
+or prove deployment. Live launcher/mount/image replacement still requires the exact
+instance drain and writer-stop boundaries above.

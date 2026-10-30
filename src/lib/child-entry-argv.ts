@@ -10,7 +10,7 @@
 //
 // W1-T9601: a miss for the daemon's OWN tree (this package's root, where garden children and the harness-rooted gate
 // and check-proof children start) asks the store to build that tree once per source hash, so the next launch hits.
-import { fork, type ChildProcess, type ForkOptions } from "node:child_process";
+import { fork, spawn, type ChildProcess, type ForkOptions } from "node:child_process";
 import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -421,4 +421,27 @@ function defaultStoreRoot(): string | false {
     process.stderr.write(`child-entry store unavailable: ${String((err as Error)?.message ?? err).slice(0, 120)}\n`);
     return false;
   }
+}
+
+/** Shell qualification shares bundle currency/tsx resolution, without filling or reading a shared store. */
+export async function selectedRegistryShadowChild(root: string, args: readonly string[]): Promise<number> {
+  try {
+    const launch = childEntryArgv(root, "selected-registry-shadow", "src/selected-registry-shadow-main.ts", args,
+      undefined, { root: false });
+    return await new Promise<number>((resolveExit, rejectExit) => {
+      const child = spawn(process.execPath, launch.argv, { stdio: "inherit" });
+      child.once("error", rejectExit);
+      child.once("exit", code => resolveExit(code ?? 1));
+    });
+  } catch (error) {
+    // Resolution, synchronous OS refusal and async spawn failure are unrecorded transport, never legacy success.
+    console.error("instance_registry.shell_shadow_unrecorded", "child_launch_failed");
+    return 1;
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const [mode, root, ...args] = process.argv.slice(2);
+  if (mode !== "--selected-registry-shadow" || !root) process.exitCode = 2;
+  else void selectedRegistryShadowChild(root, args).then(code => { process.exitCode = code; });
 }

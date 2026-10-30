@@ -1,6 +1,35 @@
 #!/usr/bin/env bash
 # Private, bounded fleet snapshot. Install with install-field-trials-refresh.sh on the fleet host.
 set -euo pipefail
+
+registry_shadow_observe() { :; }
+registry_shadow_session=""
+registry_shadow_pin=""
+registry_shadow_forward=()
+registry_shadow_argv=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --selected-registry-pin)
+      registry_shadow_pin="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    --selected-registry-shadow)
+      registry_shadow_session="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    *) registry_shadow_argv+=("$1"); shift ;;
+  esac
+done
+set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
 umask 077
 
 REGISTRY="${RMD_INSTANCE_REGISTRY:-/home/craigoleyagent/rmd-state2/daemon-install/.remudero/daemon-instances.yaml}"
@@ -52,6 +81,7 @@ test -n "$IMAGE" || { echo "field-trials-refresh: core image unavailable" >&2; e
 # routing review. Use the mounted installation checkout, whose main branch can satisfy the normal
 # freshness guard; serving generations are deliberately detached.
 routing_review() {
+registry_shadow_observe field-trials core craigoley/remudero host "$CORE"
 docker run --rm --network none --volumes-from remudero-daemon \
   --mount "type=bind,src=$SITE/state,dst=/field-trials/site,readonly" \
   --mount "type=bind,src=$CONSOLE/state,dst=/field-trials/console,readonly" \
@@ -65,6 +95,7 @@ ROUTING_EXIT=0
 routing_review || ROUTING_EXIT=$?
 APP_ID=""; INSTALLATION_ID=""; KEY_PATH=""
 credentials() {
+  registry_shadow_observe field-trials core craigoley/remudero host "$CORE"
   APP_ID="$(docker exec remudero-daemon printenv GH_APP_ID)" || return $?
   INSTALLATION_ID="$(docker exec remudero-daemon printenv GH_APP_INSTALLATION_ID)" || return $?
   KEY_PATH="$(docker exec remudero-daemon printenv GH_APP_PRIVATE_KEY_PATH)" || return $?
@@ -83,6 +114,7 @@ if [[ -n "${RMD_FIELD_TRIALS_CASE_FILES:-}" ]]; then
   CASE_EXIT=skipped
 else
   collect_cases() {
+    registry_shadow_observe field-trials core craigoley/remudero host "$CORE"
     if (( CREDENTIAL_EXIT != 0 )); then return "$CREDENTIAL_EXIT"; fi
   docker run --rm --network host --volumes-from remudero-daemon \
     --env "GH_APP_ID=$APP_ID" --env "GH_APP_INSTALLATION_ID=$INSTALLATION_ID" \
@@ -106,6 +138,7 @@ fi
 SCRIPT_BLOB="$( { printf 'blob %s\0' "$(wc -c < "$0" | tr -d '[:space:]')"; cat "$0"; } | sha1sum | cut -d ' ' -f 1)"
 REFRESH_ARG=(--refresh-step "routing-review=$ROUTING_EXIT" --refresh-step "case-files=$CASE_EXIT" --refresh-script-blob "$SCRIPT_BLOB")
 collect_snapshot() {
+registry_shadow_observe field-trials core craigoley/remudero host "$CORE"
 if (( CREDENTIAL_EXIT != 0 )); then
   docker exec --workdir /home/node/Remudero/daemon-install remudero-daemon \
     /bin/sh -c 'umask 077; exec "$@"' field-trials-refresh /home/node/Remudero/daemon-install/bin/rmd field-trials \
@@ -129,6 +162,7 @@ docker run --rm --network host --volumes-from remudero-daemon \
 SNAPSHOT_EXIT=0
 collect_snapshot || SNAPSHOT_EXIT=$?
 if (( SNAPSHOT_EXIT != 0 )); then
+  registry_shadow_observe field-trials core craigoley/remudero host "$CORE"
   RECORD_EXIT=0
   if (( CREDENTIAL_EXIT != 0 )); then
     docker exec --workdir /home/node/Remudero/daemon-install remudero-daemon \

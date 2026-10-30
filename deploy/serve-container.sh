@@ -112,6 +112,35 @@
 # and gives the same value to the console's and site's Vercel env as RMD_INCIDENT_INGEST_TOKEN.
 set -euo pipefail
 
+registry_shadow_observe() { :; }
+registry_shadow_session=""
+registry_shadow_pin=""
+registry_shadow_forward=()
+registry_shadow_argv=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --selected-registry-pin)
+      registry_shadow_pin="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    --selected-registry-shadow)
+      registry_shadow_session="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    *) registry_shadow_argv+=("$1"); shift ;;
+  esac
+done
+set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
+
 REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
 TAG="${TAG:-latest}"
@@ -793,6 +822,7 @@ RUN_ARGS=(
 )
 
 if [ "${DRY_RUN}" -eq 1 ]; then
+  registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
   echo "serve-container: --dry-run, nothing changed. The launch would be:"
   echo "  docker ${RUN_ARGS[*]}"
   echo "  (-e NAME passes the NAME only; each value is read from this script's own environment —"
@@ -850,6 +880,7 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
     SERVE_OUTGOING_READS="$(scratch_outgoing_reads "${CONTAINER_NAME}" 2>/dev/null || true)"
   fi
   echo "serve-container: docker stop ${CONTAINER_NAME}"
+  registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
   docker stop "${CONTAINER_NAME}" >/dev/null
   echo "serve-container: docker rm ${CONTAINER_NAME}"
   docker rm "${CONTAINER_NAME}" >/dev/null
@@ -857,6 +888,7 @@ fi
 
 if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then scratch_fresh_tmp; fi
 echo "serve-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
+registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
 docker "${RUN_ARGS[@]}" >/dev/null
 if [ "${#SCRATCH_ARGS[@]}" -gt 0 ] && command -v scratch_placement_row >/dev/null 2>&1; then
   scratch_placement_row "${STATE_DIR}/state/ledger.ndjson" "${CONTAINER_NAME}" "${SERVE_REPO_DIR}" "${SERVE_CHECKOUT_COLD}" "${SERVE_OUTGOING_READS}"

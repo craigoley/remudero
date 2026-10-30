@@ -435,6 +435,27 @@ test("W1-T1010: with no in-flight workers the wait clears immediately and the re
   assert.ok(run.calls.filter(isRun).length > 0, "a replacement must start");
 });
 
+test("selected shell shadow reaches real lifecycle and heartbeat consumers through the recycler", t => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-selected-recycle-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const selected = join(root, "private.yaml"), session = join(root, "session.json");
+  writeFileSync(selected, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
+  const run = runRecycle("good", { stateDir: root, args: ["--selected-registry-shadow", session],
+    extraEnv: { HOME: root, RMD_INSTANCE_REGISTRY: selected, RMD_RECYCLE_HOST_LOCK: join(root, "host.lock") } });
+  t.after(() => {
+    rmSync(run.fixtureRecordingDir, { recursive: true, force: true });
+    rmSync(run.fixtureStubDir, { recursive: true, force: true });
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.calls.filter(isRun).length, 1, "the real unchanged docker launch reaches the recorder");
+  const rows = readFileSync(session + ".observations", "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(rows.at(-1).action, "recycle");
+  assert.equal(rows.at(-1).selected_outcome, "would-refuse", "missing actual selected identity cannot borrow fixture authority");
+  assert.equal(rows.at(-1).publication_permission, "not-granted");
+  assert.ok(!JSON.stringify(run.calls).includes(selected));
+  assert.ok(!JSON.stringify(run.calls).includes(session));
+});
+
 test("a hung docker removal refuses with the pause retained and no replacement", () => {
   const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
   const run = runRecycle("rm-hang", { stateDir: state, extraEnv: { RMD_RECYCLE_DOCKER_TIMEOUT_S: "1" } });

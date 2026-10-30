@@ -110,6 +110,35 @@
 # `-e` would turn the most alarming states this script exists to report into silence.
 set -uo pipefail
 
+registry_shadow_observe() { :; }
+registry_shadow_session=""
+registry_shadow_pin=""
+registry_shadow_forward=()
+registry_shadow_argv=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --selected-registry-pin)
+      registry_shadow_pin="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    --selected-registry-shadow)
+      registry_shadow_session="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    *) registry_shadow_argv+=("$1"); shift ;;
+  esac
+done
+set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/deploy/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
+
 # Resolve the install directory the same way bin/rmd does, symlink chain included, so this script
 # and the verb it reports on can never disagree about which checkout they mean.
 SOURCE="${BASH_SOURCE[0]}"
@@ -184,7 +213,7 @@ if [ -z "${RMD_HEARTBEAT_LOCK_HELD:-}" ]; then
   # existed before this block, whereas refusing to beat at all would delete the signal entirely.
   if command -v flock >/dev/null 2>&1; then
     export RMD_HEARTBEAT_LOCK_HELD=1
-    exec flock -n "$HEARTBEAT_LOCK" "$0" "$@"
+    exec flock -n "$HEARTBEAT_LOCK" "$0" ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"} "$@"
   fi
 fi
 
@@ -976,6 +1005,7 @@ fi
 #
 # Seams for the fixtures: RMD_CGROUP_ROOT, RMD_HEARTBEAT_DOCKER, RMD_INSTANCE_REGISTRY.
 MEM_REGISTRY="${RMD_INSTANCE_REGISTRY:-${INSTALL_DIR}/.remudero/daemon-instances.yaml}"
+registry_shadow_observe heartbeat "" "" host
 MEM_CGROUP_ROOT="${RMD_CGROUP_ROOT:-/sys/fs/cgroup}"
 MEM_STATE_FILE="${RMD_ROOT}/state/heartbeat-mem.txt"
 MEM_LINES=""
@@ -1002,6 +1032,7 @@ if [ -n "$MEM_CONTAINERS" ]; then
   mem_one_line() { printf '%s' "$1" | tr '\n\r' '  ' | cut -c1-400; }
   while read -r _mem_id _mem_name; do
     [ -n "$_mem_name" ] || continue
+    registry_shadow_observe heartbeat "" "" host "$_mem_id|$_mem_name"
     _mem_cg=""
     for _d in "$MEM_CGROUP_ROOT/system.slice/docker-${_mem_id}.scope" "$MEM_CGROUP_ROOT/docker/${_mem_id}"; do
       [ -r "$_d/memory.high" ] && { _mem_cg="$_d"; break; }
