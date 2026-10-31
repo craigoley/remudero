@@ -24,3 +24,11 @@
     Add the named regression in test/github/compress-src-lib-arm-auto-merge-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares src/lib/arm-auto-merge.ts, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-31T10:46:51.854Z"
+    pin: "6cb0ad974f52fbd3e7b5be37ea513e244b68a092138dee9ec9a1cba3ba493c49"
