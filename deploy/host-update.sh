@@ -62,6 +62,35 @@
 
 set -euo pipefail
 
+registry_shadow_observe() { :; }
+registry_shadow_session=""
+registry_shadow_pin=""
+registry_shadow_forward=()
+registry_shadow_argv=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --selected-registry-pin)
+      registry_shadow_pin="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    --selected-registry-shadow)
+      registry_shadow_session="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    *) registry_shadow_argv+=("$1"); shift ;;
+  esac
+done
+set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
+
 # ── SUDO GUARD (W1-T3682) — an accidental `sudo` silently redirects every path to /root ─────────
 # MEASURED 2026-09-16, hit by hand on the Azure host: running this script under `sudo` resolves
 # ${HOME} to /root, so every RMD_*_DIR default derived below would come from /root instead of the
@@ -248,6 +277,7 @@ find_sibling_with_marker() {
 # GITIGNORED and does not survive the container that wrote it — so REQ 5 in deploy/Dockerfile
 # carries the conclusions instead, and this block carries the command.
 if [ "${PRINT_DAEMON_RUN}" -eq 1 ]; then
+  registry_shadow_observe host-update "" "" host "$STATE_DIR|$DAEMON_REPO"
   CODEX_MOUNT_LINE=""
   if [ -d "${CODEX_DIR}" ]; then
     printf -v CODEX_MOUNT_LINE '    -v %s:%s \\\n' "${CODEX_DIR}" "${CODEX_MOUNT_DEST}"
@@ -572,6 +602,7 @@ if [ "${CHECK_STATE_ROOTS}" -eq 1 ] || [ -n "${RELOCATE_INSTANCE}" ]; then
   PERSISTENT_ROOT="${RMD_PERSISTENT_ROOT:-/mnt/rmd}"
   EPHEMERAL_ROOT="${RMD_EPHEMERAL_ROOT:-/mnt/scratch}"
   SR_REGISTRY="${RMD_INSTANCE_REGISTRY:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd)/.remudero/daemon-instances.yaml}"
+  registry_shadow_observe host-update "$RELOCATE_INSTANCE" "" host "$SR_REGISTRY|$RELOCATE_DEST"
   fs_device() { df -P "$1" 2>/dev/null | awk 'NR==2 {print $1}'; }
   resolve_dir() { (cd "$1" 2>/dev/null && pwd -P); }
   # name<TAB>state_dir<TAB>container_name<TAB>retired, one line per declared instance — the same
@@ -706,6 +737,7 @@ if [ -n "${RELOCATE_INSTANCE}" ]; then
     fi
   fi
   rl_stage="${RELOCATE_DEST}.relocating.$$"
+  registry_shadow_observe host-update "$RELOCATE_INSTANCE" "" host "$rl_src_real|$RELOCATE_DEST"
   mkdir -p -- "${rl_stage}"
   if ! cp -a -- "${rl_src_real}/." "${rl_stage}/"; then
     rm -rf -- "${rl_stage}"
@@ -724,6 +756,7 @@ if [ -n "${RELOCATE_INSTANCE}" ]; then
     echo "  The copy was discarded; nothing installed at ${RELOCATE_DEST}; the source is untouched." >&2
     exit 1
   fi
+  registry_shadow_observe host-update "$RELOCATE_INSTANCE" "" host "$rl_src_real|$RELOCATE_DEST"
   mv -- "${rl_stage}" "${RELOCATE_DEST}"
   echo "host-update: relocated ${RELOCATE_INSTANCE}: ${rl_files} file(s) byte-identical at ${RELOCATE_DEST}"
   echo "  The source ${rl_src} is UNTOUCHED. To switch ${RELOCATE_INSTANCE} over (root, instance stopped):"
@@ -768,6 +801,7 @@ host_update_cleanup_tmp() {
   return 0
 }
 trap host_update_cleanup_tmp EXIT
+registry_shadow_observe host-update "" "" host "$STATE_DIR|$DAEMON_REPO"
 if ! DOCKER_ERR="$(mktemp "${HOST_UPDATE_TMPDIR%/}/rmd-host-update-docker-err.XXXXXX" 2>/dev/null)"; then
   # NAME WHAT ACTUALLY FAILED. Under the old fixed path this branch did not exist: the redirect
   # failed, the conditional fell through, and the script announced "docker is not answering" —
@@ -1073,6 +1107,9 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
       continue
     fi
     echo "host-update: state snapshot — ${snap_state} -> ${snap_backups} via ${STATE_SNAPSHOT_IMAGE}"
+    # The snapshot child is launched after earlier Docker and filesystem work. Its own
+    # boundary must recheck the startup pin, even if the selected file changed meanwhile.
+    registry_shadow_observe host-update "" "" host "$snap_root|$STATE_SNAPSHOT_IMAGE"
     snap_out="$(docker run --rm --pull never --network none --entrypoint node -w /app \
       -v "${snap_state}:${SNAP_IN_STATE}:ro" -v "${snap_backups}:${SNAP_IN_BACKUPS}" \
       "${STATE_SNAPSHOT_IMAGE}" --import tsx --input-type=module -e "${SNAP_JS}" 2>&1 </dev/null)" && snap_rc=0 || snap_rc=$?
@@ -1683,6 +1720,7 @@ fi
 # a deliberate security posture, not an oversight. `rmd` therefore cannot reclaim images from
 # inside; only the host can, so the schedule has to live here.
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
+  registry_shadow_observe host-update "" "" host "$STATE_DIR|$DAEMON_REPO"
   AFTER_AVAIL="$(df -Pk / | awk 'NR==2 {print $4}')"
   echo
   echo "host-update: reclaim-only — no pull, no restart. Free on / : ${AFTER_AVAIL} KiB"
@@ -1709,6 +1747,7 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
       echo "host-update: cannot prepare state snapshot receipt ${snapshot_receipt}" >&2
       exit 1
     fi
+    registry_shadow_observe host-update "" "" host "$STATE_DIR|$DAEMON_REPO"
     if ! printf 'result=%s\nts=%s\narchives=%s\noffhost=%s\nreason=%s\n' \
       "${snapshot_result}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${#STATE_SNAPSHOT_ARCHIVES[@]}" \
       "${state_snapshot_offhost}" "${snapshot_reason}" >"${snapshot_receipt_tmp}" \
@@ -1777,6 +1816,7 @@ if [ "${DRY_RUN}" -eq 0 ]; then
 fi
 
 # ── 6. MEASURE AFTER, AND SAY WHETHER ANYTHING ACTUALLY CHANGED ──────────────────────────────
+registry_shadow_observe host-update "" "" host "$STATE_DIR|$DAEMON_REPO"
 AFTER_DIGEST="$(digest_of "${REF}")"
 AFTER_ID="$(id_of "${REF}")"
 AFTER_FREE="$(free_kb "${DOCKER_ROOT}")"

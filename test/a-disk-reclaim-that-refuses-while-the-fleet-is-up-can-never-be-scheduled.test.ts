@@ -18,11 +18,11 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { registryShellFixture } from "#test/helpers/registry-shell-fixture.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = readFileSync(join(REPO_ROOT, "deploy", "host-update.sh"), "utf8");
 
 test("the fleet-up refusal still fires in the ordinary mode — the guard is carved out, not weakened", () => {
@@ -55,12 +55,29 @@ test("reclaim-only skips the registry login, so an expired token cannot fail a d
   );
 });
 
-test("reclaim-only stops before the pull and the restart — a timer must never redeploy", () => {
-  const stopIdx = SCRIPT.indexOf('if [ "${RECLAIM_ONLY}" -eq 1 ]; then\n  AFTER_AVAIL=');
-  const pullIdx = SCRIPT.indexOf("# ── 5. PULL, AFTER THE SPACE EXISTS");
-  assert.ok(stopIdx > 0, "the reclaim-only exit exists");
-  assert.ok(pullIdx > 0, "control: the pull section exists to be stopped before");
-  assert.ok(stopIdx < pullIdx, "and the exit precedes it, so no pull or restart can run on a timer");
+test("reclaim-only stops before the pull and the restart — a timer must never redeploy", t => {
+  const script = join(REPO_ROOT, "deploy", "host-update.sh");
+  for (const shadow of [false, true]) {
+    const f = registryShellFixture(t);
+    if (shadow) f.capture();
+    const run = f.run(script, ["--reclaim-only",
+      ...(shadow ? ["--selected-registry-shadow", f.session] : [])], { FIXTURE_RUNNING: "1" });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /host-update: reclaim-only — no pull, no restart/);
+    const docker = f.receipts().filter(c => c.bin === "docker");
+    assert.ok(docker.some(c => c.args[0] === "image" && c.args[1] === "prune"), "reclaim actually ran");
+    assert.ok(docker.some(c => c.args[0] === "builder" && c.args[1] === "prune"), "builder reclaim actually ran");
+    assert.ok(!docker.some(c => ["pull", "start", "stop", "restart", "rm"].includes(c.args[0]!)),
+      "reclaim-only must exit before pulling or changing any container lifecycle");
+    assert.ok(docker.filter(c => c.args[0] === "run").every(c => c.args.some(a => a.endsWith(":/rmd-snapshot/state:ro"))),
+      "any child is a read-only state snapshot, never a replacement container");
+    if (shadow) assert.ok(f.rows().some(row => row.action === "host-update"), "shadow observations still run");
+  }
+  const control = registryShellFixture(t);
+  const ordinary = control.run(script);
+  assert.equal(ordinary.status, 0, ordinary.stdout + ordinary.stderr);
+  assert.ok(control.receipts().some(c => c.bin === "docker" && c.args[0] === "pull"),
+    "control: the same transport records a real ordinary-mode pull");
 });
 
 test("the flag is accepted and initialised, so an unknown-arg path cannot swallow it", () => {

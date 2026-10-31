@@ -1,4 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { execFileSync, spawnSync } from "node:child_process";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
+import { join } from "node:path";
 import type { SelectedModeSettings } from "./config-schema.js";
 import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO,
   type RegistrySelectionInput, type SelectedRegistryBinding } from "./instance-registry-selection.js";
@@ -34,6 +37,53 @@ const unknown = (reason: string, digest?: string): Evidence => ({ selected_state
 const LIMIT = 32;
 interface ConsumerScope { observer: SelectedRegistryObserver | undefined; active: boolean }
 const consumerScope = new AsyncLocalStorage<ConsumerScope>();
+
+/** Invocation-private argv, admitted only at the supervisor's two known shell children. */
+export function selectedRegistryLifecycleExec(installRoot: string, binding: { session?: string; pin?: string }) {
+  const { session, pin } = binding;
+  const recycler = join(installRoot, "deploy/recycle-container.sh"), serve = join(installRoot, "deploy/serve-container.sh");
+  return (cmd: string, args: string[], options?: { env: NodeJS.ProcessEnv }): string => {
+    const script = cmd === "bash" && args[0] === recycler ? recycler
+      : cmd === "bash" && args[0] === "-c" && args[2] === "recycle-wait" && args[4] === recycler ? recycler
+      : cmd === "env" && args[0]?.startsWith("RMD_STATE_DIR=") && args.at(-3) === "bash"
+        && args.at(-2) === serve && args.at(-1) === "--replace" ? serve : undefined;
+    let forward = false;
+    if (script && session && pin) {
+      try {
+        const fd = openSync(script, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          if (!fstatSync(fd).isFile()) throw new Error("unsupported_child");
+          const header = Buffer.alloc(16384);
+          const count = readSync(fd, header, 0, header.length, 0);
+          const text = header.subarray(0, count).toString("utf8").split("\n").slice(0, 256).join("\n");
+          forward = text.includes("--selected-registry-shadow)") && text.includes("--selected-registry-pin)");
+        } finally { closeSync(fd); }
+      } catch (error) {
+        console.error("instance_registry.shell_shadow_unrecorded", error instanceof Error ? "child_header_unavailable" : "child_header_failed");
+      }
+    }
+    const childArgs = forward ? [...args, "--selected-registry-shadow", session!, "--selected-registry-pin", pin!] : args;
+    if (!forward) return execFileSync(cmd, childArgs, { ...options, encoding: "utf8" });
+    const redact = (value: unknown) => String(value ?? "").replaceAll(session!, "<private>").replaceAll(pin!, "<private>");
+    try {
+      const result = spawnSync(cmd, childArgs, { ...options, encoding: "utf8" });
+      if (result.stderr) process.stderr.write(redact(result.stderr));
+      if (result.error || result.status !== 0) throw Object.assign(new Error(result.error?.message
+        ?? `Command failed: ${cmd} ${args.join(" ")}${result.stderr ? "\n" + result.stderr : ""}`), {
+        status: result.status, code: (result.error as NodeJS.ErrnoException | undefined)?.code,
+        stdout: result.stdout, stderr: result.stderr,
+      });
+      return result.stdout;
+    }
+    catch (error) {
+      // execFileSync's message repeats argv. Preserve exit/refusal evidence without private transport.
+      const failed = error as { status?: number; code?: string; stdout?: unknown; stderr?: unknown };
+      throw Object.assign(new Error(error instanceof Error ? redact(error.message) : "trusted lifecycle child failed"), {
+        status: failed?.status, code: failed?.code, stdout: redact(failed?.stdout), stderr: redact(failed?.stderr),
+      });
+    }
+  };
+}
 
 /** Invocation-owned diagnostics only. An absent nested invocation masks, rather than inherits, opt-in. */
 export function selectedRegistryObserverInContext(): SelectedRegistryObserver | undefined {

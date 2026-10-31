@@ -91,6 +91,35 @@
 
 set -euo pipefail
 
+registry_shadow_observe() { :; }
+registry_shadow_session=""
+registry_shadow_pin=""
+registry_shadow_forward=()
+registry_shadow_argv=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --selected-registry-pin)
+      registry_shadow_pin="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    --selected-registry-shadow)
+      registry_shadow_session="${2:-}"
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
+    *) registry_shadow_argv+=("$1"); shift ;;
+  esac
+done
+set -- ${registry_shadow_argv[@]+"${registry_shadow_argv[@]}"}
+if [ -n "$registry_shadow_session" ]; then
+  registry_shadow_forward=(--selected-registry-shadow "$registry_shadow_session")
+  registry_shadow_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/registry-shadow.sh"
+  if [ -r "$registry_shadow_lib" ] && . "$registry_shadow_lib" 2>/dev/null; then
+    registry_shadow_start ${registry_shadow_forward[@]+"${registry_shadow_forward[@]}"}
+    registry_shadow_forward+=(--selected-registry-pin "$registry_shadow_pin")
+  else
+    registry_shadow_observe() { :; }
+    printf '%s\n' 'instance_registry.shell_shadow_unrecorded' >&2 || :
+  fi
+fi
+
 # ── BASH 3.2 PORTABILITY (W1-T3595) ─────────────────────────────────────────────────────────────
 # The macOS worker host's `/bin/bash` is 3.2 (Apple has shipped nothing newer since the GPLv3
 # relicense), which rejects `readarray`/`mapfile` outright ("command not found") and rejects
@@ -1579,6 +1608,7 @@ else
   # W1-T5804 key on it. The start time is C-locale UTC, the exact form the release check re-reads.
   RECYCLE_PAUSE_CONTAINER_ID="$(docker inspect --format '{{.Id}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 | tr -d '"\\' || true)"
   RECYCLE_PAUSE_BODY="{\"reason\":\"${RECYCLE_PAUSE_REASON}\",\"requestedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"pid\":$$,\"host\":\"$(hostname)\",\"container\":\"${RECYCLE_PAUSE_CONTAINER_ID}\",\"containerName\":\"${CONTAINER_NAME}\",\"writerStart\":\"${RECYCLE_WRITER_START}\",\"caller\":$(recycle_json_string "$RECYCLE_CALLER"),\"actor_evidence\":${RECYCLE_ACTOR_EVIDENCE},\"phase\":\"waiting\"}"
+  registry_shadow_observe recycle "$INSTANCE_NAME" "${repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
   printf '%s\n' "${RECYCLE_PAUSE_BODY}" > "${PAUSE_FILE}"
   echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
 fi
@@ -2449,6 +2479,7 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
     RECYCLE_OUTGOING_READS="$(scratch_outgoing_reads "${CONTAINER_NAME}" 2>/dev/null || true)"
   fi
   echo "recycle-container: docker stop ${CONTAINER_NAME}"
+  registry_shadow_observe recycle "$INSTANCE_NAME" "${repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
   record_recycled_cadence_child
   run_docker_control stop docker stop "${CONTAINER_NAME}"
   echo "recycle-container: docker rm ${CONTAINER_NAME}"
@@ -2533,6 +2564,7 @@ if [ -n "${INSTANCE_NAME}" ]; then
   DOCKER_RUN_ARGS+=(-e "RMD_INSTANCE_NAME=${INSTANCE_NAME}")
 fi
 DOCKER_RUN_ARGS+=("${REF}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
+registry_shadow_observe recycle "$INSTANCE_NAME" "${repo:-}" host "$STATE_DIR|$CONTAINER_NAME"
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
 
 # ── 7. PROVE IT — THE STARTED CONTAINER'S IMAGE MUST BE THE DIGEST JUST PULLED ──────────────────

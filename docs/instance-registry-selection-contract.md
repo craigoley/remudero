@@ -57,9 +57,9 @@ override, human/service scopes and normal review/CI/security remain independent.
 An observation sink failure cannot substitute its error for the operation's
 result or original exception. Publication permission is always not-granted.
 
-This does not qualify deployment, serve, pause/resume, heartbeat or every child
-process; those consumers still need separate compatibility and recovery evidence
-before private staging or selection. Isolated source/tests do not require a
+These run/sweep observations do not qualify every child process; shell and heartbeat
+qualification is separately opted in as described below. Private staging or selection
+still needs compatibility and recovery evidence. Isolated source/tests do not require a
 worker stop. Live compatible replacement requires separately approved affected
 instance draining; incompatible shared state, claims, credentials or config
 requires an approved full affected-writer stop, all workers only if all are
@@ -234,3 +234,85 @@ affected paths/mounts/consumers, current owner holds, durable drain evidence,
 bounded abort criteria and a tested rollback to the retained compatible tuple.
 An unreadable writer census refuses promotion, not the writer's existence.
 Never clear another owner's hold or reclaim a contested claim.
+
+### Shell lifecycle and heartbeat qualification
+
+W1-T9795 adds the explicit `--selected-registry-shadow /absolute/private/session.json`
+option to install-host-units, recycle-container, serve-container, host-update,
+field-trials-refresh and fleet-heartbeat. The session's existing parent must be an
+owned mode-0700 directory. The session and its `.observations` sibling are mode 0600,
+regular single-link files opened without following symlinks. Observations stop at
+64 KiB; failure records a fixed diagnostic and the original shell effect continues.
+Shell capture and each observation have a five-second process deadline, including
+observer children that inherit capture pipes. Timeout terminates only the private
+observer process group, emits the same fixed diagnostic and resumes legacy behavior.
+The installed `~/.local/bin/rmd-field-trials-refresh` command resolves its adapter
+and source entry through the trusted `<RMD_STATE_DIR>/daemon-install` checkout,
+with the host installer's `/home/craigoleyagent/rmd-state2` default. It never sources
+an adapter beside the installed command. A missing checkout leaves observations
+unrecorded while the independent refresh continues.
+
+Only this option enables observations. `RMD_INSTANCE_REGISTRY` alone retains its
+existing legacy meaning. Capture preserves absence and explicit empty/invalid input
+separately, uses the maintained bounded reader and pins its digest and capabilities.
+Failed initial selection stays unknown. Existing sessions are never refreshed into
+healthy authority. A separate session digest travels through trusted launcher and
+installer/recycler child arguments as `--selected-registry-pin`; changing the session
+or selected bytes invalidates later observations. This option is not exported to
+workers or added to container environment/mount allowlists.
+Generated installer/recycler forwarding first checks the known child's bounded argv
+header. An older child without this grammar receives its original arguments and no
+private selection; missing child evidence remains unknown. Capability checking never
+executes an older heartbeat or field-trial script as a probe.
+The generated healthy watchdog also carries the session and pin into `deploy-run`
+when that trusted CLI supports the handoff. The supervisor snapshots the two argv
+values and uses its existing subprocess seams for the recycler (including its
+derived drain-wait wrapper) and independent serve replacement. Only those exact
+checkout child paths with both option cases in their bounded headers receive the
+private arguments. Other subprocesses retain their original argv and environment.
+Children recheck the original pin at their own effects, including after image pulls;
+neither a revised session nor revised selection is recaptured into fresh authority.
+Child failure status and refusal evidence survive transport redaction.
+An installer elevated by sudo runs only its observer back as sudo's original numeric
+caller. Session and parent ownership checks still run as that caller; root gets no
+ownership exemption. Explicit selected environment input travels only on this trusted
+observer command, preserving unset versus empty across sudo's environment reset.
+Legacy installer writes keep their original elevated identity. Failure to return to
+the caller leaves qualification unrecorded and does not suppress those writes.
+
+The maintained CLI dispatch is `rmd inspect selected-registry-shadow --shadow
+--capture --session /absolute/private/session.json`. It prints only the session pin.
+Observations use `--shadow --session <file> --pin <pin> --consumer <name>` with optional
+`--instance`, `--repository`, `--namespace` and private `--identity` arguments. The
+narrow source entry uses the same function; shells launch it through the maintained
+child-entry bundle/tsx resolver with the shared store disabled. It avoids CLI housekeeping, credentials,
+GitHub, state-root discovery and self-update. Capture optionally accepts `--registry`,
+`--contract-version` and `--require-capability`; these retain the shared reader's
+grammar, capabilities, byte limits and deadlines rather than adding a YAML parser.
+
+Each receipt describes an attempted boundary, not a successful effect. Installer
+writes, generated launch attempts, recycler/serve launches, host-update, field-trial
+Docker operations and later heartbeat measurements recheck the pin. Shell outcomes,
+Docker arguments and heartbeat publication retain their independent legacy behavior,
+including STOP and other healthy traps. Observation and sink failures never gate them.
+The default heartbeat remains Bash and Git; missing Node/tsx affects only explicitly
+requested qualification and cannot suppress the beat.
+
+Host name/repository matching is supported. Container/repository-relative mappings
+are unknown, and host state/container tuples are hashed as actual target evidence,
+never represented as a certified namespace mapping (`mapping_state: unknown`). Same
+names cannot borrow a different repository or a revised registry's evidence. Public
+heartbeat payloads and worker arguments receive no session, selected path, raw bytes,
+state roots or credentials from this adapter. A digest grants no release consent:
+every receipt carries `publication_permission: not-granted`.
+
+Disposable transport fixtures exercise the real scripts, generated launcher and CLI.
+The mixed-version fixtures retain the installer and field-trials script from
+`f936be06908593755b64b37f79c56e563203fc55`, with file digests in their provenance
+receipt. Linux x64 runs a hash-verified Bash 3.2 package and its pinned libraries
+from disposable extraction roots; macOS verifies its native Bash 3.2 version.
+The mixed-version proof fails when its required historical interpreter is unavailable.
+This is source qualification only: merging can reach existing automatic image/code
+update paths, but does not enable the option, install a schedule, activate admission
+or prove deployment. Live launcher/mount/image replacement still requires the exact
+instance drain and writer-stop boundaries above.
