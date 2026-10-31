@@ -3,14 +3,15 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: low
   priority: 1.39
   # refusal-amendment (W1-T10463, run W1-T10463-1793034692020, 2026-10-26T18:08:22.712Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: The cited failing expression is absent from HEAD and main; HEAD uses destructuring at `src/run-task.ts:36772`, and the cited test passes.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
   # redesign: signature=7e16003d3361ceaf
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 2 (cause stopped) of the operator's mechanical rulings (2026-10-21, W1-T10371): the symptom had 0 occurrence(s) across 7 day(s), never seen. Retired by the machine-filing judge, 2026-10-31T08:28:10.395Z
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/ledger-account-dimension.test.ts:flaky"

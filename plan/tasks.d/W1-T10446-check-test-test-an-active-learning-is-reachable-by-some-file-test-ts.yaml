@@ -3,14 +3,15 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: low
   priority: 1.58
   # refusal-amendment (W1-T10446, run W1-T10446-1793201218439, 2026-10-28T17:21:44.056Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: The reported failure requires changing the proof reader or original census test; `src/lib/learnings.ts` does not control either surface.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
   # redesign: signature=4c7cd5b2884a8b21
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 2 (cause stopped) of the operator's mechanical rulings (2026-10-21, W1-T10371): the symptom had 0 occurrence(s) across 7 day(s), never seen. Retired by the machine-filing judge, 2026-10-31T08:28:10.387Z
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/an-active-learning-is-reachable-by-some-file.test.ts"
