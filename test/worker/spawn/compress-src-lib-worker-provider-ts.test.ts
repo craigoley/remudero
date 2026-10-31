@@ -32,9 +32,9 @@ test("W1-T10918: comment compression preserves executable code", () => {
   // W1-T10954 adds exact settlement, preserves partial counters and reconciles late raw receipts.
   // Refresh executable fingerprints for those behaviors; retain the compression bounds below.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
-  assert.equal(actual.tokenCount, 45168);
-  assert.equal(actual.tokenDigest, "c3a98d9eb5ec909fa59c38f39bccb45fa2acb47d83d69a780479736feef9d071");
-  assert.equal(actual.astDigest, "953ee38361986ae700ebdfe8dbebb99ab5202cbe23a91287164c7b931b440702");
+  assert.equal(actual.tokenCount, 45441);
+  assert.equal(actual.tokenDigest, "5fec4d08cc6b000937a10c5551f22733dffe7b2b876e377c521900063ef553da");
+  assert.equal(actual.astDigest, "44425353b5c89eade9d62a9ba10e395f5a480d203e2b89c25a8096fdf61bbb69");
   assert.ok(actual.commentLines < 1357, "comment lines must decrease from the pre-compression source");
   assert.ok(actual.commentBytes < 104858, "comment bytes must decrease; rewrapping alone is insufficient");
 

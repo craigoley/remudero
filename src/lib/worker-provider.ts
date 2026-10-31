@@ -1,4 +1,4 @@
-import { recordCashAccounting, validCashIdentity, cashEndpointIdentity, type CashRequestIdentity, type CashReservation, type CashAccountingEvidence } from "./cash-accounting.js";
+import { recordCashAccounting, validCashIdentity, cashIdentityMatches, cashEndpointIdentity, type CashRequestIdentity, type CashReservation, type CashAccountingEvidence } from "./cash-accounting.js";
 import { setTimeout as abortableDelay } from "node:timers/promises";
 import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-request-effort.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
@@ -4116,15 +4116,23 @@ export function reserveOpenWeightBudget(
 export function settleOpenWeightBudget(
   config: Config,
   input: CashAccountingEvidence & { requestId: string; atIso: string },
-): void {
+): CashReservation | undefined {
   const utcDay = openWeightUtcDay(input.atIso);
-  mutateOpenWeightAllowance(openWeightAllowancePath(config), utcDay, (state) => {
+  return mutateOpenWeightAllowance<CashReservation | undefined>(openWeightAllowancePath(config), utcDay, (state) => {
     const row = state.reservations[input.requestId];
-    if (state.utcDay !== utcDay || row === undefined) return { next: state, result: undefined };
+    if (state.utcDay !== utcDay || row === undefined || !row.identity || !cashIdentityMatches(row.identity, input.identity))
+      return { next: state, result: undefined };
     const recorded = recordCashAccounting(row, input);
-    return { next: { ...state, reservations: { ...state.reservations, [input.requestId]: recorded } }, result: undefined };
+    return { next: { ...state, reservations: { ...state.reservations, [input.requestId]: recorded } }, result: recorded };
   }, undefined, sharedCashAllowancePath(config) !== undefined, false, true);
 }
+
+type CashBudgetAttempt = {
+  requestId: string; identity: CashRequestIdentity; atIso: string;
+  reservation: ReturnType<typeof reserveOpenWeightBudget>;
+  receipt?: CashReservation;
+  tokens?: { input: number; output: number; cacheRead: number; cacheCreation: number };
+};
 
 export interface OpenWeightSpawnArgs {
   /** set ONLY by W1-T3692's blocked-auction fallback. Selects `dailyCapUsd.squeezed`
@@ -5221,7 +5229,7 @@ export async function spawnFoundryClaudeWorker(
   let sessionId = "";
   const servedModels: Array<string | undefined> = [];
   const requestEfforts: CashRequestEffortCount[] = [];
-  let pending: { requestId: string; identity: CashRequestIdentity; reservedUsd: number } | undefined;
+  let pending: CashBudgetAttempt | undefined;
   const requestPrefix = `${args.runId ?? args.taskId ?? "foundry-claude"}-${startedAt}-${randomUUID()}`;
   try {
     if (!isFoundryClaudeDeployment(selection.model) || (selection.model !== "claude-haiku-5-5" && args.cashSqueezed !== true)) {
@@ -5254,26 +5262,27 @@ export async function spawnFoundryClaudeWorker(
         output_config: { effort: selection.effort === "default" ? "medium" : selection.effort },
         ...(tools.length ? { tools } : {}),
       });
-      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<{
-        requestId: string; identity: CashRequestIdentity; reservation: ReturnType<typeof reserveOpenWeightBudget>;
-      }>({
+      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<CashBudgetAttempt>({
         args, deployment: selection.model, source: `cash ${label}`, endpoint, body,
         headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
         onEnvelope: (envelope, attempt) => {
           const usage = foundryClaudeReceiptUsage(envelope);
           if (!usage) return;
+          attempt.tokens = { input: usage.input_tokens, output: usage.output_tokens,
+            cacheRead: usage.cache_read_input_tokens, cacheCreation: usage.cache_creation_input_tokens };
           const actualUsd = foundryClaudeUsageUsd(selection.model, usage);
-          if (actualUsd <= attempt.reservation.reservedUsd) settleOpenWeightBudget(config, {
-            requestId: attempt.requestId, identity: attempt.identity, actualUsd, atIso: clock.iso(),
+          if (actualUsd <= attempt.reservation.reservedUsd) attempt.receipt = settleOpenWeightBudget(config, {
+            requestId: attempt.requestId, identity: attempt.identity, actualUsd, atIso: attempt.atIso,
           });
         },
         canContinue: () => turns < maxTurns,
         chargeFailure: () => {
-          settleOpenWeightBudget(config, { requestId: pending!.requestId, identity: pending!.identity,
-            atIso: clock.iso(), reason: "rate-limited without usage" });
-          spentUsd += pending!.reservedUsd;
-          budgetHeldUsd += pending!.reservedUsd;
-          budgetSettledUsd += pending!.reservedUsd;
+          const recorded = settleOpenWeightBudget(config, { requestId: pending!.requestId, identity: pending!.identity,
+            atIso: pending!.atIso, reason: "rate-limited without usage" });
+          const chargedUsd = recorded?.settledUsd ?? pending!.reservation.reservedUsd;
+          spentUsd += chargedUsd;
+          if (recorded?.settledUsd == null) budgetHeldUsd += pending!.reservation.reservedUsd;
+          budgetSettledUsd += chargedUsd;
           pending = undefined;
         },
         next: (checkActive) => {
@@ -5285,12 +5294,13 @@ export async function spawnFoundryClaudeWorker(
           checkActive();
           const requestId = `${requestPrefix}-${++turns}`;
           const identity: CashRequestIdentity = { requestId, attemptId: requestPrefix, provider: "cash", deployment: selection.model, endpoint: cashEndpointIdentity(endpoint) };
+          const atIso = clock.iso();
           const reservation = reserveOpenWeightBudget(config, { requestId, identity, deployment: selection.model,
-            requestBodyBytes: Buffer.byteLength(body, "utf8"), atIso: clock.iso(), squeezed: args.cashSqueezed === true });
+            requestBodyBytes: Buffer.byteLength(body, "utf8"), atIso, squeezed: args.cashSqueezed === true });
           budgetReservedUsd += reservation.reservedUsd;
-          pending = { requestId, identity, reservedUsd: reservation.reservedUsd };
+          pending = { requestId, identity, atIso, reservation };
           recordCashRequestEffort(requestEfforts, body, "foundry-messages");
-          return { requestId, identity, reservation };
+          return pending;
         },
       });
       const payload = envelope as {
@@ -5301,7 +5311,7 @@ export async function spawnFoundryClaudeWorker(
       servedModels.push(cashResponseModel(payload.model));
       const measured = foundryClaudeReceiptUsage(envelope);
       if (!measured) {
-        settleOpenWeightBudget(config, { requestId, identity: pending!.identity, atIso: clock.iso(), reason: "usage unavailable" });
+        settleOpenWeightBudget(config, { requestId, identity: pending!.identity, atIso: pending!.atIso, reason: "usage unavailable" });
         budgetHeldUsd += reservation.reservedUsd;
         spentUsd += reservation.reservedUsd;
         budgetSettledUsd += reservation.reservedUsd;
@@ -5312,8 +5322,10 @@ export async function spawnFoundryClaudeWorker(
         completionTokens += measured.output_tokens;
         cacheReadTokens += measured.cache_read_input_tokens;
         cacheCreationTokens += measured.cache_creation_input_tokens;
-        spentUsd += actualUsd;
-        budgetSettledUsd += actualUsd;
+        const chargedUsd = pending!.receipt?.settledUsd ?? reservation.reservedUsd;
+        if (pending!.receipt?.settledUsd == null) budgetHeldUsd += reservation.reservedUsd;
+        spentUsd += chargedUsd;
+        budgetSettledUsd += chargedUsd;
       }
       pending = undefined;
       if (!Array.isArray(payload.content)) throw new Error(`cash ${label} response has no content blocks`);
@@ -5364,13 +5376,18 @@ export async function spawnFoundryClaudeWorker(
   } catch (error) {
     // An unknown transport outcome remains charged. Only a definite 404 is known to cost zero.
     if (pending) {
-      const billed = error instanceof OpenWeightDeploymentNotFoundError ? 0 : pending.reservedUsd;
-      settleOpenWeightBudget(config, { requestId: pending.requestId, identity: pending.identity,
-        ...(billed === 0 ? { actualUsd: 0, unbilled: true } : {}), atIso: clock.iso(),
+      const unbilled = error instanceof OpenWeightDeploymentNotFoundError;
+      const recorded = pending.receipt ?? settleOpenWeightBudget(config, { requestId: pending.requestId, identity: pending.identity,
+        ...(unbilled ? { actualUsd: 0, unbilled: true } : {}), atIso: pending.atIso,
         reason: error instanceof Error ? error.message : String(error) });
-      if (billed !== 0) budgetHeldUsd += billed;
-      spentUsd += billed;
-      budgetSettledUsd += billed;
+      const chargedUsd = recorded?.settledUsd ?? pending.reservation.reservedUsd;
+      if (recorded?.settledUsd == null) budgetHeldUsd += pending.reservation.reservedUsd;
+      spentUsd += chargedUsd;
+      budgetSettledUsd += chargedUsd;
+      promptTokens += pending.tokens?.input ?? 0;
+      completionTokens += pending.tokens?.output ?? 0;
+      cacheReadTokens += pending.tokens?.cacheRead ?? 0;
+      cacheCreationTokens += pending.tokens?.cacheCreation ?? 0;
     }
     return reconcileBoundedProviderAttempt(openWeightResult({
       model: selection.model, effort: selection.effort, requestEfforts, servedModels, startedAt, clock, text, sessionId, turns,
@@ -5425,7 +5442,7 @@ export async function spawnOpenWeightWorker(
   let budgetReservedUsd = 0;
   let budgetSettledUsd = 0;
   let budgetHeldUsd = 0;
-  let pendingReservation: { requestId: string; identity: CashRequestIdentity; reservedUsd: number } | undefined;
+  let pendingReservation: CashBudgetAttempt | undefined;
   let azureOpenAi429Unbilled = false;
   // Metered SEPARATELY from conversation turns (W1-T3558). They share the day cap — one cap is the
   // only way it bounds total Azure spend — but are counted apart so an operator can read what web
@@ -5502,15 +5519,18 @@ export async function spawnOpenWeightWorker(
         ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
       });
       const requestBodyBytes = Buffer.byteLength(body, "utf8");
-      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<{
-        requestId: string; identity: CashRequestIdentity; reservation: { reservedUsd: number };
-      }>({
+      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<CashBudgetAttempt>({
         args, deployment: selection.model, source: "openweight", endpoint, body,
         headers: { "content-type": "application/json", "api-key": key },
         onEnvelope: (envelope, attempt) => {
-          const actualUsd = openWeightReceiptUsd(openWeightEnvelopeUsage(envelope, usesResponses), selection.model, usesResponses);
-          if (actualUsd !== undefined) settleOpenWeightBudget(config, {
-            requestId: attempt.requestId, identity: attempt.identity, actualUsd, atIso: clock.iso(),
+          const usage = openWeightEnvelopeUsage(envelope, usesResponses);
+          attempt.tokens = { input: validFoundryTokenCount(usage?.prompt_tokens) ? usage.prompt_tokens : 0,
+            output: validFoundryTokenCount(usage?.completion_tokens) ? usage.completion_tokens : 0,
+            cacheRead: validFoundryTokenCount(usage?.cached_tokens) ? usage.cached_tokens : 0,
+            cacheCreation: validFoundryTokenCount(usage?.cache_creation_tokens) ? usage.cache_creation_tokens : 0 };
+          const actualUsd = openWeightReceiptUsd(usage, selection.model, usesResponses);
+          if (actualUsd !== undefined) attempt.receipt = settleOpenWeightBudget(config, {
+            requestId: attempt.requestId, identity: attempt.identity, actualUsd, atIso: attempt.atIso,
           });
         },
         observeHeaders: (headers) => {
@@ -5524,11 +5544,11 @@ export async function spawnOpenWeightWorker(
         canContinue: () => turns < maxTurns,
         chargeFailure: (error) => {
           const unbilled = unbilledCashRefusal(error, azureOpenAi429Unbilled);
-          settleOpenWeightBudget(config, { requestId: pendingReservation!.requestId, identity: pendingReservation!.identity,
-            ...(unbilled ? { actualUsd: 0, unbilled: true } : {}), atIso: clock.iso(), reason: error.message });
-          const chargedUsd = unbilled ? 0 : pendingReservation!.reservedUsd;
+          const recorded = settleOpenWeightBudget(config, { requestId: pendingReservation!.requestId, identity: pendingReservation!.identity,
+            ...(unbilled ? { actualUsd: 0, unbilled: true } : {}), atIso: pendingReservation!.atIso, reason: error.message });
+          const chargedUsd = recorded?.settledUsd ?? pendingReservation!.reservation.reservedUsd;
           budgetSettledUsd += chargedUsd;
-          if (!unbilled) budgetHeldUsd += chargedUsd;
+          if (recorded?.settledUsd == null) budgetHeldUsd += pendingReservation!.reservation.reservedUsd;
           pendingReservation = undefined;
         },
         next: (checkActive) => {
@@ -5540,12 +5560,13 @@ export async function spawnOpenWeightWorker(
           checkActive();
           const requestId = `${runRequestPrefix}-${++turns}`;
           const identity: CashRequestIdentity = { requestId, attemptId: runRequestPrefix, provider: "cash", deployment: selection.model, endpoint: cashEndpointIdentity(endpoint) };
+          const atIso = clock.iso();
           const reservation = reserveOpenWeightBudget(config, { requestId, identity, deployment: selection.model,
-            requestBodyBytes, atIso: clock.iso(), squeezed: args.cashSqueezed === true });
+            requestBodyBytes, atIso, squeezed: args.cashSqueezed === true });
           budgetReservedUsd += reservation.reservedUsd;
-          pendingReservation = { requestId, identity, reservedUsd: reservation.reservedUsd };
+          pendingReservation = { requestId, identity, atIso, reservation };
           recordCashRequestEffort(requestEfforts, body, usesResponses ? "responses" : "chat-completions");
-          return { requestId, identity, reservation };
+          return pendingReservation;
         },
       });
       const usage = openWeightEnvelopeUsage(envelope, usesResponses);
@@ -5560,9 +5581,10 @@ export async function spawnOpenWeightWorker(
       promptTokens += turnPromptTokens;
       completionTokens += turnCompletionTokens;
       if (actualUsd !== undefined) {
-        budgetSettledUsd += Math.min(actualUsd, reservation.reservedUsd);
+        budgetSettledUsd += pendingReservation!.receipt?.settledUsd ?? reservation.reservedUsd;
+        if (pendingReservation!.receipt?.settledUsd == null) budgetHeldUsd += reservation.reservedUsd;
       } else {
-        settleOpenWeightBudget(config, { requestId, identity: pendingReservation!.identity, atIso: clock.iso(), reason: "usage unavailable" });
+        settleOpenWeightBudget(config, { requestId, identity: pendingReservation!.identity, atIso: pendingReservation!.atIso, reason: "usage unavailable" });
         budgetHeldUsd += reservation.reservedUsd;
         budgetSettledUsd += reservation.reservedUsd;
       }
@@ -5664,12 +5686,16 @@ export async function spawnOpenWeightWorker(
     }, args);
     if (pendingReservation !== undefined) {
       const unbilled = unbilledCashRefusal(error, azureOpenAi429Unbilled);
-      settleOpenWeightBudget(config, { requestId: pendingReservation.requestId, identity: pendingReservation.identity,
-        ...(unbilled ? { actualUsd: 0, unbilled: true } : {}), atIso: clock.iso(),
+      const recorded = pendingReservation.receipt ?? settleOpenWeightBudget(config, { requestId: pendingReservation.requestId, identity: pendingReservation.identity,
+        ...(unbilled ? { actualUsd: 0, unbilled: true } : {}), atIso: pendingReservation.atIso,
         reason: error instanceof Error ? error.message : String(error) });
-      const chargedUsd = unbilled ? 0 : pendingReservation.reservedUsd;
+      const chargedUsd = recorded?.settledUsd ?? pendingReservation.reservation.reservedUsd;
       budgetSettledUsd += chargedUsd;
-      if (!unbilled) budgetHeldUsd += chargedUsd;
+      if (recorded?.settledUsd == null) budgetHeldUsd += pendingReservation.reservation.reservedUsd;
+      promptTokens += pendingReservation.tokens?.input ?? 0;
+      completionTokens += pendingReservation.tokens?.output ?? 0;
+      cacheReadTokens += pendingReservation.tokens?.cacheRead ?? 0;
+      cacheCreationTokens += pendingReservation.tokens?.cacheCreation ?? 0;
     }
     // Preserve the transport/tool failure in the result's stderr + error flags; a failure must not
     // collapse into an ordinary empty worker response for callers or the catch-erasure census.
@@ -5740,6 +5766,7 @@ async function brokerCashWebSearch(input: {
   const endpoint = cashWebSearchEndpoint(typeof rawEndpoint === "string" ? rawEndpoint : "", input.model);
   const body = JSON.stringify({ model: input.model, input: query, tools: [{ type: "web_search" }] });
   const identity: CashRequestIdentity = { requestId: input.requestId, attemptId: input.attemptId, provider: "cash", deployment: input.model, endpoint: cashEndpointIdentity(endpoint) };
+  const atIso = input.clock.iso();
   let reservation: { reservedUsd: number; committedUsd: number; capUsd: number };
   try {
     reservation = reserveOpenWeightBudget(input.config, {
@@ -5747,7 +5774,7 @@ async function brokerCashWebSearch(input: {
       deployment: input.model,
       requestBodyBytes: Buffer.byteLength(body, "utf8"),
       extraInputTokens: CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS,
-      atIso: input.clock.iso(),
+      atIso,
     });
   } catch (error) {
     // AN EXHAUSTED ALLOWANCE REFUSES THE SEARCH, NOT THE RUN, and it is metered as a refusal at
@@ -5765,18 +5792,14 @@ async function brokerCashWebSearch(input: {
     model: input.model,
     fetchImpl: input.fetchImpl,
   });
-  let settledUsd = reservation.reservedUsd;
-  if (result.usageRead) {
-    settledUsd = Math.min(
+  const recorded = settleOpenWeightBudget(input.config, { requestId: input.requestId, identity, atIso,
+    ...(result.usageRead ? { actualUsd: Math.min(
       openWeightUsageUsd(input.model, result.usage.promptTokens, result.usage.completionTokens),
       reservation.reservedUsd,
-    );
-    settleOpenWeightBudget(input.config, { requestId: input.requestId, identity, actualUsd: settledUsd, atIso: input.clock.iso() });
-  }
-  if (!result.usageRead) settleOpenWeightBudget(input.config, { requestId: input.requestId, identity,
-    atIso: input.clock.iso(), reason: "search usage unavailable" });
+    ) } : { reason: "search usage unavailable" }) });
+  const settledUsd = recorded?.settledUsd ?? reservation.reservedUsd;
   input.onMetered({ accepted: result.outcome === "accepted", reservedUsd: reservation.reservedUsd, settledUsd,
-    heldUsd: result.usageRead ? 0 : reservation.reservedUsd });
+    heldUsd: recorded?.settledUsd == null ? reservation.reservedUsd : 0 });
   if (result.outcome === "refused") {
     return { error: `web_search refused (${result.reason}): ${result.detail}`, sources: [] };
   }

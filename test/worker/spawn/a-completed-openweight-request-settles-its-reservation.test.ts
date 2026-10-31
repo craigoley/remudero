@@ -37,9 +37,163 @@ function receipt(model: string, adapterError = false) {
 }
 
 test("W1-T10954: real and duplicate settlement evidence affects only its exact request once while preserving all caps", async t => {
+  for (const model of models) for (const failure of ["none", "adapter", "observer", "rolled-day", "observer-rollover"]) {
+    await t.test(`${model} midnight receipt with ${failure}`, async child => {
+      const { dir } = ownedFixtureDir(child, "cash-midnight-receipt");
+      const day = new Date().toISOString().slice(0, 10);
+      const reservedAt = `${day}T23:59:59.990Z`;
+      let now = Date.parse(reservedAt);
+      const clock = { now: () => now, iso: () => new Date(now).toISOString() };
+      const config = { claudeBin: "/unused", root: dir, dailyCapUsd: 25, workerProviders: {
+        cashDeploymentEndpoints: { [model]: { endpoint: "https://mapped.example.test/", keyEnv: "RMD_CASH_EASTUS_API_KEY" } },
+      } } as Config;
+      let before!: OpenWeightAllowanceState;
+      let afterObserver: OpenWeightAllowanceState | undefined;
+      let otherId = "";
+      let calls = 0;
+      const result = await spawnOpenWeightWorker({ cwd: dir, workerHome: dir, prompt: "fixture", tools: [], clock,
+        env, streamObserver: event => {
+          if (event.kind !== "working" || !failure.startsWith("observer")) return;
+          if (failure === "observer-rollover") {
+            const settled = readAllowance(dir);
+            const [requestId, own] = Object.entries(before.reservations).find(([id]) => id !== otherId)!;
+            assert.equal(settled.reservations[requestId]!.settledUsd, openWeightUsageUsd(model, 10, 2));
+            reserveOpenWeightBudget(config, { requestId: "observer-new-day",
+              identity: { ...own.identity!, requestId: "observer-new-day" }, deployment: model,
+              requestBodyBytes: 100, atIso: clock.iso() });
+            afterObserver = readAllowance(dir);
+          }
+          throw new Error("fixture working observer failed");
+        }, fetchImpl: async url => {
+          calls++;
+          assert.equal(new URL(String(url)).hostname, "mapped.example.test");
+          const own = Object.values(readAllowance(dir).reservations)[0]!;
+          otherId = "other-request";
+          reserveOpenWeightBudget(config, { requestId: otherId,
+            identity: { ...own.identity!, requestId: otherId, attemptId: "other-attempt" },
+            deployment: model, requestBodyBytes: 100, atIso: reservedAt,
+            extraInputTokens: model === "claude-haiku-5-5" ? 4_900_000 : 0 });
+          before = readAllowance(dir);
+          config.dailyCapUsd = openWeightCommittedUsd(before);
+          now += 20;
+          if (failure === "rolled-day") {
+            reserveOpenWeightBudget(config, { requestId: "new-day-request",
+              identity: { ...own.identity!, requestId: "new-day-request", attemptId: "new-day-attempt" },
+              deployment: model, requestBodyBytes: 100, atIso: clock.iso() });
+            before = readAllowance(dir);
+          }
+          return Response.json(receipt(model, failure === "adapter"));
+        } }, config, { model, effort: "low" });
+      const state = readAllowance(dir);
+      assert.equal(calls, 1);
+      assert.equal(result.isError, failure === "adapter" || failure.startsWith("observer"));
+      assert.equal(result.tokens.input, 10);
+      assert.equal(result.tokens.output, 2);
+      assert.equal(result.billedUsd, null);
+      if (failure === "rolled-day") {
+        assert.deepEqual(state, before, "an old receipt cannot reset or settle the next day's allowance");
+        assert.equal(result.budgetHeldUsd, result.budgetReservedUsd);
+        assert.equal(result.usageEstimateUsd, null, "a settlement that was not recorded must not be reported");
+        return;
+      }
+      const [requestId, own] = Object.entries(before.reservations).find(([id]) => id !== otherId)!;
+      const actualUsd = openWeightUsageUsd(model, 10, 2);
+      if (failure === "observer-rollover") {
+        assert.ok(afterObserver, "the observer opened the next day's allowance after usage settled");
+        assert.deepEqual(state, afterObserver);
+        assert.equal(result.budgetSettledUsd, actualUsd);
+        assert.equal(result.budgetHeldUsd, 0);
+        assert.equal(result.usageEstimateUsd, actualUsd, "preserve recorded usage through a later observer failure");
+        return;
+      }
+      assert.equal(state.utcDay, day);
+      assert.deepEqual(state.reservations[requestId], { ...own, settledUsd: actualUsd,
+        accountingState: "usage-rated", usageEstimateUsd: actualUsd, heldUsd: 0 });
+      assert.deepEqual(state.reservations[otherId], before.reservations[otherId]);
+      assert.equal(result.budgetSettledUsd, actualUsd);
+      assert.equal(result.costUsd, actualUsd);
+      assert.equal(result.budgetHeldUsd, 0);
+      assert.equal(result.usageEstimateUsd, actualUsd);
+      assert.equal(openWeightCommittedUsd(state), actualUsd + state.reservations[otherId]!.reservedUsd);
+      settleOpenWeightBudget(config, { requestId, identity: own.identity, actualUsd: 0, atIso: reservedAt });
+      assert.deepEqual(readAllowance(dir), state, "a duplicate cannot change the first receipt or another request");
+      assert.throws(() => reserveOpenWeightBudget(config, { requestId: "over-cap", deployment: model,
+        requestBodyBytes: 20_000_000, atIso: reservedAt }), OpenWeightAllowanceExhaustedError);
+      assert.deepEqual(readAllowance(dir), state, "settlement preserves cap enforcement");
+      if (model === "claude-haiku-5-5") {
+        config.dailyCapUsd = 25;
+        assert.throws(() => reserveOpenWeightBudget(config, { requestId: "over-subcap", deployment: model,
+          requestBodyBytes: 200_000, atIso: reservedAt }), (error: unknown) =>
+          error instanceof OpenWeightAllowanceExhaustedError && error.limit === "foundry-claude");
+        assert.deepEqual(readAllowance(dir), state, "the provider subcap still counts the other request's hold");
+      }
+    });
+  }
+
+  for (const rolledDay of [false, true]) await t.test(`brokered midnight search with rolledDay=${rolledDay}`, async child => {
+    const { dir } = ownedFixtureDir(child, "cash-midnight-search");
+    let now = Date.parse(`${new Date().toISOString().slice(0, 10)}T23:59:59.990Z`);
+    const reservedAt = new Date(now).toISOString();
+    const clock = { now: () => now, iso: () => new Date(now).toISOString() };
+    const model = "gpt-6-luna";
+    const config = { claudeBin: "/unused", root: dir, dailyCapUsd: 25, workerProviders: { cashWebSearch: true,
+      cashDeploymentEndpoints: { [model]: { endpoint: "https://mapped.example.test/", keyEnv: "RMD_CASH_EASTUS_API_KEY" } },
+    } } as Config;
+    let before!: OpenWeightAllowanceState;
+    let searchId = "";
+    let calls = 0;
+    const result = await spawnOpenWeightWorker({ cwd: dir, workerHome: dir, prompt: "fixture", tools: ["WebSearch"],
+      maxTurns: 2, clock, env: { ...env, RMD_CASH_WEB_SEARCH_API_KEY: "search-fixture-only" },
+      fetchImpl: async url => {
+        calls++;
+        assert.equal(new URL(String(url)).hostname, "mapped.example.test");
+        if (!String(url).includes("/openai/responses")) return Response.json({ ...receipt(model),
+          choices: [{ message: { content: null, tool_calls: [
+            { id: "search", function: { name: "web_search", arguments: '{"query":"fixture"}' } },
+            { id: "invalid", function: { name: "undeclared", arguments: "{}" } },
+          ] } }] });
+        before = readAllowance(dir);
+        searchId = Object.keys(before.reservations).find(id => id.includes("-search-"))!;
+        assert.ok(searchId, "the broker reserved its own request before sending");
+        now += 20;
+        if (rolledDay) {
+          const identity = before.reservations[searchId]!.identity!;
+          reserveOpenWeightBudget(config, { requestId: "new-day-request",
+            identity: { ...identity, requestId: "new-day-request" }, deployment: model,
+            requestBodyBytes: 100, atIso: clock.iso() });
+          before = readAllowance(dir);
+        }
+        return Response.json({ usage: { input_tokens: 10, output_tokens: 2 },
+          output: [{ type: "web_search_call" }, { type: "message", content: [{ type: "output_text", text: "found",
+            annotations: [{ type: "url_citation", url: "https://example.test/source" }] }] }] });
+      } }, config, { model, effort: "low" });
+    const state = readAllowance(dir);
+    assert.equal(calls, 2);
+    assert.equal(result.isError, true);
+    assert.match(result.stderr, /undeclared tool/);
+    assert.equal(result.webSearchAccepted, 1);
+    if (rolledDay) {
+      assert.deepEqual(state, before);
+      assert.ok(result.budgetHeldUsd > 0);
+      assert.equal(result.usageEstimateUsd, null);
+      return;
+    }
+    const actualUsd = openWeightUsageUsd(model, 10, 2);
+    assert.equal(state.utcDay, reservedAt.slice(0, 10));
+    assert.equal(state.reservations[searchId]!.settledUsd, actualUsd);
+    assert.equal(state.reservations[searchId]!.heldUsd, 0);
+    for (const id of Object.keys(before.reservations).filter(id => id !== searchId))
+      assert.deepEqual(state.reservations[id], before.reservations[id]);
+    assert.equal(result.budgetHeldUsd, 0);
+    assert.equal(result.usageEstimateUsd, 2 * actualUsd);
+    assert.equal(result.budgetSettledUsd, openWeightCommittedUsd(state));
+  });
+
   for (const model of models) for (const phase of ["fetch", "body"]) await t.test(`${model} late ${phase} settles its own held attempt`, async child => {
     const { dir } = ownedFixtureDir(child, "cash-late-body");
-    const clock = fixedClock(Date.now());
+    let now = Date.parse(`${new Date().toISOString().slice(0, 10)}T23:59:59.990Z`);
+    const clock = { now: () => now, iso: () => new Date(now).toISOString() };
+    const reservedAt = clock.iso();
     const config = { root: dir, dailyCapUsd: 25, workerProviders: {
       cashEndpoint: "https://default.example.test/",
       cashDeploymentEndpoints: { [model]: { endpoint: "https://mapped.example.test/", keyEnv: "RMD_CASH_EASTUS_API_KEY" } },
@@ -76,6 +230,7 @@ test("W1-T10954: real and duplicate settlement evidence affects only its exact r
     config.dailyCapUsd = held.reservedUsd + otherReservation.reservedUsd;
     assert.throws(() => reserve({ ...other, requestId: "third-request" }), OpenWeightAllowanceExhaustedError);
     const beforeReceipt = readAllowance(dir);
+    now += 20;
     deliver();
     await new Promise<void>(resolve => setImmediate(resolve));
     const settled = readAllowance(dir);
@@ -85,9 +240,10 @@ test("W1-T10954: real and duplicate settlement evidence affects only its exact r
     assert.equal(settled.reservations[requestId]!.billedUsd, null);
     assert.equal(settled.reservations[requestId]!.usageEstimateUsd, actualUsd);
     assert.deepEqual(settled.reservations[other.requestId], beforeReceipt.reservations[other.requestId]);
-    settleOpenWeightBudget(config, { requestId, identity: held.identity, actualUsd: 0, atIso: clock.iso() });
+    settleOpenWeightBudget(config, { requestId, identity: held.identity, actualUsd: 0, atIso: reservedAt });
     assert.deepEqual(readAllowance(dir), settled, "a duplicate cannot revise the late receipt");
-    reserve({ ...other, requestId: "third-request" });
+    reserveOpenWeightBudget(config, { requestId: "third-request", identity: { ...other, requestId: "third-request" },
+      deployment: model, requestBodyBytes: 100, atIso: reservedAt });
     assert.equal(calls, 1, "settlement never issues a replacement request");
   });
 
