@@ -5,14 +5,14 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { ReviewVerdict } from "../src/lib/review.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { ReviewVerdict } from "#src/lib/review.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 // Loaded by a computed specifier so this suite is not a new direct importer of the run-task
 // module: the affected-suite reach ratchet caps that importer count and only lets it shrink.
-const RUN_TASK = ["..", "src", "run-task.js"].join("/");
+const RUN_TASK = ["#src", "run-task.js"].join("/");
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Loose = (...args: any[]) => any;
 const { commitWorkerEdits, runFixRung } = (await import(RUN_TASK)) as {

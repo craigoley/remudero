@@ -30680,7 +30680,8 @@ export function commitWorkerEdits(
   if (message.trim().length === 0) {
     return { committed: false, undeclared: [], reason: "refusing to commit with an empty message" };
   }
-  if (declaredPaths.length === 0 && !options.checkpoint) {
+  // Fix rounds can repair admitted tests and regenerable artifacts even without a filed surface.
+  if (declaredPaths.length === 0 && !options.checkpoint && !options.admitTests) {
     return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
   }
 
