@@ -40,6 +40,8 @@ import { WORKER_OUTPUT_BYTES } from "#src/lib/worker.js";
 import fs from "node:fs";
 import { childGardenPassSpawn, GARDEN_OUTPUT_BYTES, GARDEN_PASS_STEP, startGardenOffLoop } from "#src/lib/garden-registry.js";
 import type { GardenerRuntimeEvent } from "#src/lib/gardener-runtime.js";
+import { CODEX_WORKER_STDERR_MAX_BYTES, spawnCodexWorker } from "#src/lib/worker-provider.js";
+import { repoRoot } from "#test/helpers/repo-root.js";
 
 test("W1-T10962: truncated or unreadable worker and gardener output stays explicit and cannot become a complete success", async (t) => {
   {
@@ -139,6 +141,111 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
         process.stderr.write(bytes, error => error ? reject(error) : resolve());
       });
     } `;
+  const stderrEvents: Array<{ text: string; state?: string }> = [];
+  const eofChild = spawnDetachedGroup({ command: process.execPath,
+    args: ["-e", "process.stderr.write(Buffer.from([0xf0, 0x9f]))"],
+    env: { ...process.env, NODE_V8_COVERAGE: "" } },
+  (text, failure) => stderrEvents.push({ text, state: failure?.state }));
+  eofChild.process.stdout.resume();
+  eofChild.process.stdin.end();
+  let eofExit: number | null | undefined;
+  eofChild.process.once("exit", (code) => { eofExit = code; });
+  assert.ok(eofChild.outputClosed, "the real spawn must expose pipe closure to its result consumer");
+  await eofChild.outputClosed;
+  assert.equal(eofExit, 0);
+  assert.equal(stderrEvents.at(-1)?.state, "malformed", "pipe closure must include EOF decoding failures");
+  const runCodex = async (body: string, mode?: "pipe-error" | "split" | "late-stderr") => {
+    const script = join(dir, "codex-report.mjs");
+    const bin = join(dir, "codex-fixture");
+    const ack = join(dir, "stderr-read");
+    rmSync(ack, { force: true });
+    const events = [{ type: "thread.started", thread_id: "real-codex-attempt" },
+      { type: "turn.started" },
+      { type: "item.completed", item: { type: "agent_message", text: "done" } },
+      { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 25, output_tokens: 10 } }];
+    writeFileSync(script, `import { existsSync } from "node:fs";
+      process.stdin.resume(); await new Promise(r => process.stdin.once("end", r));
+      ${write}${body}
+      process.stdout.write(${JSON.stringify(events.map(event => JSON.stringify(event)).join("\n") + "\n")});`);
+    writeFileSync(bin, `#!/bin/sh\nexec '${process.execPath}' '${script}'\n`);
+    chmodSync(bin, 0o700);
+    const realSpawn = childProcess.spawn;
+    let outputClosed: Promise<void> | undefined;
+    const observe = mode && t.mock.method(childProcess, "spawn", (...args: Parameters<typeof realSpawn>) => {
+      const child = realSpawn(...args);
+      if (mode === "pipe-error") child.stderr!.once("data", () => child.stderr!.emit("error", new Error("codex pipe refused")));
+      if (mode === "split") child.stderr!.once("data", () => writeFileSync(ack, "read"));
+      if (mode === "late-stderr") {
+        child.once("exit", () => writeFileSync(ack, "exited"));
+        outputClosed = new Promise(resolve => child.once("close", () => resolve()));
+      }
+      return child;
+    });
+    syncBuiltinESMExports();
+    try {
+      const result = await spawnCodexWorker({ workerHome: join(dir, "codex-home"), cwd: dir,
+        prompt: "synthetic report", tools: ["Read"], settingsFile: join(repoRoot(), "settings/worker.json") },
+      { claudeBin: "/unused", root: dir, workerProviders: { codexBin: bin, codexModel: "gpt-6.1-sol", codexHome: join(dir, "codex-auth") } });
+      assert.equal(result.sessionId, "real-codex-attempt");
+      assert.equal(result.text, "done");
+      assert.equal(result.numTurns, 1);
+      assert.deepEqual(result.tokens, { input: 100, cacheRead: 25, cacheCreation: 0, output: 10 });
+      assert.equal(result.outputRetention?.originalSubtype, "success");
+      return result;
+    } finally {
+      await outputClosed;
+      if (observe) observe.mock.restore();
+      syncBuiltinESMExports();
+    }
+  };
+  for (const [body, mode, state, reason, bytes] of [
+    ['await writeStderr(Buffer.from([0xc3, 0x28])); await writeStderr("later");', undefined, "malformed", /encoded data.*valid/i, 7],
+    ['await writeStderr(Buffer.from([0xf0, 0x9f]));', undefined, "malformed", /encoded data.*valid/i, 2],
+    ['await writeStderr("pipe fixture");', "pipe-error", "unreadable", /codex pipe refused/, 12],
+    [`await writeStderr("x".repeat(${CODEX_WORKER_STDERR_MAX_BYTES + 4}));`, undefined, "truncated", undefined, CODEX_WORKER_STDERR_MAX_BYTES + 4],
+  ] as const) {
+    const result = await runCodex(body, mode);
+    assert.equal(result.outputRetention?.stderr.state, state, "Codex must preserve real stderr failures");
+    assert.equal(result.outputRetention?.stderr.fileBytes, bytes);
+    if (reason) assert.match(result.outputRetention!.stderr.reason!, reason);
+    assert.equal(result.isError, true, "Codex cannot grant complete success to incomplete output");
+    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(workerLedgerFields(result).verdict, "error_incomplete_output");
+    assert.equal(workerLedgerFields(result).output_retention?.stderr.state, state);
+    assert.deepEqual(result.exit, { kind: "exit", code: 0 });
+  }
+  // The descendant owns a separate group so normal worker teardown cannot erase its final pipe bytes.
+  const lateWriter = `const fs = require("node:fs");
+    const timer = setInterval(() => {
+      if (fs.existsSync(${JSON.stringify(join(dir, "stderr-read"))})) {
+        clearInterval(timer); process.stderr.write(Buffer.from([0xf0, 0x9f]));
+      }
+    }, 5);`;
+  const lateCodex = await runCodex(`const { spawn } = await import("node:child_process");
+    spawn(process.execPath, ["-e", ${JSON.stringify(lateWriter)}],
+      { detached: true, stdio: ["ignore", "ignore", "inherit"] }).unref();`, "late-stderr");
+  assert.equal(lateCodex.outputRetention?.stderr.state, "malformed", "Codex must drain stderr after its actual exit");
+  assert.equal(lateCodex.outputRetention?.stderr.fileBytes, 2);
+  assert.equal(lateCodex.isError, true);
+  assert.equal(lateCodex.subtype, "error_incomplete_output");
+  assert.deepEqual(lateCodex.exit, { kind: "exit", code: 0 });
+  const codexNonzero = await runCodex('await writeStderr(Buffer.from([0xf0, 0x9f])); process.exitCode = 23;');
+  assert.equal(codexNonzero.outputRetention?.stderr.state, "malformed");
+  assert.equal(codexNonzero.isError, true);
+  assert.equal(codexNonzero.subtype, "error_exit_23");
+  assert.deepEqual(codexNonzero.exit, { kind: "exit", code: 23 });
+  const codexSplit = await runCodex(`await writeStderr(Buffer.from([0xf0, 0x9f]));
+    while (!existsSync(${JSON.stringify(join(dir, "stderr-read"))})) await new Promise(r => setTimeout(r, 5));
+    await writeStderr(Buffer.from([0x99, 0x82]));`, "split");
+  assert.equal(codexSplit.stderr, "🙂");
+  assert.equal(codexSplit.outputRetention?.stderr.state, "complete");
+  assert.equal(codexSplit.isError, false);
+  assert.equal(codexSplit.subtype, "success");
+  const codexEmpty = await runCodex("");
+  assert.equal(codexEmpty.stderr, "");
+  assert.equal(codexEmpty.outputRetention?.stderr.state, "complete");
+  assert.equal(codexEmpty.isError, false);
+  assert.equal(codexEmpty.subtype, "success");
   for (const bytes of [8193, GARDEN_OUTPUT_BYTES]) {
     const { row, event } = await runGarden(`${write}await writeStderr("x".repeat(${bytes}));`);
     assert.equal(row.exit, 0);

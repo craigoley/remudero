@@ -74,6 +74,7 @@ export interface ContainedSpawnOptions {
 export interface ContainedProcess {
   process: SdkSpawnedProcess;
   pid: number;
+  outputClosed?: Promise<void>;
 }
 
 /** Longest args excerpt {@link describeSpawnTarget} will put on a throw. The
@@ -165,6 +166,8 @@ export function spawnDetachedGroup(
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   });
+  // Exit can precede the final pipe bytes and the decoder's EOF validation.
+  const outputClosed = new Promise<void>((resolve) => child.once("close", () => resolve()));
   // A no-pid spawn (below) still fires its 'error' event ASYNCHRONOUSLY after
   // this function has already thrown — with no listener attached, Node
   // treats that as an uncaught exception (crashing the caller's process)
@@ -238,7 +241,7 @@ export function spawnDetachedGroup(
   // `ChildProcess.stdin: Writable | null` typing, which does not narrow off
   // the literal `stdio` tuple. The SDK's own doc comment on `SpawnedProcess`
   // states "ChildProcess already satisfies this interface".
-  return { process: child as unknown as SdkSpawnedProcess, pid: child.pid };
+  return { process: child as unknown as SdkSpawnedProcess, pid: child.pid, outputClosed };
 }
 
 /**

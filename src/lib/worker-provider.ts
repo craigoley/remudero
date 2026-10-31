@@ -62,7 +62,10 @@ import {
   workerMarkerEnv,
   type ContainedProcess,
   type ContainedSpawnOptions,
+  type StderrFailure,
+  type StderrSink,
 } from "./worker-containment.js";
+import type { FileTail } from "./bounded-file-tail.js";
 import {
   CASH_WEB_SEARCH_KEY_ENV,
   CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS,
@@ -103,7 +106,7 @@ interface CodexSpawnArgs {
   containment?: {
     spawn?: (
       opts: ContainedSpawnOptions,
-      onStderr?: (chunk: string) => void,
+      onStderr?: StderrSink,
       onSpawnError?: (error: NodeJS.ErrnoException) => void,
     ) => ContainedProcess;
     teardown?: (pgid: number) => void;
@@ -140,6 +143,12 @@ interface CodexWorkerResult {
   outputTruncation?: CodexOutputTruncation;
   /** W1-T8203: set when stderr passed its retention bound and only its head and tail were kept. */
   stderrTruncation?: CodexStderrTruncation;
+  outputRetention?: {
+    text: Omit<FileTail, "text">;
+    blocks: Omit<FileTail, "text">;
+    stderr: Omit<FileTail, "text">;
+    originalSubtype: string;
+  };
   subtype: string;
   isError: boolean;
   /** W1-T6027: the child's own `exit(code, signal)`, never derived from `subtype`. */
@@ -2274,7 +2283,7 @@ export const CODEX_WORKER_STDOUT_MAX_BYTES = 1 * 1024 * 1024;
 export const CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES = 64 * 1024 * 1024;
 /** PRIMARY CONTROL (W1-T8203): a MEMORY bound on what is RETAINED of stderr, a share of the stdout retention bound. stderr is
  * diagnostic evidence (failure tail, retro evidence), never protocol input: passing this keeps the head and the
- * tail and records the drop. It never tears the worker down and never decides a verdict. */
+ * tail and records the drop. It never tears the worker down; lost evidence denies complete success. */
 export const CODEX_WORKER_STDERR_MAX_BYTES = CODEX_WORKER_STDOUT_MAX_BYTES / 4;
 
 export interface CodexStderrTruncation {
@@ -2324,15 +2333,29 @@ export class CodexStderrRetainer {
 
   truncation(): CodexStderrTruncation | undefined {
     if (this.totalBytes <= this.limitBytes) return undefined;
-    const retainedBytes = this.headBytes + this.tailBuffer().length;
+    const ends = this.retainedEnds();
+    const retainedBytes = Buffer.byteLength(ends.head) + Buffer.byteLength(ends.tail);
     return { limitBytes: this.limitBytes, retainedBytes, droppedBytes: this.totalBytes - retainedBytes };
+  }
+
+  private retainedEnds(): { head: string; tail: string } {
+    const head = new StringDecoder("utf8").write(Buffer.concat(this.head));
+    const tail = this.tailBuffer();
+    let start = 0;
+    while (start < Math.min(3, tail.length) && (tail[start]! & 0xc0) === 0x80) start++;
+    return { head, tail: tail.subarray(start).toString("utf8") };
+  }
+
+  evidence(): Omit<FileTail, "text"> {
+    return { state: this.totalBytes > this.limitBytes ? "truncated" : "complete",
+      bytesRead: Math.min(this.totalBytes, this.limitBytes), fileBytes: this.totalBytes };
   }
 
   text(): string {
     const truncation = this.truncation();
-    const head = Buffer.concat(this.head).toString("utf8");
-    if (!truncation) return head + Buffer.concat(this.tail).toString("utf8");
-    return `${head}\n[... ${truncation.droppedBytes} bytes of stderr dropped ...]\n${this.tailBuffer().toString("utf8")}`;
+    if (!truncation) return Buffer.concat([...this.head, ...this.tail]).toString("utf8");
+    const { head, tail } = this.retainedEnds();
+    return `${head}\n[... ${truncation.droppedBytes} bytes of stderr dropped ...]\n${tail}`;
   }
 }
 
@@ -5832,6 +5855,7 @@ async function spawnCodexWorkerInPrivateTemp(
   const stdoutDecoder = new StringDecoder("utf8");
   let stdoutBytes = 0;
   const stderrRetainer = new CodexStderrRetainer();
+  let stderrFailure: StderrFailure | undefined;
   let outputLimit: CodexWorkerOutputLimitError | undefined;
   const pidRef: { pid?: number } = {};
   const spawn = args.containment?.spawn ?? spawnDetachedGroup;
@@ -5857,9 +5881,10 @@ async function spawnCodexWorkerInPrivateTemp(
   const childEnv = { ...codexSpawnEnv(config, args, nativeCacheRoot), TMPDIR: privateTmpDir };
   const contained = spawn(
     { command: bin, args: codexExecArgs(args, config, selection, nativeCacheRoot), cwd: args.cwd, env: childEnv },
-    (chunk) => {
+    (chunk, failure) => {
       if (outputLimit || timedOut) return;
-      // W1-T8203: stderr past its bound is truncated (head + tail), never a teardown and never a verdict.
+      if (failure) stderrFailure = failure;
+      // Retain diagnostics without interrupting the child; completeness is judged after its actual exit.
       stderrRetainer.push(chunk);
     },
     args.onSpawnError,
@@ -5910,11 +5935,11 @@ async function spawnCodexWorkerInPrivateTemp(
   else signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const exit = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
+    await contained.outputClosed;
     if (outputLimit) throw outputLimit;
     if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
     stdout.push(stdoutDecoder.end());
     const parsed = stdout.finish();
-    lineageEnd = exit.kind === "exit" && exit.code === 0 && !parsed.isError ? "stream-ended" : "interrupted";
     if (parsed.outputTruncation && args.runId) appendLedger(ledgerPathFor(config), {
       run_id: args.runId,
       task_id: args.taskId ?? "unattributed",
@@ -5923,9 +5948,20 @@ async function spawnCodexWorkerInPrivateTemp(
     });
     const stderr = stderrRetainer.text();
     const stderrTruncation = stderrRetainer.truncation();
+    const droppedOutput = (parsed.outputTruncation?.droppedBytes ?? 0) > 0;
+    const textBytes = Buffer.byteLength(parsed.text);
+    const blockBytes = parsed.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    const outputRetention: NonNullable<CodexWorkerResult["outputRetention"]> = {
+      text: { state: droppedOutput ? "truncated" : "complete", bytesRead: textBytes },
+      blocks: { state: droppedOutput ? "truncated" : "complete", bytesRead: blockBytes },
+      stderr: { ...stderrRetainer.evidence(), ...stderrFailure },
+      originalSubtype: parsed.subtype,
+    };
+    const incomplete = Object.values(outputRetention).some(value => typeof value !== "string" && value.state !== "complete");
     // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
     const exitCode = exit.kind === "exit" ? exit.code : null;
-    const isError = parsed.isError || exitCode !== 0;
+    const isError = parsed.isError || exitCode !== 0 || incomplete;
+    lineageEnd = isError ? "interrupted" : "stream-ended";
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
     const harnessCommit = harnessCommits && !isError ? commitCodexWriterEdits(args.cwd, parsed.text) : undefined;
@@ -5950,7 +5986,9 @@ async function spawnCodexWorkerInPrivateTemp(
       ...(parsed.outputTruncation ? { outputTruncation: parsed.outputTruncation } : {}),
       ...(stderrTruncation ? { stderrTruncation } : {}),
       stderr,
-      subtype: isError ? (parsed.isError ? parsed.subtype : `error_exit_${exitCode}`) : "success",
+      outputRetention,
+      subtype: parsed.isError ? parsed.subtype : exitCode !== 0 ? `error_exit_${exitCode}`
+        : incomplete ? "error_incomplete_output" : "success",
       isError,
       exit,
       apiError: parsed.errors.some((error) => /rate limit|server|network/i.test(error)),
