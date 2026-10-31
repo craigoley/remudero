@@ -22,6 +22,54 @@ function readAllowance(root: string): OpenWeightAllowanceState {
 }
 
 test("W1-T10954: real and duplicate settlement evidence affects only its exact request once while preserving all caps", async t => {
+  for (const model of ["gpt-oss-120b", "gpt-6-luna", "gpt-6.1-sol"]) await t.test(`${model} late body settles its own held attempt`, async child => {
+    const { dir } = ownedFixtureDir(child, "cash-late-body");
+    const clock = fixedClock(Date.now());
+    const config = { root: dir, dailyCapUsd: 25, workerProviders: {
+      cashEndpoint: "https://mapped.example.test/",
+    } } as Config;
+    let deliverBody!: (value: unknown) => void;
+    let calls = 0;
+    const body = new Promise<unknown>(resolve => { deliverBody = resolve; });
+    const result = await spawnOpenWeightWorker({ cwd: dir, workerHome: dir, prompt: "fixture", tools: [], clock,
+      requestTimeoutMs: 20, env: { RMD_OPENWEIGHT_API_KEY: "fixture-only" }, fetchImpl: async () => {
+        calls++;
+        const response = new Response(null, { status: 200 });
+        Object.defineProperty(response, "json", { value: () => body });
+        return response;
+      } }, config, { model, effort: "low" });
+    const before = readAllowance(dir);
+    const [requestId, held] = Object.entries(before.reservations)[0]!;
+    assert.equal(calls, 1);
+    assert.equal(result.isError, true);
+    assert.equal(held.settledUsd, null);
+    assert.equal(result.budgetHeldUsd, held.reservedUsd);
+    const other: CashRequestIdentity = { ...held.identity!, requestId: "another-request", attemptId: "another-attempt" };
+    const reserve = (identity: CashRequestIdentity) => reserveOpenWeightBudget(config, {
+      requestId: identity.requestId, identity, deployment: model, requestBodyBytes: 100, atIso: clock.iso(),
+    });
+    const otherReservation = reserve(other);
+    config.dailyCapUsd = held.reservedUsd + otherReservation.reservedUsd;
+    assert.throws(() => reserve({ ...other, requestId: "third-request" }), OpenWeightAllowanceExhaustedError);
+    const beforeReceipt = readAllowance(dir);
+    deliverBody(model === "gpt-6.1-sol"
+      ? { status: "completed", usage: { input_tokens: 10, output_tokens: 2,
+        input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } },
+        output: [{ type: "message", content: [{ type: "output_text", text: "late" }] }] }
+      : { usage: { prompt_tokens: 10, completion_tokens: 2 },
+        choices: [{ message: { content: "late" }, finish_reason: "stop" }] });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const settled = readAllowance(dir);
+    const actualUsd = openWeightUsageUsd(model, 10, 2);
+    assert.equal(settled.reservations[requestId]!.settledUsd, actualUsd);
+    assert.equal(settled.reservations[requestId]!.heldUsd, 0);
+    assert.deepEqual(settled.reservations[other.requestId], beforeReceipt.reservations[other.requestId]);
+    settleOpenWeightBudget(config, { requestId, identity: held.identity, actualUsd: 0, atIso: clock.iso() });
+    assert.deepEqual(readAllowance(dir), settled, "a duplicate cannot revise the late receipt");
+    reserve({ ...other, requestId: "third-request" });
+    assert.equal(calls, 1, "settlement never issues a replacement request");
+  });
+
   for (const model of ["gpt-oss-120b", "gpt-6-luna"]) {
     for (const adapterError of [false, true]) await t.test(`${model} adapterError=${adapterError}`, async child => {
       const { dir } = ownedFixtureDir(child, "cash-usage-settlement");

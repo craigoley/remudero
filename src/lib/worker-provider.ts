@@ -3600,7 +3600,7 @@ async function cashHttpFailure(response: Response, source: string, signal: Abort
 }
 
 /** A provider that ignores cancellation must still not hold its caller or wake up to spend later. */
-function cashAbortable<T>(signal: AbortSignal, run: () => Promise<T>): Promise<T> {
+function cashAbortable<T>(signal: AbortSignal, run: () => Promise<T>, onLate?: (value: T) => void): Promise<T> {
   signal.throwIfAborted();
   return new Promise<T>((resolve, reject) => {
     const finish = (done: () => void): void => {
@@ -3610,7 +3610,14 @@ function cashAbortable<T>(signal: AbortSignal, run: () => Promise<T>): Promise<T
     const aborted = (): void => finish(() => reject(signal.reason));
     signal.addEventListener("abort", aborted, { once: true });
     Promise.resolve().then(() => { signal.throwIfAborted(); return run(); }).then(
-      value => finish(() => resolve(value)), error => finish(() => reject(error)),
+      value => {
+        if (signal.aborted) {
+          try { onLate?.(value); }
+          catch (error) {
+            console.error(JSON.stringify({ event: "cash.late_receipt_failed", reason: error instanceof Error ? error.name : "unknown" }));
+          }
+        } else finish(() => resolve(value));
+      }, error => finish(() => reject(error)),
     );
   });
 }
@@ -3620,6 +3627,8 @@ async function cashRequestJson<T>(input: {
   args: OpenWeightSpawnArgs; deployment: string; source: string; endpoint: string;
   body: string; headers: Record<string, string>; next: (checkActive: () => void) => T;
   canContinue: () => boolean; chargeFailure: (error: Error) => void;
+  /** A parsed body can arrive after the deadline; it still belongs to the original paid attempt. */
+  onLateEnvelope?: (envelope: unknown, attempt: T) => void;
   /** W1-T10856: sees every response's headers (success or failure) before its status is handled. */
   observeHeaders?: (headers: Headers) => void;
 }): Promise<{ envelope: unknown; attempt: T }> {
@@ -3674,7 +3683,8 @@ async function cashRequestJson<T>(input: {
             }
           }
         }
-        const envelope = await cashAbortable(controller.signal, () => response.json());
+        const envelope = await cashAbortable(controller.signal, () => response.json(),
+          late => input.onLateEnvelope?.(late, attempt));
         checkActive();
         args.streamObserver?.({ kind: "working", tsMs: (args.clock ?? systemClock).now() });
         return { envelope, attempt };
@@ -5151,6 +5161,20 @@ function validFoundryTokenCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+type OpenWeightReceiptUsage = {
+  prompt_tokens?: unknown; completion_tokens?: unknown; cached_tokens?: unknown; cache_creation_tokens?: unknown;
+};
+
+function openWeightReceiptUsd(usage: OpenWeightReceiptUsage | undefined, deployment: string, usesResponses: boolean): number | undefined {
+  if (!usage || !validFoundryTokenCount(usage.prompt_tokens) || !validFoundryTokenCount(usage.completion_tokens) ||
+      (usage.cached_tokens !== undefined && !validFoundryTokenCount(usage.cached_tokens)) ||
+      (usesResponses ? !validFoundryTokenCount(usage.cache_creation_tokens)
+        : usage.cache_creation_tokens !== undefined && !validFoundryTokenCount(usage.cache_creation_tokens)) ||
+      ((usage.cached_tokens as number | undefined) ?? 0) + ((usage.cache_creation_tokens as number | undefined) ?? 0) > usage.prompt_tokens) return undefined;
+  return openWeightUsageUsd(deployment, usage.prompt_tokens, usage.completion_tokens,
+    (usage.cached_tokens as number | undefined) ?? 0, (usage.cache_creation_tokens as number | undefined) ?? 0);
+}
+
 export async function spawnFoundryClaudeWorker(
   args: OpenWeightSpawnArgs,
   config: Config,
@@ -5454,9 +5478,20 @@ export async function spawnOpenWeightWorker(
         ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
       });
       const requestBodyBytes = Buffer.byteLength(body, "utf8");
-      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson({
+      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<{
+        requestId: string; identity: CashRequestIdentity; reservation: { reservedUsd: number };
+      }>({
         args, deployment: selection.model, source: "openweight", endpoint, body,
         headers: { "content-type": "application/json", "api-key": key },
+        onLateEnvelope: (late, attempt) => {
+          if (late === null || typeof late !== "object") return;
+          const receipt = (responses ? responses.read(late as Parameters<CashResponsesConversation["read"]>[0]) : late) as
+            { usage?: OpenWeightReceiptUsage };
+          const actualUsd = openWeightReceiptUsd(receipt.usage, selection.model, usesResponses);
+          if (actualUsd !== undefined) settleOpenWeightBudget(config, {
+            requestId: attempt.requestId, identity: attempt.identity, actualUsd, atIso: clock.iso(),
+          });
+        },
         observeHeaders: (headers) => {
           try { recordCashCapacity(config, selection.model, headers, { clock, runId: args.runId, taskId: args.taskId, endpoint: capacityEndpoint }); }
           catch (error) {
@@ -5489,23 +5524,19 @@ export async function spawnOpenWeightWorker(
           budgetReservedUsd += reservation.reservedUsd;
           pendingReservation = { requestId, identity, reservedUsd: reservation.reservedUsd };
           recordCashRequestEffort(requestEfforts, body, usesResponses ? "responses" : "chat-completions");
-          return { requestId, reservation };
+          return { requestId, identity, reservation };
         },
       });
       const payload = (responses ? responses.read(envelope as Parameters<CashResponsesConversation["read"]>[0]) : envelope) as {
         id?: unknown;
         model?: unknown;
-        usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; cached_tokens?: unknown; cache_creation_tokens?: unknown };
+        usage?: OpenWeightReceiptUsage;
         choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
       servedModels.push(cashResponseModel(payload.model));
       const usage = payload.usage;
-      const trustworthy = usage && validFoundryTokenCount(usage.prompt_tokens) && validFoundryTokenCount(usage.completion_tokens) &&
-        (usage.cached_tokens === undefined || validFoundryTokenCount(usage.cached_tokens)) &&
-        (usesResponses ? validFoundryTokenCount(usage.cache_creation_tokens)
-          : usage.cache_creation_tokens === undefined || validFoundryTokenCount(usage.cache_creation_tokens)) &&
-        ((usage.cached_tokens as number | undefined) ?? 0) + ((usage.cache_creation_tokens as number | undefined) ?? 0) <= usage.prompt_tokens;
+      const actualUsd = openWeightReceiptUsd(usage, selection.model, usesResponses);
       // Valid counters remain observable even when an incomplete receipt cannot price the request.
       const turnPromptTokens = validFoundryTokenCount(usage?.prompt_tokens) ? usage.prompt_tokens : 0;
       const turnCompletionTokens = validFoundryTokenCount(usage?.completion_tokens) ? usage.completion_tokens : 0;
@@ -5515,8 +5546,7 @@ export async function spawnOpenWeightWorker(
       cacheCreationTokens += turnWritten;
       promptTokens += turnPromptTokens;
       completionTokens += turnCompletionTokens;
-      if (trustworthy) {
-        const actualUsd = openWeightUsageUsd(selection.model, turnPromptTokens, turnCompletionTokens, turnCached, turnWritten);
+      if (actualUsd !== undefined) {
         settleOpenWeightBudget(config, { requestId, identity: pendingReservation!.identity, actualUsd, atIso: clock.iso() });
         budgetSettledUsd += Math.min(actualUsd, reservation.reservedUsd);
       } else {
