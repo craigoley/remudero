@@ -13,6 +13,8 @@
  * refresh) stays in the parent, because a child starts fresh every pass.
  */
 import { spawn } from "node:child_process";
+import { BoundedOutput } from "./bounded-file-tail.js";
+import { RmdError } from "./errors.js";
 import { inboxGardenerMode } from "./inbox-retirement.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { readFileSync } from "node:fs";
@@ -367,12 +369,12 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
         observe(event("running", { passId, nextDueAt: null, queueMs: Math.max(0, admittedMs - startedMs) }));
       },
     };
-    const settle = (outcome: GardenPassOutcome, error?: string): void => {
+    const settle = (outcome: GardenPassOutcome, error?: string, report?: GardenReportError): void => {
       settled = true;
       const deferred = typeof outcome === "object" && outcome !== null;
-      const exit = deferred ? null : outcome;
+      const exit = report ? report.childExit : deferred ? null : outcome;
       running = false;
-      if (hourly && exit === 0) reportedBucket = bucket;
+      if (hourly && exit === 0 && error === undefined) reportedBucket = bucket;
       // One completion timestamp for both destinations: the logger's own latency
       // is not child execution, and the persisted card can correlate this row.
       const finishedMs = clock.now();
@@ -388,11 +390,13 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
       const queueMs = admittedMs === undefined ? null : Math.max(0, admittedMs - startedMs);
       const executionMs = deferred || admittedMs === undefined ? null : Math.max(0, finishedMs - admittedMs);
       wiring.log(GARDEN_PASS_STEP, { name, passId, ms: finishedMs - startedMs, queueMs, executionMs, exit,
-        ...(deferred ? { reason: outcome.reason } : {}), ...(error === undefined ? {} : { error }) });
+        ...(deferred ? { reason: outcome.reason } : {}), ...(error === undefined ? {} : { error }),
+        ...(report ? { signal: report.signal, output_retention: report.retained.evidence,
+          stderr: report.retained.chunks.join("") } : {}) });
       const phase = deferred ? "idle" : error !== undefined || (exit !== null && exit !== 0) ? "failed" : exit === 0 ? "completed" : "cancelled";
       observe(event(phase, { passId, exit,
         queueMs, executionMs, ...(dueIntervalMs === undefined ? {} : { dueIntervalMs }),
-        reason: deferred ? outcome.reason : error !== undefined ? "spawn-failed" : exit === 0 ? "process-completed" : exit === null ? "signal-or-cancelled" : "process-failed" }));
+        reason: deferred ? outcome.reason : report ? "process-failed" : error !== undefined ? "spawn-failed" : exit === 0 ? "process-completed" : exit === null ? "signal-or-cancelled" : "process-failed" }));
     };
     let pass: Promise<GardenPassOutcome>;
     try {
@@ -404,7 +408,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     }
     pass.then(
       (exit) => settle(exit),
-      (e: unknown) => settle(null, String((e as Error)?.message ?? e)),
+      (e: unknown) => settle(null, String((e as Error)?.message ?? e), e instanceof GardenReportError ? e : undefined),
     );
   };
   const tick = (): void => {
@@ -483,7 +487,15 @@ export const GARDEN_PRIORITY_DEGRADED_STEP = "garden.priority_degraded";
 export const GARDEN_HEAP_EXHAUSTED = "heap_exhausted";
 
 const HEAP_EXHAUSTED_STDERR = /heap out of memory/;
-const STDERR_TAIL_CHARS = 8 * 1024;
+const STDERR_TAIL_BYTES = 8 * 1024;
+
+/** A failed report keeps the child's observed exit separate from the evidence failure. */
+class GardenReportError extends RmdError {
+  constructor(message: string, readonly childExit: number | null, readonly signal: NodeJS.Signals | null,
+    readonly retained: ReturnType<BoundedOutput["finish"]>) {
+    super("gardener", 1, message);
+  }
+}
 
 /** The harness tree this module runs from: where the precompiled run-task entry for a garden child lives. */
 const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -608,14 +620,27 @@ export function childGardenPassSpawn(
         stdio: ["ignore", "ignore", "pipe"],
       });
       child.once("spawn", () => signal.admitted?.());
-      let stderr = "";
+      const stderr = new BoundedOutput(STDERR_TAIL_BYTES);
+      const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+      let stderrFailure: { state: "unreadable" | "malformed"; reason: string } | undefined;
+      let stderrBytes = 0;
+      let heapSuffix = "";
       let heapExhaustedSeen = false;
-      child.stderr?.on("data", (chunk: Buffer | string) => {
-        const captured = `${stderr}${String(chunk)}`;
-        // Classify the stream before bounding its diagnostic tail: a long native backtrace
-        // can displace the fatal signature, including when a single chunk exceeds the cap.
+      child.stderr?.on("data", (chunk: Buffer) => {
+        stderrBytes += chunk.length;
+        // The fatal signature is ASCII; decoding failures must not erase a heap verdict.
+        const captured = heapSuffix + chunk.toString("latin1");
         heapExhaustedSeen ||= HEAP_EXHAUSTED_STDERR.test(captured);
-        stderr = captured.slice(-STDERR_TAIL_CHARS);
+        heapSuffix = captured.slice(-32);
+        if (stderrFailure) return;
+        try {
+          stderr.push(decoder.decode(chunk, { stream: true }));
+        } catch (error) {
+          stderrFailure = { state: "malformed", reason: String((error as Error)?.message ?? error).slice(0, 240) };
+        }
+      });
+      child.stderr?.once("error", (error) => {
+        stderrFailure = { state: "unreadable", reason: error.message.slice(0, 240) };
       });
       let lowered: Promise<void> = Promise.resolve();
       const pid = child.pid;
@@ -642,9 +667,19 @@ export function childGardenPassSpawn(
       });
       child.once("close", (code, signal) => {
         release();
+        if (!stderrFailure) {
+          try { stderr.push(decoder.decode()); }
+          catch (error) {
+            stderrFailure = { state: "malformed", reason: String((error as Error)?.message ?? error).slice(0, 240) };
+          }
+        }
+        const retained = stderr.finish();
+        if (stderrFailure) retained.evidence = { ...retained.evidence, ...stderrFailure, fileBytes: stderrBytes };
         void lowered.then(() => {
           if (signal !== null && heapExhaustedSeen) {
-            reject(new Error(`${GARDEN_HEAP_EXHAUSTED}: garden ${name} exceeded its ${heapLimitMb} MB heap cap (${signal})`));
+            reject(new GardenReportError(`${GARDEN_HEAP_EXHAUSTED}: garden ${name} exceeded its ${heapLimitMb} MB heap cap (${signal})`, code, signal, retained));
+          } else if (retained.evidence.state !== "complete") {
+            reject(new GardenReportError(`garden ${name}: incomplete stderr output (${retained.evidence.state})`, code, signal, retained));
           } else {
             resolve(code);
           }

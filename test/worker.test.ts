@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,7 +37,8 @@ import { ledgeredNonDispatchSpawn, runReview } from "../src/run-task.js";
 import { BoundedOutput } from "#src/lib/bounded-file-tail.js";
 import { WORKER_OUTPUT_BYTES } from "#src/lib/worker.js";
 import fs from "node:fs";
-import { readConfigGardenLedgerRows } from "#src/lib/config-gardener.js";
+import { childGardenPassSpawn, GARDEN_PASS_STEP, startGardenOffLoop } from "#src/lib/garden-registry.js";
+import type { GardenerRuntimeEvent } from "#src/lib/gardener-runtime.js";
 
 test("W1-T10962: truncated or unreadable worker and gardener output stays explicit and cannot become a complete success", async (t) => {
   {
@@ -73,11 +76,103 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
   assert.equal(clean.subtype, "success");
   const dir = mkdtempSync(join(tmpdir(), "rmd-garden-report-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  mkdirSync(join(dir, "state"));
-  writeFileSync(join(dir, "state", "ledger.ndjson"), "");
-  const archiveAt = new Date(Date.now() - 24 * 3600 * 1000).toISOString().replaceAll(":", "-").replace(".", "-");
-  writeFileSync(join(dir, "state", `ledger.${archiveAt}.ndjson.gz`), "unreadable archive");
-  assert.throws(() => readConfigGardenLedgerRows(join(dir, "state")), /incomplete ledger union/);
+  const entry = join(dir, "garden-report.mjs");
+  const runGarden = async (body: string) => {
+    writeFileSync(entry, body);
+    const events: GardenerRuntimeEvent[] = [];
+    let finish!: (row: Record<string, unknown>) => void;
+    const finished = new Promise<Record<string, unknown>>((resolve) => { finish = resolve; });
+    const log = (step: string, row: Record<string, unknown> = {}) => {
+      if (step === GARDEN_PASS_STEP) finish(row);
+    };
+    const spawnPass = childGardenPassSpawn({ entry, execArgv: [], root: dir, cwd: dir,
+      env: { ...process.env, NODE_V8_COVERAGE: "" }, reserve: () => undefined, log });
+    const garden = startGardenOffLoop("config", 3600_000, { spawnPass, log,
+      observe: (event) => { events.push(event); } });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const row = await Promise.race([finished, new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("garden child did not settle")), 10_000);
+      })]);
+      assert.equal(typeof row.passId, "string", "the actual attempt remains identifiable");
+      assert.equal(events.at(-1)?.passId, row.passId);
+      return { row, event: events.at(-1)! };
+    } finally {
+      clearTimeout(timer);
+      garden.stop();
+    }
+  };
+  const write = 'import { writeSync } from "node:fs"; ';
+  for (const [output, exit] of [["x".repeat(32768), 0], ["🙂".repeat(8192), 23]] as const) {
+    const { row, event } = await runGarden(`${write}writeSync(2, ${JSON.stringify(output)}); process.exit(${exit});`);
+    const retention = row.output_retention as { state: string; bytesRead: number; fileBytes: number };
+    assert.equal(retention?.state, "truncated", "real gardener output must carry retention evidence");
+    assert.equal(retention.fileBytes, 32768);
+    assert.equal(retention.bytesRead, 8192);
+    assert.ok(Buffer.byteLength(String(row.stderr)) <= 8192);
+    assert.doesNotMatch(String(row.stderr), /\uFFFD/);
+    assert.equal(row.exit, exit, "retention failure must preserve the actual process exit");
+    assert.equal(row.signal, null);
+    assert.equal(event.exit, exit);
+    assert.equal(event.phase, "failed", "an incomplete report cannot record a completed pass");
+    assert.equal(event.reason, "process-failed");
+    assert.match(String(row.error), /incomplete.*truncated/);
+  }
+  const readFailure = t.mock.method(fs, "readSync", () => { throw new Error("garden report read refused"); });
+  try {
+    const { row, event } = await runGarden(`${write}writeSync(2, "x".repeat(32768));`);
+    const retention = row.output_retention as { state: string; reason: string };
+    assert.equal(retention?.state, "unreadable");
+    assert.match(retention.reason, /garden report read refused/);
+    assert.equal(row.exit, 0);
+    assert.equal(event.phase, "failed");
+  } finally { readFailure.mock.restore(); }
+  const spawn = childProcess.spawn;
+  const pipeFailure = t.mock.method(childProcess, "spawn", (...args: Parameters<typeof spawn>) => {
+    const child = spawn(...args);
+    child.stderr?.once("data", () => child.stderr?.emit("error", new Error("garden pipe refused")));
+    return child;
+  });
+  syncBuiltinESMExports();
+  try {
+    const { row, event } = await runGarden(`${write}writeSync(2, "pipe error fixture");`);
+    const retention = row.output_retention as { state: string; reason: string };
+    assert.equal(retention?.state, "unreadable");
+    assert.match(retention.reason, /garden pipe refused/);
+    assert.equal(row.exit, 0);
+    assert.equal(event.phase, "failed");
+  } finally { pipeFailure.mock.restore(); syncBuiltinESMExports(); }
+  for (const bytes of [[0xc3, 0x28], [0xf0, 0x9f]]) {
+    const continuation = bytes[0] === 0xc3 ? 'await new Promise(r => setTimeout(r, 25)); writeSync(2, "end");' : "";
+    const malformed = await runGarden(`${write}writeSync(2, Buffer.from(${JSON.stringify(bytes)}));
+      ${continuation}`);
+    const retention = malformed.row.output_retention as { state: string; reason: string };
+    assert.equal(retention?.state, "malformed");
+    assert.match(retention.reason, /encoded data.*valid/i);
+    assert.equal(malformed.row.exit, 0);
+    assert.equal(malformed.event.phase, "failed");
+  }
+  const signalled = await runGarden(`${write}writeSync(2, "x".repeat(32768)); process.kill(process.pid, "SIGTERM");`);
+  assert.equal(signalled.row.exit, null);
+  assert.equal(signalled.row.signal, "SIGTERM");
+  assert.equal(signalled.event.phase, "failed");
+  const heap = await runGarden(`${write}writeSync(2, Buffer.from([0xc3, 0x28]));
+    await new Promise(r => setTimeout(r, 25)); writeSync(2, "heap out of memory");
+    process.kill(process.pid, "SIGTERM");`);
+  assert.match(String(heap.row.error), /^heap_exhausted:/);
+  assert.equal((heap.row.output_retention as { state: string })?.state, "malformed");
+  assert.equal(heap.row.exit, null);
+  assert.equal(heap.row.signal, "SIGTERM");
+  assert.equal(heap.event.phase, "failed");
+  const complete = await runGarden(`${write}writeSync(2, Buffer.from([0xf0, 0x9f]));
+    await new Promise(r => setTimeout(r, 25)); writeSync(2, Buffer.from([0x99, 0x82]));`);
+  assert.equal(complete.row.exit, 0);
+  assert.equal(complete.row.error, undefined, "split UTF-8 must remain complete");
+  assert.equal(complete.event.phase, "completed");
+  const empty = await runGarden("");
+  assert.equal(empty.row.exit, 0);
+  assert.equal(empty.row.error, undefined, "empty stderr is a complete stream");
+  assert.equal(empty.event.phase, "completed");
 });
 
 test("W1-T10962: retention preserves error envelopes and refuses an absent result", async () => {
