@@ -15,6 +15,7 @@
     - src/lib/inbox.ts
     - src/cli/commands/fix.ts
     - test/routing/inbox-and-fix-rows-name-the-model-that-served-them.test.ts
+    - "src/run-task.ts"
   status: queued
   attempts: 0
   rationale: |
