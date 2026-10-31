@@ -153,6 +153,8 @@ import {
   workerMarkerEnv,
   type ContainedProcess,
   type ContainedSpawnOptions,
+  type StderrFailure,
+  type StderrSink,
 } from "./worker-containment.js";
 import {
   abandonProviderWindowMeasurement,
@@ -1239,7 +1241,7 @@ export interface SpawnWorkerArgs {
   containment?: {
     spawn?: (
       opts: ContainedSpawnOptions,
-      onStderr?: (chunk: string) => void,
+      onStderr?: StderrSink,
       onSpawnError?: (err: NodeJS.ErrnoException) => void,
     ) => ContainedProcess;
     teardown?: (pgid: number) => void;
@@ -3193,6 +3195,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     }
 
     const stderrOutput = new BoundedOutput(WORKER_OUTPUT_BYTES);
+    let stderrFailure: StderrFailure | undefined;
 
     // Worker process-tree containment. `pidRef` is populated lazily by the spawn closure the first time the SDK spawns, and
     // `withWorkerGroupTeardown` guarantees teardown against it once the stream settles on EITHER path, so a run's process
@@ -3219,7 +3222,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // custom spawn (W1-T117).
       spawnClaudeCodeProcess: buildContainedSpawnFn(
         spawnContained,
-        (chunk) => stderrOutput.push(chunk),
+        (chunk, failure) => {
+          stderrOutput.push(chunk);
+          if (failure) stderrFailure = failure;
+        },
         pidRef,
         args.onSpawnError,
       ),
@@ -3356,6 +3362,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           collectWorkerResult(liveQuery, {
             childEnvKeys: Object.keys(childEnv).sort(),
             stderrOutput,
+            stderrFailure: () => stderrFailure,
             // Logged verbatim as CONFIGURED inputs, never a read-back: effort is absent from the SDK envelope, and model here
             // is the requested knob, which may differ from the envelope's `modelUsage` keys. Unset gives the honest "default"
             // label, never a guess.
@@ -3839,6 +3846,7 @@ export async function collectWorkerResult(
     taskId?: string;
     stderrChunks?: string[];
     stderrOutput?: BoundedOutput;
+    stderrFailure?: () => StderrFailure | undefined;
     /** Configured input, logged verbatim — defaults to `DEFAULT_MODEL_LABEL`. */
     model?: string;
     /** Configured input, logged verbatim — defaults to `DEFAULT_EFFORT_LABEL`. */
@@ -4077,6 +4085,8 @@ export async function collectWorkerResult(
   const retainedBlocks = blockOutput.finish(readOutput);
   const retainedText = textOutput.finish(readOutput);
   const retainedStderr = stderrOutput.finish(readOutput);
+  const stderrFailure = opts.stderrFailure?.();
+  if (stderrFailure) retainedStderr.evidence = { ...retainedStderr.evidence, ...stderrFailure };
   if (!sawResult) retainedText.evidence = { state: "absent", bytesRead: 0, reason: "no result envelope observed" };
   const outputRetention = { blocks: retainedBlocks.evidence, text: retainedText.evidence,
     stderr: retainedStderr.evidence, originalSubtype: subtype };

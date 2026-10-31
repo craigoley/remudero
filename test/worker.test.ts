@@ -6,6 +6,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { WorkerSettingsError } from "../src/lib/settings.js";
 import { WorkerKeychainError } from "../src/lib/worker-home.js";
 import { isPidAlive, RUN_ID_ENV, spawnDetachedGroup, TASK_ID_ENV } from "../src/lib/worker-containment.js";
@@ -102,7 +103,45 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
       garden.stop();
     }
   };
-  const write = 'import { writeSync } from "node:fs"; ';
+  const runWorker = async (body: string, pipeError = false) => {
+    const workerDir = join(dir, "worker");
+    mkdirSync(workerDir, { recursive: true });
+    const queryFn = (({ options }: { options: {
+      env: Record<string, string>;
+      spawnClaudeCodeProcess: (opts: unknown) => ChildProcessWithoutNullStreams;
+    } }) => (async function* () {
+      const child = options.spawnClaudeCodeProcess({ command: process.execPath,
+        args: ["--input-type=module", "-e", body], cwd: workerDir,
+        env: { ...options.env, NODE_V8_COVERAGE: "" } });
+      if (pipeError) child.stderr.once("data", () => child.stderr.emit("error", new Error("worker pipe refused")));
+      // A handshake makes split UTF-8 arrive in separate parent reads.
+      child.stdout.on("data", () => child.stdin.write("continue\n"));
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", resolve);
+      });
+      yield { type: "result", subtype: "success", is_error: false, result: "done",
+        session_id: "real-worker-attempt", total_cost_usd: 0.5, num_turns: 3 };
+      if (code !== 0) throw Object.assign(new Error("fixture worker failed"), { exitCode: code });
+    })()) as unknown as Parameters<typeof spawnWorker>[0]["queryFn"];
+    const result = await spawnWorker({ ...e2eSpawnWorkerArgs(workerDir), queryFn });
+    assert.equal(result.sessionId, "real-worker-attempt");
+    assert.equal(result.costUsd, 0.5);
+    assert.equal(result.numTurns, 3);
+    return result;
+  };
+  const write = `import { writeSync as writePart } from "node:fs";
+    function writeSync(fd, value) {
+      const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      let written = 0;
+      while (written < bytes.length) {
+        const count = writePart(fd, bytes, written, bytes.length - written);
+        if (count <= 0) throw new Error("fixture short write");
+        written += count;
+      }
+      if (written !== bytes.length) throw new Error("fixture byte count mismatch");
+      return written;
+    } `;
   for (const bytes of [8193, GARDEN_OUTPUT_BYTES]) {
     const { row, event } = await runGarden(`${write}writeSync(2, "x".repeat(${bytes}));`);
     assert.equal(row.exit, 0);
@@ -172,6 +211,44 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
   assert.equal(heap.row.exit, null);
   assert.equal(heap.row.signal, "SIGTERM");
   assert.equal(heap.event.phase, "failed");
+  for (const [bytes, exit] of [[[0xc3, 0x28], 0], [[0xf0, 0x9f], 23]] as const) {
+    const following = exit === 0 ? `process.stdout.write("ready");
+      await new Promise(r => process.stdin.once("data", r)); writeSync(2, "later");` : "";
+    const result = await runWorker(`${write}writeSync(2, Buffer.from(${JSON.stringify(bytes)}));
+      ${following} process.exit(${exit});`);
+    assert.equal(result.outputRetention?.stderr.state, "malformed", "raw child bytes must be validated");
+    assert.match(result.outputRetention!.stderr.reason!, /encoded data.*valid/i);
+    assert.equal(result.outputRetention?.stderr.fileBytes, bytes.length + (exit === 0 ? 5 : 0));
+    assert.equal(result.outputRetention?.originalSubtype, "success");
+    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(result.isError, true);
+    assert.equal(workerLedgerFields(result).verdict, "error_incomplete_output");
+    assert.equal(workerLedgerFields(result).output_retention?.stderr.state, "malformed");
+    assert.deepEqual(result.exit, exit === 0 ? { kind: "unobserved" } : { kind: "exit", code: exit });
+  }
+  const brokenPipe = await runWorker(`${write}writeSync(2, "pipe fixture");`, true);
+  assert.equal(brokenPipe.outputRetention?.stderr.state, "unreadable");
+  assert.match(brokenPipe.outputRetention!.stderr.reason!, /worker pipe refused/);
+  assert.equal(brokenPipe.isError, true);
+  assert.equal(brokenPipe.subtype, "error_incomplete_output");
+  const largeWorker = await runWorker(`${write}writeSync(2, "x".repeat(${WORKER_OUTPUT_BYTES + 4}));`);
+  assert.equal(largeWorker.outputRetention?.stderr.state, "truncated");
+  assert.equal(largeWorker.outputRetention?.stderr.fileBytes, WORKER_OUTPUT_BYTES + 4);
+  assert.equal(largeWorker.outputRetention?.stderr.bytesRead, WORKER_OUTPUT_BYTES);
+  assert.equal(largeWorker.subtype, "error_incomplete_output");
+  assert.equal(largeWorker.isError, true);
+  const splitWorker = await runWorker(`${write}writeSync(2, Buffer.from([0xf0, 0x9f]));
+    process.stdout.write("ready");
+    await new Promise(r => process.stdin.once("data", r));
+    writeSync(2, Buffer.from([0x99, 0x82])); process.stdin.destroy();`);
+  assert.equal(splitWorker.stderr, "🙂");
+  assert.equal(splitWorker.outputRetention?.stderr.state, "complete");
+  assert.equal(splitWorker.isError, false);
+  assert.equal(splitWorker.subtype, "success");
+  const emptyWorker = await runWorker("");
+  assert.equal(emptyWorker.outputRetention?.stderr.state, "complete");
+  assert.equal(emptyWorker.stderr, "");
+  assert.equal(emptyWorker.isError, false);
   const complete = await runGarden(`${write}writeSync(2, Buffer.from([0xf0, 0x9f]));
     await new Promise(r => setTimeout(r, 25)); writeSync(2, Buffer.from([0x99, 0x82]));`);
   assert.equal(complete.row.exit, 0);

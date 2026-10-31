@@ -133,6 +133,14 @@ export function commandExecutable(command: string): string {
   }
 }
 
+export interface StderrFailure {
+  state: "malformed" | "unreadable";
+  reason: string;
+  fileBytes: number;
+}
+
+export type StderrSink = (chunk: string, failure?: StderrFailure) => void;
+
 /**
  * Spawn `opts.command` DETACHED into its own process group/session (see file
  * header) and pipe its stderr into `onStderr` — replicating the SDK's own
@@ -146,7 +154,7 @@ export function commandExecutable(command: string): string {
  */
 export function spawnDetachedGroup(
   opts: ContainedSpawnOptions,
-  onStderr?: (chunk: string) => void,
+  onStderr?: StderrSink,
   onSpawnError?: (err: NodeJS.ErrnoException) => void,
 ): ContainedProcess {
   const child = spawn(opts.command, opts.args, {
@@ -177,7 +185,37 @@ export function spawnDetachedGroup(
     }
   });
   if (onStderr) {
-    child.stderr?.on("data", (chunk: Buffer) => onStderr(chunk.toString("utf8")));
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    let failure: Omit<StderrFailure, "fileBytes"> | undefined;
+    let bytes = 0;
+    child.stderr?.on("data", (chunk: Buffer) => {
+      bytes += chunk.length;
+      if (failure) return;
+      let text: string;
+      try {
+        text = decoder.decode(chunk, { stream: true });
+      } catch (error) {
+        failure = { state: "malformed", reason: String((error as Error)?.message ?? error).slice(0, 240) };
+        onStderr("", { ...failure, fileBytes: bytes });
+        return;
+      }
+      onStderr(text);
+    });
+    child.stderr?.once("error", (error) => {
+      failure = { state: "unreadable", reason: error.message.slice(0, 240) };
+      onStderr("", { ...failure, fileBytes: bytes });
+    });
+    child.stderr?.once("end", () => {
+      if (!failure) {
+        let text = "";
+        try { text = decoder.decode(); }
+        catch (error) {
+          failure = { state: "malformed", reason: String((error as Error)?.message ?? error).slice(0, 240) };
+        }
+        onStderr(text);
+      }
+      if (failure) onStderr("", { ...failure, fileBytes: bytes });
+    });
   }
   if (typeof child.pid !== "number") {
     // Synchronous spawn failure (e.g. a bad cwd) — the SDK's own default
@@ -321,10 +359,10 @@ export function workerMarkerEnv(runId?: string, taskId?: string, scope?: string)
 export function buildContainedSpawnFn(
   spawnContained: (
     opts: ContainedSpawnOptions,
-    onStderr?: (chunk: string) => void,
+    onStderr?: StderrSink,
     onSpawnError?: (err: NodeJS.ErrnoException) => void,
   ) => ContainedProcess,
-  onStderr: (chunk: string) => void,
+  onStderr: StderrSink,
   pidRef: { pid?: number },
   onSpawnError?: (err: NodeJS.ErrnoException) => void,
 ): (spawnOpts: ContainedSpawnOptions) => SdkSpawnedProcess {
