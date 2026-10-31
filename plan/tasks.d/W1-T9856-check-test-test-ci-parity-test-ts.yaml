@@ -3,14 +3,15 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: low
   priority: 1.18
   # refusal-amendment (W1-T9856, run W1-T9856-1792379814337, 2026-10-19T03:48:09.069Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: The reported checkout-dependent assertion lives in `test/ci-parity.test.ts`, outside the authorized implementation files.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
   # redesign: signature=effb1b3429f4d599
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 2 (cause stopped) of the operator's mechanical rulings (2026-10-21, W1-T10371): the symptom had 0 occurrence(s) across 7 day(s), never seen. Retired by the machine-filing judge, 2026-10-31T03:38:24.286Z
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/ci-parity.test.ts"

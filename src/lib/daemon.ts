@@ -142,7 +142,7 @@ import type { RetroTriggerDecision } from "./retro.js";
 // Type-only, keeping this module free of a runtime dependency on worker-containment.ts.
 import type { OrphanSweepReport } from "./worker-containment.js";
 // Type-only — shapes the feedback-landing injection points below (W1-T530).
-import type { FeedbackRefusal, LandFeedbackResult } from "./feedback-landing.js";
+import type { FeedbackRefusal, LandFeedbackResult, LandingGitMeter } from "./feedback-landing.js";
 // Type-only — github-posture.ts owns this shape; the real read lives in run-task.ts (W1-T1040).
 import type { GithubPostureFinding } from "./github-posture.js";
 // The Clock port (W1-T2897): declared in "../lib/clock" so every reachable-through-lib import
@@ -1712,6 +1712,7 @@ export interface DaemonDeps {
     CiLearningCadenceRunResult & {
       filedCount: number; skippedCount: number; refusedCount: number;
       carryRefusedCount?: number; carryRefused?: FeedbackRefusal[];
+      git?: LandingGitMeter;
     }
   >;
   /** Evaluate the retro cadence trigger this tick. Fires on merges-since-marker or days-since-marker, whichever
@@ -5303,6 +5304,10 @@ export async function runDaemon(
                       refused: result.refusedCount,
                       carry_refused: result.carryRefusedCount ?? 0,
                       carry_refusals: result.carryRefused ?? [],
+                      git_driver: result.git?.driver ?? "none",
+                      git_calls: result.git?.calls ?? 0,
+                      git_wall_ms: Math.round(result.git?.wallMs ?? 0),
+                      git_loop_ms: Math.round(result.git?.loopMs ?? 0),
                       lesson_recurrences: result.lessonRecurrences,
                     });
                   })

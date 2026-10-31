@@ -1985,7 +1985,8 @@ function fragmentJsonToYaml(raw: string): string {
 
 /** One Architect worker call for one proposal's draft prompt; tests inject a fake. Returns the full {@link
  *  WorkerResult} so {@link runDraftRung} logs the same `workerLedgerFields` as every spawn. */
-export type DraftSpawn = (proposal: Proposal, prompt: string, ctx?: DraftSpawnContext) => Promise<WorkerResult>;
+export type DraftWorkerResult = WorkerResult & { requestedModel?: string | null };
+export type DraftSpawn = (proposal: Proposal, prompt: string, ctx?: DraftSpawnContext) => Promise<DraftWorkerResult>;
 
 /**
  * W1-T4864: dirty drafts exclude that model on the next ladder attempt (`avoidModels` starts empty).
@@ -1996,6 +1997,8 @@ export interface DraftSpawnContext {
   attempt: number;
   /** The models whose draft for this proposal failed lint, in the order they were tried. */
   avoidModels: readonly string[];
+  /** Report the request before awaiting the worker, so a rejected spawn retains its model. */
+  onRequestedModel?: (model: string | null) => void;
 }
 
 export interface DraftRungDeps {
@@ -2004,7 +2007,7 @@ export interface DraftRungDeps {
   clock?: Clock;
   spawn: DraftSpawn;
   /** One optional subscription attempt after cash could not produce a lint-clean fragment. Undefined means reserve blocked it. */
-  escalate?: (proposal: Proposal, prompt: string) => Promise<WorkerResult | undefined>;
+  escalate?: (proposal: Proposal, prompt: string) => Promise<DraftWorkerResult | undefined>;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -2029,6 +2032,7 @@ export interface InboxDraftCompletion {
   snapshot: InboxDraftSnapshot;
   lintClean: boolean;
   violations: string[];
+  modelFields?: ReturnType<typeof draftModelFields>;
 }
 
 /** Content is a generation guard, NEVER an operator input identity. */
@@ -2105,6 +2109,7 @@ export function commitInboxDraftOutcomes(opts: {
           record.adopted = true; saveOutbox();
         }
         opts.log("inbox.drafted", { proposal_id: snapshot.proposal.id, repository: snapshot.repository, completion_id: id,
+          ...(completion.modelFields ?? draftModelFields()),
           consumed_inputs: snapshot.inputs, cache_adopted: true, lint_clean: completion.lintClean, unresolved_violations: completion.violations });
         delete outbox[id]; saveOutbox();
       }
@@ -2442,6 +2447,12 @@ function draftWorkerModel(worker: WorkerResult): string | null {
   return worker.routedModel ?? worker.model ?? null;
 }
 
+function draftModelFields(worker?: DraftWorkerResult, requestedModel?: string | null) {
+  return { requested_model: worker?.requestedModel ?? requestedModel ?? null, served_model: worker?.servedModel ?? null,
+    ...(worker?.servedModel == null ? { served_model_reason: worker?.servedModelReason ??
+      "the provider reported no served model for this call" } : {}) };
+}
+
 /** Draft EVERY proposal in `toDraft`. Independent proposals run concurrently up to {@link DAEMON_DRAFT_BATCH_CAP};
  *  one proposal's self-lint retries stay serial. NEVER THROWS — each spawn and parse is isolated in its OWN try/catch
  *  (W1-T192's fail-soft requirement), which is what makes this safe on an unattended poll. */
@@ -2449,20 +2460,24 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
   const captured = toDraft.map(proposal => ({ proposal: structuredClone(proposal),
     snapshot: deps.causalScope ? captureInboxDraftSnapshot(proposal, deps.causalScope) : undefined }));
   const draftOne = async (proposal: Proposal, snapshot?: InboxDraftSnapshot): Promise<DraftRungOutcome> => {
+    let lastWorker: DraftWorkerResult | undefined;
+    let lastRequestedModel: string | null = null;
     try {
       let prompt = inboxDraftPrompt(proposal, currentPlanText, runId);
       let parsed: ReturnType<typeof parseDraftedCandidate> = null;
       let violations: DraftLintViolation[] = [];
       // cc71f2 SELF-LINT: draft, lint, and on a blocking violation redraft with the failures in hand, bounded, so a
       // fired proposal reaches READY without an operator cleanup pass.
-      let lastWorker: Awaited<ReturnType<DraftRungDeps["spawn"]>> | undefined;
       // W1-T4864: a dirty relint walks the LADDER instead of re-rolling the same model.
       const avoidModels: string[] = [];
       let dirty: { from: string | null; violations: string[] } | undefined;
       let cashAttempts = 0;
       for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
         cashAttempts = attempt;
-        const worker = await deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels] });
+        lastWorker = undefined;
+        lastRequestedModel = null;
+        const worker = await deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels],
+          onRequestedModel: model => { lastRequestedModel = model; } });
         lastWorker = worker;
         if (dirty) {
           // NAME THE FALL-THROUGH, with the model that actually answered — a spawn that ignored `avoidModels` shows up
@@ -2545,6 +2560,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           : (failure.reason ?? "no FRAGMENT/STAMP markers in worker output");
         deps.log("inbox.draft_error", {
           proposal_id: proposal.id,
+          ...draftModelFields(lastWorker),
           ...(lastWorker ? { provider: lastWorker.provider, model: draftWorkerModel(lastWorker), selection_assignment_id: lastWorker.selectionAssignmentId } : {}),
           error,
           fragments: failure.fragments,
@@ -2567,7 +2583,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         };
       }
       const candidate: DraftedCandidate = {
-        ...(snapshot ? { completion: { snapshot, lintClean: violations.length === 0, violations: violations.map(v => v.message) } } : {}),
+        ...(snapshot ? { completion: { snapshot, lintClean: violations.length === 0, violations: violations.map(v => v.message), modelFields: draftModelFields(lastWorker) } } : {}),
         ...(parsed.releaseTaskId ? { releaseTaskId: parsed.releaseTaskId } : {}),
         proposalId: proposal.id,
         fragmentYaml: parsed.fragmentYaml,
@@ -2576,11 +2592,11 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       };
       // A still-dirty draft after the bounded retries is cached anyway and surfaces NOT-READY, but the unresolved set
       // is named on the ledger so the retro sees what the rung could not fix.
-      if (!deps.causalScope) deps.log("inbox.drafted", { proposal_id: proposal.id, lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });
+      if (!deps.causalScope) deps.log("inbox.drafted", { proposal_id: proposal.id, ...draftModelFields(lastWorker), lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });
       return { proposalId: proposal.id, ok: true, candidate };
     } catch (e) {
       const error = String((e as Error)?.message ?? e);
-      deps.log("inbox.draft_error", { proposal_id: proposal.id, error });
+      deps.log("inbox.draft_error", { proposal_id: proposal.id, ...draftModelFields(lastWorker, lastRequestedModel), error });
       return { proposalId: proposal.id, ok: false, error };
     }
   };
