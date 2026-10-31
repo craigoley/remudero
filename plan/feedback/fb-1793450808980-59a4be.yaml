@@ -1,0 +1,78 @@
+id: fb-1793450808980-59a4be
+ts: 2026-10-31T12:46:48.981Z
+raw: >-
+  Product-plan proposals must resolve the verified managed target checkout
+  independently of the serving generation's source directory.
+
+
+  OBSERVED on 2026-10-31: in both live serving generation trees,
+  ProductCaseService's default plan checkout port derives
+  join(dirname(options.repoRoot), repository.name). Serve composes product case
+  routes with repoRoot=deps.panelGraph.root. Live serve processes run from
+  generation directories /home/node/rmd-serve-gens/a and
+  /home/node/rmd-serve-gens/b. Both generation trees have the correct
+  managed-repository enrollment; the maintained target provider finds the
+  expected public craigoley/wreckterra repository at head
+  8dcce032af9c5c8df97fabad645103691cbfd07e; runnerRegistered and
+  bootstrapConfirmed return true. However, the default resolves
+  /home/node/rmd-serve-gens/wreckterra, which does not exist, while
+  /home/node/Remudero/repos/wreckterra/.git exists. The SDK-sibling default is
+  also not that managed checkout.
+
+
+  The plan producer refuses target_unreadable before creating its journal when
+  its checkout callback returns undefined. No plan execute, replay, worker, kick
+  or model was invoked to obtain this finding. The existing product/repository
+  are intact and have no plan operation recorded; the precise browser-displayed
+  response is still unavailable because of a separately reported OpenAI
+  browser-control defect. The observed default-lookup fault is independently
+  sufficient to block a new proposal that reaches that prerequisite; it is not
+  proof of the exact previous HTTP response.
+
+
+  Source: current Core Main e381a169c916cf377870fa64b956714b6780fcf8,
+  src/lib/product-case.ts default checkout composition;
+  src/lib/product-plan-operation.ts propose checkout prerequisite;
+  src/lib/serve.ts product-case route composition. Default managed checkout
+  layout is already maintained by instance-gateway.ts: config/control-root
+  repos/<repository>. Preserve repository identity and supported native
+  target/instance resolution rather than creating an artificial checkout beside
+  serving code.
+
+
+  Pre-filing check: all 21 observed open Core PR head trees were read against
+  fresh Main and each PR's merge-base. None owns a change to the
+  checkout/route-composition subject. Older dependency PRs inherit pre-C3 code;
+  they are not existing repairs. Main's plan search found the merged C3 source
+  task and receipt follow-ups, not an already-filed repair for this specific
+  default resolver.
+
+
+  Requested bounded proposal: correct the production default managed-checkout
+  resolution using the existing canonical control-root/instance configuration
+  and reject absent or identity-mismatched targets before handoff. Add a real
+  filesystem/Git fixture exercising the default ProductCaseService composition
+  without injecting planCheckout; keep an immutable generation root separate
+  from the existing target checkout. Demonstrate the old resolver fails,
+  corrected resolver selects the existing managed target, missing/mismatched
+  targets refuse without a journal/handoff, and retrying the same saved command
+  does not start a second plan. Preserve all current
+  product/brief/source/ownership/plan-review/resource/idempotency gates and the
+  required first real signed-in Console C4 gameplay launch.
+
+
+  Capture/proposal only: this submission requests no implementation model,
+  retry, budget increase, access-setting change, service restart or worker stop.
+  Any resulting implementation task must remain held until its ordinary filing
+  review and required operator approval/admission are complete. Existing global
+  limits and downstream Wreckterra holds remain. Do not reopen or hand-push the
+  completed C3 or Console branches.
+attachments: []
+origin: cli
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: f205e8ee-959a-4581-b439-6381fc213daf
+thread_id: null
