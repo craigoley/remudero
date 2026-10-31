@@ -397,8 +397,8 @@ export function scriptsTheSourceMapDescribes(result, sourceMapCache) {
     const lineLengths = sourceMapCache?.[script.url]?.lineLengths;
     if (seen.get(script.url) === 1 || !Array.isArray(lineLengths)) return true;
     const generated = lineLengths.reduce((sum, n) => sum + n, 0) + lineLengths.length - 1;
-    const extent = Math.max(...script.functions.flatMap((fn) => fn.ranges.filter((r) => r.startOffset === 0).map((r) => r.endOffset)));
-    return extent === generated;
+    const extent = generatedExtent(script);
+    return extent >= 0 && extent === generated;
   });
 }
 
@@ -472,7 +472,7 @@ function recordLineState(coverage) {
 }
 
 /** The largest V8 offset a raw script's whole-script ranges reach: its generated extent. */
-function generatedExtent(script) {
+export function generatedExtent(script) {
   let extent = -1;
   for (const fn of script?.functions ?? []) for (const range of fn?.ranges ?? []) {
     if (range.startOffset === 0 && range.endOffset > extent) extent = range.endOffset;
