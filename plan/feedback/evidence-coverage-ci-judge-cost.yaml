@@ -4,7 +4,7 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `ci-judge`, field `cost`.
 
-  Coverage: 99/405 joined worker calls (24.4%) in the trailing 7-day window;
+  Coverage: 96/354 joined worker calls (27.1%) in the trailing 7-day window;
   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
   First seen: 2026-10-08T16:51:25.889Z.
@@ -42,7 +42,7 @@ thread_id: null
 answered_by: null
 evidence_coverage_revision:
   version: 1
-  mainSha: e90d4b09f15ddeaa740249e249461a0a5c4cda13
+  mainSha: 693cc1991c68d3339d88f613958e4e869b1f7d53
   expectedRecord: >
     id: evidence-coverage-ci-judge-cost
 
@@ -52,7 +52,7 @@ evidence_coverage_revision:
       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
       `ci-judge`, field `cost`.
 
-      Coverage: 107/478 joined worker calls (22.4%) in the trailing 7-day window;
+      Coverage: 99/405 joined worker calls (24.4%) in the trailing 7-day window;
       below the field's 90.0% floor — a chronic gap no baseline excuses.
 
       First seen: 2026-10-08T16:51:25.889Z.
@@ -99,7 +99,7 @@ evidence_coverage_revision:
 
     evidence_coverage_revision:
       version: 1
-      mainSha: cfa32ee06fa43b109da3f8e49f5de664990a38c5
+      mainSha: e90d4b09f15ddeaa740249e249461a0a5c4cda13
       expectedRecord: >
         id: evidence-coverage-ci-judge-cost
 
@@ -109,8 +109,8 @@ evidence_coverage_revision:
           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
           `ci-judge`, field `cost`.
 
-          Coverage: 7/37 joined worker calls (18.9%) in the trailing 7-day window; below
-          the field's 90.0% floor — a chronic gap no baseline excuses.
+          Coverage: 107/478 joined worker calls (22.4%) in the trailing 7-day window;
+          below the field's 90.0% floor — a chronic gap no baseline excuses.
 
           First seen: 2026-10-08T16:51:25.889Z.
 
@@ -153,18 +153,92 @@ evidence_coverage_revision:
         thread_id: null
 
         answered_by: null
+
+        evidence_coverage_revision:
+          version: 1
+          mainSha: cfa32ee06fa43b109da3f8e49f5de664990a38c5
+          expectedRecord: >
+            id: evidence-coverage-ci-judge-cost
+
+            ts: 2026-10-08T16:52:14.613Z
+
+            raw: >-
+              Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+              `ci-judge`, field `cost`.
+
+              Coverage: 7/37 joined worker calls (18.9%) in the trailing 7-day window; below
+              the field's 90.0% floor — a chronic gap no baseline excuses.
+
+              First seen: 2026-10-08T16:51:25.889Z.
+
+
+              This follow-up never gates a PR or blocks work. Restore the field at the
+              lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+              reads), or record why this lane legitimately lacks it. The evidence-coverage
+              gardener updates this entry in place while the gap persists.
+            attachments: []
+
+            origin: cli
+
+            status: accepted
+
+            reply_to: null
+
+            proposal_pr: https://github.com/craigoley/remudero/pull/11344
+
+            summary:
+              headline: CI-judge lane is missing cost data on 81% of worker calls
+              what_happened: Only 7 of 37 worker calls in the last 7 days recorded the cost
+                field, at 18.9% against a 90% floor. The gap has persisted and no baseline
+                explains it. This follow-up does not block any PR.
+              decision: Restore the cost field at the ci-judge ledger write site, or record a
+                reason this lane legitimately lacks it.
+              options:
+                - label: Restore the cost field
+                  consequence: The ci-judge lane writes cost again, and coverage should recover
+                    toward the 90% floor.
+                - label: Record a legitimate exemption
+                  consequence: The lane is documented as not needing cost, and this gap entry
+                    stops being flagged.
+                - label: Leave the gap open for now
+                  consequence: The gardener keeps updating this entry in place, and the chronic
+                    gap stays visible.
+            expansion: null
+
+            submission_key: null
+
+            thread_id: null
+
+            answered_by: null
+          expectedPlan:
+            plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+            plan/tasks.d: e3c8eaa6813cf0e890d1f94323ce0d0b87be8a05
+          measurement:
+            lane: ci-judge
+            field: cost
+            observed: 107
+            denominator: 478
+            floor: 0.9
+            at: 2026-10-29T17:59:07.863Z
+            since: 2026-10-22T17:59:07.863Z
+            line: "Coverage: 107/478 joined worker calls (22.4%) in the trailing 7-day
+              window; below the field's 90.0% floor — a chronic gap no baseline
+              excuses."
+          closure:
+            eligible: false
+            reason: task W1-T9109 is unknown
       expectedPlan:
         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-        plan/tasks.d: e3c8eaa6813cf0e890d1f94323ce0d0b87be8a05
+        plan/tasks.d: 391aef7817cbca835d4bde7824a85e4f2e36ee08
       measurement:
         lane: ci-judge
         field: cost
-        observed: 107
-        denominator: 478
+        observed: 99
+        denominator: 405
         floor: 0.9
-        at: 2026-10-29T17:59:07.863Z
-        since: 2026-10-22T17:59:07.863Z
-        line: "Coverage: 107/478 joined worker calls (22.4%) in the trailing 7-day
+        at: 2026-10-30T07:35:31.215Z
+        since: 2026-10-23T07:35:31.215Z
+        line: "Coverage: 99/405 joined worker calls (24.4%) in the trailing 7-day
           window; below the field's 90.0% floor — a chronic gap no baseline
           excuses."
       closure:
@@ -172,16 +246,16 @@ evidence_coverage_revision:
         reason: task W1-T9109 is unknown
   expectedPlan:
     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-    plan/tasks.d: 391aef7817cbca835d4bde7824a85e4f2e36ee08
+    plan/tasks.d: aca553155ad25a92ff5c4c44170ca314c305b8ea
   measurement:
     lane: ci-judge
     field: cost
-    observed: 99
-    denominator: 405
+    observed: 96
+    denominator: 354
     floor: 0.9
-    at: 2026-10-30T07:35:31.215Z
-    since: 2026-10-23T07:35:31.215Z
-    line: "Coverage: 99/405 joined worker calls (24.4%) in the trailing 7-day
+    at: 2026-10-31T04:44:46.001Z
+    since: 2026-10-24T04:44:46.001Z
+    line: "Coverage: 96/354 joined worker calls (27.1%) in the trailing 7-day
       window; below the field's 90.0% floor — a chronic gap no baseline
       excuses."
   closure:
