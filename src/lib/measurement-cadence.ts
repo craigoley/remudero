@@ -82,7 +82,7 @@ import {
 } from "./coverage-improvement.js";
 import { handRunCensus, type HandRunCensusCadenceOpts, type HandRunCensusCadenceResult } from "./hand-run-census.js";
 import { lintTask } from "./task-linter.js";
-import { machineShardHeaderLines } from "./machine-filing.js";
+import { machineShardFilingRefusal, machineShardHeaderLines } from "./machine-filing.js";
 import { mechanicalRulingRow, type MechanicalDecision } from "./mechanical-rulings.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import {
@@ -3350,9 +3350,10 @@ export function ciLearningRecordVerdict(contents: string, label: string): { ok: 
   try {
     const task = loadPlanFromYaml(contents, label).tasks[0];
     const lint = lintTask(task);
-    return lint.ok
-      ? { ok: true, reason: "" }
-      : { ok: false, reason: lint.violations.map((v) => `${v.severity}:${v.check}`).join(", ") };
+    if (!lint.ok) return { ok: false, reason: lint.violations.map((v) => `${v.severity}:${v.check}`).join(", ") };
+    // A lesson creates its own path; admission must not borrow files from the daemon's tree.
+    const refused = machineShardFilingRefusal(contents, label, { pathExists: () => false });
+    return refused === undefined ? { ok: true, reason: "" } : { ok: false, reason: refused };
   } catch (e) {
     return { ok: false, reason: `unparseable: ${(e as Error).message}` };
   }
