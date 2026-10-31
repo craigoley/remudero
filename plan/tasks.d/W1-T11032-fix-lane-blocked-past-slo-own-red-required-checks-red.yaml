@@ -1,0 +1,37 @@
+- id: W1-T11032
+  title: "THE FIX-LANE GARDENER'S COSTLIEST DEFECT CLASS — blocked-past-slo:own-red:required checks red cost 53.61 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.2
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "fix-lane:blocked-past-slo:own-red:required checks red"
+  files:
+    - src/lib/machine-filing.ts
+    - test/triage/fix-lane-blocked-past-slo-own-red-required-checks-red.test.ts
+  acceptance:
+    - claim: "blocked-past-slo:own-red:required checks red no longer needs an operator hand fix"
+      proof: "grep: test(\"W1-T11032: fix-lane-blocked-past-slo-own-red-required-checks-red clears without a person\" in test/triage/fix-lane-blocked-past-slo-own-red-required-checks-red.test.ts"
+  note: "Filed by fix-lane at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    blocked-past-slo:own-red:required checks red cost 53.61 PR-hours; owner fix-lane
+    Owner: the fix lane itself (a defect in the harness that repairs PRs, not in the PR).
+    Source owner: src/lib/machine-filing.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #15046: 17.83 PR-hours — required checks red — refused (1 at this head) — retrying the fix round — mergeability unread this pass; inherited last known "clean" observed 2026-10-29T20:24:34.619Z for this exact head 3638bc8 (W1-T4470) — NOT DISPATCHED this pass: a needs-human escalation for this exact (task, PR, head 3638bc8c70124b6338c98a1beb6fff93ceb83b01, cause) is ALREADY OPEN and awaiting a human (https://github.com/craigoley/remudero/issues/15562) — a strike here would re-ask a question already in front of someone and append to that same issue; standing down until it is closed, the head moves, or the task contract changes, or an operator answers
+    - PR #15520: 15.16 PR-hours — required checks red — comment-load-ratchet refused by expiring-fixture-census — refused (1 at this head) — retrying the fix round — NOT DISPATCHED this pass: a needs-human escalation for this exact (task, PR, head 9dca5f8097ad82132b848c854f066a4515d69af7, cause) is ALREADY OPEN and awaiting a human (https://github.com/craigoley/remudero/issues/15594) — a strike here would re-ask a question already in front of someone and append to that same issue; standing down until it is closed, the head moves, or the task contract changes, or an operator answers
+    - PR #15551: 14.86 PR-hours — required checks red — ci-log fix, strike 1/2 — NOT DISPATCHED this pass: a needs-human escalation for this exact (task, PR, head 791baa42309446caee7327c313b30c7717765175, cause) is ALREADY OPEN and awaiting a human (https://github.com/craigoley/remudero/issues/15614) — a strike here would re-ask a question already in front of someone and append to that same issue; standing down until it is closed, the head moves, or the task contract changes, or an operator answers
+    - PR #9222: 6.67 PR-hours — required checks red — ci-log fix, strike 1/2 — mergeability unread this pass; inherited last known "dirty" observed 2026-10-05T10:22:20.986Z for this exact head 8b30cfc (W1-T4470)
+    - PR #9206: 6.03 PR-hours — required checks red — ci-log fix, strike 1/2 — mergeability unread this pass; inherited last known "dirty" observed 2026-10-05T10:22:20.994Z for this exact head f3e3e4f (W1-T4470)
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The rationale aggregates five PRs with differing blocker histories but supplies no common root-cause diagnosis or bounded remedy; the claimed fix-lane finding cannot be verified from the supplied record.; on the change's description/files alone, no diff was read — Three cited PRs explicitly await human decisions. The acceptance requires clearing without a person but does not explain how those pending decisions remain respected.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for test declaration text, which does not establish that the described blocker clears or that escalation safeguards remain effective."
+    judged_at: "2026-10-30T18:42:27.907Z"
+    pin: "78c0bf73466bd3b8d3d76deabb23662a8d1094fa5e85870ab1a34c9b8b956af0"

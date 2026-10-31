@@ -50,6 +50,7 @@ import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "../../lib/derivative-ci-failure.js";
 import { ghJson, parseReport, foreignTreeStandDownReason, workerTranscript, worktreeAdd, worktreeRemove, type SpawnWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, workerContinuation } from "../../lib/worker.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
+import { recordInstrumentGrantShadow } from "../../lib/instrument-grant.js";
 import type { MergeConflictEvidence } from "../../lib/merge-state.js";
 import { runStepsAsync, runStepsSync, step } from "../../lib/git-push.js";
 import { FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "../../lib/fix-fence.js";
@@ -2217,6 +2218,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     deriveChangesetClaimUpdate,
   } = fixCommandHelpers(host);
   const roundRows: Record<string, unknown>[] = [];
+  let roundModelFields: { requested_model: string | null; served_model: string | null; served_model_reason?: string } | undefined;
   const deps = { ...opts.deps, log: (step: string, extra?: Record<string, unknown>) => {
     // W1-T10339: a stand-down (and a design handoff) records the head, task contract and body it read, so the sweep
     // dispatches this PR again only once one of them has changed.
@@ -2224,8 +2226,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       ? { ...fixRungInputFields({ headSha: typeof extra?.head_sha === "string" ? extra.head_sha : opts.initialReview.headSha,
           contractRevision: currentContractRevision, bodySha256: opts.prBodySha256 }), ...extra }
       : extra;
-    roundRows.push({ ...row, task_id: opts.taskId, step });
-    opts.deps.log(step, row);
+    const attributed = roundModelFields && ["fix.dispatch", "fix.done", "fix.exhausted", "fix.commit_refused", "fix.stood_down"].includes(step)
+      ? { ...(step === "fix.dispatch" ? { requested_model: roundModelFields.requested_model } : roundModelFields), ...row } : row;
+    roundRows.push({ ...attributed, task_id: opts.taskId, step });
+    opts.deps.log(step, attributed);
   } };
   // W1-T7096: production call sites opt into the LLM judge. A caller that wires none (a test
   // fixture) keeps the former bounds as an explicit, judge-shaped stand-in — never a silent LLM spawn.
@@ -2532,6 +2536,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       consultedThisRound = true;
       if (stop.verdict === "change-approach") progressApproach = stop.approach;
     }
+    // A new round has no worker yet. Keep the last round only when the ceiling above ends it.
+    roundModelFields = undefined;
     const claimLost = branchClaimLost();
     if (claimLost) return claimLost;
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
@@ -4186,6 +4192,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         return { outcome: "stood_down", review, strikes, retriggers, reason: "admission-abandoned",
           standDownReason: "fix admission abandoned before a worker started" };
       }
+      roundModelFields = { requested_model: fixArgs.model ?? null, served_model: fixResult.servedModel ?? null,
+        ...(fixResult.servedModel == null ? { served_model_reason: fixResult.servedModelReason ??
+          "the provider reported no served model for this call" } : {}) };
     } catch (e) {
       if (!isSpawnInfraBlockedError(e)) throw e;
       // No subprocess ever launched, nothing was billed: an INFRA-tagged $0 line, NEVER a
@@ -4719,6 +4728,11 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       if (workflowPaths.length > 0 || instrumentPaths.length > 0 || unfiledScope) {
         const scopeKind = workflowPaths.length > 0 ? "workflow" : instrumentPaths.length > 0 ? "instrument" : "unfiled";
         const paths = [...new Set(fixAction.paths)].sort();
+        // W1-T11029: judge the worker's instrument edit in shadow and save it for the operator's spot-check. It grants
+        // nothing and never throws, so the escalation below is unchanged.
+        if (scopeKind === "instrument") await recordInstrumentGrantShadow({ worktreePath: opts.worktreePath, instrumentPaths,
+          stateDir: join(opts.config.root, "state"), roundId, prNumber, headSha: priorHeadSha, log: deps.log,
+          git: (cwd, args) => (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(cwd, args, { maxBuffer: 1 << 26 }) });
         // #14217: an unfiled question is the same question at every head that still lacks these paths, so its identity
         // (the issue's Contract line) and its issue dedup omit the head; a closed issue still gets a fresh one.
         const headIndependent = scopeKind === "unfiled";

@@ -1,0 +1,38 @@
+- id: W1-T11028
+  title: A fix-branch lock held by an orphaned operator run is reclaimed after six hours instead of holding the branch and the recycle for days
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the in-flight lock's staleness rule; a live holder must never be reclaimed
+  origin: operator-session#slo-ladder-recon-2026-10-29
+  plan_refs:
+    - W1-T289
+    - W1-T396
+    - W1-T1067
+  files:
+    - src/lib/fs-race-safe.ts
+    - src/lib/inflight-lock.ts
+    - test/dispatch/an-orphaned-operator-run-releases-its-fix-branch-lock.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An in-flight lock whose holder run id starts with OPERATOR-, whose holder process has been adopted by its pid namespace's init (parent pid 1) and has no child process, and which is older than six hours, is reclaimed on the next acquire, and the reclaim names the holder's run id, pid and age. A holder with any other parent, with a child process, or younger than six hours still reads live, as does every holder whose run id does not start with OPERATOR-"
+      proof: "unit test: test/dispatch/an-orphaned-operator-run-releases-its-fix-branch-lock.test.ts"
+  rationale: |
+    OBSERVED, operator recon 2026-10-29/30:
+    - Three fix-branch locks in state/inflight were held by operator runs started inside the daemon container: OPERATOR-W10880-1619039 (since 2026-10-27T23:04:35Z), OPERATOR-W10898-3865986 (2026-10-28T17:52:38Z) and OPERATOR-W10942-989495 (2026-10-28T21:51:58Z).
+    - Each holder process was alive, sleeping, parented by the container's tini (pid 1 in its namespace) and had no child process. isHolderStale (src/lib/fs-race-safe.ts) therefore read each one live, correctly by its own rules.
+    - #15078 (W1-T10880) wrote sweep.fix.checkout_claim_declined reason inflight_lock_owner 59 times in 24 h, so its fix round never started.
+    - deploy.restart_refused at 2026-10-29T15:46:10Z named all three locks, and 95 deploy.skip rows followed until the container was recreated at 2026-10-30T05:39:08Z, which ended the holders.
+    INFERRED: an operator run started with docker exec whose session ended keeps running under init; nothing ends it but a recycle, which these same locks refuse.
+  design: |
+    One more staleness rung in isHolderStale (or a named sibling the in-flight lock calls), after the existing host, boot and pid rungs: run id OPERATOR-*, parent pid 1 in the holder's own pid namespace, no child process (from /proc/<pid>/stat and /proc/<pid>/task/*/children), and age over OPERATOR_ORPHAN_LOCK_MS (6 h). Read only /proc stat and children files, never cmdline or environ. An unreadable probe keeps the holder live. The reclaim row goes through the existing reclaim logging.
+  falsifier: |
+    Remove the rung: the orphaned fixture reads live and the test fails. Drop the parent check: the fixture of a live operator run (parent other than init) is reclaimed and the test fails.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (run-unfiled-1793371974275).
+    The deploy recycle's own lock wait is unchanged by this task; it benefits because the lock is gone.

@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
-  ORPHAN_RUN_BRANCH_GRACE_MS,
   orphanRunBranchReleased,
   runDrain,
   stillBlockedByPushedRunBranch,
@@ -24,13 +23,15 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 const ORPHAN = "run-W1-T3720-1790578461549";
 const ORPHAN_SHA = "4b1c0ffee4b1c0ffee4b1c0ffee4b1c0ffee4b1c";
 const ORPHAN_EPOCH = 1790578461549;
-const LATER = ORPHAN_EPOCH + ORPHAN_RUN_BRANCH_GRACE_MS + 60_000;
+const OBSERVED_SPAN = 2 * 60 * 60 * 1000;
+const LATER = ORPHAN_EPOCH + OBSERVED_SPAN + 60_000;
 
 const ref: PushedRunRef = { taskId: "W1-T3720", ref: ORPHAN, sha: ORPHAN_SHA };
 const evidence = (over: Partial<OrphanRunBranchEvidence> = {}): OrphanRunBranchEvidence => ({
   noPrHeadShas: { [ORPHAN]: ORPHAN_SHA },
   nowMs: LATER,
   liveTaskIds: new Set(),
+  longestSettledRunMs: OBSERVED_SPAN,
   ...over,
 });
 
@@ -50,7 +51,7 @@ function orphanPlan(): Plan {
 
 const ok = (id: string): RunResult => ({ taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" });
 
-test("an orphan run ref with a proven no-PR tip past the grace and no live run is released", () => {
+test("an orphan run ref with a proven no-PR tip older than observed runs and no live run is released", () => {
   assert.equal(orphanRunBranchReleased(ref, evidence()), true);
 });
 
@@ -63,7 +64,7 @@ test("an orphan run ref keeps blocking whenever any release condition is unprove
     false,
     "a re-push moved the tip off the proven sha",
   );
-  assert.equal(orphanRunBranchReleased(ref, evidence({ nowMs: ORPHAN_EPOCH + 60_000 })), false, "still inside the grace");
+  assert.equal(orphanRunBranchReleased(ref, evidence({ nowMs: ORPHAN_EPOCH + 60_000 })), false, "still inside the observed span");
   assert.equal(orphanRunBranchReleased(ref, evidence({ liveTaskIds: new Set(["W1-T3720"]) })), false, "a live run holds the lock");
   const oddEpoch: PushedRunRef = { taskId: "W1-T3906", ref: "run-W1-T3906-17899494673N", sha: ORPHAN_SHA };
   assert.equal(
@@ -105,7 +106,7 @@ test("the daemon dispatches a task held only by an orphan run branch and ledgers
   );
   assert.deepEqual(ran, ["W1-T3720"]);
   const release = lines.find((l) => l.step === "dispatch.run_branch_exception");
-  assert.equal(release?.extra.reason, "orphan-run-branch-no-pr");
+  assert.equal(release?.extra.reason, "older-than-observed-runs");
   assert.equal(release?.extra.ref, ORPHAN);
   assert.ok(!lines.some((l) => l.extra.reason === "run-branch-already-pushed"));
 });
@@ -151,7 +152,7 @@ test("runDrain releases an orphan run branch through the same shared predicate",
     { max: 1 },
   );
   assert.deepEqual(ran, ["W1-T3720"]);
-  assert.equal(lines.find((l) => l.step === "dispatch.run_branch_exception")?.extra.reason, "orphan-run-branch-no-pr");
+  assert.equal(lines.find((l) => l.step === "dispatch.run_branch_exception")?.extra.reason, "older-than-observed-runs");
 });
 
 test("the multi-lane drain releases an orphan run branch through the same shared predicate", async () => {
@@ -172,7 +173,7 @@ test("the multi-lane drain releases an orphan run branch through the same shared
     { laneCount: 2, max: 1 },
   );
   assert.deepEqual(ran, ["W1-T3720"]);
-  assert.equal(lines.find((l) => l.step === "dispatch.run_branch_exception")?.extra.reason, "orphan-run-branch-no-pr");
+  assert.equal(lines.find((l) => l.step === "dispatch.run_branch_exception")?.extra.reason, "older-than-observed-runs");
 });
 
 test("the orphan evidence reader returns the reaper no-PR cache with the clock and live locks", () => {

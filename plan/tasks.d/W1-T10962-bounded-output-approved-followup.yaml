@@ -20,6 +20,7 @@
     - test/infra/bounded-file-tail.test.ts
     - test/worker.test.ts
     - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
+    - "src/lib/garden-registry.ts"
   status: queued
   priority: 2
   attempts: 0

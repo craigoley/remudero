@@ -1,0 +1,22 @@
+id: incident-478bc5f43bbc20de
+ts: 2026-10-30T20:28:27.916Z
+raw: |-
+  Incident 478bc5f43bbc: flow pr-stage-stall:awaiting-review:review loop
+  First seen: 2026-10-30T20:24:28.104Z
+  Last seen: 2026-10-30T20:24:28.104Z
+  Count: 1, burn: 1.00/hr
+  Deploy sha(s): unknown
+  Instance(s): core
+  Sample events:
+    - pr=15797 awaiting-review: review loop
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#478bc5f43bbc20de9ace71cf17a7797f1ae05f361b977af1945134858e4c67ee
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
