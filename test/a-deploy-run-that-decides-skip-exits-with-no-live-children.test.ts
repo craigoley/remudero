@@ -5,11 +5,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { daemonInstanceRegistryPath } from "#src/lib/deployer.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function fixture(t: TestContext, primary = false) {
   const root = mkdtempSync(join(tmpdir(), "rmd-deploy-exit-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  const github = ghShim([{ when: "", exit: 1 }], { kind: "deploy-exit" });
+  t.after(() => rmSync(github.dir, { recursive: true, force: true }));
   const stateRoot = join(root, "instance");
   const installPath = join(stateRoot, "daemon-install");
   const bin = join(root, "bin");
@@ -25,7 +28,6 @@ function fixture(t: TestContext, primary = false) {
     *" remote "*) echo https://example.invalid/fixture.git ;;
   esac`);
   stub("docker", `echo "$*" >> '${root}/docker-calls'; exit 1`);
-  stub("gh", "exit 1");
   stub("launchctl", 'case "$1" in print) echo "pid = 12345" ;; list) echo \'"PID" = 12345;\' ;; *) exit 1 ;; esac');
   if (primary) {
     const registry = daemonInstanceRegistryPath(installPath);
@@ -34,7 +36,7 @@ function fixture(t: TestContext, primary = false) {
   }
   return { root, stateRoot, installPath, bin, stub, env: {
     ...process.env, HOME: root, TMPDIR: root, GH_TOKEN: "fixture-token",
-    RMD_SELF_SYNC_DONE: "1", PATH: `${bin}:${process.env.PATH ?? ""}`,
+    RMD_SELF_SYNC_DONE: "1", PATH: `${bin}:${github.dir}:${process.env.PATH ?? ""}`,
   } };
 }
 
