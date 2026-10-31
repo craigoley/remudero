@@ -61,7 +61,9 @@ test("W1-T10954: an invoked request with unreadable reply and no usage retains i
       assert.equal(result.budgetHeldUsd, row.reservedUsd);
       assert.equal(result.usageEstimateUsd, null);
       assert.equal(result.billedUsd, null);
-      assert.equal(result.tokenUsageState, "unavailable");
+      assert.equal(result.tokenUsageState, failure === "invalidUsage" ? "partial" : "unavailable");
+      assert.equal(result.tokens.input, failure === "invalidUsage" ? 10 : 0);
+      assert.equal(result.tokens.output, 0, "invalid or missing output tokens remain unobserved");
       assert.equal(result.isError, !["missingUsage", "invalidUsage"].includes(failure));
 
       config.dailyCapUsd = row.reservedUsd;

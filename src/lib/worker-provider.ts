@@ -5506,10 +5506,11 @@ export async function spawnOpenWeightWorker(
         (usesResponses ? validFoundryTokenCount(usage.cache_creation_tokens)
           : usage.cache_creation_tokens === undefined || validFoundryTokenCount(usage.cache_creation_tokens)) &&
         ((usage.cached_tokens as number | undefined) ?? 0) + ((usage.cache_creation_tokens as number | undefined) ?? 0) <= usage.prompt_tokens;
-      const turnPromptTokens = trustworthy ? usage.prompt_tokens as number : 0;
-      const turnCompletionTokens = trustworthy ? usage.completion_tokens as number : 0;
-      const turnCached = trustworthy ? (usage.cached_tokens as number | undefined) ?? 0 : 0;
-      const turnWritten = trustworthy ? (usage.cache_creation_tokens as number | undefined) ?? 0 : 0;
+      // Valid counters remain observable even when an incomplete receipt cannot price the request.
+      const turnPromptTokens = validFoundryTokenCount(usage?.prompt_tokens) ? usage.prompt_tokens : 0;
+      const turnCompletionTokens = validFoundryTokenCount(usage?.completion_tokens) ? usage.completion_tokens : 0;
+      const turnCached = validFoundryTokenCount(usage?.cached_tokens) ? usage.cached_tokens : 0;
+      const turnWritten = validFoundryTokenCount(usage?.cache_creation_tokens) ? usage.cache_creation_tokens : 0;
       cacheReadTokens += turnCached;
       cacheCreationTokens += turnWritten;
       promptTokens += turnPromptTokens;

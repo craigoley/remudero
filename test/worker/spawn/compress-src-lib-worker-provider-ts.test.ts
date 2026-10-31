@@ -29,11 +29,12 @@ test("W1-T10918: comment compression preserves executable code", () => {
   // Pre-compression source: 811d6e2d19018530bd12c885d307d08f02fb09bc.
   // Historical comparison evidence for this edit, not a new comment ceiling.
   // W1-T10855 intentionally adds price, shape and effort rows plus the effort lookup.
-  // Refresh executable fingerprints for that behavior; retain the compression bounds below.
+  // W1-T10954 adds exact cash settlement and preserves partial usage counters.
+  // Refresh executable fingerprints for those behaviors; retain the compression bounds below.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
-  assert.equal(actual.tokenCount, 44036);
-  assert.equal(actual.tokenDigest, "ca6c6a142830a81efbc569c3692b9b18ad5fe760b01c29ae2b10dd769f8b31fe");
-  assert.equal(actual.astDigest, "9f97e3043c20e31c8fe50a437016871c3d24c254ac1c7386174fb531acbf4742");
+  assert.equal(actual.tokenCount, 44702);
+  assert.equal(actual.tokenDigest, "90d240bc3a41aafb3e0ef0a091b2b4c960752b71cdc662ed5c4eb05583de0ead");
+  assert.equal(actual.astDigest, "d79c6ecf3226f4fd110b0876d8208b8c941708e68e009d92d7b56cee6ea1027d");
   assert.ok(actual.commentLines < 1357, "comment lines must decrease from the pre-compression source");
   assert.ok(actual.commentBytes < 104858, "comment bytes must decrease; rewrapping alone is insufficient");
 
