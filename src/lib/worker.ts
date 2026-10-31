@@ -203,6 +203,7 @@ import {
   codexCapabilityForRequestedModel,
   codexCandidatesForCapability,
   type WorkerExit,
+  type CodexCompletionEvidence,
 } from "./worker-provider.js";
 import {
   resolveProviderRoutingPolicy,
@@ -266,6 +267,7 @@ export interface WorkerResult {
     text: Omit<FileTail, "text">;
     blocks: Omit<FileTail, "text">;
     stderr: Omit<FileTail, "text">;
+    completion?: CodexCompletionEvidence;
     originalSubtype: string;
   };
   /** Provider-safe continuation disposition; never contains a session id or prompt. */
@@ -642,8 +644,8 @@ export function workerLedgerFields(r: WorkerResult): {
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
-    ...(r.outputRetention && [r.outputRetention.text, r.outputRetention.blocks, r.outputRetention.stderr]
-      .some((output) => output.state !== "complete") ? { output_retention: r.outputRetention } : {}),
+    ...(r.outputRetention && Object.values(r.outputRetention)
+      .some((output) => typeof output === "object" && output.state !== "complete") ? { output_retention: r.outputRetention } : {}),
     ...(r.mcpIsolation ? { mcp_isolation: r.mcpIsolation } : {}),
     ...(r.mcpBoundary ? { mcp_boundary: r.mcpBoundary } : {}),
     ...(r.mcpExposure ? { mcp_exposure: r.mcpExposure } : {}),

@@ -18,9 +18,9 @@ const { countCommentLines } = await import(COMMENT_LOAD_SCRIPT) as {
 // Fingerprint token kinds, raw literal contents and preceding line breaks (ASI), including types.
 // W1-T9855's reviewed root-provisioning and refusal edits changed the executable fingerprint.
 // W1-T10962's reviewed bounded output and incomplete-evidence handling changed it again.
-// Its final stderr drain and preservation of error-result subtypes are included in this fingerprint.
+// Its final stderr drain, error-result subtypes and terminal completion evidence are included here.
 // Intentional future code edits must review this hash before updating it.
-const REVIEWED_TOKENS_SHA256 = "38a6d04805ccbb696f181bf3997adbe47d9be6e55f2d87c7b4c43f292dc707bb";
+const REVIEWED_TOKENS_SHA256 = "401f2ea399ca69595f69d301666e4c61a07a082f5577a97196f7ba507d518764";
 const BEFORE_COMMENT_LINES = 2018;
 
 function executableTokens(source: string): Array<[SyntaxKind, string, boolean]> {

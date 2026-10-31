@@ -298,6 +298,66 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
   assert.equal(codexEmpty.outputRetention?.stderr.state, "complete");
   assert.equal(codexEmpty.isError, false);
   assert.equal(codexEmpty.subtype, "success");
+  const thread = { type: "thread.started", thread_id: "completion-attempt" };
+  const started = { type: "turn.started" };
+  const message = { type: "item.completed", item: { type: "agent_message", text: "unfinished report" } };
+  const completed = { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 25, output_tokens: 10 } };
+  for (const fixture of [
+    { name: "empty stdout", events: [], state: "absent", turns: 0 },
+    { name: "whitespace stdout", events: [], report: " \n\t ", state: "absent", turns: 0 },
+    { name: "thread without a turn", events: [thread], state: "incomplete", turns: 0 },
+    { name: "unfinished turn without a message", events: [thread, started], state: "incomplete", turns: 1 },
+    { name: "message without terminal completion", events: [thread, started, message], state: "incomplete", turns: 1 },
+    { name: "message without turn events", events: [thread, message], state: "incomplete", turns: 0 },
+    { name: "unfinished second turn", events: [thread, started, message, completed, started, message],
+      state: "incomplete", turns: 2 },
+    { name: "unmatched earlier turn", events: [thread, started, started, message, completed],
+      state: "incomplete", turns: 2 },
+    { name: "unfinished nonzero exit", events: [thread, started, message], state: "incomplete", turns: 1, exit: 23 },
+    { name: "terminal provider failure", events: [thread, started, { type: "turn.failed", error: { message: "network failed" } }],
+      state: "incomplete", turns: 1, subtype: "error_codex" },
+    { name: "completed turn without usage", events: [thread, started, message, { type: "turn.completed" }],
+      state: "complete", turns: 1 },
+    { name: "completed second turn", events: [thread, started, message, completed, started, message, completed],
+      state: "complete", turns: 2 },
+  ] as const) {
+    await t.test(`real Codex child: ${fixture.name}`, async () => {
+      const script = join(dir, "codex-completion.mjs");
+      const bin = join(dir, "codex-completion");
+      const report = "report" in fixture ? fixture.report : fixture.events.map(event => JSON.stringify(event)).join("\n");
+      const exitCode = "exit" in fixture ? fixture.exit : 0;
+      writeFileSync(script, `process.stdin.resume(); await new Promise(r => process.stdin.once("end", r));
+        process.stdout.write(${JSON.stringify(report)}); process.exitCode = ${exitCode};`);
+      writeFileSync(bin, `#!/bin/sh\nexec '${process.execPath}' '${script}'\n`);
+      chmodSync(bin, 0o700);
+      const result = await spawnCodexWorker({ workerHome: join(dir, "completion-home"), cwd: dir,
+        prompt: "completion evidence", tools: ["Read"], settingsFile: join(repoRoot(), "settings/worker.json"),
+        resumeSessionId: "resumed-attempt" },
+      { claudeBin: "/unused", root: dir, workerProviders: { codexBin: bin, codexModel: "gpt-6.1-sol",
+        codexHome: join(dir, "completion-auth") } });
+      const success = fixture.state === "complete";
+      assert.equal(result.isError, !success, "exit 0 and retained prose cannot substitute for turn.completed");
+      assert.equal(result.subtype, "subtype" in fixture ? fixture.subtype : exitCode !== 0 ? `error_exit_${exitCode}`
+        : success ? "success" : "error_incomplete_output");
+      assert.deepEqual(result.exit, { kind: "exit", code: exitCode });
+      assert.equal(result.sessionId, fixture.events.length ? "completion-attempt" : "resumed-attempt");
+      assert.equal(result.numTurns, fixture.turns);
+      assert.equal(result.text, fixture.events.some(event => event === message) ? message.item.text : "");
+      assert.equal(result.outputRetention?.completion?.state, fixture.state);
+      if (!success) {
+        assert.match(result.outputRetention!.completion!.reason!, fixture.state === "absent" ? /absent/ : /turn.completed/);
+        assert.deepEqual(workerLedgerFields(result).output_retention?.completion, result.outputRetention?.completion);
+      } else {
+        assert.equal(workerLedgerFields(result).output_retention, undefined);
+      }
+      assert.equal(workerLedgerFields(result).verdict, result.subtype);
+      assert.equal(workerLedgerFields(result).worker_exit_code, exitCode);
+      const completedCount = fixture.events.filter(event => event === completed).length;
+      assert.deepEqual(result.tokens, { input: completedCount * 100, output: completedCount * 10,
+        cacheRead: completedCount * 25, cacheCreation: 0 });
+      assert.equal(result.tokenUsageState, completedCount ? success ? "observed" : "partial" : "unavailable");
+    });
+  }
   for (const bytes of [8193, GARDEN_OUTPUT_BYTES]) {
     const { row, event } = await runGarden(`${write}await writeStderr("x".repeat(${bytes}));`);
     assert.equal(row.exit, 0);

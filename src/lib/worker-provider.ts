@@ -147,6 +147,7 @@ interface CodexWorkerResult {
     text: Omit<FileTail, "text">;
     blocks: Omit<FileTail, "text">;
     stderr: Omit<FileTail, "text">;
+    completion?: CodexCompletionEvidence;
     originalSubtype: string;
   };
   subtype: string;
@@ -2256,6 +2257,11 @@ interface CodexJsonEvent {
   };
 }
 
+export interface CodexCompletionEvidence {
+  state: "complete" | "absent" | "incomplete";
+  reason?: string;
+}
+
 export interface ParsedCodexEvents {
   sessionId: string;
   text: string;
@@ -2268,6 +2274,7 @@ export interface ParsedCodexEvents {
   errors: string[];
   usageRefusal?: UsageLimitRefusal;
   outputTruncation?: CodexOutputTruncation;
+  completion: CodexCompletionEvidence;
 }
 
 export interface CodexOutputTruncation {
@@ -2509,6 +2516,11 @@ class CodexJsonlAccumulator {
       isError: this.failed,
       subtype: this.failed ? "error_codex" : "success",
       errors: this.errors,
+      completion: Object.values(this.eventBytes).every(bytes => bytes === 0)
+        ? { state: "absent", reason: "Codex stdout report is absent" }
+        : this.completedTurns === 0 || this.turnInProgress || this.numTurns > this.completedTurns
+          ? { state: "incomplete", reason: "Codex report lacks turn.completed for the final turn" }
+          : { state: "complete" },
       ...(this.usageRefusal ? { usageRefusal: this.usageRefusal } : {}),
       ...(this.droppedBytes > 0 || this.spilledBytes > 0 ? { outputTruncation: {
         limitBytes: CODEX_WORKER_STDOUT_MAX_BYTES,
@@ -5955,9 +5967,10 @@ async function spawnCodexWorkerInPrivateTemp(
       text: { state: droppedOutput ? "truncated" : "complete", bytesRead: textBytes },
       blocks: { state: droppedOutput ? "truncated" : "complete", bytesRead: blockBytes },
       stderr: { ...stderrRetainer.evidence(), ...stderrFailure },
+      completion: parsed.completion,
       originalSubtype: parsed.subtype,
     };
-    const incomplete = Object.values(outputRetention).some(value => typeof value !== "string" && value.state !== "complete");
+    const incomplete = Object.values(outputRetention).some(value => typeof value === "object" && value.state !== "complete");
     // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
     const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0 || incomplete;
