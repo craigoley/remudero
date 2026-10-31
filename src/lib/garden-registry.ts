@@ -487,7 +487,8 @@ export const GARDEN_PRIORITY_DEGRADED_STEP = "garden.priority_degraded";
 export const GARDEN_HEAP_EXHAUSTED = "heap_exhausted";
 
 const HEAP_EXHAUSTED_STDERR = /heap out of memory/;
-const STDERR_TAIL_BYTES = 8 * 1024;
+/** PRIMARY CONTROL: match worker report retention; valid telemetry alone exceeds the old 8 KiB excerpt. */
+export const GARDEN_OUTPUT_BYTES = 256 * 1024;
 
 /** A failed report keeps the child's observed exit separate from the evidence failure. */
 class GardenReportError extends RmdError {
@@ -620,7 +621,7 @@ export function childGardenPassSpawn(
         stdio: ["ignore", "ignore", "pipe"],
       });
       child.once("spawn", () => signal.admitted?.());
-      const stderr = new BoundedOutput(STDERR_TAIL_BYTES);
+      const stderr = new BoundedOutput(GARDEN_OUTPUT_BYTES);
       const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
       let stderrFailure: { state: "unreadable" | "malformed"; reason: string } | undefined;
       let stderrBytes = 0;

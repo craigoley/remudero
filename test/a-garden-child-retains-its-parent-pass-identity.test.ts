@@ -133,13 +133,15 @@ async function sdkGardenProbe(t: TestContext, body: (dir: string) => string, tok
   const completed = new Promise<void>(resolve => { done = resolve; });
   const child = childGardenPassSpawn({ execPath: process.execPath,
     execArgv: ["--import", import.meta.resolve("tsx")], entry, cwd: root, root, env });
-  const garden = startGardenOffLoop("config", 60_000, { spawnPass: boundedGardenPassSpawn(child, 1), log: () => {},
+  let passReport: Record<string, unknown> | undefined;
+  const garden = startGardenOffLoop("config", 60_000, { spawnPass: boundedGardenPassSpawn(child, 1),
+    log: (_step, row) => { passReport = { exit: row?.exit, error: row?.error, output_retention: row?.output_retention }; },
     observe: event => { observed.push(event); if (["completed", "failed", "cancelled"].includes(event.phase)) done(); } });
   t.after(() => garden.stop());
   await completed;
   garden.stop();
   const parent = observed.find(event => event.phase === "completed");
-  assert.ok(parent?.passId, `private real garden must finish: ${JSON.stringify(observed)}`);
+  assert.ok(parent?.passId, `private real garden must finish: ${JSON.stringify({ observed, passReport })}`);
   assert.notEqual(parent.passId, passId, "this is a newly generated pass, not the old fixture UUID");
   assert.deepEqual(observed.map(event => event.phase), ["queued", "running", "completed"]);
   return { dir, expected: { state: "linked", version: 1, name: "config", passId: parent.passId } };

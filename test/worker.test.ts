@@ -37,7 +37,7 @@ import { ledgeredNonDispatchSpawn, runReview } from "../src/run-task.js";
 import { BoundedOutput } from "#src/lib/bounded-file-tail.js";
 import { WORKER_OUTPUT_BYTES } from "#src/lib/worker.js";
 import fs from "node:fs";
-import { childGardenPassSpawn, GARDEN_PASS_STEP, startGardenOffLoop } from "#src/lib/garden-registry.js";
+import { childGardenPassSpawn, GARDEN_OUTPUT_BYTES, GARDEN_PASS_STEP, startGardenOffLoop } from "#src/lib/garden-registry.js";
 import type { GardenerRuntimeEvent } from "#src/lib/gardener-runtime.js";
 
 test("W1-T10962: truncated or unreadable worker and gardener output stays explicit and cannot become a complete success", async (t) => {
@@ -103,13 +103,21 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
     }
   };
   const write = 'import { writeSync } from "node:fs"; ';
-  for (const [output, exit] of [["x".repeat(32768), 0], ["🙂".repeat(8192), 23]] as const) {
+  for (const bytes of [8193, GARDEN_OUTPUT_BYTES]) {
+    const { row, event } = await runGarden(`${write}writeSync(2, "x".repeat(${bytes}));`);
+    assert.equal(row.exit, 0);
+    assert.equal(row.error, undefined, "complete output above the former excerpt limit is retained");
+    assert.equal(row.output_retention, undefined, "no retention failure occurred");
+    assert.equal(event.phase, "completed");
+  }
+  const oversizedBytes = GARDEN_OUTPUT_BYTES + 4;
+  for (const [output, exit] of [["x".repeat(oversizedBytes), 0], ["🙂".repeat(oversizedBytes / 4), 23]] as const) {
     const { row, event } = await runGarden(`${write}writeSync(2, ${JSON.stringify(output)}); process.exit(${exit});`);
     const retention = row.output_retention as { state: string; bytesRead: number; fileBytes: number };
     assert.equal(retention?.state, "truncated", "real gardener output must carry retention evidence");
-    assert.equal(retention.fileBytes, 32768);
-    assert.equal(retention.bytesRead, 8192);
-    assert.ok(Buffer.byteLength(String(row.stderr)) <= 8192);
+    assert.equal(retention.fileBytes, oversizedBytes);
+    assert.equal(retention.bytesRead, GARDEN_OUTPUT_BYTES);
+    assert.ok(Buffer.byteLength(String(row.stderr)) <= GARDEN_OUTPUT_BYTES);
     assert.doesNotMatch(String(row.stderr), /\uFFFD/);
     assert.equal(row.exit, exit, "retention failure must preserve the actual process exit");
     assert.equal(row.signal, null);
@@ -120,7 +128,7 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
   }
   const readFailure = t.mock.method(fs, "readSync", () => { throw new Error("garden report read refused"); });
   try {
-    const { row, event } = await runGarden(`${write}writeSync(2, "x".repeat(32768));`);
+    const { row, event } = await runGarden(`${write}writeSync(2, "x".repeat(${oversizedBytes}));`);
     const retention = row.output_retention as { state: string; reason: string };
     assert.equal(retention?.state, "unreadable");
     assert.match(retention.reason, /garden report read refused/);
@@ -152,7 +160,7 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
     assert.equal(malformed.row.exit, 0);
     assert.equal(malformed.event.phase, "failed");
   }
-  const signalled = await runGarden(`${write}writeSync(2, "x".repeat(32768)); process.kill(process.pid, "SIGTERM");`);
+  const signalled = await runGarden(`${write}writeSync(2, "x".repeat(${oversizedBytes})); process.kill(process.pid, "SIGTERM");`);
   assert.equal(signalled.row.exit, null);
   assert.equal(signalled.row.signal, "SIGTERM");
   assert.equal(signalled.event.phase, "failed");
