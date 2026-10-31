@@ -40,7 +40,22 @@ test("W1-T10871: comment compression preserves executable code", () => {
   // Remove only that exact addition when comparing the merged executable snapshot.
   const cohortFields = "                due_because: result.dueBecause,\n                pass_ms: result.passMs,\n";
   assert.equal(source.split(cohortFields).length, 2, "the cohort fields occur once in the daemon row");
-  const baselineSource = source.replace(cohortFields, "");
+  // W1-T9914 adds the landing meter; its behavior is pinned by the cadence meter tests.
+  const meterFields = [
+    '                      git_driver: result.git?.driver ?? "none",',
+    '                      git_calls: result.git?.calls ?? 0,',
+    '                      git_wall_ms: Math.round(result.git?.wallMs ?? 0),',
+    '                      git_loop_ms: Math.round(result.git?.loopMs ?? 0),',
+    "",
+  ].join("\n");
+  assert.equal(source.split(meterFields).length, 2, "the landing meter occurs once in the daemon row");
+  const meterImport = 'import type { FeedbackRefusal, LandFeedbackResult, LandingGitMeter } from "./feedback-landing.js";';
+  const meterType = "      git?: LandingGitMeter;\n";
+  assert.equal(source.split(meterImport).length, 2, "the meter type is imported once");
+  assert.equal(source.split(meterType).length, 2, "the cadence result declares its meter once");
+  const baselineSource = source.replace(cohortFields, "").replace(meterFields, "")
+    .replace(meterImport, 'import type { FeedbackRefusal, LandFeedbackResult } from "./feedback-landing.js";')
+    .replace(meterType, "");
   assert.equal(executableDigest(baselineSource), EXPECTED_EXECUTABLE, "all other non-comment code lines match the accepted snapshot");
   // Independently catch ASI changes and whitespace inside multiline string/template literals.
   assert.equal(emittedDigest(baselineSource), EXPECTED_EMITTED, "other emitted JavaScript matches the accepted snapshot");

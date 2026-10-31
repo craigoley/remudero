@@ -169,7 +169,11 @@ test("W1-T9755: a content landing reads its identity without blocking a timer", 
   const git = sleepingGit();
   try {
     const { result, ticks } = await beside(git, () => landCiLearningShardsAsync([], f.clone, f.deps()));
-    assert.deepEqual(result, { filed: [], skipped: [], refused: [] });
+    const { git: meter, ...outcome } = result;
+    assert.deepEqual(outcome, { filed: [], skipped: [], refused: [] });
+    assert.ok(meter);
+    assert.equal(meter.driver, "async");
+    assert.equal(meter.calls, git.children().length, "the meter counts the observed git children");
     const children = git.children();
     const identity = children.filter((child) => child.argv.includes("config --get remote.origin.url"));
     assert.equal(identity.length, 2, `positive control: the target and the source identity reads ran: ${JSON.stringify(children)}`);
@@ -206,7 +210,19 @@ test("W1-T9755: the sync and async drivers acknowledge the same shards", async (
   try {
     const r1 = withLiveWritesAllowed(() => landCiLearningShards([], sync.clone, sync.deps()));
     const r2 = await withLiveWritesAllowed(() => landCiLearningShardsAsync([], awaited.clone, awaited.deps()));
-    assert.deepEqual(r2, r1);
+    const { git: syncMeter, ...syncOutcome } = r1;
+    const { git: asyncMeter, ...asyncOutcome } = r2;
+    assert.deepEqual(asyncOutcome, syncOutcome);
+    assert.ok(syncMeter);
+    assert.ok(asyncMeter);
+    assert.equal(syncMeter.driver, "sync");
+    assert.equal(asyncMeter.driver, "async");
+    assert.ok(syncMeter.calls > 0);
+    assert.equal(asyncMeter.calls, syncMeter.calls, "both drivers perform the same git work");
+    assert.ok(syncMeter.wallMs > 0);
+    assert.equal(syncMeter.loopMs, syncMeter.wallMs);
+    assert.ok(asyncMeter.wallMs > 0);
+    assert.ok(asyncMeter.loopMs > 0 && asyncMeter.loopMs <= asyncMeter.wallMs);
     assert.deepEqual(awaited.queued(), sync.queued());
     assert.deepEqual(sync.queued(), ["W1-T2-changed.yaml", "W1-T3-new.yaml"]);
   } finally {
