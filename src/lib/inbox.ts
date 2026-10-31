@@ -1985,7 +1985,8 @@ function fragmentJsonToYaml(raw: string): string {
 
 /** One Architect worker call for one proposal's draft prompt; tests inject a fake. Returns the full {@link
  *  WorkerResult} so {@link runDraftRung} logs the same `workerLedgerFields` as every spawn. */
-export type DraftSpawn = (proposal: Proposal, prompt: string, ctx?: DraftSpawnContext) => Promise<WorkerResult>;
+export type DraftWorkerResult = WorkerResult & { requestedModel?: string | null };
+export type DraftSpawn = (proposal: Proposal, prompt: string, ctx?: DraftSpawnContext) => Promise<DraftWorkerResult>;
 
 /**
  * W1-T4864: dirty drafts exclude that model on the next ladder attempt (`avoidModels` starts empty).
@@ -2004,7 +2005,7 @@ export interface DraftRungDeps {
   clock?: Clock;
   spawn: DraftSpawn;
   /** One optional subscription attempt after cash could not produce a lint-clean fragment. Undefined means reserve blocked it. */
-  escalate?: (proposal: Proposal, prompt: string) => Promise<WorkerResult | undefined>;
+  escalate?: (proposal: Proposal, prompt: string) => Promise<DraftWorkerResult | undefined>;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -2444,8 +2445,8 @@ function draftWorkerModel(worker: WorkerResult): string | null {
   return worker.routedModel ?? worker.model ?? null;
 }
 
-function draftModelFields(worker?: WorkerResult) {
-  return { requested_model: worker?.model ?? null, served_model: worker?.servedModel ?? null,
+function draftModelFields(worker?: DraftWorkerResult) {
+  return { requested_model: worker?.requestedModel ?? null, served_model: worker?.servedModel ?? null,
     ...(worker?.servedModel == null ? { served_model_reason: worker?.servedModelReason ??
       "the provider reported no served model for this call" } : {}) };
 }
@@ -2457,7 +2458,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
   const captured = toDraft.map(proposal => ({ proposal: structuredClone(proposal),
     snapshot: deps.causalScope ? captureInboxDraftSnapshot(proposal, deps.causalScope) : undefined }));
   const draftOne = async (proposal: Proposal, snapshot?: InboxDraftSnapshot): Promise<DraftRungOutcome> => {
-    let lastWorker: WorkerResult | undefined;
+    let lastWorker: DraftWorkerResult | undefined;
     try {
       let prompt = inboxDraftPrompt(proposal, currentPlanText, runId);
       let parsed: ReturnType<typeof parseDraftedCandidate> = null;

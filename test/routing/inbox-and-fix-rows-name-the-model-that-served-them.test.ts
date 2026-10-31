@@ -1,24 +1,27 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { captureInboxDraftSnapshot, commitInboxDraftOutcomes, inboxDraftExampleFragmentYaml,
-  MAX_DRAFT_LINT_ATTEMPTS, runDraftRung, type Proposal } from "#src/lib/inbox.js";
+  MAX_DRAFT_LINT_ATTEMPTS, runDraftRung, type DraftWorkerResult, type Proposal } from "#src/lib/inbox.js";
 import type { Config } from "#src/lib/config.js";
 import type { WorkerResult } from "#src/lib/worker.js";
-import { harnessCommitForShellLessWorker, runFixRung } from "#test/helpers/run-task-test.js";
+import { draftProposalBatch, harnessCommitForShellLessWorker, runFixRung,
+  spawnEscalatedInboxDraft } from "#test/helpers/run-task-test.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
 
 type Row = { step: string } & Record<string, unknown>;
 const proposal: Proposal = { id: "P9", summary: "model attribution", evidenceAnchors: [] };
 const clean = `=== FRAGMENT START ===\n${inboxDraftExampleFragmentYaml()}\n=== FRAGMENT END ===\nSTAMP: model attribution`;
 const dirty = "=== FRAGMENT START ===\n- id: NEW-1\n  title: x\n  acceptance: not a list\n=== FRAGMENT END ===\nSTAMP: model attribution";
 
-function worker(over: Partial<WorkerResult> = {}): WorkerResult {
+function worker(over: Partial<DraftWorkerResult> = {}): DraftWorkerResult {
   return { sessionId: "fixture", costUsd: 0, numTurns: 1, text: clean, blocks: [], stderr: "",
     subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
-    provider: "claude", model: "requested-draft", servedModel: "served-draft", effort: "medium",
+    provider: "cash", requestedModel: "requested-draft", model: "selected-deployment", servedModel: "served-draft", effort: "medium",
     tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
     compactionEvents: [], qualitySuspect: false, ...over };
 }
@@ -35,6 +38,7 @@ function assertModels(row: Row | undefined, requested: string, served: string | 
 }
 
 test("W1-T10876: an inbox draft row names the requested and served model", async t => {
+  await productionDraftRows(t);
   for (const scoped of [false, true]) for (const text of [clean, dirty]) {
     for (const servedModel of ["served-draft", undefined]) {
       const stateDir = ownedFixtureDir(t, "draft-model").dir;
@@ -64,6 +68,90 @@ test("W1-T10876: an inbox draft row names the requested and served model", async
   }
 });
 
+async function productionDraftRows(t: TestContext) {
+  const root = ownedFixtureDir(t, "production-draft-model").dir;
+  const target = gitRepo({ scope: t, kind: "draft-model-repo" });
+  mkdirSync(join(target.dir, "plan"));
+  writeFileSync(join(target.dir, "plan", "tasks.yaml"), inboxDraftExampleFragmentYaml().replace("NEW-1", "W1-T1"));
+  writeFileSync(join(target.dir, "README.md"), "model attribution\n");
+  for (const manifest of ["package.json", "package-lock.json"]) {
+    writeFileSync(join(target.dir, manifest), readFileSync(join(REPO_ROOT, manifest)));
+  }
+  target.git("add", ".");
+  target.git("commit", "-m", "fixture plan");
+  const origin = gitRepo({ scope: t, bare: true, kind: "draft-model-origin" });
+  target.addRemote("origin", origin.dir);
+  target.git("push", "origin", "main");
+  mkdirSync(join(root, "repos"));
+  renameSync(target.dir, join(root, "repos", "remudero"));
+  const requested = loadMounts(mountsPath(REPO_ROOT)).synthesis.inbox_draft;
+  assert.equal(requested.provider, "cash", "exercise the production cash draft route");
+  assert.notEqual(requested.model, "selected-deployment");
+  const scope = { repository: "acme/remudero" };
+  // A README grep proof is lint-clean against this small, real checkout.
+  const productionClean = clean.replace("src/lib/plan.ts", "README.md").replace(
+    "unit test: parseTasksFromYaml rejects an empty input instead of throwing a TypeError", "grep: draft-attribution-added in README.md");
+  let batch = 0;
+  for (const text of [productionClean, dirty, "malformed final result"]) for (const servedModel of ["served-draft", undefined]) {
+    const stateDir = join(root, "receipts", String(++batch));
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [proposal] }));
+    const rows: Row[] = [], requests: string[] = [];
+    const log = (step: string, extra?: Record<string, unknown>) => { rows.push({ step, ...extra }); };
+    const outcomes = await draftProposalBatch([proposal], { root, installRoot: REPO_ROOT,
+      workerProviders: { enabled: ["cash"], reservePercent: 5 } } as Config,
+      "acme", "remudero", `model-${batch}`, log, async args => {
+        requests.push(args.model!);
+        assert.equal(args.mountProvider, "cash");
+        // Only the external provider is replaced; the real caller must preserve args.model.
+        return worker({ text, requestedModel: undefined, servedModel,
+          servedModelReason: "fixture provider omitted its model" });
+      });
+    assert.ok(requests.length > 0, JSON.stringify({ outcomes, rows }));
+    assert.ok(requests.every(model => model === requested.model));
+    if (text === "malformed final result") {
+      assert.equal(outcomes[0].ok, false);
+      assertModels(rows.find(row => row.step === "inbox.draft_error"), requested.model, servedModel ?? null,
+        "fixture provider omitted its model");
+      continue;
+    }
+    assert.equal(outcomes[0].ok, true);
+    const args = { stateDir, scope, snapshots: [captureInboxDraftSnapshot(proposal, scope)], outcomes, log };
+    assert.throws(() => commitInboxDraftOutcomes({ ...args, log: () => { throw new Error("append unavailable"); } }), /append unavailable/);
+    commitInboxDraftOutcomes({ ...args, snapshots: [], outcomes: [] });
+    const drafted = rows.filter(row => row.step === "inbox.drafted");
+    assert.equal(drafted.length, 1);
+    assertModels(drafted[0], requested.model, servedModel ?? null, "fixture provider omitted its model");
+    assert.equal(drafted[0].lint_clean, text === productionClean, JSON.stringify(drafted[0]));
+  }
+}
+
+test("production draft escalation preserves the subscription request before provider resolution", async t => {
+  const root = ownedFixtureDir(t, "escalated-model").dir;
+  for (const servedModel of ["served-subscription", undefined]) {
+    const rows: Row[] = [];
+    let rescues = 0;
+    await runDraftRung([proposal], "- id: W1-T1\n", {
+      log: (step, extra) => { rows.push({ step, ...extra }); },
+      spawn: async () => worker({ text: dirty }),
+      escalate: async (_proposal, prompt) => spawnEscalatedInboxDraft({
+        cwd: root, settingsFile: join(root, "settings.json"), prompt,
+        config: { root, workerProviders: { enabled: ["cash", "claude"], reservePercent: 5 } } as Config,
+        mount: { model: "haiku", provider: "cash", effort: "high", maxTurns: 1, contextBudget: 1000 },
+        disallowedTools: [],
+      }, async args => {
+        rescues++;
+        assert.equal(args.model, "sonnet");
+        return worker({ requestedModel: undefined, model: "selected-subscription", servedModel,
+          servedModelReason: "fixture provider omitted its model" });
+      }, async () => ({ provider: "claude", readable: true, windows: [{ name: "weekly", usedPercent: 50 }] })),
+    }, "escalated-model");
+    assert.equal(rescues, 1, JSON.stringify(rows));
+    assertModels(rows.find(row => row.step === "inbox.drafted"), "sonnet", servedModel ?? null,
+      "fixture provider omitted its model");
+  }
+});
+
 test("draft attribution follows the final retry or escalation and survives draft errors", async t => {
   for (const escalation of [false, true]) for (const text of [clean, "malformed final result"]) {
     const rows: Row[] = [];
@@ -71,8 +159,8 @@ test("draft attribution follows the final retry or escalation and survives draft
     await runDraftRung([proposal], "- id: W1-T1\n", {
       log: (step, extra) => { rows.push({ step, ...extra }); },
       spawn: async () => worker(++attempts === MAX_DRAFT_LINT_ATTEMPTS && !escalation
-        ? { text, model: "requested-final", servedModel: "served-final" } : { text: dirty }),
-      ...(escalation ? { escalate: async () => worker({ text, model: "requested-final", servedModel: "served-final" }) } : {}),
+        ? { text, requestedModel: "requested-final", servedModel: "served-final" } : { text: dirty }),
+      ...(escalation ? { escalate: async () => worker({ text, requestedModel: "requested-final", servedModel: "served-final" }) } : {}),
     }, "final-model");
     assert.equal(attempts, MAX_DRAFT_LINT_ATTEMPTS);
     assertModels(rows.find(row => row.step === (text === clean || escalation ? "inbox.drafted" : "inbox.draft_error")),
