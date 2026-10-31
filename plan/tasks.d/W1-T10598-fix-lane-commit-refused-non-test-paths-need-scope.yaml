@@ -34,3 +34,11 @@
   amendment: |
     2026-10-31, by the redesign Architect (machine, rule 16): The original grep proof was malformed, so we replace it with a valid unit test proof.
     Changed acceptance proof to a unit test path for criterion 1.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The record names repeated commit refusals and PR-hour costs, but supplies no cause diagnosis or proposed remedy beyond eliminating operator hand fixes.; on the change's description/files alone, no diff was read — The supplied scope does not establish whether the remedy supplies required scope or relaxes its enforcement; compliance with the operator-only restriction on gate loosening therefore cannot be verified from what is shown."
+    judged_at: "2026-10-31T12:54:57.293Z"
+    pin: "4b173039522bafa504eeddc1da656d9645f025e837c338d59e00a07325d2c266"
