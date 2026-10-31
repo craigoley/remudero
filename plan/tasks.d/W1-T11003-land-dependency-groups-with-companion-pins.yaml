@@ -22,10 +22,10 @@
     - test/the-haiku55-image-pins-match-its-sdk.test.ts
     - test/semgrep-native-install.test.ts
     - test/review/dependency-groups-15180-companion-pins.test.ts
-  priority: 4
+  priority: 2
   status: queued
-  # backlog gardener: band=4 evidence=65294f7f6d5c3135
-  # backlog gardener: placed=2026-10-30T04:04:41.730Z
+  # backlog gardener: band=2 evidence=d5041c8117821aa1
+  # backlog gardener: placed=2026-10-31T04:48:26.717Z
   attempts: 0
   rationale: |
     The checkout still pins image CLI versions 2.1.303 and 0.163.0, SDK
