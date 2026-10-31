@@ -353,7 +353,7 @@ export function defectEventsOf(records: readonly LedgerRecord[], now: number, so
   const events: DefectEvent[] = [];
   const add = (r: LedgerRecord, key: string, evidence: string, pr = prOfRow(r, byHead, byRound), elapsedMs?: number) =>
     events.push({ pr, at: tsOf(r), key, evidence, elapsedMs: elapsedMs ?? (typeof r.elapsed_ms === "number" ? r.elapsed_ms : undefined) });
-  const pushed = new Map<string, { pr: number; done: LedgerRecord }>();
+  const pushed = new Map<string, { pr: number; done: LedgerRecord; reds: Failure[] }>();
   const previousRound = new Map<number, LedgerRecord>();
   const lastSet = new Map<number, string>(), lastFlake = new Map<number, string>(), lastWasFixed = new Map<number, boolean>();
   for (const r of rows) {
@@ -383,7 +383,7 @@ export function defectEventsOf(records: readonly LedgerRecord[], now: number, so
       const outcome = String(r.fix_outcome ?? "");
       if (pr > 0) lastWasFixed.set(pr, outcome === "FIXED");
       if (outcome === "unstated" && tsOf(r) >= GLOSS_PARSER_FIX_AT) add(r, "fix-outcome:unstated", `the worker's FIX_OUTCOME line was not recognised${roundShape(r)}${quote(r.worker_tail)}`);
-      if (outcome === "FIXED" && typeof r.pushed_head_sha === "string") pushed.set(r.pushed_head_sha, { pr, done: r });
+      if (outcome === "FIXED" && typeof r.pushed_head_sha === "string") pushed.set(r.pushed_head_sha, { pr, done: r, reds: failuresOf(typeof r.round_id === "string" ? rows.find(d => d.step === "fix.dispatch" && d.round_id === r.round_id) ?? r : r) });
       if (outcome === "FLAKE" && pr > 0) {
         const dispatch = rows.find(d => d.step === "fix.dispatch" && d.round_id === r.round_id);
         const set = dispatch ? checkSet(dispatch) : "";
@@ -409,6 +409,19 @@ export function defectEventsOf(records: readonly LedgerRecord[], now: number, so
       // rerun going red must not resurrect the old FIXED round as a failed repair.
       if (r.blocker === "own-red") {
         pushed.delete(r.head_sha);
+        // A sweep.disposed row has the blocker and head, but no ci_failures. The next fix.dispatch
+        // for this PR and head records the checks that made the sweep red. Its receipt is written
+        // when the round ends, so it can appear later in the ledger than this disposal.
+        const nextDispatch = rows.find(d => d.step === "fix.dispatch" && d.head_sha === r.head_sha &&
+          tsOf(d) >= tsOf(r) && prOfRow(d, byHead, byRound) === (pr || fixed.pr));
+        const nowReds = nextDispatch ? failuresOf(nextDispatch) : [];
+        // A repair that cleared every red it was sent for, with only a different check red now,
+        // did its job: that is a new defect, not a repair that stayed red.
+        if (fixed.reds.length > 0 && nowReds.length > 0 &&
+            !nowReds.some(b => fixed.reds.some(a => a.check === b.check))) {
+          add(r, "fixed-new-red", `a FIXED push ${r.head_sha.slice(0, 9)} cleared ${checkSet({ ci_failures: fixed.reds } as LedgerRecord)} but ${checkSet(nextDispatch!)} is red on the next sweep${quote(fixed.done.worker_tail)}`, pr || fixed.pr);
+          continue;
+        }
         add(r, "fixed-still-red", `a FIXED push ${r.head_sha.slice(0, 9)} is still red on the next sweep${quote(fixed.done.worker_tail)}`, pr || fixed.pr);
       } else if (["awaiting-arm", "armed-idle", "operator-hold"].includes(String(r.blocker))) pushed.delete(r.head_sha);
     } else if (r.step === "automerge.arm_skipped" && pr > 0) {
