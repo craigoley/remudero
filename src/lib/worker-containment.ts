@@ -366,12 +366,13 @@ export function buildContainedSpawnFn(
     onSpawnError?: (err: NodeJS.ErrnoException) => void,
   ) => ContainedProcess,
   onStderr: StderrSink,
-  pidRef: { pid?: number },
+  pidRef: { pid?: number; outputClosed?: Promise<void> },
   onSpawnError?: (err: NodeJS.ErrnoException) => void,
 ): (spawnOpts: ContainedSpawnOptions) => SdkSpawnedProcess {
   return (spawnOpts) => {
     const spawned = spawnContained(spawnOpts, onStderr, onSpawnError);
     pidRef.pid = spawned.pid;
+    pidRef.outputClosed = spawned.outputClosed;
     return spawned.process;
   };
 }

@@ -3201,10 +3201,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // `withWorkerGroupTeardown` guarantees teardown against it once the stream settles on EITHER path, so a run's process
     // group never outlives its own teardown. That closure also owns stderr piping, because a custom spawn gets none from the
     // SDK (W1-T117).
-    const pidRef: { pid?: number } = {};
+    const pidRef: { pid?: number; outputClosed?: Promise<void> } = {};
     const spawnContainedBase = boundContainment.spawn ?? spawnDetachedGroup;
     const spawnContained: typeof spawnContainedBase = withWorkerPidReport(spawnContainedBase, args.onWorkerPid);
     const teardownContained = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
+    let tornDown = false;
+    const teardownOnce = (pgid: number) => {
+      if (tornDown) return;
+      tornDown = true;
+      teardownContained(pgid);
+    };
 
     // TRAP (SDK 0.3.209): passing BOTH a `settings` file path and the `sandbox` option throws "Cannot use both …". The
     // sandbox config therefore lives inside the settings file, and the probe (verdict 7) confirms empirically that it engaged
@@ -3363,6 +3369,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             childEnvKeys: Object.keys(childEnv).sort(),
             stderrOutput,
             stderrFailure: () => stderrFailure,
+            settleOutput: async () => {
+              if (pidRef.pid !== undefined) teardownOnce(pidRef.pid);
+              await pidRef.outputClosed;
+            },
             // Logged verbatim as CONFIGURED inputs, never a read-back: effort is absent from the SDK envelope, and model here
             // is the requested knob, which may differ from the envelope's `modelUsage` keys. Unset gives the honest "default"
             // label, never a guess.
@@ -3389,7 +3399,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // collectWorkerResult's own `Date.now` (W1-T1045).
             now: args.clockBound?.now,
           }),
-        teardownContained,
+        teardownOnce,
       );
       result.provider = "claude";
       result.continuation = execution.receipt;
@@ -3847,6 +3857,8 @@ export async function collectWorkerResult(
     stderrChunks?: string[];
     stderrOutput?: BoundedOutput;
     stderrFailure?: () => StderrFailure | undefined;
+    /** Teardown and drain the child pipes after the SDK stream ends, before judging retained output. */
+    settleOutput?: () => Promise<void>;
     /** Configured input, logged verbatim — defaults to `DEFAULT_MODEL_LABEL`. */
     model?: string;
     /** Configured input, logged verbatim — defaults to `DEFAULT_EFFORT_LABEL`. */
@@ -4072,6 +4084,7 @@ export async function collectWorkerResult(
       };
     }
   } finally {
+    await opts.settleOutput?.();
     toolLineage.finish(lineageEnd);
     if (!sawResult) {
       blockOutput.finish();

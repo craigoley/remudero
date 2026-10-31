@@ -9,7 +9,7 @@ import { test } from "node:test";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { WorkerSettingsError } from "../src/lib/settings.js";
 import { WorkerKeychainError } from "../src/lib/worker-home.js";
-import { isPidAlive, RUN_ID_ENV, spawnDetachedGroup, TASK_ID_ENV } from "../src/lib/worker-containment.js";
+import { isPidAlive, killProcessGroup, RUN_ID_ENV, spawnDetachedGroup, TASK_ID_ENV } from "../src/lib/worker-containment.js";
 import {
   BILLING_MODE,
   CLAUDE_BIN_ENV_OVERRIDE,
@@ -141,6 +141,58 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
         process.stderr.write(bytes, error => error ? reject(error) : resolve());
       });
     } `;
+  // The SDK result is yielded at the CLI's exit, while a detached writer still owns its
+  // stderr pipe. Teardown releases that writer. The old finalization order returned success
+  // before the late oversized bytes arrived, even though the pipe had not closed.
+  const lateAck = join(dir, "claude-late-stderr-ack");
+  const lateClaudeWriter = `const fs = require("node:fs");
+    const ack = ${JSON.stringify(lateAck)};
+    const deadline = Date.now() + 5000;
+    const timer = setInterval(() => {
+      if (fs.existsSync(ack)) {
+        clearInterval(timer);
+        process.stderr.write(Buffer.alloc(${WORKER_OUTPUT_BYTES + 4}, 0x78));
+      } else if (Date.now() > deadline) {
+        clearInterval(timer);
+        process.exitCode = 2;
+      }
+    }, 5);`;
+  const lateCli = `const { spawn } = require("node:child_process");
+    spawn(process.execPath, ["-e", ${JSON.stringify(lateClaudeWriter)}],
+      { detached: true, stdio: ["ignore", "ignore", "inherit"] }).unref();`;
+  let cliExited = false;
+  let pipeClosed = false;
+  const lateQuery = (({ options }: { options: {
+    env: Record<string, string>;
+    spawnClaudeCodeProcess: (opts: unknown) => ChildProcessWithoutNullStreams;
+  } }) => (async function* () {
+    const child = options.spawnClaudeCodeProcess({ command: process.execPath,
+      args: ["-e", lateCli], cwd: dir, env: { ...options.env, NODE_V8_COVERAGE: "" } });
+    child.once("close", () => { pipeClosed = true; });
+    child.stdout.resume();
+    child.stdin.end();
+    await new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", () => { cliExited = true; resolve(); });
+    });
+    assert.equal(pipeClosed, false, "the SDK result must precede final stderr pipe closure");
+    yield { type: "result", subtype: "success", is_error: false, result: "done",
+      session_id: "late-claude-attempt", total_cost_usd: 0.5, num_turns: 3 };
+  })()) as unknown as Parameters<typeof spawnWorker>[0]["queryFn"];
+  const lateResult = await spawnWorker({ ...e2eSpawnWorkerArgs(dir), queryFn: lateQuery,
+    containment: { teardown: (pid) => {
+      killProcessGroup(pid);
+      writeFileSync(lateAck, "release");
+    } } });
+  assert.equal(cliExited, true);
+  assert.equal(pipeClosed, true, "the result must wait for the actual pipe close");
+  assert.equal(lateResult.sessionId, "late-claude-attempt");
+  assert.equal(lateResult.outputRetention?.stderr.state, "truncated");
+  assert.equal(lateResult.outputRetention?.stderr.fileBytes, WORKER_OUTPUT_BYTES + 4);
+  assert.equal(lateResult.outputRetention?.originalSubtype, "success");
+  assert.equal(lateResult.isError, true);
+  assert.equal(lateResult.subtype, "error_incomplete_output");
+  assert.equal(workerLedgerFields(lateResult).verdict, "error_incomplete_output");
   const stderrEvents: Array<{ text: string; state?: string }> = [];
   const eofChild = spawnDetachedGroup({ command: process.execPath,
     args: ["-e", "process.stderr.write(Buffer.from([0xf0, 0x9f]))"],
