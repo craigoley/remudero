@@ -103,9 +103,10 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
       garden.stop();
     }
   };
-  const runWorker = async (body: string, pipeError = false) => {
+  const runWorker = async (body: string, pipeError = false, expectedExit = 0) => {
     const workerDir = join(dir, "worker");
     mkdirSync(workerDir, { recursive: true });
+    let observedExit: number | null | undefined;
     const queryFn = (({ options }: { options: {
       env: Record<string, string>;
       spawnClaudeCodeProcess: (opts: unknown) => ChildProcessWithoutNullStreams;
@@ -120,30 +121,26 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
         child.once("error", reject);
         child.once("close", resolve);
       });
+      observedExit = code;
       yield { type: "result", subtype: "success", is_error: false, result: "done",
         session_id: "real-worker-attempt", total_cost_usd: 0.5, num_turns: 3 };
       if (code !== 0) throw Object.assign(new Error("fixture worker failed"), { exitCode: code });
     })()) as unknown as Parameters<typeof spawnWorker>[0]["queryFn"];
     const result = await spawnWorker({ ...e2eSpawnWorkerArgs(workerDir), queryFn });
+    assert.equal(observedExit, expectedExit, "the fixture must finish writing before its intended exit");
     assert.equal(result.sessionId, "real-worker-attempt");
     assert.equal(result.costUsd, 0.5);
     assert.equal(result.numTurns, 3);
     return result;
   };
-  const write = `import { writeSync as writePart } from "node:fs";
-    function writeSync(fd, value) {
+  const write = `async function writeStderr(value) {
       const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
-      let written = 0;
-      while (written < bytes.length) {
-        const count = writePart(fd, bytes, written, bytes.length - written);
-        if (count <= 0) throw new Error("fixture short write");
-        written += count;
-      }
-      if (written !== bytes.length) throw new Error("fixture byte count mismatch");
-      return written;
+      await new Promise((resolve, reject) => {
+        process.stderr.write(bytes, error => error ? reject(error) : resolve());
+      });
     } `;
   for (const bytes of [8193, GARDEN_OUTPUT_BYTES]) {
-    const { row, event } = await runGarden(`${write}writeSync(2, "x".repeat(${bytes}));`);
+    const { row, event } = await runGarden(`${write}await writeStderr("x".repeat(${bytes}));`);
     assert.equal(row.exit, 0);
     assert.equal(row.error, undefined, "complete output above the former excerpt limit is retained");
     assert.equal(row.output_retention, undefined, "no retention failure occurred");
@@ -151,14 +148,14 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
   }
   const oversizedBytes = GARDEN_OUTPUT_BYTES + 4;
   for (const [output, exit] of [["x".repeat(oversizedBytes), 0], ["🙂".repeat(oversizedBytes / 4), 23]] as const) {
-    const { row, event } = await runGarden(`${write}writeSync(2, ${JSON.stringify(output)}); process.exit(${exit});`);
+    const { row, event } = await runGarden(`${write}await writeStderr(${JSON.stringify(output)}); process.exit(${exit});`);
     const retention = row.output_retention as { state: string; bytesRead: number; fileBytes: number };
-    assert.equal(retention?.state, "truncated", "real gardener output must carry retention evidence");
-    assert.equal(retention.fileBytes, oversizedBytes);
+    assert.equal(row.exit, exit, "the fixture must finish writing before its intended exit");
+    assert.equal(retention?.fileBytes, oversizedBytes, "the entire fixture reached the parent");
+    assert.equal(retention.state, "truncated", "real gardener output must carry retention evidence");
     assert.equal(retention.bytesRead, GARDEN_OUTPUT_BYTES);
     assert.ok(Buffer.byteLength(String(row.stderr)) <= GARDEN_OUTPUT_BYTES);
     assert.doesNotMatch(String(row.stderr), /\uFFFD/);
-    assert.equal(row.exit, exit, "retention failure must preserve the actual process exit");
     assert.equal(row.signal, null);
     assert.equal(event.exit, exit);
     assert.equal(event.phase, "failed", "an incomplete report cannot record a completed pass");
@@ -167,11 +164,12 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
   }
   const readFailure = t.mock.method(fs, "readSync", () => { throw new Error("garden report read refused"); });
   try {
-    const { row, event } = await runGarden(`${write}writeSync(2, "x".repeat(${oversizedBytes}));`);
-    const retention = row.output_retention as { state: string; reason: string };
+    const { row, event } = await runGarden(`${write}await writeStderr("x".repeat(${oversizedBytes}));`);
+    const retention = row.output_retention as { state: string; reason: string; fileBytes: number };
+    assert.equal(row.exit, 0, "the fixture must finish writing before its intended exit");
+    assert.equal(retention?.fileBytes, oversizedBytes, "all fixture bytes were written before the read failed");
     assert.equal(retention?.state, "unreadable");
     assert.match(retention.reason, /garden report read refused/);
-    assert.equal(row.exit, 0);
     assert.equal(event.phase, "failed");
   } finally { readFailure.mock.restore(); }
   const spawn = childProcess.spawn;
@@ -182,7 +180,7 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
   });
   syncBuiltinESMExports();
   try {
-    const { row, event } = await runGarden(`${write}writeSync(2, "pipe error fixture");`);
+    const { row, event } = await runGarden(`${write}await writeStderr("pipe error fixture");`);
     const retention = row.output_retention as { state: string; reason: string };
     assert.equal(retention?.state, "unreadable");
     assert.match(retention.reason, /garden pipe refused/);
@@ -190,8 +188,8 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
     assert.equal(event.phase, "failed");
   } finally { pipeFailure.mock.restore(); syncBuiltinESMExports(); }
   for (const bytes of [[0xc3, 0x28], [0xf0, 0x9f]]) {
-    const continuation = bytes[0] === 0xc3 ? 'await new Promise(r => setTimeout(r, 25)); writeSync(2, "end");' : "";
-    const malformed = await runGarden(`${write}writeSync(2, Buffer.from(${JSON.stringify(bytes)}));
+    const continuation = bytes[0] === 0xc3 ? 'await new Promise(r => setTimeout(r, 25)); await writeStderr("end");' : "";
+    const malformed = await runGarden(`${write}await writeStderr(Buffer.from(${JSON.stringify(bytes)}));
       ${continuation}`);
     const retention = malformed.row.output_retention as { state: string; reason: string };
     assert.equal(retention?.state, "malformed");
@@ -199,12 +197,12 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
     assert.equal(malformed.row.exit, 0);
     assert.equal(malformed.event.phase, "failed");
   }
-  const signalled = await runGarden(`${write}writeSync(2, "x".repeat(${oversizedBytes})); process.kill(process.pid, "SIGTERM");`);
+  const signalled = await runGarden(`${write}await writeStderr("x".repeat(${oversizedBytes})); process.kill(process.pid, "SIGTERM");`);
   assert.equal(signalled.row.exit, null);
   assert.equal(signalled.row.signal, "SIGTERM");
   assert.equal(signalled.event.phase, "failed");
-  const heap = await runGarden(`${write}writeSync(2, Buffer.from([0xc3, 0x28]));
-    await new Promise(r => setTimeout(r, 25)); writeSync(2, "heap out of memory");
+  const heap = await runGarden(`${write}await writeStderr(Buffer.from([0xc3, 0x28]));
+    await new Promise(r => setTimeout(r, 25)); await writeStderr("heap out of memory");
     process.kill(process.pid, "SIGTERM");`);
   assert.match(String(heap.row.error), /^heap_exhausted:/);
   assert.equal((heap.row.output_retention as { state: string })?.state, "malformed");
@@ -213,9 +211,9 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
   assert.equal(heap.event.phase, "failed");
   for (const [bytes, exit] of [[[0xc3, 0x28], 0], [[0xf0, 0x9f], 23]] as const) {
     const following = exit === 0 ? `process.stdout.write("ready");
-      await new Promise(r => process.stdin.once("data", r)); writeSync(2, "later");` : "";
-    const result = await runWorker(`${write}writeSync(2, Buffer.from(${JSON.stringify(bytes)}));
-      ${following} process.exit(${exit});`);
+      await new Promise(r => process.stdin.once("data", r)); await writeStderr("later");` : "";
+    const result = await runWorker(`${write}await writeStderr(Buffer.from(${JSON.stringify(bytes)}));
+      ${following} process.exit(${exit});`, false, exit);
     assert.equal(result.outputRetention?.stderr.state, "malformed", "raw child bytes must be validated");
     assert.match(result.outputRetention!.stderr.reason!, /encoded data.*valid/i);
     assert.equal(result.outputRetention?.stderr.fileBytes, bytes.length + (exit === 0 ? 5 : 0));
@@ -226,21 +224,23 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
     assert.equal(workerLedgerFields(result).output_retention?.stderr.state, "malformed");
     assert.deepEqual(result.exit, exit === 0 ? { kind: "unobserved" } : { kind: "exit", code: exit });
   }
-  const brokenPipe = await runWorker(`${write}writeSync(2, "pipe fixture");`, true);
+  const brokenPipe = await runWorker(`${write}await writeStderr("pipe fixture");`, true);
   assert.equal(brokenPipe.outputRetention?.stderr.state, "unreadable");
   assert.match(brokenPipe.outputRetention!.stderr.reason!, /worker pipe refused/);
   assert.equal(brokenPipe.isError, true);
   assert.equal(brokenPipe.subtype, "error_incomplete_output");
-  const largeWorker = await runWorker(`${write}writeSync(2, "x".repeat(${WORKER_OUTPUT_BYTES + 4}));`);
+  const largeWorker = await runWorker(`${write}await writeStderr("x".repeat(${WORKER_OUTPUT_BYTES + 4}));`);
+  assert.deepEqual(largeWorker.exit, { kind: "unobserved" }, "the fixture must not throw a pipe write error");
+  assert.equal(largeWorker.outputRetention?.stderr.fileBytes, WORKER_OUTPUT_BYTES + 4,
+    "the entire worker fixture reached the parent");
   assert.equal(largeWorker.outputRetention?.stderr.state, "truncated");
-  assert.equal(largeWorker.outputRetention?.stderr.fileBytes, WORKER_OUTPUT_BYTES + 4);
   assert.equal(largeWorker.outputRetention?.stderr.bytesRead, WORKER_OUTPUT_BYTES);
   assert.equal(largeWorker.subtype, "error_incomplete_output");
   assert.equal(largeWorker.isError, true);
-  const splitWorker = await runWorker(`${write}writeSync(2, Buffer.from([0xf0, 0x9f]));
+  const splitWorker = await runWorker(`${write}await writeStderr(Buffer.from([0xf0, 0x9f]));
     process.stdout.write("ready");
     await new Promise(r => process.stdin.once("data", r));
-    writeSync(2, Buffer.from([0x99, 0x82])); process.stdin.destroy();`);
+    await writeStderr(Buffer.from([0x99, 0x82])); process.stdin.destroy();`);
   assert.equal(splitWorker.stderr, "🙂");
   assert.equal(splitWorker.outputRetention?.stderr.state, "complete");
   assert.equal(splitWorker.isError, false);
@@ -249,8 +249,8 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
   assert.equal(emptyWorker.outputRetention?.stderr.state, "complete");
   assert.equal(emptyWorker.stderr, "");
   assert.equal(emptyWorker.isError, false);
-  const complete = await runGarden(`${write}writeSync(2, Buffer.from([0xf0, 0x9f]));
-    await new Promise(r => setTimeout(r, 25)); writeSync(2, Buffer.from([0x99, 0x82]));`);
+  const complete = await runGarden(`${write}await writeStderr(Buffer.from([0xf0, 0x9f]));
+    await new Promise(r => setTimeout(r, 25)); await writeStderr(Buffer.from([0x99, 0x82]));`);
   assert.equal(complete.row.exit, 0);
   assert.equal(complete.row.error, undefined, "split UTF-8 must remain complete");
   assert.equal(complete.event.phase, "completed");
