@@ -1399,7 +1399,7 @@ import {
   TaskAdmissionError,
 } from "./lib/plan.js";
 import { exitCodeFor, GENERIC_EXIT_CODE, RmdError } from "./lib/errors.js";
-import { flushThenExit } from "./lib/flush-exit.js";
+import { drained, flushThenExit } from "./lib/flush-exit.js";
 import {
   DEFAULT_OVERLAP_WARNING_POLICY,
   declarationCountsByPath,
@@ -42923,10 +42923,23 @@ export async function main(
   }
   // W1-T4063: exit only after stdout/stderr have drained — a bare process.exit() dropped every line a
   // pipe had not yet taken (522 of 280,672 for a piped `rmd ledger-grep`).
-  await flushThenExit(
-    await withSelectedRegistryContext(registryObserver, async () => deps.dispatch
-      ? await deps.dispatch(cmd, rest, REGISTRY, USAGE) : await dispatchCommand(cmd, rest, REGISTRY, USAGE)),
-  );
+  const exitCode = await withSelectedRegistryContext(registryObserver, async () => deps.dispatch
+    ? await deps.dispatch(cmd, rest, REGISTRY, USAGE) : await dispatchCommand(cmd, rest, REGISTRY, USAGE));
+  if (cmd === "deploy-run") {
+    await Promise.all([process.stdout, process.stderr].map(stream => drained(stream)));
+    try {
+      const root = invocationStateRoot ?? loadConfig().root;
+      if (validateDeployStateRoot(root).ok) {
+        appendLedger(ledgerPathFor({ root }), {
+          run_id: `DEPLOY-${systemClock.now()}`, task_id: "DEPLOY",
+          step: "deploy.exit_requested", exit_code: exitCode,
+        });
+      }
+    } catch (error) {
+      console.error(`deploy.exit_requested could not be recorded: ${String(error)}`);
+    }
+  }
+  await flushThenExit(exitCode);
 }
 
 // W1-T9722: the read-plane worker starts from ./lib/tick-read-worker.ts, never from this module; a worker
