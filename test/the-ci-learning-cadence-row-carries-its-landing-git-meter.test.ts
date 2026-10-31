@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { runDaemon } from "#src/lib/daemon.js";
@@ -96,6 +96,24 @@ test("W1-T9914: a sync ci-learning landing returns its own git meter", (t) => {
   assert.equal(result.filed.length, 1);
   assert.equal(f.origin.git("show", `${CI_LEARNING_LANDING_BRANCH}:${f.relPath}`), f.contents.trim());
   assertMeter(result.git, "sync");
+});
+
+test("W1-T9914: an admission refusal has no landing git meter", async (t) => {
+  const f = queuedLanding(t);
+  rmSync(join(f.deps.stateRoot, "state", "ci-learning-pending"), { recursive: true, force: true });
+  const deps = {
+    ...f.deps,
+    mintTaskId: () => "W1-T9916",
+    recordVerdict: () => ({ ok: false, reason: "admission refused" }),
+  };
+  const expected = {
+    filed: [], skipped: [],
+    refused: [{ findingId: f.draft.findingId, reason: "admission refused" }],
+  };
+  const sync = withLiveWritesAllowed(() => landCiLearningShards([f.draft], f.checkout.dir, deps));
+  assert.deepEqual(sync, expected);
+  const asyncResult = await withLiveWritesAllowed(() => landCiLearningShardsAsync([f.draft], f.checkout.dir, deps));
+  assert.deepEqual(asyncResult, expected);
 });
 
 test("W1-T9914: the cadence runner forwards the meter only when it lands", async (t) => {

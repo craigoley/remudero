@@ -96,8 +96,7 @@ test("the daemon's ci-learning landing runs its git fetch of origin while a time
   assert.ok(sawFetchRunning, "a tick landed while the fetch's child was alive: the sync git was never called for it");
   const { git, ...filing } = result;
   assert.deepEqual(filing, { filed: [], skipped: [], refused: [] });
-  assert.equal(git?.driver, "async");
-  assert.ok(git && git.calls > 0);
+  assert.equal(git, undefined, "a fetch without queued content is not a landing");
 });
 
 test("control: the sync ci-learning landing holds the loop for the whole git fetch of origin", async () => {
@@ -109,8 +108,7 @@ test("control: the sync ci-learning landing holds the loop for the whole git fet
   assert.equal(sawFetchRunning, false, "no tick can land while execFileSync holds the thread");
   const { git, ...filing } = result;
   assert.deepEqual(filing, { filed: [], skipped: [], refused: [] });
-  assert.equal(git?.driver, "sync");
-  assert.ok(git && git.calls > 0);
+  assert.equal(git, undefined, "a fetch without queued content is not a landing");
 });
 
 test("the awaited ci-learning landing still skips a draft whose origin fetched origin/main already holds", async () => {
@@ -133,8 +131,7 @@ test("the awaited ci-learning landing still skips a draft whose origin fetched o
 
   const { git, ...filing } = result;
   assert.deepEqual(filing, { filed: [], skipped: ["ci-learning:1:seed"], refused: [] }, "the yielded origin/main read still feeds idempotency");
-  assert.equal(git?.driver, "async");
-  assert.ok(git && git.calls > 0);
+  assert.equal(git, undefined, "a skipped draft leaves no content to land");
 });
 
 /** One draft the rung would land; its finding id is not on the fixture's main. */
