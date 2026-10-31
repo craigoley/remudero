@@ -1,0 +1,60 @@
+- id: W1-T11051
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:test-slow-shard:red-with-no-failing-test cost 7.9 PR minute(s) across 2 round(s) on 2 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:test-slow-shard:red-with-no-failing-test"
+  files:
+    - .github/workflows/ci.yml
+    - test/gardeners/check-ci-log-test-slow-shard-red-with-no-failing-test.test.ts
+  acceptance:
+    - claim: "a recorded check:ci-log:test-slow-shard:red-with-no-failing-test round, replayed through the real code path in .github/workflows/ci.yml, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11051: check:ci-log:test-slow-shard:red-with-no-failing-test is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:test-slow-shard:red-with-no-failing-test's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:test-slow-shard:red-with-no-failing-test cost 7.9 PR minute(s) (seven-day half-life) across 2 fix round(s) on 2 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job test-slow-shard for test-slow-shard
+    - the rounds name a failing test: test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #15268 (https://github.com/craigoley/remudero/pull/15268) at 2026-10-30T01:44:13.278Z: ci-log round — test-slow-shard (1/2): red with no failing test; proof-discrimination: proof-discrimination: FAIL — N proof(s) pass at both PR head and merge base (); they cannot establish this PR's wo
+        log excerpt:
+          | # tests 4181
+          | ##[group]Run MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
+          | 
+          | # pass 4180
+          | # fail 0
+          | # cancelled 0
+          | # skipped 1
+          | # todo 0
+          | # duration_ms 1867733.855206
+          | test-tier-manifest: REST RUN INCOMPLETE — its exit 0 is counted as FAILED: 1 of 297 file(s) never reported (first: test/entrypoint-boot.test.ts). 296/297 file(s) reported, # tests 4181, # fail 0. Last test started: test/entrypoint-boot.test.ts > a fixture boot never inherits the host's GitHub App credentials or token. The real process.exit(0) from Test.run (node:internal/test_runner/test:1492:15) <- process.pro
+    - PR #15022 (https://github.com/craigoley/remudero/pull/15022) at 2026-10-28T08:04:35.717Z: ci-log round — rule-checks: test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts; test-slow-shard (2/2): red with no failing test; test-slow-shard (1/2): test/the-pre-push-gat
+        failing tests: test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts: injected runSuites passes both-red, refuses head-only red, and exits 2 for an unrunnable base; test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts: a green head never creates or runs a base tree; test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts: the real child compares both trees and treats a missing base suite as not measured; test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts
+        log excerpt:
+          | --- rule-checks failed-suites line retained from this job ---
+          | rule-checks: failed suites: test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts test/a-census-this-branch-grows-is-refused-before-the-push.test.ts test/census-precheck-counts-the-deps-interface-ceilings.test.ts test/census-precheck-counts-the-house-layout-ratchet.test.ts test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts test/census-precheck-runs-the-admitted-census-suites.test.ts test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts test/the-census-precheck-runs-the-sourc
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-31T06:34:43.635Z"
+    pin: "a062fe5c2de1ef82440f989a288692d89a8316b7a299c40024eec717fb0c9ee4"

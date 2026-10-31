@@ -56,6 +56,7 @@ function finiteNumber(value: unknown): number | undefined {
 
 /** The row's cost: `total_cost_usd`, else `cost_usd`. Absent stays `undefined` — never drawn as 0. */
 export function spendAmountUsd(row: Record<string, unknown>): number | undefined {
+  if (row.provider === "cash" && (row.token_usage_state === "unavailable" || row.token_usage_state === "partial")) return undefined;
   return finiteNumber(row.total_cost_usd) ?? finiteNumber(row.cost_usd);
 }
 

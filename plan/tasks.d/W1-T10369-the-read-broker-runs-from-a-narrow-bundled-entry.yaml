@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 6.00
+  budget_usd: 9.50
   risk: high  # Rule 19: one concern, which entry the broker process starts from; what the broker serves and how it paces are unchanged
   band_meaning: span
   origin: "coordinator brief f1021b item 15 (2026-10-21): `rmd gh-broker serve` uses ~320 MB RSS because it loads the whole tsx run-task entry"

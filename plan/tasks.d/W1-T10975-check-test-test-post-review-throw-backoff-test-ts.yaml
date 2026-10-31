@@ -3,16 +3,19 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  risk: low
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
+  risk: high  # Rule 19 span: widened to ledger, sweep by a scope amendment for #15756
+  band_meaning: span
   priority: 1.2
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-10-30T18:42:44.550Z
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/post-review-throw-backoff.test.ts"
   files:
     - src/lib/ledger.ts
     - test/ledger/check-test-test-post-review-throw-backoff-test-ts.test.ts
+    - "src/lib/sweep.ts"
   acceptance:
     - claim: "the harness no longer spends a fix round on check:test:test/post-review-throw-backoff.test.ts"
       proof: "unit test: W1-T10975: check:test:test/post-review-throw-backoff.test.ts is prevented, not retried"
@@ -48,10 +51,10 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "rule-3-low-privilege"
-    action: proceed
-    confidence: 1
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
     reasons:
-      - "rule 3 (live and low-privilege): the symptom is live, 1 occurrence(s) across 7 day(s), last seen 2026-10-29T06:28:22.325Z, and the record declares no privileged path"
-    judged_at: "2026-10-29T10:57:35.617Z"
-    pin: "fd633eba079cc16ca0b49a9fa4b561dfa43be2bcccdfdcf39d170262af9b2145"
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The record shows one failing round on one PR, but supplies no root-cause diagnosis connecting that failure to the proposed ledger.ts and sweep.ts changes.; on the change's description/files alone, no diff was read — Acceptance requires preventing a fix round, while the remedy permits either prevention or self-healing without specifying the mechanism. The supplied evidence cannot verify whether this fixes the underlying failure or changes review dispatch policy; the escalation rule explicitly covers unverifiable findings."
+    judged_at: "2026-10-30T15:41:13.174Z"
+    pin: "fe8207705242d210c30ae452a9ce1cf74e54869a9f4fa438b0f4c2a361945834"
