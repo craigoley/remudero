@@ -11,7 +11,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // Comment count was frozen before compression at f134daa07bf5ca8467f7c699968ef6e2051b6e5a.
 // W1-T10876 intentionally changed executable tokens to record draft model attribution; pin that result.
 const BEFORE_COMMENTS = 1059;
-const APPROVED_TOKENS = "25699c4288ad0582319f529ca6c49c3dd63d459a6b095cb0a05b8ce175eef7bf";
+const APPROVED_TOKENS = "f3dec88103e9eaa7743f517d73ad0d6e0bca79a40df4ffc35df377326afd96d2";
 
 function executableDigest(source: string): string {
   const scanner = createScanner(true, undefined, source);

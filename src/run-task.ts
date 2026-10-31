@@ -1053,6 +1053,7 @@ import {
   type DraftCache,
   type DraftSelectionContext,
   type DraftRungOutcome,
+  type DraftWorkerResult,
   type EvidenceAnchor,
   type BatchApproveResult,
   type InboxClassification,
@@ -35064,18 +35065,20 @@ export async function spawnEscalatedInboxDraft(
   args: Parameters<typeof buildInboxDraftSpawnArgs>[0],
   rawSpawn: typeof spawnWorker = spawnWorker,
   readCapacity: (config: Config) => Promise<ProviderCapacity> = (config) => readClaudeProviderCapacity(config, { forceRefresh: true }),
-): Promise<WorkerResult | undefined> {
+): Promise<DraftWorkerResult | undefined> {
   const policy = resolveProviderRoutingPolicy(args.config.root, args.config);
   if (!policy.routableProviders.includes("claude")) return undefined;
   const capacity = await readCapacity(args.config);
   if (!providerEligibility(capacity, policy.reservePercent).eligible) return undefined;
-  return rawSpawn({
+  const spawnArgs = {
     ...buildInboxDraftSpawnArgs({
       ...args,
       mount: { ...args.mount, model: "sonnet", provider: "claude", effort: "medium" },
     }),
     onSelectionAssignment: undefined,
-  });
+  };
+  const requestedModel = spawnArgs.model ?? null;
+  return { ...await rawSpawn(spawnArgs), requestedModel };
 }
 
 /**
@@ -35190,8 +35193,8 @@ export async function draftProposalBatch(
       {
         repoFacts: checkoutRepoFacts(worktreePath),
         causalScope,
-        spawn: (proposal, prompt, ctx) =>
-          benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({ ...buildInboxDraftSpawnArgs({
+        spawn: async (proposal, prompt, ctx) => {
+          const spawnArgs = { ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
             settingsFile,
             mount: inboxDraftMount,
@@ -35207,7 +35210,10 @@ export async function draftProposalBatch(
             // test reads this body so a later extraction cannot silently turn the guarantee into
             // a helper-level convention.
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
-          }), onSelectionAssignment: undefined }),
+          }), onSelectionAssignment: undefined };
+          const requestedModel = spawnArgs.model ?? null;
+          return { ...await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)(spawnArgs), requestedModel };
+        },
         ...(inboxDraftMount.provider === "cash" ? {
           escalate: (proposal: Proposal, prompt: string) => spawnEscalatedInboxDraft({
             cwd: worktreePath,

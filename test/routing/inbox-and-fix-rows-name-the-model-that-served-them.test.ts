@@ -1,24 +1,27 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { captureInboxDraftSnapshot, commitInboxDraftOutcomes, inboxDraftExampleFragmentYaml,
-  MAX_DRAFT_LINT_ATTEMPTS, runDraftRung, type Proposal } from "#src/lib/inbox.js";
+  MAX_DRAFT_LINT_ATTEMPTS, runDraftRung, type DraftWorkerResult, type Proposal } from "#src/lib/inbox.js";
+import { draftProposalBatch, spawnEscalatedInboxDraft } from "#src/run-task.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
 import type { Config } from "#src/lib/config.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { harnessCommitForShellLessWorker, runFixRung } from "#test/helpers/run-task-test.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Row = { step: string } & Record<string, unknown>;
 const proposal: Proposal = { id: "P9", summary: "model attribution", evidenceAnchors: [] };
 const clean = `=== FRAGMENT START ===\n${inboxDraftExampleFragmentYaml()}\n=== FRAGMENT END ===\nSTAMP: model attribution`;
 const dirty = "=== FRAGMENT START ===\n- id: NEW-1\n  title: x\n  acceptance: not a list\n=== FRAGMENT END ===\nSTAMP: model attribution";
 
-function worker(over: Partial<WorkerResult> = {}): WorkerResult {
+function worker(over: Partial<DraftWorkerResult> = {}): DraftWorkerResult {
   return { sessionId: "fixture", costUsd: 0, numTurns: 1, text: clean, blocks: [], stderr: "",
     subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
-    provider: "claude", model: "requested-draft", servedModel: "served-draft", effort: "medium",
+    provider: "claude", requestedModel: "requested-draft", model: "selected-draft", servedModel: "served-draft", effort: "medium",
     tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
     compactionEvents: [], qualitySuspect: false, ...over };
 }
@@ -64,6 +67,70 @@ test("W1-T10876: an inbox draft row names the requested and served model", async
   }
 });
 
+test("cash draft rows preserve the production route request when the adapter selects another model", async t => {
+  const root = ownedFixtureDir(t, "cash-draft-model").dir;
+  const seed = gitRepo({ scope: t, kind: "cash-draft-origin" });
+  mkdirSync(join(seed.dir, "plan"));
+  mkdirSync(join(seed.dir, "src", "lib"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), inboxDraftExampleFragmentYaml().replaceAll("NEW-1", "W1-T1")
+    .replace("Tighten the empty-input guard in parseTasksFromYaml", "Qualify xenolith riverbed alpenglow context"));
+  copyFileSync(join(REPO_ROOT, "src", "lib", "plan.ts"), join(seed.dir, "src", "lib", "plan.ts"));
+  seed.git("add", ".");
+  seed.git("commit", "-m", "chore: seed offline draft attribution fixture");
+  seed.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  mkdirSync(join(root, "repos"));
+  seed.git("clone", "--quiet", seed.dir, join(root, "repos", "fixture"));
+  const mount = loadMounts(mountsPath(REPO_ROOT)).synthesis.inbox_draft;
+  assert.equal(mount.provider, "cash");
+  const config = { root, installRoot: REPO_ROOT, claudeBin: "/never-spawned",
+    workerProviders: { enabled: ["cash"] } } as Config;
+  for (const text of [clean, dirty, "malformed output"]) for (const servedModel of ["served-cash", undefined]) {
+    const rows: Row[] = [];
+    const log = (step: string, fields?: Record<string, unknown>) => { rows.push({ step, ...fields }); };
+    let calls = 0;
+    const outcomes = await draftProposalBatch([proposal], config, "acme", "fixture", "cash-attribution", log, async args => {
+      calls++;
+      assert.equal(args.model, mount.model);
+      assert.notEqual(args.model, "selected-cash");
+      assert.equal(args.mountProvider, "cash");
+      return worker({ provider: "cash", model: "selected-cash", routedModel: "selected-cash",
+        requestedModel: undefined, text, servedModel, servedModelReason: "cash response omitted model" });
+    });
+    assert.equal(calls, text === dirty ? MAX_DRAFT_LINT_ATTEMPTS : 1);
+    assert.equal(outcomes[0].ok, text !== "malformed output");
+    if (outcomes[0].ok) {
+      const stateDir = ownedFixtureDir(t, "cash-draft-completion").dir;
+      const scope = { repository: "acme/fixture" };
+      writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [proposal] }));
+      commitInboxDraftOutcomes({ stateDir, scope, snapshots: [captureInboxDraftSnapshot(proposal, scope)], outcomes, log });
+    }
+    const row = rows.find(row => row.step === (outcomes[0].ok ? "inbox.drafted" : "inbox.draft_error"));
+    assertModels(row, mount.model, servedModel ?? null, "cash response omitted model");
+    if (outcomes[0].ok) assert.equal(row!.lint_clean, text === clean);
+  }
+});
+
+test("subscription draft rescue records its original request rather than the resolved deployment", async t => {
+  const root = ownedFixtureDir(t, "rescue-draft-model").dir;
+  const config = { root, workerProviders: { enabled: ["claude", "cash"], reservePercent: 5 } } as Config;
+  const rows: Row[] = [];
+  let rescues = 0;
+  await runDraftRung([proposal], "- id: W1-T1\n", {
+    spawn: async () => worker({ text: dirty }),
+    escalate: async (_proposal, prompt) => spawnEscalatedInboxDraft({
+      cwd: root, settingsFile: join(root, "unused-settings.json"), prompt, config, disallowedTools: [],
+      mount: { provider: "cash", model: "haiku", effort: "high", maxTurns: 1, contextBudget: 1000 },
+    }, async args => {
+      rescues++;
+      assert.equal(args.model, "sonnet");
+      return worker({ requestedModel: undefined, model: "resolved-sonnet", servedModel: "served-sonnet" });
+    }, async () => ({ provider: "claude", readable: true, windows: [{ name: "weekly", usedPercent: 50 }] })),
+    log: (step, fields) => { rows.push({ step, ...fields }); },
+  }, "rescue-attribution");
+  assert.equal(rescues, 1);
+  assertModels(rows.find(row => row.step === "inbox.drafted"), "sonnet", "served-sonnet");
+});
+
 test("draft attribution follows the final retry or escalation and survives draft errors", async t => {
   for (const escalation of [false, true]) for (const text of [clean, "malformed final result"]) {
     const rows: Row[] = [];
@@ -71,8 +138,8 @@ test("draft attribution follows the final retry or escalation and survives draft
     await runDraftRung([proposal], "- id: W1-T1\n", {
       log: (step, extra) => { rows.push({ step, ...extra }); },
       spawn: async () => worker(++attempts === MAX_DRAFT_LINT_ATTEMPTS && !escalation
-        ? { text, model: "requested-final", servedModel: "served-final" } : { text: dirty }),
-      ...(escalation ? { escalate: async () => worker({ text, model: "requested-final", servedModel: "served-final" }) } : {}),
+        ? { text, requestedModel: "requested-final", servedModel: "served-final" } : { text: dirty }),
+      ...(escalation ? { escalate: async () => worker({ text, requestedModel: "requested-final", servedModel: "served-final" }) } : {}),
     }, "final-model");
     assert.equal(attempts, MAX_DRAFT_LINT_ATTEMPTS);
     assertModels(rows.find(row => row.step === (text === clean || escalation ? "inbox.drafted" : "inbox.draft_error")),
