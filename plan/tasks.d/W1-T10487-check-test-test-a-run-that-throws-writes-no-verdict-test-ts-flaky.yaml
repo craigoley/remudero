@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: high
   band_meaning: blast-radius
   priority: 1.68
@@ -11,7 +11,8 @@
   #   worker evidence: Both cited failing test titles were replaced in merged PR #12660; both suites import `Config` only as a type and inject configuration, leaving no evidenced remedy in `src/lib/config.ts`.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
   # redesign: signature=6c91617bf83d2a07
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 2 (cause stopped) of the operator's mechanical rulings (2026-10-21, W1-T10371): the symptom had 0 occurrence(s) across 7 day(s), never seen. Retired by the machine-filing judge, 2026-10-31T10:47:14.244Z
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/a-run-that-throws-writes-no-verdict.test.ts:flaky"
