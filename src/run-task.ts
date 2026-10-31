@@ -137,6 +137,8 @@ import {
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
 import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
+import { daemonBoot } from "./lib/daemon.js";
+import { settleRunChildBacklog } from "./lib/run-child.js";
 export { readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync };
 import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
@@ -1757,7 +1759,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, failedFireBackoff, feedbackChangedAtOnMain, AUTO_TRIAGE_FAILURE_STEPS, newFeedbackIdsOldestFirst, oldestFeedbackAgeMs, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, releaseDispatchClaimAsync, gitDispatchClaimReserver, gitDispatchClaimReserverAsync, gitClaimRunnerAsync, dispatchClaimRef, claimDropRefusal, pidIsPresent, readNamespaceBootMs, reclaimSilentDispatchClaim, holdDispatchClaim, renewDispatchClaim, DISPATCH_CLAIM_RENEW_INTERVAL_MS, type DispatchClaimRenewal, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "./lib/dispatch-claim.js";
 import {
   checkGithubPosture,
@@ -20369,7 +20371,8 @@ function readRetroTriggerLedger(config: Config): string {
 // W1-T10046: OBSERVED 2026-10-17, each boot re-read the whole corpus twice (retro 288 MB, auto-triage 243 MB on the loop) for ~1 MB slices.
 export const RETRO_TRIGGER_RUN_SLICE: EscalationTriageSlice = { holder: "run-task.retro-trigger-runs", steps: RETRO_TRIGGER_RUN_STEPS, version: "1" };
 export const AUTO_TRIAGE_REFUSAL_SLICE: EscalationTriageSlice = {
-  holder: "run-task.auto-triage-refusals", steps: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP], version: "1",
+  holder: "run-task.auto-triage-refusals",
+  steps: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP, ...AUTO_TRIAGE_FAILURE_STEPS], version: "2",
 };
 
 let retroTriggerRunReader: EscalationTriageHistoryReader | undefined;
@@ -20524,7 +20527,7 @@ export async function readRetroTriggerRunsAsync(
   return records;
 }
 
-/** The refusal rows from `reader`; `undefined` when a rotation went unread. */
+/** Refusal and failure history from `reader`; `undefined` when a rotation went unread. */
 export async function readAutoTriageRefusalRowsAsync(
   config: Config,
   reader: EscalationTriageHistoryReader,
@@ -20534,7 +20537,9 @@ export async function readAutoTriageRefusalRowsAsync(
   const read = await reader(join(config.root, "state"));
   appendSliceReadRow(ledgerPathFor(config), "AUTO-TRIAGE", "auto_triage.refusal_read",
     { ok: read.ok, rows: read.rows.length, ...sliceReadCost(reader, read, startedMs) }, append);
-  return read.ok ? read.rows : undefined;
+  return read.ok ? read.rows.filter((row) => row.step === TRIAGE_COMMIT_REFUSED_STEP ||
+    row.step === TRIAGE_REFUSAL_CLEARED_STEP || row.step === "auto_triage.run_failed" ||
+    (typeof row.task_id === "string" && row.task_id.startsWith("TRIAGE-"))) : undefined;
 }
 
 /** What the trigger knows once its local reads are done and only the GitHub-backed pass remains. */
@@ -20906,9 +20911,10 @@ export async function autoTriageCheck(
     /** W1-T4769: injected owner/repo resolver for the real reserver's clone path; production uses
      *  {@link resolveOwnerRepo}. */
     resolveClaimRepo?: () => { repo: string };
-    /** W1-T4203: injected read of the refused-triage-commit rows; `undefined` = unreadable. */
+    /** Refused commits, failed fires and triage ends; `undefined` = unreadable. */
     readRefusalRows?: () => Array<Record<string, unknown>> | undefined | Promise<Array<Record<string, unknown>> | undefined>;
     refusalHistory?: EscalationTriageHistoryReader;
+    readFeedbackChangedAt?: (feedbackId: string) => Promise<string | undefined>;
   } = {},
 ): Promise<AutoTriageDecision> {
   const config = opts.config ?? loadConfig();
@@ -20955,21 +20961,28 @@ export async function autoTriageCheck(
   if (!first.fire) return first;
   // W1-T4203: an entry whose triage commit was REFUSED is terminal until cleared. An unreadable
   // ledger reads as no refusals (the entry is retried, today's behaviour) rather than starving the rung. W1-T10046: off the loop.
-  const refused = refusedTriageIds(
-    (await (opts.readRefusalRows ??
-      (() => readAutoTriageRefusalRowsAsync(config, opts.refusalHistory ?? autoTriageRefusalHistory())))()) ?? [],
-  );
+  const rows = await (opts.readRefusalRows ??
+    (() => readAutoTriageRefusalRowsAsync(config, opts.refusalHistory ?? autoTriageRefusalHistory())))();
+  const refused = refusedTriageIds(rows ?? []);
   const candidates = inputs.candidates.filter((c) => !refused.has(c));
   if (candidates.length === 0) {
     return { fire: false, reason: `every one of the ${inputs.candidates.length} candidate(s) at status: new has a refused triage commit — cleared by a ${TRIAGE_REFUSAL_CLEARED_STEP} row` };
   }
   const passInputs = { ...inputs, candidates };
+  const backedOffCandidates = rows === undefined ? undefined : new Map<string, number>();
+  for (const id of candidates) {
+    if (rows === undefined || !failedFireBackoff(rows, id, inputs.policy.minIntervalMinutes, now).backedOff) continue;
+    const changedAt = await (opts.readFeedbackChangedAt ?? ((c) => feedbackChangedAtOnMain(feedbackRoot, c)))(id);
+    const backoff = failedFireBackoff(rows, id, inputs.policy.minIntervalMinutes, now, changedAt);
+    if (backoff.backedOff) backedOffCandidates!.set(id, backoff.retryAtMs!);
+  }
   const sweep = await triageClaimSweepForPass(config, now, candidates, opts);
   const ordered = await prioritizeDepReviewRepairs(candidates, join(config.root, "state"), opts.repairSnapshot?.(), now.getTime(),
     (step, extra) => appendProducerLedger(ledgerPathFor(config), "daemon", { run_id: "AUTO-TRIAGE", step, ...extra }));
-  const decision = decideAutoTriage({ ...passInputs, candidates: ordered, ...(sweep === undefined ? {} : { heldCandidates: sweep }) });
+  const decision = decideAutoTriage({ ...passInputs, candidates: ordered, backedOffCandidates,
+    ...(sweep === undefined ? {} : { heldCandidates: sweep }) });
   return decision.fire && ordered.indexOf(decision.feedbackId) < candidates.indexOf(decision.feedbackId)
-    ? { ...decision, reason: "verified aged dependency repair precedes ordinary FIFO feedback; all normal triage bounds passed" }
+    ? { ...decision, reason: `verified aged dependency repair precedes ordinary FIFO feedback; ${decision.reason}` }
     : decision;
 }
 
@@ -27999,6 +28012,11 @@ export async function daemonCommand(
   rest: string[],
   deps: Parameters<typeof daemonCommandFromModule>[1] = {},
 ): Promise<number> {
+  const boot = deps.daemonBoot ?? daemonBoot;
+  deps = { ...deps, daemonBoot: (...args) => {
+    settleRunChildBacklog(join((deps.config ?? loadConfig()).root, "state"), args[0]);
+    return boot(...args);
+  } };
   return daemonCommandFromModule(rest, deps, daemonCommandHost());
 }
 

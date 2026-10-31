@@ -54,10 +54,15 @@ const BEFORE_EMITTED_SHA256 = "aa928235e9239efb1768cec6ddbdd527074cde71b639f982a
 
 test("W1-T10998: comment compression preserves executable code", () => {
   const source = readFileSync(join(REPO_ROOT, "src/lib/ledger.ts"), "utf8");
-  const tokens = executableTokens(source);
+  // W1-T9853 adds one decision-relevant step so failed-fire history survives rotation.
+  // Remove only that reviewed addition before comparing with the pre-compression snapshot.
+  const reviewedAddition = '  "auto_triage.run_failed", // W1-T9853: failedFireBackoff derives the per-entry retry from these rows.\n';
+  assert.equal(source.split(reviewedAddition).length, 2, "the failed-fire retention row must occur exactly once");
+  const preAdditionSource = source.replace(reviewedAddition, "");
+  const tokens = executableTokens(preAdditionSource);
   assert.equal(createHash("sha256").update(JSON.stringify(tokens)).digest("hex"), BEFORE_TOKENS_SHA256,
     "all pre-compression executable tokens, literals and line-break boundaries must remain unchanged");
-  assert.equal(emittedDigest(source), BEFORE_EMITTED_SHA256,
+  assert.equal(emittedDigest(preAdditionSource), BEFORE_EMITTED_SHA256,
     "emitted JavaScript must preserve newline-sensitive behavior");
   const { comments } = countCommentLines(source, "src/lib/ledger.ts");
   assert.ok(comments < BEFORE_COMMENT_LINES,

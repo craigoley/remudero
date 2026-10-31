@@ -7,11 +7,12 @@
 // it ran as and why. Nothing here touches the run. A probe that fails ledgers why, and `startRunChildProbe` never rejects.
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
+import { systemClock } from "./clock.js";
 import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
 import { type EngineRef, listEngines, newestCurrentEngine, type NewestEngineOptions } from "./engine-tree.js";
 import { defaultInstance, type HostMemoryLedgerOptions } from "./host-memory-ledger.js";
@@ -19,6 +20,7 @@ import {
   createTreePeakSampler, openLearnedReservation, type LearnedReservation, type PeakStoreOptions, type TreePeakSampler,
 } from "./host-memory-learning.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { readLedgerUnionRawLinesSync, realLedgerFs } from "./ledger-union.js";
 import { loadRunChildMode, runChildEffectiveMode, type RunChildMode } from "./policy.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { pauseDetail, stopDetail } from "./fleet-control.js";
@@ -27,7 +29,7 @@ import {
   runChildModeFor, runChildModeWindow, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence,
 } from "./run-child-mode.js";
 import {
-  RUN_CHILD_SCHEMA, classifyRunDir, fromRunChildFailure, isTerminalState, readSpec, readStatus, runDir, writeSpec,
+  RUN_CHILD_SCHEMA, classifyRunDir, fromRunChildFailure, isTerminalState, readSpec, readStatus, realRunChildProbe, runDir, writeSpec, writeStatus,
   type RunChildEntryKind, type RunChildFailureClass, type RunChildProbe, type RunChildSpec, type RunChildSpecOptions, type RunChildStatus,
 } from "./run-child-contract.js";
 import { waitingStarts } from "./host-memory-admission.js";
@@ -66,6 +68,87 @@ export const PROBE_RUN_DIRS_KEPT = 16;
 const STDERR_TAIL_BYTES = 4_096;
 
 type Log = (step: string, extra?: Record<string, unknown>) => void;
+
+const inFlightRunDirs = new Set<string>();
+
+/** Record an observed end only when the child left no status. Even a torn or newer contract is preserved. */
+function recordParentSettlement(
+  dir: string, reason: string, pid?: number, entryKind: RunChildStatus["entryKind"] = "unknown",
+  probe: RunChildProbe = realRunChildProbe,
+): boolean {
+  const spec = readSpec(dir);
+  if (!spec.ok || spec.value.runId !== basename(dir)) return false;
+  if (lstatSync(join(dir, "status.json"), { throwIfNoEntry: false })) return false;
+  writeStatus(dir, {
+    schema: RUN_CHILD_SCHEMA, runId: spec.value.runId, engineSha: spec.value.engine.sha, entryKind,
+    identity: pid === undefined ? { settledByParent: true } : { pid, startTicks: "unknown", containerGeneration: probe.generation() },
+    state: "aborted", phase: "parent-settled", heartbeatAt: systemClock.now(),
+    failure: { class: "aborted", reasonClass: "parent-settled", message: reason },
+  });
+  return true;
+}
+
+/** Boot repairs only spec-only directories whose exact run id has an end in the complete ledger union. */
+export function settleRunChildBacklog(stateRoot: string, log: Log): void {
+  const counts = { settled: 0, unsettled: 0, unread: 0 };
+  const candidates = new Map<string, string>();
+  let unreadReason: string | undefined;
+  try {
+    const root = join(stateRoot, "runs");
+    for (const entry of existsSync(root) ? readdirSync(root, { withFileTypes: true }) : []) {
+      if (!entry.isDirectory()) continue;
+      const dir = join(root, entry.name);
+      if (lstatSync(join(dir, "status.json"), { throwIfNoEntry: false })) continue;
+      if (inFlightRunDirs.has(dir)) { counts.unsettled++; continue; }
+      const spec = readSpec(dir);
+      if (!spec.ok || spec.value.runId !== entry.name) { counts.unread++; continue; }
+      candidates.set(entry.name, dir);
+    }
+    if (candidates.size) {
+      const ids = [...candidates.keys()].map(id => id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+      const unread = new Set<string>();
+      const union = readLedgerUnionRawLinesSync(stateRoot, {
+        pattern: new RegExp(`"run_id"[ \\t]*:[ \\t]*"(?:${ids.join("|")})"`),
+        step: [RUN_CHILD_SHADOW_STEP, RUN_CHILD_LOST_STEP, "run_child.settled"], refuseIncomplete: true,
+      }, { ...realLedgerFs, readFileSync: (path) => {
+        try { return realLedgerFs.readFileSync(path); }
+        catch (error) { unread.add(path); unreadReason = reasonOf(error); throw error; }
+      } });
+      for (const path of union.unread) unread.add(path);
+      counts.unread += unread.size;
+      if (!union.ok || unread.size) {
+        unreadReason ??= `ledger union unreadable: ${[...unread].join(", ")}`;
+        counts.unsettled += candidates.size;
+      } else {
+        const ends = new Map<string, Record<string, unknown>>();
+        for (const line of union.rawLines) {
+          const row = JSON.parse(line) as Record<string, unknown>;
+          if (typeof row.run_id !== "string" || !candidates.has(row.run_id)) continue;
+          const probe = row.run_id.startsWith("probe-");
+          if (probe ? row.step === RUN_CHILD_SHADOW_STEP : row.step === RUN_CHILD_LOST_STEP || row.step === "run_child.settled") ends.set(row.run_id, row);
+        }
+        for (const [id, dir] of candidates) {
+          const row = ends.get(id);
+          if (!row) { counts.unsettled++; continue; }
+          const reason = [row.error, row.detail, row.reason].find(value => typeof value === "string") as string | undefined;
+          try {
+            const pid = Number.isSafeInteger(row.child_pid) && Number(row.child_pid) > 0 ? Number(row.child_pid) : undefined;
+            if (recordParentSettlement(dir, reason ?? `${row.step}: ${row.outcome ?? "settled"}`, pid,
+              row.entry_kind === "bundle" || row.entry_kind === "tsx" ? row.entry_kind : "unknown")) counts.settled++;
+            else counts.unsettled++;
+          } catch (error) {
+            const reason = reasonOf(error);
+            counts.unread++; counts.unsettled++; unreadReason = reason;
+          }
+        }
+      }
+    }
+    log("run_child.boot_settlement", { ...counts, ...(unreadReason === undefined ? {} : { error: unreadReason }) });
+  } catch (error) {
+    log("run_child.boot_settlement", { ...counts, unsettled: counts.unsettled + candidates.size,
+      unread: counts.unread + 1, error: reasonOf(error) });
+  }
+}
 
 /** What the probe needs of the plan the run was admitted against: the tasks, serialized. */
 export interface AdmittedPlan {
@@ -306,6 +389,8 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
   const effective = runChildEffectiveMode(mode);
   if (effective.mode === "off") return { started: false, reason: "mode off" };
   let reservation: LearnedReservation | undefined;
+  let probeChild: ChildProcess | undefined;
+  let probeEnded = false;
   const runId = `probe-${sanitiseId(input.taskId)}-${clock()}-${randomBytes(2).toString("hex")}`;
   try {
     if (listEngines(input.stateRoot).length === 0) return skip("no engine tree has been built yet");
@@ -341,15 +426,24 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
       reservationId: reservation.id ?? "", options: input.options,
       ...(input.work ? { work: input.work } : {}),
     } as RunChildSpec);
-    const child = (seams.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], { cwd: options.cwd, stdio: ["ignore", "ignore", "pipe"] })))(
+    inFlightRunDirs.add(dir);
+    const child = probeChild = (seams.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], { cwd: options.cwd, stdio: ["ignore", "ignore", "pipe"] })))(
       process.execPath, launch.argv, { cwd: launch.cwd },
     );
     if (child.pid !== undefined) reservation.bindRoot(child.pid);
     const ended = await runProbe(child, sampler, seams.timeoutMs ?? PROBE_TIMEOUT_MS, seams.sampleMs ?? PROBE_SAMPLE_MS);
+    probeEnded = true;
+    inFlightRunDirs.delete(dir);
     const estimateMib = reservation.estimateMib;
     reservation.releaseOccupancy();
     reservation = undefined;
     const row = settleRow({ taskId: input.taskId, runId, dir, engine, launch, ended, peakMib, estimateMib, mode, effective, work: input.work });
+    try {
+      recordParentSettlement(dir, String(row.error ?? "probe ended without a terminal status"), child.pid, launch.kind);
+    } catch (error) {
+      const reason = reasonOf(error);
+      row.settlement_error = reason;
+    }
     log(RUN_CHILD_SHADOW_STEP, row);
     try {
       prunePlanSnapshots(input.stateRoot);
@@ -365,6 +459,12 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
       void releaseError; // Best effort: the original failure is the one to report.
     }
     const row = { run_id: runId, task_id: input.taskId, contract: "unknown" satisfies RunChildFailureClass, error: reasonOf(error), mode, behaves_as: effective.mode };
+    if (!probeChild || probeEnded) {
+      const dir = runDir(input.stateRoot, runId);
+      inFlightRunDirs.delete(dir);
+      try { recordParentSettlement(dir, row.error, probeChild?.pid); }
+      catch (settlementError) { log(RUN_CHILD_SHADOW_SKIPPED_STEP, { task_id: input.taskId, reason: `settlement failed: ${reasonOf(settlementError)}` }); }
+    }
     log(RUN_CHILD_SHADOW_STEP, row);
     return { started: true, row };
   }
@@ -717,6 +817,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     mkdirSync(dir, { recursive: true });
     // The snapshot and the spec are written back to back, so a prune between them cannot take a snapshot a spec is about to name.
     const snapshot = writePlanSnapshot(input.stateRoot, admitted.plan.tasks);
+    inFlightRunDirs.add(dir);
     writeSpec(dir, {
       schema: RUN_CHILD_SCHEMA, taskId: input.taskId, runId, instance: defaultInstance(input.root).name,
       engine: { sourceHash: engine.sourceHash, sha: engine.sha }, planSnapshotPath: snapshot.path,
@@ -731,6 +832,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     if (child.pid === undefined) throw new Error("the run child has no pid (spawn failed)");
     reservation.bindRoot(child.pid);
   } catch (error) {
+    inFlightRunDirs.delete(runDir(input.stateRoot, runId));
     try {
       reservation?.releaseOccupancy();
     } catch (releaseError) {
@@ -760,9 +862,10 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
   if (input.signal?.aborted) onAbort();
   let detach: (() => void) | undefined;
   const settled = awaitRunChild({
-    taskId: input.taskId, runId, dir, child, probe: ports.probe, pollMs: ports.pollMs ?? RUN_CHILD_POLL_MS, watch: ports.watch !== false, log,
+    taskId: input.taskId, runId, dir, child, entryKind: launch.kind, probe: ports.probe, pollMs: ports.pollMs ?? RUN_CHILD_POLL_MS, watch: ports.watch !== false, log,
     onWatch: (stop) => { detach = stop; },
     onEnd: () => {
+      inFlightRunDirs.delete(dir);
       input.signal?.removeEventListener("abort", onAbort);
       try {
         held.releaseOccupancy();
@@ -782,6 +885,7 @@ interface AwaitRunChild {
   runId: string;
   dir: string;
   child?: ChildProcess;
+  entryKind?: RunChildEntryKind;
   probe?: RunChildProbe;
   pollMs: number;
   watch: boolean;
@@ -810,13 +914,24 @@ function awaitRunChild(a: AwaitRunChild): Promise<RunResult> {
       a.onEnd();
       settle();
     };
-    const lost = (detail: string): void => finish(() => {
-      a.log(RUN_CHILD_LOST_STEP, {
-        task_id: a.taskId, run_id: a.runId, detail, exit_code: exit?.code ?? null, exit_signal: exit?.signal ?? null,
-        stderr_tail: readFileTail(stderrPath),
+    const lost = (detail: string): void => {
+      if (done) return;
+      let settlementError: string | undefined;
+      try {
+        recordParentSettlement(a.dir, detail, a.child?.pid, a.entryKind, a.probe);
+      } catch (error) {
+        const reason = reasonOf(error);
+        settlementError = reason;
+      }
+      finish(() => {
+        a.log(RUN_CHILD_LOST_STEP, {
+          task_id: a.taskId, run_id: a.runId, detail, exit_code: exit?.code ?? null, exit_signal: exit?.signal ?? null,
+          stderr_tail: readFileTail(stderrPath),
+          ...(settlementError === undefined ? {} : { settlement_error: settlementError }),
+        });
+        reject(new RunChildLostError(`run child ${a.runId} lost: ${detail}`, classifyRunChildLoss({ detail, stderr_tail: readFileTail(stderrPath) })));
       });
-      reject(new RunChildLostError(`run child ${a.runId} lost: ${detail}`, classifyRunChildLoss({ detail, stderr_tail: readFileTail(stderrPath) })));
-    });
+    };
     const settleTerminal = (status: RunChildStatus): void => {
       if (status.state === "done") {
         if (status.result) finish(() => resolve(status.result as RunResult));
