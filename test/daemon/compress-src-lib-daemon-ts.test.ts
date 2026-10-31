@@ -49,12 +49,13 @@ test("W1-T10871: comment compression preserves executable code", () => {
     "",
   ].join("\n");
   assert.equal(source.split(meterFields).length, 2, "the landing meter occurs once in the daemon row");
-  const meterImport = 'import type { FeedbackRefusal, LandFeedbackResult, LandingGitMeter } from "./feedback-landing.js";';
+  const landingModule = "./feedback-landing.js";
+  const meterImport = `import type { FeedbackRefusal, LandFeedbackResult, LandingGitMeter } from "${landingModule}";`;
   const meterType = "      git?: LandingGitMeter;\n";
   assert.equal(source.split(meterImport).length, 2, "the meter type is imported once");
   assert.equal(source.split(meterType).length, 2, "the cadence result declares its meter once");
   const baselineSource = source.replace(cohortFields, "").replace(meterFields, "")
-    .replace(meterImport, 'import type { FeedbackRefusal, LandFeedbackResult } from "./feedback-landing.js";')
+    .replace(meterImport, `import type { FeedbackRefusal, LandFeedbackResult } from "${landingModule}";`)
     .replace(meterType, "");
   assert.equal(executableDigest(baselineSource), EXPECTED_EXECUTABLE, "all other non-comment code lines match the accepted snapshot");
   // Independently catch ASI changes and whitespace inside multiline string/template literals.
