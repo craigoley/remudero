@@ -2218,6 +2218,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     deriveChangesetClaimUpdate,
   } = fixCommandHelpers(host);
   const roundRows: Record<string, unknown>[] = [];
+  let roundModelFields: { requested_model: string | null; served_model: string | null; served_model_reason?: string } | undefined;
   const deps = { ...opts.deps, log: (step: string, extra?: Record<string, unknown>) => {
     // W1-T10339: a stand-down (and a design handoff) records the head, task contract and body it read, so the sweep
     // dispatches this PR again only once one of them has changed.
@@ -2225,8 +2226,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       ? { ...fixRungInputFields({ headSha: typeof extra?.head_sha === "string" ? extra.head_sha : opts.initialReview.headSha,
           contractRevision: currentContractRevision, bodySha256: opts.prBodySha256 }), ...extra }
       : extra;
-    roundRows.push({ ...row, task_id: opts.taskId, step });
-    opts.deps.log(step, row);
+    const attributed = roundModelFields && ["fix.dispatch", "fix.done", "fix.exhausted", "fix.commit_refused", "fix.stood_down"].includes(step)
+      ? { ...(step === "fix.dispatch" ? { requested_model: roundModelFields.requested_model } : roundModelFields), ...row } : row;
+    roundRows.push({ ...attributed, task_id: opts.taskId, step });
+    opts.deps.log(step, attributed);
   } };
   // W1-T7096: production call sites opt into the LLM judge. A caller that wires none (a test
   // fixture) keeps the former bounds as an explicit, judge-shaped stand-in — never a silent LLM spawn.
@@ -2533,6 +2536,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       consultedThisRound = true;
       if (stop.verdict === "change-approach") progressApproach = stop.approach;
     }
+    // A new round has no worker yet. Keep the last round only when the ceiling above ends it.
+    roundModelFields = undefined;
     const claimLost = branchClaimLost();
     if (claimLost) return claimLost;
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
@@ -4187,6 +4192,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         return { outcome: "stood_down", review, strikes, retriggers, reason: "admission-abandoned",
           standDownReason: "fix admission abandoned before a worker started" };
       }
+      roundModelFields = { requested_model: fixArgs.model ?? null, served_model: fixResult.servedModel ?? null,
+        ...(fixResult.servedModel == null ? { served_model_reason: fixResult.servedModelReason ??
+          "the provider reported no served model for this call" } : {}) };
     } catch (e) {
       if (!isSpawnInfraBlockedError(e)) throw e;
       // No subprocess ever launched, nothing was billed: an INFRA-tagged $0 line, NEVER a
