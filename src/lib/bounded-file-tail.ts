@@ -18,7 +18,7 @@ export function readBoundedFileTail(path: string, maxBytes: number): FileTail {
   let fd: number | undefined;
   let result: FileTail = { state: "unreadable", text: "", bytesRead: 0 };
   try {
-    fd = fs.openSync(path, "r");
+    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW, 0o600);
     const before = fs.fstatSync(fd);
     if (!before.isFile()) throw new Error("report is not a regular file");
     result.fileBytes = before.size;
@@ -53,11 +53,12 @@ export function readBoundedFileTail(path: string, maxBytes: number): FileTail {
   return result;
 }
 
-/** Small streams stay in memory; larger streams spill to disposable scratch before a bounded read. */
+/** Small streams stay in memory; larger streams spill to a private file before a bounded read. */
 export class BoundedOutput {
   private chunks: string[] = [];
   private bytes = 0;
   private dir?: string;
+  private fd?: number;
   private failure?: string;
   private finished?: { chunks: string[]; evidence: Omit<FileTail, "text"> };
 
@@ -76,6 +77,8 @@ export class BoundedOutput {
     try {
       if (!this.dir) {
         this.dir = fs.mkdtempSync(join(tmpdir(), "rmd-worker-output-"));
+        this.fd = fs.openSync(join(this.dir, "output"),
+          fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
         this.append(this.chunks.join(this.separator));
         this.chunks = [];
       }
@@ -93,13 +96,26 @@ export class BoundedOutput {
       let end = Math.min(start + 8192, text.length);
       const last = text.charCodeAt(end - 1);
       if (end < text.length && last >= 0xd800 && last <= 0xdbff) end--;
-      fs.appendFileSync(join(this.dir!, "output"), text.slice(start, end), { mode: 0o600 });
+      const part = Buffer.from(text.slice(start, end));
+      for (let written = 0; written < part.length;) {
+        const count = fs.writeSync(this.fd!, part, written, part.length - written);
+        if (count === 0) throw new Error("short write: report could not be retained");
+        written += count;
+      }
       start = end;
     }
   }
 
   finish(read: typeof readBoundedFileTail = readBoundedFileTail): { chunks: string[]; evidence: Omit<FileTail, "text"> } {
     if (this.finished) return this.finished;
+    if (this.fd !== undefined) {
+      try { fs.closeSync(this.fd); }
+      catch (error) {
+        const reason = reasonOf(error);
+        this.failure = reason;
+      }
+      this.fd = undefined;
+    }
     let tail: FileTail = this.failure
       ? { state: "unreadable", text: "", bytesRead: 0, reason: this.failure }
       : this.dir ? read(join(this.dir, "output"), this.maxBytes)

@@ -77,7 +77,7 @@ test("bounded report short reads and close failures never claim completeness", (
   assert.equal(closed.bytesRead, Buffer.byteLength("complete report"));
 });
 
-test("bounded output spills, preserves small chunks and reports write and cleanup failures", (t) => {
+test("bounded output spills privately, preserves small chunks and reports write and cleanup failures", (t) => {
   assert.throws(() => new BoundedOutput(-1), /byte bound/);
   const small = new BoundedOutput(12);
   small.push("");
@@ -87,13 +87,27 @@ test("bounded output spills, preserves small chunks and reports write and cleanu
   assert.equal(small.finish().evidence.state, "complete");
   assert.doesNotThrow(() => small.push("late"));
   assert.deepEqual(small.finish().chunks, ["hello", "é"]);
+  const open = fs.openSync;
+  const created: Array<{ flags: number; mode: number | undefined; actualMode: number }> = [];
+  const secureOpen = t.mock.method(fs, "openSync", (path: fs.PathLike, flags: string | number, mode?: number) => {
+    const fd = open(path, flags, mode);
+    if (typeof flags === "number" && flags & fs.constants.O_CREAT) {
+      created.push({ flags, mode, actualMode: fs.fstatSync(fd).mode & 0o777 });
+    }
+    return fd;
+  });
   const spilled = new BoundedOutput(8);
   spilled.push("first");
   spilled.push("\n🙂é終\n");
   spilled.push("end");
   assert.deepEqual(spilled.finish().chunks, ["終\nend"]);
-  assert.equal(spilled.finish().evidence.state, "truncated");
-  const write = t.mock.method(fs, "appendFileSync", () => { throw new Error("disk full"); });
+  assert.deepEqual(spilled.finish().evidence, { state: "truncated", bytesRead: 8, fileBytes: 19 });
+  assert.equal(created.length, 1);
+  assert.equal(created[0]!.mode, 0o600);
+  assert.equal(created[0]!.actualMode, 0o600);
+  assert.ok(created[0]!.flags & fs.constants.O_EXCL);
+  secureOpen.mock.restore();
+  const write = t.mock.method(fs, "writeSync", () => { throw new Error("disk full"); });
   const failed = new BoundedOutput(1);
   failed.push("large");
   failed.push("ignored");
@@ -102,6 +116,16 @@ test("bounded output spills, preserves small chunks and reports write and cleanu
   assert.match(failedOutput.evidence.reason!, /disk full/);
   assert.deepEqual(failedOutput.chunks, []);
   write.mock.restore();
+  const close = fs.closeSync;
+  const closeFailure = t.mock.method(fs, "closeSync", (fd: number) => {
+    close(fd);
+    throw new Error("close refused");
+  });
+  const unclosed = new BoundedOutput(1);
+  unclosed.push("large");
+  assert.equal(unclosed.finish().evidence.state, "unreadable");
+  assert.match(unclosed.finish().evidence.reason!, /close refused/);
+  closeFailure.mock.restore();
   const create = t.mock.method(fs, "mkdtempSync", () => { throw new Error("scratch refused"); });
   const noScratch = new BoundedOutput(0);
   noScratch.push("x");
