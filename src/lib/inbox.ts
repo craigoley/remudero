@@ -1997,6 +1997,8 @@ export interface DraftSpawnContext {
   attempt: number;
   /** The models whose draft for this proposal failed lint, in the order they were tried. */
   avoidModels: readonly string[];
+  /** Report the request before awaiting the worker, so a rejected spawn retains its model. */
+  onRequestedModel?: (model: string | null) => void;
 }
 
 export interface DraftRungDeps {
@@ -2445,8 +2447,8 @@ function draftWorkerModel(worker: WorkerResult): string | null {
   return worker.routedModel ?? worker.model ?? null;
 }
 
-function draftModelFields(worker?: DraftWorkerResult) {
-  return { requested_model: worker?.requestedModel ?? null, served_model: worker?.servedModel ?? null,
+function draftModelFields(worker?: DraftWorkerResult, requestedModel?: string | null) {
+  return { requested_model: worker?.requestedModel ?? requestedModel ?? null, served_model: worker?.servedModel ?? null,
     ...(worker?.servedModel == null ? { served_model_reason: worker?.servedModelReason ??
       "the provider reported no served model for this call" } : {}) };
 }
@@ -2459,6 +2461,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
     snapshot: deps.causalScope ? captureInboxDraftSnapshot(proposal, deps.causalScope) : undefined }));
   const draftOne = async (proposal: Proposal, snapshot?: InboxDraftSnapshot): Promise<DraftRungOutcome> => {
     let lastWorker: DraftWorkerResult | undefined;
+    let lastRequestedModel: string | null = null;
     try {
       let prompt = inboxDraftPrompt(proposal, currentPlanText, runId);
       let parsed: ReturnType<typeof parseDraftedCandidate> = null;
@@ -2472,7 +2475,9 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
         cashAttempts = attempt;
         lastWorker = undefined;
-        const worker = await deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels] });
+        lastRequestedModel = null;
+        const worker = await deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels],
+          onRequestedModel: model => { lastRequestedModel = model; } });
         lastWorker = worker;
         if (dirty) {
           // NAME THE FALL-THROUGH, with the model that actually answered — a spawn that ignored `avoidModels` shows up
@@ -2591,7 +2596,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       return { proposalId: proposal.id, ok: true, candidate };
     } catch (e) {
       const error = String((e as Error)?.message ?? e);
-      deps.log("inbox.draft_error", { proposal_id: proposal.id, ...draftModelFields(lastWorker), error });
+      deps.log("inbox.draft_error", { proposal_id: proposal.id, ...draftModelFields(lastWorker, lastRequestedModel), error });
       return { proposalId: proposal.id, ok: false, error };
     }
   };

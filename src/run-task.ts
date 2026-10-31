@@ -35212,6 +35212,7 @@ export async function draftProposalBatch(
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
           }), onSelectionAssignment: undefined };
           const requestedModel = spawnArgs.model ?? null;
+          ctx?.onRequestedModel?.(requestedModel);
           return { ...await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)(spawnArgs), requestedModel };
         },
         ...(inboxDraftMount.provider === "cash" ? {

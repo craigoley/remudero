@@ -92,7 +92,7 @@ async function productionDraftRows(t: TestContext) {
   const productionClean = clean.replace("src/lib/plan.ts", "README.md").replace(
     "unit test: parseTasksFromYaml rejects an empty input instead of throwing a TypeError", "grep: draft-attribution-added in README.md");
   let batch = 0;
-  for (const text of [productionClean, dirty, "malformed final result"]) for (const servedModel of ["served-draft", undefined]) {
+  for (const text of [productionClean, dirty, "malformed final result", "provider unavailable"]) for (const servedModel of ["served-draft", undefined]) {
     const stateDir = join(root, "receipts", String(++batch));
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [proposal] }));
@@ -103,12 +103,18 @@ async function productionDraftRows(t: TestContext) {
       "acme", "remudero", `model-${batch}`, log, async args => {
         requests.push(args.model!);
         assert.equal(args.mountProvider, "cash");
+        if (text === "provider unavailable") throw new Error(text);
         // Only the external provider is replaced; the real caller must preserve args.model.
         return worker({ text, requestedModel: undefined, servedModel,
           servedModelReason: "fixture provider omitted its model" });
       });
     assert.ok(requests.length > 0, JSON.stringify({ outcomes, rows }));
     assert.ok(requests.every(model => model === requested.model));
+    if (text === "provider unavailable") {
+      assert.equal(outcomes[0].ok, false);
+      assertModels(rows.find(row => row.step === "inbox.draft_error"), requested.model, null);
+      continue;
+    }
     if (text === "malformed final result") {
       assert.equal(outcomes[0].ok, false);
       assertModels(rows.find(row => row.step === "inbox.draft_error"), requested.model, servedModel ?? null,
@@ -171,15 +177,16 @@ test("draft attribution follows the final retry or escalation and survives draft
     let calls = 0;
     await runDraftRung([proposal], "- id: W1-T1\n", {
       log: (step, extra) => { rows.push({ step, ...extra }); },
-      spawn: async () => {
+      spawn: async (_proposal, _prompt, ctx) => {
         if (afterResult && calls++ === 0) return worker({ text: dirty });
+        ctx?.onRequestedModel?.("requested-failed");
         throw new Error("provider unavailable");
       },
     }, "throwing-model");
     const row = rows.find(row => row.step === "inbox.draft_error");
     assert.ok(row);
     assert.equal(rows.filter(row => row.step === "inbox.draft_synthesized").length, afterResult ? 1 : 0);
-    assert.equal(row.requested_model, null);
+    assert.equal(row.requested_model, "requested-failed");
     assert.equal(row.served_model, null);
     assert.equal(typeof row.served_model_reason, "string");
   }
