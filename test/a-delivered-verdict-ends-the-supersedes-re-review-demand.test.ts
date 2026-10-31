@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import type { Plan } from "../src/lib/plan.js";
-import { decideArmFromLedgerVerdict, priorReviewVerdictFromLedger } from "../src/lib/review.js";
-import { readLedgerLines } from "../src/lib/status.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan } from "#src/lib/plan.js";
+import { decideArmFromLedgerVerdict, priorReviewVerdictFromLedger } from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import {
   buildSweepEffects,
   DEFAULT_SWEEP_POLICY,
@@ -17,8 +17,8 @@ import {
   type BuildSweepEffectsDeps,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#test/helpers/sweep-test.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // ── W1-T5813 ──────────────────────────────────────────────────────────────────────────────────
 //

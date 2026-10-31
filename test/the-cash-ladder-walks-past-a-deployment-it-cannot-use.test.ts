@@ -27,8 +27,8 @@ import {
   selectOpenWeightModel,
   OpenWeightUnsupportedResponseFormatError,
   OpenWeightRequestTimeoutError,
-} from "../src/lib/worker-provider.js";
-import { runOpenWeightWalkingLadder } from "../src/lib/worker.js";
+} from "#src/lib/worker-provider.js";
+import { runOpenWeightWalkingLadder } from "#src/lib/worker.js";
 
 test("the selection carries the rest of its ladder, not just the winner", () => {
   // Asserted against the REAL configured ladder, and deliberately WITHOUT naming a model: the

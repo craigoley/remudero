@@ -23,7 +23,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { parse as parseYaml } from "yaml";
 
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "source-size-ratchet.mjs");

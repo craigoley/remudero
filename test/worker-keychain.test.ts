@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { daemonBoot } from "../src/lib/daemon.js";
+import { daemonBoot } from "#src/lib/daemon.js";
 import {
   WORKER_KEYCHAIN_SERVICE,
   WorkerKeychainError,
@@ -11,7 +11,7 @@ import {
   materializeWorkerHome,
   workerHomePlan,
   workerKeychainPaths,
-} from "../src/lib/worker-home.js";
+} from "#src/lib/worker-home.js";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "rmd-workerkeychain-"));

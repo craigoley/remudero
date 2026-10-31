@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { COMMANDS, HANDLERS, USAGE, commandHelp } from "../src/run-task.js";
+import { COMMANDS, HANDLERS, USAGE, commandHelp } from "#src/run-task.js";
 
 // W1-T47: COMMANDS is the ONE source of truth `rmd --help` (USAGE) and `rmd <cmd>
 // --help` (commandHelp) are BOTH generated from — these tests pin that relationship so

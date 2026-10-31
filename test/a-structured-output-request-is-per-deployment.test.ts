@@ -4,7 +4,7 @@ import {
   OPENWEIGHT_RESPONSE_FORMATS,
   OpenWeightUnsupportedResponseFormatError,
   openWeightResponseFormatField,
-} from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
 
 // `spawnOpenWeightWorker` carried a blanket "Do not add `response_format` here",
 // measured against gpt-oss-120b, which returns MALFORMED JSON under json_object. That measurement

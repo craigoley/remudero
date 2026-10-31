@@ -19,9 +19,9 @@ import {
   type RollupCheckEntry,
   type StaleCiGateTransition,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { resolveDoctrineForReader } from "../src/lib/learnings.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#test/helpers/sweep-test.js";
+import { resolveDoctrineForReader } from "#src/lib/learnings.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 // ── W1-T261: ci-gate RE-AGGREGATES on member-check completion ───────────────────────────────
 //

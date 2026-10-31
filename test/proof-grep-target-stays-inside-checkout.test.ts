@@ -32,7 +32,7 @@ import {
   parseWhitelistedProof,
   ProofTargetOutsideCheckoutError,
   type ProofExecContext,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 /** The bit the oracle would have read. Present in the OUTSIDE file and in the in-tree control,
  *  so a proof naming either one would report `pass` if the containment check were not there. */

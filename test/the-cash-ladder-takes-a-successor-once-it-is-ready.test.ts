@@ -3,9 +3,9 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { loadMounts, mountsPath, type CapabilityLadder } from "../src/lib/mounts.js";
+import type { Config } from "#src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadMounts, mountsPath, type CapabilityLadder } from "#src/lib/mounts.js";
 import {
   clearOpenWeightAbsence,
   markOpenWeightDeploymentAbsent,
@@ -16,8 +16,8 @@ import {
   selectOpenWeightModel,
   spawnOpenWeightWorker,
   type OpenWeightAllowanceState,
-} from "../src/lib/worker-provider.js";
-import { runOpenWeightWalkingLadder, type WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/worker-provider.js";
+import { runOpenWeightWalkingLadder, type WorkerResult } from "#src/lib/worker.js";
 
 // W1-T4079 (operator ruling 2026-09-22): stay on gpt-5.6 until GPT-6 is priced and shaped,
 // then select it automatically. A measured 404 still drops the unavailable deployment briefly.

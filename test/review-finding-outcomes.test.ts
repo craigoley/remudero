@@ -3,10 +3,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { deriveReviewFindingOutcomes, type VerifiedFindingEvidence } from "../src/lib/review-finding-outcomes.js";
-import { buildFieldTrialsFlowSnapshot, buildFieldTrialsRelease, projectFlowRow, readFieldTrialsLedger, type FieldTrialsSource } from "../src/lib/field-trials-flow.js";
-import { emptyRepoStore } from "../src/lib/field-trials-github.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { deriveReviewFindingOutcomes, type VerifiedFindingEvidence } from "#src/lib/review-finding-outcomes.js";
+import { buildFieldTrialsFlowSnapshot, buildFieldTrialsRelease, projectFlowRow, readFieldTrialsLedger, type FieldTrialsSource } from "#src/lib/field-trials-flow.js";
+import { emptyRepoStore } from "#src/lib/field-trials-github.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const at = "2026-09-30T00:00:00Z";
 const pr = "https://github.com/acme/core/pull/1";

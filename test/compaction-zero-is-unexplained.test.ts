@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { collectWorkerResult, workerLedgerFields } from "../src/lib/worker.js";
+import { collectWorkerResult, workerLedgerFields } from "#src/lib/worker.js";
 
 // ── W1-T2245: the compaction ledger row cannot tell DISABLED from NEVER-NEEDED from
 // FAILED. `quality_suspect`/`compaction_events` fire ONLY off a real `compact_boundary`

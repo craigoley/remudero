@@ -13,9 +13,9 @@ import {
   InMemoryCapabilityGrantStore,
   verifyCapabilityGrant,
   type CapabilityUseRequest,
-} from "../src/lib/capability-grant.js";
-import type { Config } from "../src/lib/config.js";
-import { CapabilityGrantRefusedError, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
+} from "#src/lib/capability-grant.js";
+import type { Config } from "#src/lib/config.js";
+import { CapabilityGrantRefusedError, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 
 const FUTURE = new Date(Date.now() + 60_000).toISOString();
 const APPROVAL = { approvedBy: "operator:alice", approvedAt: new Date(Date.now() - 1_000).toISOString() };

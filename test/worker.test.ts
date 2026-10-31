@@ -4,9 +4,9 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { WorkerSettingsError } from "../src/lib/settings.js";
-import { WorkerKeychainError } from "../src/lib/worker-home.js";
-import { isPidAlive, RUN_ID_ENV, spawnDetachedGroup, TASK_ID_ENV } from "../src/lib/worker-containment.js";
+import { WorkerSettingsError } from "#src/lib/settings.js";
+import { WorkerKeychainError } from "#src/lib/worker-home.js";
+import { isPidAlive, RUN_ID_ENV, spawnDetachedGroup, TASK_ID_ENV } from "#src/lib/worker-containment.js";
 import {
   BILLING_MODE,
   CLAUDE_BIN_ENV_OVERRIDE,
@@ -30,8 +30,8 @@ import {
   workerKeychainGrantApps,
   workerLedgerFields,
   workerTranscript,
-} from "../src/lib/worker.js";
-import { ledgeredNonDispatchSpawn, runReview } from "../src/run-task.js";
+} from "#src/lib/worker.js";
+import { ledgeredNonDispatchSpawn, runReview } from "#src/run-task.js";
 
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();

@@ -1,4 +1,3 @@
-// test/check-acceptance-names-a-proof-that-discriminates-nothing.test.ts
 //
 // W1-T3687. `rmd check-acceptance` is the one pre-flight verb an author runs before opening a PR,
 // and it never asked the discrimination question `rmd check-proof --base` already answers: a
@@ -27,7 +26,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { checkAcceptanceCommand } from "../src/run-task.js";
+import { checkAcceptanceCommand } from "#src/run-task.js";
 
 /** Run `checkAcceptanceCommand` with stdout captured, from `cwd` — same discipline
  *  `test/check-proof-base.test.ts`'s own `runCheckProof` uses for its sibling verb. */

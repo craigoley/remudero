@@ -17,7 +17,7 @@ import {
   CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES,
   isCodexWorkerOutputLimitError,
   spawnCodexWorker,
-} from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
 
 function fakeCodex(streamObserver?: Parameters<typeof spawnCodexWorker>[0]["streamObserver"]): { stdout: PassThrough; proc: EventEmitter; run: Promise<unknown>; home: string; teardowns: () => number; spawned: Promise<void> } {
   const stdin = new PassThrough();

@@ -15,8 +15,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { finishJudgedRun } from "./helpers/judged-pool-run.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

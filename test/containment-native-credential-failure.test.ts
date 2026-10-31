@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { assessWorkerSmoke, ContainmentError, defaultExecutor, NATIVE_LOGIN_EXPIRED_RE, NATIVE_TOKEN_EXPIRED_RE, probeContainment, runWorkerSmoke, type ProbeExecResult } from "../src/lib/containment.js";
-import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { assessWorkerSmoke, ContainmentError, defaultExecutor, NATIVE_LOGIN_EXPIRED_RE, NATIVE_TOKEN_EXPIRED_RE, probeContainment, runWorkerSmoke, type ProbeExecResult } from "#src/lib/containment.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const LOGIN = "Failed to authenticate: OAuth session expired and could not be refreshed";
 const TOKEN = "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue";

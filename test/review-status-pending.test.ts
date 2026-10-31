@@ -5,10 +5,10 @@ import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { CLAUDE_BIN_ENV_OVERRIDE, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "../src/lib/worker.js";
-import { buildOpenPrViews, runReview } from "../src/run-task.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { buildOpenPrViews, runReview } from "#src/run-task.js";
 import {
   REVIEW_ENGINE_REVISION,
   assessPendingReviewOwner,
@@ -20,8 +20,8 @@ import {
   reviewInputDigest,
   resolveReviewProvenance,
   type PrLifecycleState,
-} from "../src/lib/review.js";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView } from "../src/lib/sweep.js";
+} from "#src/lib/review.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView } from "#src/lib/sweep.js";
 
 /**
  * W1-T913 (fb-1784901239119-1be356, PR #707): `remudero-review` was posted ONLY in a terminal

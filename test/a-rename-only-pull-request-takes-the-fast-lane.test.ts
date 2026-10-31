@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { isRenameOnlyDiff } from "../src/lib/review.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { isRenameOnlyDiff } from "#src/lib/review.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T4811 (operator ruling 2026-09-22, W1-T2982). The predicate is judged against REAL git output, because the
 // falsifier is a predicate keyed on path names: only a real rename-plus-edit shows whether it discriminates.

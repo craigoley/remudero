@@ -17,8 +17,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
 import {
   OPENWEIGHT_MAX_COMPLETION_TOKENS,
   OPENWEIGHT_PRICES,
@@ -28,7 +28,7 @@ import {
   openWeightUsageUsd,
   reserveOpenWeightBudget,
   spawnOpenWeightWorker,
-} from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
 
 const AT_ISO = "2026-09-15T10:00:00.000Z";
 

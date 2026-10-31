@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyInstrumentChange } from "../src/lib/review.js";
+import { classifyInstrumentChange } from "#src/lib/review.js";
 
 const FILE = "scripts/x-baseline.json";
 

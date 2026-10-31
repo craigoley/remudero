@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import type { GitHub } from "../src/lib/status.js";
-import { memoiseGatewayByRepo } from "../src/run-task.js";
+import type { GitHub } from "#src/lib/status.js";
+import { memoiseGatewayByRepo } from "#src/run-task.js";
 // @source-text-subject: this file pins WHERE the daemon verb's wiring lives in source; the verb moved from src/run-task.ts to src/cli/commands/daemon.ts (W1-T9333), so it reads both.
 
 /**

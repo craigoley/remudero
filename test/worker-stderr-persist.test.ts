@@ -3,19 +3,19 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { defaultExecutor as containmentDefaultExecutor, probeContainment } from "../src/lib/containment.js";
-import { defaultExecutor as isolationDefaultExecutor, probeIsolation } from "../src/lib/isolation.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { defaultExecutor as containmentDefaultExecutor, probeContainment } from "#src/lib/containment.js";
+import { defaultExecutor as isolationDefaultExecutor, probeIsolation } from "#src/lib/isolation.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 import {
   capStderrExcerpt,
   collectWorkerResult,
   STDERR_EXCERPT_CAP,
   workerFailureExcerpt,
   workerLedgerFields,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 /** Minimal fake WorkerResult — only the fields the defaultExecutor call sites read. */
 function fakeWorkerResult(overrides: Partial<WorkerResult>): WorkerResult {

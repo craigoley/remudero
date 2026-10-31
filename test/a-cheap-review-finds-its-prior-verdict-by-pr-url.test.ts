@@ -13,8 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { appendLedger, type LedgerLine } from "../src/lib/ledger.js";
-import { missingReviewReuseFact, priorPostedReviewRow, type ReviewVerdict } from "../src/lib/review.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { missingReviewReuseFact, priorPostedReviewRow, type ReviewVerdict } from "#src/lib/review.js";
 
 const URL = "https://github.com/acme/scratch/pull/11882";
 const OTHER = "https://github.com/acme/scratch/pull/1";

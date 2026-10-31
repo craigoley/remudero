@@ -17,8 +17,8 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { checkWaitStalled, STALL_WINDOW, waitForCiGreen, ciGateState, ciGateFromRollup } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { checkWaitStalled, STALL_WINDOW, waitForCiGreen, ciGateState, ciGateFromRollup } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /** `STALL_WINDOW` identical copies of `reading` — the minimum a real caller would have
  *  accumulated before {@link checkWaitStalled} has enough evidence to conclude stalled. */

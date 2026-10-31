@@ -28,7 +28,7 @@ import { dirname, join } from "node:path";
 // starts stamping those fields is the other half (#1609) and is not required by anything here.
 
 // `scripts/**` sits OUTSIDE tsconfig's `include` (see tsconfig.json), so a static
-// `import … from "../scripts/learnings-budget-ratchet.mjs"` is a TS7016 — the same reason
+// `import … from "#scripts/learnings-budget-ratchet.mjs"` is a TS7016 — the same reason
 // test/clock-sweep.test.ts reaches its script through a runtime import rather than a typed one.
 // A dynamic specifier is not statically resolved, so this loads the REAL module with no shadow
 // copy to drift from it.

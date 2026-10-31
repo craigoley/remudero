@@ -4,7 +4,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSyn
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
-import { makeTempDir } from '../src/lib/tmp.js';
+import { makeTempDir } from '#src/lib/tmp.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 type ModuleVerdict = { verdict: string; stage?: string; message?: string };

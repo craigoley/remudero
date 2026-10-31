@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { detectTestTheater } from "../src/lib/review.js";
+import { detectTestTheater } from "#src/lib/review.js";
 
 /**
  * `detectTestTheater` scanned every added line under `test/` as test CODE, so a PR adding a

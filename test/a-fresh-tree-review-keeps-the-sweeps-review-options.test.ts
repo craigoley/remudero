@@ -17,7 +17,7 @@ import {
   resolveReviewTaskId,
   reviewOptionFlags,
   reviewOptionsFromFlags,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const STALE = {
   status: "stale" as const,

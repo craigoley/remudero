@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 import {
   MAX_RETAINED_REMEDY_LINES,
@@ -28,7 +28,7 @@ import {
   fetchCiFailures,
   generatorFixFor,
   retainGeneratorRemedyLines,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const TAIL = 60;
 const REMEDY = "Run 'npm run docs-index' and commit the result.";

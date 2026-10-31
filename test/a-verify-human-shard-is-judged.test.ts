@@ -31,11 +31,11 @@ import {
   spawnVerifyHumanJudgeWorker,
   realVerifyHumanJudge,
   resolveVerifyHumanJudgeMount,
-} from "../src/lib/verify-human-judge.js";
-import { resolveRiskJudgeMount } from "../src/lib/risk-judge.js";
-import type { Mount, Mounts } from "../src/lib/mounts.js";
-import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
+} from "#src/lib/verify-human-judge.js";
+import { resolveRiskJudgeMount } from "#src/lib/risk-judge.js";
+import type { Mount, Mounts } from "#src/lib/mounts.js";
+import type { WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
 import {
   priorVerifyHumanVerdicts,
   routeVerifyHumanBacklog,
@@ -43,15 +43,15 @@ import {
   verifyHumanSweepCommand,
   parkedVerifyHumanShards,
   type VerifyHumanRouteDeps,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadPlan } from "../src/lib/plan.js";
-import { loadProposalRegistry } from "../src/lib/inbox.js";
-import type { Config } from "../src/lib/config.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { loadProposalRegistry } from "#src/lib/inbox.js";
+import type { Config } from "#src/lib/config.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /** PLAINLY still needs a person: nothing has landed, nothing is cited, it asks for a judgement. */
 const NEEDS: ShardUnderJudgement = {
@@ -725,7 +725,7 @@ test("W1-T3188: a shard whose file IS in git reports a real age in days, not the
   assert.equal(shards[0].ageDays, 3, "three days after the shard was added, the age must read 3");
 });
 
-import { world as whyMeWorld } from "./helpers/why-me-world.js";
+import { world as whyMeWorld } from "#test/helpers/why-me-world.js";
 
 test("the production sweep intake reads correction receipts from its configured state root", async t => {
   const repo = gitRepo({ kind: "why-me-production", seedCommit: false });
@@ -734,7 +734,7 @@ test("the production sweep intake reads correction receipts from its configured 
   writeFileSync(w.planPath, w.plan + "  files: [DECISIONS.md]\n"); await w.refresh();
   mkdirSync(join(w.root, ".remudero"));
   (await import("node:fs")).copyFileSync(join(import.meta.dirname, "..", ".remudero", "mounts.yaml"), join(w.root, ".remudero", "mounts.yaml"));
-  const { persistedInboxPath } = await import("../src/lib/fleet-lane.js");
+  const { persistedInboxPath } = await import("#src/lib/fleet-lane.js");
   repo.addRemote("origin", "https://github.com/owner/core.git");
   const before = process.env.RMD_INSTANCE_NAME;
   t.after(() => { if (before === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = before; });

@@ -6,9 +6,9 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { certainHeadRefusals } from "../src/lib/review.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { certainHeadRefusals } from "#src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /**
  * 2026-09-29 — the worker half of "reviewer-unmet", the CI-friction gardener's costliest cause. MEASURED 2026-09-15..29:

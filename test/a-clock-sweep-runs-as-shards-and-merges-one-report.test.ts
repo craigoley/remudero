@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { derivePrCheckCandidates, loadCiGateLists, type WorkflowDoc } from "../src/lib/ci-control-plane.js";
+import { derivePrCheckCandidates, loadCiGateLists, type WorkflowDoc } from "#src/lib/ci-control-plane.js";
 
 // W1-T5102 — the clock sweep runs as a matrix of shards and one merge job classifies their union.
 // `scripts/**` is outside tsconfig's `include`, so the modules load through dynamic specifiers

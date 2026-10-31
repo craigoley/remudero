@@ -3,8 +3,8 @@ import { lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { acquireTestSlot, TEST_SLOT_LEASE_MS, type TestSlotLease, type TestSlotOptions } from "../src/lib/test-slot.js";
-import { observeSlotCapacity } from "../src/lib/test-slot-capacity.js";
+import { acquireTestSlot, TEST_SLOT_LEASE_MS, type TestSlotLease, type TestSlotOptions } from "#src/lib/test-slot.js";
+import { observeSlotCapacity } from "#src/lib/test-slot-capacity.js";
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "rmd-private-namespace-")), path = join(dir, "slot-1.json");

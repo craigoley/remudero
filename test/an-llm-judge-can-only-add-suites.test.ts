@@ -23,13 +23,13 @@ import {
   unionJudgeWithFloor,
   withCiJudgeAfterSweep,
   type CiJudgePorts,
-} from "../src/lib/ci-escalation-judge.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { WorktreePointerRefusedError } from "../src/lib/worktree-git.js";
-import { daemonCommand } from "../src/run-task.js";
-import { buildBatchedGithub } from "../src/lib/status.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/ci-escalation-judge.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { WorktreePointerRefusedError } from "#src/lib/worktree-git.js";
+import { daemonCommand } from "#src/run-task.js";
+import { buildBatchedGithub } from "#src/lib/status.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T4407. A judge beside the deterministic selector may WIDEN what CI runs — add a suite, or escalate
 // to a full run — and can never narrow it. The falsifier: let the judge's list replace the selection,

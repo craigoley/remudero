@@ -6,9 +6,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { judgeReview, resolvePlanCriteriaAtHead } from "../src/lib/review.js";
-import { openTaskIdsFromPlan } from "../src/run-task.js";
-import type { Plan } from "../src/lib/plan.js";
+import { judgeReview, resolvePlanCriteriaAtHead } from "#src/lib/review.js";
+import { openTaskIdsFromPlan } from "#src/run-task.js";
+import type { Plan } from "#src/lib/plan.js";
 
 // ── W1-T2623 — THE AT-HEAD RESOLVER SWAP WAS NOT FIELD-FOR-FIELD ────────────────────────────────
 //

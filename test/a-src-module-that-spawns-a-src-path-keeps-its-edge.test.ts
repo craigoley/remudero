@@ -16,7 +16,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import * as affected from "../src/lib/affected-suites.js";
+import * as affected from "#src/lib/affected-suites.js";
 
 const REPO = join(import.meta.dirname, "..");
 

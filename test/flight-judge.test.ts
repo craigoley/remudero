@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import type { Mount } from "../src/lib/mounts.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import type { Mount } from "#src/lib/mounts.js";
 import {
   buildFlightJudgeSpawnArgs,
   buildJudgePrompt,
@@ -18,7 +18,7 @@ import {
   type JudgeInput,
   type JudgeTurnEvidence,
   type JudgeVerdict,
-} from "../src/lib/flight-judge.js";
+} from "#src/lib/flight-judge.js";
 
 const CRITERIA: AcceptanceCriterion[] = [{ claim: "does the thing", proof: "test/thing.test.ts passes" }];
 

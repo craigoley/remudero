@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import {
   acquireReviewStatusLock,
   decideReviewStatusPost,
@@ -20,12 +20,12 @@ import {
   ReviewStatusLockTimeoutError,
   type PostedReviewStatusRecord,
   type PrLifecycleState,
-} from "../src/lib/review.js";
-import { type GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { ghLiveStateByNumber } from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/review.js";
+import { type GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { ghLiveStateByNumber } from "#src/run-task.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 /**
  * W1-T228 — "the review status channel is last-write-wins across

@@ -16,7 +16,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { preexistingProofHits, parseWhitelistedProof } from "../src/lib/review.js";
+import { preexistingProofHits, parseWhitelistedProof } from "#src/lib/review.js";
 
 const ADDED = "test/a-brand-new-suite.test.ts";
 const PREEXISTING = "test/an-already-shipped-suite.test.ts";

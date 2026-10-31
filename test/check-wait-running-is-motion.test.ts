@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { checkWaitStalled, rollupHasRunningCheck, STALL_WINDOW, waitForCiGreen, ciGateState } from "../src/run-task.js";
+import { checkWaitStalled, rollupHasRunningCheck, STALL_WINDOW, waitForCiGreen, ciGateState } from "#src/run-task.js";
 
 /**
  * A RUNNING CHECK IS MOTION. W1-T382 correctly replaced a DEADLINE with a DERIVATIVE, then

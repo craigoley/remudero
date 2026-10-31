@@ -30,8 +30,8 @@ import {
   defaultMergeEvidenceLog,
   LINT_FILING_SUBJECT_RE,
   lintPlanCommand,
-} from "../src/run-task.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+} from "#src/run-task.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

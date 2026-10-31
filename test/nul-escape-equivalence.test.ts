@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { hashToolCall } from "../src/lib/flight-signals.js";
+import { hashToolCall } from "#src/lib/flight-signals.js";
 
 /** Built with the `\0` escape — exactly how the three composite-key sites now spell it. */
 function escapedKey(a: string, b: string): string {

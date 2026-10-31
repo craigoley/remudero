@@ -7,7 +7,7 @@ import {
   openUsageProbeSession,
   type ResolveClaudeExecutableDeps,
   type UsageProbeQueryFn,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 /**
  * W1-T9362. The Agent SDK's `query()` picks its native binary itself whenever `pathToClaudeCodeExecutable` is unset, and on

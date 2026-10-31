@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { terminalVerdictFields } from "../src/run-task.js";
-import { gatherRuns, type LedgerRecord } from "../src/lib/retro.js";
-import { notionalSpendUsd, spendAmountUsd } from "../src/lib/spend-rows.js";
-import { workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
-import { codexNotionalCostUsd, openWeightPriceFor, OpenWeightUnpricedDeploymentError } from "../src/lib/worker-provider.js";
+import { terminalVerdictFields } from "#src/run-task.js";
+import { gatherRuns, type LedgerRecord } from "#src/lib/retro.js";
+import { notionalSpendUsd, spendAmountUsd } from "#src/lib/spend-rows.js";
+import { workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
+import { codexNotionalCostUsd, openWeightPriceFor, OpenWeightUnpricedDeploymentError } from "#src/lib/worker-provider.js";
 
 const tokens = { input: 1_000_000, output: 100_000, cacheRead: 400_000, cacheCreation: 0 };
 

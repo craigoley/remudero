@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bodyContradictsDiff, changesetClaimsDisagreeing } from "../src/lib/review.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing } from "#src/lib/review.js";
 
 // ── W1-T2224 ─────────────────────────────────────────────────────────────────
 //

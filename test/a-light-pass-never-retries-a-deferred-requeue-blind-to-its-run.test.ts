@@ -13,8 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   buildSweepEffects,
   CHECK_REQUEUE_DEFERRAL_BACKSTOP,
@@ -29,8 +29,8 @@ import {
   type OpenPrView,
   type RollupCheckEntry,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { blockedFixableIsRequeueOnly, lightPassActionable } from "../src/run-task.js";
+} from "#test/helpers/sweep-test.js";
+import { blockedFixableIsRequeueOnly, lightPassActionable } from "#src/run-task.js";
 
 const PR = 9392;
 const HEAD = "1f9c8198e0b0344153d1c20259ddf6c81f6ffc61";

@@ -6,10 +6,10 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { certainHeadRefusals } from "../src/lib/review.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { certainHeadRefusals } from "#src/lib/review.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /**
  * W1-T5026. #8156 (W1-T4914) named its test "... recorded as clean with no conflicting paths" while the proof was

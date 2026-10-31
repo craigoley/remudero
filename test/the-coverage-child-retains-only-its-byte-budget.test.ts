@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
-import { spawnCoverageChild } from "../src/run-task.js";
+import { spawnCoverageChild } from "#src/run-task.js";
 
 const run = (body: string, cap = 1024, timeout = 10_000) =>
   spawnCoverageChild(process.execPath, ["-e", body], tmpdir(), process.env, timeout, cap);

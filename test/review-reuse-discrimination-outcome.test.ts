@@ -7,12 +7,12 @@ import {
   judgeReview,
   type ProofExecutor,
   type ReviewVerdict,
-} from "../src/lib/review.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { buildSweepEffects } from "../src/run-task.js";
-import { discriminateReviewReuse, type OpenPrView, type ReviewReuseInputs } from "../src/lib/sweep.js";
-import { readLedgerLines } from "../src/lib/status.js";
+} from "#src/lib/review.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { buildSweepEffects } from "#src/run-task.js";
+import { discriminateReviewReuse, type OpenPrView, type ReviewReuseInputs } from "#src/lib/sweep.js";
+import { readLedgerLines } from "#src/lib/status.js";
 
 const CRITERION = {
   claim: "W1-T3901 proof discrimination observes the current head",

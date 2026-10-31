@@ -27,9 +27,9 @@ import {
   parseGitEventDump,
   verdictCalibrationReport,
   type VerdictRow,
-} from "../src/lib/verdict-calibration.js";
-import { defaultVerdictCalibrationGitLog, verdictCalibrationCommand } from "../src/run-task.js";
-import { configPath, type Config } from "../src/lib/config.js";
+} from "#src/lib/verdict-calibration.js";
+import { defaultVerdictCalibrationGitLog, verdictCalibrationCommand } from "#src/run-task.js";
+import { configPath, type Config } from "#src/lib/config.js";
 
 function tmpStateDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { resolveVitestLeafCandidates } from "../src/lib/check-proof.js";
-import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/run-task.js";
+import { resolveVitestLeafCandidates } from "#src/lib/check-proof.js";
+import { checkProofCommand, CHECK_PROOF_EXIT } from "#src/run-task.js";
 
 function vitestCheckout(): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-vitest-proof-"));

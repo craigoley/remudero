@@ -18,8 +18,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { finishJudgedRun } from "./helpers/judged-pool-run.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");

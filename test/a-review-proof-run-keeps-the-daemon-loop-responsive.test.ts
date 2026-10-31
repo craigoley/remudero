@@ -16,9 +16,9 @@ import {
   registerReviewerCheckout,
   resetBrowserPreflightForTests,
   resolveNameFilteredCandidatesAsync,
-} from "../src/lib/review.js";
-import { discriminateReviewReuse, discriminateReviewReuseAsync } from "../src/lib/sweep.js";
-import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
+} from "#src/lib/review.js";
+import { discriminateReviewReuse, discriminateReviewReuseAsync } from "#src/lib/sweep.js";
+import { inlineJudgedTally } from "#test/helpers/judged-pool-run.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 

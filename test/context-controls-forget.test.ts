@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
-import { buildContextControlsRoutes } from "../src/lib/context-controls.js";
-import { CONTEXT_ITEM_STEP, readGovernedContext, type ContextItem } from "../src/lib/operator-agent.js";
-import { appendLedger } from "../src/lib/ledger.js";
+import { createService } from "#src/lib/service.js";
+import { buildContextControlsRoutes } from "#src/lib/context-controls.js";
+import { CONTEXT_ITEM_STEP, readGovernedContext, type ContextItem } from "#src/lib/operator-agent.js";
+import { appendLedger } from "#src/lib/ledger.js";
 
 const READ = "context-controls-forget-read";
 const WRITE = "context-controls-forget-write";

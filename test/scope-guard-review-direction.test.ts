@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { judgeReview } from "../src/lib/review.js";
-import { scopeGuardOutOfScopeFiles } from "../src/run-task.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { judgeReview } from "#src/lib/review.js";
+import { scopeGuardOutOfScopeFiles } from "#src/run-task.js";
 
 // W1-T401 — `scopeGuardOutOfScopeFiles` (src/run-task.ts) is wired at exactly ONE of
 // `gitPushRunBranch`'s nine call sites (the orchestrator's fallback push, taken only when the

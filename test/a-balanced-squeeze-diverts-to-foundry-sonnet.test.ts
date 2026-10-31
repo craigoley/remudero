@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
 import {
   FOUNDRY_CLAUDE_PRICES,
   openWeightUsageUsd,
@@ -12,15 +12,15 @@ import {
   spawnOpenWeightWorker,
   type OpenWeightModelSelection,
   type ProviderCapacity,
-} from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
 import {
   createClaudeExecutableCache,
   spawnWorker,
   type SpawnWorkerArgs,
   type WorkerResult,
   type WorkerSelectionAssignment,
-} from "../src/lib/worker.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+} from "#src/lib/worker.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
 
 // W1-T4785: a balanced task squeezed off BOTH subscriptions runs on Foundry Sonnet 5.5 through the
 // Opus emergency's /anthropic adapter and shared Claude cap, with the Luna ladder kept as fallback.

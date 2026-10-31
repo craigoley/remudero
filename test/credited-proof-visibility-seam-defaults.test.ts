@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { CREDITED_PROOF_QUEUE_AUDIT_CAUSES } from "../src/lib/proof-queue-audit.js";
-import { creditedProofVisibility, proofQueueAuditCommand } from "../src/run-task.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { CREDITED_PROOF_QUEUE_AUDIT_CAUSES } from "#src/lib/proof-queue-audit.js";
+import { creditedProofVisibility, proofQueueAuditCommand } from "#src/run-task.js";
 
 // ── THE TWO INJECTED-SEAM DEFAULTS INSIDE `creditedProofVisibility` (src/run-task.ts) ────────
 //

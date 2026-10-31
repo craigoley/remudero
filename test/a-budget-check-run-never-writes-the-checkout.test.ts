@@ -4,7 +4,7 @@ import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { type GitRepo, gitRepo } from "./helpers/git-repo.js";
+import { type GitRepo, gitRepo } from "#test/helpers/git-repo.js";
 
 // ── W1-T7841 — A BUDGET CHECK RUN NEVER WRITES THE CHECKOUT ───────────────────────────────────
 //

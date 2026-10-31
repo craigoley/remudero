@@ -7,8 +7,8 @@ import {
   OPENWEIGHT_UNIT_TEST_TOO_BROAD,
   selectOpenWeightUnitTestSuites,
   spawnOpenWeightWorker,
-} from "../src/lib/worker-provider.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/worker-provider.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 function put(repo: GitRepo, path: string, text = "export {};\n"): void {
   mkdirSync(join(repo.dir, path, ".."), { recursive: true });

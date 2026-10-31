@@ -3,14 +3,14 @@ import fs, { mkdirSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { daemonCommand, drainCommand } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { DaemonDeps } from "../src/lib/daemon.js";
-import type { DrainDeps } from "../src/lib/drain.js";
-import type { productionFixPressure } from "../src/lib/sweep.js";
-import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { daemonCommand, drainCommand } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { DaemonDeps } from "#src/lib/daemon.js";
+import type { DrainDeps } from "#src/lib/drain.js";
+import type { productionFixPressure } from "#src/lib/sweep.js";
+import type { GitHub } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 async function wired(t: TestContext, readQueuePressure?: typeof productionFixPressure) {
   const home = makeTempDir("queue-pressure-home"), root = join(home, "Remudero"), planPath = join(home, "tasks.yaml");

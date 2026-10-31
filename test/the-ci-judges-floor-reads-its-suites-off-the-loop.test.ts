@@ -15,10 +15,10 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
-import { affectedSelectionOrFull, readAffectedSuitesInput } from "../src/lib/affected-suites.js";
-import { judgeCiEscalation, productionCiJudgePorts, type CiJudgePorts } from "../src/lib/ci-escalation-judge.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { affectedSelectionOrFull, readAffectedSuitesInput } from "#src/lib/affected-suites.js";
+import { judgeCiEscalation, productionCiJudgePorts, type CiJudgePorts } from "#src/lib/ci-escalation-judge.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const SUITE = "test/example.test.ts";
 const CHANGED = "src/example.ts";

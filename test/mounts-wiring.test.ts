@@ -3,11 +3,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { resolveRunMounts } from "../src/run-task.js";
+import { resolveRunMounts } from "#src/run-task.js";
 import { fileURLToPath } from "node:url";
-import { loadMounts, mountsPath, MountsError, resolveMount } from "../src/lib/mounts.js";
-import { loadPlan, TASK_RISKS } from "../src/lib/plan.js";
-import type { GitHub } from "../src/lib/status.js";
+import { loadMounts, mountsPath, MountsError, resolveMount } from "#src/lib/mounts.js";
+import { loadPlan, TASK_RISKS } from "#src/lib/plan.js";
+import type { GitHub } from "#src/lib/status.js";
 
 /** An offline GitHub gateway: the merged-status projection runs with zero network round-trips
  *  (and zero dependence on whatever real state craigoley/remudero happens to carry for a
@@ -255,7 +255,7 @@ test("runTask resolves the class-routed mount and ledgers run.start with task_cl
     root,
     installRoot: process.cwd(),
   } as never;
-  const { runTask } = await import("../src/run-task.js");
+  const { runTask } = await import("#src/run-task.js");
   // The spawn boundary throws (no claude binary) — run.start must already be ledgered
   // by then, carrying the W1-T167 routing pair. The run may either reject or resolve
   // to a failed result depending on the boundary's error path; both are acceptable —

@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(ROOT, "scripts", "test-with-retry.mjs");

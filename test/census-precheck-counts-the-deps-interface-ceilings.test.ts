@@ -13,9 +13,9 @@ import { test } from "node:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 // @ts-ignore the executable .mjs module has no declaration file.
-import { evaluateCensusPrecheck, main } from "../scripts/census-precheck.mjs";
+import { evaluateCensusPrecheck, main } from "#scripts/census-precheck.mjs";
 
 type Tree = Record<string, string>;
 

@@ -9,8 +9,8 @@ import {
   pinnedBase,
   runContextLine,
   runPreflightCoverage,
-} from "../src/lib/ci-parity.js";
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
+} from "#src/lib/ci-parity.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
 
 /**
  * W1-T3017 — THE GATE FETCHED THE BASE AND THEN DIFFED AGAINST IT BY NAME.

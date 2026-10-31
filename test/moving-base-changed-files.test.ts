@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { worktreeChangedFiles } from "../src/run-task.js";
+import { worktreeChangedFiles } from "#src/run-task.js";
 
 /**
  * "DON'T MERGE WHILE A DRAIN RUNS" WAS NEVER A RULE — IT WAS A MOVING BASE.

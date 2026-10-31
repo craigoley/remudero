@@ -24,7 +24,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a static import of a .mjs there is a TS7016 —
 // the same reason test/acceptance-author-gate.test.ts and test/mutation-ratchet.test.ts reach their

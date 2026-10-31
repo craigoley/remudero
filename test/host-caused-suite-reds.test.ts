@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
 import {
   CI_PARITY_TABLE,
   HOST_CAUSED_SUITE_REDS,
@@ -31,7 +31,7 @@ import {
   parseBashMajorVersion,
   runCiParity,
   type HostFacts,
-} from "../src/lib/ci-parity.js";
+} from "#src/lib/ci-parity.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");

@@ -6,11 +6,11 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { spawnDetachedGroup } from "#src/lib/worker-containment.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { laneDeliveryFailure } from "../src/lib/drain.js";
-import { GhJsonUnreadableResponseError } from "../src/lib/github-transport.js";
-import { defaultGeneration } from "../src/lib/host-memory-ledger.js";
-import { isSpawnInfraBlockedError } from "../src/lib/ledger.js";
-import { TaskAdmissionError } from "../src/lib/plan.js";
+import { laneDeliveryFailure } from "#src/lib/drain.js";
+import { GhJsonUnreadableResponseError } from "#src/lib/github-transport.js";
+import { defaultGeneration } from "#src/lib/host-memory-ledger.js";
+import { isSpawnInfraBlockedError } from "#src/lib/ledger.js";
+import { TaskAdmissionError } from "#src/lib/plan.js";
 import {
   RUN_CHILD_SCHEMA,
   RUN_CHILD_FAILURE_TEXT_BOUND,
@@ -30,7 +30,7 @@ import {
   type RunChildProbe,
   type RunChildSpec,
   type RunChildStatus,
-} from "../src/lib/run-child-contract.js";
+} from "#src/lib/run-child-contract.js";
 
 const GENERATION = { containerId: "box-a", initStart: "proc:1" };
 

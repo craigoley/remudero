@@ -6,9 +6,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { parseAcceptanceBlock } from "../src/lib/review.js";
-import { reviewCommand } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+import { parseAcceptanceBlock } from "#src/lib/review.js";
+import { reviewCommand } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 
 // ── W1-T2462: reviewCommand actually CALLS resolvePlanCriteriaAtHead ────────────────────────────
 //
@@ -280,12 +280,12 @@ test("an untrailered body is unchanged — still resolves from its own PR body A
           postReviewPending: async () => ({ posted: false }),
           materialize: () =>
             ({ worktreePath: undefined, failure: { errorClass: "test", message: "skip" } }) as unknown as ReturnType<
-              typeof import("../src/run-task.js").materializeReviewWorktree
+              typeof import("#src/run-task.js").materializeReviewWorktree
             >,
           runReview: ((args: { task: { acceptance: { claim: string }[] } }) => {
             captured = args;
             throw new Error(SENTINEL);
-          }) as unknown as typeof import("../src/run-task.js").runReview,
+          }) as unknown as typeof import("#src/run-task.js").runReview,
         }),
       (e: Error) => e.message === SENTINEL,
     );
@@ -339,12 +339,12 @@ test("the swap costs no second network fetch and stays synchronous — one fetch
           postReviewPending: async () => ({ posted: false }),
           materialize: () =>
             ({ worktreePath: undefined, failure: { errorClass: "test", message: "skip" } }) as unknown as ReturnType<
-              typeof import("../src/run-task.js").materializeReviewWorktree
+              typeof import("#src/run-task.js").materializeReviewWorktree
             >,
           runReview: ((args: { task: { acceptance: { claim: string }[] } }) => {
             captured = args;
             throw new Error(SENTINEL);
-          }) as unknown as typeof import("../src/run-task.js").runReview,
+          }) as unknown as typeof import("#src/run-task.js").runReview,
         }),
       (e: Error) => e.message === SENTINEL,
     );

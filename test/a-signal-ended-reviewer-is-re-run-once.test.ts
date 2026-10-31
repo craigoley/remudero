@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appendLedger } from "../src/lib/ledger.js";
-import * as review from "../src/lib/review.js";
-import { shadowJudgeSampled } from "../src/lib/shadow-judge.js";
-import { WorkerAbandonedError, type SpawnWorkerArgs, type WorkerResult } from "../src/lib/worker.js";
-import { runReview } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import * as review from "#src/lib/review.js";
+import { shadowJudgeSampled } from "#src/lib/shadow-judge.js";
+import { WorkerAbandonedError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { runReview } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 function result(sessionId: string, overrides: Partial<WorkerResult> = {}): WorkerResult {
   return {

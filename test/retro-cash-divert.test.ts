@@ -3,12 +3,12 @@ import { test } from "node:test";
 import {
   harnessCommitForShellLessWorker,
   retroPrompt,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 import {
   cashCanServeToolSurface,
   cashDivertToolsForLane,
   harnessOwnsGitFor,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 test("W1-T3746: retro's cash surface is runnable and shell-less", () => {
   const tools = cashDivertToolsForLane("retro");

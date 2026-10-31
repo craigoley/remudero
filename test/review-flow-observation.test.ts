@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { observeReviewFlow } from "../src/lib/review-flow-observation.js";
+import { observeReviewFlow } from "#src/lib/review-flow-observation.js";
 
 const asOf = "2026-10-05T12:00:00Z", start = "2026-10-04T12:00:00Z";
 const event = (step: string, minute: number, over: Record<string, unknown> = {}) => ({ step,

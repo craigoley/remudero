@@ -6,14 +6,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   createTreePeakSampler, openLearnedReservation, readPeakSamples, recordPeak, recordTestFilePeak, testFileEstimates,
   type PeakStoreOptions,
-} from "../src/lib/host-memory-learning.js";
-import { runBoundedTest, selectedTestFiles } from "../src/lib/test-run.js";
-import { acquireTestSlot, memoryTestConcurrency, type TestSlotHolder } from "../src/lib/test-slot.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/host-memory-learning.js";
+import { runBoundedTest, selectedTestFiles } from "#src/lib/test-run.js";
+import { acquireTestSlot, memoryTestConcurrency, type TestSlotHolder } from "#src/lib/test-slot.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const MiB = 1024 ** 2;
 const NOW = Date.now();

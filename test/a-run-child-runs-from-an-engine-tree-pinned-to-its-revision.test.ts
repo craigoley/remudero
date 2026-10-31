@@ -10,11 +10,11 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { gitRepo } from "./helpers/git-repo.js";
-import { engineChildEntryArgv, childEntryArgv } from "../src/lib/child-entry-argv.js";
-import { ENGINE_RECORD, enginePath, ensureEngineTree, listEngines, newestCurrentEngine, pruneEngineTrees } from "../src/lib/engine-tree.js";
-import { writeStatus, type RunChildStatus } from "../src/lib/run-child-contract.js";
-import { buildEngineAfterStore } from "../src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { engineChildEntryArgv, childEntryArgv } from "#src/lib/child-entry-argv.js";
+import { ENGINE_RECORD, enginePath, ensureEngineTree, listEngines, newestCurrentEngine, pruneEngineTrees } from "#src/lib/engine-tree.js";
+import { writeStatus, type RunChildStatus } from "#src/lib/run-child-contract.js";
+import { buildEngineAfterStore } from "#src/run-task.js";
 
 const tmp = (): string => realpathSync(mkdtempSync(join(tmpdir(), "rmd-engine-")));
 const hashOf = (n: number): string => n.toString(16).padStart(64, "0");

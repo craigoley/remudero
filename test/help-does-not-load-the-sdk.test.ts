@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { loadHeavyVerb } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { loadHeavyVerb } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const rmdBin = join(repoRoot, "bin", "rmd");
@@ -75,7 +75,7 @@ test("W1-T2921: each heavy verb loads its OWN module on demand, and the pairing 
   for (const name of ["review", "dep-review", "drain", "daemon"] as const) {
     await assert.doesNotReject(() => loadHeavyVerb(name), `${name} must resolve its heavy module`);
   }
-  const loaded = [...Object.keys(await import("../src/run-task.js"))].length;
+  const loaded = [...Object.keys(await import("#src/run-task.js"))].length;
   assert.ok(loaded > 0, "the module under test must actually be importable, or the loop above proves nothing");
 });
 

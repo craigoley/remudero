@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { resolveDaemonTarget } from "../src/run-task.js";
+import { resolveDaemonTarget } from "#src/run-task.js";
 
 /**
  * W1-T1062 ACCEPTANCE 3: "the self-host predicate compares owner as well as repo, so this

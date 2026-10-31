@@ -3,9 +3,9 @@ import { test } from "node:test";
 import { existsSync, mkdtempSync, mkdirSync, utimesSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
-import { daemonCommand, ledgerPathFor } from "../src/run-task.js";
-import { DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS, sweepStaleWorkerHomes } from "../src/lib/worker-home.js";
-import type { DaemonSummary } from "../src/lib/daemon.js";
+import { daemonCommand, ledgerPathFor } from "#src/run-task.js";
+import { DEFAULT_WORKER_HOME_SWEEP_MAX_AGE_MS, sweepStaleWorkerHomes } from "#src/lib/worker-home.js";
+import type { DaemonSummary } from "#src/lib/daemon.js";
 
 // ── W1-T170 boot sweep wiring: `daemonCommand` runs `sweepStaleWorkerHomes(workerHomeDir(config))` ──
 // as part of its `daemonBoot` call, BEFORE handing off to `runDaemon` — the same boot rung already

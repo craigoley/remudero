@@ -3,8 +3,8 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { provisionWorktreeNodeModules } from "../src/lib/worker.js";
-import { ensureDeps, ensureDepsAsync } from "../src/lib/review.js";
+import { provisionWorktreeNodeModules } from "#src/lib/worker.js";
+import { ensureDeps, ensureDepsAsync } from "#src/lib/review.js";
 
 test("enabled worktree provisioning primes once without a donor and preserves existing installs without blocking the event loop", async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-enabled-seeds-")));

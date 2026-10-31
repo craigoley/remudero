@@ -4,8 +4,8 @@ import { chmodSync, closeSync, linkSync, lstatSync, mkdirSync, mkdtempSync, open
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { acquireTestSlot as acquireNativeTestSlot, type TestSlotOptions } from "../src/lib/test-slot.js";
-import { observeSlotCapacity, publishSlotCapacity, retireOwnedSlotCapacity } from "../src/lib/test-slot-capacity.js";
+import { acquireTestSlot as acquireNativeTestSlot, type TestSlotOptions } from "#src/lib/test-slot.js";
+import { observeSlotCapacity, publishSlotCapacity, retireOwnedSlotCapacity } from "#src/lib/test-slot-capacity.js";
 
 const input = { pid: process.pid, host: "fixture-host", bootId: "fixture-boot", pidNs: "fixture-namespace",
   startedAt: "2026-10-15T00:00:00.000Z", concurrency: 2, memoryBytes: 8192 };

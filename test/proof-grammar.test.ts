@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ACCEPTANCE_PROOF_GRAMMAR } from "../src/lib/proof-grammar.js";
-import { triagePrompt } from "../src/lib/triage.js";
-import { planArchitectPrompt, type PlanMode } from "../src/lib/plan-architect.js";
-import { parseWhitelistedProof } from "../src/lib/review.js";
-import { breMetacharsIn, lintTask } from "../src/lib/task-linter.js";
-import type { FeedbackEntry } from "../src/lib/feedback.js";
-import type { Task } from "../src/lib/plan.js";
+import { ACCEPTANCE_PROOF_GRAMMAR } from "#src/lib/proof-grammar.js";
+import { triagePrompt } from "#src/lib/triage.js";
+import { planArchitectPrompt, type PlanMode } from "#src/lib/plan-architect.js";
+import { parseWhitelistedProof } from "#src/lib/review.js";
+import { breMetacharsIn, lintTask } from "#src/lib/task-linter.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
+import type { Task } from "#src/lib/plan.js";
 
 // ── WHAT THIS SUITE DOES AND DOES NOT PROVE. Read this before adding to it.
 //

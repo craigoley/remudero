@@ -4,17 +4,17 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
-import { buildRuleHeadlinesPart, implementPromptParts, renderImplementPrompt } from "../src/run-task.js";
-import { renderAnchorBlock } from "../src/lib/compaction.js";
-import { assertProvenance } from "../src/lib/provenance.js";
-import { policyPath, validatePolicy } from "../src/lib/policy.js";
+import { buildRuleHeadlinesPart, implementPromptParts, renderImplementPrompt } from "#src/run-task.js";
+import { renderAnchorBlock } from "#src/lib/compaction.js";
+import { assertProvenance } from "#src/lib/provenance.js";
+import { policyPath, validatePolicy } from "#src/lib/policy.js";
 import {
   wipeTestFactorMasksLearnings,
   wipeTestFactorMasksRecon,
   wipeTestFactorMasksRules,
   WIPE_TEST_FACTORS,
-} from "../src/lib/wipe-test.js";
-import type { Task } from "../src/lib/plan.js";
+} from "#src/lib/wipe-test.js";
+import type { Task } from "#src/lib/plan.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 

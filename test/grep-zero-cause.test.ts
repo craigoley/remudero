@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { classifyGrepZeroHit } from "../src/lib/grep-zero-cause.js";
-import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
+import { classifyGrepZeroHit } from "#src/lib/grep-zero-cause.js";
+import { checkProofCommand, CHECK_PROOF_EXIT } from "#src/lib/check-proof.js";
 
 // ── W1-T1224: a zero-hit `grep:` proof must say WHY it read zero ────────────────────────────────
 //

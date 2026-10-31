@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { judgeCriterion, judgeReview, type ProofExecutor } from "../src/lib/review.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import { judgeCriterion, judgeReview, type ProofExecutor } from "#src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 
 /**
  * W1-T1071 — "a self-path `grep:` proof discriminates on the FILING PR and CANNOT on the

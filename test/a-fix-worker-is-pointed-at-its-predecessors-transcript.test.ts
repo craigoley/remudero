@@ -34,7 +34,7 @@ import {
   predecessorTranscriptPromptLines,
   pruneArchivedTranscripts,
   transcriptPathFor,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "rmd-w1-t3079-transcripts-"));

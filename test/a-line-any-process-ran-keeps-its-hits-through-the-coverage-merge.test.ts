@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /**
  * W1-T9481 — A LINE ANY SINGLE PROCESS RAN KEEPS ITS HITS THROUGH THE COVERAGE MERGE.

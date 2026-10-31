@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createCapabilityGrant, InMemoryCapabilityGrantStore, useCapabilityGrant } from "../src/lib/capability-grant.js";
-import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays } from "../src/lib/capability-inspection.js";
+import { createCapabilityGrant, InMemoryCapabilityGrantStore, useCapabilityGrant } from "#src/lib/capability-grant.js";
+import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays } from "#src/lib/capability-inspection.js";
 
 test("test/capability-inspection-verifier.test.ts: canonical verification and independent replay preserve state", () => {
   const store = new InMemoryCapabilityGrantStore();

@@ -4,10 +4,10 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { readLedgerLines } from "../src/lib/status.js";
-import { CLAUDE_BIN_ENV_OVERRIDE, spawnWorker } from "../src/lib/worker.js";
-import { ledgeredNonDispatchSpawn, runReview } from "../src/run-task.js";
-import { judgeReview, planOnlyDiff, reviewerOutcome, taskIdDeclarationsInDiff } from "../src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, spawnWorker } from "#src/lib/worker.js";
+import { ledgeredNonDispatchSpawn, runReview } from "#src/run-task.js";
+import { judgeReview, planOnlyDiff, reviewerOutcome, taskIdDeclarationsInDiff } from "#src/lib/review.js";
 
 const REPO_ROOT = process.cwd();
 /** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */

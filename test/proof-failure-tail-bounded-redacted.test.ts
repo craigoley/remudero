@@ -5,8 +5,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { formatTail, redactProofOutput } from "../src/lib/proofExecutor.js";
-import { proofFailureTail } from "../src/lib/review.js";
+import { formatTail, redactProofOutput } from "#src/lib/proofExecutor.js";
+import { proofFailureTail } from "#src/lib/review.js";
 
 const numbered = (n: number): string => Array.from({ length: n }, (_, i) => `line ${i}`).join("\n");
 

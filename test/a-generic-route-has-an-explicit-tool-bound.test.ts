@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import type { GitHub } from "../src/lib/status.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import type { GitHub } from "#src/lib/status.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   GENERIC_ROUTE_TOOL_BOUNDS,
   IMPLEMENT_CLAUDE_TOOLS,
@@ -20,10 +20,10 @@ import {
   type SpawnWorkerArgs,
   type WorkerResult,
   type spawnWorker,
-} from "../src/lib/worker.js";
-import { spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
-import { runTask } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/worker.js";
+import { spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import { runTask } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // ── W1-T3573: routes.review and routes.manual (`.remudero/mounts.yaml`) dispatch through the
 // SAME generic implement spawn as routes.implement — before this task, that spawn passed no

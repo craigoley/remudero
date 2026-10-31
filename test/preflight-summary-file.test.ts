@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { buildPreflightSummary, preflightSummaryPath, type CiParityStepResult } from "../src/lib/ci-parity.js";
-import { preflightCommand, readHeadShaForSummary } from "../src/run-task.js";
+import { buildPreflightSummary, preflightSummaryPath, type CiParityStepResult } from "#src/lib/ci-parity.js";
+import { preflightCommand, readHeadShaForSummary } from "#src/run-task.js";
 import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 /**

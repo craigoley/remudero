@@ -4,21 +4,21 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import {
   FALLBACK_PUSH_EVIDENCE_ABSENT,
   fallbackPushCause,
   fallbackPushEvidence,
   runTask,
   scrubGitCredentialText,
-} from "../src/run-task.js";
-import { STDERR_EXCERPT_CAP } from "../src/lib/worker.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import type { spawnWorker } from "../src/lib/worker.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/run-task.js";
+import { STDERR_EXCERPT_CAP } from "#src/lib/worker.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import type { spawnWorker } from "#src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
 
 /**
  * W1-T2522 — THE WORKER'S OWN GIT/GH FAILURE TEXT IS CARRIED INTO THE LEDGER, NOT JUST ITS CLASS.

@@ -18,7 +18,7 @@ import {
   REST_MERGE_UNSETTLED_MAX_READS,
   REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS,
   type ArmDeps,
-} from "../src/lib/arm-auto-merge.js";
+} from "#src/lib/arm-auto-merge.js";
 
 /** The merge-facts reading `readMergeFacts` returns: arm-auto-merge's own shape for it. */
 type FixRebaseMergeFacts = ReturnType<NonNullable<ArmDeps["readMergeFacts"]>>;

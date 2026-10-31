@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createCapabilityGrant, InMemoryCapabilityGrantStore, type CapabilityGrant } from "../src/lib/capability-grant.js";
-import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays, loadCapabilityInspectionSource, type CapabilityInspectionSource } from "../src/lib/capability-inspection.js";
+import { createCapabilityGrant, InMemoryCapabilityGrantStore, type CapabilityGrant } from "#src/lib/capability-grant.js";
+import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays, loadCapabilityInspectionSource, type CapabilityInspectionSource } from "#src/lib/capability-inspection.js";
 
 test("test/capability-inspection-source.test.ts: unknown input and unavailable sources are distinct from refusal", () => {
   const request = { grantId: "g", target: "t", operation: "read", audience: "a", nonce: "n" };

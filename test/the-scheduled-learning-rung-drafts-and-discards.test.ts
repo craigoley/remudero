@@ -16,8 +16,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { buildCiLearningCadenceRunner } from "../src/run-task.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { buildCiLearningCadenceRunner } from "#src/run-task.js";
 
 // @host-capability isolated-temp-root: each test process owns its writable ledger fixture.
 const fixture = mkdtempSync(join(tmpdir(), "rmd-test-w1t3324-"));

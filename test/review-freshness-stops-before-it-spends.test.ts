@@ -3,11 +3,11 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildReviewerCodeFreshnessGate, type RunResult } from "../src/run-task.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import type { ReviewerCodeFreshness } from "../src/lib/self-sync.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { buildReviewerCodeFreshnessGate, type RunResult } from "#src/run-task.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import type { ReviewerCodeFreshness } from "#src/lib/self-sync.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /**
  * W1-T3618 — THE REVIEWER PAYS IN FULL AND THEN DISCARDS THE VERDICT.

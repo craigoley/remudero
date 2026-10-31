@@ -15,16 +15,16 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { type Config } from "../src/lib/config.js";
-import { appendLedger } from "../src/lib/ledger.js";
+import { type Config } from "#src/lib/config.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import {
   pruneStaleRuns,
   reapStaleWorktrees,
   runLockPath,
   runWorktreeReapRung,
   writeRunLock,
-} from "../src/lib/worker.js";
-import { buildSweepHook, sweepCommand } from "../src/run-task.js";
+} from "#src/lib/worker.js";
+import { buildSweepHook, sweepCommand } from "#src/run-task.js";
 
 // pruneStaleRuns needs a real git repo + worktree to exercise `git worktree list`.
 // Build one: repoDir with a NAMED worktree under worktreesRoot, then assert the

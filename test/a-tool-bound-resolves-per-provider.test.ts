@@ -11,9 +11,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DISPATCH_LANE_TOOL_BOUNDS, resolveDispatchLaneToolBound } from "../src/lib/worker.js";
-import { OPENWEIGHT_FUNCTIONS } from "../src/lib/worker-provider.js";
-import { renderReconPrompt } from "../src/lib/prompt-render.js";
+import { DISPATCH_LANE_TOOL_BOUNDS, resolveDispatchLaneToolBound } from "#src/lib/worker.js";
+import { OPENWEIGHT_FUNCTIONS } from "#src/lib/worker-provider.js";
+import { renderReconPrompt } from "#src/lib/prompt-render.js";
 
 test("a command-running lane resolves Bash on claude and RunCheck on openweight", () => {
   const claude = resolveDispatchLaneToolBound("recon", "claude");

@@ -9,8 +9,8 @@ import {
   declaredEnvVarNames,
   declaredLedgerSteps,
   type RuntimeAdoptionRow,
-} from "../src/lib/producer-completeness.js";
-import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "../src/lib/short-path-root.js";
+} from "#src/lib/producer-completeness.js";
+import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "#src/lib/short-path-root.js";
 
 // ── W1-T2408 — the fifth shape. W1-T2266's four shapes (symbol/field/script/gate) and
 // producer-completeness above both ask a STATIC corpus whether a mechanism was WIRED. This file

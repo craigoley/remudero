@@ -7,7 +7,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
 import {
   HAND_WORKTREE_TASK_ID_RE,
   createHandWorktree,
@@ -16,10 +16,10 @@ import {
   formatGiB,
   hardLinkNodeModules,
   renderHandWorktree,
-} from "../src/lib/hand-worktree.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { handWorktreeCommand } from "../src/run-task.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/hand-worktree.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { handWorktreeCommand } from "#src/run-task.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const NOW = 1_791_000_000_000;
 const PKG = '{"name":"fixture","version":"1.0.0","private":true}\n';

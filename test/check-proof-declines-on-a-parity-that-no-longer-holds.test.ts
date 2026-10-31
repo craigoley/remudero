@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
+import { checkProofCommand, CHECK_PROOF_EXIT } from "#src/lib/check-proof.js";
 
 // ── W1-T2686 ───────────────────────────────────────────────────────────────────────────────────
 //

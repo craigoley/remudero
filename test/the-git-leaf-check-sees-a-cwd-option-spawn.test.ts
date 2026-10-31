@@ -12,8 +12,8 @@ import assert from "node:assert/strict";
 
 // Read as a namespace, not named imports: a base without the widened census still LOADS this file,
 // so each case below fails as a real subtest rather than as a module-load error.
-const census: Partial<typeof import("./every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js")> =
-  await import("./every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js");
+const census: Partial<typeof import("#test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js")> =
+  await import("#test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js");
 const { WIDENED_SITE_EXCEPTIONS = {}, functionBody, readAll } = census;
 const widenedGitSites: NonNullable<typeof census.widenedGitSites> = (text) => census.widenedGitSites!(text);
 const widenedLeafSiteViolations: NonNullable<typeof census.widenedLeafSiteViolations> = (texts) =>

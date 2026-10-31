@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import { ledgerPathFor } from "../src/lib/ledger-path.js";
-import { postReviewStatusGuarded } from "../src/lib/review.js";
-import type { ReviewerCodeFreshness } from "../src/lib/self-sync.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { buildReviewerCodeFreshnessGate, reviewCommand, type ReviewRunResult } from "../src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import { ledgerPathFor } from "#src/lib/ledger-path.js";
+import { postReviewStatusGuarded } from "#src/lib/review.js";
+import type { ReviewerCodeFreshness } from "#src/lib/self-sync.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { buildReviewerCodeFreshnessGate, reviewCommand, type ReviewRunResult } from "#src/run-task.js";
 
 /**
  * JUDGE AT REVIEW START — operator ruling 2026-10-06.

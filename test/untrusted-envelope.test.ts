@@ -9,11 +9,11 @@ import {
   envelopeCloseMarker,
   envelopeOpenMarker,
   untrustedNotice,
-} from "../src/lib/untrusted-envelope.js";
-import { buildPromptManifest, unwrappedExternalParts } from "../src/lib/prompt-manifest.js";
-import { feedbackEntryBlock, triagePrompt, buildGrillEscalation } from "../src/lib/triage.js";
-import { renderFixPrompt } from "../src/run-task.js";
-import type { FeedbackEntry } from "../src/lib/feedback.js";
+} from "#src/lib/untrusted-envelope.js";
+import { buildPromptManifest, unwrappedExternalParts } from "#src/lib/prompt-manifest.js";
+import { feedbackEntryBlock, triagePrompt, buildGrillEscalation } from "#src/lib/triage.js";
+import { renderFixPrompt } from "#src/run-task.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
 
 /**
  * test/untrusted-envelope.test.ts — W1-T2700.

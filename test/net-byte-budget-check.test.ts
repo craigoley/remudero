@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 // @ts-expect-error The executable .mjs module has no declaration file; exercise its export directly.
-import { checkNetByteBudget } from "../scripts/claude-md-budget-ratchet.mjs";
+import { checkNetByteBudget } from "#scripts/claude-md-budget-ratchet.mjs";
 
 test("net-byte budget check returns false on oversized budget", () => {
   assert.equal(checkNetByteBudget(101, 100), false);

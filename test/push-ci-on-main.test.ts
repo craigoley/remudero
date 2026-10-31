@@ -4,8 +4,8 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { baseCausedCheckName, classifyRedCause, type CiFailure, type OpenPrView } from "../src/lib/sweep.js";
-import { PUSH_UNSAFE_TOKENS } from "./helpers/push-safety.js";
+import { baseCausedCheckName, classifyRedCause, type CiFailure, type OpenPrView } from "#src/lib/sweep.js";
+import { PUSH_UNSAFE_TOKENS } from "#test/helpers/push-safety.js";
 
 // ── W1-T1033: nothing ran the suite against `main` ──────────────────────────────────────────
 //

@@ -29,7 +29,7 @@ import {
   acceptanceBlockRegion,
   bodyContradictsDiff,
   parseAcceptanceBlock,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 /** A diff that is emphatically NOT plan-scoped, so a genuine `plan-only` claim over it contradicts. */
 const SOURCE_DIFF = [".github/workflows/ci.yml", "test/x.test.ts"];

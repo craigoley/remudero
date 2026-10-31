@@ -14,15 +14,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
-import type { MainRepairFixRequest, MainRepairRevertRequest } from "../src/lib/main-health-rung.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
-import { ACCEPTANCE_PROOF_GRAMMAR, inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "../src/lib/proof-grammar.js";
-import { acceptanceAuthorTimeCheck, isDialectPrefixed, parseAcceptanceBlock, parseWhitelistedProof } from "../src/lib/review.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
+import type { MainRepairFixRequest, MainRepairRevertRequest } from "#src/lib/main-health-rung.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
+import { ACCEPTANCE_PROOF_GRAMMAR, inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "#src/lib/proof-grammar.js";
+import { acceptanceAuthorTimeCheck, isDialectPrefixed, parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 import {
   type AlertFixDispatchDeps,
   dispatchMainRepairFixRun,
@@ -35,7 +35,7 @@ import {
   mainRepairLaneFor,
   mainRepairRevertBody,
   mainRepairTaskId,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const OWNER = "craigoley";
 const RED_MERGE = "97e3f9136d82".padEnd(40, "0"); // #11085's merge, the first red push run

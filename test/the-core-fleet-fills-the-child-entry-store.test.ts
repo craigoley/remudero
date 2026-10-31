@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ghPrCreateFillCommandAsync, runTask } from "../src/run-task.js";
-import { buildIntoStore, childEntryStoreRoot } from "../src/lib/child-entry-store.js";
-import { planPrPreflight, planPrPreflightAsync } from "../src/lib/plan-pr-emitter.js";
-import { checkProofLaunchArgv, defaultProofRunner } from "../src/lib/pr-open.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { ghPrCreateFillCommandAsync, runTask } from "#src/run-task.js";
+import { buildIntoStore, childEntryStoreRoot } from "#src/lib/child-entry-store.js";
+import { planPrPreflight, planPrPreflightAsync } from "#src/lib/plan-pr-emitter.js";
+import { checkProofLaunchArgv, defaultProofRunner } from "#src/lib/pr-open.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ENTRY = "src/check-proof-main.ts";

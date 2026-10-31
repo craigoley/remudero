@@ -11,16 +11,16 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 
-import { lintPlanCommand } from "../src/run-task.js";
-import { parseTasksFromYaml, type Plan } from "../src/lib/plan.js";
-import { defaultCreditOverridePath, defaultCreditStorePath, durableDependencyCredit, invalidateDurableCredit, loadCreditOverrides, loadCreditStore, projectPlan, recordCredit, saveCreditStore, type CreditReadState, type CreditStore, type DeriveDeps, type PrRef, type StatusProjection } from "../src/lib/status.js";
-import { taskRulingPin } from "../src/lib/task-linter.js";
-import { withTempDir } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { lintPlanCommand } from "#src/run-task.js";
+import { parseTasksFromYaml, type Plan } from "#src/lib/plan.js";
+import { defaultCreditOverridePath, defaultCreditStorePath, durableDependencyCredit, invalidateDurableCredit, loadCreditOverrides, loadCreditStore, projectPlan, recordCredit, saveCreditStore, type CreditReadState, type CreditStore, type DeriveDeps, type PrRef, type StatusProjection } from "#src/lib/status.js";
+import { taskRulingPin } from "#src/lib/task-linter.js";
+import { withTempDir } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { createHash } from "node:crypto";
-import { CI_DEPENDENCY_EVIDENCE_SCHEMA } from "../scripts/lib/ci-dependency-evidence.mjs";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { CI_DEPENDENCY_EVIDENCE_SCHEMA } from "#scripts/lib/ci-dependency-evidence.mjs";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // Operator resource contract: a cold child must also finish within this bound.

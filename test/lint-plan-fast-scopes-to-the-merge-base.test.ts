@@ -15,8 +15,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { lintPlanCommand, lintScopeMergeBase } from "../src/run-task.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { lintPlanCommand, lintScopeMergeBase } from "#src/run-task.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const LINT_DEPS = {
   offline: true,

@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { READ_MAP_FORMAT, readAffectedSuitesInput, selectAffectedSuites, type ReadMapInput } from "../src/lib/affected-suites.js";
-import { IMPACT_MAP_STALENESS_BOUND } from "../src/lib/test-impact-map.js";
+import { READ_MAP_FORMAT, readAffectedSuitesInput, selectAffectedSuites, type ReadMapInput } from "#src/lib/affected-suites.js";
+import { IMPACT_MAP_STALENESS_BOUND } from "#src/lib/test-impact-map.js";
 
 const contracts = ["openapi/daemon.yaml", "packages/api-client/src/schema.d.ts"];
 const proof = "test/an-openapi-change-selects-the-contract-suites-not-the-full-suite.test.ts";

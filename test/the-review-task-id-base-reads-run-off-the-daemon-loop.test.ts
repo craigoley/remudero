@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 // Namespace import: this file must LOAD on a base without the awaited symbols, so each proof
 // fails there on its own assertion rather than on a missing export.
-import * as reviewLib from "../src/lib/review.js";
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import * as reviewLib from "#src/lib/review.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 // After #9644 made the anchor read awaited, runReview's task-id evidence still read origin/main's declarations (ls-tree + cat-file --batch) and
 // the reservation baseline (git show) through execFileSync, and judgeReview re-read the declarations

@@ -1,8 +1,8 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { bodyContradictsDiff, changesetClaimsDisagreeing } from "../src/lib/review.js";
-import { writeMutantModule } from "./helpers/mutant-module.js";
+import { bodyContradictsDiff, changesetClaimsDisagreeing } from "#src/lib/review.js";
+import { writeMutantModule } from "#test/helpers/mutant-module.js";
 
 /**
  * W1-T2549 — THE INLINE-QUOTATION GUARD COVERED ONE OF `bodyContradictsDiff`'S FOUR ARMS.
@@ -101,7 +101,7 @@ test("criterion 4 (falsified): removing the hoisted guard from shorthandIsAboutC
       "  const rest = report.slice(index + length);",
   );
   const mutantPath = writeMutantModule("review.ts", mutatedSrc);
-  const mutant = (await import(mutantPath)) as typeof import("../src/lib/review.js");
+  const mutant = (await import(mutantPath)) as typeof import("#src/lib/review.js");
 
   // A single line removed restores the OLD (buggy) behaviour on all three sub-arms at once —
   // that simultaneity is what proves the guard is shared rather than copied per arm.

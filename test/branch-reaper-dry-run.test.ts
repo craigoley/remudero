@@ -19,9 +19,9 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { planBranchReap, type BranchFacts } from "../src/lib/status.js";
-import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { planBranchReap, type BranchFacts } from "#src/lib/status.js";
+import { DECLARED_BRANCH_GUARDS, reapBranchesCommand } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const f = (name: string, over: Partial<BranchFacts> = {}): BranchFacts => ({
   name,

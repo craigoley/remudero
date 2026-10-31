@@ -7,8 +7,8 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { COMMANDS } from "../src/run-task.js";
-import { parseWhitelistedProof } from "../src/lib/review.js";
+import { COMMANDS } from "#src/run-task.js";
+import { parseWhitelistedProof } from "#src/lib/review.js";
 
 const ROOT = join(import.meta.dirname, "..");
 const read = (path: string): string => readFileSync(join(ROOT, path), "utf8");

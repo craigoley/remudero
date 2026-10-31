@@ -5,11 +5,11 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { certainStaleProofs, isDialectGrepProof, type StaleProofRow } from "../src/lib/proof-base-stale.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { runPreflightProofs } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { certainStaleProofs, isDialectGrepProof, type StaleProofRow } from "#src/lib/proof-base-stale.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { runPreflightProofs } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /**
  * W1-T4921 — #7882 was W1-T4550's BUILD (branch run-W1-T4550-..., diff only a plan shard) and the pre-push precheck

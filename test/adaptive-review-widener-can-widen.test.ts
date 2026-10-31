@@ -21,7 +21,7 @@ import {
   type ReviewCapacityObservation,
   type ReviewCapacityPolicy,
   type ReviewCapacityState,
-} from "../src/lib/review-capacity.js";
+} from "#src/lib/review-capacity.js";
 
 const POLICY: ReviewCapacityPolicy = {
   hostWorkerBudget: 8,

@@ -21,7 +21,7 @@
 // tested once at the bottom, against THIS repo's own real checkout).
 
 import assert from "node:assert/strict";
-import { taskIdFromRunBranch } from "../src/lib/status.js";
+import { taskIdFromRunBranch } from "#src/lib/status.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,7 +29,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { FAST_GATE_STEPS } from "../src/lib/ci-parity.js";
+import { FAST_GATE_STEPS } from "#src/lib/ci-parity.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");

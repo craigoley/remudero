@@ -3,8 +3,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { CENSUS_POPULATION, listRuleSuites, MIN_RULE_SUITE_COUNT } from "../src/lib/ci-parity.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { CENSUS_POPULATION, listRuleSuites, MIN_RULE_SUITE_COUNT } from "#src/lib/ci-parity.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 test("test/a-test-named-like-a-rule-suite-can-declare-it-is-not-one.test.ts", async (t) => {
   const repo = gitRepo({ seedCommit: false, kind: "rule-suite-marker" });

@@ -3,10 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync 
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { coverageScratchDir, testWithCoverageLeaf } from "../src/lib/ci-parity.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { acquireTestSlot, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "../src/lib/test-slot.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
+import { coverageScratchDir, testWithCoverageLeaf } from "#src/lib/ci-parity.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { acquireTestSlot, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "#src/lib/test-slot.js";
 
 const GIB = 1024 ** 3;
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";

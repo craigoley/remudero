@@ -18,7 +18,7 @@ import {
   readRunLock,
   runLockPath,
   writeRunLock,
-} from "../src/lib/worker.js";
+} from "#src/lib/worker.js";
 
 // ── W1-T208: WRITE-SIDE ATOMICITY + READ-SIDE HONESTY for the sibling run.lock ──────
 //

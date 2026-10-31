@@ -27,9 +27,9 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertWorkerCredentialFile } from "../src/lib/worker-home.js";
-import { buildWorkerEnv, billingMode } from "../src/lib/env.js";
-import { WorkerKeychainError } from "../src/lib/worker-home.js";
+import { assertWorkerCredentialFile } from "#src/lib/worker-home.js";
+import { buildWorkerEnv, billingMode } from "#src/lib/env.js";
+import { WorkerKeychainError } from "#src/lib/worker-home.js";
 
 const FAKE_TOKEN = "sk-ant-oat01-FAKE-NOT-A-CREDENTIAL";
 /** A `.credentials.json` the classifier calls usable: a real Claude block with an expiry. */

@@ -20,7 +20,7 @@ import {
   ENTANGLEMENT_EXEMPT_INSTRUMENTS,
   INSTRUMENT_SURFACE,
   detectInstrumentEntanglement,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 const SIZE_LEDGER = "scripts/source-size-baseline.json";
 const MUTATION_FLOOR = "scripts/mutation-baseline.json";

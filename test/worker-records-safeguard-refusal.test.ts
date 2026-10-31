@@ -8,10 +8,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { collectWorkerResult, workerLedgerFields } from "../src/lib/worker.js";
-import { spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
+import type { Config } from "#src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { collectWorkerResult, workerLedgerFields } from "#src/lib/worker.js";
+import { spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 
 const resultEnvelope = (over: Record<string, unknown> = {}) => ({
   type: "result",

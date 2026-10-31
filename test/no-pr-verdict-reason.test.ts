@@ -9,8 +9,8 @@
 // stays valid unchanged.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { noPrVerdict } from "../src/run-task.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { noPrVerdict } from "#src/run-task.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 function result(over: Partial<WorkerResult>): WorkerResult {
   return {

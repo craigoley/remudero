@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { IssueGateway } from "../src/lib/escalate.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
 import {
   capWorkerTailLines,
   findStalledWorkers,
@@ -28,8 +28,8 @@ import {
   WORKER_STALLED_LEDGER_STEP,
   WORKER_STATE_LEDGER_STEP,
   type WorkerStallCandidate,
-} from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
+} from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
 
 function tmpRoot(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `rmd-${prefix}-`));

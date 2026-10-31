@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CHECK_PROOF_EXIT, preflightCommand, preflightSummarySentence, runPreflightProofs, type PreflightTier } from "../src/run-task.js";
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { CHECK_PROOF_EXIT, preflightCommand, preflightSummarySentence, runPreflightProofs, type PreflightTier } from "#src/run-task.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // ── W1-T3738 — THE PROOF GATE HAS NO LOCAL TIER ──────────────────────────────────────────────
 //

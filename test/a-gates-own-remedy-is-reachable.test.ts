@@ -38,8 +38,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { fixRungScopeStandDownReason, outOfDeclaredScopeFiles, renderFixPrompt } from "../src/run-task.js";
-import { FAST_GATE_STEPS, remedyFilesForFailingChecks, type FastGateStep } from "../src/lib/ci-parity.js";
+import { fixRungScopeStandDownReason, outOfDeclaredScopeFiles, renderFixPrompt } from "#src/run-task.js";
+import { FAST_GATE_STEPS, remedyFilesForFailingChecks, type FastGateStep } from "#src/lib/ci-parity.js";
 
 const FIXTURE_REMEDY = "remedy/a.json";
 const SOURCE_SIZE_REMEDY = "scripts/source-size-baseline.json";

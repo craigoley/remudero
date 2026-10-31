@@ -16,16 +16,16 @@ import { after, before, test } from "node:test";
 
 import {
   auditThisReuse, dropPushGatePass, gateVerdictsDir, harnessRecipe, pushGateKeyDigest, recordPushGatePass, reusablePushGatePass, type PushGateKey,
-} from "../src/lib/gate-verdict-record.js";
+} from "#src/lib/gate-verdict-record.js";
 import {
   defaultPushGateVerdicts, gitPushRunBranchAsync, PUSH_GATE_AUDITED_STEP, PUSH_GATE_RAN_STEP, PUSH_GATE_REUSED_STEP,
   PUSH_GATE_UNRECORDED_STEP, PushFailedError, runPushGate, worktreePushExec, worktreePushExecAsync, gitPushRunBranch, type PushGateVerdicts,
-} from "../src/lib/git-push.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import { preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate } from "../src/lib/preopen-gate.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { worktreeAdd } from "../src/lib/worker.js";
-import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+} from "#src/lib/git-push.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate } from "#src/lib/preopen-gate.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { worktreeAdd } from "#src/lib/worker.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 let root: string;
 let harnessHooks: string;

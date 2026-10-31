@@ -4,10 +4,10 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test } from "node:test";
-import { affectedSelectionOrFull, readAffectedSuitesInput } from "../src/lib/affected-suites.js";
-import { CI_JUDGE_HEADS_FILE, judgeCiEscalation, productionCiJudgePorts, type CiJudgePorts } from "../src/lib/ci-escalation-judge.js";
-import { WorktreePointerRefusedError } from "../src/lib/worktree-git.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { affectedSelectionOrFull, readAffectedSuitesInput } from "#src/lib/affected-suites.js";
+import { CI_JUDGE_HEADS_FILE, judgeCiEscalation, productionCiJudgePorts, type CiJudgePorts } from "#src/lib/ci-escalation-judge.js";
+import { WorktreePointerRefusedError } from "#src/lib/worktree-git.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const SUITE = "test/example.test.ts";
 const FLOOR = { suites: [SUITE], fullRun: false };

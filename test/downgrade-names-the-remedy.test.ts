@@ -14,15 +14,15 @@
 //      suppression conjuncts (a first review of a head is never suppressed) are untouched.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import {
   applyVerdictStability,
   judgeCriterion,
   parseReviewerVerdictClauses,
   parseReviewerVerdicts,
   type PriorReviewVerdict,
-} from "../src/lib/review.js";
-import type { ReviewVerdict } from "../src/lib/review.js";
+} from "#src/lib/review.js";
+import type { ReviewVerdict } from "#src/lib/review.js";
 
 const CRITERION: AcceptanceCriterion = { claim: "the widget renders", proof: "widget renders densely above the fold" };
 const REPORT_TOKENS = new Set(["widget", "renders", "densely", "above", "fold"]); // full keyword coverage ⇒ floor MET

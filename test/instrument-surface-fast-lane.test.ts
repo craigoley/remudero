@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { INSTRUMENT_SURFACE, detectInstrumentEntanglement } from "../src/lib/review.js";
+import { INSTRUMENT_SURFACE, detectInstrumentEntanglement } from "#src/lib/review.js";
 
 // ── W1-T2428: the fast lane's classifier, declared on the instrument surface ───────────────────
 //

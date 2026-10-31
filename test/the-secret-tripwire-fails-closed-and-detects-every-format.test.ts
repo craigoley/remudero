@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const scriptPath = fileURLToPath(new URL("../.github/scripts/leak-grep.sh", import.meta.url));
 const fixtureEnv: NodeJS.ProcessEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };

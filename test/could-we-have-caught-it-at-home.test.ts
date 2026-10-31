@@ -6,7 +6,7 @@ import {
   stripMatrixSuffix,
   MATRIX_SUFFIX_RE,
   type ParityRow,
-} from "../src/lib/ci-failure-corpus.js";
+} from "#src/lib/ci-failure-corpus.js";
 
 // ── W1-T3740 — THE SCOREBOARD THE LOOP NEVER HAD ─────────────────────────────────────────────
 //

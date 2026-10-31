@@ -26,16 +26,16 @@ import {
   type AffectedSuitesInput,
   type ReadMap,
   type ReadMapInput,
-} from "../src/lib/affected-suites.js";
-import { IMPACT_MAP_STALENESS_BOUND } from "../src/lib/test-impact-map.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/affected-suites.js";
+import { IMPACT_MAP_STALENESS_BOUND } from "#src/lib/test-impact-map.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   createReadRecorder,
   patchFsForReadMap,
   recordFileName,
   repoRelative,
   suiteOfEntry,
-} from "./setup/read-map.js";
+} from "#test/setup/read-map.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TSX = import.meta.resolve("tsx");

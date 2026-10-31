@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // 2026-10-09: coverage shards on several PRs went red with every test passing because one child process,
 // killed mid-write, left a truncated raw V8 report ("COVERAGE-REPORT-FAILED … Unexpected end of JSON input").

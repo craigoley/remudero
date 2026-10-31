@@ -9,8 +9,8 @@ import {
   parseWhitelistedProof,
   type BrowserPreflightRunner,
   type ProofSpawner,
-} from "../src/lib/review.js";
-import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
+} from "#src/lib/review.js";
+import { inlineJudgedTally } from "#test/helpers/judged-pool-run.js";
 
 const PASSING_TAP = "ok 1 - fixture passes\n# tests 1\n# pass 1\n# duration_ms 1\n";
 

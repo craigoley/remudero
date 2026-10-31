@@ -5,7 +5,7 @@ import {
   detectInstrumentEntanglement,
   failSummary,
   INSTRUMENT_SURFACE,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 const REVIEW = "src/lib/review.ts";
 const PRODUCT = "src/lib/widget.ts";

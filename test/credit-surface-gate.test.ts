@@ -1,4 +1,3 @@
-// test/credit-surface-gate.test.ts
 //
 // W1-T1214 — NOTHING REFUSES A MERGE THAT WILL LAND UNCREDITED ON EITHER GIT SURFACE.
 // `appendTaskTrailerToCommit` (src/run-task.ts, W1-T1012) only runs inside the harness run loop,
@@ -30,7 +29,7 @@ const REPO_ROOT = join(__dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "credit-surface-gate.mjs");
 
 // `scripts/**` sits OUTSIDE tsconfig's `include` (see tsconfig.json), so a static
-// `import … from "../scripts/credit-surface-gate.mjs"` is a TS7016 — the same reason
+// `import … from "#scripts/credit-surface-gate.mjs"` is a TS7016 — the same reason
 // test/acceptance-author-gate.test.ts reaches its script through a runtime import rather than a
 // typed one. A dynamic specifier is not statically resolved, so this loads the REAL module with
 // no shadow copy to drift from it.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createWorkerToolLineage, observeWorkerToolLineage, type WorkerToolReceipt } from "../src/lib/worker-tool-lineage.js";
+import { createWorkerToolLineage, observeWorkerToolLineage, type WorkerToolReceipt } from "#src/lib/worker-tool-lineage.js";
 
 test("test/worker-tool-lineage-outcomes.test.ts observations never claim admission or verified completion and duplicates are distinct", () => {
   const rows: WorkerToolReceipt[] = [];

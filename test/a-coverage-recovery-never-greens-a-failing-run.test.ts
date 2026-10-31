@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // 2026-10-12, #11085 coverage-shard (8/8): the W1-T5935 census failed (`# fail 1`), one child's raw V8
 // report was truncated, and the wrapper read a NESTED run's earlier `# fail 0` summary as the shard's own.

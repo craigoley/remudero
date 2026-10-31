@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { checkSatisfiedByGuard, criterionFieldTampered, judgeReview } from "../src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { checkSatisfiedByGuard, criterionFieldTampered, judgeReview } from "#src/lib/review.js";
 
 // W1-T5031 — Rule 15 protected claim/proof/satisfied_by, but `kind: guard` exempts a criterion from the
 // proof-discrimination gate (and two lints), which resolves criteria AT THE PR HEAD. A builder diff that only ADDED

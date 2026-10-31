@@ -9,8 +9,8 @@ import {
   proofDebtProposalId,
   runMeasurementCadenceReport,
   type ProofDebtMintCadenceResult,
-} from "../src/lib/measurement-cadence.js";
-import { proofQueueAudit, type ProofQueueAuditOffender } from "../src/lib/proof-queue-audit.js";
+} from "#src/lib/measurement-cadence.js";
+import { proofQueueAudit, type ProofQueueAuditOffender } from "#src/lib/proof-queue-audit.js";
 import {
   anchorFingerprint,
   classifyProposal,
@@ -18,8 +18,8 @@ import {
   type DraftedCandidate,
   type EvidenceAnchor,
   type ReadinessContext,
-} from "../src/lib/inbox.js";
-import { loadPlanFromYaml, type MergedResolver, type Plan } from "../src/lib/plan.js";
+} from "#src/lib/inbox.js";
+import { loadPlanFromYaml, type MergedResolver, type Plan } from "#src/lib/plan.js";
 
 // ── W1-T2477 — SEVENTY-NINE UNRESOLVABLE PROOFS ACROSS TWENTY-ONE OPEN TASKS AND NOTHING HAS
 // EVER REPORTED THEM ON A SCHEDULE. proofQueueAudit (lib/proof-queue-audit.ts) already resolves

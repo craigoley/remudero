@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Options, HookInput } from "@anthropic-ai/claude-agent-sdk";
-import { applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpIsolationEvidence } from "../src/lib/worker-mcp-isolation.js";
-import { workerInitSummaryFromMessage } from "../src/lib/worker-init-summary.js";
-import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker, workerLedgerFields } from "../src/lib/worker.js";
+import { applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpIsolationEvidence } from "#src/lib/worker-mcp-isolation.js";
+import { workerInitSummaryFromMessage } from "#src/lib/worker-init-summary.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker, workerLedgerFields } from "#src/lib/worker.js";
 
 const rule = "mcp__knowledge__rule";
 const init = (servers: unknown = [], tools: unknown = []) => workerInitSummaryFromMessage({

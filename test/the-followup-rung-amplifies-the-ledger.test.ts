@@ -21,7 +21,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { followupSetDigest, harvestFollowupsFromReport } from "../src/run-task.js";
+import { followupSetDigest, harvestFollowupsFromReport } from "#src/run-task.js";
 
 const REPORT = [
   "## Follow-ups",

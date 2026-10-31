@@ -14,10 +14,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { plainTemplate } from "../src/lib/inbox-plain.js";
-import { verifyHumanAgeBandKey } from "../src/lib/measurement-cadence.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { plainTemplate } from "#src/lib/inbox-plain.js";
+import { verifyHumanAgeBandKey } from "#src/lib/measurement-cadence.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   automationProposalFromJudgedShard,
   buildVerifyHumanJudgePrompt,
@@ -25,12 +25,12 @@ import {
   proposalFromJudgedShard,
   type ShardUnderJudgement,
   type VerifyHumanVerdict,
-} from "../src/lib/verify-human-judge.js";
+} from "#src/lib/verify-human-judge.js";
 import { createTaskFilingHistoryInvocation, resolveTaskFilingHistory, FILING_HISTORY_LIMITS,
-  type FilingHistoryOptions } from "../src/lib/task-filing-history.js";
-import { hostWorktreeGit } from "../src/lib/worktree-git.js";
-import { parkedVerifyHumanShards } from "../src/run-task.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+  type FilingHistoryOptions } from "#src/lib/task-filing-history.js";
+import { hostWorktreeGit } from "#src/lib/worktree-git.js";
+import { parkedVerifyHumanShards } from "#src/run-task.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 
 const DAY_MS = 86_400_000;
 

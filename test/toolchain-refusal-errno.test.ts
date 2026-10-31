@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ClaudeToolchainBlockedError, createClaudeExecutableCache, resolveClaudeExecutable } from "../src/lib/worker.js";
+import { ClaudeToolchainBlockedError, createClaudeExecutableCache, resolveClaudeExecutable } from "#src/lib/worker.js";
 
 // W1-T901 — the 2026-07-23 incident (feedback fb-1784830299772-26248a): the
 // npm-global `claude` symlink was rewritten mid-swap to an ASCII launcher

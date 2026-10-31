@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 // The script is intentionally a standalone .mjs entry point; tsx executes it in this suite.
 // @ts-expect-error no declaration file is needed for the runtime-tested script module.
-import { censusSatisfiedTasks, main, readTaskRecords, renderReport } from "../scripts/satisfied-task-census.mjs";
+import { censusSatisfiedTasks, main, readTaskRecords, renderReport } from "#scripts/satisfied-task-census.mjs";
 
 const task = (id: string, proofs: string[], extra: Record<string, unknown> = {}) => ({
   id,

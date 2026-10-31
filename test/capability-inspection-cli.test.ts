@@ -4,9 +4,9 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { createCapabilityGrant, InMemoryCapabilityGrantStore, useCapabilityGrant } from "../src/lib/capability-grant.js";
-import { authorityCommand, COMMANDS, HANDLERS, USAGE } from "../src/run-task.js";
-import { CAPABILITY_INSPECTION_MAX_FILE_BYTES } from "../src/lib/capability-inspection.js";
+import { createCapabilityGrant, InMemoryCapabilityGrantStore, useCapabilityGrant } from "#src/lib/capability-grant.js";
+import { authorityCommand, COMMANDS, HANDLERS, USAGE } from "#src/run-task.js";
+import { CAPABILITY_INSPECTION_MAX_FILE_BYTES } from "#src/lib/capability-inspection.js";
 
 test("test/capability-inspection-cli.test.ts: real local command reads canonical snapshot and receipts cannot execute", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-inspection-"));

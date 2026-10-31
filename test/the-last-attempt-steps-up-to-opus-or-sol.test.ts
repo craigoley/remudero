@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { frontierPeerWorkerRow, loadMounts, MountsError, mountsPath } from "../src/lib/mounts.js";
+import { frontierPeerWorkerRow, loadMounts, MountsError, mountsPath } from "#src/lib/mounts.js";
 
 // Operator ruling 2026-09-22: "Sol and Opus are okay to use whenever Luna or Sonnet can't do the
 // work, but I would prefer that we try Luna and Sonnet for most tasks." The routes stay on the

@@ -206,7 +206,7 @@ test("learnings-budget-ratchet module: importing (not spawning as the entry scri
 
 // The rest of this file drives the CLI with fixtures; these five need the predicates directly, so
 // they load the .mjs the same way the script itself is run. No .d.ts exists for it by design.
-const gateMod = await import("../scripts/learnings-budget-ratchet.mjs" as string) as {
+const gateMod = await import("#scripts/learnings-budget-ratchet.mjs" as string) as {
   evaluateRatchet: (chars: number, baseline: Record<string, unknown>) => string[];
   exceedsCurationTarget: (chars: number, baseline: Record<string, unknown>) => boolean;
 };

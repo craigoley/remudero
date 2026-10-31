@@ -10,9 +10,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Proposal, RatifyGateway } from "../src/lib/inbox.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { approveCommand, inboxCommand } from "../src/run-task.js";
+import type { Proposal, RatifyGateway } from "#src/lib/inbox.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { approveCommand, inboxCommand } from "#src/run-task.js";
 
 function fixture(declines: Array<{ step: string; id: string; reason: string }>) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}approve-declined-`));

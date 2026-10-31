@@ -5,7 +5,7 @@ import {
   type ReviewCapacityObservation,
   type ReviewCapacityPolicy,
   type ReviewCapacityState,
-} from "../src/lib/review-capacity.js";
+} from "#src/lib/review-capacity.js";
 
 // W1-T2992 — A GOVERNOR THAT CAN SHED MUST PROVE IT CAN RECOVER.
 //

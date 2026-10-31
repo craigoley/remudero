@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { crc32, deflateRawSync } from "node:zlib";
-import type { GhCallPacer } from "../src/lib/github-transport.js";
+import type { GhCallPacer } from "#src/lib/github-transport.js";
 import {
   MUTATION_VERDICT_PULL_MAX_DOWNLOADS,
   ledgerTextFromArtifactZip,
@@ -14,11 +14,11 @@ import {
   wellFormedVerdictRows,
   mutationVerdictArtifactZipRestArgs,
   mutationVerdictArtifactsRestArgs,
-} from "../src/lib/mutation-verdict-pull.js";
-import { MUTATION_GATE_VERDICT_STEP, mutationGateLifetime, parseLedger } from "../src/lib/retro.js";
-import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runSweep } from "./helpers/sweep-test.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/mutation-verdict-pull.js";
+import { MUTATION_GATE_VERDICT_STEP, mutationGateLifetime, parseLedger } from "#src/lib/retro.js";
+import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runSweep } from "#test/helpers/sweep-test.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // ── W1-T2927: a verdict written inside a CI runner reaches the ledger that reports it ─────────
 //

@@ -4,17 +4,17 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildOpenPrViews, buildSweepEffects, reviewAttemptsForInput, reviewOrphansFor } from "../src/run-task.js";
-import { reviewInputDigest } from "../src/lib/review.js";
+import { buildOpenPrViews, buildSweepEffects, reviewAttemptsForInput, reviewOrphansFor } from "#src/run-task.js";
+import { reviewInputDigest } from "#src/lib/review.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
   isCappedReviewOrphanEscalation,
   reviewInputBackoffElapsed,
   type OpenPrView,
-} from "../src/lib/sweep.js";
-import type { IssueGateway } from "../src/lib/escalate.js";
-import { writeMutantModule } from "./helpers/mutant-module.js";
+} from "#src/lib/sweep.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
+import { writeMutantModule } from "#test/helpers/mutant-module.js";
 
 /**
  * W1-T225's two fields shipped their MECHANISM in full — two disposition rows, a reason branch,
@@ -176,7 +176,7 @@ test("W1-T1015: inverting the attribution fails the foreign-push control", async
   // `tick-read-worker.ts` sits at `src/lib/`, so its relative imports resolve against that origin directory
   // through the shared helper.
   const mutantPath = writeMutantModule("tick-read-worker.ts", mutatedSrc, /* originDir */ join(process.cwd(), "src", "lib"));
-  const mutant = (await import(mutantPath)) as typeof import("../src/lib/tick-read-worker.js");
+  const mutant = (await import(mutantPath)) as typeof import("#src/lib/tick-read-worker.js");
   const ledger = [
     ledgerLine("review.posted", "W1-A", PRIOR_A),
     ledgerLine("sweep.update_branch.updated", "W1-A", PRIOR_A),
@@ -552,7 +552,7 @@ test("W1-T983: inverting the predicate fails the paired control", () => {
 
   const mutantPath = writeMutantModule("sweep.ts", mutatedSrc);
   return (async () => {
-    const mutant = (await import(mutantPath)) as typeof import("../src/lib/sweep.js");
+    const mutant = (await import(mutantPath)) as typeof import("#src/lib/sweep.js");
 
     const capped = fullPr({
       reviewState: "none",
@@ -740,7 +740,7 @@ test("W1-T1018: removing the backoff reset fails the re-review test", () => {
 
   const mutantPath = writeMutantModule("sweep.ts", mutatedSrc);
   return (async () => {
-    const mutant = (await import(mutantPath)) as typeof import("../src/lib/sweep.js");
+    const mutant = (await import(mutantPath)) as typeof import("#src/lib/sweep.js");
 
     const pastBackoff = backoffPr({ reviewInputLastAttemptAt: "2026-08-01T10:00:00.000Z" });
     const derived = mutant.deriveDisposition(pastBackoff, DEFAULT_SWEEP_POLICY, BACKOFF_NOW);

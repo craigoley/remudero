@@ -3,9 +3,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { Config } from "../src/lib/config.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { createCapabilityGrant, InMemoryCapabilityGrantStore } from "../src/lib/capability-grant.js";
+import type { Config } from "#src/lib/config.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { createCapabilityGrant, InMemoryCapabilityGrantStore } from "#src/lib/capability-grant.js";
 import {
   OPENWEIGHT_ALLOWANCE_FILENAME,
   OPENWEIGHT_PRICES,
@@ -14,7 +14,7 @@ import {
   reserveOpenWeightBudget,
   spawnOpenWeightWorker,
   type OpenWeightAllowanceState,
-} from "../src/lib/worker-provider.js";
+} from "#src/lib/worker-provider.js";
 
 const NOW = Date.parse("2026-09-24T12:00:00Z");
 const ISO = "2026-09-24T12:00:00.000Z";

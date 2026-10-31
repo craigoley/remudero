@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cashCanServeToolSurface, cashFallbackRefusal } from "../src/lib/worker.js";
-import { OPENWEIGHT_FUNCTIONS } from "../src/lib/worker-provider.js";
-import type { Config } from "../src/lib/config-schema.js";
+import { cashCanServeToolSurface, cashFallbackRefusal } from "#src/lib/worker.js";
+import { OPENWEIGHT_FUNCTIONS } from "#src/lib/worker-provider.js";
+import type { Config } from "#src/lib/config-schema.js";
 
 // W1-T3692. When no subscription has readable headroom the auction throws
 // ProviderCapacityBlockedError and the queue STALLS. Cash should carry the work at exactly that
@@ -72,7 +72,7 @@ test("W1-T3692: cash must be an enabled provider, and the spend must be capped",
 test("W1-T3692: every declared dispatch-lane openweight bound is genuinely servable by cash", async () => {
   // The bounds table and the adapter's function list must not drift apart: a lane declaring an
   // openweight row that cash cannot run would pass the auction fallback and then throw.
-  const { DISPATCH_LANE_TOOL_BOUNDS } = await import("../src/lib/worker.js");
+  const { DISPATCH_LANE_TOOL_BOUNDS } = await import("#src/lib/worker.js");
   const table = DISPATCH_LANE_TOOL_BOUNDS as unknown as Record<string, { openweight?: readonly string[] }>;
   let checked = 0;
   for (const [lane, byProvider] of Object.entries(table)) {
@@ -92,7 +92,7 @@ test("W1-T3692: every declared dispatch-lane openweight bound is genuinely serva
 // so recon and diagnose were refused at the moment the subscription ran out, even though
 // DISPATCH_LANE_TOOL_BOUNDS has declared their cash equivalents since W1-T3656.
 
-import { cashDivertSpawnFields, cashDivertToolsForLane, resolveDispatchLaneToolBound } from "../src/lib/worker.js";
+import { cashDivertSpawnFields, cashDivertToolsForLane, resolveDispatchLaneToolBound } from "#src/lib/worker.js";
 
 test("W1-T3726: the CLAUDE surface of a read-only lane is refused — this is the defect being fixed", () => {
   for (const lane of ["recon", "diagnose"]) {

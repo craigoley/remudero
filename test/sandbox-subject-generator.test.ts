@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadLearningsIndex, type LearningsIndex } from "../src/lib/learnings.js";
-import { generateSandboxTask } from "../src/lib/wipe-test.js";
+import { loadLearningsIndex, type LearningsIndex } from "#src/lib/learnings.js";
+import { generateSandboxTask } from "#src/lib/wipe-test.js";
 
 // W1-T1253 — the wipe-test harness's design says signal comes only from an AGGREGATE over
 // many SEEDED pairs, but nothing seeded: `generateSandboxTask` is the subject GENERATOR

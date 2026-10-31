@@ -19,9 +19,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildDigestCadenceDaemonHooks } from "../src/run-task.js";
-import type { NotifyChannel } from "../src/lib/notify.js";
-import type { Config } from "../src/lib/config.js";
+import { buildDigestCadenceDaemonHooks } from "#src/run-task.js";
+import type { NotifyChannel } from "#src/lib/notify.js";
+import type { Config } from "#src/lib/config.js";
 
 function fixtureRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1t3000-"));

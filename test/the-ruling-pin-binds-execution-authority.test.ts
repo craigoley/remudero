@@ -9,9 +9,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { stringify as stringifyYaml } from "yaml";
 
-import { parseTasksFromYaml, type Task, type TaskRiskRuling } from "../src/lib/plan.js";
-import { recordFilingRiskRuling } from "../src/lib/risk-judge.js";
-import { machineAuthorVerifyViolation, taskRulingPin } from "../src/lib/task-linter.js";
+import { parseTasksFromYaml, type Task, type TaskRiskRuling } from "#src/lib/plan.js";
+import { recordFilingRiskRuling } from "#src/lib/risk-judge.js";
+import { machineAuthorVerifyViolation, taskRulingPin } from "#src/lib/task-linter.js";
 
 function authorityTask(): Task {
   return {

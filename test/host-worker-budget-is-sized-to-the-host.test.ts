@@ -7,8 +7,8 @@ import {
   selectAdaptiveReviewWidth,
   type ReviewCapacityObservation,
   type ReviewCapacityPolicy,
-} from "../src/lib/review-capacity.js";
-import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
+} from "#src/lib/review-capacity.js";
+import { DEFAULT_SWEEP_POLICY } from "#src/lib/sweep.js";
 
 const HOST_LOGICAL_CORES = 8;
 const MEASURED_MEM_AVAILABLE_MIB = 23_483;

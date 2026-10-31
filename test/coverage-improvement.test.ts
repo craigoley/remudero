@@ -17,10 +17,10 @@ import {
   rankCoverageDebt,
   type FileDebt,
   type LcovFileRecord,
-} from "../src/lib/coverage-improvement.js";
-import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
-import { coverageImproveCommand } from "../src/run-task.js";
-import type { FeedbackEntry } from "../src/lib/feedback.js";
+} from "#src/lib/coverage-improvement.js";
+import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
+import { coverageImproveCommand } from "#src/run-task.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
 
 function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

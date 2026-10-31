@@ -1,4 +1,3 @@
-// test/the-scarce-resource-is-the-window-not-the-notional-dollar.test.ts
 //
 // W1-T2577 — A ROUTER THAT OPTIMISES `cost_usd` IS OPTIMISING A NUMBER §9 ALREADY CALLS NOTIONAL.
 // On subscription the dollars mount-recommender.ts (W1-T2575) compares are the API-equivalent
@@ -27,12 +26,12 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { validateMounts, type Mounts } from "../src/lib/mounts.js";
+import { validateMounts, type Mounts } from "#src/lib/mounts.js";
 import {
   routingObjectiveFor,
   type ArmWindowShare,
   type RoutingObjectiveArm,
-} from "../src/lib/routing-objective.js";
+} from "#src/lib/routing-objective.js";
 import {
   recommendMounts,
   type MountHeadroomArm,
@@ -40,7 +39,7 @@ import {
   type MountHeadroomComparison,
   type MountRecommendation,
   type MountRefusal,
-} from "../src/lib/mount-recommender.js";
+} from "#src/lib/mount-recommender.js";
 
 // ── PART ONE: routingObjectiveFor, exercised directly ──────────────────────────────────────
 

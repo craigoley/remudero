@@ -43,7 +43,7 @@ import {
   FAST_GATE_CENSUS_RUNAWAY_MULTIPLE,
   censusRunawayThresholdMs,
   runPreflightFast,
-} from "../src/lib/ci-parity.js";
+} from "#src/lib/ci-parity.js";
 
 const PKG = JSON.stringify({ scripts: { "census:a": "x", "census:b": "x", "census:c": "x", plain: "x" } });
 

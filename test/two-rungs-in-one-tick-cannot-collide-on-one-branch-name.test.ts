@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { addLaneWorktree, nextLaneEpochMs } from "../src/run-task.js";
-import { worktreeAdd } from "../src/lib/worker.js";
-import { taskIdFromRunBranch } from "../src/lib/status.js";
+import { addLaneWorktree, nextLaneEpochMs } from "#src/run-task.js";
+import { worktreeAdd } from "#src/lib/worker.js";
+import { taskIdFromRunBranch } from "#src/lib/status.js";
 
 // W1-T2528 — THE DEFECT. A lane's runId is a PER-PROCESS name (`DAEMON-${Date.now()}`,
 // `RETRO-${Date.now()}`, `${taskId}-${Date.now()}`, …) minted once, then handed straight to

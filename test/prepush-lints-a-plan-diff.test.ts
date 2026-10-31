@@ -13,9 +13,9 @@ import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 // @ts-expect-error -- test executes the untyped executable module directly.
-import { lintArgvFromPackage, lintPlanPrecheckVerdict, runLintPlanPrecheck } from "../scripts/lint-plan-precheck.mjs";
+import { lintArgvFromPackage, lintPlanPrecheckVerdict, runLintPlanPrecheck } from "#scripts/lint-plan-precheck.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK = join(REPO_ROOT, "hooks", "pre-push");

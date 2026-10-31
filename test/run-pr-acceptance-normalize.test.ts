@@ -16,9 +16,9 @@
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { test } from "node:test";
-import { normalizeRunPrAcceptanceFromPlan } from "../src/run-task.js";
-import { parseAcceptanceBlock } from "../src/lib/review.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { normalizeRunPrAcceptanceFromPlan } from "#src/run-task.js";
+import { parseAcceptanceBlock } from "#src/lib/review.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const PR = "https://github.com/craigoley/remudero/pull/6888";
 const TASK_ID = "W1-T4356";

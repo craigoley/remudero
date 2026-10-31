@@ -25,9 +25,9 @@ import {
   redChecks,
   type DepReviewCheck,
   CONVENTIONAL_TITLE_PREFIX_RE,
-} from "../src/lib/dep-review.js";
-import { reviewInputDigest } from "../src/lib/review.js";
-import { ghShim } from "./helpers/gh-shim.js";
+} from "#src/lib/dep-review.js";
+import { reviewInputDigest } from "#src/lib/review.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 // ── Recorded fixtures (acceptance #1, the FALSIFIER) ────────────────────────
 // These are RECORDED, not invented: live Dependabot PRs #80 (patch, grouped) and
@@ -635,7 +635,7 @@ async function driveMigrationDepReview(opts: {
   capture?: ReturnType<typeof migrationCaptureRecorder>;
   mutations?: ReturnType<typeof mutationRecorder>;
 }) {
-  const { depReviewCommand } = await import("../src/run-task.js");
+  const { depReviewCommand } = await import("#src/run-task.js");
   const tmp = mkdtempSync(join(tmpdir(), "rmd-t2705-depreview-"));
   const ledgerPath = join(tmp, "state", "ledger.ndjson");
   const events = opts.events ?? [];
@@ -809,7 +809,7 @@ test("W1-T9689 the default dep review reader binds checks to the selected head",
       }
     }, 5);
     try {
-      const { depReviewCommand } = await import("../src/run-task.js");
+      const { depReviewCommand } = await import("#src/run-task.js");
       const code = await depReviewCommand("3654", ["--repo", "craigoley/remudero"], {
         config: { root: tmp, ledger: ledgerPath } as never, prDiff: () => PR80_DIFF,
         postStatus: (async () => { posted++; return { posted: true }; }) as never,
@@ -860,7 +860,7 @@ function selectedPaginationFixture() {
 }
 
 test("selected dependency evidence paginates every population and retains a page-two red", async () => {
-  const { readSelectedDepReviewChecks } = await import("../src/lib/dep-review.js");
+  const { readSelectedDepReviewChecks } = await import("#src/lib/dep-review.js");
   for (const conclusion of ["success", "failure"]) {
     const f = selectedPaginationFixture();
     f.checks[122].conclusion = conclusion;
@@ -879,7 +879,7 @@ test("selected dependency evidence paginates every population and retains a page
 });
 
 test("selected dependency pagination refuses incomplete changing overlapping and foreign pages", async (t) => {
-  const { readSelectedDepReviewChecks } = await import("../src/lib/dep-review.js");
+  const { readSelectedDepReviewChecks } = await import("#src/lib/dep-review.js");
   for (const stage of ["check_runs", "statuses", "workflow_runs"]) {
     for (const defect of ["read failure", "short page", "empty page", "total drift", "duplicate", "foreign head", "null row", "invalid total"]) {
       await t.test(`${stage}: ${defect}`, async () => {
@@ -910,7 +910,7 @@ test("selected dependency pagination refuses incomplete changing overlapping and
 });
 
 test("selected dependency pagination keeps zero and exact-page populations single-read", async () => {
-  const { readSelectedDepReviewChecks } = await import("../src/lib/dep-review.js");
+  const { readSelectedDepReviewChecks } = await import("#src/lib/dep-review.js");
   for (const count of [0, 100]) {
     const f = selectedPaginationFixture();
     f.checks.length = count; f.statuses.length = count; f.workflows.length = count;
@@ -921,7 +921,7 @@ test("selected dependency pagination keeps zero and exact-page populations singl
 });
 
 test("W1-T9689 selected evidence retains snapshots and explicit unknown shape outcomes", async (t) => {
-  const { readSelectedDepReviewChecks } = await import("../src/lib/dep-review.js");
+  const { readSelectedDepReviewChecks } = await import("#src/lib/dep-review.js");
   const sha = "a".repeat(40), target = { number: 3654, url: "https://github.com/craigoley/remudero/pull/3654", headSha: sha, body: "body" };
   const pull = { id: 8, number: 3654, html_url: target.url, state: "open", merged: false, head: { sha },
     base: { repo: { id: 55, full_name: "craigoley/remudero" } }, body: "body" };
@@ -975,7 +975,7 @@ test("W1-T9689 selected evidence retains snapshots and explicit unknown shape ou
 test("W1-T9798 a posted check is read by its posting run, not the suite GitHub files it under", async () => {
   // PR11968 at f102d2d75: light-gates posted 16 checks as run:38722031956:1:job:116378673939, and GitHub
   // filed every one under check suite 104930348981, which belongs to run 38722026716 (security-policy-producer).
-  const { readSelectedDepReviewChecks } = await import("../src/lib/dep-review.js");
+  const { readSelectedDepReviewChecks } = await import("#src/lib/dep-review.js");
   const sha = "f102d2d7503c18b8e77cd5f28be32e78a32a156c", target = { number: 11968, url: "https://github.com/craigoley/remudero/pull/11968", headSha: sha, body: "b" };
   const pull = { id: 8, number: 11968, html_url: target.url, state: "open", merged: false, head: { sha },
     base: { repo: { id: 55, full_name: "craigoley/remudero" } }, body: "b" };

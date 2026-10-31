@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { extractReviewFindings, recordReviewFindings } from "../src/lib/review-findings.js";
-import { appendLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { projectFlowRow } from "../src/lib/field-trials-flow.js";
-import { runReview } from "../src/run-task.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { extractReviewFindings, recordReviewFindings } from "#src/lib/review-findings.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { projectFlowRow } from "#src/lib/field-trials-flow.js";
+import { runReview } from "#src/run-task.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 async function fixture(fn: (root: string, sha: string) => Promise<void> | void): Promise<void> {
   const repo = gitRepo({ kind: "review-findings" });
@@ -113,7 +113,7 @@ test("the production reviewer posts status and ledgers a finding only once acros
           permissionDenials: [], childEnvKeys: [], model: "sonnet", provider: "codex", servedModel: "gpt-6-sol", effort: "high",
           tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
         };
-      }) as typeof import("../src/lib/worker.js").spawnWorker,
+      }) as typeof import("#src/lib/worker.js").spawnWorker,
       reviewerMount: { model: "sonnet", effort: "high", maxTurns: 10, contextBudget: 120_000 },
       headCheckoutDir: root, ledgerPath, runId,
       disarm: () => "not-armed" as const, arm: () => ({ armed: false, reason: "test" }),

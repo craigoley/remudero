@@ -19,10 +19,10 @@ import {
   loadCiGateLists,
   loadWorkflowDocuments,
   type WorkflowDoc,
-} from "../src/lib/ci-control-plane.js";
-import { checkJobId } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildSweepEffects, cancelledRequiredChecks, fetchCiFailures } from "../src/run-task.js";
+} from "#src/lib/ci-control-plane.js";
+import { checkJobId } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildSweepEffects, cancelledRequiredChecks, fetchCiFailures } from "#src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OWNER = "owner";

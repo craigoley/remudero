@@ -25,9 +25,9 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { bodyContradictsDiff, judgeReview } from "../src/lib/review.js";
-import { writeMutantModule } from "./helpers/mutant-module.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { bodyContradictsDiff, judgeReview } from "#src/lib/review.js";
+import { writeMutantModule } from "#test/helpers/mutant-module.js";
 
 /** W1-T4423: a plan-only PASS rests on the review's own lint-plan run; this is that run finding nothing. */
 const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
@@ -260,7 +260,7 @@ test("MUTANT: dropping the anchor makes the required proof path contradict the d
     "review.ts",
     src.replace(target, "    const violators = diffFiles.filter((f) => !isInPlanScope(f));"),
   );
-  const mutant = (await import(mutantPath)) as typeof import("../src/lib/review.js");
+  const mutant = (await import(mutantPath)) as typeof import("#src/lib/review.js");
 
   const proofLine = "proof: unit test: test/trailer-credit-plan-only.test.ts";
   assert.equal(

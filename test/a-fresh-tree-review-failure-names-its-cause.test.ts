@@ -12,14 +12,14 @@ import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { makeTempDir } from "../src/lib/tmp.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 import {
   FRESH_TREE_FAILURE_MAX_CHARS,
   buildFreshTreeReviewRunner,
   buildReviewerCodeFreshnessGate,
   freshTreeFailureText,
   spawnRmdReviewForFreshTree,
-} from "../src/run-task.js";
+} from "#src/run-task.js";
 
 const CODE_SHA = "aaaaaaaaaaaa";
 const MAIN_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

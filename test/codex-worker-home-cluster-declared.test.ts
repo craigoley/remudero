@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { HOST_CAUSED_SUITE_REDS } from "../src/lib/ci-parity.js";
+import { HOST_CAUSED_SUITE_REDS } from "#src/lib/ci-parity.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SUBJECT = "test/codex-worker-home-redirection.test.ts";

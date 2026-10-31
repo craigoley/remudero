@@ -19,7 +19,7 @@ import {
   verdictCalibrationReport,
   type GitCommitEvent,
   type VerdictRow,
-} from "../src/lib/verdict-calibration.js";
+} from "#src/lib/verdict-calibration.js";
 
 interface FixtureCommit {
   sha: string;

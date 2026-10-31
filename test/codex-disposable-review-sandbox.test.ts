@@ -6,9 +6,9 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { spawnCodexWorker } from "../src/lib/worker-provider.js";
-import type { ContainedSpawnOptions } from "../src/lib/worker-containment.js";
-import type { SpawnWorkerArgs } from "../src/lib/worker.js";
+import { spawnCodexWorker } from "#src/lib/worker-provider.js";
+import type { ContainedSpawnOptions } from "#src/lib/worker-containment.js";
+import type { SpawnWorkerArgs } from "#src/lib/worker.js";
 
 async function captureCodexSpawn(
   root: string,

@@ -16,8 +16,8 @@ import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 

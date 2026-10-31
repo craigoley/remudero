@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createDaemonLaneWorktree } from "../src/run-task.js";
-import { readRunLock, uniqueRunBranch, worktreeAdd, worktreeRemove } from "../src/lib/worker.js";
+import { createDaemonLaneWorktree } from "#src/run-task.js";
+import { readRunLock, uniqueRunBranch, worktreeAdd, worktreeRemove } from "#src/lib/worker.js";
 
 // W1-T2493 — THE DEFECT. `runId = DAEMON-${Date.now()}` is minted ONCE at daemon boot and a
 // per-poll rung built once from it (`buildInboxDraftHook`/`draftProposalBatch`, run-task.ts)
