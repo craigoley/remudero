@@ -137,6 +137,8 @@ import {
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
 import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
+import { daemonBoot } from "./lib/daemon.js";
+import { settleRunChildBacklog } from "./lib/run-child.js";
 export { readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync };
 import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
@@ -28010,6 +28012,11 @@ export async function daemonCommand(
   rest: string[],
   deps: Parameters<typeof daemonCommandFromModule>[1] = {},
 ): Promise<number> {
+  const boot = deps.daemonBoot ?? daemonBoot;
+  deps = { ...deps, daemonBoot: (...args) => {
+    settleRunChildBacklog(join((deps.config ?? loadConfig()).root, "state"), args[0]);
+    return boot(...args);
+  } };
   return daemonCommandFromModule(rest, deps, daemonCommandHost());
 }
 

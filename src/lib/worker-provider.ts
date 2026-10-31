@@ -913,6 +913,12 @@ export interface OpenWeightContextWindow {
 }
 
 export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightContextWindow>> = {
+  // Microsoft Learn: models sold directly by Azure, read 2026-10-27.
+  "DeepSeek-V4-Flash": { totalTokens: 1_000_000, readAt: "2026-10-27" },
+  // Third-party figure; the V4.1 window is unconfirmed on Azure.
+  "DeepSeek-V4.1-Flash": { totalTokens: 1_000_000, readAt: "2026-10-27" },
+  // Microsoft Learn: Kimi-K2.6 context window, read 2026-10-27.
+  "Kimi-K2.6": { totalTokens: 262_144, readAt: "2026-10-27" },
   "claude-haiku-5-5": { totalTokens: 1_000_000, readAt: "2026-10-07" },
   "gpt-oss-120b": { totalTokens: 131_072, readAt: "2026-09-15" },
   "gpt-5-nano": { totalTokens: 272_000, readAt: "2026-09-15" },
@@ -3229,6 +3235,24 @@ export const FOUNDRY_HAIKU_PRICE: OpenWeightPrice = {
 };
 
 export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
+  // Azure Retail Prices API: Azure Deepseek Models / V4 Flash Inp/Outp/cached glbl Tokens,
+  // effective 2026-08-01. Reserve cached input at full input price pending W1-T10858.
+  "DeepSeek-V4-Flash": {
+    inputUsdPerMillion: 0.19, outputUsdPerMillion: 0.51, cachedInputUsdPerMillion: 0.028,
+    reservationInputUsdPerMillion: 0.19, readAt: "2026-10-27",
+  },
+  // Azure Retail Prices API: Azure Deepseek Models / V4.1 Flash Input/Output/cached Glbl 1M
+  // Tokens, effective 2026-10-01; the same conservative cache reservation applies.
+  "DeepSeek-V4.1-Flash": {
+    inputUsdPerMillion: 0.30, outputUsdPerMillion: 1.20, cachedInputUsdPerMillion: 0.006,
+    reservationInputUsdPerMillion: 0.30, readAt: "2026-10-27",
+  },
+  // Azure Retail Prices API: Azure Kimi / K2.6 Thinking Inp/Outp glbl Tokens, effective
+  // 2026-05-01; K2.6 cached glbl Tokens effective 2026-07-01. Reserve full input rate.
+  "Kimi-K2.6": {
+    inputUsdPerMillion: 0.95, outputUsdPerMillion: 4, cachedInputUsdPerMillion: 0.16,
+    reservationInputUsdPerMillion: 0.95, readAt: "2026-10-27",
+  },
   "claude-haiku-5-5": FOUNDRY_HAIKU_PRICE,
   // Azure serverless published rate. These are the two numbers this adapter has always used;
   // they are unchanged, and are now this deployment's ROW rather than the provider's default.
@@ -3350,9 +3374,20 @@ export const FOUNDRY_CLAUDE_DAILY_CAP_USD = { normal: 5, squeezed: 10 } as const
  * gpt-oss-120b already demonstrated.
  */
 export const OPENWEIGHT_RESPONSE_FORMATS: Readonly<Record<string, readonly string[]>> = {
+  // Clean json_object measured on the adapter's Azure route; Kimi remains undeclared.
+  "DeepSeek-V4-Flash": ["json_object"],
+  "DeepSeek-V4.1-Flash": ["json_object"],
   "gpt-6.1-sol": ["json_object"],
   "gpt-5.6-luna": ["json_object"],
   "gpt-5.6-terra": ["json_object"],
+};
+
+/** Exact deployment ids only. Azure DeepSeek thinking is off when effort is omitted;
+ *  admitted efforts enable it. Measured 2026-10-27; Kimi admits no effort parameter. */
+export const OPENWEIGHT_REASONING_EFFORTS: Readonly<Record<string, readonly string[]>> = {
+  "DeepSeek-V4-Flash": ["low", "medium", "high"],
+  "DeepSeek-V4.1-Flash": ["low", "medium", "high"],
+  "Kimi-K2.6": [],
 };
 
 /** Raised INSTEAD of sending a structured-output request a deployment cannot honour. Thrown before
@@ -3389,6 +3424,10 @@ export function openWeightResponseFormatField(
 }
 
 export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
+  // All three accepted temperature: 0 on the adapter's route, measured 2026-10-27.
+  "DeepSeek-V4-Flash": 0,
+  "DeepSeek-V4.1-Flash": 0,
+  "Kimi-K2.6": 0,
   "claude-haiku-5-5": null,
   "gpt-oss-120b": 0,
   "gpt-5-nano": null,
@@ -4973,15 +5012,9 @@ export function assertOpenWeightToolBoundary(
  * with no second endpoint shape required, and the branch W1-T3598 deferred is not needed for it
  * at all.
  *
- * IT IS STILL NOT WIRED INTO {@link OPENWEIGHT_PRICES}, deliberately. No published rate for
- * DeepSeek-V4-Flash could be confirmed (absent from the pricing page, the retail prices API and
- * the catalog's `cost` field), and its billing is publicly disputed -- Microsoft Q&A threads
- * report ~357x the published rate on cached tokens and 4.5x on V4 Pro. `OPENWEIGHT_PRICES`'s own
- * contract is that a deployment with no row is refused rather than priced by a neighbour (see
- * {@link openWeightPriceFor}), so naming this deployment in the cash ladder before a bill
- * confirms its real rate would convert a disputed page number into an under-reservation. The
- * route is proven here; the price is not, and only an OBSERVED bill (not this recon) closes that
- * gap (W1-T3695).
+ * W1-T10855 adds the now-published Azure Retail Prices API rows (read 2026-10-27).
+ * The cached-token billing dispute remains: reservations use full input rates until
+ * W1-T10858 reconciles an observed invoice. Readiness alone does not add a cash ladder entry.
  */
 function openWeightEndpoint(config: Config, model: string): string {
   // W1-T10837: resolves THIS deployment's own endpoint when `workerProviders.cashDeploymentEndpoints`
@@ -5438,7 +5471,9 @@ export async function spawnOpenWeightWorker(
         ...temperatureField,
         ...responseFormatField,
         // GPT-6 Chat Completions accepts function tools only at reasoning_effort=none.
-        ...(selection.model === "gpt-6-luna" && declaredNames.size > 0 ? { reasoning_effort: "none" } : {}),
+        ...(selection.model === "gpt-6-luna" && declaredNames.size > 0 ? { reasoning_effort: "none" }
+          : (OPENWEIGHT_REASONING_EFFORTS[selection.model] ?? []).includes(selection.effort)
+            ? { reasoning_effort: selection.effort } : {}),
         max_completion_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
         ...(declaredNames.size > 0 ? { tools, tool_choice: "auto" } : {}),
       });
