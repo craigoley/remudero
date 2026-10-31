@@ -21,6 +21,7 @@
     - test/worker.test.ts
     - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
     - "src/lib/garden-registry.ts"
+    - "src/lib/worker-containment.ts"
   status: queued
   priority: 2
   attempts: 0
