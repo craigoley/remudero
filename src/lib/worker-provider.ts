@@ -3600,7 +3600,7 @@ async function cashHttpFailure(response: Response, source: string, signal: Abort
 }
 
 /** A provider that ignores cancellation must still not hold its caller or wake up to spend later. */
-function cashAbortable<T>(signal: AbortSignal, run: () => Promise<T>, onLate?: (value: T) => void): Promise<T> {
+function cashAbortable<T>(signal: AbortSignal, run: () => Promise<T>, onLate?: (value: T) => void | Promise<void>): Promise<T> {
   signal.throwIfAborted();
   return new Promise<T>((resolve, reject) => {
     const finish = (done: () => void): void => {
@@ -3612,10 +3612,9 @@ function cashAbortable<T>(signal: AbortSignal, run: () => Promise<T>, onLate?: (
     Promise.resolve().then(() => { signal.throwIfAborted(); return run(); }).then(
       value => {
         if (signal.aborted) {
-          try { onLate?.(value); }
-          catch (error) {
+          void Promise.resolve().then(() => onLate?.(value)).catch(error => {
             console.error(JSON.stringify({ event: "cash.late_receipt_failed", reason: error instanceof Error ? error.name : "unknown" }));
-          }
+          });
         } else finish(() => resolve(value));
       }, error => finish(() => reject(error)),
     );
@@ -3627,8 +3626,8 @@ async function cashRequestJson<T>(input: {
   args: OpenWeightSpawnArgs; deployment: string; source: string; endpoint: string;
   body: string; headers: Record<string, string>; next: (checkActive: () => void) => T;
   canContinue: () => boolean; chargeFailure: (error: Error) => void;
-  /** A parsed body can arrive after the deadline; it still belongs to the original paid attempt. */
-  onLateEnvelope?: (envelope: unknown, attempt: T) => void;
+  /** Usage belongs to this paid attempt even when fetch or body completion misses the deadline. */
+  onEnvelope?: (envelope: unknown, attempt: T) => void;
   /** W1-T10856: sees every response's headers (success or failure) before its status is handled. */
   observeHeaders?: (headers: Headers) => void;
 }): Promise<{ envelope: unknown; attempt: T }> {
@@ -3657,6 +3656,8 @@ async function cashRequestJson<T>(input: {
           return (args.fetchImpl ?? fetch)(input.endpoint, {
             method: "POST", headers: input.headers, body: input.body, signal: controller.signal,
           });
+        }, async late => {
+          if (late.ok) input.onEnvelope?.(await late.json(), attempt);
         });
         try { input.observeHeaders?.(response.headers); }
         catch (error) {
@@ -3684,7 +3685,8 @@ async function cashRequestJson<T>(input: {
           }
         }
         const envelope = await cashAbortable(controller.signal, () => response.json(),
-          late => input.onLateEnvelope?.(late, attempt));
+          late => input.onEnvelope?.(late, attempt));
+        input.onEnvelope?.(envelope, attempt);
         checkActive();
         args.streamObserver?.({ kind: "working", tsMs: (args.clock ?? systemClock).now() });
         return { envelope, attempt };
@@ -5165,6 +5167,27 @@ type OpenWeightReceiptUsage = {
   prompt_tokens?: unknown; completion_tokens?: unknown; cached_tokens?: unknown; cache_creation_tokens?: unknown;
 };
 
+function openWeightEnvelopeUsage(envelope: unknown, usesResponses: boolean): OpenWeightReceiptUsage | undefined {
+  const usage = (envelope as { usage?: OpenWeightReceiptUsage & {
+    input_tokens?: unknown; output_tokens?: unknown;
+    input_tokens_details?: { cached_tokens?: unknown; cache_write_tokens?: unknown };
+  } } | null)?.usage;
+  return usesResponses ? { prompt_tokens: usage?.input_tokens, completion_tokens: usage?.output_tokens,
+    cached_tokens: usage?.input_tokens_details?.cached_tokens,
+    cache_creation_tokens: usage?.input_tokens_details?.cache_write_tokens } : usage;
+}
+
+function foundryClaudeReceiptUsage(envelope: unknown) {
+  const usage = (envelope as { usage?: { input_tokens?: unknown; output_tokens?: unknown;
+    cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown } } | null)?.usage;
+  if (!usage || !validFoundryTokenCount(usage.input_tokens) || !validFoundryTokenCount(usage.output_tokens) ||
+      (usage.cache_read_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_read_input_tokens)) ||
+      (usage.cache_creation_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_creation_input_tokens))) return undefined;
+  return { input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
+    cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
+    cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0 };
+}
+
 function openWeightReceiptUsd(usage: OpenWeightReceiptUsage | undefined, deployment: string, usesResponses: boolean): number | undefined {
   if (!usage || !validFoundryTokenCount(usage.prompt_tokens) || !validFoundryTokenCount(usage.completion_tokens) ||
       (usage.cached_tokens !== undefined && !validFoundryTokenCount(usage.cached_tokens)) ||
@@ -5231,9 +5254,19 @@ export async function spawnFoundryClaudeWorker(
         output_config: { effort: selection.effort === "default" ? "medium" : selection.effort },
         ...(tools.length ? { tools } : {}),
       });
-      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson({
+      const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<{
+        requestId: string; identity: CashRequestIdentity; reservation: ReturnType<typeof reserveOpenWeightBudget>;
+      }>({
         args, deployment: selection.model, source: `cash ${label}`, endpoint, body,
         headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+        onEnvelope: (envelope, attempt) => {
+          const usage = foundryClaudeReceiptUsage(envelope);
+          if (!usage) return;
+          const actualUsd = foundryClaudeUsageUsd(selection.model, usage);
+          if (actualUsd <= attempt.reservation.reservedUsd) settleOpenWeightBudget(config, {
+            requestId: attempt.requestId, identity: attempt.identity, actualUsd, atIso: clock.iso(),
+          });
+        },
         canContinue: () => turns < maxTurns,
         chargeFailure: () => {
           settleOpenWeightBudget(config, { requestId: pending!.requestId, identity: pending!.identity,
@@ -5257,33 +5290,24 @@ export async function spawnFoundryClaudeWorker(
           budgetReservedUsd += reservation.reservedUsd;
           pending = { requestId, identity, reservedUsd: reservation.reservedUsd };
           recordCashRequestEffort(requestEfforts, body, "foundry-messages");
-          return { requestId, reservation };
+          return { requestId, identity, reservation };
         },
       });
       const payload = envelope as {
         id?: unknown; model?: unknown; stop_reason?: unknown; stop_details?: { category?: unknown } | null;
         content?: Array<Record<string, unknown>>;
-        usage?: { input_tokens?: unknown; output_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown };
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
       servedModels.push(cashResponseModel(payload.model));
-      const usage = payload.usage;
-      if (!usage || !validFoundryTokenCount(usage.input_tokens) || !validFoundryTokenCount(usage.output_tokens) ||
-          (usage.cache_read_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_read_input_tokens)) ||
-          (usage.cache_creation_input_tokens !== undefined && !validFoundryTokenCount(usage.cache_creation_input_tokens))) {
+      const measured = foundryClaudeReceiptUsage(envelope);
+      if (!measured) {
         settleOpenWeightBudget(config, { requestId, identity: pending!.identity, atIso: clock.iso(), reason: "usage unavailable" });
         budgetHeldUsd += reservation.reservedUsd;
         spentUsd += reservation.reservedUsd;
         budgetSettledUsd += reservation.reservedUsd;
       } else {
-        const measured = {
-          input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
-          cache_read_input_tokens: typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : 0,
-          cache_creation_input_tokens: typeof usage.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : 0,
-        };
         const actualUsd = foundryClaudeUsageUsd(selection.model, measured);
         if (actualUsd > reservation.reservedUsd) throw new Error(`cash ${label} usage exceeded its conservative reservation`);
-        settleOpenWeightBudget(config, { requestId, identity: pending!.identity, actualUsd, atIso: clock.iso() });
         promptTokens += measured.input_tokens;
         completionTokens += measured.output_tokens;
         cacheReadTokens += measured.cache_read_input_tokens;
@@ -5483,11 +5507,8 @@ export async function spawnOpenWeightWorker(
       }>({
         args, deployment: selection.model, source: "openweight", endpoint, body,
         headers: { "content-type": "application/json", "api-key": key },
-        onLateEnvelope: (late, attempt) => {
-          if (late === null || typeof late !== "object") return;
-          const receipt = (responses ? responses.read(late as Parameters<CashResponsesConversation["read"]>[0]) : late) as
-            { usage?: OpenWeightReceiptUsage };
-          const actualUsd = openWeightReceiptUsd(receipt.usage, selection.model, usesResponses);
+        onEnvelope: (envelope, attempt) => {
+          const actualUsd = openWeightReceiptUsd(openWeightEnvelopeUsage(envelope, usesResponses), selection.model, usesResponses);
           if (actualUsd !== undefined) settleOpenWeightBudget(config, {
             requestId: attempt.requestId, identity: attempt.identity, actualUsd, atIso: clock.iso(),
           });
@@ -5527,15 +5548,7 @@ export async function spawnOpenWeightWorker(
           return { requestId, identity, reservation };
         },
       });
-      const payload = (responses ? responses.read(envelope as Parameters<CashResponsesConversation["read"]>[0]) : envelope) as {
-        id?: unknown;
-        model?: unknown;
-        usage?: OpenWeightReceiptUsage;
-        choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
-      };
-      sessionId = typeof payload.id === "string" ? payload.id : sessionId;
-      servedModels.push(cashResponseModel(payload.model));
-      const usage = payload.usage;
+      const usage = openWeightEnvelopeUsage(envelope, usesResponses);
       const actualUsd = openWeightReceiptUsd(usage, selection.model, usesResponses);
       // Valid counters remain observable even when an incomplete receipt cannot price the request.
       const turnPromptTokens = validFoundryTokenCount(usage?.prompt_tokens) ? usage.prompt_tokens : 0;
@@ -5547,7 +5560,6 @@ export async function spawnOpenWeightWorker(
       promptTokens += turnPromptTokens;
       completionTokens += turnCompletionTokens;
       if (actualUsd !== undefined) {
-        settleOpenWeightBudget(config, { requestId, identity: pendingReservation!.identity, actualUsd, atIso: clock.iso() });
         budgetSettledUsd += Math.min(actualUsd, reservation.reservedUsd);
       } else {
         settleOpenWeightBudget(config, { requestId, identity: pendingReservation!.identity, atIso: clock.iso(), reason: "usage unavailable" });
@@ -5555,6 +5567,12 @@ export async function spawnOpenWeightWorker(
         budgetSettledUsd += reservation.reservedUsd;
       }
       pendingReservation = undefined;
+      const payload = (responses ? responses.read(envelope as Parameters<CashResponsesConversation["read"]>[0]) : envelope) as {
+        id?: unknown; model?: unknown;
+        choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
+      };
+      sessionId = typeof payload.id === "string" ? payload.id : sessionId;
+      servedModels.push(cashResponseModel(payload.model));
       const message = payload.choices?.[0]?.message;
       if (!message) throw new Error("openweight response has no assistant message");
       // A TRUNCATED REPLY IS A NAMED FAILURE, NOT A SHORT ANSWER. Checked AFTER settlement above so

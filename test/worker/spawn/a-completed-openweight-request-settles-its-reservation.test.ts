@@ -21,21 +21,42 @@ function readAllowance(root: string): OpenWeightAllowanceState {
   return JSON.parse(readFileSync(join(root, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "utf8"));
 }
 
+const models = ["gpt-oss-120b", "gpt-6-luna", "gpt-6.1-sol", "claude-haiku-5-5"];
+const env = { RMD_CASH_EASTUS_API_KEY: "mapped-fixture-only",
+  RMD_FOUNDRY_CLAUDE_API_KEY: "fixture-only",
+  RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://mapped.example.test/anthropic" };
+
+function receipt(model: string, adapterError = false) {
+  if (model === "claude-haiku-5-5") return { usage: { input_tokens: 10, output_tokens: 2 },
+    content: adapterError ? [null] : [{ type: "text", text: "completed" }], stop_reason: "end_turn" };
+  if (model === "gpt-6.1-sol") return { status: "completed",
+    usage: { input_tokens: 10, output_tokens: 2, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } },
+    output: adapterError ? [null] : [{ type: "message", content: [{ type: "output_text", text: "completed" }] }] };
+  return { usage: { prompt_tokens: 10, completion_tokens: 2 },
+    choices: adapterError ? [] : [{ message: { content: "completed" }, finish_reason: "stop" }] };
+}
+
 test("W1-T10954: real and duplicate settlement evidence affects only its exact request once while preserving all caps", async t => {
-  for (const model of ["gpt-oss-120b", "gpt-6-luna", "gpt-6.1-sol"]) await t.test(`${model} late body settles its own held attempt`, async child => {
+  for (const model of models) for (const phase of ["fetch", "body"]) await t.test(`${model} late ${phase} settles its own held attempt`, async child => {
     const { dir } = ownedFixtureDir(child, "cash-late-body");
     const clock = fixedClock(Date.now());
     const config = { root: dir, dailyCapUsd: 25, workerProviders: {
-      cashEndpoint: "https://mapped.example.test/",
+      cashEndpoint: "https://default.example.test/",
+      cashDeploymentEndpoints: { [model]: { endpoint: "https://mapped.example.test/", keyEnv: "RMD_CASH_EASTUS_API_KEY" } },
     } } as Config;
-    let deliverBody!: (value: unknown) => void;
+    let deliver!: () => void;
     let calls = 0;
-    const body = new Promise<unknown>(resolve => { deliverBody = resolve; });
+    const ready = new Promise<void>(resolve => { deliver = resolve; });
     const result = await spawnOpenWeightWorker({ cwd: dir, workerHome: dir, prompt: "fixture", tools: [], clock,
-      requestTimeoutMs: 20, env: { RMD_OPENWEIGHT_API_KEY: "fixture-only" }, fetchImpl: async () => {
+      requestTimeoutMs: 20, env, fetchImpl: async url => {
         calls++;
+        assert.equal(new URL(String(url)).hostname, "mapped.example.test");
+        if (phase === "fetch") await ready;
         const response = new Response(null, { status: 200 });
-        Object.defineProperty(response, "json", { value: () => body });
+        Object.defineProperty(response, "json", { value: async () => {
+          if (phase === "body") await ready;
+          return receipt(model, true);
+        } });
         return response;
       } }, config, { model, effort: "low" });
     const before = readAllowance(dir);
@@ -44,6 +65,9 @@ test("W1-T10954: real and duplicate settlement evidence affects only its exact r
     assert.equal(result.isError, true);
     assert.equal(held.settledUsd, null);
     assert.equal(result.budgetHeldUsd, held.reservedUsd);
+    assert.equal(result.usageEstimateUsd, null);
+    assert.equal(held.identity?.deployment, model);
+    assert.equal(new URL(held.identity!.endpoint).hostname, "mapped.example.test");
     const other: CashRequestIdentity = { ...held.identity!, requestId: "another-request", attemptId: "another-attempt" };
     const reserve = (identity: CashRequestIdentity) => reserveOpenWeightBudget(config, {
       requestId: identity.requestId, identity, deployment: model, requestBodyBytes: 100, atIso: clock.iso(),
@@ -52,17 +76,14 @@ test("W1-T10954: real and duplicate settlement evidence affects only its exact r
     config.dailyCapUsd = held.reservedUsd + otherReservation.reservedUsd;
     assert.throws(() => reserve({ ...other, requestId: "third-request" }), OpenWeightAllowanceExhaustedError);
     const beforeReceipt = readAllowance(dir);
-    deliverBody(model === "gpt-6.1-sol"
-      ? { status: "completed", usage: { input_tokens: 10, output_tokens: 2,
-        input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } },
-        output: [{ type: "message", content: [{ type: "output_text", text: "late" }] }] }
-      : { usage: { prompt_tokens: 10, completion_tokens: 2 },
-        choices: [{ message: { content: "late" }, finish_reason: "stop" }] });
+    deliver();
     await new Promise<void>(resolve => setImmediate(resolve));
     const settled = readAllowance(dir);
     const actualUsd = openWeightUsageUsd(model, 10, 2);
     assert.equal(settled.reservations[requestId]!.settledUsd, actualUsd);
     assert.equal(settled.reservations[requestId]!.heldUsd, 0);
+    assert.equal(settled.reservations[requestId]!.billedUsd, null);
+    assert.equal(settled.reservations[requestId]!.usageEstimateUsd, actualUsd);
     assert.deepEqual(settled.reservations[other.requestId], beforeReceipt.reservations[other.requestId]);
     settleOpenWeightBudget(config, { requestId, identity: held.identity, actualUsd: 0, atIso: clock.iso() });
     assert.deepEqual(readAllowance(dir), settled, "a duplicate cannot revise the late receipt");
@@ -70,7 +91,43 @@ test("W1-T10954: real and duplicate settlement evidence affects only its exact r
     assert.equal(calls, 1, "settlement never issues a replacement request");
   });
 
-  for (const model of ["gpt-oss-120b", "gpt-6-luna"]) {
+  for (const model of models) for (const failure of ["http", "unreadable", "invalid-usage"]) {
+    await t.test(`${model} late fetch ${failure} keeps its original hold`, async child => {
+      const { dir } = ownedFixtureDir(child, "cash-late-unknown");
+      const clock = fixedClock(Date.now());
+      const config = { root: dir, dailyCapUsd: 25, workerProviders: {
+        cashDeploymentEndpoints: { [model]: { endpoint: "https://mapped.example.test/", keyEnv: "RMD_CASH_EASTUS_API_KEY" } },
+      } } as Config;
+      let deliver!: () => void;
+      const ready = new Promise<void>(resolve => { deliver = resolve; });
+      let reads = 0;
+      const result = await spawnOpenWeightWorker({ cwd: dir, workerHome: dir, prompt: "fixture", tools: [], clock,
+        requestTimeoutMs: 20, env, fetchImpl: async () => {
+          await ready;
+          const response = new Response(null, { status: failure === "http" ? 503 : 200 });
+          Object.defineProperty(response, "json", { value: async () => {
+            reads++;
+            if (failure === "unreadable") throw new Error("fixture body unreadable");
+            return failure === "invalid-usage" ? { ...receipt(model), usage: { input_tokens: 10,
+              prompt_tokens: 10, output_tokens: -1, completion_tokens: -1 } } : receipt(model);
+          } });
+          return response;
+        } }, config, { model, effort: "low" });
+      const before = readAllowance(dir);
+      const held = Object.values(before.reservations)[0]!;
+      assert.equal(result.isError, true);
+      assert.equal(result.budgetHeldUsd, held.reservedUsd);
+      deliver();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(reads, failure === "http" ? 0 : 1);
+      assert.deepEqual(readAllowance(dir), before, "failed late evidence cannot change money or attempt identity");
+      assert.equal(held.settledUsd, null);
+      assert.equal(held.usageEstimateUsd, null);
+      assert.equal(held.billedUsd, null);
+    });
+  }
+
+  for (const model of models) {
     for (const adapterError of [false, true]) await t.test(`${model} adapterError=${adapterError}`, async child => {
       const { dir } = ownedFixtureDir(child, "cash-usage-settlement");
       const clock = fixedClock(Date.now());
@@ -80,11 +137,10 @@ test("W1-T10954: real and duplicate settlement evidence affects only its exact r
       } } as Config;
       let calls = 0;
       const result = await spawnOpenWeightWorker({ cwd: dir, workerHome: dir, prompt: "fixture", tools: [], clock,
-        env: { RMD_CASH_EASTUS_API_KEY: "mapped-fixture-only" }, fetchImpl: async url => {
+        env, fetchImpl: async url => {
           calls++;
           assert.equal(new URL(String(url)).hostname, "mapped.example.test");
-          return Response.json({ usage: { prompt_tokens: 10, completion_tokens: 2 },
-            choices: adapterError ? [] : [{ message: { content: "completed" }, finish_reason: "stop" }] });
+          return Response.json(receipt(model, adapterError));
         } }, config, { model, effort: "low" });
       const state = readAllowance(dir);
       const [requestId, row] = Object.entries(state.reservations)[0]!;
@@ -99,6 +155,8 @@ test("W1-T10954: real and duplicate settlement evidence affects only its exact r
       assert.equal(result.usageEstimateUsd, actualUsd);
       assert.equal(result.budgetHeldUsd, 0);
       assert.equal(result.billedUsd, null);
+      assert.equal(result.tokens.input, 10);
+      assert.equal(result.tokens.output, 2);
       assert.equal(openWeightCommittedUsd(state), actualUsd);
       assert.equal(row.identity?.deployment, model);
       assert.equal(new URL(row.identity!.endpoint).hostname, "mapped.example.test");
