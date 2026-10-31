@@ -1,0 +1,30 @@
+id: incident-2e27ca4b57850c39
+ts: 2026-10-31T18:45:21.405Z
+raw: >-
+  Incident 2e27ca4b5785: intervention
+  armed-idle:armed-idle-merge:review-success-required-checks-green-arm
+
+  First seen: 2026-10-31T17:02:11.090Z
+
+  Last seen: 2026-10-31T18:45:20.006Z
+
+  Count: 4, burn: 2.33/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=push target=pr#13952@d862d9684 actor=cao825 cause=armed-idle:armed-idle-merge:review-success-required-checks-green-arm — a hand action answered a fleet state no lane resolved
+    - surface=pr action=update-branch target=pr#13952@189e996ca actor=cao825 cause=armed-idle:armed-idle-merge:review-success-required-checks-green-arm — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#2e27ca4b57850c3979d4fffe335ba1090035f25ff81dec97969b02b9b860ccac
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

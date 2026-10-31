@@ -1,0 +1,29 @@
+id: incident-08c653c81bd260fb
+ts: 2026-10-31T18:46:34.834Z
+raw: >-
+  Incident 08c653c81bd2: intervention
+  review-failed:fix-lane:unmet-criteria-fix-round-judge-change-ap
+
+  First seen: 2026-10-31T18:45:20.006Z
+
+  Last seen: 2026-10-31T18:46:33.764Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=update-branch target=pr#13868@16248d4d9 actor=cao825 cause=review-failed:fix-lane:unmet-criteria-fix-round-judge-change-ap — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#08c653c81bd260fbbdaece8f5e0d8094b59e124d4fdf87388065484bb181b1de
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
