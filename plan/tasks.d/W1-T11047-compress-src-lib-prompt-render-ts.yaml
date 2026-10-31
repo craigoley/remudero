@@ -1,0 +1,35 @@
+- id: W1-T11047
+  title: "Compress the 531 comment lines in src/lib/prompt-render.ts without changing executable code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "comment-compression:src/lib/prompt-render.ts"
+  files:
+    - src/lib/prompt-render.ts
+    - test/worker/compress-src-lib-prompt-render-ts.test.ts
+  acceptance:
+    - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
+      proof: "unit test: W1-T11047: comment compression preserves executable code"
+  rationale: |
+    Observed 531 comment lines in src/lib/prompt-render.ts. This is maintenance debt, never a merge ceiling.
+    Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
+    Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.
+    Add the named regression in test/worker/compress-src-lib-prompt-render-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
+    Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
+    Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.96
+    reasons:
+      - "The filed scope limits work to comment compression in one source file and a regression test requiring executable-token preservation and measurable comment reduction."
+      - "The rationale requires preserving behavioral assertions, invariants, historical citations, owners, stops and deployment holds, and prohibits a new hard comment ceiling."
+      - "The supplied gates report filing-time assessment with no stated failure; the family record lists 17 merged tasks and zero declined tasks. No implementation verification is claimed."
+    judged_at: "2026-10-31T03:37:37.718Z"
+    pin: "c5c15860c75e82905cc39e07e11cd522528832742844c69cbd3ddaf1b4d4fd55"

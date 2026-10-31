@@ -1053,6 +1053,7 @@ import {
   type DraftCache,
   type DraftSelectionContext,
   type DraftRungOutcome,
+  type DraftWorkerResult,
   type EvidenceAnchor,
   type BatchApproveResult,
   type InboxClassification,
@@ -26449,6 +26450,7 @@ export function buildCiLearningDaemonHooks(deps: {
  *  LANDED. Reporting only drafts is what made a rung that filed nothing indistinguishable from a
  *  clean one (W1-T3324). */
 export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResult {
+  git?: CiLearningFilingResult["git"];
   windowComplete?: boolean;
   unreadablePrCount?: number;
   /** W1-T4115: what the gate fire-rate measurement over the same window found. */
@@ -26533,6 +26535,7 @@ export function buildCiLearningCadenceRunner(deps: {
     let skipped = 0;
     let refused = 0;
     let carryRefused: FeedbackRefusal[] = [];
+    let git: CiLearningFilingResult["git"];
     if (result.drafts.length > 0 || pendingOrigins.length > 0) {
       try {
         const mintTaskId = deps.mintTaskId ?? ciLearningTaskIdMinter(deps.checkoutRoot, (step, fields) =>
@@ -26555,6 +26558,7 @@ export function buildCiLearningCadenceRunner(deps: {
         skipped = filing.skipped.length;
         refused = filing.refused.length;
         carryRefused = filing.carryRefused ?? [];
+        git = filing.git;
       } catch {
         // Counts stay zero — "drafted but not filed" is a distinct outcome and the row below says so.
       }
@@ -26582,6 +26586,7 @@ export function buildCiLearningCadenceRunner(deps: {
       refusedCount: refused,
       carryRefusedCount: carryRefused.length,
       carryRefused,
+      ...(git ? { git } : {}),
     };
     (deps.recordFire ?? recordCiLearningCadenceFire)(deps.root, at);
     return completed;
@@ -35064,18 +35069,20 @@ export async function spawnEscalatedInboxDraft(
   args: Parameters<typeof buildInboxDraftSpawnArgs>[0],
   rawSpawn: typeof spawnWorker = spawnWorker,
   readCapacity: (config: Config) => Promise<ProviderCapacity> = (config) => readClaudeProviderCapacity(config, { forceRefresh: true }),
-): Promise<WorkerResult | undefined> {
+): Promise<DraftWorkerResult | undefined> {
   const policy = resolveProviderRoutingPolicy(args.config.root, args.config);
   if (!policy.routableProviders.includes("claude")) return undefined;
   const capacity = await readCapacity(args.config);
   if (!providerEligibility(capacity, policy.reservePercent).eligible) return undefined;
-  return rawSpawn({
+  const spawnArgs = {
     ...buildInboxDraftSpawnArgs({
       ...args,
       mount: { ...args.mount, model: "sonnet", provider: "claude", effort: "medium" },
     }),
     onSelectionAssignment: undefined,
-  });
+  };
+  const requestedModel = spawnArgs.model ?? null;
+  return { ...await rawSpawn(spawnArgs), requestedModel };
 }
 
 /**
@@ -35190,8 +35197,8 @@ export async function draftProposalBatch(
       {
         repoFacts: checkoutRepoFacts(worktreePath),
         causalScope,
-        spawn: (proposal, prompt, ctx) =>
-          benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({ ...buildInboxDraftSpawnArgs({
+        spawn: async (proposal, prompt, ctx) => {
+          const spawnArgs = { ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
             settingsFile,
             mount: inboxDraftMount,
@@ -35207,7 +35214,11 @@ export async function draftProposalBatch(
             // test reads this body so a later extraction cannot silently turn the guarantee into
             // a helper-level convention.
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
-          }), onSelectionAssignment: undefined }),
+          }), onSelectionAssignment: undefined };
+          const requestedModel = spawnArgs.model ?? null;
+          ctx?.onRequestedModel?.(requestedModel);
+          return { ...await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)(spawnArgs), requestedModel };
+        },
         ...(inboxDraftMount.provider === "cash" ? {
           escalate: (proposal: Proposal, prompt: string) => spawnEscalatedInboxDraft({
             cwd: worktreePath,
