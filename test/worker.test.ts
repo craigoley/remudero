@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { WorkerSettingsError } from "../src/lib/settings.js";
 import { WorkerKeychainError } from "../src/lib/worker-home.js";
-import { isPidAlive, RUN_ID_ENV, spawnDetachedGroup, TASK_ID_ENV } from "../src/lib/worker-containment.js";
+import { isPidAlive, killProcessGroup, RUN_ID_ENV, spawnDetachedGroup, TASK_ID_ENV } from "../src/lib/worker-containment.js";
 import {
   BILLING_MODE,
   CLAUDE_BIN_ENV_OVERRIDE,
@@ -32,6 +35,476 @@ import {
   workerTranscript,
 } from "../src/lib/worker.js";
 import { ledgeredNonDispatchSpawn, runReview } from "../src/run-task.js";
+import { BoundedOutput } from "#src/lib/bounded-file-tail.js";
+import { WORKER_OUTPUT_BYTES } from "#src/lib/worker.js";
+import fs from "node:fs";
+import { childGardenPassSpawn, GARDEN_OUTPUT_BYTES, GARDEN_PASS_STEP, startGardenOffLoop } from "#src/lib/garden-registry.js";
+import type { GardenerRuntimeEvent } from "#src/lib/gardener-runtime.js";
+import { CODEX_WORKER_STDERR_MAX_BYTES, spawnCodexWorker } from "#src/lib/worker-provider.js";
+import { repoRoot } from "#test/helpers/repo-root.js";
+
+test("W1-T10962: truncated or unreadable worker and gardener output stays explicit and cannot become a complete success", async (t) => {
+  {
+    const stream = (async function* () {
+      yield { type: "assistant", message: { content: [{ type: "text", text: "🙂".repeat(WORKER_OUTPUT_BYTES) }] } };
+      yield { type: "result", subtype: "success", is_error: false, result: "done", session_id: "worker-attempt",
+        total_cost_usd: 1.25, num_turns: 9 };
+      throw Object.assign(new Error("child failed"), { exitCode: 23 });
+    })();
+    const result = await collectWorkerResult(stream, { childEnvKeys: [] });
+    assert.equal(result.outputRetention?.blocks.state, "truncated");
+    assert.equal(result.outputRetention?.originalSubtype, "success");
+    assert.equal(result.isError, true);
+    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(result.sessionId, "worker-attempt");
+    assert.equal(result.numTurns, 9);
+    assert.equal(result.costUsd, 1.25);
+    assert.deepEqual(result.exit, { kind: "exit", code: 23 });
+    assert.ok(Buffer.byteLength(result.blocks.join("")) <= WORKER_OUTPUT_BYTES);
+    assert.equal(workerLedgerFields(result).output_retention?.blocks.state, "truncated");
+  }
+  const failed = t.mock.method(fs, "readSync", () => { throw new Error("report read refused"); });
+  const stderrOutput = new BoundedOutput(4);
+  stderrOutput.push("large stderr");
+  const unreadable = await collectWorkerResult(successStream(), { childEnvKeys: [], stderrOutput });
+  assert.equal(unreadable.outputRetention?.stderr.state, "unreadable");
+  assert.match(unreadable.outputRetention!.stderr.reason!, /report read refused/);
+  assert.equal(unreadable.isError, true);
+  assert.equal(unreadable.subtype, "error_incomplete_output");
+  assert.deepEqual(unreadable.exit, { kind: "unobserved" });
+  failed.mock.restore();
+  const clean = await collectWorkerResult(successStream(), { childEnvKeys: [] });
+  assert.equal(clean.outputRetention?.text.state, "complete");
+  assert.equal(clean.isError, false);
+  assert.equal(clean.subtype, "success");
+  const dir = mkdtempSync(join(tmpdir(), "rmd-garden-report-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const entry = join(dir, "garden-report.mjs");
+  const runGarden = async (body: string) => {
+    writeFileSync(entry, body);
+    const events: GardenerRuntimeEvent[] = [];
+    let finish!: (row: Record<string, unknown>) => void;
+    const finished = new Promise<Record<string, unknown>>((resolve) => { finish = resolve; });
+    const log = (step: string, row: Record<string, unknown> = {}) => {
+      if (step === GARDEN_PASS_STEP) finish(row);
+    };
+    const spawnPass = childGardenPassSpawn({ entry, execArgv: [], root: dir, cwd: dir,
+      env: { ...process.env, NODE_V8_COVERAGE: "" }, reserve: () => undefined, log });
+    const garden = startGardenOffLoop("config", 3600_000, { spawnPass, log,
+      observe: (event) => { events.push(event); } });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const row = await Promise.race([finished, new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("garden child did not settle")), 10_000);
+      })]);
+      assert.equal(typeof row.passId, "string", "the actual attempt remains identifiable");
+      assert.equal(events.at(-1)?.passId, row.passId);
+      return { row, event: events.at(-1)! };
+    } finally {
+      clearTimeout(timer);
+      garden.stop();
+    }
+  };
+  const runWorker = async (body: string, pipeError = false, expectedExit = 0) => {
+    const workerDir = join(dir, "worker");
+    mkdirSync(workerDir, { recursive: true });
+    let observedExit: number | null | undefined;
+    const queryFn = (({ options }: { options: {
+      env: Record<string, string>;
+      spawnClaudeCodeProcess: (opts: unknown) => ChildProcessWithoutNullStreams;
+    } }) => (async function* () {
+      const child = options.spawnClaudeCodeProcess({ command: process.execPath,
+        args: ["--input-type=module", "-e", body], cwd: workerDir,
+        env: { ...options.env, NODE_V8_COVERAGE: "" } });
+      if (pipeError) child.stderr.once("data", () => child.stderr.emit("error", new Error("worker pipe refused")));
+      // A handshake makes split UTF-8 arrive in separate parent reads.
+      child.stdout.on("data", () => child.stdin.write("continue\n"));
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", resolve);
+      });
+      observedExit = code;
+      yield { type: "result", subtype: "success", is_error: false, result: "done",
+        session_id: "real-worker-attempt", total_cost_usd: 0.5, num_turns: 3 };
+      if (code !== 0) throw Object.assign(new Error("fixture worker failed"), { exitCode: code });
+    })()) as unknown as Parameters<typeof spawnWorker>[0]["queryFn"];
+    const result = await spawnWorker({ ...e2eSpawnWorkerArgs(workerDir), queryFn });
+    assert.equal(observedExit, expectedExit, "the fixture must finish writing before its intended exit");
+    assert.equal(result.sessionId, "real-worker-attempt");
+    assert.equal(result.costUsd, 0.5);
+    assert.equal(result.numTurns, 3);
+    return result;
+  };
+  const write = `async function writeStderr(value) {
+      const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      await new Promise((resolve, reject) => {
+        process.stderr.write(bytes, error => error ? reject(error) : resolve());
+      });
+    } `;
+  // The SDK result is yielded at the CLI's exit, while a detached writer still owns its
+  // stderr pipe. Teardown releases that writer. The old finalization order returned success
+  // before the late oversized bytes arrived, even though the pipe had not closed.
+  const lateAck = join(dir, "claude-late-stderr-ack");
+  const lateClaudeWriter = `const fs = require("node:fs");
+    const ack = ${JSON.stringify(lateAck)};
+    const deadline = Date.now() + 5000;
+    const timer = setInterval(() => {
+      if (fs.existsSync(ack)) {
+        clearInterval(timer);
+        process.stderr.write(Buffer.alloc(${WORKER_OUTPUT_BYTES + 4}, 0x78));
+      } else if (Date.now() > deadline) {
+        clearInterval(timer);
+        process.exitCode = 2;
+      }
+    }, 5);`;
+  const lateCli = `const { spawn } = require("node:child_process");
+    spawn(process.execPath, ["-e", ${JSON.stringify(lateClaudeWriter)}],
+      { detached: true, stdio: ["ignore", "ignore", "inherit"] }).unref();`;
+  let cliExited = false;
+  let pipeClosed = false;
+  const lateQuery = (({ options }: { options: {
+    env: Record<string, string>;
+    spawnClaudeCodeProcess: (opts: unknown) => ChildProcessWithoutNullStreams;
+  } }) => (async function* () {
+    const child = options.spawnClaudeCodeProcess({ command: process.execPath,
+      args: ["-e", lateCli], cwd: dir, env: { ...options.env, NODE_V8_COVERAGE: "" } });
+    child.once("close", () => { pipeClosed = true; });
+    child.stdout.resume();
+    child.stdin.end();
+    await new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", () => { cliExited = true; resolve(); });
+    });
+    assert.equal(pipeClosed, false, "the SDK result must precede final stderr pipe closure");
+    yield { type: "result", subtype: "success", is_error: false, result: "done",
+      session_id: "late-claude-attempt", total_cost_usd: 0.5, num_turns: 3 };
+  })()) as unknown as Parameters<typeof spawnWorker>[0]["queryFn"];
+  const lateResult = await spawnWorker({ ...e2eSpawnWorkerArgs(dir), queryFn: lateQuery,
+    containment: { teardown: (pid) => {
+      killProcessGroup(pid);
+      writeFileSync(lateAck, "release");
+    } } });
+  assert.equal(cliExited, true);
+  assert.equal(pipeClosed, true, "the result must wait for the actual pipe close");
+  assert.equal(lateResult.sessionId, "late-claude-attempt");
+  assert.equal(lateResult.outputRetention?.stderr.state, "truncated");
+  assert.equal(lateResult.outputRetention?.stderr.fileBytes, WORKER_OUTPUT_BYTES + 4);
+  assert.equal(lateResult.outputRetention?.originalSubtype, "success");
+  assert.equal(lateResult.isError, true);
+  assert.equal(lateResult.subtype, "error_incomplete_output");
+  assert.equal(workerLedgerFields(lateResult).verdict, "error_incomplete_output");
+  const stderrEvents: Array<{ text: string; state?: string }> = [];
+  const eofChild = spawnDetachedGroup({ command: process.execPath,
+    args: ["-e", "process.stderr.write(Buffer.from([0xf0, 0x9f]))"],
+    env: { ...process.env, NODE_V8_COVERAGE: "" } },
+  (text, failure) => stderrEvents.push({ text, state: failure?.state }));
+  eofChild.process.stdout.resume();
+  eofChild.process.stdin.end();
+  let eofExit: number | null | undefined;
+  eofChild.process.once("exit", (code) => { eofExit = code; });
+  assert.ok(eofChild.outputClosed, "the real spawn must expose pipe closure to its result consumer");
+  await eofChild.outputClosed;
+  assert.equal(eofExit, 0);
+  assert.equal(stderrEvents.at(-1)?.state, "malformed", "pipe closure must include EOF decoding failures");
+  const runCodex = async (body: string, mode?: "pipe-error" | "split" | "late-stderr") => {
+    const script = join(dir, "codex-report.mjs");
+    const bin = join(dir, "codex-fixture");
+    const ack = join(dir, "stderr-read");
+    rmSync(ack, { force: true });
+    const events = [{ type: "thread.started", thread_id: "real-codex-attempt" },
+      { type: "turn.started" },
+      { type: "item.completed", item: { type: "agent_message", text: "done" } },
+      { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 25, output_tokens: 10 } }];
+    writeFileSync(script, `import { existsSync } from "node:fs";
+      process.stdin.resume(); await new Promise(r => process.stdin.once("end", r));
+      ${write}${body}
+      process.stdout.write(${JSON.stringify(events.map(event => JSON.stringify(event)).join("\n") + "\n")});`);
+    writeFileSync(bin, `#!/bin/sh\nexec '${process.execPath}' '${script}'\n`);
+    chmodSync(bin, 0o700);
+    const realSpawn = childProcess.spawn;
+    let outputClosed: Promise<void> | undefined;
+    const observe = mode && t.mock.method(childProcess, "spawn", (...args: Parameters<typeof realSpawn>) => {
+      const child = realSpawn(...args);
+      if (mode === "pipe-error") child.stderr!.once("data", () => child.stderr!.emit("error", new Error("codex pipe refused")));
+      if (mode === "split") child.stderr!.once("data", () => writeFileSync(ack, "read"));
+      if (mode === "late-stderr") {
+        child.once("exit", () => writeFileSync(ack, "exited"));
+        outputClosed = new Promise(resolve => child.once("close", () => resolve()));
+      }
+      return child;
+    });
+    syncBuiltinESMExports();
+    try {
+      const result = await spawnCodexWorker({ workerHome: join(dir, "codex-home"), cwd: dir,
+        prompt: "synthetic report", tools: ["Read"], settingsFile: join(repoRoot(), "settings/worker.json") },
+      { claudeBin: "/unused", root: dir, workerProviders: { codexBin: bin, codexModel: "gpt-6.1-sol", codexHome: join(dir, "codex-auth") } });
+      assert.equal(result.sessionId, "real-codex-attempt");
+      assert.equal(result.text, "done");
+      assert.equal(result.numTurns, 1);
+      assert.deepEqual(result.tokens, { input: 100, cacheRead: 25, cacheCreation: 0, output: 10 });
+      assert.equal(result.outputRetention?.originalSubtype, "success");
+      return result;
+    } finally {
+      await outputClosed;
+      if (observe) observe.mock.restore();
+      syncBuiltinESMExports();
+    }
+  };
+  for (const [body, mode, state, reason, bytes] of [
+    ['await writeStderr(Buffer.from([0xc3, 0x28])); await writeStderr("later");', undefined, "malformed", /encoded data.*valid/i, 7],
+    ['await writeStderr(Buffer.from([0xf0, 0x9f]));', undefined, "malformed", /encoded data.*valid/i, 2],
+    ['await writeStderr("pipe fixture");', "pipe-error", "unreadable", /codex pipe refused/, 12],
+    [`await writeStderr("x".repeat(${CODEX_WORKER_STDERR_MAX_BYTES + 4}));`, undefined, "truncated", undefined, CODEX_WORKER_STDERR_MAX_BYTES + 4],
+  ] as const) {
+    const result = await runCodex(body, mode);
+    assert.equal(result.outputRetention?.stderr.state, state, "Codex must preserve real stderr failures");
+    assert.equal(result.outputRetention?.stderr.fileBytes, bytes);
+    if (reason) assert.match(result.outputRetention!.stderr.reason!, reason);
+    assert.equal(result.isError, true, "Codex cannot grant complete success to incomplete output");
+    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(workerLedgerFields(result).verdict, "error_incomplete_output");
+    assert.equal(workerLedgerFields(result).output_retention?.stderr.state, state);
+    assert.deepEqual(result.exit, { kind: "exit", code: 0 });
+  }
+  // The descendant owns a separate group so normal worker teardown cannot erase its final pipe bytes.
+  const lateWriter = `const fs = require("node:fs");
+    const timer = setInterval(() => {
+      if (fs.existsSync(${JSON.stringify(join(dir, "stderr-read"))})) {
+        clearInterval(timer); process.stderr.write(Buffer.from([0xf0, 0x9f]));
+      }
+    }, 5);`;
+  const lateCodex = await runCodex(`const { spawn } = await import("node:child_process");
+    spawn(process.execPath, ["-e", ${JSON.stringify(lateWriter)}],
+      { detached: true, stdio: ["ignore", "ignore", "inherit"] }).unref();`, "late-stderr");
+  assert.equal(lateCodex.outputRetention?.stderr.state, "malformed", "Codex must drain stderr after its actual exit");
+  assert.equal(lateCodex.outputRetention?.stderr.fileBytes, 2);
+  assert.equal(lateCodex.isError, true);
+  assert.equal(lateCodex.subtype, "error_incomplete_output");
+  assert.deepEqual(lateCodex.exit, { kind: "exit", code: 0 });
+  const codexNonzero = await runCodex('await writeStderr(Buffer.from([0xf0, 0x9f])); process.exitCode = 23;');
+  assert.equal(codexNonzero.outputRetention?.stderr.state, "malformed");
+  assert.equal(codexNonzero.isError, true);
+  assert.equal(codexNonzero.subtype, "error_exit_23");
+  assert.deepEqual(codexNonzero.exit, { kind: "exit", code: 23 });
+  const codexSplit = await runCodex(`await writeStderr(Buffer.from([0xf0, 0x9f]));
+    while (!existsSync(${JSON.stringify(join(dir, "stderr-read"))})) await new Promise(r => setTimeout(r, 5));
+    await writeStderr(Buffer.from([0x99, 0x82]));`, "split");
+  assert.equal(codexSplit.stderr, "🙂");
+  assert.equal(codexSplit.outputRetention?.stderr.state, "complete");
+  assert.equal(codexSplit.isError, false);
+  assert.equal(codexSplit.subtype, "success");
+  const codexEmpty = await runCodex("");
+  assert.equal(codexEmpty.stderr, "");
+  assert.equal(codexEmpty.outputRetention?.stderr.state, "complete");
+  assert.equal(codexEmpty.isError, false);
+  assert.equal(codexEmpty.subtype, "success");
+  const thread = { type: "thread.started", thread_id: "completion-attempt" };
+  const started = { type: "turn.started" };
+  const message = { type: "item.completed", item: { type: "agent_message", text: "unfinished report" } };
+  const completed = { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 25, output_tokens: 10 } };
+  for (const fixture of [
+    { name: "empty stdout", events: [], state: "absent", turns: 0 },
+    { name: "whitespace stdout", events: [], report: " \n\t ", state: "absent", turns: 0 },
+    { name: "thread without a turn", events: [thread], state: "incomplete", turns: 0 },
+    { name: "unfinished turn without a message", events: [thread, started], state: "incomplete", turns: 1 },
+    { name: "message without terminal completion", events: [thread, started, message], state: "incomplete", turns: 1 },
+    { name: "message without turn events", events: [thread, message], state: "incomplete", turns: 0 },
+    { name: "unfinished second turn", events: [thread, started, message, completed, started, message],
+      state: "incomplete", turns: 2 },
+    { name: "unmatched earlier turn", events: [thread, started, started, message, completed],
+      state: "incomplete", turns: 2 },
+    { name: "unfinished nonzero exit", events: [thread, started, message], state: "incomplete", turns: 1, exit: 23 },
+    { name: "terminal provider failure", events: [thread, started, { type: "turn.failed", error: { message: "network failed" } }],
+      state: "incomplete", turns: 1, subtype: "error_codex" },
+    { name: "completed turn without usage", events: [thread, started, message, { type: "turn.completed" }],
+      state: "complete", turns: 1 },
+    { name: "completed second turn", events: [thread, started, message, completed, started, message, completed],
+      state: "complete", turns: 2 },
+  ] as const) {
+    await t.test(`real Codex child: ${fixture.name}`, async () => {
+      const script = join(dir, "codex-completion.mjs");
+      const bin = join(dir, "codex-completion");
+      const report = "report" in fixture ? fixture.report : fixture.events.map(event => JSON.stringify(event)).join("\n");
+      const exitCode = "exit" in fixture ? fixture.exit : 0;
+      writeFileSync(script, `process.stdin.resume(); await new Promise(r => process.stdin.once("end", r));
+        process.stdout.write(${JSON.stringify(report)}); process.exitCode = ${exitCode};`);
+      writeFileSync(bin, `#!/bin/sh\nexec '${process.execPath}' '${script}'\n`);
+      chmodSync(bin, 0o700);
+      const result = await spawnCodexWorker({ workerHome: join(dir, "completion-home"), cwd: dir,
+        prompt: "completion evidence", tools: ["Read"], settingsFile: join(repoRoot(), "settings/worker.json"),
+        resumeSessionId: "resumed-attempt" },
+      { claudeBin: "/unused", root: dir, workerProviders: { codexBin: bin, codexModel: "gpt-6.1-sol",
+        codexHome: join(dir, "completion-auth") } });
+      const success = fixture.state === "complete";
+      assert.equal(result.isError, !success, "exit 0 and retained prose cannot substitute for turn.completed");
+      assert.equal(result.subtype, "subtype" in fixture ? fixture.subtype : exitCode !== 0 ? `error_exit_${exitCode}`
+        : success ? "success" : "error_incomplete_output");
+      assert.deepEqual(result.exit, { kind: "exit", code: exitCode });
+      assert.equal(result.sessionId, fixture.events.length ? "completion-attempt" : "resumed-attempt");
+      assert.equal(result.numTurns, fixture.turns);
+      assert.equal(result.text, fixture.events.some(event => event === message) ? message.item.text : "");
+      assert.equal(result.outputRetention?.completion?.state, fixture.state);
+      if (!success) {
+        assert.match(result.outputRetention!.completion!.reason!, fixture.state === "absent" ? /absent/ : /turn.completed/);
+        assert.deepEqual(workerLedgerFields(result).output_retention?.completion, result.outputRetention?.completion);
+      } else {
+        assert.equal(workerLedgerFields(result).output_retention, undefined);
+      }
+      assert.equal(workerLedgerFields(result).verdict, result.subtype);
+      assert.equal(workerLedgerFields(result).worker_exit_code, exitCode);
+      const completedCount = fixture.events.filter(event => event === completed).length;
+      assert.deepEqual(result.tokens, { input: completedCount * 100, output: completedCount * 10,
+        cacheRead: completedCount * 25, cacheCreation: 0 });
+      assert.equal(result.tokenUsageState, completedCount ? success ? "observed" : "partial" : "unavailable");
+    });
+  }
+  for (const bytes of [8193, GARDEN_OUTPUT_BYTES]) {
+    const { row, event } = await runGarden(`${write}await writeStderr("x".repeat(${bytes}));`);
+    assert.equal(row.exit, 0);
+    assert.equal(row.error, undefined, "complete output above the former excerpt limit is retained");
+    assert.equal(row.output_retention, undefined, "no retention failure occurred");
+    assert.equal(event.phase, "completed");
+  }
+  const oversizedBytes = GARDEN_OUTPUT_BYTES + 4;
+  for (const [output, exit] of [["x".repeat(oversizedBytes), 0], ["🙂".repeat(oversizedBytes / 4), 23]] as const) {
+    const { row, event } = await runGarden(`${write}await writeStderr(${JSON.stringify(output)}); process.exit(${exit});`);
+    const retention = row.output_retention as { state: string; bytesRead: number; fileBytes: number };
+    assert.equal(row.exit, exit, "the fixture must finish writing before its intended exit");
+    assert.equal(retention?.fileBytes, oversizedBytes, "the entire fixture reached the parent");
+    assert.equal(retention.state, "truncated", "real gardener output must carry retention evidence");
+    assert.equal(retention.bytesRead, GARDEN_OUTPUT_BYTES);
+    assert.ok(Buffer.byteLength(String(row.stderr)) <= GARDEN_OUTPUT_BYTES);
+    assert.doesNotMatch(String(row.stderr), /\uFFFD/);
+    assert.equal(row.signal, null);
+    assert.equal(event.exit, exit);
+    assert.equal(event.phase, "failed", "an incomplete report cannot record a completed pass");
+    assert.equal(event.reason, "process-failed");
+    assert.match(String(row.error), /incomplete.*truncated/);
+  }
+  const readFailure = t.mock.method(fs, "readSync", () => { throw new Error("garden report read refused"); });
+  try {
+    const { row, event } = await runGarden(`${write}await writeStderr("x".repeat(${oversizedBytes}));`);
+    const retention = row.output_retention as { state: string; reason: string; fileBytes: number };
+    assert.equal(row.exit, 0, "the fixture must finish writing before its intended exit");
+    assert.equal(retention?.fileBytes, oversizedBytes, "all fixture bytes were written before the read failed");
+    assert.equal(retention?.state, "unreadable");
+    assert.match(retention.reason, /garden report read refused/);
+    assert.equal(event.phase, "failed");
+  } finally { readFailure.mock.restore(); }
+  const spawn = childProcess.spawn;
+  const pipeFailure = t.mock.method(childProcess, "spawn", (...args: Parameters<typeof spawn>) => {
+    const child = spawn(...args);
+    child.stderr?.once("data", () => child.stderr?.emit("error", new Error("garden pipe refused")));
+    return child;
+  });
+  syncBuiltinESMExports();
+  try {
+    const { row, event } = await runGarden(`${write}await writeStderr("pipe error fixture");`);
+    const retention = row.output_retention as { state: string; reason: string };
+    assert.equal(retention?.state, "unreadable");
+    assert.match(retention.reason, /garden pipe refused/);
+    assert.equal(row.exit, 0);
+    assert.equal(event.phase, "failed");
+  } finally { pipeFailure.mock.restore(); syncBuiltinESMExports(); }
+  for (const bytes of [[0xc3, 0x28], [0xf0, 0x9f]]) {
+    const continuation = bytes[0] === 0xc3 ? 'await new Promise(r => setTimeout(r, 25)); await writeStderr("end");' : "";
+    const malformed = await runGarden(`${write}await writeStderr(Buffer.from(${JSON.stringify(bytes)}));
+      ${continuation}`);
+    const retention = malformed.row.output_retention as { state: string; reason: string };
+    assert.equal(retention?.state, "malformed");
+    assert.match(retention.reason, /encoded data.*valid/i);
+    assert.equal(malformed.row.exit, 0);
+    assert.equal(malformed.event.phase, "failed");
+  }
+  const signalled = await runGarden(`${write}await writeStderr("x".repeat(${oversizedBytes})); process.kill(process.pid, "SIGTERM");`);
+  assert.equal(signalled.row.exit, null);
+  assert.equal(signalled.row.signal, "SIGTERM");
+  assert.equal(signalled.event.phase, "failed");
+  const heap = await runGarden(`${write}await writeStderr(Buffer.from([0xc3, 0x28]));
+    await new Promise(r => setTimeout(r, 25)); await writeStderr("heap out of memory");
+    process.kill(process.pid, "SIGTERM");`);
+  assert.match(String(heap.row.error), /^heap_exhausted:/);
+  assert.equal((heap.row.output_retention as { state: string })?.state, "malformed");
+  assert.equal(heap.row.exit, null);
+  assert.equal(heap.row.signal, "SIGTERM");
+  assert.equal(heap.event.phase, "failed");
+  for (const [bytes, exit] of [[[0xc3, 0x28], 0], [[0xf0, 0x9f], 23]] as const) {
+    const following = exit === 0 ? `process.stdout.write("ready");
+      await new Promise(r => process.stdin.once("data", r)); await writeStderr("later");` : "";
+    const result = await runWorker(`${write}await writeStderr(Buffer.from(${JSON.stringify(bytes)}));
+      ${following} process.exit(${exit});`, false, exit);
+    assert.equal(result.outputRetention?.stderr.state, "malformed", "raw child bytes must be validated");
+    assert.match(result.outputRetention!.stderr.reason!, /encoded data.*valid/i);
+    assert.equal(result.outputRetention?.stderr.fileBytes, bytes.length + (exit === 0 ? 5 : 0));
+    assert.equal(result.outputRetention?.originalSubtype, "success");
+    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(result.isError, true);
+    assert.equal(workerLedgerFields(result).verdict, "error_incomplete_output");
+    assert.equal(workerLedgerFields(result).output_retention?.stderr.state, "malformed");
+    assert.deepEqual(result.exit, exit === 0 ? { kind: "unobserved" } : { kind: "exit", code: exit });
+  }
+  const brokenPipe = await runWorker(`${write}await writeStderr("pipe fixture");`, true);
+  assert.equal(brokenPipe.outputRetention?.stderr.state, "unreadable");
+  assert.match(brokenPipe.outputRetention!.stderr.reason!, /worker pipe refused/);
+  assert.equal(brokenPipe.isError, true);
+  assert.equal(brokenPipe.subtype, "error_incomplete_output");
+  const largeWorker = await runWorker(`${write}await writeStderr("x".repeat(${WORKER_OUTPUT_BYTES + 4}));`);
+  assert.deepEqual(largeWorker.exit, { kind: "unobserved" }, "the fixture must not throw a pipe write error");
+  assert.equal(largeWorker.outputRetention?.stderr.fileBytes, WORKER_OUTPUT_BYTES + 4,
+    "the entire worker fixture reached the parent");
+  assert.equal(largeWorker.outputRetention?.stderr.state, "truncated");
+  assert.equal(largeWorker.outputRetention?.stderr.bytesRead, WORKER_OUTPUT_BYTES);
+  assert.equal(largeWorker.subtype, "error_incomplete_output");
+  assert.equal(largeWorker.isError, true);
+  const splitWorker = await runWorker(`${write}await writeStderr(Buffer.from([0xf0, 0x9f]));
+    process.stdout.write("ready");
+    await new Promise(r => process.stdin.once("data", r));
+    await writeStderr(Buffer.from([0x99, 0x82])); process.stdin.destroy();`);
+  assert.equal(splitWorker.stderr, "🙂");
+  assert.equal(splitWorker.outputRetention?.stderr.state, "complete");
+  assert.equal(splitWorker.isError, false);
+  assert.equal(splitWorker.subtype, "success");
+  const emptyWorker = await runWorker("");
+  assert.equal(emptyWorker.outputRetention?.stderr.state, "complete");
+  assert.equal(emptyWorker.stderr, "");
+  assert.equal(emptyWorker.isError, false);
+  const complete = await runGarden(`${write}await writeStderr(Buffer.from([0xf0, 0x9f]));
+    await new Promise(r => setTimeout(r, 25)); await writeStderr(Buffer.from([0x99, 0x82]));`);
+  assert.equal(complete.row.exit, 0);
+  assert.equal(complete.row.error, undefined, "split UTF-8 must remain complete");
+  assert.equal(complete.event.phase, "completed");
+  const empty = await runGarden("");
+  assert.equal(empty.row.exit, 0);
+  assert.equal(empty.row.error, undefined, "empty stderr is a complete stream");
+  assert.equal(empty.event.phase, "completed");
+});
+
+test("W1-T10962: retention preserves error envelopes and refuses an absent result", async () => {
+  const result = await collectWorkerResult((async function* () {
+    yield { type: "result", subtype: "error_max_budget_usd", is_error: true,
+      result: "x".repeat(WORKER_OUTPUT_BYTES + 1), session_id: "budget-attempt", total_cost_usd: 2, num_turns: 7 };
+  })(), { childEnvKeys: [] });
+  assert.equal(result.outputRetention?.text.state, "truncated");
+  assert.equal(result.subtype, "error_max_budget_usd");
+  assert.equal(result.isError, true);
+  assert.equal(result.sessionId, "budget-attempt");
+  assert.equal(result.costUsd, 2);
+  const absent = await collectWorkerResult((async function* () {})(), { childEnvKeys: [] });
+  assert.equal(absent.outputRetention?.text.state, "absent");
+  assert.equal(absent.isError, true);
+  assert.equal(absent.subtype, "error_incomplete_output");
+});
+
+test("W1-T10962: complete reports keep the last result envelope", async () => {
+  const result = await collectWorkerResult((async function* () {
+    yield* successStream();
+    yield { type: "result", subtype: "success", is_error: false, result: "last report",
+      session_id: "last-session", total_cost_usd: 3, num_turns: 10 };
+  })(), { childEnvKeys: [] });
+  assert.equal(result.text, "last report");
+  assert.equal(result.sessionId, "last-session");
+  assert.equal(result.costUsd, 3);
+});
 
 const REPO_ROOT = process.cwd();
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();

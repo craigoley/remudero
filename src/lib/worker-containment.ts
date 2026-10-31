@@ -74,6 +74,7 @@ export interface ContainedSpawnOptions {
 export interface ContainedProcess {
   process: SdkSpawnedProcess;
   pid: number;
+  outputClosed?: Promise<void>;
 }
 
 /** Longest args excerpt {@link describeSpawnTarget} will put on a throw. The
@@ -133,6 +134,14 @@ export function commandExecutable(command: string): string {
   }
 }
 
+export interface StderrFailure {
+  state: "malformed" | "unreadable";
+  reason: string;
+  fileBytes: number;
+}
+
+export type StderrSink = (chunk: string, failure?: StderrFailure) => void;
+
 /**
  * Spawn `opts.command` DETACHED into its own process group/session (see file
  * header) and pipe its stderr into `onStderr` — replicating the SDK's own
@@ -146,7 +155,7 @@ export function commandExecutable(command: string): string {
  */
 export function spawnDetachedGroup(
   opts: ContainedSpawnOptions,
-  onStderr?: (chunk: string) => void,
+  onStderr?: StderrSink,
   onSpawnError?: (err: NodeJS.ErrnoException) => void,
 ): ContainedProcess {
   const child = spawn(opts.command, opts.args, {
@@ -157,6 +166,8 @@ export function spawnDetachedGroup(
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   });
+  // Exit can precede the final pipe bytes and the decoder's EOF validation.
+  const outputClosed = new Promise<void>((resolve) => child.once("close", () => resolve()));
   // A no-pid spawn (below) still fires its 'error' event ASYNCHRONOUSLY after
   // this function has already thrown — with no listener attached, Node
   // treats that as an uncaught exception (crashing the caller's process)
@@ -177,7 +188,37 @@ export function spawnDetachedGroup(
     }
   });
   if (onStderr) {
-    child.stderr?.on("data", (chunk: Buffer) => onStderr(chunk.toString("utf8")));
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    let failure: Omit<StderrFailure, "fileBytes"> | undefined;
+    let bytes = 0;
+    child.stderr?.on("data", (chunk: Buffer) => {
+      bytes += chunk.length;
+      if (failure) return;
+      let text: string;
+      try {
+        text = decoder.decode(chunk, { stream: true });
+      } catch (error) {
+        failure = { state: "malformed", reason: String((error as Error)?.message ?? error).slice(0, 240) };
+        onStderr("", { ...failure, fileBytes: bytes });
+        return;
+      }
+      onStderr(text);
+    });
+    child.stderr?.once("error", (error) => {
+      failure = { state: "unreadable", reason: error.message.slice(0, 240) };
+      onStderr("", { ...failure, fileBytes: bytes });
+    });
+    child.stderr?.once("end", () => {
+      if (!failure) {
+        let text = "";
+        try { text = decoder.decode(); }
+        catch (error) {
+          failure = { state: "malformed", reason: String((error as Error)?.message ?? error).slice(0, 240) };
+        }
+        onStderr(text);
+      }
+      if (failure) onStderr("", { ...failure, fileBytes: bytes });
+    });
   }
   if (typeof child.pid !== "number") {
     // Synchronous spawn failure (e.g. a bad cwd) — the SDK's own default
@@ -200,7 +241,7 @@ export function spawnDetachedGroup(
   // `ChildProcess.stdin: Writable | null` typing, which does not narrow off
   // the literal `stdio` tuple. The SDK's own doc comment on `SpawnedProcess`
   // states "ChildProcess already satisfies this interface".
-  return { process: child as unknown as SdkSpawnedProcess, pid: child.pid };
+  return { process: child as unknown as SdkSpawnedProcess, pid: child.pid, outputClosed };
 }
 
 /**
@@ -321,16 +362,17 @@ export function workerMarkerEnv(runId?: string, taskId?: string, scope?: string)
 export function buildContainedSpawnFn(
   spawnContained: (
     opts: ContainedSpawnOptions,
-    onStderr?: (chunk: string) => void,
+    onStderr?: StderrSink,
     onSpawnError?: (err: NodeJS.ErrnoException) => void,
   ) => ContainedProcess,
-  onStderr: (chunk: string) => void,
-  pidRef: { pid?: number },
+  onStderr: StderrSink,
+  pidRef: { pid?: number; outputClosed?: Promise<void> },
   onSpawnError?: (err: NodeJS.ErrnoException) => void,
 ): (spawnOpts: ContainedSpawnOptions) => SdkSpawnedProcess {
   return (spawnOpts) => {
     const spawned = spawnContained(spawnOpts, onStderr, onSpawnError);
     pidRef.pid = spawned.pid;
+    pidRef.outputClosed = spawned.outputClosed;
     return spawned.process;
   };
 }

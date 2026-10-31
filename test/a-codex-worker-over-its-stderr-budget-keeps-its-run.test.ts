@@ -1,5 +1,5 @@
 // W1-T8203: stderr is diagnostic evidence. Past its retention bound it is truncated (head + tail), never a
-// teardown and never a verdict — the worker's own exit and result decide the run, as W1-T6352 does for stdout.
+// teardown. W1-T10962 preserves the exit and result while denying complete-success credit to a partial report.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -56,7 +56,9 @@ test("W1-T8203: stderr over the bound keeps the worker result", async () => {
     const result = await child.run;
     assert.equal(result.text, "REPORT");
     assert.equal(result.sessionId, "stderr-run");
-    assert.equal(result.isError, false);
+    assert.equal(result.isError, true);
+    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(result.outputRetention?.stderr.state, "truncated");
     assert.deepEqual(result.exit, { kind: "exit", code: 0 });
     assert.ok(result.stderrTruncation, "the truncation is recorded on the result");
   } finally { rmSync(child.home, { recursive: true, force: true }); }
@@ -104,7 +106,9 @@ test("W1-T8203: stderr volume never tears the worker down", async () => {
     child.finish();
     const result = await child.run;
     assert.equal(child.teardowns(), 1, "only the normal exit cleans up the group");
-    assert.equal(result.isError, false);
+    assert.equal(result.isError, true);
+    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(result.outputRetention?.stderr.state, "truncated");
     assert.equal(result.text, "REPORT");
     assert.ok(Buffer.byteLength(result.stderr) < 2 * CODEX_WORKER_STDERR_MAX_BYTES);
   } finally { rmSync(child.home, { recursive: true, force: true }); }

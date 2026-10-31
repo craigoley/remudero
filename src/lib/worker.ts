@@ -1,4 +1,5 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
+import { BoundedOutput, readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
 import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, denyMcpSuccessCredit, validateWorkerMcpIsolation,
   workerMcpExposure, workerMcpIsolationEvidence, workerMcpProbeBoundary, workerPluginInventory, WORKER_MCP_STRICT,
@@ -152,6 +153,8 @@ import {
   workerMarkerEnv,
   type ContainedProcess,
   type ContainedSpawnOptions,
+  type StderrFailure,
+  type StderrSink,
 } from "./worker-containment.js";
 import {
   abandonProviderWindowMeasurement,
@@ -200,6 +203,7 @@ import {
   codexCapabilityForRequestedModel,
   codexCandidatesForCapability,
   type WorkerExit,
+  type CodexCompletionEvidence,
 } from "./worker-provider.js";
 import {
   resolveProviderRoutingPolicy,
@@ -259,6 +263,13 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  outputRetention?: {
+    text: Omit<FileTail, "text">;
+    blocks: Omit<FileTail, "text">;
+    stderr: Omit<FileTail, "text">;
+    completion?: CodexCompletionEvidence;
+    originalSubtype: string;
+  };
   /** Provider-safe continuation disposition; never contains a session id or prompt. */
   continuation?: WorkerContinuationReceipt;
   notStarted?: "admission-abandoned";
@@ -284,11 +295,11 @@ export interface WorkerResult {
   /** Configured maxTurns INPUT, beside numTurns, never replacing it or read from the envelope.
    * Undefined without a cap; moving mounts.yaml cannot explain old rows (RECON_MAX_TURNS moved 8 -> 20; W1-T303). */
   maxTurns?: number;
-  /** Final result text (the `result` field of the SDK result message). */
+  /** Retained final result text; outputRetention names any loss. */
   text: string;
-  /** All assistant text blocks concatenated, in order. */
+  /** Retained assistant text blocks, in order; outputRetention names any loss. */
   blocks: string[];
-  /** Everything the child wrote to stderr — proof surface for the billing boundary. */
+  /** Retained stderr; outputRetention names any loss. */
   stderr: string;
   /** Result subtype: 'success' | 'error_max_turns' | 'error_max_budget_usd' | … */
   subtype: string;
@@ -549,6 +560,7 @@ export function workerFailureExcerpt(r: Pick<WorkerResult, "isError" | "stderr" 
 /** Cap terminal-success reports like {@link STDERR_EXCERPT_CAP}; run-task.ts's silent-no-op guard
  * parses them three times and used to drop reports without a PR (W1-T407). */
 export const REPORT_EXCERPT_CAP = 4000;
+export const WORKER_OUTPUT_BYTES = 256 * 1024;
 
 /** Join once. TRAP: SDK result echoes the last assistant block; hand-rolled joins double-count it.
  * Remove only that duplicate; retain ordering, non-repeats and "last marker line wins" (W1-T2205). */
@@ -572,6 +584,7 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * max_turns records the cap; stderr_excerpt requires r.isError. Always emit served_model,
  * null when unknown; unreportable models never fail runs (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
+  output_retention?: WorkerResult["outputRetention"];
   continuation?: WorkerContinuationReceipt;
   mcp_isolation?: WorkerMcpIsolationEvidence;
   mcp_boundary?: typeof WORKER_MCP_STRICT;
@@ -631,6 +644,8 @@ export function workerLedgerFields(r: WorkerResult): {
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
+    ...(r.outputRetention && Object.values(r.outputRetention)
+      .some((output) => typeof output === "object" && output.state !== "complete") ? { output_retention: r.outputRetention } : {}),
     ...(r.mcpIsolation ? { mcp_isolation: r.mcpIsolation } : {}),
     ...(r.mcpBoundary ? { mcp_boundary: r.mcpBoundary } : {}),
     ...(r.mcpExposure ? { mcp_exposure: r.mcpExposure } : {}),
@@ -1228,7 +1243,7 @@ export interface SpawnWorkerArgs {
   containment?: {
     spawn?: (
       opts: ContainedSpawnOptions,
-      onStderr?: (chunk: string) => void,
+      onStderr?: StderrSink,
       onSpawnError?: (err: NodeJS.ErrnoException) => void,
     ) => ContainedProcess;
     teardown?: (pgid: number) => void;
@@ -3181,17 +3196,23 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       }
     }
 
-    const stderrChunks: string[] = [];
-    const blocks: string[] = [];
+    const stderrOutput = new BoundedOutput(WORKER_OUTPUT_BYTES);
+    let stderrFailure: StderrFailure | undefined;
 
     // Worker process-tree containment. `pidRef` is populated lazily by the spawn closure the first time the SDK spawns, and
     // `withWorkerGroupTeardown` guarantees teardown against it once the stream settles on EITHER path, so a run's process
     // group never outlives its own teardown. That closure also owns stderr piping, because a custom spawn gets none from the
     // SDK (W1-T117).
-    const pidRef: { pid?: number } = {};
+    const pidRef: { pid?: number; outputClosed?: Promise<void> } = {};
     const spawnContainedBase = boundContainment.spawn ?? spawnDetachedGroup;
     const spawnContained: typeof spawnContainedBase = withWorkerPidReport(spawnContainedBase, args.onWorkerPid);
     const teardownContained = args.containment?.teardown ?? ((pgid: number) => void teardownProcessGroup(pgid));
+    let tornDown = false;
+    const teardownOnce = (pgid: number) => {
+      if (tornDown) return;
+      tornDown = true;
+      teardownContained(pgid);
+    };
 
     // TRAP (SDK 0.3.209): passing BOTH a `settings` file path and the `sandbox` option throws "Cannot use both …". The
     // sandbox config therefore lives inside the settings file, and the probe (verdict 7) confirms empirically that it engaged
@@ -3205,11 +3226,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       settingSources: WORKER_SETTING_SOURCES, // real value: settingSources: [] (see WORKER_SPAWN_ISOLATION above)
       // Run the CLI DETACHED into its own process group and session, so teardown reaches every descendant — including one
       // outliving the CLI's own exit — with a single group signal. This REPLACES the SDK's default local spawn, so
-      // `stderrChunks` is fed from THIS closure rather than an `Options.stderr` callback, which the SDK never invokes for a
+      // `stderrOutput` is fed from THIS closure rather than an `Options.stderr` callback, which the SDK never invokes for a
       // custom spawn (W1-T117).
       spawnClaudeCodeProcess: buildContainedSpawnFn(
         spawnContained,
-        (chunk) => stderrChunks.push(chunk),
+        (chunk, failure) => {
+          stderrOutput.push(chunk);
+          if (failure) stderrFailure = failure;
+        },
         pidRef,
         args.onSpawnError,
       ),
@@ -3345,7 +3369,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         () =>
           collectWorkerResult(liveQuery, {
             childEnvKeys: Object.keys(childEnv).sort(),
-            stderrChunks,
+            stderrOutput,
+            stderrFailure: () => stderrFailure,
+            settleOutput: async () => {
+              if (pidRef.pid !== undefined) teardownOnce(pidRef.pid);
+              await pidRef.outputClosed;
+            },
             // Logged verbatim as CONFIGURED inputs, never a read-back: effort is absent from the SDK envelope, and model here
             // is the requested knob, which may differ from the envelope's `modelUsage` keys. Unset gives the honest "default"
             // label, never a guess.
@@ -3372,7 +3401,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // collectWorkerResult's own `Date.now` (W1-T1045).
             now: args.clockBound?.now,
           }),
-        teardownContained,
+        teardownOnce,
       );
       result.provider = "claude";
       result.continuation = execution.receipt;
@@ -3406,6 +3435,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       if (abandonment) throw new WorkerAbandonedError(abandonment, err);
       throw err;
     } finally {
+      stderrOutput.finish();
       stopWatchdog?.();
       unchainSignal?.();
       // Unconditional: no exit path may leave a handle for a later answer to steer into a dead session (W1-T4673).
@@ -3827,6 +3857,10 @@ export async function collectWorkerResult(
     runId?: string;
     taskId?: string;
     stderrChunks?: string[];
+    stderrOutput?: BoundedOutput;
+    stderrFailure?: () => StderrFailure | undefined;
+    /** Teardown and drain the child pipes after the SDK stream ends, before judging retained output. */
+    settleOutput?: () => Promise<void>;
     /** Configured input, logged verbatim — defaults to `DEFAULT_MODEL_LABEL`. */
     model?: string;
     /** Configured input, logged verbatim — defaults to `DEFAULT_EFFORT_LABEL`. */
@@ -3856,8 +3890,9 @@ export async function collectWorkerResult(
   const startedAtMs = Date.now();
   const toolLineage = createWorkerToolLineage({ provider: "claude", root: opts.root, runId: opts.runId, taskId: opts.taskId });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
-  const blocks: string[] = [];
-  const stderrChunks = opts.stderrChunks ?? [];
+  const blockOutput = new BoundedOutput(WORKER_OUTPUT_BYTES, "\n");
+  let textOutput = new BoundedOutput(WORKER_OUTPUT_BYTES);
+  const stderrOutput = opts.stderrOutput ?? new BoundedOutput(WORKER_OUTPUT_BYTES);
 
   let sessionId = "";
   let costUsd = 0;
@@ -3936,7 +3971,7 @@ export async function collectWorkerResult(
             const blockType = block && (block as { type?: string }).type;
             if (blockType === "text") {
               const text = (block as { text: string }).text;
-              blocks.push(text);
+              blockOutput.push(text);
               opts.streamObserver?.({ kind: "working", tsMs: nowFn(), text, turnsSoFar });
               observedThisMessage = true;
             } else if (blockType === "tool_use") {
@@ -3999,7 +4034,9 @@ export async function collectWorkerResult(
         opts.streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
         subtype = r.subtype;
         isError = r.is_error;
-        text = r.result ?? "";
+        textOutput.finish();
+        textOutput = new BoundedOutput(WORKER_OUTPUT_BYTES);
+        textOutput.push(r.result ?? "");
         sessionId = r.session_id;
         costUsd = r.total_cost_usd;
         numTurns = typeof r.num_turns === "number" ? r.num_turns : 0;
@@ -4034,7 +4071,7 @@ export async function collectWorkerResult(
     // Otherwise the throw is the SDK's post-error-result signal; the envelope is already captured. Record the message on
     // stderr for the proof surface.
     const swallowed = String((err as Error)?.message ?? err);
-    stderrChunks.push(`\n[collectWorkerResult] error-result throw swallowed: ${swallowed}\n`);
+    stderrOutput.push(`\n[collectWorkerResult] error-result throw swallowed: ${swallowed}\n`);
     isError = true;
     exit = workerExitOfError(err);
     // CLASSIFY THE REFUSAL HERE, while the message still exists. `detectUsageLimitRefusal` (lib/classify.ts) is the fleet's
@@ -4049,9 +4086,27 @@ export async function collectWorkerResult(
       };
     }
   } finally {
+    await opts.settleOutput?.();
     toolLineage.finish(lineageEnd);
+    if (!sawResult) {
+      blockOutput.finish();
+      textOutput.finish();
+      stderrOutput.finish();
+    }
   }
 
+  for (const chunk of opts.stderrChunks ?? []) stderrOutput.push(chunk);
+  const readOutput = (path: string, maxBytes: number) => readBoundedFileTail(path, maxBytes);
+  const retainedBlocks = blockOutput.finish(readOutput);
+  const retainedText = textOutput.finish(readOutput);
+  const retainedStderr = stderrOutput.finish(readOutput);
+  const stderrFailure = opts.stderrFailure?.();
+  if (stderrFailure) retainedStderr.evidence = { ...retainedStderr.evidence, ...stderrFailure };
+  if (!sawResult) retainedText.evidence = { state: "absent", bytesRead: 0, reason: "no result envelope observed" };
+  const outputRetention = { blocks: retainedBlocks.evidence, text: retainedText.evidence,
+    stderr: retainedStderr.evidence, originalSubtype: subtype };
+  const incomplete = !sawResult || [retainedBlocks, retainedText, retainedStderr].some((r) => r.evidence.state !== "complete");
+  text = retainedText.chunks.join("");
   const finalStopReason = envelopeStopReason ?? assistantStopReason;
   return {
     ...(opts.lostGrants?.length ? { lostGrants: opts.lostGrants } : {}),
@@ -4061,10 +4116,11 @@ export async function collectWorkerResult(
     numTurns,
     maxTurns: opts.maxTurns,
     text,
-    blocks,
-    stderr: stderrChunks.join(""),
-    subtype,
-    isError,
+    blocks: retainedBlocks.chunks,
+    stderr: retainedStderr.chunks.join(""),
+    outputRetention,
+    subtype: incomplete && (!sawResult || subtype === "success") ? "error_incomplete_output" : subtype,
+    isError: isError || incomplete,
     exit,
     apiError,
     ...(usageRefusal ? { usageRefusal } : {}),

@@ -44,7 +44,9 @@ test("W1-T6352: output past the retention budget is truncated, not fatal", async
     const result = await child.run;
     assert.equal(result.text, "REPORT\nCOMMIT_MESSAGE: fix(worker): preserve the result");
     assert.equal(result.sessionId, "budget-run");
-    assert.equal(result.isError, false);
+    assert.equal(result.isError, true);
+    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(result.outputRetention?.blocks.state, "truncated");
     assert.deepEqual(result.exit, { kind: "exit", code: 0 });
     assert.deepEqual(result.tokens, { input: 100, output: 10, cacheRead: 25, cacheCreation: 0 });
     assert.equal(child.teardowns(), 1, "only normal exit cleans up the group");
@@ -69,7 +71,9 @@ test("W1-T6352: retained output never exceeds the budget", async () => {
     child.end();
     const result = await child.run;
     assert.equal(result.text, "done 🦊");
-    assert.equal(result.isError, false);
+    assert.equal(result.isError, true);
+    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(result.outputRetention?.blocks.state, "truncated");
     assert.ok(result.outputTruncation);
     const bytes = [...result.blocks, ...result.permissionDenials as string[]].reduce((sum, text) => sum + Buffer.byteLength(text), 0);
     assert.ok(bytes <= CODEX_WORKER_STDOUT_MAX_BYTES);
@@ -89,7 +93,9 @@ test("W1-T6352: an oversized fragmented result preserves its head and tail", asy
     child.stdout.write("\n");
     child.end();
     const result = await child.run;
-    assert.equal(result.isError, false);
+    assert.equal(result.isError, true);
+    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(result.outputRetention?.text.state, "truncated");
     assert.match(result.text, /^HEAD/);
     assert.match(result.text, /TAIL$/);
     assert.match(result.text, /truncated.*\d+ bytes/);
