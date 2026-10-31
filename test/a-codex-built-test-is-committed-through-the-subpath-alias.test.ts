@@ -41,7 +41,7 @@ test("W1-T10084: a Codex-built test is committed through the subpath alias", asy
   try {
     const stdout = new PassThrough();
     const proc = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout });
-    // The writer's async Git probe runs BEFORE the containment spawn: the child may only exit once it exists.
+    // The async Git probe runs before containment spawn; wait before emitting output or exit.
     let spawned!: () => void;
     const hasSpawned = new Promise<void>((resolve) => { spawned = resolve; });
     const run = spawnCodexWorker({
@@ -50,15 +50,18 @@ test("W1-T10084: a Codex-built test is committed through the subpath alias", asy
       containment: { spawn: () => { spawned(); return { process: proc as never, pid: 10084 }; }, teardown: () => { proc.emit("exit", null); } },
     }, { claudeBin: "/unused", root: home, workerProviders: { codexBin: "/bin/sh", codexModel: "gpt-6-luna" } });
     void run.catch(() => undefined);
+    await Promise.race([hasSpawned, run]);
     // The Codex writer adds a test that imports `../src`, then ends its turn.
     writeFileSync(join(wt.dir, "test/a.test.ts"), RELATIVE);
     stdout.write('{"type":"thread.started","thread_id":"t10084"}\n{"type":"turn.started"}\n');
     stdout.write(`${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "done\nCOMMIT_MESSAGE: test: add a" } })}\n`);
     stdout.end('{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}\n');
-    await hasSpawned;
     proc.emit("exit", 0);
     const result = await run;
 
+    assert.equal(result.isError, false);
+    assert.equal(result.outputRetention?.completion?.state, "complete");
+    assert.deepEqual(result.exit, { kind: "exit", code: 0 });
     assert.equal(result.harnessCommit?.outcome, "committed");
     assert.equal(wt.git("show", "HEAD:test/a.test.ts") + "\n", ALIASED);
     const rows = readFileSync(join(home, "state/ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
