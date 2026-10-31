@@ -1,0 +1,51 @@
+- id: W1-T11053
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/ledger-literal-census.test.ts cost 7.8 PR minute(s) across 1 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.41
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/ledger-literal-census.test.ts"
+  files:
+    - src/lib/ledger-path.ts
+    - test/ledger/ci-friction-remedy-6941267845e546b7.test.ts
+  acceptance:
+    - claim: "a recorded check:test:test/ledger-literal-census.test.ts round, replayed through the real code path in src/lib/ledger-path.ts, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11053: check:test:test/ledger-literal-census.test.ts is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/ledger-literal-census.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/ledger-literal-census.test.ts cost 7.8 PR minute(s) (seven-day half-life) across 1 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ledger-path.ts: test/ledger-literal-census.test.ts imports it
+    - test/ledger-literal-census.test.ts: named by the failing check
+    - the rounds name a failing test: test/ledger-literal-census.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #13317 (https://github.com/craigoley/remudero/pull/13317) at 2026-10-21T08:55:56.550Z: ci-log round — rule-checks: test/ledger-literal-census.test.ts
+        failing tests: the ledger filename literal appears only in the ledger owner modules
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/ledger-literal-census.test.ts:1:933
+          | ✖ the ledger filename literal appears only in the ledger owner modules (76.230464ms)
+          |   AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'src/lib/state-backup-engine-links.ts'
+          |   + ]
+          |   - []
+          | 
+          |       at TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/ledger-literal-census.test.ts:22:10)
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
