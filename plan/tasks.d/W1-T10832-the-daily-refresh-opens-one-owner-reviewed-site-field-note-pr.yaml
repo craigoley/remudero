@@ -8,12 +8,12 @@
   budget_usd: 35.00
   risk: high  # writes a PR on a public repository; a wrongly armed PR or an unreviewed stamp would publish data without the owner
   band_meaning: blast-radius
-  priority: 2  # queue-judge-2026-10-31: has dependent W1-T10878
+  priority: 2.5  # queue-judge-2026-10-31: Task W1-T10878 depends on this task, raising priority reduces its delay
   # refusal-amendment (W1-T10832, run DAEMON-1793261281327@a35d38801afe49b412cee8616fe6a2a3060d137e, 2026-10-29T12:49:46.451Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
   #   worker evidence: The connector rejected the required PR-body update, so the exact consent command and digest cannot be placed in the implementation PR body from this session.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
-  # queue judge: priority=2 evidence=8c50456be8022489
+  # queue judge: priority=2.5 evidence=ff6b194bfb531499
   attempts: 0
   origin: "filing agent F20, 2026-10-27, on Craig's 2026-10-27 field-trials ask; consent file approved by Craig at ~13:45Z the same day (receipt owner-2026-10-27-craig-oley)"
   plan_refs: [W1-T4574, W1-T10830, W1-T10831, W1-T10756, W1-T136, PORTAL-T41, W1-T10878]
