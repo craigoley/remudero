@@ -165,12 +165,18 @@ test("W1-T9755: the fixture clock is finite and a real synchronous child still b
 });
 
 test("W1-T9755: a content landing reads its identity without blocking a timer", async () => {
-  const f = fixture("identity", {}, {});
+  const f = fixture("identity", {}, { "W1-T3-new.yaml": shard("W1-T3", "new", "finding-3") });
   const git = sleepingGit();
   try {
     const { result, ticks } = await beside(git, () => landCiLearningShardsAsync([], f.clone, f.deps()));
     const { git: meter, ...outcome } = result;
-    assert.deepEqual(outcome, { filed: [], skipped: [], refused: [] });
+    assert.deepEqual(outcome, {
+      filed: [{ taskId: "W1-T3", relPath: `${SHARDS}/W1-T3-new.yaml`, findingId: "finding-3" }],
+      skipped: [],
+      refused: [],
+    });
+    assert.equal(f.ghCalls.filter((args) => args[0] === "pr" && args[1] === "create").length, 1,
+      "the queued shard reaches a landing PR before its git meter is judged");
     assert.ok(meter);
     assert.equal(meter.driver, "async");
     assert.equal(meter.calls, git.children().length, "the meter counts the observed git children");
