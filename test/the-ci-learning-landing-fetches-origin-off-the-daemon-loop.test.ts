@@ -19,10 +19,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import * as landing from "../src/lib/feedback-landing.js";
-import { ciLearningRecordVerdict, ciLearningShardYaml } from "../src/lib/measurement-cadence.js";
-import { buildCiLearningCadenceRunner } from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as landing from "#src/lib/feedback-landing.js";
+import { ciLearningRecordVerdict, ciLearningShardYaml } from "#src/lib/measurement-cadence.js";
+import { buildCiLearningCadenceRunner } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const { landCiLearningShards, landCiLearningShardsAsync } = landing;
 
