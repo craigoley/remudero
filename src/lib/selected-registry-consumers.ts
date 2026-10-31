@@ -4,8 +4,15 @@ import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO,
   type RegistrySelectionInput, type SelectedRegistryBinding } from "./instance-registry-selection.js";
 
 export type RegistryConsumerAction = "serve-registry" | "serve-readiness" | "serve-go-live" | "serve-shadow-evidence" | "serve-topology"
-  | "serve-liveness" | "repositories-view" | "repo-dashboard" | "benchmark-discovery" | "inbox-discovery";
-export interface RegistryConsumerTarget { repository?: string; instanceName?: string }
+  | "serve-liveness" | "repositories-view" | "repo-dashboard" | "benchmark-discovery" | "inbox-discovery"
+  | "deploy-restart" | "deploy-recycle" | "deploy-rollback" | "serve-policy-replace" | "pause-target" | "pause" | "resume" | "sre-target";
+export interface RegistryConsumerTarget {
+  repository?: string;
+  instanceName?: string;
+  stateRoot?: string;
+  containerName?: string;
+  namespace?: "host" | "container";
+}
 export type RegistryObservationSink = (step: string, fields: Readonly<Record<string, unknown>>) => unknown;
 export type RegistryConsumerRead = typeof readSelectedInstanceRegistry;
 /** Trusted composition only. Neither this context nor its selected input belongs in a public body. */
@@ -32,6 +39,8 @@ const unavailableIntent = (): SelectedRegistryIntent => Object.freeze({ kind: "u
 const unknown = (reason: string, digest?: string): Evidence => ({ selected_state: "unknown", reason,
   ...(digest === undefined ? {} : { binding_digest: digest }) });
 const LIMIT = 32;
+const isLifecycleAction = (action: RegistryConsumerAction): boolean => action.startsWith("deploy-")
+  || ["serve-policy-replace", "pause-target", "pause", "resume", "sre-target"].includes(action);
 interface ConsumerScope { observer: SelectedRegistryObserver | undefined; active: boolean }
 const consumerScope = new AsyncLocalStorage<ConsumerScope>();
 
@@ -121,16 +130,25 @@ export function selectedRegistryObserverFromIntent(intent: unknown, record: Regi
   return createSelectedRegistryObserver({ settings: { mode: "shadow", instanceName: copied.instanceName }, input: copied.input, record });
 }
 
-function targetSnapshot(target: RegistryConsumerTarget, name: string | undefined): {
+function targetSnapshot(target: RegistryConsumerTarget, name: string | undefined, lifecycle = false): {
   fields: Readonly<Record<string, string>>; repository?: string; instanceName?: string; reason?: string;
+  stateRoot?: string; containerName?: string; namespace?: "host" | "container";
 } {
   try {
     const repository = target.repository, selectedName = target.instanceName;
-    const instanceName = Object.hasOwn(target, "instanceName") ? selectedName : selectedName ?? name;
+    const stateRoot = target.stateRoot, containerName = target.containerName, namespace = target.namespace;
+    if (stateRoot !== undefined && (typeof stateRoot !== "string" || !stateRoot.startsWith("/") || stateRoot.includes("\0"))) {
+      return { fields: {}, reason: "invalid_state_root" };
+    }
+    if (containerName !== undefined && (typeof containerName !== "string" || !/^[A-Za-z0-9_.-]+$/.test(containerName))) {
+      return { fields: {}, reason: "invalid_container" };
+    }
+    if (namespace !== undefined && namespace !== "host" && namespace !== "container") return { fields: {}, reason: "namespace_unverified" };
+    const instanceName = lifecycle || Object.hasOwn(target, "instanceName") ? selectedName : selectedName ?? name;
     if (Object.hasOwn(target, "instanceName") && instanceName === undefined && repository === undefined) return { fields: {}, reason: "target_unavailable" };
     if (repository !== undefined && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) return { fields: {}, reason: "invalid_repository" };
     if (instanceName !== undefined && !/^[A-Za-z0-9_-]+$/.test(instanceName)) return { fields: {}, reason: "invalid_instance" };
-    return { repository: repository?.toLowerCase(), instanceName,
+    return { repository: repository?.toLowerCase(), instanceName, stateRoot, containerName, namespace,
       fields: Object.freeze({ ...(repository === undefined ? {} : { target_repo: repository.toLowerCase() }),
         ...(instanceName === undefined ? {} : { target_instance: instanceName }) }) };
   } catch {
@@ -157,6 +175,7 @@ function consumerObserver(captured: Captured, reader: RegistryConsumerRead, unav
   }
   let closed = false, diagnosticSent = false, sinkPending = 0;
   const pending = new Set<Promise<void>>(), keys = new Set<string>();
+  const lifecycleFailures = new Map<string, Evidence>();
   const unavailable = (): void => {
     if (diagnosticSent) return;
     diagnosticSent = true;
@@ -179,8 +198,8 @@ function consumerObserver(captured: Captured, reader: RegistryConsumerRead, unav
       return { kind: "unknown", reason: "source_read_rejected" };
     }
   };
-  let held: Promise<Bound> | undefined, retryNeeded = false;
-  const current = async (original: Promise<Bound>, target: ReturnType<typeof targetSnapshot>): Promise<Evidence> => {
+  let held: Promise<Bound> | undefined, lifecycleHeld: Promise<Bound> | undefined, retryNeeded = false;
+  const current = async (original: Promise<Bound>, target: ReturnType<typeof targetSnapshot>, action: RegistryConsumerAction): Promise<Evidence> => {
     if (target.reason) return unknown(target.reason);
     const bound = await original;
     if (bound.kind !== "ready") {
@@ -202,6 +221,21 @@ function consumerObserver(captured: Captured, reader: RegistryConsumerRead, unav
       && (target.repository === undefined || row.repo.toLowerCase() === target.repository));
     if (rows.length === 0) return { selected_state: "absent", reason: "target_absent", ...identity };
     if (rows.every(row => !row.live)) return { selected_state: "retired", reason: "target_retired", ...identity };
+    const lifecycle = isLifecycleAction(action);
+    if (lifecycle && (target.stateRoot === undefined || target.instanceName === undefined)) {
+      return { ...unknown("target_unavailable", digest), ...identity };
+    }
+    if (action === "deploy-recycle" && target.containerName === undefined) return { ...unknown("target_unavailable", digest), ...identity };
+    if (lifecycle && rows.length !== 1) return { ...unknown("target_ambiguous", digest), ...identity };
+    if (target.stateRoot !== undefined) {
+      if (target.namespace !== "host") return { ...unknown("namespace_unverified", digest), ...identity };
+      if (target.instanceName === undefined || bound.binding.matchesLifecycleTarget === undefined) {
+        return { ...unknown("lifecycle_binding_unavailable", digest), ...identity };
+      }
+      if (!bound.binding.matchesLifecycleTarget(target.instanceName, target.stateRoot, target.containerName)) {
+        return { ...unknown("state_root_unverified", digest), ...identity };
+      }
+    }
     return { selected_state: "ready", ...identity };
   };
   const report = (action: RegistryConsumerAction, target: ReturnType<typeof targetSnapshot>, evidence: Evidence, threw: boolean): void => {
@@ -228,35 +262,55 @@ function consumerObserver(captured: Captured, reader: RegistryConsumerRead, unav
   const queue = (action: RegistryConsumerAction, target: ReturnType<typeof targetSnapshot>, threw: boolean, original: Promise<Bound>): void => {
     if (closed) return;
     if (pending.size >= LIMIT) { report(action, target, unknown("observation_capacity"), threw); return; }
-    const work = current(original, target).then(evidence => report(action, target, evidence, threw)).catch(() => {
-      // Unexpected observer failure still reports unknown, with no raw result, exception, bytes or private path.
-      report(action, target, unknown("observation_failed"), threw);
+    const work = current(original, target, action).catch(() => {
+      // A failed observation is pinned unknown just like a failed read or final recheck.
+      return unknown("observation_failed");
+    }).then(evidence => {
+      if (isLifecycleAction(action)) {
+        const key = JSON.stringify([target.instanceName, target.repository, target.stateRoot, target.containerName, target.namespace]);
+        const prior = lifecycleFailures.get(key);
+        if (prior) evidence = prior;
+        else if (lifecycleFailures.size >= LIMIT) evidence = unknown("observation_capacity");
+        else if (evidence.selected_state !== "ready") lifecycleFailures.set(key, evidence);
+      }
+      report(action, target, evidence, threw);
     }).finally(() => pending.delete(work));
     pending.add(work);
   };
   return Object.freeze({
     observe: async <T>(action: RegistryConsumerAction, target: RegistryConsumerTarget, operation: () => T | Promise<T>): Promise<T> => {
-      const capturedTarget = targetSnapshot(target, captured.kind === "selected" ? captured.name : undefined);
-      if (held === undefined || retryNeeded) { held = read(); retryNeeded = false; }
-      const original = held;
+      const capturedTarget = targetSnapshot(target, captured.kind === "selected" ? captured.name : undefined, isLifecycleAction(action));
+      let original: Promise<Bound>;
+      if (isLifecycleAction(action)) {
+        // Recovery belongs to the original invocation. A later healthy registry cannot repair its unknown evidence.
+        original = lifecycleHeld ??= read();
+      } else {
+        if (held === undefined || retryNeeded) { held = read(); retryNeeded = false; }
+        original = held;
+      }
       let result: T;
       try { result = await operation(); }
       catch (error) { queue(action, capturedTarget, true, original); throw error; }
       queue(action, capturedTarget, false, original); return result;
     },
     observeSync: <T>(action: RegistryConsumerAction, target: RegistryConsumerTarget, operation: () => T): T => {
-      const snapshot = targetSnapshot(target, captured.kind === "selected" ? captured.name : undefined);
+      const snapshot = targetSnapshot(target, captured.kind === "selected" ? captured.name : undefined, isLifecycleAction(action));
       try { const result = operation(); report(action, snapshot, unknown(snapshot.reason ?? "synchronous_seam"), false); return result; }
       catch (error) { report(action, snapshot, unknown(snapshot.reason ?? "synchronous_seam"), true); throw error; }
     },
     settled: async (): Promise<void> => { await Promise.all([...pending]); },
-    close: (): void => { closed = true; controller.abort(); keys.clear(); },
+    close: (): void => { closed = true; controller.abort(); keys.clear(); lifecycleFailures.clear(); },
   });
 }
 
-export async function observeSelectedRegistry<T>(observer: SelectedRegistryObserver | undefined, action: RegistryConsumerAction,
-  target: RegistryConsumerTarget, operation: () => T | Promise<T>): Promise<T> {
-  return observer === undefined ? operation() : observer.observe(action, target, operation);
+export function observeSelectedRegistry<T>(observer: SelectedRegistryObserver | undefined, action: RegistryConsumerAction,
+  target: RegistryConsumerTarget, operation: () => T, synchronous: true): T;
+export function observeSelectedRegistry<T>(observer: SelectedRegistryObserver | undefined, action: RegistryConsumerAction,
+  target: RegistryConsumerTarget, operation: () => T | Promise<T>): Promise<T>;
+export function observeSelectedRegistry<T>(observer: SelectedRegistryObserver | undefined, action: RegistryConsumerAction,
+  target: RegistryConsumerTarget, operation: () => T | Promise<T>, synchronous?: true): T | Promise<T> {
+  if (synchronous) return observeSelectedRegistrySync(observer, action, target, operation);
+  return (async () => observer === undefined ? operation() : observer.observe(action, target, operation))();
 }
 
 export function observeSelectedRegistrySync<T>(observer: SelectedRegistryObserver | undefined, action: RegistryConsumerAction,
