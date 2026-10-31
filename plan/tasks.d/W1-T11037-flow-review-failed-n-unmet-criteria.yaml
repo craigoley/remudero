@@ -25,3 +25,11 @@
     - PR #15532: 2.69 PR-hours — 4 unmet criteria — fix round 14 — judge: change-approach (The same four review findings remain after 13 rounds, with four no-op rounds,...) — NOT DISPATCHED this pass: a needs-human escalation for this exact (task, PR, head 25fec8ecf0e4f6f5d8e8b815e81f4c5320c95667, cause) is ALREADY OPEN and awaiting a human (https://github.com/craigoley/remudero/issues/15776) — a strike here would re-ask a question already in front of someone and append to that same issue; standing down until it is closed, the head moves, or the task contract changes, or an operator answers
     Previous remedy W1-T10596: src/lib/sweep.ts, test/sweep/flow-review-failed-n-unmet-criteria.test.ts; did not fall: share of PR-hours 3.9% (42.390932777777714/1089.1938177777802) before, 3.1% (56.022692500000026/1794.1836144444426) after, over 3 day(s) each side. Take a structurally different remedy.
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — Both cited episodes explicitly await human decisions on existing escalations, while acceptance requires clearing the blocker without manual intervention. The record does not explain how that remedy preserves those decision boundaries.; on the change's description/files alone, no diff was read — The rationale attributes failure to fix-lane, but its cited dispositions explicitly describe intentional stand-down pending human input or changed conditions. The claimed owner failure is therefore not established by the supplied evidence.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; that cannot verify the promised autonomous clearance or preservation of review policy."
+    judged_at: "2026-10-30T22:53:57.612Z"
+    pin: "575faf386e3a6f8ff49f57a9c9b52b40c0a52cab3953deef3901320659761c5c"
