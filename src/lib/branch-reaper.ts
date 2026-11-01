@@ -81,6 +81,12 @@ function* lsRemoteOriginSteps(exec: BranchReapExec, before: readonly string[], a
   return yield* step(() => exec("git", ["ls-remote", ...before, "origin", ...after]));
 }
 
+/** The reaper's one `git push` site: `push <before…> origin <after…>`, run in the managed checkout. The prune's
+ *  chunked `--delete` and the stale-hold archive's atomic leased push both go through it. */
+function* pushOriginSteps(exec: BranchReapExec, before: readonly string[], after: readonly string[]): Steps<string> {
+  return yield* step(() => exec("git", ["push", ...before, "origin", ...after]));
+}
+
 export function* remoteBranchNamesSteps(exec: BranchReapExec): Steps<string[]> {
   return (yield* lsRemoteOriginSteps(exec, ["--heads"]))
     .split("\n")
@@ -699,7 +705,7 @@ export function* pruneDeletableBranchesSteps(
   for (let i = 0; i < deletable.length; i += chunkSize) {
     const chunk = deletable.slice(i, i + chunkSize);
     try {
-      yield* step(() => exec("git", ["push", "origin", "--delete", ...chunk.map((e) => e.name)]));
+      yield* pushOriginSteps(exec, [], ["--delete", ...chunk.map((e) => e.name)]);
       for (const e of chunk) deleted.push(e.name);
     } catch (err) {
       // The whole chunk survives: git applies a rejected push atomically per invocation, so naming
@@ -881,4 +887,84 @@ export function parseDispatchClaimTaskIds(raw: string): Set<string> {
     if (ref?.startsWith("refs/rmd-dispatch/")) ids.add(ref.slice("refs/rmd-dispatch/".length));
   }
   return ids;
+}
+
+// ── REPO HYGIENE, ACT MODE (operator ruling 2026-11-01: "Build act mode, flag off") ──────────────
+//
+// Armed only by `sweep.armStaleBranchArchive` in plan/policy.yaml (default false), and only on the
+// automatic rung's prune pass or an explicit `rmd reap-branches --archive-stale`. Unarmed, the lane
+// stays the shadow above: it ledgers `branch_reap.hygiene_shadow` and pushes nothing.
+
+/** BACKSTOP: at most this many stale holds are archived per pass. The 2026-11-01 backlog was 379
+ *  (296 shipped-task branches past 7 days, 83 unshipped ones past 14); 25 matches the prune's own
+ *  chunk size, so a first armed pass removes a reviewable handful rather than the whole backlog, and
+ *  the rest drain over later passes. The ledger row's `capped` names what this pass left. */
+export const STALE_HOLD_ARCHIVE_CAP = 25;
+
+export interface StaleHoldArchived {
+  name: string;
+  sha: string;
+  reason: StaleHoldReason;
+  archive_ref: string;
+}
+
+export interface StaleHoldArchiveOutcome {
+  archived: StaleHoldArchived[];
+  /** A push git refused: the lease failed (the branch moved) or the remote rejected it. The branch is unchanged. */
+  failed: { name: string; error: string }[];
+  /** Candidates past the cap, left for a later pass. */
+  capped: number;
+}
+
+/** `refs/rmd-recovery/reaped/<branch>/<sha>`: where a stale hold's tip is kept once its branch is deleted. */
+export function staleHoldArchiveRef(name: string, sha: string): string {
+  return `${STALE_HOLD_ARCHIVE_PREFIX}${name}/${sha}`;
+}
+
+/**
+ * The documented one-line restore for an archived branch:
+ * `git fetch origin <archive_ref>:<archive_ref> && git push origin <archive_ref>:refs/heads/<name>`.
+ * The fetch is not optional: a push's source is resolved LOCALLY, and the archive ref exists only on
+ * origin, so the bare push fails with "src refspec … does not match any" in any clone that has not
+ * fetched it (measured against a real remote in this lane's test).
+ */
+export function staleHoldRestoreCommand(name: string, sha: string): string {
+  const ref = staleHoldArchiveRef(name, sha);
+  return `git fetch origin ${ref}:${ref} && git push origin ${ref}:refs/heads/${name}`;
+}
+
+/**
+ * Archive each stale hold's tip and delete its branch, ONE ATOMIC PUSH PER BRANCH:
+ *
+ *   git push --atomic --force-with-lease=refs/heads/<name>:<sha> origin \
+ *     <sha>:refs/rmd-recovery/reaped/<name>/<sha> :refs/heads/<name>
+ *
+ * `--atomic` makes the archive ref and the delete land together or not at all, and the lease makes
+ * the whole push refuse when the branch no longer points at the sha the planner read — so a branch
+ * that gained a commit is left alone, never deleted. A refused push is reported in `failed` and its
+ * branch stays. One push per branch, not a chunk, so one moved branch cannot block the others.
+ *
+ * RESTORE is one line ({@link staleHoldRestoreCommand}):
+ *   git fetch origin refs/rmd-recovery/reaped/<name>/<sha>:refs/rmd-recovery/reaped/<name>/<sha> \\
+ *     && git push origin refs/rmd-recovery/reaped/<name>/<sha>:refs/heads/<name>
+ */
+export function* archiveStaleHoldsSteps(
+  candidates: readonly StaleHoldCandidate[],
+  exec: BranchReapExec,
+  opts: { readonly cap?: number } = {},
+): Steps<StaleHoldArchiveOutcome> {
+  const cap = Math.max(0, opts.cap ?? STALE_HOLD_ARCHIVE_CAP);
+  const archived: StaleHoldArchived[] = [];
+  const failed: { name: string; error: string }[] = [];
+  for (const c of candidates.slice(0, cap)) {
+    const archiveRef = staleHoldArchiveRef(c.name, c.sha);
+    try {
+      yield* pushOriginSteps(exec, ["--atomic", `--force-with-lease=refs/heads/${c.name}:${c.sha}`],
+        [`${c.sha}:${archiveRef}`, `:refs/heads/${c.name}`]);
+      archived.push({ name: c.name, sha: c.sha, reason: c.reason, archive_ref: archiveRef });
+    } catch (err) {
+      failed.push({ name: c.name, error: String((err as Error)?.message ?? err) });
+    }
+  }
+  return { archived, failed, capped: Math.max(0, candidates.length - cap) };
 }
