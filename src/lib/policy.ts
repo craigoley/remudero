@@ -1113,6 +1113,42 @@ export function loadLaneGovernorMode(path: string = installPolicyPath()): LaneGo
   return parseLaneGovernorMode(isPlainObject(raw) ? raw.sweep : undefined);
 }
 
+// ── sweep.observedOverlap.mode ──────────────────────────────────────────────────────────────
+// Read optionally, exactly like `sweep.laneGovernor.mode` above. An absent block reads as `shadow`.
+
+/** `shadow` ledgers what open PRs' changed files would hold back and changes nothing; `enforce`
+ *  holds those candidates out of the pass (lib/observed-overlap.ts). */
+export const OBSERVED_OVERLAP_MODES = ["shadow", "enforce"] as const;
+export type ObservedOverlapMode = (typeof OBSERVED_OVERLAP_MODES)[number];
+
+/** Validate `sweep.observedOverlap.mode` out of the `sweep` mapping. An absent block reads as `shadow`. */
+export function parseObservedOverlapMode(sweep: unknown): ObservedOverlapMode {
+  const block = isPlainObject(sweep) ? sweep.observedOverlap : undefined;
+  if (block === undefined) return "shadow";
+  if (!isPlainObject(block)) throw new PolicyError("policy.yaml: 'sweep.observedOverlap' must be a mapping.");
+  const row = block.mode;
+  if (!isPlainObject(row)) throw new PolicyError("policy.yaml: 'sweep.observedOverlap.mode' must be a mapping with 'value'/'origin'.");
+  if (row.origin !== "proposal") {
+    throw new PolicyError(`policy.yaml: 'sweep.observedOverlap.mode.origin' must be "proposal", got ${JSON.stringify(row.origin)}.`);
+  }
+  const found = OBSERVED_OVERLAP_MODES.find((mode) => mode === row.value);
+  if (found === undefined) {
+    throw new PolicyError(`policy.yaml: 'sweep.observedOverlap.mode' accepts only "shadow", "enforce", got ${JSON.stringify(row.value)}.`);
+  }
+  return found;
+}
+
+/** `sweep.observedOverlap.mode` from the policy at `path` (default: this installation's). A missing or unparseable file throws. */
+export function loadObservedOverlapMode(path: string = installPolicyPath()): ObservedOverlapMode {
+  let raw: unknown;
+  try {
+    raw = parseYaml(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new PolicyError(`policy.yaml is not valid YAML (${path}): ${String(err)}`);
+  }
+  return parseObservedOverlapMode(isPlainObject(raw) ? raw.sweep : undefined);
+}
+
 // ── Daily-cost-ceiling override store (W1-T332) ─────────────────────────────────────────────
 // A runtime-tunable value belongs in a store the console can write at runtime, not the committed
 // `plan/policy.yaml` behind a PR and a deploy (operator ruling 2026-08-04) — reuses

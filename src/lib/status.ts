@@ -3909,6 +3909,17 @@ export type SupersessionSearch = (symbol: string, path: string) => readonly Supe
 
 const TRAILER_RE = /^Remudero-Task:[ \t]*([A-Za-z0-9-]+)[ \t]*$/m;
 
+/** The task ids an open PR builds: its `run-<id>-<epoch>` head, then a distinct well-formed
+ *  `Remudero-Task:` trailer. One extractor for `projectPlan`'s open index and the dispatch's
+ *  observed-scope producer (lib/observed-overlap.ts), so the two cannot map a PR differently. */
+export function prOwningTaskIds(pr: Pick<PrRef, "headRefName" | "body">): string[] {
+  const owner = taskIdFromRunBranch(pr.headRefName);
+  const owners = owner === undefined ? [] : [owner];
+  const trailerOwner = (pr.body ?? "").match(TRAILER_RE)?.[1];
+  if (trailerOwner && TASK_ID_TRAILER_RE.test(trailerOwner) && trailerOwner !== owner) owners.push(trailerOwner);
+  return owners;
+}
+
 /**
  * A task's proof-derived symbols paired with every path the task declared. W1-T506 WIDENED THIS FROM
  * `grep:`-ONLY, which was dialect-gated and getting worse as convention moves proofs to `unit test:`, whose
@@ -4186,17 +4197,11 @@ export function projectPlan(
     if (allOpen !== null) {
       openByTask = new Map<string, PrRef[]>();
       for (const pr of allOpen) {
-        const owner = taskIdFromRunBranch(pr.headRefName);
-        if (owner !== undefined) {
+        for (const owner of prOwningTaskIds(pr)) {
           const existing = openByTask.get(owner);
           if (existing) existing.push(pr);
           else openByTask.set(owner, [pr]);
         }
-        const trailerOwner = (pr.body ?? "").match(TRAILER_RE)?.[1];
-        if (!trailerOwner || !TASK_ID_TRAILER_RE.test(trailerOwner) || trailerOwner === owner) continue;
-        const trailerOwned = openByTask.get(trailerOwner);
-        if (trailerOwned) trailerOwned.push(pr);
-        else openByTask.set(trailerOwner, [pr]);
       }
     }
     const capturedOpen = openByTask;

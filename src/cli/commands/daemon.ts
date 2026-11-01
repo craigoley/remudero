@@ -109,7 +109,8 @@ import { resolveRepoLayout } from "../../lib/repo-layout.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { liveInflightRuns, readCheckoutDepth } from "../../lib/report-commands.js";
 import { adoptRunChildren, createAdmittedPlanSlot, runChildModeIsOn, startRunChildProbe, tapPlanSnapshot, type AdoptedRunChild } from "../../lib/run-child.js";
-import { loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
+import { loadObservedOverlapMode, loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
+import { observedScopeFromOpenPrs } from "../../lib/observed-overlap.js";
 import {
   bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor,
   type RunChildContractEscalation, type RunChildModeDecision,
@@ -573,6 +574,8 @@ export async function daemonCommand(
     runDaemon?: typeof runDaemon;
     runTask?: DaemonCommandHost["runTask"];
     readRunChildMode?: () => RunChildMode;
+    /** Stand-in for `sweep.observedOverlap.mode` (policy.ts); absent reads the installation's policy. */
+    readObservedOverlapMode?: () => "shadow" | "enforce";
     /** W1-T9089: delivers `run_child.contract_failing`'s escalation; production raises it through `escalate`. */
     runChildContractEscalate?: (escalation: RunChildContractEscalation) => string | null | undefined;
     /** Command seams for the selected-repository PR-action wiring test. Production keeps the
@@ -1017,6 +1020,9 @@ export async function daemonCommand(
   const activePlanRef: { current: Plan } = { current: plan };
   const projectionGithub = githubFactory(target.owner, target.repo);
   const boardOpenPrCount = createOpenPrCountObservation();
+  // The open rows `projectPlan` observed this pass, kept for the observed-scope producer below:
+  // the SAME batch the WIP governor counts, never a second read.
+  let lastOpenRows: readonly PrRef[] | undefined;
   const refreshMerged: (planOverride?: Plan) => MergedSet = (planOverride = activePlanRef.current) => {
     if (freshReadGeneration(tickReadGeneration, { consumer: "refresh_merged", log })) {
       const projection = lastProj;
@@ -1026,9 +1032,11 @@ export async function daemonCommand(
     // loop body opens with `deps.refreshMerged()` (lib/daemon.ts) exactly as `runDrain`'s two do.
     projectionGithub.resetFailureFlags?.();
     boardOpenPrCount.reset();
+    lastOpenRows = undefined;
     const proj = projectPlan(
       planOverride,
-      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe, skipUncreditedBuildWarning: true },
+      { ledgerPath, github: projectionGithub, skipUncreditedBuildWarning: true,
+        observeOpenPrCount: (rows) => { lastOpenRows = rows; boardOpenPrCount.observe(rows); } },
       statusPath,
     );
     lastProj = proj;
@@ -1801,6 +1809,10 @@ export async function daemonCommand(
         // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
         checkHeavyNewBuild: deps.checkHeavyNewBuild ?? captureHeavyNewBuildStartupGate(log, config),
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
+        // Open PR heads' changed files as observed scope: this pass's rows, and the file lists the
+        // projection gateway's head-keyed cache already holds for `openSiblingBuild`. No new read.
+        observedOpenPrScope: () => observedScopeFromOpenPrs(lastOpenRows, (url) => projectionGithub.changedFiles?.(url)),
+        observedOverlapMode: deps.readObservedOverlapMode ?? (() => loadObservedOverlapMode()),
         // W1-T1062: `owner: target.owner` must reach `runTask`, else a FOREIGN `--repo owner/name` run
         // falls back to this checkout's owner and opens its PR there (test/owner-dispatch-threading).
         // W1-T9924: the same mode read `runInChildWhenOn` makes below; a run it would keep in-process reads false.
