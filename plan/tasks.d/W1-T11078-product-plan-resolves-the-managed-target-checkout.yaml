@@ -16,7 +16,10 @@
     - src/lib/serve.ts
     - test/plan/product-case-managed-checkout.test.ts
     - test/console-api/serve/product-routes.test.ts
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=16397fdaecd26603
+  # backlog gardener: placed=2026-11-01T15:40:01.449Z
   dispatch_hold: true
   attempts: 0
   rationale: >-
