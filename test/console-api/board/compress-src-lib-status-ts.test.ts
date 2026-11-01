@@ -8,7 +8,9 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // @source-text-subject: this task preserves status.ts tokens while compressing its comments.
 // Frozen before compression at dde8a92c463ea090413f985c5d7d8c6a67f6c5e3; no moving git ref.
-const BEFORE = { comments: 1798, tokens: "3bad233be41eea7b48449da606a005dc14aa7c1b2bbef5f1093169f411a27b23" };
+// Regenerated for the observed-overlap producer, which moves prOwningTaskIds out of projectPlan (operator ruling
+// 2026-11-01). The comment-reduction threshold stays fixed.
+const BEFORE = { comments: 1798, tokens: "e6e0928d925dcde36a3d9b3952597e25c1c3c551e0e4f36a0ec3a27370f8570c" };
 
 function executableDigest(text: string): string {
   const scanner = createScanner(true, undefined, text);
