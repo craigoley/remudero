@@ -1,0 +1,30 @@
+- id: W1-T11075
+  title: The ci and fix-progress judges resolve their own mount rows, and a DeepSeek-V4-Flash cash arm shadows them so its agreement is measured
+  repo: remudero
+  depends_on:
+    - W1-T10857
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the judges' verdicts stay the subscription judge's; the cash arm only shadows
+  origin: operator-session#token-efficiency-2026-11-01
+  plan_refs:
+    - W1-T3614
+    - W1-T10855
+    - W1-T10856
+  files:
+    - src/lib/risk-judge.ts
+    - .remudero/mounts.yaml
+    - test/review/the-ci-and-fix-progress-judges-shadow-a-deepseek-arm.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The ci judge and the fix-progress judge resolve their own mount rows, which may name a provider, instead of the risk judge's provider-less mount. With a cash shadow arm declared on those rows, each judgement also asks the shadow deployment, inside the existing cash budget, and ledgers both verdicts and whether they agree; the verdict the sweep acts on is still the primary judge's. A shadow call that is refused for capacity or budget is ledgered and changes nothing"
+      proof: "unit test: test/review/the-ci-and-fix-progress-judges-shadow-a-deepseek-arm.test.ts"
+  rationale: |
+    Operator ruling 2026-11-01 ("Judge bake-off on DeepSeek"): widen DECISIONS 2026-10-27 item 7 (open-weight models are inbox bake-off arms only) to short-prompt judge shadows, starting with DeepSeek-V4-Flash; Kimi stays a low-priority arm. The operator approved raising the three deployments' Azure GlobalStandard capacity from 20 to 300 (1 unit = 1K tokens per minute; the subscription quota limit already reads 300).
+    OBSERVED, operator recon 2026-11-01: the inbox bake-off of 2026-10-31 (BAKEOFF-1793415129039) drafted 0 of 8 on all nine DeepSeek and Kimi arms because every request (about 440-447K tokens) exceeded the 20K-per-minute limit (48 cash.capacity.shortfall rows), and even 300K cannot take an inbox draft; state/bakeoff-trialed.json now lists all three as trialed (W1-T10857, a dependency, stops a capacity shortfall from marking an arm trialed). The ci judge and fix-progress judge run about 356 short judgements a day on subscription Haiku through resolveRiskJudgeMount (src/lib/risk-judge.ts), which has no provider field. DeepSeek-V4-Flash is priced at $0.19 input and $0.51 output per million tokens.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (run-unfiled-1793538128289). Promotion of a shadow arm to lead stays behind W1-T10858 (invoice reconciliation) and an operator ruling.

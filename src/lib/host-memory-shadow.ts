@@ -1,68 +1,34 @@
 /**
- * lib/host-memory-shadow.ts — W1-T7094: a COUNTERFACTUAL host-memory admission verdict for every real worker start.
- *
- * OBSERVED 2026-10-09: three daemon containers and serve share one 16.8 GB host, a container sat with 4.0 GB in swap,
- * and serve (5-6 GB steady, 7.5 GB in a cold start) could not restart without heavy swap-in. Whether a host-wide budget
- * would have protected serve, and what throughput it would cost, is unknown. This module answers "would this start
- * have fit?" for each start that HAPPENED, so enforcement can be ruled on from measurements rather than guesses.
- *
- * THE VERDICT NEVER GATES ITS OWN START. It is computed after the start is committed, synchronously, inside try/catch,
- * and its result is never read by the caller. The policy mode is "off", "shadow" or "enforce"; the shipped mode is
- * "shadow". Under "enforce" a SEPARATE call before the start (host-memory-admission.ts) evaluates the same snapshot and
- * may wait; switching to it is an operator ruling, made by editing plan/policy.yaml.
- *
- * NO DOUBLE COUNT. A worker tree's resident memory is already inside MemAvailable and the container's memory.current,
- * so a reservation counts only its UNREALIZED part: max(0, estimate - the tree's current rss+swap). A process inside
- * two recorded trees (a test run nested in a worker's tree) is resident in the innermost one only.
- *
- * ONE TAIL AT A TIME (the container check). A reservation's estimate is its class's p90 peak, and the live trees do not
- * all reach their p90 at once. The container claim is each live tree's TYPICAL remaining growth, max(0, class median -
- * resident), summed, plus ONE tail allowance: the largest single remaining spike above a typical, max over trees of
- * (remaining to the p90 - remaining to the median). Both quantiles are learned (host-memory-learning.ts); a class with
- * no samples has its median equal to its estimate, so its whole claim counts and it adds no tail.
- * The daemon is one more such tail: its growth back to its LAST-HOUR peak rss+swap (W1-T9972: never its boot-time VmHWM)
- * splits into a TYPICAL part, its median rss+swap over the last hour, each less its current rss+swap, and the rest,
- * which competes with the trees' tails for the one allowance. Too few samples: VmHWM - VmRSS, all of it typical. The HOST check applies the same rule across every live tree
- * and every measured daemon: all typical parts, plus the one largest tail. An unseen start carries its class median
- * too (W1-T9762), and a live tree's typical part and tail are scaled by its class's measured survival at its age: the
- * share of the class's trees that peaked later than that (host-memory-learning.ts `survivalAt`).
- * The samples are the daemon's own rolling footprint (daemon-footprint.ts), kept across ledger rotations and daemon
- * restarts; the live ledger's tail, which a rotation cuts and a restart's new pid filters, is read only when it holds
- * more of the last hour than the footprint does (before the daemon has written one).
- *
- * THE CONTAINER CEILING JUDGES ITS OWN PRESSURE. The container check defers when the projected working set (working set +
- * the claims above + the daemon's typical growth) crosses memory.high (#10486's tuner sets it) and its flags predict
- * own pressure beyond sampling noise (unlearned: the projection alone), or while the container
- * is AT its ceiling now: a crossing of its memory.high (memory.events `high`) within the minute before a verdict that
- * finds its OWN tasks stalled past the PSI thresholds (its memory.pressure). Its own swap-in is reported, not judged: it
- * ran at 500-1800 pages/s with no crossing (the host's reclaim). Pressure unread: the static `containerReserveMib`.
- * No onset below memory.high is learned: a crossing proves usage REACHED it at a peak between verdicts, which a sample
- * misses (the cgroup is mounted read-only, so memory.peak cannot be reset per interval). On 10-11/12 (core, 1,283 rows)
- * learning the lowest sampled working set at 12 crossings (2379-3589 MiB) put this arm on 77% of rows, and the
- * projection at them (median 6790 MiB) matched every row's (6705 MiB): no lower level separates them.
- *
- * SWAP-IN COUNTS ONLY WHILE IT PREDICTS STALL. A host swap-in rate past `swapInPagesPerSecMax` defers only when the
- * instance's verdicts over {@link SWAP_STALL_HISTORY_MS} with such a rate were followed by host PSI past its thresholds
- * within {@link SWAP_STALL_WINDOW_MS} more often than the verdicts WITHOUT it (the complement), by over twice the noise
- * of that difference; too few swap-in verdicts, the rate alone. Over the same rows that ratio was 0.95-1.02 (PSI some10
- * median 0.9 at ~1,245 pages/s): churn. OPERATOR RULING 2026-10-19: comparing against ALL verdicts compares a set with
- * itself once swap-in is chronic (10-19: 82-84% of swap-in verdicts against 76-80% of all, ~95% of verdicts swapping),
- * so a complement thinner than {@link SWAP_STALL_MIN_SAMPLES} means swap-in is not a discriminating signal and holds
- * nothing ("swap-in chronic: no contrast").
- * THE HISTORY OUTLIVES ITS READER. The relation and the PSI bound learn from the instance's pressure store, which no
- * process id filters, so a daemon restart keeps them. A reader that could not read the store never replaces it: it may
- * only create a missing one (OPERATOR RULING 2026-10-19 (2)). OBSERVED 10-15..10-19 on core: six resets of the store's
- * history to nothing, none at a daemon boot (10-19 14:52Z fell between two verdicts of one daemon, 67 s apart); a read
- * that failed and then wrote is the one path here that replaces a written history with an empty one.
- *
- * THE PSI START BOUND IS LEARNED LIKE SWAP-IN (W1-T10085). Host PSI full avg10 names "psi" past a bound learned from
- * the instance's own admitted starts over the same windows, minimum and noise: the prior `psiFullAvg10Max` rises only
- * to a level whose admitted starts were followed by harm (an oom_kill rise, or full avg60 past the PRIOR) no more often
- * than every verdict in their band, and by no OOM kill. Unread or thin: the prior.
- *
- * NEVER WAITS. No lock is taken; a ledger reader that reports a held lock (EWOULDBLOCK/EAGAIN/EBUSY), an errno, or a
- * missing/unreadable/reset store yields a verdict naming that state as an uncertainty that WIDENS the margin. It is
- * never read as zero reservations. File reads are bounded (a ledger tail, a capped process count).
+ * W1-T7094: counterfactual host-memory verdicts for committed starts; their throughput/protection benefit is unknown.
+ * OBSERVED 2026-10-09: three daemons + serve shared 16.8 GB; one container had 4.0 GB swapped. Serve (5-6 GB steady,
+ * 7.5 GB cold) could not restart without heavy swap-in. Measure "would this start have fit?" before ruling on enforcement.
+ * NEVER GATES ITS OWN START: synchronous, caught, after commitment; callers ignore the result. Modes: "off", "shadow"
+ * (shipped), "enforce". Only host-memory-admission.ts may wait before starting; plan/policy.yaml changes need operator ruling.
+ * NO DOUBLE COUNT: resident rss+swap is already in MemAvailable/memory.current. Claim max(0, estimate - resident);
+ * nested processes belong only to the innermost tree. ONE TAIL: sum max(0, class median - resident), plus the largest
+ * remaining p90-minus-median spike. host-memory-learning.ts learns both; unsampled median = estimate, with no tail.
+ * W1-T9972: daemon growth uses LAST-HOUR peak rss+swap, never boot VmHWM; median-minus-current is typical, the rest tail.
+ * Too few samples: VmHWM - VmRSS, all typical. Host accounting sums all trees'/daemons' typical growth plus ONE tail.
+ * W1-T9762: unseen starts carry their class median; live claims scale by survivalAt(age), the share peaking later.
+ * daemon-footprint.ts persists samples across rotations/restarts; use the pid-filtered ledger tail only if it covers
+ * more of the last hour (before a footprint exists).
+ * CONTAINER CEILING: working set + claims + typical daemon growth crossing memory.high (#10486 tuner) defers when flags
+ * predict own pressure beyond noise (unlearned: projection alone). Also defer at the ceiling now: memory.events `high`
+ * crossed within a minute AND own memory.pressure exceeds PSI thresholds. Own swap-in is diagnostic: 500-1800 pages/s
+ * without crossings was host reclaim. Unread pressure: static containerReserveMib. Never learn onset below memory.high:
+ * read-only cgroups prevent resetting memory.peak; samples miss peaks. Core 10-11/12: 1,283 rows, 12 crossings at 2379-3589 MiB;
+ * using the lowest sample held 77%, while crossing projections (median 6790 MiB) resembled all rows (6705 MiB).
+ * SWAP-IN: over SWAP_STALL_HISTORY_MS, compare closed SWAP_STALL_WINDOW_MS outcomes above swapInPagesPerSecMax with
+ * the measured complement; defer only for PSI lift > twice its noise. Too few swap-in samples: rate alone. Observed
+ * lift 0.95-1.02, some10 median 0.9 at ~1,245 pages/s: churn. OPERATOR RULING 2026-10-19: never compare with ALL rows;
+ * chronic swap-in (~95% of rows; 82-84% stall vs 76-80% overall) self-compares. Complement < SWAP_STALL_MIN_SAMPLES
+ * holds nothing ("swap-in chronic: no contrast"). HISTORY OUTLIVES READER: pressure history is instance-wide, not pid-filtered.
+ * OPERATOR RULING 2026-10-19 (2): failed readers may only create missing stores, never replace them. Core 10-15..10-19:
+ * six history resets, none at boot; 10-19 14:52Z was between same-daemon verdicts 67 s apart. Failed read + write erased history.
+ * W1-T10085: learn PSI full avg10 bound with the same windows/minimum/noise. Raise psiFullAvg10Max only where admitted
+ * starts have no greater harm than all verdicts in-band, and no OOM kill. Harm = oom_kill rise or full avg60 > PRIOR;
+ * unread/thin history keeps the prior. NEVER WAITS: no lock; EWOULDBLOCK/EAGAIN/EBUSY, errno or missing/unreadable/reset
+ * stores widen uncertainty, never imply zero reservations. Reads are bounded by ledger-tail bytes and process count.
  */
 
 import { randomUUID } from "node:crypto";
