@@ -280,7 +280,6 @@ import {
   type EscalationJudgeDecision,
   type EscalationJudgeVerdict,
   escalationJudgeReceiptFields,
-  extractPrRef,
   type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
@@ -1230,6 +1229,13 @@ export function requiredSweepRuntimeCtor<T extends SweepRuntimeCtor>(name: strin
       throw new Error(`buildSweepEffects requires ${name} from its entrypoint adapter`);
     }
   }) as unknown as T;
+}
+
+/** The first PR a free-text escalation names (`/pull/<n>`, `PR #<n>`, `PR <n>`), as escalate.ts's private
+ *  dedup reader reads it. It is kept here because W1-T11034's compression pin freezes escalate.ts's executable
+ *  tokens, so that reader cannot be exported. */
+function firstPrRefInText(text: string): string | undefined {
+  return /\/pull\/(\d+)\b/.exec(text)?.[1] ?? /\bPR\s*#(\d+)\b/i.exec(text)?.[1] ?? /\bPR\s+(\d+)\b/i.exec(text)?.[1];
 }
 
 function prNumberFromRef(ref: string): number | undefined {
@@ -13877,13 +13883,13 @@ export function ownEscalationAtHead(
   for (const row of rows) {
     const atHead = row.head_sha === pr.headSha;
     const thisPr = row.pr_number === pr.prNumber ||
-      (typeof row.pr_url === "string" && extractPrRef(row.pr_url) === String(pr.prNumber));
+      (typeof row.pr_url === "string" && firstPrRefInText(row.pr_url) === String(pr.prNumber));
     if (atHead && thisPr && row.run_id !== undefined) runsAtHead.add(row.run_id);
     // Issue 15818: another lane's escalation is this head's too. Every lane's issue crosses the transport, whose
     // birth row carries the escalation it filed; a stall report's own issue (cause stage-stall) never counts.
     const subject = (row.triage_subject ?? undefined) as Record<string, unknown> | undefined;
     if (ESCALATION_TRIAGE_BIRTH_STEPS.includes(String(row.step)) && subject !== undefined && subject.cause !== "stage-stall" &&
-        extractPrRef(`${String(subject.summary ?? "")}\n${String(subject.detail ?? "")}`) === String(pr.prNumber) &&
+        firstPrRefInText(`${String(subject.summary ?? "")}\n${String(subject.detail ?? "")}`) === String(pr.prNumber) &&
         (subject.headSha === undefined ? runsAtHead.has(row.run_id) : subject.headSha === pr.headSha)) {
       found = { ts: at(row), reason: text(subject.summary), ...(text(row.issue_url) ? { issueUrl: String(row.issue_url) } : {}) };
       continue;
