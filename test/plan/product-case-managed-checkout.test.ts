@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ProductCaseService } from "#src/lib/product-case.js";
@@ -97,10 +97,10 @@ test("managed product checkout refuses missing unreadable foreign and stale repo
     { name: "registry", code: "target_unreadable", change(f: ReturnType<typeof fixture>) { writeFileSync(f.registryPath, "unreadable registry"); } },
     { name: "ambiguous", code: "target_unreadable", change(f: ReturnType<typeof fixture>) { writeFileSync(f.managedPath, JSON.stringify({ repos: ["craigoley/wreckterra", "foreign/wreckterra"] })); } },
     { name: "ancestor", code: "target_unreadable", change(f: ReturnType<typeof fixture>) { rmSync(join(f.checkout, ".git"), { recursive: true }); } },
-    { name: "permissions", code: "target_unreadable", change(f: ReturnType<typeof fixture>) {
+    { name: "config-directory", code: "target_unreadable", change(f: ReturnType<typeof fixture>) {
       const path = join(f.checkout, ".git/config");
-      chmodSync(path, 0);
-      t.after(() => { if (existsSync(path)) chmodSync(path, 0o600); });
+      rmSync(path);
+      mkdirSync(path);
     } },
   ];
   for (const scenario of cases) {
