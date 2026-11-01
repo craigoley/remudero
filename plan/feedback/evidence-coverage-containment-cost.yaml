@@ -4,7 +4,7 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `containment`, field `cost`.
 
-  Coverage: 156/433 joined worker calls (36.0%) in the trailing 7-day window;
+  Coverage: 156/420 joined worker calls (37.1%) in the trailing 7-day window;
   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
   First seen: 2026-09-28T05:55:37.084Z.
@@ -43,7 +43,7 @@ answered_by: null
 evidence_coverage_last_reopened: "25.5"
 evidence_coverage_revision:
   version: 1
-  mainSha: 693cc1991c68d3339d88f613958e4e869b1f7d53
+  mainSha: 648b3a6030b468e42ee875bce17a60281cc1a368
   expectedRecord: >
     id: evidence-coverage-containment-cost
 
@@ -53,7 +53,7 @@ evidence_coverage_revision:
       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
       `containment`, field `cost`.
 
-      Coverage: 184/648 joined worker calls (28.4%) in the trailing 7-day window;
+      Coverage: 156/433 joined worker calls (36.0%) in the trailing 7-day window;
       below the field's 90.0% floor — a chronic gap no baseline excuses.
 
       First seen: 2026-09-28T05:55:37.084Z.
@@ -102,7 +102,7 @@ evidence_coverage_revision:
 
     evidence_coverage_revision:
       version: 1
-      mainSha: e90d4b09f15ddeaa740249e249461a0a5c4cda13
+      mainSha: 693cc1991c68d3339d88f613958e4e869b1f7d53
       expectedRecord: >
         id: evidence-coverage-containment-cost
 
@@ -112,7 +112,7 @@ evidence_coverage_revision:
           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
           `containment`, field `cost`.
 
-          Coverage: 215/843 joined worker calls (25.5%) in the trailing 7-day window;
+          Coverage: 184/648 joined worker calls (28.4%) in the trailing 7-day window;
           below the field's 90.0% floor — a chronic gap no baseline excuses.
 
           First seen: 2026-09-28T05:55:37.084Z.
@@ -161,7 +161,7 @@ evidence_coverage_revision:
 
         evidence_coverage_revision:
           version: 1
-          mainSha: cfa32ee06fa43b109da3f8e49f5de664990a38c5
+          mainSha: e90d4b09f15ddeaa740249e249461a0a5c4cda13
           expectedRecord: >
             id: evidence-coverage-containment-cost
 
@@ -171,7 +171,7 @@ evidence_coverage_revision:
               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
               `containment`, field `cost`.
 
-              Coverage: 49/61 joined worker calls (80.3%) in the trailing 7-day window;
+              Coverage: 215/843 joined worker calls (25.5%) in the trailing 7-day window;
               below the field's 90.0% floor — a chronic gap no baseline excuses.
 
               First seen: 2026-09-28T05:55:37.084Z.
@@ -181,18 +181,33 @@ evidence_coverage_revision:
               lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
               reads), or record why this lane legitimately lacks it. The evidence-coverage
               gardener updates this entry in place while the gap persists.
+
+              Evidence coverage reopened 2026-10-29T17:59:07.863Z: 25.5% (215/843); window
+              2026-10-22T17:59:07.863Z through 2026-10-29T17:59:07.863Z; overrides rejected.
             attachments: []
 
             origin: cli
 
-            status: rejected
+            status: accepted
 
             reply_to: null
 
-            proposal_pr: null
+            proposal_pr: https://github.com/craigoley/remudero/pull/15580
 
-            summary: null
-
+            summary:
+              headline: Restore or explain containment cost evidence
+              what_happened: Only 215 of 843 joined worker calls (25.5%) recorded the `cost`
+                field over the past seven days, below the 90% floor. The gap has persisted
+                since September 28 and reopened October 29; overrides were rejected.
+              decision: Restore `cost` evidence at the containment ledger write site, or
+                document why the lane legitimately lacks it.
+              options:
+                - label: Restore evidence
+                  consequence: Record the field on containment ledger writes and let the gardener
+                    update coverage.
+                - label: Document the gap
+                  consequence: Record why containment legitimately lacks cost evidence; coverage
+                    remains below the floor.
             expansion: null
 
             submission_key: null
@@ -200,35 +215,96 @@ evidence_coverage_revision:
             thread_id: null
 
             answered_by: null
+
+            evidence_coverage_last_reopened: "25.5"
+
+            evidence_coverage_revision:
+              version: 1
+              mainSha: cfa32ee06fa43b109da3f8e49f5de664990a38c5
+              expectedRecord: >
+                id: evidence-coverage-containment-cost
+
+                ts: 2026-09-28T05:56:12.848Z
+
+                raw: >-
+                  Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+                  `containment`, field `cost`.
+
+                  Coverage: 49/61 joined worker calls (80.3%) in the trailing 7-day window;
+                  below the field's 90.0% floor — a chronic gap no baseline excuses.
+
+                  First seen: 2026-09-28T05:55:37.084Z.
+
+
+                  This follow-up never gates a PR or blocks work. Restore the field at the
+                  lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+                  reads), or record why this lane legitimately lacks it. The evidence-coverage
+                  gardener updates this entry in place while the gap persists.
+                attachments: []
+
+                origin: cli
+
+                status: rejected
+
+                reply_to: null
+
+                proposal_pr: null
+
+                summary: null
+
+                expansion: null
+
+                submission_key: null
+
+                thread_id: null
+
+                answered_by: null
+              expectedPlan:
+                plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+                plan/tasks.d: e3c8eaa6813cf0e890d1f94323ce0d0b87be8a05
+              measurement:
+                lane: containment
+                field: cost
+                observed: 215
+                denominator: 843
+                floor: 0.9
+                at: 2026-10-29T17:59:07.863Z
+                since: 2026-10-22T17:59:07.863Z
+                line: "Coverage: 215/843 joined worker calls (25.5%) in the trailing 7-day
+                  window; below the field's 90.0% floor — a chronic gap no baseline
+                  excuses."
+              closure:
+                eligible: true
+                reason: rejected with a measured gap
           expectedPlan:
             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-            plan/tasks.d: e3c8eaa6813cf0e890d1f94323ce0d0b87be8a05
+            plan/tasks.d: 391aef7817cbca835d4bde7824a85e4f2e36ee08
           measurement:
             lane: containment
             field: cost
-            observed: 215
-            denominator: 843
+            observed: 184
+            denominator: 648
             floor: 0.9
-            at: 2026-10-29T17:59:07.863Z
-            since: 2026-10-22T17:59:07.863Z
-            line: "Coverage: 215/843 joined worker calls (25.5%) in the trailing 7-day
+            at: 2026-10-30T07:35:31.215Z
+            since: 2026-10-23T07:35:31.215Z
+            line: "Coverage: 184/648 joined worker calls (28.4%) in the trailing 7-day
               window; below the field's 90.0% floor — a chronic gap no baseline
               excuses."
           closure:
-            eligible: true
-            reason: rejected with a measured gap
+            eligible: false
+            reason: task W1-T10995 is unknown
       expectedPlan:
         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-        plan/tasks.d: 391aef7817cbca835d4bde7824a85e4f2e36ee08
+        plan/tasks.d: aca553155ad25a92ff5c4c44170ca314c305b8ea
       measurement:
         lane: containment
         field: cost
-        observed: 184
-        denominator: 648
+        observed: 156
+        denominator: 433
         floor: 0.9
-        at: 2026-10-30T07:35:31.215Z
-        since: 2026-10-23T07:35:31.215Z
-        line: "Coverage: 184/648 joined worker calls (28.4%) in the trailing 7-day
+        at: 2026-10-31T04:44:46.001Z
+        since: 2026-10-24T04:44:46.001Z
+        line: "Coverage: 156/433 joined worker calls (36.0%) in the trailing 7-day
           window; below the field's 90.0% floor — a chronic gap no baseline
           excuses."
       closure:
@@ -236,16 +312,16 @@ evidence_coverage_revision:
         reason: task W1-T10995 is unknown
   expectedPlan:
     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-    plan/tasks.d: aca553155ad25a92ff5c4c44170ca314c305b8ea
+    plan/tasks.d: dfa3d2d48298daddc5077700195fef9420ffc109
   measurement:
     lane: containment
     field: cost
     observed: 156
-    denominator: 433
+    denominator: 420
     floor: 0.9
-    at: 2026-10-31T04:44:46.001Z
-    since: 2026-10-24T04:44:46.001Z
-    line: "Coverage: 156/433 joined worker calls (36.0%) in the trailing 7-day
+    at: 2026-10-31T11:12:26.962Z
+    since: 2026-10-24T11:12:26.962Z
+    line: "Coverage: 156/420 joined worker calls (37.1%) in the trailing 7-day
       window; below the field's 90.0% floor — a chronic gap no baseline
       excuses."
   closure:
