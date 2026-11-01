@@ -2274,7 +2274,7 @@ export function startInterphaseReviewClock(
   let elapsedMs = 0;
   let passes = 0;
   let held = 0;
-  const activePasses = new Set<Promise<void>>();
+  const activePasses = new Map<Promise<void>, { passNumber: number; startedAtMs: number; trigger: string }>();
   const phase = scope === "drain" ? "freshness_drain" : scope === "pause" ? "pause" : "interphase";
   const scopeTag: Record<string, boolean> =
     scope === "drain" ? { during_drain: true } : scope === "pause" ? { during_pause: true } : {};
@@ -2335,6 +2335,8 @@ export function startInterphaseReviewClock(
             continue;
           }
           passes += 1;
+          const passNumber = passes;
+          const startedAtMs = interphaseClock.now();
           const pass = (async () => {
             try {
               const named = { reviewOnly: true, scope: scope ?? "interphase-review" } as const;
@@ -2345,8 +2347,8 @@ export function startInterphaseReviewClock(
               log("daemon.sweep_light.failed", { phase, ...scopeTag, error: String((e as Error)?.message ?? e) });
             }
           })();
-          activePasses.add(pass);
-          void pass.finally(() => activePasses.delete(pass));
+          activePasses.set(pass, { passNumber, startedAtMs, trigger });
+          void pass.then(() => activePasses.delete(pass), () => activePasses.delete(pass));
         }
       })()
     : undefined;
@@ -2355,7 +2357,31 @@ export function startInterphaseReviewClock(
     stop: async () => {
       active = false;
       if (runner) await runner;
-      if (activePasses.size > 0) await Promise.all(activePasses);
+      if (activePasses.size > 0) {
+        const activeAtStop = [...activePasses.keys()];
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const boundedWait = new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS);
+        });
+        try {
+          const settled = Promise.all(activeAtStop).then(() => true);
+          const completedWithinBound = await Promise.race([settled, boundedWait]);
+          if (!completedWithinBound) {
+            const observedAtMs = interphaseClock.now();
+            for (const details of activePasses.values()) {
+              log("daemon.review_clock.pass_left_running", {
+                pass_number: details.passNumber,
+                trigger: details.trigger,
+                phase,
+                elapsed_ms: Math.max(0, observedAtMs - details.startedAtMs),
+                bound_ms: INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS,
+              });
+            }
+          }
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      }
       return { eventWakeSeen, passes, held };
     },
     handWake: () => {
