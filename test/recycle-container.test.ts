@@ -575,8 +575,8 @@ test("private registry selection defaults and falsifiers forbid live effects: fi
   }
 });
 
-function registryDeletionChildEnv(scratch: string, phase: "intact" | "deleted" | "restored"): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: scratch, NODE_TEST_CONTEXT: undefined };
+function registryDeletionChildEnv(scratch: string, phase: "intact" | "deleted" | "restored", parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...parent, TMPDIR: scratch, NODE_TEST_CONTEXT: undefined };
   if (env.NODE_V8_COVERAGE) {
     // These are different programs at one copied pathname, not coverage of the committed tree.
     // Collect each variant separately rather than contaminating the owning source-map corpus.
@@ -592,10 +592,10 @@ test("mutant coverage is retained per source variant and never mixed into head e
   const prior = process.env.NODE_V8_COVERAGE, parent = join(root, "parent");
   mkdirSync(parent);
   try {
-    process.env.NODE_V8_COVERAGE = parent;
+    const parentEnv = { ...process.env, NODE_V8_COVERAGE: parent };
     const variants = new Set<string>();
     for (const phase of ["intact", "deleted", "restored"] as const) {
-      const env = registryDeletionChildEnv(root, phase);
+      const env = registryDeletionChildEnv(root, phase, parentEnv);
       const child = spawnSync(process.execPath, ["--input-type=module", "-e",
         `function variantProbe() { return ${JSON.stringify(phase)}; } variantProbe();`],
         { env, cwd: root, encoding: "utf8", timeout: 10000 });
@@ -608,14 +608,13 @@ test("mutant coverage is retained per source variant and never mixed into head e
           .some(fn => fn.functionName === "variantProbe" && fn.ranges.some(range => range.count > 0)))));
       assert.deepEqual(readdirSync(parent), [], "mutant source must never enter the HEAD collector");
       assert.notEqual(env.NODE_V8_COVERAGE, parent);
+      assert.equal(process.env.NODE_V8_COVERAGE, prior, "a child-variant control must preserve the parent's collector");
       variants.add(env.NODE_V8_COVERAGE);
     }
     assert.equal(variants.size, 3, "intact, deleted and restored each retain their own source-map identity");
-    delete process.env.NODE_V8_COVERAGE;
-    assert.equal(registryDeletionChildEnv(root, "intact").NODE_V8_COVERAGE, undefined,
+    assert.equal(registryDeletionChildEnv(root, "intact", {}).NODE_V8_COVERAGE, undefined,
       "ordinary uninstrumented proofs preserve genuine absence");
   } finally {
-    if (prior === undefined) delete process.env.NODE_V8_COVERAGE; else process.env.NODE_V8_COVERAGE = prior;
     rmSync(root, { recursive: true, force: true });
   }
 });
