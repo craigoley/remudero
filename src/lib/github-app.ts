@@ -55,7 +55,7 @@ const JWT_TTL_SEC = 9 * 60;
 // Why: docs/forensics/github-app.md#exchange_timeout_ms
 export const EXCHANGE_TIMEOUT_MS = 20 * 1000;
 
-/** Total token-exchange attempts, including the first request. Socket resets get two fresh retries. */
+/** PRIMARY CONTROL: caps one token refresh at three total attempts, including the initial exchange. */
 export const MAX_TOKEN_EXCHANGE_ATTEMPTS = 3;
 const RETRYABLE_EXCHANGE_SOCKET_CODES = new Set(["EPIPE", "ECONNRESET", "UND_ERR_SOCKET", "ETIMEDOUT"]);
 
