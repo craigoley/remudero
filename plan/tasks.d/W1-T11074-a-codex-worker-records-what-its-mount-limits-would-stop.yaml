@@ -1,0 +1,27 @@
+- id: W1-T11074
+  title: A codex worker records, in shadow, when its mount's turn cap or context budget would have stopped it, and whether compaction would have run
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # shadow only: the codex spawn's own limits and its outcome are unchanged
+  origin: operator-session#token-efficiency-2026-11-01
+  plan_refs:
+    - W1-T2245
+    - W1-T5448
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/worker.ts
+    - test/worker/spawn/a-codex-worker-records-what-its-mount-limits-would-stop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Every codex worker run's done row records the mount's max_turns and context budget it ran under, the turn and prompt-token counts at which either would have stopped it (or none), and whether compaction would have triggered, without changing the spawn's arguments or the run's outcome"
+      proof: "unit test: test/worker/spawn/a-codex-worker-records-what-its-mount-limits-would-stop.test.ts"
+  rationale: |
+    OBSERVED, operator token recon 2026-11-01: codex carries 67 percent of prompt tokens. Per call it uses about 10 to 13 times Claude's tokens on every lane at equal FIXED rates (reviews 1.61M vs 0.12M median, resumed fix rounds 1.99M vs 0.15M, implement 5.2M vs 0.5M). compaction_configured is false on all 3,076 done rows (autoCompactEnabled, src/lib/worker.ts), and the mounts' context_budget is used only by riskJudgeDiffInputBudget; most worker mounts allow max_turns 400. This task measures what enforcing the limits would cut before any limit is enforced; enforcement is a follow-up gated on its evidence.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (run-unfiled-1793538128289).
