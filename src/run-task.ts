@@ -14328,19 +14328,22 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   // REPO HYGIENE, SHADOW (operator ruling 2026-11-01): name the held run branches stale enough to archive
   // and reap, and ledger them. Nothing is deleted on this path; planBranchReap's hold stands. One claim read
   // for the whole corpus, and a failed read names nothing (planStaleHoldArchive fails closed on undefined).
-  const claimedTaskIds = yield* readDispatchClaimTaskIdsSteps(exec);
+  const claims = yield* readDispatchClaimTaskIdsSteps(exec);
+  const claimedTaskIds = "ids" in claims ? claims.ids : undefined;
+  const hygieneNowMs = (opts.clock ?? systemClock).now();
   const staleHolds = planStaleHoldArchive({ facts, reasons: plan.reasons, tips: remoteTips,
-    nowMs: (opts.clock ?? systemClock).now(), claimedTaskIds, runTaskByBranch,
+    nowMs: hygieneNowMs, claimedTaskIds, runTaskByBranch,
     ...(creditReadSucceeded ? { creditedTaskIds } : {}) });
   const staleCount = (reason: string) => staleHolds.filter((c) => c.reason === reason).length;
   print(`stale:     ${staleHolds.length}  held run branches an archive-then-reap would remove (shadow — nothing deleted)`);
   if (opts.ledgerPath) {
     appendLedger(opts.ledgerPath, {
-      run_id: opts.runId ?? `REAP-${Date.now()}`,
+      run_id: opts.runId ?? `REAP-${hygieneNowMs}`,
       task_id: "REAP",
       step: "branch_reap.hygiene_shadow",
       mode: "shadow",
       claims_read: claimedTaskIds !== undefined,
+      ...("error" in claims ? { claims_error: claims.error } : {}),
       would_reap: staleHolds.length,
       credited_sibling_stale: staleCount("credited_sibling_stale"),
       orphan_unshipped_stale: staleCount("orphan_unshipped_stale"),
