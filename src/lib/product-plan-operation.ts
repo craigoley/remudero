@@ -18,7 +18,9 @@ import {
 } from "./product-intent.js";
 import type { ProductRepositoryProvider } from "./product-repository.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { parseOwnerRepoFromRemoteUrl } from "./onboard/inventory.js";
 import { readReviewStatusEntry, resolveReviewProvenance, REVIEWER_IDENTITY_ENV } from "./review.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as const;
 /** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
@@ -187,7 +189,7 @@ export interface ProductPlanObservation {
 export type ProductPlanOperationCode = ProductStoreCode
   | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable"
   | "target_not_enrolled" | "target_unreadable" | "runner_missing" | "bootstrap_unverified"
-  | "envelope_missing" | "handoff_unavailable";
+  | "envelope_missing" | "handoff_unavailable" | "task_stale";
 export type ProductPlanOperationResult =
   | { ok: true; value: { observation: ProductPlanObservation; replayed: boolean }; code?: never }
   | { ok: false; code: ProductPlanOperationCode; value?: never };
@@ -214,7 +216,7 @@ export interface ProductPlanOperationOptions {
   /** The core ledger the gateway's `ratify.cli_*` rows and the native plan run's own rows land in. */
   ledgerPath?: string;
   /** The verified managed checkout of the target repository, or `undefined` when it is not there. */
-  checkout: (repository: PlanRepository) => string | undefined;
+  checkout: (repository: PlanRepository, targetHead: string) => string | undefined | Promise<string | undefined>;
   text?: GhText;
   clock?: Clock;
   isAlive?: (pid: number) => boolean;
@@ -252,6 +254,23 @@ async function serializedJournal<T>(path: string, work: () => Promise<T>): Promi
 
 class Fault extends RmdError {
   constructor(readonly code: ProductPlanOperationCode) { super("usage", GENERIC_EXIT_CODE, `product plan operation: ${code}`); }
+}
+
+/** Verify the default checkout before freezing a new command; replay never resolves or retargets it. */
+export async function verifyProductPlanCheckout(checkout: string, repository: PlanRepository, targetHead: string): Promise<string> {
+  try {
+    const read = (args: string[]) => hostWorktreeGitAsync(checkout, args, { timeout: 20_000, maxBuffer: 64 * 1024 });
+    const identity = parseOwnerRepoFromRemoteUrl(await read(["config", "--get", "remote.origin.url"]));
+    if (!identity) throw new Fault("target_unreadable");
+    if (identity.owner.toLowerCase() !== repository.owner.toLowerCase() || identity.repo.toLowerCase() !== repository.name.toLowerCase())
+      throw new Fault("repository_conflict");
+    if (realpathSync((await read(["rev-parse", "--show-toplevel"])).trim()) !== realpathSync(checkout)) throw new Fault("target_unreadable");
+    if ((await read(["rev-parse", "HEAD"])).trim() !== targetHead) throw new Fault("task_stale");
+    return checkout;
+  } catch (error) {
+    if (error instanceof Fault) throw error;
+    throw Object.assign(new Fault("target_unreadable"), { cause: error });
+  }
 }
 const errno = (error: unknown, code: string) => (error as NodeJS.ErrnoException | undefined)?.code === code;
 const processAlive = (pid: number) => {
@@ -365,7 +384,7 @@ export class ProductPlanOperationService {
         journal = this.bind(paths, journal, requestKey, { operationId: reusable.operationId, payloadDigest });
       } else {
         if (Object.keys(journal.operations).length >= PRODUCT_PLAN_OPERATION_LIMITS.operations) throw new Fault("capacity");
-        const checkout = this.options.checkout(subject);
+        const checkout = await this.options.checkout(subject, head);
         if (checkout === undefined || !isAbsolute(checkout)) throw new Fault("target_unreadable");
         const mode = await this.planMode(subject, head);
         const planEvidenceId = `pplan-${operationId.slice(0, 24)}`;
