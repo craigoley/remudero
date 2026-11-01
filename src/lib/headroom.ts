@@ -240,6 +240,12 @@ export function usageSnapshotFromSdk(reading: SdkUsageReading | undefined): Usag
   const sessionPct = sdkPercent(limits.five_hour);
   if (sessionPct === undefined) return undefined;
 
+  const weekly = sdkWeeklyWindows(limits);
+  return { billingMode: sdkBillingMode(reading), session: { percentUsed: sessionPct, resetsAt: sdkReset(limits.five_hour) }, weekly };
+}
+
+/** The weekly windows of one SDK reading: the all-models `seven_day` window and every labelled model window. */
+function sdkWeeklyWindows(limits: NonNullable<SdkUsageReading["rate_limits"]>): WeeklyWindow[] {
   const weekly: WeeklyWindow[] = [];
   const allModelsPct = sdkPercent(limits.seven_day);
   if (allModelsPct !== undefined) {
@@ -254,15 +260,41 @@ export function usageSnapshotFromSdk(reading: SdkUsageReading | undefined): Usag
     if (!label) continue; // an unlabelled model window cannot be attributed; omit it
     weekly.push({ label, percentUsed: pct, resetsAt: sdkReset(m) });
   }
+  return weekly;
+}
 
-  const billingMode: BillingMode =
-    typeof reading.subscription_type === "string" && reading.subscription_type.length > 0
-      ? "subscription"
-      : reading.subscription_type === null
-        ? "api"
-        : "unknown";
+function sdkBillingMode(reading: SdkUsageReading): BillingMode {
+  return typeof reading.subscription_type === "string" && reading.subscription_type.length > 0
+    ? "subscription"
+    : reading.subscription_type === null
+      ? "api"
+      : "unknown";
+}
 
-  return { billingMode, session: { percentUsed: sessionPct, resetsAt: sdkReset(limits.five_hour) }, weekly };
+/** W1-T11072: why an SDK reading is not a full snapshot, one name per case instead of one shared "unreadable". */
+export type SdkUsageEmptyCase = "no-reading" | "rate-limits-unavailable" | "no-rate-limits" | "no-usable-window";
+
+/** W1-T11072: a reading with its session window, a reading with weekly windows only, or which empty case it is. */
+export type SdkUsageCase =
+  | { kind: "session"; snapshot: UsageSnapshot }
+  | { kind: "weekly-only"; weekly: WeeklyWindow[]; billingMode: BillingMode }
+  | { kind: SdkUsageEmptyCase };
+
+/**
+ * W1-T11072 — CLASSIFY A READING FOR PROVIDER ROUTING, without weakening {@link usageSnapshotFromSdk}'s law. Since
+ * 2026-10-31 the fleet account's readings carry `five_hour: null` beside a readable `seven_day` (3% used on 11-01), so
+ * every one was "not a snapshot" and the router excluded Claude for days. The governor keeps refusing such a reading
+ * (no session window is ever invented); routing may use its weekly windows, which are real numbers the server sent.
+ */
+export function sdkUsageReadingCase(reading: SdkUsageReading | undefined): SdkUsageCase {
+  if (!reading) return { kind: "no-reading" };
+  if (reading.rate_limits_available === false) return { kind: "rate-limits-unavailable" };
+  const limits = reading.rate_limits;
+  if (!limits) return { kind: "no-rate-limits" };
+  const snapshot = usageSnapshotFromSdk(reading);
+  if (snapshot) return { kind: "session", snapshot };
+  const weekly = sdkWeeklyWindows(limits);
+  return weekly.length > 0 ? { kind: "weekly-only", weekly, billingMode: sdkBillingMode(reading) } : { kind: "no-usable-window" };
 }
 
 export const HEADROOM_LIMIT_PCT = 95;

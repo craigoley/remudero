@@ -16,9 +16,10 @@ const { countCommentLines } = await import(COMMENT_LOAD_SCRIPT) as {
 
 // Comment baseline at 3b28ef9e3, before compression: 2,018 lines (the filing measured 2,008).
 // Fingerprint token kinds, raw literal contents and preceding line breaks (ASI), including types.
-// W1-T9855's reviewed root-provisioning and refusal edits changed the executable fingerprint.
+// W1-T9855's reviewed root-provisioning and refusal edits changed the executable fingerprint, and W1-T11072's
+// capacity call (claudeCapacityFromUsageCase over sdkUsageReadingCase) changed it again.
 // Intentional future code edits must review this hash before updating it.
-const REVIEWED_TOKENS_SHA256 = "a736fd2c4405b38979a029cef1b69f3658d622b60d4f73c0bf7ab60caa79de40";
+const REVIEWED_TOKENS_SHA256 = "ff72a6d82e24656ed483ac1d6b73334692e12e5baaa586a8a619468a56729f25";
 const BEFORE_COMMENT_LINES = 2018;
 
 function executableTokens(source: string): Array<[SyntaxKind, string, boolean]> {

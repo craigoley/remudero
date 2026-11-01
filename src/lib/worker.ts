@@ -60,7 +60,7 @@ import {
 } from "./config.js";
 import { assertModelAllowed } from "./model-gate.js";
 import { chooseDraftDeployment, readDraftStats, recordDraftRouting, type DraftStats, type DraftChoice } from "./draft-routing.js";
-import { usageSnapshotFromSdk } from "./headroom.js";
+import { sdkUsageReadingCase } from "./headroom.js";
 import {
   detectCompactionEvents,
   detectCompactionFailures,
@@ -157,6 +157,7 @@ import {
   abandonProviderWindowMeasurement,
   beginProviderWindowMeasurement,
   claudeCapacityFromUsage,
+  claudeCapacityFromUsageCase,
   finishProviderWindowMeasurement,
   providerEligibility,
   readCodexCapacity,
@@ -1944,8 +1945,8 @@ export async function readClaudeProviderCapacity(
       return value;
     }
     try {
-      const value = claudeCapacityFromUsage(
-        usageSnapshotFromSdk(await method.call(session) as never),
+      const value = claudeCapacityFromUsageCase(
+        sdkUsageReadingCase(await method.call(session) as never),
         (deps.accountLabel ?? readClaudeAccountLabel)(),
       );
       claudeCapacityCache = { at: now(), value };
