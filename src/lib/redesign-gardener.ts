@@ -388,10 +388,6 @@ export function redesignGardenSpec(
     classes: REDESIGN_CLASSES,
     review: { amend: "a task amendment is the Architect's judgement call; close this PR to decline it." },
     landingRefusal: backlogLandingGuard(deps),
-    // W1-T11069: the due check runs on the daemon's own loop, so it reads no ledger. Walking seven days of the ledger
-    // union here (redesignCandidates) held the loop for 60-180 s at a time on 2026-10-31/11-01 and starved its token
-    // refresh; the candidate walk runs in the pass itself, off the loop. The plan's mtimes and the hourly ledger bucket
-    // are what the backlog garden keys on, and a hold younger than REDESIGN_AFTER_MS (1 h) is never asked about anyway.
     cheapFingerprint: () => `${planCheapFingerprint(deps.repoRoot, deps.stateDir)}:${gardenLedgerBucket(sources.clock)}`,
     inventory: () => { throw new Error("the redesign Architect answers asynchronously: drive it with runGardenAsync"); },
     inventoryAsync: () => redesignInventory(sources, deps),
