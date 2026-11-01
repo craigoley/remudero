@@ -1,0 +1,82 @@
+id: fb-1793537475749-f15f01
+ts: 2026-11-01T12:51:15.750Z
+raw: >-
+  Wire the serving Console product-plan gateway to its existing owned
+  fresh-source runner. This is a distinct prerequisite to the managed target
+  checkout resolution already captured as fb-1793450808980-59a4be (intake
+  PR15944 merged8185b570); do not duplicate that resolver task or interpret
+  intake publication as an implementation.
+
+
+  OBSERVED 2026-11-01: supported in-app browser control is restored. The
+  signed-in existing Wreckterra product remains revision6, connected to the
+  correct public repository. Root resumed its exact saved plan command once. The
+  actual visible response was: The plan handoff is not available for this
+  product. The saved original payload remains pending reconciliation and build
+  remains unavailable. Core's positive product read still finds one owner record
+  and no plan-operation journal. No gameplay worker, plan CLI substitute, or
+  auth impersonation was used.
+
+
+  Serving generation A9ddc4d59 and B43a6d266 both compose ratify:
+  ratifyCliGateway(instancePlan.root, join(config.root, logs)) without the third
+  owned-tree argument. In panel-graph.ts that default intentionally omits
+  productPlan; it exists only with the owned fresh-tree port.
+  ProductPlanOperationService.propose refuses handoff_unavailable before
+  provider/checkout/journaling when gateway.productPlan is absent. The observed
+  Console text maps specifically to handoff_unavailable. Existing
+  fleetRatifyGateway/freshOriginMainTreeRunner already supplies the native owned
+  runner elsewhere; preserve its current ownership, freshness, causal, ledger
+  and admission behavior rather than adding an unowned detached spawn or
+  changing the refusal.
+
+
+  Current remote Main43a6d26605bb994a41ce6f96615023d86b6d1999. Pre-filing read
+  checked all31 open Core PR heads against their own merge-base and Main,
+  with510 remote heads as the corpus control; no own-diff change to
+  ratifyCliGateway/productPlan/planGateway/default checkout subject was found.
+  Both serving source trees were inspected directly, no gateway action was
+  invoked in diagnostics. Browser screenshot and native receipts remain private
+  local evidence, not a claim of a passing regression.
+
+
+  Bounded native proposal requested: compose the actual served product route
+  with the existing owned fresh-source gateway; prove via production-default
+  composition, without injecting planGateway or a fake productPlan method, that
+  the typed product-plan handoff exists and retains the normal owned-runner
+  guards. Prove absent owned runner refuses without journal/model, and repeated
+  identical saved-command recovery does not spawn twice. Keep the separately
+  tracked resolver correction as a prerequisite before claiming full proposal
+  success. Preserve native plan review, inherited product30USD/concurrency1, all
+  global limits, required real signed-in Console C4 first gameplay launch and
+  downstream deployment/device holds.
+
+
+  Capture/proposal only. No implementation model, new spending limit, service
+  restart, access change, shared-worker stop or gate override is requested. Any
+  implementation task must stay held until ordinary filing review, required
+  operator approval and native admission complete. Two earlier Root planning CLI
+  requests for the related resolver stopped before any model: SDK detached
+  freshness refusal, then clean Mac operator missing
+  daemon-install/settings/worker.json. Preserve those failures and all original
+  claims; do not fabricate a running or qualified planner.
+
+
+  CORRECTION 2026-11-01: the bare instancePlan ratify call cited earlier belongs
+  to inboxActionCliCommand. The actual served path is serveCommand leaving
+  panelGraph.ratify unset, lib/serve.ts defaulting it with two arguments, and
+  product routes receiving that default. Serving A9ddc4d59 and B695b8f30 were
+  read directly. Native no_task PR16025 cites the intended W1-T10823 design;
+  Root requested changes because it does not supply the omitted production
+  wiring. This approved bounded follow-up preserves that decision and the
+  separate W1-T11078 resolver prerequisite.
+attachments: []
+origin: cli
+status: proposed
+reply_to: null
+proposal_pr: https://github.com/craigoley/remudero/pull/16047
+summary: null
+expansion: null
+submission_key: 487a077d-7e6d-4713-9fe4-57cd06a21541
+thread_id: null
+answered_by: null
