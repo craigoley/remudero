@@ -62,10 +62,11 @@ raw: >-
   claims; do not fabricate a running or qualified planner.
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: 487a077d-7e6d-4713-9fe4-57cd06a21541
 thread_id: null
+answered_by: null
