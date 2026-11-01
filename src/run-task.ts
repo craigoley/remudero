@@ -2904,7 +2904,7 @@ import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./l
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { withManagedGardenTokenRefresh } from "./lib/managed-garden-token.js";
 import { runChildCredentialSocket } from "./lib/secret-boundary.js";
-import { automaticBranchReapStateFileName, branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, pruneDeletableBranches, pruneDeletableBranchesSteps, readAutomaticBranchReapState, readNamedInSource, readNamedInSourceSteps, readRemoteBranchTips, readRemoteBranchTipsSteps, readTipInMainMembership, readTipInMainMembershipSteps, remoteBranchNames, remoteBranchNamesSteps, tipInMainFor, writeAutomaticBranchReapState, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
+import { automaticBranchReapStateFileName, branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, planStaleHoldArchive, readDispatchClaimTaskIdsSteps, pruneDeletableBranches, pruneDeletableBranchesSteps, readAutomaticBranchReapState, readNamedInSource, readNamedInSourceSteps, readRemoteBranchTips, readRemoteBranchTipsSteps, readTipInMainMembership, readTipInMainMembershipSteps, remoteBranchNames, remoteBranchNamesSteps, tipInMainFor, writeAutomaticBranchReapState, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
 // initialiser (`resolveRepoRoot`) its own declaration (`repoRoot`) depends on — a move, never
 // an interface change. `resolveRepoRoot` is re-exported below so every existing import path
@@ -14015,6 +14015,8 @@ export type ReapBranchesOpts = {
   /** Names why a pass exits non-zero (drift, a refused or failed prune), so a caller's ledger row
    *  reports the cause rather than only the code. */
   onExitReason?: (reason: string) => void;
+  /** The clock the repo-hygiene shadow ages held branches against; the system clock by default. */
+  clock?: Pick<Clock, "now">;
 };
 
 export function reapBranchesCommand(rest: string[], opts: ReapBranchesOpts = {}): number {
@@ -14060,18 +14062,22 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   // candidate corpus, then read merge credit ONCE for the whole command. This enrichment can
   // change only `plan.reasons`: both named-task outcomes remain held by planBranchReap.
   const namedTaskByBranch = new Map<string, string>();
+  const runTaskByBranch = new Map<string, string>();
   let creditedTaskIds = new Set<string>();
   let creditReadSucceeded = false;
   try {
     const taskPlan = opts.plan?.() ?? (opts.loadPlan ?? loadPlan)(join(checkoutRoot, "plan", "tasks.yaml"));
     const candidates = taskPlan.tasks.map((task) => task.id);
+    const planIds = new Set(candidates);
     for (const name of names) {
       const taskId = taskIdFromSlugBranch(name, candidates);
       if (taskId !== undefined) namedTaskByBranch.set(name, taskId);
+      const runTask = taskIdFromRunBranch(name);
+      if (runTask !== undefined && planIds.has(runTask)) runTaskByBranch.set(name, runTask);
     }
-    // No resolved slug means there is no credit question to ask. Keeping this lazy avoids a
+    // No resolved slug or run task means there is no credit question to ask. Keeping this lazy avoids a
     // bounded archive walk on repositories whose branch corpus cannot use the answer.
-    if (namedTaskByBranch.size > 0) {
+    if (namedTaskByBranch.size > 0 || runTaskByBranch.size > 0) {
       let creditPath = opts.creditLedgerPath ?? opts.ledgerPath;
       if (creditPath === undefined) {
         try {
@@ -14316,6 +14322,29 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
       kept_reversible_close_branches: keptReversibleClose,
       kept_handoff_receipt_branches: keptHandoffReceipts,
       reasons: plan.reasons,
+    });
+  }
+
+  // REPO HYGIENE, SHADOW (operator ruling 2026-11-01): name the held run branches stale enough to archive
+  // and reap, and ledger them. Nothing is deleted on this path; planBranchReap's hold stands. One claim read
+  // for the whole corpus, and a failed read names nothing (planStaleHoldArchive fails closed on undefined).
+  const claimedTaskIds = yield* readDispatchClaimTaskIdsSteps(exec);
+  const staleHolds = planStaleHoldArchive({ facts, reasons: plan.reasons, tips: remoteTips,
+    nowMs: (opts.clock ?? systemClock).now(), claimedTaskIds, runTaskByBranch,
+    ...(creditReadSucceeded ? { creditedTaskIds } : {}) });
+  const staleCount = (reason: string) => staleHolds.filter((c) => c.reason === reason).length;
+  print(`stale:     ${staleHolds.length}  held run branches an archive-then-reap would remove (shadow — nothing deleted)`);
+  if (opts.ledgerPath) {
+    appendLedger(opts.ledgerPath, {
+      run_id: opts.runId ?? `REAP-${Date.now()}`,
+      task_id: "REAP",
+      step: "branch_reap.hygiene_shadow",
+      mode: "shadow",
+      claims_read: claimedTaskIds !== undefined,
+      would_reap: staleHolds.length,
+      credited_sibling_stale: staleCount("credited_sibling_stale"),
+      orphan_unshipped_stale: staleCount("orphan_unshipped_stale"),
+      candidates: staleHolds.map((c) => ({ name: c.name, sha: c.sha, reason: c.reason, age_days: Math.floor(c.ageMs / 86_400_000) })),
     });
   }
 
@@ -32451,6 +32480,7 @@ function* automaticBranchReapSteps(
       quiet: true,
       runId,
       creditLedgerPath: ledgerPath,
+      ...(opts.clock ? { clock: opts.clock } : {}),
       // W1-T4476 design (iii)/(iv): the cache this state carries in from the LAST pass, and the
       // update this pass hands back — `state` is the one object the caller (buildSweepHook)
       // persists to disk right after this function returns, so the cache and the cadence fields
