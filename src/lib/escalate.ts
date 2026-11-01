@@ -992,7 +992,7 @@ export function configureEscalationTriage(factory: typeof productionTriage): voi
  *  return the number. Every current `escalate()` caller embeds one in `summary` or `detail`, so
  *  dedup needs no new field: the CONTENT already carries it. `undefined` means no PR is named, and
  *  those never participate in dedup. */
-function extractPrRef(text: string): string | undefined {
+export function extractPrRef(text: string): string | undefined {
   return (
     /\/pull\/(\d+)\b/.exec(text)?.[1] ?? /\bPR\s*#(\d+)\b/i.exec(text)?.[1] ?? /\bPR\s+(\d+)\b/i.exec(text)?.[1]
   );
