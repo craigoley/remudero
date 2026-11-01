@@ -1,0 +1,91 @@
+- id: W1-T11085
+  title: The served product plan action receives the existing owned fresh-source gateway
+  repo: remudero
+  depends_on: [W1-T10823, W1-T11078]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30
+  risk: high
+  band_meaning: blast-radius
+  origin: feedback#fb-1793537475749-f15f01
+  plan_refs: ["§7B", W1-T10823, W1-T11078]
+  files:
+    - src/run-task.ts
+    - src/lib/serve.ts
+    - test/run-task.test.ts
+    - test/serve.test.ts
+    - test/console-api/serve/product-routes.test.ts
+  status: queued
+  dispatch_hold: true
+  attempts: 0
+  rationale: >-
+    The saved signed-in Wreckterra plan command actually returned handoff_unavailable and created
+    no plan operation. Both serving A9ddc4d59 and B695b8f30 leave panelGraph.ratify unset in
+    serveCommand and default it in lib/serve.ts to ratifyCliGateway with only root and logDir.
+    The product route receives that same handle as planGateway. panel-graph.ts intentionally
+    exposes productPlan only when its third owned-tree argument exists. W1-T10823 design (2)
+    intended this handoff but its merged source did not supply the runner in production assembly.
+    Its intended design is not proof of that omitted behavior. Native triage produced no_task
+    PR16025 citing that design; Root requested changes with the actual default-composition trace.
+    Preserve that native decision and its metadata proof separately from this follow-up.
+    W1-T11078 is the distinct later managed-target resolver repair, filed by merged PR16024.
+    It supplies no productPlan gateway. This follow-up depends on its actual implementation merge
+    to avoid concurrent edits to shared composition and route tests. Human
+    call_bb5e78feba854d4294f26976463a5b79 approved exactly these five files and a USD30 task cap
+    after normal filing review, required checks and protected merge. Global limits are unchanged.
+    A refreshed open-head source and changed-task subject audit found only the resolver proposal;
+    refresh it again before publication and dispatch. No historical task credit is rewritten.
+  design: |
+    Reuse fleetRatifyGateway/freshOriginMainTreeRunner and the maintained owned worktree factory,
+    dependency attachment, clean source, identity, lease, child lifetime, causal scope and ledger
+    behavior. Correct the actual serveCommand/server composition so its real product routes
+    receive the typed owned public productPlan port. Keep library code independent of CLI
+    initializers. Use one maintained construction path; do not add another launcher, clone scan,
+    hard-coded host directory, detached fallback or persistent service. Preserve correct control,
+    instance, source and target roots. Check the production worktree/log/state locations rather
+    than assuming an immutable generation's sibling is a managed target or writable worktree.
+
+    Existing unowned server assembly must continue to make productPlan unavailable explicitly.
+    Preserve approve/reframe compatibility and update the old CLI wiring assertion if the owned
+    gateway now arrives from the CLI. Do not weaken the refusal or fabricate successful status.
+    Keep product ownership, verification, operation idempotency and product/global budget gates.
+    A failed fresh-source handoff remains a failed/unknown operation under the existing journal;
+    it is not evidence of success and is not silently retried.
+
+    Exercise the production assembly without injecting planGateway or a fake productPlan method.
+    Use local Git repositories, configured fixture identity, a real child fixture executable and
+    the existing owned runner/ledger path. Observe actual cli_started/exited rows and source/head
+    provenance. No test invokes a model or remote side effect. Cover no owned runner, unavailable
+    fresh source and repeated identical saved-command recovery with at most one actual child.
+    Keep each catch/refusal observable; fixture-only fake services cannot substitute for testing
+    the default seam. New imports use package aliases and the shared repository-root helper.
+
+    Keep this task dispatch-held until its filing review, required checks, protected merge and
+    approved operator release are recorded. Approval is scoped to five files and USD30, not a new
+    implementation retry allowance or higher global limit. Normal ownership, selector, admission,
+    TDD, review, hosted CI and protected merge remain required. Do not revive completed C3 source
+    branches, edit other workers' claims, change access, restart services or stop shared workers.
+    Source tests, deployment adoption and signed-in operation results are separate evidence.
+    The first actual Wreckterra gameplay worker must still launch through signed-in Console C4;
+    no CLI substitute or physical-device claim is granted by this repair.
+  acceptance:
+    - claim: Production serve assembly supplies the typed owned product-plan gateway and retains actual fresh-source and child ledger provenance without an injected productPlan implementation
+      proof: "unit test: served product planning receives the owned gateway from production assembly"
+    - claim: Server assembly with no owned runner keeps productPlan unavailable and the real proposal route refuses before creating an operation or spending a model
+      proof: "unit test: served product planning refuses when no owned runner is available"
+    - claim: Unavailable or changed fresh source refuses through the normal owned runner with truthful terminal evidence and no detached fallback
+      proof: "unit test: served product planning retains fresh source refusal evidence"
+    - claim: Identical saved-command recovery preserves its operation and starts at most one real owned child through production composition
+      proof: "unit test: served product planning retains owned fresh-source child evidence on recovery"
+  falsifier: |
+    Restore the old unowned production composition in a disposable committed mutant: the real
+    production-default positive regression must fail. Restore the correct wiring and require
+    that named regression to pass with real test summaries at the exact qualified head.
+    Independently exercise the missing-runner and fresh-source refusal controls and count actual
+    fixture child starts during identical-command recovery. A source grep, an injected fake
+    productPlan method or a historical plan citation cannot qualify these behavior claims.
+  note: >-
+    Approved bounded follow-up design, implementation held pending ordinary filing gates and
+    recorded release. No gameplay, deployment or actual iPhone result is claimed.
