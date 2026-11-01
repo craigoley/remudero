@@ -1,0 +1,89 @@
+- id: W1-T11078
+  title: Product plan proposals resolve the verified managed target independently of serving source
+  repo: remudero
+  depends_on: [W1-T10823]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30
+  risk: high
+  band_meaning: blast-radius
+  origin: feedback#fb-1793450808980-59a4be
+  plan_refs: ["§7B", W1-T10823, W1-T10799, W1-T10865]
+  files:
+    - src/lib/product-case.ts
+    - src/lib/product-plan-operation.ts
+    - src/lib/serve.ts
+    - test/plan/product-case-managed-checkout.test.ts
+    - test/console-api/serve/product-routes.test.ts
+  status: queued
+  dispatch_hold: true
+  attempts: 0
+  rationale: >-
+    The captured feedback reports both serving generations resolving a nonexistent sibling
+    /home/node/rmd-serve-gens/wreckterra instead of the maintained managed target. This triage
+    independently confirms the source defect: ProductCaseService defaults to
+    join(dirname(options.repoRoot), repository.name), checks only for .git existence, and serve
+    supplies deps.panelGraph.root as repoRoot while supplying deps.fleetControlRoot as root.
+    ProductPlanOperationService refuses an undefined checkout before committing its operation
+    journal. These source facts establish the prerequisite defect, not the exact earlier HTTP
+    response or live runtime state. W1-T10823 specifies a verified managed target but does not
+    specifically file this generation-independent default resolver repair. W1-T10865 owns run
+    receipts; W1-T10925 owns operator CLI plan resolution, not the product-case default.
+    MASTER-PLAN.md, both task source forms, LEARNINGS.md and DECISIONS.md were searched for this
+    subject. No separate repair was found. The feedback reports a 21-open-head subject sweep;
+    this headless pass has not independently refreshed that remote inventory. Refresh the
+    complete open-head subject audit during ordinary filing review before implementation.
+  design: |
+    Resolve the production default checkout through the existing canonical control-root and
+    instance configuration, reusing maintained native target/instance resolution. Keep the
+    serving source root distinct from the target checkout. Inspect product-build.ts's native
+    target resolution and instance-gateway.ts's instanceStateRoot layout before choosing the
+    composition; do not import CLI initializers or invent another registry or hard-coded host path.
+    Pass any required existing configuration through serve's maintained composition. Preserve
+    supported native managed targets and registered instance targets; an unreadable or ambiguous
+    resolution refuses rather than guessing a sibling, scanning directories or creating a clone.
+
+    Before a new operation journal commit or native handoff, verify the resolved Git checkout
+    matches the saved verified repository identity and frozen target head using maintained
+    repository identity semantics. A .git entry alone is insufficient. Refuse absent, unreadable,
+    foreign or stale targets with truthful existing failure codes where applicable. Preserve
+    already-journaled replay semantics and the frozen command; do not silently retarget or restart
+    an existing operation. Cover supported Git directory and worktree .git-file layouts.
+
+    Add a real filesystem/Git fixture exercising ProductCaseService without injecting
+    planCheckout. Put the immutable generation source and the managed target under separate
+    fixture roots; make only the actual managed checkout exist, initialize its Git identity and
+    configure fixture-local Git author identity. Use real local Git reads for checkout validation.
+    No remote service or model spend is needed. Verify the existing saved-command path selects
+    the managed target and retry/reload with the same command starts no second plan. Missing and
+    mismatched targets create no operation journal record and invoke no handoff. Test a deceptive
+    existing sibling checkout so fallback cannot mask the defect. Confirm test placement with
+    rmd test-place on final imports, using package aliases and the shared root helper as required.
+    Exercise the real served default composition in the existing product route suite as well.
+
+    Preserve product, brief, source, ownership, actor, plan-review, resource and idempotency gates.
+    This proposal grants no implementation run, retry, budget increase, access/configuration
+    change, restart, worker stop or hold release. Keep dispatch_hold true until ordinary filing
+    review and explicit operator approval/admission authorize release. Do not reopen or hand-push
+    completed C3 or Console branches. Global limits and downstream Wreckterra holds remain;
+    the first real gameplay launch still requires the signed-in Console C4 flow. Fixture success
+    supplies no live product or gameplay acceptance credit.
+  acceptance:
+    - claim: The default service resolves the existing managed target with a separate immutable generation source, preserving native and instance target resolution and supported Git layouts
+      proof: "unit test: managed product checkout resolves outside an immutable serving generation"
+    - claim: Missing, unreadable, identity-mismatched and stale targets refuse before an operation journal commit or handoff, including a deceptive sibling checkout
+      proof: "unit test: managed product checkout refuses missing unreadable foreign and stale repositories before journaling"
+    - claim: Retrying and reloading the same saved command preserves its durable command and starts at most one native plan
+      proof: "unit test: managed product checkout replays a saved command without a second native plan"
+    - claim: The served product proposal uses the corrected default resolution through authenticated route composition
+      proof: "unit test: served product proposal uses the verified managed checkout default"
+  falsifier: |
+    Restore the old sibling resolver: the separate-generation positive fixture must fail.
+    Independently remove checkout identity validation: the deceptive foreign-checkout fixture
+    must fail. Remove replay reuse: the retry fixture must observe a second handoff and fail.
+    Record real test summaries for each removed guard and the restored implementation. Keep
+    all mutations confined to disposable fixtures and restore the implementation before finishing.
+  note: >-
+    Held capture/proposal only. High risk reflects choosing the repository root for a spending
+    native plan handoff; verify:auto covers local fixtures and grants no live launch authority.
