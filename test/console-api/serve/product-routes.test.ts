@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { stringify } from "yaml";
 import { productCasePlanText } from "#src/lib/product-case.js";
 import { REVIEWER_IDENTITY_ENV } from "#src/lib/review.js";
@@ -900,8 +902,20 @@ test("W1-T10618: the served product case operation matches the authenticated API
   assert.ok(!shim.calls().some((call) => call.includes("-X POST")));
 });
 
-test("W1-T10823: the served plan proposal reaches the maintained native handoff", async (t) => {
-  const head = "d".repeat(40);
+test("W1-T10823: the served plan proposal reaches the maintained native handoff; served product proposal uses the verified managed checkout default", async (t) => {
+  const root = ownedFixtureDir(t, "product-plan-http").dir;
+  const repoRoot = join(root, "immutable-generation", "remudero");
+  const stateBase = join(root, "instances");
+  const checkout = join(stateBase, "arcade", "repos", "wreckterra");
+  mkdirSync(join(stateBase, "arcade", "repos"), { recursive: true });
+  renameSync(gitRepo({ scope: t }).dir, checkout);
+  mkdirSync(join(stateBase, "arcade", "state"), { recursive: true });
+  const git = (...args: string[]) => execFileSync("git", ["-C", checkout, ...args], { encoding: "utf8",
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("config", "user.name", "Product route fixture");
+  git("config", "user.email", "product-route@example.test");
+  git("remote", "add", "origin", "https://github.com/craigoley/wreckterra.git");
+  const head = git("rev-parse", "HEAD");
   const shim = ghShim([
     { when: "commits/main", stdout: JSON.stringify({ sha: head }) },
     { when: `contents?ref=${head}`, stdout: JSON.stringify([{ name: "src" }]) },
@@ -912,12 +926,10 @@ test("W1-T10823: the served plan proposal reaches the maintained native handoff"
   const originalPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${originalPath}`;
   t.after(() => { process.env.PATH = originalPath; rmSync(shim.dir, { recursive: true, force: true }); });
-  const root = ownedFixtureDir(t, "product-plan-http").dir;
-  const repoRoot = join(root, "repos", "remudero");
-  const checkout = join(root, "repos", "wreckterra");
-  mkdirSync(join(checkout, ".git"), { recursive: true });
   mkdirSync(join(repoRoot, ".remudero"), { recursive: true });
   writeFileSync(join(repoRoot, ".remudero/managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
+  const registryPath = join(repoRoot, ".remudero", "daemon-instances.yaml");
+  writeFileSync(registryPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n  arcade:\n    github_repo: craigoley/wreckterra\n");
   // The real gateway spawns this controlled planner at its argv/ledger boundary. Its native-shaped rows retain the
   // complete brief and mode; process identity alone is not the production correlation rule.
   const tree = join(root, "fresh-tree");
@@ -945,7 +957,7 @@ setTimeout(() => {
   const gateway = ratifyCliGateway(repoRoot, join(root, "logs"), { ledgerPath, freshTree: (action) => action({ path: tree, sha: "f".repeat(40) }) });
   const panelGraph = { root: repoRoot, planPath: join(root, "plan/tasks.yaml"), ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: gateway };
   const products = assembled(root);
-  const mounted = assembled(root, "/v1/products/case", { panelGraph });
+  const mounted = assembled(root, "/v1/products/case", { panelGraph, instances: { registryPath, stateBase } });
   const app = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes: [...products, ...mounted] });
   await new Promise<void>((resolve) => app.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise<void>((resolve, reject) => app.close((error) => error ? reject(error) : resolve())));
@@ -975,7 +987,7 @@ setTimeout(() => {
   assert.equal(readFileSync(ledgerPath, "utf8"), "", "no refusal reached the gateway");
 
   const pending = await send("alice", propose());
-  assert.equal(pending.status, 200);
+  assert.equal(pending.status, 200, JSON.stringify(pending.body));
   assert.equal(pending.body.planOperation?.state, "pending", "the response is a truthful pending observation, not a wait for the child");
   assert.equal(pending.body.planOperation?.mode, "clarify");
   assert.equal(pending.body.planOperation?.targetHead, head);

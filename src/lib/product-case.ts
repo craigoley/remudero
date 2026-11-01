@@ -1,15 +1,14 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { z } from "zod";
 import { systemClock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import {
-  bootstrapConfirmed, ghProductBuildTarget, productBuildCommandSchema, ProductBuildService,
+  bootstrapConfirmed, ghProductBuildTarget, nativeTargetAdmission, registryDaemonRoot, productBuildCommandSchema, ProductBuildService,
   type ProductBuildCode, type ProductBuildOptions, type ProductBuildReceipt, type ProductBuildExecution,
 } from "./product-build.js";
 import {
-  productCasePlanText, productPlanAssociationReferences, productPlanProposalSchema, ProductPlanOperationService, verifyProductPlanEvidence,
+  productCasePlanText, productPlanAssociationReferences, productPlanProposalSchema, ProductPlanOperationService, verifyProductPlanCheckout, verifyProductPlanEvidence,
   type PlanHandoffPort, type PlanRepository, type ProductPlanObservation, type ProductPlanOperationCode,
 } from "./product-plan-operation.js";
 import { ProductIntentStore } from "./product-intent-store.js";
@@ -69,8 +68,8 @@ export interface ProductCaseOptions extends ProductBuildOptions {
   planGateway?: PlanHandoffPort;
   /** The core ledger the hand-off's `ratify.cli_*` rows and the native plan run's rows land in. */
   planLedgerPath?: string;
-  /** The verified managed checkout of a target repository; defaults to its sibling `repos/<name>` clone. */
-  planCheckout?: (repository: PlanRepository) => string | undefined;
+  /** Trusted checkout port; the default resolves and verifies the target under its owning control root. */
+  planCheckout?: (repository: PlanRepository, targetHead: string) => string | undefined | Promise<string | undefined>;
   planIsAlive?: (pid: number) => boolean;
 }
 export type ProductCaseResult = { ok: true; value: ProductCaseReply; code?: never } | { ok: false; code: ProductCaseCode; value?: never };
@@ -98,10 +97,18 @@ export class ProductCaseService {
     this.store = options.store ?? new ProductIntentStore({ root: options.root });
     this.builds = new ProductBuildService({ ...options, store: this.store });
     this.repositories = new ProductRepositoryService({ root: options.root });
-    const checkout = (repository: PlanRepository) => {
+    const checkout = async (repository: PlanRepository, targetHead: string) => {
       if (options.repoRoot === undefined) return undefined;
-      const path = join(dirname(options.repoRoot), repository.name);
-      return existsSync(join(path, ".git")) ? path : undefined;
+      const instances = { ...options.instances, repoRoot: options.repoRoot };
+      const admission = nativeTargetAdmission(repository.name, instances);
+      let root: string | undefined;
+      if (admission.state === "native" && admission.owner.toLowerCase() === repository.owner.toLowerCase()) root = options.root;
+      else if (admission.state === "own_instance") {
+        const daemon = registryDaemonRoot(options.root, instances)(repository);
+        if (daemon.state === "found" && daemon.instance === admission.instance) root = daemon.root;
+      }
+      if (root === undefined) return undefined;
+      return verifyProductPlanCheckout(join(root, "repos", repository.name), repository, targetHead);
     };
     this.plans = new ProductPlanOperationService({ root: options.root, store: this.store, provider: options.provider ?? ghProductRepositoryProvider(),
       target: options.target ?? ghProductBuildTarget({ repoRoot: options.repoRoot, text: options.planText }), bootstrapConfirmed, gateway: options.planGateway,
