@@ -864,12 +864,12 @@ export function planStaleHoldArchive(input: {
   return out;
 }
 
-/** The task ids holding a live dispatch claim, or `undefined` when the listing could not be read. */
-export function* readDispatchClaimTaskIdsSteps(exec: BranchReapExec): Steps<Set<string> | undefined> {
+/** The task ids holding a live dispatch claim, or the read's error: an unread listing is never an empty one. */
+export function* readDispatchClaimTaskIdsSteps(exec: BranchReapExec): Steps<{ ids: Set<string> } | { error: string }> {
   try {
-    return parseDispatchClaimTaskIds(yield* lsRemoteOriginSteps(exec, [], ["refs/rmd-dispatch/*"]));
-  } catch {
-    return undefined;
+    return { ids: parseDispatchClaimTaskIds(yield* lsRemoteOriginSteps(exec, [], ["refs/rmd-dispatch/*"])) };
+  } catch (err) {
+    return { error: String((err as Error)?.message ?? err) };
   }
 }
 

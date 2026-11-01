@@ -106,3 +106,10 @@ test("a reap pass ledgers the stale held run branch in shadow and deletes nothin
   assert.ok(!calls.some((c) => c.includes("--delete") || c.includes("update-ref")), "shadow deletes and archives nothing");
   assert.equal(pass("ff\trefs/rmd-dispatch/W1-T5\n").row?.would_reap, 0, "a live dispatch claim keeps the branch");
 });
+
+test("an unreadable dispatch-claim listing names nothing and ledgers why", async () => {
+  const { runStepsSync } = await import("#src/lib/git-push.js");
+  const { readDispatchClaimTaskIdsSteps } = await import("#src/lib/branch-reaper.js");
+  const read = runStepsSync(readDispatchClaimTaskIdsSteps(() => { throw new Error("origin unreachable"); }));
+  assert.deepEqual(read, { error: "origin unreachable" });
+});
