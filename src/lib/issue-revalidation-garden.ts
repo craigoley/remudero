@@ -279,6 +279,8 @@ export interface PriorVerdict {
    *  the newest one: a refresh is followed by `keep` rows, and reading only the newest row let a `keep`
    *  hide the refresh, so the pass after it refreshed again (#15114: 34 comments in 4 days). */
   lastRefreshAt?: string;
+  /** The newest earlier row whose convert ACTED: a `keep` after it must not let the next pass convert again. */
+  lastConvertAt?: string;
 }
 
 const OPERATOR_OWNED_CLASSES = new Set(["MANUAL", "GRILL"]);
@@ -354,7 +356,9 @@ export function decideAction(input: {
   }
   if (verdict.verdict === "convert-to-task") {
     if (operatorOwned) return refreshUnlessRecent(input.prior, input.nowMs, "operator-owned-class");
-    if (input.prior?.action === "convert" && input.prior.acted) return { action: "keep", guard: "refresh-not-due" };
+    if (input.prior?.lastConvertAt !== undefined || (input.prior?.action === "convert" && input.prior.acted)) {
+      return { action: "keep", guard: "refresh-not-due" };
+    }
     return { action: "convert" };
   }
   return refreshUnlessRecent(input.prior, input.nowMs);
@@ -658,14 +662,16 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
 export function priorVerdictsFromRows(rows: Iterable<Record<string, unknown>>): Map<number, PriorVerdict> {
   const out = new Map<number, PriorVerdict>();
   const refreshedAt = new Map<number, string>();
+  const convertedAt = new Map<number, string>();
   for (const r of rows) {
     if (r.step !== ISSUE_REVALIDATION_VERDICT_STEP) continue;
     const n = Number(r.issue_number);
     const at = String(r.ts ?? "");
     if (!Number.isSafeInteger(n) || !Number.isFinite(Date.parse(at))) continue;
-    if (r.action === "refresh" && r.acted === true) {
-      const last = refreshedAt.get(n);
-      if (last === undefined || Date.parse(last) < Date.parse(at)) refreshedAt.set(n, at);
+    for (const [action, seenAt] of [["refresh", refreshedAt], ["convert", convertedAt]] as const) {
+      if (r.action !== action || r.acted !== true) continue;
+      const last = seenAt.get(n);
+      if (last === undefined || Date.parse(last) < Date.parse(at)) seenAt.set(n, at);
     }
     const seen = out.get(n);
     if (seen !== undefined && Date.parse(seen.at) >= Date.parse(at)) continue;
@@ -679,6 +685,7 @@ export function priorVerdictsFromRows(rows: Iterable<Record<string, unknown>>): 
     });
   }
   for (const [n, lastRefreshAt] of refreshedAt) out.set(n, { ...out.get(n)!, lastRefreshAt });
+  for (const [n, lastConvertAt] of convertedAt) out.set(n, { ...out.get(n)!, lastConvertAt });
   return out;
 }
 

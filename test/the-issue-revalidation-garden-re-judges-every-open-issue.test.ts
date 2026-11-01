@@ -724,3 +724,17 @@ test("the run-task ports derive referents through the reconciler, load the plan 
   assert.deepEqual(spawned[0]!.tools, []);
   assert.equal(spawned[0]!.prompt, "the prompt");
 });
+
+test("a converted issue is never converted again, even after a keep row follows the conversion", () => {
+  const step = "issue_revalidation.verdict";
+  const rows = [
+    { step, issue_number: 9, ts: "2026-11-01T01:00:00.000Z", verdict: "convert-to-task", action: "convert", acted: true },
+    { step, issue_number: 9, ts: "2026-11-01T02:00:00.000Z", verdict: "convert-to-task", action: "keep", acted: false },
+  ];
+  const prior = priorVerdictsFromRows(rows).get(9);
+  assert.equal(prior?.action, "keep", "positive control: the newest row is the keep that hid the conversion");
+  assert.equal(prior?.lastConvertAt, "2026-11-01T01:00:00.000Z");
+  const decided = decideAction({ verdict: { verdict: "convert-to-task", reason: "names work" }, escalationClass: "BLOCKED",
+    operatorSpokeLast: false, prior, nowMs: Date.parse("2026-11-01T03:00:00.000Z") });
+  assert.deepEqual(decided, { action: "keep", guard: "refresh-not-due" });
+});
