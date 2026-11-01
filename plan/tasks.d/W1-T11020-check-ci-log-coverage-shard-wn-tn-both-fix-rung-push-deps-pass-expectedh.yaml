@@ -1,0 +1,51 @@
+- id: W1-T11020
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-shard:wn-tn-both-fix-rung-push-deps-pass-expectedheadsha-through-p cost 9 PR minute(s) across 1 round(s) on 1 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.35
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-shard:wn-tn-both-fix-rung-push-deps-pass-expectedheadsha-through-p"
+  files:
+    - .github/workflows/ci.yml
+    - test/gardeners/check-ci-log-coverage-shard-wn-tn-both-fix-rung-push-deps-pass-expectedh.test.ts
+  acceptance:
+    - claim: "a recorded check:ci-log:coverage-shard:wn-tn-both-fix-rung-push-deps-pass-expectedheadsha-through-p round, replayed through the real code path in .github/workflows/ci.yml, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T11020: CI friction c05f97df0b84cb82 is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-shard:wn-tn-both-fix-rung-push-deps-pass-expectedheadsha-through-p's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:coverage-shard:wn-tn-both-fix-rung-push-deps-pass-expectedheadsha-through-p cost 9 PR minute(s) (seven-day half-life) across 1 fix round(s) on 1 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/ci.yml: declares job coverage-ratchet for coverage-shard
+
+    RECENT ROUNDS (newest first):
+    - PR #14326 (https://github.com/craigoley/remudero/pull/14326) at 2026-10-26T04:29:49.420Z: ci-log round — coverage-shard (6/8): WN-TN: both fix-rung push deps pass expectedHeadSha through pushFixRound to gitPushRunBranch (grep-verifiable)
+        failing tests: W1-T2610: both fix-rung push deps pass expectedHeadSha through pushFixRound to gitPushRunBranch (grep-verifiable)
+        log excerpt:
+          | Test.run (node:internal/test_runner/test:1402:25)
+          |     async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+          |   ...
+          | RMD-TEST-FILE-DIAGNOSTIC {"diagnosticVersion":1,"attemptId":"4cdadbc4-010b-43ca-8e12-0b7f74f4d94f","sequence":4,"phase":"stream-ended","elapsedMs":6118.516332}
+          | test-judge: NODE --TEST RUN FAILED (status 1): # fail 1. 1/1 file(s) reported, # tests 9, # fail 1. Last test started: test/git-push-head-confirmation.test.ts > W1-T2610: both fix-rung push deps pass expectedHeadSha through pushFixRound to gitPushRunBranch (grep-verifiable).
+          | FLAKE-RETRY: retry ALSO failed
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-30T14:33:41.473Z"
+    pin: "95c3fc8356173a0fd72c89cc40a4cc7765270da230b0fc741d60dabda9eaf4bc"

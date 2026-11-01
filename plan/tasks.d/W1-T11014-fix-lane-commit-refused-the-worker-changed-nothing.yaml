@@ -1,0 +1,38 @@
+- id: W1-T11014
+  title: "THE FIX-LANE GARDENER'S COSTLIEST DEFECT CLASS — commit-refused:the worker changed nothing cost 53.95 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.2
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "fix-lane:commit-refused:the worker changed nothing#r2"
+  files:
+    - src/run-task.ts
+    - test/worker/run-task/fix-lane-commit-refused-the-worker-changed-nothing.test.ts
+  acceptance:
+    - claim: "commit-refused:the worker changed nothing no longer needs an operator hand fix"
+      proof: "grep: test(\"W1-T11014: fix-lane-commit-refused-the-worker-changed-nothing clears without a person\" in test/worker/run-task/fix-lane-commit-refused-the-worker-changed-nothing.test.ts"
+  note: "Filed by fix-lane at rung 2; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    commit-refused:the worker changed nothing cost 53.95 PR-hours; owner fix-lane
+    Owner: the fix lane itself (a defect in the harness that repairs PRs, not in the PR).
+    Source owner: src/run-task.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #15434: 44.93 PR-hours — the worker changed nothing [provider codex, selected_model gpt-6.1-sol, model sonnet, effort medium] — worker saw: state/runs/DAEMON-1793338756960-fix1-1793348778602.tail
+    - PR #14999: 4.05 PR-hours — the worker changed nothing []
+    - PR #13987: 4.05 PR-hours — the worker changed nothing []
+    - PR #15000: 4.05 PR-hours — the worker changed nothing []
+    - PR #10397: 0.95 PR-hours — the worker changed nothing []
+    Previous remedy W1-T7748: src/run-task.ts, test/fix-lane-commit-refused-the-worker-changed-nothing.test.ts; did not fall: share of PR-hours 0.2% (9.994260833333339/5833.364996666704) before, 0.6% (42.219054722222225/6556.194641111101) after, over 14 day(s) each side. Take a structurally different remedy.
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The record requests a structurally different remedy based on recurrence and PR-hours, but supplies no root-cause finding or proposed mechanism; the remedy's scope cannot be verified from what is shown.; on the change's description/files alone, no diff was read — Acceptance checks for a test declaration with grep; that alone cannot verify the stated outcome that operator intervention is no longer needed."
+    judged_at: "2026-10-30T12:59:07.838Z"
+    pin: "b221a125d99a06d981959196bf5bf901c4733137f82b34f263284546e1097f11"

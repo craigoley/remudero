@@ -1,0 +1,42 @@
+id: incident-89a9c688886ac0a3
+ts: 2026-10-31T10:03:07.970Z
+raw: >-
+  Incident 89a9c688886a: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: merge conflict (mergeState dirty) — rmd-owned branch has captured
+  deletion evidence on
+  test/worker/spawn/compress-src-lib-worker-provider-ts.test.ts (ours -<n>,
+  theirs -<n>) — would dispatch the bounded merge-conflict fix worker to inspect
+  actual hunks and preserve both sides' intended behavior; a fresh review and CI
+  gate the new head — mergeability unread this pass; inherited last known
+  "dirty" observed <n>-<n>-31T04:<n>:<n>.788Z for this exact head <sha>
+  (W1-T4470) — NOT DISPATCHED this pass: detached fix dispatch failed before
+  fix.dispatch <n> times on #<pr> at head <sha> (fix dispatch refused: worker
+  admission is held: PAUSE: cannot reach origin to read refs/rmd-pause/hold —
+  holding rather than dispatching optimistically (an unreachable remote is never
+  read as clear)) — FIX_DISPATCH_FAILED_BACKSTOP <n> reached, no further
+  dispatch is attempted at this head
+
+  First seen: 2026-10-31T10:02:16.998Z
+
+  Last seen: 2026-10-31T10:02:16.998Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15679 escalated: already escalated (reason unreadable: no escalation of this PR at head 0a66a11 is in the ledger); this pass: merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on test/worker/spawn/compress-src-lib-worker-provider-ts.test.ts (ours -3, theirs -3) — would dispatch the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head — mergeability unread this pass; inherited last known "dirty" observed 2026-10-31T04:24:39.788Z for this exact head 0a66a11 (W1-T4470) — NOT DISPATCHED this pass: detached fix dispatch failed before fix.dispatch 3 times on #15679 at head 0a66a11 (fix dispatch refused: worker admission is held: PAUSE: cannot reach origin to read refs/rmd-pause/hold — holding rather than dispatching optimistically (an unreachable remote is never read as clear)) — FIX_DISPATCH_FAILED_BACKSTOP 3 reached, no further dispatch is attempted at this head
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#89a9c688886ac0a32607070cc3f2a25aceafcb704180ac3cdc17f89373838961
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

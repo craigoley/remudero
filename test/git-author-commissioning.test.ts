@@ -1,4 +1,4 @@
-import { legacyHostScript } from "#test/helpers/legacy-host-launch.js";
+import { legacyHostScript } from "#test/helpers/gh-shim.js";
 // W1-T6160: `deploy/recycle-container.sh --instance <name> --commission-git-author` commissions or
 // replaces one target's Git author. An ordinary recycle keeps a non-empty outgoing RMD_GIT_AUTHOR_*
 // over a conflicting export (W1-T3454) and the entrypoint used to leave an already-configured HOME

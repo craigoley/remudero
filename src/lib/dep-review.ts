@@ -6,7 +6,6 @@ import { checkCommitMessage, CONVENTIONAL_LIMITS } from "./commit-message.js";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
-import { TICK_READ_MAX_AGE_MS } from "./read-plane.js";
 import { checkRunsRestArgs, combinedStatusRestArgs, jobsForRunRestArgs, rollupFromRest, runsForHeadRestArgs, singlePrRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { planNodePin } from "../../scripts/node-pin-follows-the-image.mjs";
@@ -1090,7 +1089,7 @@ export function buildDepReviewEscalation(args: {
   title: string;
   body: string;
   semverLevel: SemverLevel;
-  hold?: { headSha: string; redChecks: string[]; advisoryRed?: string[]; refresh?: DependabotRefreshRecord };
+  hold?: { headSha: string; redChecks: string[]; advisoryRed?: string[]; refresh?: DependabotRefreshRecord; progress?: string };
 }): Escalation {
   if (args.hold) {
     const refresh = args.hold.refresh;
@@ -1099,12 +1098,13 @@ export function buildDepReviewEscalation(args: {
       taskId: `dep-review-hold-PR${args.prNumber}`,
       headSha: args.hold.headSha,
       cause: "ci",
-      summary: `Aged dependency review hold: ${args.title}`,
+      summary: `Stalled dependency review hold: ${args.title}`,
       detail: [
         `Dependabot PR ${args.prUrl} is held on head ${args.hold.headSha}.`,
         `Blocker: required check(s) not green: ${args.hold.redChecks.join(", ")}.`,
         ...(args.hold.advisoryRed?.length ? [`Advisory red, not holding (still visible on the PR): ${args.hold.advisoryRed.join(", ")}.`] : []),
         ...(refresh === undefined ? [] : refreshEscalationLines(refresh)),
+        ...(args.hold.progress === undefined ? [] : [args.hold.progress]),
         `Owner: repository operator. Inspect the failed check logs, rerun transient failures,`,
         `or repair the dependency/CI failure and ask Dependabot to rebase or recreate the PR.`,
         `Do not override failing checks. Green checks resume deterministic review and auto-merge;`,
@@ -1145,12 +1145,74 @@ export function buildDepReviewEscalation(args: {
   };
 }
 
-/** BACKSTOP: allow a full day for transient CI failures before asking the repository operator. */
-export const DEP_REVIEW_HOLD_AGE_MS = 24 * 60 * 60 * 1000;
+type HoldRemedyKind = "refresh" | "proposal";
+interface HoldRemedyProgress {
+  active: boolean;
+  evidence: string;
+  lastChangedMs: number;
+  longestGapMs: number;
+}
+interface HoldProgress {
+  fingerprint: string;
+  lastChangedMs: number;
+  remedies: Partial<Record<HoldRemedyKind, HoldRemedyProgress>>;
+}
+export interface DepReviewProposalProgress { evidence: unknown; terminal: boolean }
+
+function validGaps(gaps: Partial<Record<HoldRemedyKind, number>>): boolean {
+  return !!gaps && typeof gaps === "object" && !Array.isArray(gaps) &&
+    Object.entries(gaps).every(([kind, gap]) => ["refresh", "proposal"].includes(kind) &&
+      typeof gap === "number" && Number.isFinite(gap) && gap >= 0);
+}
+
+function validHoldProgress(progress: HoldProgress): boolean {
+  return !!progress && typeof progress.fingerprint === "string" && Number.isFinite(progress.lastChangedMs) &&
+    !!progress.remedies && typeof progress.remedies === "object" && !Array.isArray(progress.remedies) &&
+    Object.entries(progress.remedies).every(([kind, remedy]) => ["refresh", "proposal"].includes(kind) &&
+      !!remedy && typeof remedy.active === "boolean" && typeof remedy.evidence === "string" &&
+      Number.isFinite(remedy.lastChangedMs) && Number.isFinite(remedy.longestGapMs) && remedy.longestGapMs >= 0);
+}
+
+function holdRecoveryGaps(state: DepReviewHoldState, headSha: string, recovered: boolean, nowMs: number): void {
+  if (recovered || state.headSha !== headSha) {
+    for (const [kind, remedy] of Object.entries(state.progress?.remedies ?? {})) {
+      const key = kind as HoldRemedyKind;
+      state.pendingRecoveryGaps ??= {};
+      state.pendingRecoveryGaps[key] = Math.max(state.pendingRecoveryGaps[key] ?? 0, remedy.longestGapMs,
+        remedy.active ? nowMs - remedy.lastChangedMs : 0);
+    }
+  }
+  if (!recovered) return;
+  for (const [kind, gap] of Object.entries(state.pendingRecoveryGaps ?? {})) {
+    const key = kind as HoldRemedyKind;
+    state.recoveredGaps ??= {};
+    state.recoveredGaps[key] = Math.max(state.recoveredGaps[key] ?? 0, gap);
+  }
+  delete state.pendingRecoveryGaps;
+}
+
+function recoveredHoldGaps(statePath: string, state: DepReviewHoldState): Partial<Record<HoldRemedyKind, number>> {
+  const gaps = { ...state.recoveredGaps };
+  for (const name of readdirSync(dirname(statePath))) {
+    if (!/^PR[0-9]+\.json$/.test(name) || join(dirname(statePath), name) === statePath) continue;
+    const sibling = JSON.parse(readFileSync(join(dirname(statePath), name), "utf8")) as DepReviewHoldState;
+    if (sibling?.recoveredGaps === undefined) continue;
+    if (!validGaps(sibling.recoveredGaps)) throw new Error("invalid dependency hold recovery history");
+    for (const [kind, gap] of Object.entries(sibling.recoveredGaps)) {
+      const key = kind as HoldRemedyKind;
+      gaps[key] = Math.max(gaps[key] ?? 0, gap);
+    }
+  }
+  return gaps;
+}
 
 interface DepReviewHoldState {
   headSha: string;
   heldSinceMs: number | null;
+  progress?: HoldProgress;
+  recoveredGaps?: Partial<Record<HoldRemedyKind, number>>;
+  pendingRecoveryGaps?: Partial<Record<HoldRemedyKind, number>>;
+  deliveredRemedyAsks?: Record<string, string>;
   asks: Array<{ headSha: string; issueUrl: string; retired: boolean }>;
   /** W1-T9584 — every head a Dependabot refresh was asked for. Never pruned, so neither a restart
    *  nor a ledger rotation can ask twice for one head. */
@@ -1158,8 +1220,27 @@ interface DepReviewHoldState {
   supersededReruns?: SupersededRerunRecord[];
 }
 
+/** Validate the durable hold before any remedy can mutate it or act on its behalf. */
+export function readDepReviewHoldState(statePath: string, headSha: string): DepReviewHoldState {
+  const state: DepReviewHoldState = existsSync(statePath)
+    ? JSON.parse(readFileSync(statePath, "utf8"))
+    : { headSha, heldSinceMs: null, asks: [] };
+  if (!state || typeof state !== "object" || typeof state.headSha !== "string" ||
+      !(state.heldSinceMs === null || (typeof state.heldSinceMs === "number" && Number.isFinite(state.heldSinceMs))) ||
+      (state.progress !== undefined && !validHoldProgress(state.progress)) ||
+      (state.recoveredGaps !== undefined && !validGaps(state.recoveredGaps)) ||
+      (state.pendingRecoveryGaps !== undefined && !validGaps(state.pendingRecoveryGaps)) ||
+      (state.deliveredRemedyAsks !== undefined && (!state.deliveredRemedyAsks || typeof state.deliveredRemedyAsks !== "object" ||
+        Array.isArray(state.deliveredRemedyAsks) || Object.values(state.deliveredRemedyAsks).some(url => typeof url !== "string"))) ||
+      !Array.isArray(state.asks) || state.asks.some((ask) =>
+        !ask || typeof ask.headSha !== "string" || typeof ask.issueUrl !== "string" || typeof ask.retired !== "boolean")) {
+    throw new Error("invalid dependency hold state; refusing to forget delivered heads");
+  }
+  return state;
+}
+
 /** Durable per-PR state survives ledger rotation; delivered heads stay recorded after retirement. */
-export function reconcileDepReviewHold(args: {
+export async function reconcileDepReviewHold(args: {
   statePath: string;
   prUrl: string;
   prNumber: number;
@@ -1168,19 +1249,15 @@ export function reconcileDepReviewHold(args: {
   headSha: string;
   result: DepReviewResult;
   nowMs: number;
+  remedyAskUrl?: string;
+  checks?: readonly (DepReviewCheck & { checkRunId?: number; workflowRunId?: number; externalId?: string;
+    startedAt?: string; completedAt?: string; detailsUrl?: string })[];
+  proposalProgress?: (feedbackId: string) => DepReviewProposalProgress | Promise<DepReviewProposalProgress>;
   escalationDeps: () => EscalateDeps;
   log: (step: string, extra: Record<string, unknown>) => void;
-}): void {
+}): Promise<void> {
   if (args.result.decision !== "hold" && !existsSync(args.statePath)) return;
-  const state: DepReviewHoldState = existsSync(args.statePath)
-    ? JSON.parse(readFileSync(args.statePath, "utf8"))
-    : { headSha: args.headSha, heldSinceMs: null, asks: [] };
-  if (!state || typeof state !== "object" || typeof state.headSha !== "string" ||
-      !(state.heldSinceMs === null || (typeof state.heldSinceMs === "number" && Number.isFinite(state.heldSinceMs))) ||
-      !Array.isArray(state.asks) || state.asks.some((ask) =>
-        !ask || typeof ask.headSha !== "string" || typeof ask.issueUrl !== "string" || typeof ask.retired !== "boolean")) {
-    throw new Error("invalid dependency hold state; refusing to forget delivered heads");
-  }
+  const state = readDepReviewHoldState(args.statePath, args.headSha);
   const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
   for (const ask of state.asks) {
     if (ask.retired || (ask.headSha === args.headSha && args.result.decision === "hold")) continue;
@@ -1196,16 +1273,60 @@ export function reconcileDepReviewHold(args: {
     save();
     args.log("dep-review.hold_retired", { issue_url: ask.issueUrl, head_sha: ask.headSha, reason });
   }
-  if (state.headSha !== args.headSha || args.result.decision !== "hold") state.heldSinceMs = null;
+  holdRecoveryGaps(state, args.headSha, args.result.decision === "arm" && args.result.redChecks.length === 0, args.nowMs);
+  if (state.headSha !== args.headSha || args.result.decision !== "hold") {
+    state.heldSinceMs = null;
+    delete state.progress;
+  }
   state.headSha = args.headSha;
-  if (args.result.decision === "hold") state.heldSinceMs ??= args.nowMs;
+  if (args.result.decision !== "hold") { delete state.pendingRecoveryGaps; save(); return; }
+  state.heldSinceMs ??= args.nowMs;
+  if (args.remedyAskUrl) (state.deliveredRemedyAsks ??= {})[args.headSha] = args.remedyAskUrl;
+  const attempts = (args.checks ?? []).filter(c => args.result.redChecks.includes(c.name ?? c.context ?? ""))
+    .map(c => [c.name ?? c.context, c.checkRunId, c.workflowRunId, c.externalId, c.startedAt, c.completedAt, c.detailsUrl])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const refresh = refreshFor(state, args.headSha).refresh;
+  const bumps = parseDependabotBumpFacts(args.title, args.body)
+    .map(b => ownRedBumpKey({ dependency: b.dependency, fromVersion: b.fromVersion, toVersion: b.toVersion }));
+  const ownRed = (state as DepReviewHoldState & { ownRed?: unknown }).ownRed;
+  const feedbackId = isOwnRedRecord(ownRed) && ownRed.headSha === args.headSha ? ownRed.feedbackId : undefined;
+  const proposals = await Promise.all(readOwnRedProposals(join(dirname(args.statePath), OWN_RED_PROPOSALS_FILE))
+    .filter(p => (p.prNumbers.includes(args.prNumber) || p.feedbackId === feedbackId) &&
+      bumps.length > 0 && bumps.every(b => p.bumps.includes(b)))
+    .sort((a, b) => a.feedbackId.localeCompare(b.feedbackId))
+    .map(async p => ({ ...p, progress: await args.proposalProgress?.(p.feedbackId) ?? { evidence: "captured", terminal: false } })));
+  const evidence: Partial<Record<HoldRemedyKind, { active: boolean; value: unknown }>> = {};
+  if (refresh) evidence.refresh = { active: !refresh.updateFailed && (refresh.answer !== "refused" || refresh.via === "update-branch"), value: refresh };
+  if (proposals.length) evidence.proposal = { active: proposals.some(p => !p.progress.terminal), value: proposals };
+  const fingerprint = JSON.stringify([args.headSha, [...args.result.redChecks].sort(), attempts, refresh, proposals]);
+  const prior = state.progress;
+  const remedies: HoldProgress["remedies"] = { ...prior?.remedies };
+  for (const [kind, current] of Object.entries(evidence)) {
+    const key = kind as HoldRemedyKind;
+    const value = JSON.stringify([current.value, attempts]);
+    const previous = remedies[key];
+    const changed = previous?.evidence !== value;
+    remedies[key] = { active: current.active, evidence: value,
+      lastChangedMs: changed ? args.nowMs : previous.lastChangedMs,
+      longestGapMs: Math.max(previous?.longestGapMs ?? 0, changed && previous?.active ? args.nowMs - previous.lastChangedMs : 0) };
+  }
+  for (const kind of Object.keys(remedies) as HoldRemedyKind[]) {
+    if (!evidence[kind]) remedies[kind] = { ...remedies[kind]!, active: false };
+  }
+  state.progress = { fingerprint, lastChangedMs: prior?.fingerprint === fingerprint ? prior.lastChangedMs : args.nowMs, remedies };
   save();
-  if (state.heldSinceMs === null || args.nowMs - state.heldSinceMs < DEP_REVIEW_HOLD_AGE_MS ||
-      state.asks.some((ask) => ask.headSha === args.headSha)) return;
+  if (prior?.fingerprint !== fingerprint || state.asks.some(ask => ask.headSha === args.headSha) ||
+      refresh?.issueUrl || state.deliveredRemedyAsks?.[args.headSha]) return;
+  const gaps = recoveredHoldGaps(args.statePath, state);
+  const active = (Object.entries(remedies) as Array<[HoldRemedyKind, HoldRemedyProgress]>).filter(([, r]) => r.active);
+  if (active.some(([kind, r]) => gaps[kind] === undefined || args.nowMs - r.lastChangedMs <= gaps[kind]!)) return;
+  const remedyState = Object.entries(remedies).map(([kind, remedy]) => remedy.active
+    ? `${kind} stalled (recovered maximum gap ${gaps[kind as HoldRemedyKind]} ms)` : `${kind} terminal`).join(", ") || "none";
   const issueUrl = escalate(buildDepReviewEscalation({
     ...args,
     semverLevel: args.result.semverLevel,
-    hold: { headSha: args.headSha, redChecks: args.result.redChecks, advisoryRed: args.result.advisoryRed, ...refreshFor(state, args.headSha) },
+    hold: { headSha: args.headSha, redChecks: args.result.redChecks, advisoryRed: args.result.advisoryRed, ...refreshFor(state, args.headSha),
+      progress: `Fingerprint unchanged since ${fixedClock(state.progress.lastChangedMs).iso()}; remedy state: ${remedyState}.` },
   }), args.escalationDeps());
   if (!issueUrl) throw new Error("dependency hold escalation not delivered; retry after the issue read recovers");
   state.asks.push({ headSha: args.headSha, issueUrl, retired: false });
@@ -1343,7 +1464,7 @@ function readRefreshState(statePath: string, headSha: string): DepReviewHoldStat
 
 export type DependabotRefreshOutcome = "requested" | "unanswered" | "refused" | "escalated" | "failed" | "none";
 
-/** Runs after {@link reconcileDepReviewHold} on the same pass and state file. Acts only on a
+/** Runs before {@link reconcileDepReviewHold} on the same pass and state file. Acts only on a
  *  `hold` with red checks: a hold on pending checks has nothing to refresh.
  *
  *  W1-T9994: a base refresh goes through the guarded REST update-branch (`expected_head_sha`), never a
@@ -1757,6 +1878,13 @@ export interface DepReviewRepairSnapshot {
 /** PRIMARY CONTROL: the operator's stuck-PR horizon; it changes ordering, never admission or spend. */
 export const DEPENDABOT_STUCK_PR_AGE_MS = 60 * 60 * 1000;
 
+/** BACKSTOP: the oldest open-PR snapshot the repair ordering reads. The tick read's five minutes refused a HEALTHY
+ * pass: the daemon reaches its triage step a median 11.4 min (p90 16.2, max 35.2) after the read, so over
+ * 2026-10-23..30 the ordering applied 2 times in 98 and #15180's repair waited 30 h in FIFO. It reorders only,
+ * and only a PR the snapshot shows red past {@link DEPENDABOT_STUCK_PR_AGE_MS} whose registry record is bound
+ * to that same head, so a snapshot as old as the stuck horizon itself misorders at most one triage pass. */
+export const DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS = DEPENDABOT_STUCK_PR_AGE_MS;
+
 /** Reorder existing eligible feedback only. Registry, per-head repair state and a fresh OPEN
  * PR snapshot must agree; prose never grants priority. Unknown evidence preserves FIFO. */
 export async function prioritizeDepReviewRepairs(
@@ -1772,11 +1900,11 @@ export async function prioritizeDepReviewRepairs(
     return ordinary;
   }
   if (!Number.isFinite(nowMs) || !Number.isFinite(snapshot.asOfMs) ||
-      nowMs < snapshot.asOfMs || nowMs - snapshot.asOfMs > TICK_READ_MAX_AGE_MS ||
+      nowMs < snapshot.asOfMs || nowMs - snapshot.asOfMs > DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS ||
       !/^[\w.-]+$/.test(snapshot.owner) || !/^[\w.-]+$/.test(snapshot.repo)) {
     const reasonCode = !Number.isFinite(nowMs) || !Number.isFinite(snapshot.asOfMs) ? "clock-unreadable"
       : nowMs < snapshot.asOfMs ? "snapshot-future"
-      : nowMs - snapshot.asOfMs > TICK_READ_MAX_AGE_MS ? "snapshot-stale" : "repository-unreadable";
+      : nowMs - snapshot.asOfMs > DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS ? "snapshot-stale" : "repository-unreadable";
     recordEvent("auto_triage.repair_priority_unavailable", { reasonCode, candidate_count: candidates.length,
       snapshot_as_of_ms: snapshot.asOfMs, decision_at_ms: nowMs });
     return ordinary;

@@ -1,4 +1,4 @@
-import { legacyHostScript } from "#test/helpers/legacy-host-launch.js";
+import { legacyHostScript } from "#test/helpers/gh-shim.js";
 // W1-T6160, criterion 4: a commissioning NEVER reports success it did not observe. An identity write
 // error at boot, a replacement whose environment lacks the pair, a repository-local or environment
 // identity that masks it, and a probe that fails or hangs each return failure, name the phase, give

@@ -868,8 +868,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   /** W1-T9604: each asked step's rows up to `lastSeq`, read in full once; the ingest queues its new rows in `stepPending`
    *  and the next ask merges them into a NEW array, so one handed out never changes. The plan-only sets likewise. */
   const stepCache = new Map<string, StepBucket>();
+  const auditedSteps = new Set<string>();
   const stepPending = new Map<string, StepRow[]>();
   let planOnlyCache: PlanOnlySets | undefined;
+  let planOnlyAudited = false;
   let planOnlyPending: StepRow[] = [];
   /** Every row of the three plan-only steps (plan-only or not) the cache's sets were read over, as the store digests it. */
   let planOnlyDigest: StepDigest | undefined;
@@ -1285,8 +1287,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
 
   function dropStepCache(): void {
     stepCache.clear();
+    auditedSteps.clear();
     stepPending.clear();
     planOnlyCache = undefined;
+    planOnlyAudited = false;
     planOnlyPending = [];
     planOnlyDigest = undefined;
     cacheStrings?.clear();
@@ -1364,26 +1368,30 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return { steps: stepCache.size, rows: rowCount, bytes };
   }
 
-  /** W1-T9604: the oracle's A/A of the cache: every cached step and both plan-only sets against `fresh`, its uncached
-   *  index at the same seq. A difference drops the cache, and the differing names ride the oracle's row. */
-  function auditStepCache(fresh: LedgerIndex): { steps: number; rows: number; mismatches: string[] } {
+  /** Audits this slice and every new cache member against an uncached index at the same seq; a mismatch drops all. */
+  function auditStepCache(fresh: LedgerIndex, index: number, of: number): {
+    steps: number; rows: number; mismatches: string[]; slice: { index: number; of: number }; audited: number; held_back: number;
+  } {
     // The audit's own look at the cache is not a build's: of its counts, only a reset it finds is kept.
     const counted = stepReads;
     stepReads = noStepReads();
     const mine = storeIndex(rows);
     const cachedSteps = [...stepCache.keys()].sort();
+    const selected = cachedSteps.filter((step) => !auditedSteps.has(step) || boardOracleSliceOf(step, of) === index);
     const mismatches: string[] = [];
     let compared = 0;
-    for (const step of cachedSteps) {
+    for (const step of selected) {
       const [have, want] = [mine.byStep.get(step) ?? [], fresh.byStep.get(step) ?? []];
       compared += want.length;
       if (have.length !== want.length || have.some((row, at) => JSON.stringify(row) !== JSON.stringify(want[at]))) mismatches.push(step);
+      auditedSteps.add(step);
     }
-    if (planOnlyCache) {
+    if (planOnlyCache && (!planOnlyAudited || boardOracleSliceOf("plan_only", of) === index)) {
       const sorted = (sets: Pick<LedgerIndex, "planOnlyFilingPrUrls" | "planOnlyReviewedHeads">): string => JSON.stringify([
         [...sets.planOnlyFilingPrUrls].sort(), [...sets.planOnlyReviewedHeads].map(([url, heads]) => [url, [...heads].sort()]).sort(),
       ]);
       if (sorted(mine) !== sorted(fresh)) mismatches.push("plan_only");
+      planOnlyAudited = true;
     }
     if (mismatches.length > 0) {
       dropStepCache();
@@ -1391,7 +1399,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     }
     const found = stepReads.resets;
     stepReads = { ...counted, resets: { deleted: counted.resets.deleted + found.deleted, behind: counted.resets.behind + found.behind, audit: counted.resets.audit + found.audit } };
-    return { steps: cachedSteps.length, rows: compared, mismatches };
+    return { steps: cachedSteps.length, rows: compared, mismatches, slice: { index, of }, audited: selected.length, held_back: cachedSteps.length - selected.length };
   }
 
   /**
@@ -1670,7 +1678,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     let outcome: BoardOracleOutcome = "agree";
     const reasons: string[] = [];
     let healedCount = 0;
-    const audit = first ? auditStepCache(first) : undefined;
+    const audit = first ? auditStepCache(first, index, slices) : undefined;
     if (mismatches.length > 0) {
       pass = derive();
       fresh = pass.projections;

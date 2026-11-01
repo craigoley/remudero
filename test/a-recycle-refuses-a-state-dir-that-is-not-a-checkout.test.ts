@@ -1,4 +1,4 @@
-import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/legacy-host-launch.js";
+import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/gh-shim.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";

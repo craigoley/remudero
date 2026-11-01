@@ -1,4 +1,4 @@
-import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/legacy-host-launch.js";
+import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/gh-shim.js";
 /**
  * test/one-gateway-serves-every-instance.test.ts — W1-T4228.
  *

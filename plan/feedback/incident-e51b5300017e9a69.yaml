@@ -1,0 +1,32 @@
+id: incident-e51b5300017e9a69
+ts: 2026-10-30T16:28:10.433Z
+raw: >-
+  Incident e51b5300017e: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix stood down at rung.workflow_scope and nothing it read has changed
+  (head <sha>, task contract) — no worker is dispatched until one does: workflow
+  scope need escalated
+
+  First seen: 2026-10-30T11:43:12.559Z
+
+  Last seen: 2026-10-30T11:43:31.782Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15656 escalated: already escalated (reason unreadable: no escalation of this PR at head 0d5e57a is in the ledger); this pass: fix stood down at rung.workflow_scope and nothing it read has changed (head 0d5e57a, task contract) — no worker is dispatched until one does: workflow scope need escalated
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#e51b5300017e9a690afed903ef9459498e4556aaa7716919e2ee74837774683e
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

@@ -1,4 +1,4 @@
-import { legacyHostScript } from "#test/helpers/legacy-host-launch.js";
+import { legacyHostScript } from "#test/helpers/gh-shim.js";
 // W1-T6160, criterion 3: the explicit commissioning mode is the ONLY thing that may supersede an
 // outgoing author. An ordinary recycle still keeps a non-empty outgoing RMD_GIT_AUTHOR_* over a
 // conflicting shell export (W1-T3454's container-first contract), later ordinary recycles keep a

@@ -80,7 +80,7 @@ test("native Semgrep pins the runner and Python action and caches both hash lock
   assert.equal(job.container, undefined, "never initialize a Docker Hub container");
   assert.equal(job["runs-on"], "ubuntu-24.04");
   const setup = step("Set up pinned Python");
-  assert.equal(setup.uses, "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97");
+  assert.equal(setup.uses, "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0");
   assert.equal(setup.with?.["python-version"], "3.12.15");
   assert.equal(setup.with?.architecture, "x64");
   assert.equal(setup.with?.cache, "pip");
@@ -135,7 +135,7 @@ test("native Semgrep retains all four rule packs, PR-only baseline and SARIF upl
   assert.match(scan.run!, /--baseline-commit \$\{BASELINE_REF\}/);
   assert.match(scan.run!, /--sarif --output semgrep\.sarif/);
   const upload = step("Upload SARIF to code scanning");
-  assert.equal(upload.uses, "github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee");
+  assert.equal(upload.uses, "github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370");
   assert.equal(upload.if, "always()");
   assert.deepEqual(upload.with, { sarif_file: "semgrep.sarif", category: "semgrep" });
   assert.ok(fileURLToPath(root).endsWith("/"));

@@ -1,4 +1,4 @@
-import { legacyHostScript } from "#test/helpers/legacy-host-launch.js";
+import { legacyHostScript } from "#test/helpers/gh-shim.js";
 // W1-T6160, criterion 2: `--commission-git-author` refuses an invalid author pair, and an unknown,
 // ambiguous or mismatched target, BEFORE any pause, pull, stop, removal or identity write — and a
 // refusal leaves the sibling instance exactly as it was. Each refusal names the input that failed,

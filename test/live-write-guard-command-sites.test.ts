@@ -1025,6 +1025,7 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
   git(seed, "add", "-A");
   git(seed, "commit", "--quiet", "-m", "work");
   git(seed, "push", "--quiet", "origin", branch);
+  const headSha = git(seed, "rev-parse", "HEAD").trim();
   rmSync(seed, { recursive: true, force: true });
 
   const root = mkdtempSync(join(tmpdir(), "sweepfix-root-"));
@@ -1042,7 +1043,7 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
       [
         "#!/bin/sh",
         'case "$*" in',
-        `  *"headRefName"*) printf '{"headRefName":"%s"}\\n' "${branch}" ;;`,
+        '  *"headRefName"*) echo ' + JSON.stringify(JSON.stringify({ headRefName: branch, headRefOid: headSha })) + " ;;",
         '  *"statusCheckRollup"*) echo \'{"statusCheckRollup":[{"name":"ci","conclusion":"SUCCESS"}]}\' ;;',
         '  *"--json state"*) echo \'{"state":"OPEN"}\' ;;',
         '  *"--json body"*) echo \'{"body":""}\' ;;',
@@ -1098,7 +1099,7 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
         // about. A fresh PR carries zero prior strikes and its full allowance — the state
         // W1-T2452's own first criterion requires to dispatch — so stating it restores what the
         // test has always asserted rather than relaxing it.
-        { prNumber: 7, prUrl: "https://github.com/acme/sandboxrepo/pull/7", taskId: TASK, reviewState: "failure", priorStrikes: 0 } as never,
+        { prNumber: 7, prUrl: "https://github.com/acme/sandboxrepo/pull/7", taskId: TASK, headSha, headRefName: branch, reviewState: "failure", priorStrikes: 0 } as never,
           // W1-T1282: a real (non-empty) failing check — an empty `ciFailures: []` now stands
           // the rung down before any strike (the two-reader-split guard), and this fixture is
           // testing the push guard site, not ci-log evidence content.

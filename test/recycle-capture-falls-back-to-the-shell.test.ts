@@ -1,4 +1,4 @@
-import { legacyHostScript } from "#test/helpers/legacy-host-launch.js";
+import { legacyHostScript } from "#test/helpers/gh-shim.js";
 // W1-T2553: `deploy/recycle-container.sh` captured a declared runtime variable ONLY from
 // `docker inspect` when a container existed; the shell fallback sat in the `else` branch reached
 // only when NO container existed. That was fine while containers were started carrying a token,

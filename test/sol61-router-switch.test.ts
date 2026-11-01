@@ -176,6 +176,12 @@ test("Sol 6.1 missing cache write counter retains the reservation instead of und
         input_tokens_details: { cached_tokens: 60 } } }))) }, f.config, selection);
     assert.equal(result.isError, false);
     assert.equal(result.tokens.input, 100);
+    assert.equal(result.tokens.output, 20);
+    assert.equal(result.tokens.cacheRead, 60);
+    assert.equal(result.tokenUsageState, "partial");
+    assert.equal(result.usageEstimateUsd, null);
+    assert.equal(result.billedUsd, null);
+    assert.equal(result.budgetHeldUsd, result.budgetReservedUsd);
     assert.equal(result.budgetSettledUsd, result.budgetReservedUsd);
     assert.equal(result.costUsd, result.budgetReservedUsd);
   } finally { f.close(); }

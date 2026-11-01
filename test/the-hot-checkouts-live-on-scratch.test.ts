@@ -1,4 +1,4 @@
-import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/legacy-host-launch.js";
+import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/gh-shim.js";
 /**
  * W1-T9617 — THE HOT CHECKOUTS LIVE ON SCRATCH. Behind their own switch (RMD_SCRATCH_CHECKOUTS, the
  * file /etc/remudero/scratch-checkouts.on), each build daemon's own checkout is bound from
