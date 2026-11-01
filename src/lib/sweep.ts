@@ -13924,8 +13924,13 @@ export function fixDispatchHoldAtHead(
   return dispatchFailureHoldAtHead(pr, lines);
 }
 
+/** A refusal the shared PAUSE gate gave every PR alike (held, or origin unreadable): not this PR's failure. */
+const FLEET_PAUSE_REFUSAL = /PAUSE held on |cannot reach origin to read /;
+
 function dispatchFailureHoldAtHead(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): FixDispatchHold | undefined {
-  const failures = lines.filter((l) => isDetachedFixDispatchFailure(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
+  // #15679 hit the backstop on three fleet PAUSE refusals; only a new head lifts it and only a dispatch makes one.
+  const failures = lines.filter((l) => isDetachedFixDispatchFailure(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha &&
+    !FLEET_PAUSE_REFUSAL.test(String(l.error ?? "")));
   if (failures.length < FIX_DISPATCH_FAILED_BACKSTOP) return undefined;
   const reason =
     `detached fix dispatch failed before fix.dispatch ${failures.length} times on #${pr.prNumber} at head ` +
