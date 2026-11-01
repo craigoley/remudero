@@ -26,6 +26,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseSync } from "@swc/core";
 import { repoRoot } from "./lib/repo-root.mjs";
 
 /** The specifier of a static `from "x"`, a side-effect `import "x"`, or a dynamic `import("x")`. */
@@ -75,6 +76,34 @@ const RUNTIME_SHAPES = [
  * whole so a quote inside it does not open a string.
  */
 export function stringLiteralMask(text) {
+  let tree;
+  try {
+    tree = parseSync(text, { syntax: "typescript", tsx: true });
+  } catch (error) {
+    // Legacy callers also supply incomplete snippets; retain their lexical treatment on syntax errors.
+    if (error.code !== "GenericFailure") throw error;
+    return snippetLiteralMask(text);
+  }
+  const bytes = Buffer.from(text);
+  const mask = new Uint8Array(text.length);
+  const visit = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (["StringLiteral", "TemplateElement", "RegExpLiteral"].includes(node.type)) {
+      // SWC spans count UTF-8 bytes; replace() offsets count UTF-16 code units.
+      const start = bytes.subarray(0, node.span.start - 1).toString().length;
+      const end = bytes.subarray(0, node.span.end - 1).toString().length;
+      mask.fill(1, start, end);
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value === "object") visit(value);
+    }
+  };
+  visit(tree);
+  return mask;
+}
+
+function snippetLiteralMask(text) {
   const n = text.length;
   const mask = new Uint8Array(n);
   let i = 0;

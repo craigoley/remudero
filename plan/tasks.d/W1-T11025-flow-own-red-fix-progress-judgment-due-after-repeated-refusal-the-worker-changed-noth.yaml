@@ -1,0 +1,33 @@
+- id: W1-T11025
+  title: "THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — own-red:fix progress judgment due after repeated refusal: the worker changed nothing cost 12.04 PR-hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.18
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-blocker:own-red:fix progress judgment due after repeated refusal: the worker changed nothing"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/flow-own-red-fix-progress-judgment-due-after-repeated-refusal-the-worker-changed-noth.test.ts
+  acceptance:
+    - claim: "own-red:fix progress judgment due after repeated refusal: the worker changed nothing is cleared by its owner without manual intervention"
+      proof: "grep: test(\"W1-T11025: flow-own-red-fix-progress-judgment-due-after-repeated-refusal-the-worker-changed-noth clears without a person\" in test/sweep/flow-own-red-fix-progress-judgment-due-after-repeated-refusal-the-worker-changed-noth.test.ts"
+  note: "Filed by flow at rung 1; measure the cause's share of PR-hours after the build merges."
+  rationale: |
+    own-red:fix progress judgment due after repeated refusal: the worker changed nothing cost 12.04 PR-hours; owner fix-lane
+    Owner fix-lane failed to clear eligible episodes.
+    Source owner: fix-lane → src/lib/sweep.ts. Top five PRs by observed hours, with original blocker reasons:
+    - PR #15434: 12.35 PR-hours — fix progress judgment due after repeated refusal: the worker changed nothing — acceptance-author-gate failed on ab3c17d — NOT DISPATCHED this pass: a needs-human escalation for this exact (task, PR, head ab3c17dedd980d991df6fb69c30d10a12ecbdaac, cause) is ALREADY OPEN and awaiting a human (https://github.com/craigoley/remudero/issues/15735) — a strike here would re-ask a question already in front of someone and append to that same issue; standing down until it is closed, the head moves, or the task contract changes, or an operator answers
+    Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The cited episode explicitly awaits a human decision in issue #15735 and states conditions for resuming; the acceptance instead requires clearance without manual intervention, without specifying how that human escalation will be respected.; on the change's description/files alone, no diff was read — The supplied evidence establishes an existing escalation, but does not verify the rationale's claim that the owner failed to clear an eligible episode. The proposed remedy therefore requires clarification of the human-decision boundary."
+    judged_at: "2026-10-30T15:41:34.224Z"
+    pin: "559e8cd2071b017079807f9a610af6d5c7f5ef1264d85c5ae888f083387a3848"

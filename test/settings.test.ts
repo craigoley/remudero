@@ -451,3 +451,12 @@ test("W1-T2916: assertSdkVersionField rejects a package.json with no usable vers
 test("W1-T2916: assertSdkVersionField returns a real version string unchanged", () => {
   assert.equal(assertSdkVersionField({ version: "1.2.3" }, "@x/y"), "1.2.3");
 });
+
+test("SDK 0.3.310: sandbox.allowNestedUserNamespaces true is refused by name, while false is accepted", () => {
+  const withNested = (value: boolean) => ({ ...GOOD, sandbox: { ...GOOD.sandbox, allowNestedUserNamespaces: value } });
+  assert.throws(
+    () => validateWorkerSettings(withNested(true)),
+    (e: unknown) => e instanceof WorkerSettingsError && /allowNestedUserNamespaces/.test((e as Error).message),
+  );
+  assert.doesNotThrow(() => validateWorkerSettings(withNested(false)));
+});

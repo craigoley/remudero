@@ -81,6 +81,8 @@ export interface CiLearningFilingResult {
   filed: CiLearningFiledShard[];
   skipped: string[];
   refused: { findingId: string; reason: string }[];
+  /** Present when queued content reached the landing step; absent when the queue stayed empty. */
+  git?: LandingGitMeter;
   /** W1-T9753: paths the landing refused to carry forward because main changed them too. */
   carryRefused?: FeedbackRefusal[];
 }
@@ -2195,7 +2197,8 @@ export function landCiLearningShards(
   checkoutRoot: string,
   deps: LandCiLearningShardsOptions,
 ): CiLearningFilingResult {
-  return driveLanding(ciLearningLandingSteps(drafts, checkoutRoot, deps), syncPreflightOf(checkoutRoot, deps));
+  const git = newGitMeter("sync");
+  return driveLanding(ciLearningLandingSteps(drafts, checkoutRoot, deps, git), syncPreflightOf(checkoutRoot, deps), git);
 }
 
 export interface LandCiLearningShardsAsyncOptions extends Omit<LandCiLearningShardsOptions, "planPrPreflight"> {
@@ -2210,7 +2213,8 @@ export async function landCiLearningShardsAsync(
 ): Promise<CiLearningFilingResult> {
   const { planPrPreflight, ...landOpts } = deps;
   const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(checkoutRoot, sha, pr, { log: deps.log }));
-  return driveLandingAsync(ciLearningLandingSteps(drafts, checkoutRoot, { ...landOpts, ...asyncSeamsOf(checkoutRoot, landOpts) }), preflight);
+  const git = newGitMeter("async");
+  return driveLandingAsync(ciLearningLandingSteps(drafts, checkoutRoot, { ...landOpts, ...asyncSeamsOf(checkoutRoot, landOpts) }, git), preflight, git);
 }
 
 function* ciLearningLandingSteps(
@@ -2221,9 +2225,10 @@ function* ciLearningLandingSteps(
     ghAsync?: GhExecAsync;
     mintTaskIdAsync?: (filingBranch: string) => Promise<string>;
   },
+  meter: LandingGitMeter,
 ): PreflightSteps<CiLearningFilingResult> {
-  const git = deps.git ?? defaultGit(checkoutRoot);
-  const net = landingNet(git, deps.gh ?? defaultGh(), deps);
+  const gitExec = deps.git ?? defaultGit(checkoutRoot);
+  const net = landingNet(gitExec, deps.gh ?? defaultGh(), deps);
   const kind = yield* ciLearningLandingKindSteps(checkoutRoot, deps, net);
   const shardRelDir = ciLearningShardRelDir(checkoutRoot);
   const held = new Set([...deps.planOrigins, ...ciLearningPendingOrigins(deps.stateRoot, checkoutRoot)]);
@@ -2277,7 +2282,7 @@ function* ciLearningLandingSteps(
     // Best-effort acknowledgement only; pending bytes remain retryable.
   }
   const carryRefused = landing.refused?.length ? { carryRefused: landing.refused } : {};
-  if (!landing.landed || landing.error) return { filed: [], skipped, refused, ...carryRefused };
+  if (!landing.landed || landing.error) return { filed: [], skipped, refused, ...carryRefused, git: meter };
 
   const landed = new Set(landing.files);
   const filed = inputs
@@ -2285,7 +2290,7 @@ function* ciLearningLandingSteps(
     .map((input) => ciLearningFiledShardRead(input.relPath, input.content))
     .filter((read): read is { ok: true; filed: CiLearningFiledShard } => read.ok && read.filed !== undefined)
     .map((read) => read.filed);
-  return { filed, skipped, refused, ...carryRefused };
+  return { filed, skipped, refused, ...carryRefused, git: meter };
 }
 
 /** The URL of the currently-open landing PR for this identity, if any — best-effort,

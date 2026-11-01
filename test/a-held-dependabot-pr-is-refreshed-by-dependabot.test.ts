@@ -283,11 +283,10 @@ test("W1-T9994: a base-red Dependabot refresh uses the guarded update-branch, no
   await f.run("base-red-recovered");
   assert.equal(f.updates.length, 1, "a ledger rotation never refreshes twice: the head is recorded in the durable hold state");
 
-  // The aged-hold backstop is unchanged (no new timeout) and its body names the refresh.
+  // An unanswered refresh has no recovered timing history, so elapsed time alone cannot ask.
   f.advance(24 * 60 * 60 * 1000);
   await f.run("base-red-recovered");
-  assert.equal(f.opened.length, 1);
-  assert.match(f.opened[0].body, /guarded update-branch was applied/);
+  assert.equal(f.opened.length, 0, "the requested refresh remains in flight without recovered history");
 
   // A NEW head re-earns judgement.
   f.setHead("e".repeat(40), [{ oid: "e", authors: [DEPENDABOT_AUTHOR] }]);

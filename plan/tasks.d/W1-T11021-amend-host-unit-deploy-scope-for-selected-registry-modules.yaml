@@ -5,7 +5,10 @@
   type: implement
   verify: auto
   risk: medium
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=2cd1f952daf832a8
+  # backlog gardener: placed=2026-10-30T16:59:58.806Z
   attempts: 0
   files:
     - deploy/install-host-units.sh

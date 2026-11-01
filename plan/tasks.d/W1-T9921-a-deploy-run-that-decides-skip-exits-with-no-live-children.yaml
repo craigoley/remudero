@@ -16,6 +16,11 @@
     - src/lib/serve-policy-convergence.ts
     - deploy/install-host-units.sh
     - test/a-deploy-run-that-decides-skip-exits-with-no-live-children.test.ts
+  # refusal-amendment (W1-T9921, run DAEMON-1793409305317@c1e3c513ec38f4ba4ffb8f2e04a766275a0d410e, 2026-10-31T02:44:29.895Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The 60-second exit bound and 50-repeat count require operator approval.
+  # refusal-amendment (W1-T9921, run DAEMON-1793409305317@c1e3c513ec38f4ba4ffb8f2e04a766275a0d410e, 2026-10-31T02:44:29.895Z): the worker refused criterion 3 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The 120-second subprocess timeout requires operator approval.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 2
   attempts: 0

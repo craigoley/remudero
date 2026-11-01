@@ -218,7 +218,13 @@ test("W1-T5965: a preflight that throws is read the same by the sync and the awa
     landCiLearningShardsAsync([draft("ci-learning:5965:throws")], awaited.clone.dir, { ...awaited.landDeps, planPrPreflight: async () => boom() }),
   );
 
-  assert.deepEqual(r2, r1, "the awaited landing reads a rejection exactly as the sync landing reads a throw");
+  const { git: syncGit, ...syncFiling } = r1;
+  const { git: asyncGit, ...asyncFiling } = r2;
+  assert.deepEqual(asyncFiling, syncFiling, "the awaited landing reads a rejection exactly as the sync landing reads a throw");
+  assert.equal(syncGit?.driver, "sync");
+  assert.equal(asyncGit?.driver, "async");
+  assert.ok(syncGit && syncGit.calls > 0);
+  assert.ok(asyncGit && asyncGit.calls > 0);
   assert.deepEqual(r1.filed, []);
   for (const f of [sync, awaited]) {
     assert.deepEqual(f.heads(), ["main"], "a throwing preflight pushes nothing");

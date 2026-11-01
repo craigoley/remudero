@@ -1,21 +1,10 @@
 import { INBOX_VERBS, validatedInboxAction, type InboxVerbActions, type InboxVerbActor, type InboxVerbName, type InboxVerbRespond } from "./inbox-verdict-command.js";
 import { readInboxGardenerStore, inboxGardenerPath, inboxRetirementFor, inboxOperatorIntent } from "./inbox-retirement.js";
 /**
- * lib/panel-graph.ts — the control panel's plan→task→PR graph and interactive plan adjustment
- * (MASTER-PLAN §7B). A thin Route layer over existing mechanism — lib/feedback.ts's inbox and
- * lib/trace.ts's chain builder — reached through the api-client (§7A); the daemon stays the sole
- * writer. `rmd serve` wiring is separate work.
- *
- * Six routes: GET/POST /v1/feedback (inbox; submit, or answer a grill via `replyTo`), POST
- * /v1/feedback/preview (expand a draft without filing), GET /v1/trace (provenance, mirrors `rmd
- * trace`), POST /v1/feedback/decision (accept/reject), GET /v1/drain/preview (the would-drain
- * queue, reusing `drain.ts`'s own builder).
- *
- * A grill answer is not a new primitive: `replyTo` files the reply as a fresh feedback entry and
- * re-enters the same pipeline every item does. Re-prioritize is a §7B design item with no
- * plan-schema support yet — out of scope here.
- * Why: the route-by-route rationale and the grill-answer design history —
- * docs/forensics/panel-graph.md
+ * Control-panel plan→task→PR routes (MASTER-PLAN §7B), reached through the api-client (§7A).
+ * Reuse feedback.ts, trace.ts and drain.ts; the daemon remains the sole durable writer.
+ * `replyTo` files a fresh feedback entry through the ordinary pipeline. Re-prioritization
+ * has no plan-schema support here. Route rationale and history: docs/forensics/panel-graph.md.
  */
 
 import { readPage, readPageRequest, readSnapshotCursor, snapshotCursor, type ReadPageRequest } from "./read-page.js";
@@ -236,14 +225,10 @@ export type ReconciledFeedbackEntry = FeedbackEntry & {
 };
 
 /**
- * Merging the proposal PR is the decision (W1-T257): a `proposed` entry whose `proposal_pr` has
- * merged reads as the terminal status `accepted`, rather than sitting in NEEDS ME forever, through
- * the one batched `statusGithub` gateway GET /v1/drain/preview also uses. This writes NOTHING: GET
- * /v1/feedback and the feedback view serve it, and {@link reconcileFeedbackEntries} persists it.
- *
- * No `proposal_pr`, or one open/closed-unmerged, passes through untouched. A genuinely failed
- * read (`readFailed()`) also leaves `proposed` alone but decorates `unverified: true`.
- * Why: the reconcile-vs-sweep design and the fail-safe direction — docs/forensics/panel-graph.md
+ * W1-T257: a merged `proposal_pr` projects `proposed` as `accepted` via the shared batched
+ * `statusGithub`, preventing stuck NEEDS ME entries. GETs write nothing;
+ * {@link reconcileFeedbackEntries} persists. Missing/open/closed-unmerged PRs leave status alone;
+ * `readFailed()` also preserves it, adding `unverified: true`. See docs/forensics/panel-graph.md.
  */
 export function projectReconciledFeedback(entries: readonly FeedbackEntry[], statusGithub: GitHub): ReconciledFeedbackEntry[] {
   return entries.map((entry): ReconciledFeedbackEntry => {
@@ -374,10 +359,9 @@ export function proposeHandRouteFeedback(
 }
 
 /**
- * Layers `discharged`/`dischargeUndecidable` (W1-T1257) onto every already-{@link
- * reconcileFeedbackEntries}'d entry, off lib/trace.ts's `feedbackDischargeState` predicate.
- * Reloads no PRs of its own — `plan` and `statusGithub` are the same fresh snapshot and batched
- * gateway the caller already resolved. Never touches `status:` or calls `setFeedbackStatus`.
+ * W1-T1257: decorate reconciled entries with `discharged`/`dischargeUndecidable` via trace.ts's
+ * `feedbackDischargeState`. Reuse the caller's fresh plan and batched `statusGithub`; reload no PRs
+ * and never change `status:` or call `setFeedbackStatus`.
  */
 export function decorateFeedbackDischarge(
   entries: ReconciledFeedbackEntry[],
@@ -468,10 +452,9 @@ interface SubmitFeedbackInput {
 }
 
 /**
- * `attachments`, if present, must be http(s) links only — a local path would resolve against the
- * daemon's own filesystem. `expansion`, if present, is the {@link FeedbackExpansion} the console
- * read back and the operator confirmed (W1-T350) — re-validated, not trusted verbatim.
- * `submissionKey` (W1-T2302) is an opaque per-submit dedup key checked only for non-emptiness.
+ * `attachments` accepts only http(s), preventing daemon-local path resolution. Revalidate the
+ * operator-confirmed {@link FeedbackExpansion} (W1-T350); `submissionKey` (W1-T2302) is opaque,
+ * checked only for non-emptiness.
  */
 function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedbackInput {
   if (!isRecord(body)) return { error: "body must be a JSON object" };
@@ -576,12 +559,10 @@ export interface FeedbackReplyInput {
 }
 
 /**
- * W1-T8511: the reply half of POST /v1/feedback, factored out so an operator's GitHub reply on a
- * feedback GRILL issue (lib/escalation-answers.ts) answers the record through the SAME writes the
- * console does. Captures the entry (`reply_to` set when `replyTo` is), flips the `replyTo` record to
- * `answered` with `answered_by`, and queues both under `inboxRoot` for the landing sweep. The caller
- * owns validation, the `submissionKey` dedup and the `grilling` check ({@link replyRefusalFor}). `deps` is the checkout,
- * the landing-queue root and the landing bridge.
+ * W1-T8511: console and escalation-answers.ts GRILL replies share these writes: capture `reply_to`,
+ * set the target's `answered`/`answered_by`, and queue both under `inboxRoot` for landing.
+ * The caller owns validation, `submissionKey` dedup and the `grilling` check ({@link replyRefusalFor});
+ * `deps` supplies the checkout, queue root and landing bridge.
  */
 export function captureFeedbackReply(
   deps: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
@@ -638,12 +619,10 @@ export function captureFeedbackReply(
 }
 
 /**
- * POST /v1/feedback — write-scoped. Captures an entry with `origin: ui` always. Ledgers
- * `panel.feedback_submitted`. `replyTo` must name an entry parked `grilling` (404/400
- * otherwise); the edge is durable both ends (W1-T2278) — this handler advances the target to
- * `answered`, the only code path that ever writes that status. `submissionKey` (W1-T2302) is
- * checked first, so a repeat answers with the existing entry and skips every other effect.
- * Why: the durability and dedup incidents this closed — docs/forensics/panel-graph.md
+ * POST /v1/feedback: write-scoped, always `origin: ui`, ledgers `panel.feedback_submitted`.
+ * `replyTo` requires a `grilling` target (else 404/400); only this path writes `answered`, with
+ * both edge ends durable (W1-T2278). Check `submissionKey` first: repeats return the existing entry
+ * with no other effects (W1-T2302). Incident history: docs/forensics/panel-graph.md.
  */
 export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
   return {
@@ -700,11 +679,9 @@ function validatePreviewFeedback(body: unknown): { error: string } | PreviewFeed
 }
 
 /**
- * POST /v1/feedback/preview — write-scoped (a real model call). Runs the feedback-expansion rung
- * over the draft and returns the {@link FeedbackExpansion}. Files nothing — the preview seam
- * shown before POST /v1/feedback runs. `replyTo`, when present, validates the same way the
- * submit route does. Fail-open — no `expandFeedback` wired, a throw, or a rejected response all
- * resolve `{ expansion: null }` with a 200, since the console's own fallback files it plain.
+ * POST /v1/feedback/preview: write-scoped model call returning {@link FeedbackExpansion}, filing
+ * nothing. Validate `replyTo` as submission does. Missing `expandFeedback`, throws and rejected
+ * responses fail open to 200 `{ expansion: null }`; the console can still file plain feedback.
  */
 export function buildPreviewFeedbackRoute(deps: PanelGraphDeps): Route {
   return {
@@ -737,10 +714,9 @@ export function buildPreviewFeedbackRoute(deps: PanelGraphDeps): Route {
 // ── GET /v1/trace — the plan→task→PR provenance graph ──────────────────────
 
 /**
- * GET /v1/trace?id=<task-id-or-feedback-id> — read-scoped. Same two-entry-point resolution as
- * `rmd trace <id>`: a known task id traces reverse (back through its origin), anything else is
- * looked up as a feedback entry and traces forward (out to its proposal PR / tasks / runs).
- * Returns both the structured {@link TraceChain} and the pre-rendered `rmd trace` text tree.
+ * GET /v1/trace?id=<task-id-or-feedback-id>: read-scoped, like `rmd trace <id>`.
+ * Known tasks trace reverse through origin; feedback traces forward to PR/tasks/runs.
+ * Return both {@link TraceChain} and its rendered text tree.
  */
 export function buildTraceRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   return {
@@ -1853,10 +1829,9 @@ export function computePlanSectionCounts(
 }
 
 /**
- * GET /v1/plan/view[?frontier=<n>] — read-scoped. The Plan tab's one fetch: `progress`, `sections`
- * (W1-T376), and `frontier`, off one process snapshot and one `projectPlan()` call, like {@link
- * buildDrainPreviewRoute}. The caches are created once per route closure, persisting for the
- * `rmd serve` process lifetime — never per-request, or every reading would look first-ever.
+ * GET /v1/plan/view[?frontier=<n>]: read-scoped `progress`, `sections` (W1-T376) and `frontier`
+ * from one process snapshot and `projectPlan()` call, like {@link buildDrainPreviewRoute}.
+ * Cache per route closure for serve's lifetime; per-request caches would make every read first-ever.
  */
 export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   const progressCache = createPlanProgressCache();
@@ -1940,12 +1915,9 @@ export interface InboxDraftingItem extends InboxSender {
 }
 
 /**
- * One DECLINED proposal, as GET /v1/inbox renders it (W1-T3408). Carries the decline's own reason
- * verbatim, so the list says WHY each was refused and a reader can tell a deliberate refusal from
- * one entered on reasoning that has since been shown wrong.
- *
- * IT IS A SEPARATE ARRAY, not folded into `notReady`: a declined proposal is not awaiting anything
- * and must never read as work in progress. Restore, reframe and thread replies remain available.
+ * W1-T3408: declined proposals carry the refusal reason verbatim, including reasoning later
+ * disproved. Keep a separate array from `notReady`: declined is not work in progress.
+ * Restore, reframe and thread replies remain available.
  */
 export interface InboxDeclinedItem extends InboxSender {
   proposalId: string;
@@ -3806,16 +3778,12 @@ function proposalVerdictResponse(
 }
 
 /**
- * POST /v1/inbox/decline — write-scoped. The inbox's third verb (W1-T2604): the only prior way a
- * proposal left the registry was `rmd approve`, so a self-withdrawn or duplicate one had no path
- * out except being approved into a task nobody wants. An operator act, never an inference —
- * `classifyProposal` never reads a proposal's own prose to decide this. A decline is not a delete:
- * the proposal stays in the registry (like `retired`, W1-T2451), and the receipt is checked before
- * every other predicate. W1-T3407: it is no longer PERMANENT either — {@link
- * buildRestoreProposalRoute} clears it, latest wins, so a decline entered on reasoning that later
- * proves wrong can be taken back. No plan task, no branch: this never calls {@link
- * RatifyCliGateway}. Valid for any active-registry proposal not already ratified or declined.
- * Why: the P19-shaped silent-drop history this route closes — docs/forensics/panel-graph.md
+ * POST /v1/inbox/decline: write-scoped operator decision, never inferred from proposal prose.
+ * W1-T2604 avoids approving unwanted tasks just to remove an ask. Retain the registry entry
+ * (like `retired`, W1-T2451); check its receipt before other predicates. W1-T3407:
+ * {@link buildRestoreProposalRoute} reverses it, latest wins. Any active proposal except ratified
+ * or already declined is eligible. No task/branch or {@link RatifyCliGateway} call.
+ * P19-shaped silent-drop history: docs/forensics/panel-graph.md.
  */
 export function buildDeclineProposalRoute(deps: PanelGraphDeps): Route {
   return buildInboxVerbRoute("decline", deps);
