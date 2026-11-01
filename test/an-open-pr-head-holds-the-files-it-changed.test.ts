@@ -209,3 +209,23 @@ test("observed scope producer: the daemon composition root builds it from the pr
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("observed overlap policy: the mode is read from a real policy file, and a malformed row or file is refused", async () => {
+  const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { RMD_TMP_PREFIX } = await import("#src/lib/tmp.js");
+  const policy = await import("#src/lib/policy.js");
+  assert.throws(() => policy.parseObservedOverlapMode({ observedOverlap: { mode: { value: "enforce", origin: "net-new" } } }),
+    /origin' must be "proposal"/);
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}observed-overlap-policy-`));
+  try {
+    const file = join(dir, "policy.yaml");
+    writeFileSync(file, "sweep:\n  observedOverlap:\n    mode:\n      value: enforce\n      origin: proposal\n");
+    assert.equal(policy.loadObservedOverlapMode(file), "enforce");
+    writeFileSync(file, "sweep: [unclosed\n");
+    assert.throws(() => policy.loadObservedOverlapMode(file), /not valid YAML/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
