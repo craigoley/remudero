@@ -158,7 +158,8 @@ test("code health exports bounded provenance without publishing security results
     const config = join(dir, "codeql.yml"), workflow = join(dir, "workflow.yml"), productionOutput = join(dir, "production.json");
     writeFileSync(config, '# Existing configuration\npaths-ignore:\n  - "test/**"\n');
     writeFileSync(workflow, 'queries: security-and-quality\n');
-    execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--sarif-dir", sarifDir,
+    // The CLI must share the fixture's shifted clock when judging its SARIF completion time.
+    execFileSync(process.execPath, ["--import", join(repoRoot(), "scripts/clock-shift.mjs"), join(repoRoot(), "scripts/code-health-provenance.mjs"), "--sarif-dir", sarifDir,
       "--config", config, "--workflow", workflow, "--output", productionOutput], { encoding: "utf8", env: { ...process.env,
         GITHUB_REPOSITORY: raw.repository, GITHUB_SHA: raw.analyzedSha, GITHUB_REF: raw.ref, GITHUB_RUN_ID: raw.runId,
         GITHUB_RUN_ATTEMPT: raw.runAttempt, CODE_HEALTH_LANGUAGE: raw.language, CODE_HEALTH_SARIF_ID: raw.sarifId } });
@@ -170,7 +171,7 @@ test("code health exports bounded provenance without publishing security results
     delete (withoutInvocation.runs[0] as { invocations?: unknown }).invocations;
     writeFileSync(join(sarifDir, "javascript.sarif"), JSON.stringify(withoutInvocation));
     const completedOutput = join(dir, "workflow-completion.json");
-    execFileSync(process.execPath, [join(repoRoot(), "scripts/code-health-provenance.mjs"), "--sarif-dir", sarifDir,
+    execFileSync(process.execPath, ["--import", join(repoRoot(), "scripts/clock-shift.mjs"), join(repoRoot(), "scripts/code-health-provenance.mjs"), "--sarif-dir", sarifDir,
       "--config", config, "--workflow", workflow, "--output", completedOutput], { encoding: "utf8", env: { ...process.env,
         GITHUB_REPOSITORY: raw.repository, GITHUB_SHA: raw.analyzedSha, GITHUB_REF: raw.ref, GITHUB_RUN_ID: raw.runId,
         GITHUB_RUN_ATTEMPT: raw.runAttempt, CODE_HEALTH_LANGUAGE: raw.language, CODE_HEALTH_SARIF_ID: raw.sarifId,
