@@ -22,3 +22,11 @@
     Last 24 h: n 5, p50 5, p90 5 per PR.
     Slowest PRs: #15844 (5 per PR), #15835 (5 per PR), #15833 (5 per PR).
     Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.97
+    reasons:
+      - "high-risk verdict at confidence 0.97 — on the change's description/files alone, no diff was read — Acceptance requires p50 strictly under twice a stated baseline of zero, yielding an unattainable target below zero fix rounds per PR.; on the change's description/files alone, no diff was read — The supplied evidence reports aggregate counts and three PR references but no shared cause; the rationale explicitly leaves that investigation outstanding.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for test-title text rather than executing a recovery assertion, so it cannot verify the claimed recovery."
+    judged_at: "2026-11-01T02:25:28.236Z"
+    pin: "ddf6921b1a5caaefb611176eff2c7eb93f70ab7cd691bbfcf1f89f04a241553b"
