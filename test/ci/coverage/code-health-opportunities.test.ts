@@ -150,7 +150,9 @@ test("code health exports bounded provenance without publishing security results
     writeFileSync(copiedScript, readFileSync(copiedScript, "utf8") + "\n// Changed measurement implementation.\n");
     assert.notEqual(run(raw, copiedScript).configHash, manifest.configHash, "a changed quality measurement method cannot reuse its predecessor's comparison identity");
     const original = structuredClone(raw.sarif);
-    original.runs[0]!.invocations[0]!.endTimeUtc = new Date(Date.now() - 1000).toISOString();
+    // A fixed past instant: the child stamps observedAt on the REAL clock, so an end time read from a shifted test
+    // clock could pass it, and the expiring-fixture census's clock-shift control failed this suite on main.
+    original.runs[0]!.invocations[0]!.endTimeUtc = "2026-01-01T00:00:00.000Z";
     const sarifDir = join(dir, "original"); mkdirSync(sarifDir);
     writeFileSync(join(sarifDir, "javascript.sarif"), JSON.stringify(original));
     const config = join(dir, "codeql.yml"), workflow = join(dir, "workflow.yml"), productionOutput = join(dir, "production.json");
