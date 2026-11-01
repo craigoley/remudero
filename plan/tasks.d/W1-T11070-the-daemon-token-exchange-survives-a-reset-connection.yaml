@@ -1,0 +1,29 @@
+- id: W1-T11070
+  title: The daemon's GitHub App token exchange retries a reset connection on a fresh one instead of letting the token expire
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the credential every daemon GitHub read and write uses; the token itself is never logged
+  origin: operator-session#fleet-health-2026-11-01
+  plan_refs:
+    - W1-T9083
+    - W1-T11069
+  files:
+    - src/lib/github-app.ts
+    - test/github/the-daemon-token-exchange-survives-a-reset-connection.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An installation-token exchange that fails with EPIPE, ECONNRESET, UND_ERR_SOCKET or ETIMEDOUT is retried on a fresh connection that keeps no socket alive, up to a bounded number of attempts, before the refresh is reported failed; each retry is ledgered with the error code and never with the token. A refresh that fails for any other reason (a 4xx from the exchange, an unreadable key) is not retried"
+      proof: "unit test: test/github/the-daemon-token-exchange-survives-a-reset-connection.test.ts"
+    - claim: The token exchange names its retryable socket errors
+      proof: "grep: ECONNRESET in src/lib/github-app.ts"
+  rationale: |
+    OBSERVED, operator recon 2026-11-01: github_app.token_refresh_failed was written 198 times in two days ("exchange request failed: EPIPE" 141, "ECONNRESET" 55, "UND_ERR_SOCKET" 1, "ETIMEDOUT" 1), all by the daemon process; gardener children in the same container refreshed 192 times with none. When the token expired between successes (05:59:59 and 12:10:48 on 11-01), every GitHub read answered 401 Bad credentials and the sweep stopped for hours. refreshInstallationToken and startInstallationTokenRefresh (src/lib/github-app.ts) write process.env.GH_TOKEN, which later spawns read, so a successful refresh does reach them: the fault is the in-process exchange failing.
+    INFERRED: the daemon loop's 60-180 s stalls (W1-T11069) break the exchange mid-request; this task makes the exchange tolerate it whatever the cause.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (run-unfiled-1793538128289).

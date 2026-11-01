@@ -1,0 +1,30 @@
+- id: W1-T11072
+  title: Claude stays routable when its usage reading has readable weekly windows but no five-hour window, and the row names which empty case it saw
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # provider eligibility for every worker; a reading with no usable window at all stays unreadable; worker.ts only swaps its capacity call
+  origin: operator-session#fleet-health-2026-11-01
+  plan_refs:
+    - W1-T2949
+    - W1-T10383
+  files:
+    - src/lib/headroom.ts
+    - src/lib/worker-provider.ts
+    - src/lib/worker.ts
+    - test/memory/claude-is-eligible-on-a-readable-weekly-window.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An answered SDK usage reading whose rate limits carry readable seven-day or model-scoped weekly windows but no five-hour window yields a readable Claude capacity from those weekly windows, so Claude is eligible when they leave headroom above the reserve. A reading with rate_limits_available false, or no rate_limits, or no usable window at all, stays unreadable, and each of those cases is recorded under its own reason instead of one shared capacity-unreadable"
+      proof: "unit test: test/memory/claude-is-eligible-on-a-readable-weekly-window.test.ts"
+  rationale: |
+    OBSERVED, operator recon 2026-11-01: from 2026-10-31T04:59:55Z every worker.assignment marked Claude unreadable (reason capacity-unreadable), and usage.probe_failed repeated every 6-15 min (244 rows by 11-01T11:38Z) with stage sdk "usage control request returned no usable rate-limit windows" and the CLI fallback "no 'Current session:' line in /usage output". The last Claude-selected assignment was 2026-10-29T01:34Z. Meanwhile codex ran every worker and reviewer on prepaid credits (balance 54,283 on 10-28 to 42,885 on 11-01) once its own weekly window reached 100%.
+    usageSnapshotFromSdk (src/lib/headroom.ts) returns undefined when five_hour has no usable percent, even when weekly windows are present, and claudeCapacityFromUsage then marks Claude readable false; providerEligibility excludes it. INFERRED: with no worker running on Claude, no five-hour session opens, so the reading stays empty: a self-sustaining lockout.
+    Operator ruling 2026-11-01 ("Probe, warm up, then fix") authorizes changing this behaviour, which a code comment had recorded as ratified.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (run-unfiled-1793538128289).
