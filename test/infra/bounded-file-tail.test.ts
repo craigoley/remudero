@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BoundedOutput, readBoundedFileTail } from "#src/lib/bounded-file-tail.js";
+import { CODEX_WORKER_STDOUT_MAX_BYTES, spawnCodexWorker } from "#src/lib/worker-provider.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-test("W1-T10962: the real default report reader respects a byte bound and preserves valid multibyte evidence", (t) => {
+test("W1-T10962: the real default report reader respects a byte bound and preserves valid multibyte evidence", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-bounded-tail-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, "report");
@@ -16,7 +17,7 @@ test("W1-T10962: the real default report reader respects a byte bound and preser
     { cwd: REPO_ROOT, env: { ...process.env, NODE_V8_COVERAGE: "" } });
   const read = fs.readSync;
   let requested = 0;
-  t.mock.method(fs, "readSync", (fd: number, buffer: Buffer, offset: number, length: number, position: number) => {
+  const observedRead = t.mock.method(fs, "readSync", (fd: number, buffer: Buffer, offset: number, length: number, position: number) => {
     requested += length;
     return read(fd, buffer, offset, length, position);
   });
@@ -29,6 +30,40 @@ test("W1-T10962: the real default report reader respects a byte bound and preser
   writeFileSync(path, "🙂é終\n");
   assert.equal(readBoundedFileTail(path, 10).state, "complete");
   assert.equal(readBoundedFileTail(path, 10).text, "🙂é終\n");
+  const script = join(dir, "codex-report.mjs");
+  const bin = join(dir, "codex-report");
+  const jsonPrefix = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "HEAD" } });
+  const headPadding = 64 * 1024 - Buffer.byteLength(jsonPrefix.slice(0, jsonPrefix.indexOf("HEAD") + 4)) - 2;
+  writeFileSync(script, `process.stdin.resume(); await new Promise(r => process.stdin.once("end", r));
+    for (const event of [{type:"thread.started",thread_id:"bounded-attempt"},{type:"turn.started"},
+      {type:"item.completed",item:{type:"agent_message",text:"HEAD"+"x".repeat(${headPadding})+"🙂"+
+        "x".repeat(${CODEX_WORKER_STDOUT_MAX_BYTES * 2})+"TAIL🙂é終"}},
+      {type:"turn.completed",usage:{input_tokens:1,cached_input_tokens:0,output_tokens:1}}])
+      process.stdout.write(JSON.stringify(event)+"\\n");`);
+  writeFileSync(bin, `#!/bin/sh\nexec '${process.execPath}' '${script}'\n`);
+  chmodSync(bin, 0o700);
+  const beforeCodex = requested;
+  const runCodex = () => spawnCodexWorker({ workerHome: join(dir, "worker-home"), cwd: dir, prompt: "bounded report",
+    tools: ["Read"], settingsFile: join(REPO_ROOT, "settings/worker.json") },
+  { claudeBin: "/unused", root: dir, workerProviders: { codexBin: bin, codexModel: "gpt-6.1-sol",
+    codexHome: join(dir, "codex-auth") } });
+  const codex = await runCodex();
+  assert.ok(requested - beforeCodex <= 256 * 1024, "the production spill read must request only its tail budget");
+  assert.equal(codex.outputRetention?.stdout?.state, "truncated");
+  assert.equal(codex.isError, true);
+  assert.deepEqual(codex.exit, { kind: "exit", code: 0 });
+  assert.match(codex.text, /^HEAD/, JSON.stringify({ retention: codex.outputRetention, subtype: codex.subtype,
+    blocks: codex.blocks.map(block => block.slice(0, 100)) }));
+  assert.match(codex.text, /TAIL🙂é終$/);
+  assert.ok(!codex.text.includes("�"));
+  observedRead.mock.restore();
+  const refusedRead = t.mock.method(fs, "readSync", () => { throw new Error("spill read refused"); });
+  const unreadable = await runCodex();
+  refusedRead.mock.restore();
+  assert.equal(unreadable.outputRetention?.stdout?.state, "unreadable");
+  assert.match(unreadable.outputRetention!.stdout!.reason!, /spill read refused/);
+  assert.equal(unreadable.isError, true);
+  assert.deepEqual(unreadable.exit, { kind: "exit", code: 0 });
 });
 
 test("bounded report states distinguish absent, unreadable, malformed and empty", (t) => {

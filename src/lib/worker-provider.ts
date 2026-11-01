@@ -65,7 +65,7 @@ import {
   type StderrFailure,
   type StderrSink,
 } from "./worker-containment.js";
-import type { FileTail } from "./bounded-file-tail.js";
+import { readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import {
   CASH_WEB_SEARCH_KEY_ENV,
   CASH_WEB_SEARCH_MAX_RETRIEVED_TOKENS,
@@ -146,6 +146,7 @@ interface CodexWorkerResult {
   outputRetention?: {
     text: Omit<FileTail, "text">;
     blocks: Omit<FileTail, "text">;
+    stdout?: Omit<FileTail, "text">;
     stderr: Omit<FileTail, "text">;
     completion?: CodexCompletionEvidence;
     originalSubtype: string;
@@ -2458,6 +2459,9 @@ class CodexJsonlAccumulator {
   private droppedBytes = 0;
   private spilledBytes = 0;
   private spilling = false;
+  private spillHead = "";
+  private spillHeadFull = false;
+  private spillEvidence?: Omit<FileTail, "text">;
   private failed = false;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
@@ -2466,6 +2470,21 @@ class CodexJsonlAccumulator {
   constructor(private nowMs: number, private readonly pendingFile?: string, private readonly observeToolLineage?: (raw: unknown) => void,
     private readonly observeMessage?: (text: string, tsMs: number) => void,
     private readonly observeToolCall?: (toolName: "Bash" | "Edit" | "Write", toolInput: Record<string, string>, tsMs: number) => void) {}
+
+  private appendSpillHead(part: string): void {
+    if (this.spillHeadFull) return;
+    const room = 64 * 1024 - Buffer.byteLength(this.spillHead);
+    if (room <= 0) { this.spillHeadFull = true; return; }
+    const bytes = Buffer.from(part);
+    const prefix = bytes.subarray(0, room);
+    if (bytes.length >= room) this.spillHeadFull = true;
+    for (let end = prefix.length; end > 0; end--) {
+      try {
+        this.spillHead += new TextDecoder("utf-8", { fatal: true }).decode(prefix.subarray(0, end));
+        return;
+      } catch { /* A byte cut may end inside one multibyte character. */ }
+    }
+  }
 
   push(chunk: string, nowMs = this.nowMs): void {
     this.nowMs = nowMs;
@@ -2476,10 +2495,12 @@ class CodexJsonlAccumulator {
       if (this.pendingFile && !this.spilling && this.retainedBytes() + Buffer.byteLength(part) > CODEX_WORKER_STDOUT_MAX_BYTES) {
         writeFileSync(this.pendingFile, this.pending, { mode: 0o600 });
         this.spilledBytes += this.pendingLineBytes();
+        this.appendSpillHead(this.pending);
         this.pending = "";
         this.spilling = true;
       }
       if (this.spilling) {
+        this.appendSpillHead(part);
         appendFileSync(this.pendingFile!, part);
         this.spilledBytes += Buffer.byteLength(part);
       } else {
@@ -2492,10 +2513,38 @@ class CodexJsonlAccumulator {
   }
 
   private consumePending(): void {
-    const line = this.spilling ? readFileSync(this.pendingFile!, "utf8") : this.pending;
+    let line = this.pending;
+    let sourceBytes: number | undefined;
+    if (this.spilling) {
+      const tail = readBoundedFileTail(this.pendingFile!, 256 * 1024);
+      const { text, ...evidence } = tail;
+      sourceBytes = tail.fileBytes === undefined ? undefined : tail.fileBytes + 1;
+      if (tail.state === "truncated") {
+        // Reconstruct only when the omitted bytes lie inside a JSON string. Parsing still
+        // validates the envelope; a partial line can never certify a complete report.
+        const omitted = tail.fileBytes! - Buffer.byteLength(this.spillHead) - Buffer.byteLength(text);
+        line = this.spillHead + JSON.stringify(this.truncationMarker(Math.max(0, omitted))).slice(1, -1) + text;
+        this.droppedBytes += Math.max(0, omitted);
+      } else {
+        line = text;
+      }
+      if (tail.state !== "complete") this.spillEvidence = evidence;
+      if (tail.state === "malformed" || tail.state === "unreadable" || tail.state === "absent") {
+        this.failed = true;
+        this.errors.push(`Codex stdout spill ${tail.state}: ${tail.reason ?? "report unavailable"}`);
+        this.pending = "";
+        this.spilling = false;
+        this.spillHead = "";
+        this.spillHeadFull = false;
+        this.boundRetained();
+        return;
+      }
+    }
     this.pending = "";
     this.spilling = false;
-    this.consumeLine(line);
+    this.spillHead = "";
+    this.spillHeadFull = false;
+    this.consumeLine(line, sourceBytes);
     if (this.pendingFile) this.boundRetained();
   }
 
@@ -2533,6 +2582,10 @@ class CodexJsonlAccumulator {
 
   eventBytesByKind(): Readonly<Record<string, number>> {
     return { ...this.eventBytes };
+  }
+
+  stdoutEvidence(): Omit<FileTail, "text"> | undefined {
+    return this.spillEvidence;
   }
 
   pendingLineBytes(): number {
@@ -2579,14 +2632,14 @@ class CodexJsonlAccumulator {
     this.keptBytes = bytes(this.blocks) + bytes(this.errors);
   }
 
-  private consumeLine(line: string): void {
+  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1): void {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
     try {
       event = JSON.parse(line) as CodexJsonEvent;
     } catch {
       this.observeToolLineage?.(null);
-      this.eventBytes.malformed += Buffer.byteLength(line, "utf8") + 1;
+      this.eventBytes.malformed += sourceBytes;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
       this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
       this.failed = true;
@@ -2599,7 +2652,7 @@ class CodexJsonlAccumulator {
     const kind: CodexEventByteKind = CODEX_EVENT_BYTE_KIND_KEYS.includes(combined as CodexEventByteKind)
       ? (combined as CodexEventByteKind)
       : "other";
-    this.eventBytes[kind] += Buffer.byteLength(line, "utf8") + 1;
+    this.eventBytes[kind] += sourceBytes;
     if (event.type === "thread.started" && typeof event.thread_id === "string") this.sessionId = event.thread_id;
     if (event.type === "turn.started") {
       this.numTurns += 1;
@@ -5865,6 +5918,8 @@ async function spawnCodexWorkerInPrivateTemp(
     (toolName, toolInput, tsMs) =>
       args.streamObserver?.({ kind: "tool-executing", tsMs, text: `[tool_use: ${toolName}]`, toolName, toolInput, cwd: args.cwd }));
   const stdoutDecoder = new StringDecoder("utf8");
+  const stdoutValidator = new TextDecoder("utf-8", { fatal: true });
+  let stdoutFailure: Omit<FileTail, "text"> | undefined;
   let stdoutBytes = 0;
   const stderrRetainer = new CodexStderrRetainer();
   let stderrFailure: StderrFailure | undefined;
@@ -5923,6 +5978,13 @@ async function spawnCodexWorkerInPrivateTemp(
   };
   process.stdout.on("data", (chunk: Buffer) => {
     if (outputLimit || timedOut) return;
+    if (!stdoutFailure) {
+      try { stdoutValidator.decode(chunk, { stream: true }); }
+      catch (error) {
+        stdoutFailure = { state: "malformed", bytesRead: stdoutBytes + chunk.length,
+          reason: `Codex stdout is not valid UTF-8: ${String((error as Error).message ?? error)}` };
+      }
+    }
     const text = stdoutDecoder.write(chunk);
     stdoutBytes += chunk.length;
     if (stdoutBytes > CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES) {
@@ -5950,6 +6012,14 @@ async function spawnCodexWorkerInPrivateTemp(
     await contained.outputClosed;
     if (outputLimit) throw outputLimit;
     if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
+    if (!stdoutFailure) {
+      try { stdoutValidator.decode(); }
+      catch (error) {
+        stdoutFailure = { state: "malformed", bytesRead: stdoutBytes,
+          reason: `Codex stdout is not valid UTF-8 at EOF: ${String((error as Error).message ?? error)}` };
+      }
+    }
+    if (stdoutFailure) stdoutFailure = { ...stdoutFailure, bytesRead: stdoutBytes, fileBytes: stdoutBytes };
     stdout.push(stdoutDecoder.end());
     const parsed = stdout.finish();
     if (parsed.outputTruncation && args.runId) appendLedger(ledgerPathFor(config), {
@@ -5966,6 +6036,7 @@ async function spawnCodexWorkerInPrivateTemp(
     const outputRetention: NonNullable<CodexWorkerResult["outputRetention"]> = {
       text: { state: droppedOutput ? "truncated" : "complete", bytesRead: textBytes },
       blocks: { state: droppedOutput ? "truncated" : "complete", bytesRead: blockBytes },
+      stdout: stdoutFailure ?? stdout.stdoutEvidence() ?? { state: "complete", bytesRead: stdoutBytes, fileBytes: stdoutBytes },
       stderr: { ...stderrRetainer.evidence(), ...stderrFailure },
       completion: parsed.completion,
       originalSubtype: parsed.subtype,

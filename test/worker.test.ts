@@ -206,7 +206,7 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
   await eofChild.outputClosed;
   assert.equal(eofExit, 0);
   assert.equal(stderrEvents.at(-1)?.state, "malformed", "pipe closure must include EOF decoding failures");
-  const runCodex = async (body: string, mode?: "pipe-error" | "split" | "late-stderr") => {
+  const runCodex = async (body: string, mode?: "pipe-error" | "split" | "late-stderr" | "bad-stdout" | "eof-stdout") => {
     const script = join(dir, "codex-report.mjs");
     const bin = join(dir, "codex-fixture");
     const ack = join(dir, "stderr-read");
@@ -215,10 +215,18 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
       { type: "turn.started" },
       { type: "item.completed", item: { type: "agent_message", text: "done" } },
       { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 25, output_tokens: 10 } }];
+    const report = events.map(event => JSON.stringify(event)).join("\n") + "\n";
+    const stdoutWrite = mode === "bad-stdout"
+      ? `const report = Buffer.from(${JSON.stringify(report)});
+        const at = report.indexOf(Buffer.from("done")) + 4;
+        process.stdout.write(Buffer.concat([report.subarray(0, at), Buffer.from([0xc3, 0x28]), report.subarray(at)]));`
+      : mode === "eof-stdout"
+        ? `process.stdout.write(${JSON.stringify(report)}); process.stdout.write(Buffer.from([0xf0, 0x9f]));`
+        : `process.stdout.write(${JSON.stringify(report)});`;
     writeFileSync(script, `import { existsSync } from "node:fs";
       process.stdin.resume(); await new Promise(r => process.stdin.once("end", r));
       ${write}${body}
-      process.stdout.write(${JSON.stringify(events.map(event => JSON.stringify(event)).join("\n") + "\n")});`);
+      ${stdoutWrite}`);
     writeFileSync(bin, `#!/bin/sh\nexec '${process.execPath}' '${script}'\n`);
     chmodSync(bin, 0o700);
     const realSpawn = childProcess.spawn;
@@ -239,10 +247,10 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
         prompt: "synthetic report", tools: ["Read"], settingsFile: join(repoRoot(), "settings/worker.json") },
       { claudeBin: "/unused", root: dir, workerProviders: { codexBin: bin, codexModel: "gpt-6.1-sol", codexHome: join(dir, "codex-auth") } });
       assert.equal(result.sessionId, "real-codex-attempt");
-      assert.equal(result.text, "done");
+      assert.equal(result.text, mode === "bad-stdout" ? "done�(" : "done");
       assert.equal(result.numTurns, 1);
       assert.deepEqual(result.tokens, { input: 100, cacheRead: 25, cacheCreation: 0, output: 10 });
-      assert.equal(result.outputRetention?.originalSubtype, "success");
+      assert.equal(result.outputRetention?.originalSubtype, mode === "eof-stdout" ? "error_codex" : "success");
       return result;
     } finally {
       await outputClosed;
@@ -298,6 +306,17 @@ test("W1-T10962: truncated or unreadable worker and gardener output stays explic
   assert.equal(codexEmpty.outputRetention?.stderr.state, "complete");
   assert.equal(codexEmpty.isError, false);
   assert.equal(codexEmpty.subtype, "success");
+  for (const mode of ["bad-stdout", "eof-stdout"] as const) {
+    const result = await runCodex("", mode);
+    assert.equal(result.outputRetention?.stdout?.state, "malformed", "raw stdout must be validated through EOF");
+    assert.match(result.outputRetention!.stdout!.reason!, /not valid UTF-8/);
+    assert.equal(result.outputRetention?.originalSubtype, mode === "bad-stdout" ? "success" : "error_codex");
+    assert.equal(result.isError, true);
+    assert.equal(result.subtype, mode === "bad-stdout" ? "error_incomplete_output" : "error_codex");
+    assert.deepEqual(result.exit, { kind: "exit", code: 0 });
+    assert.equal(workerLedgerFields(result).output_retention?.stdout?.state, "malformed");
+    assert.equal(workerLedgerFields(result).verdict, result.subtype);
+  }
   const thread = { type: "thread.started", thread_id: "completion-attempt" };
   const started = { type: "turn.started" };
   const message = { type: "item.completed", item: { type: "agent_message", text: "unfinished report" } };

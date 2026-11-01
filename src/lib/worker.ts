@@ -266,6 +266,7 @@ export interface WorkerResult {
   outputRetention?: {
     text: Omit<FileTail, "text">;
     blocks: Omit<FileTail, "text">;
+    stdout?: Omit<FileTail, "text">;
     stderr: Omit<FileTail, "text">;
     completion?: CodexCompletionEvidence;
     originalSubtype: string;
