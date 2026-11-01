@@ -61,6 +61,7 @@ test("W1-T11071: stop bounds a hung review pass and names its age", async () => 
   assert.equal(abandoned.length, 1);
   assert.equal(abandoned[0]?.extra?.pass_number, 1);
   assert.equal(abandoned[0]?.extra?.bound_ms, 1_000);
+  assert.equal(abandoned[0]?.extra?.reason, "review pass exceeded the stop bound");
   assert.ok(Number(abandoned[0]?.extra?.elapsed_ms) >= 900);
   pass.resolve();
 });

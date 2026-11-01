@@ -2373,6 +2373,7 @@ export function startInterphaseReviewClock(
                 pass_number: details.passNumber,
                 trigger: details.trigger,
                 phase,
+                reason: "review pass exceeded the stop bound",
                 elapsed_ms: Math.max(0, observedAtMs - details.startedAtMs),
                 bound_ms: INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS,
               });
