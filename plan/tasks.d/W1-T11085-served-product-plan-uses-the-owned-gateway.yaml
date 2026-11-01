@@ -18,7 +18,7 @@
     - test/serve.test.ts
     - test/console-api/serve/product-routes.test.ts
   status: queued
-  dispatch_hold: true
+  dispatch_hold: false
   attempts: 0
   rationale: >-
     The saved signed-in Wreckterra plan command actually returned handoff_unavailable and created
