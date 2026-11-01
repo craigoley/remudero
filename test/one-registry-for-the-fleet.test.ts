@@ -30,7 +30,6 @@ import { withInstanceRegistryRuntime } from "#src/lib/instance-registry-selectio
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO } from "../src/lib/instance-registry-selection.js";
-import { withInstanceRegistryRuntime } from "#src/lib/instance-registry-selection.js";
 import type { Route } from "../src/lib/service.js";
 
 const NOW = Date.parse("2026-09-23T12:00:00.000Z");
