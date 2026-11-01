@@ -123,7 +123,7 @@ export interface LearningEntry {
    * src/lib/review.ts requires a matching docs/troubleshooting.md diff entry (W1-T50). */
   operatorImpact?: boolean;
   /** Narrower than {@link operatorImpact}, default false; checkDrillCoverage (src/lib/review.ts)
-   * requires a scripts/recovery-drill.mjs RECOVERY_PATHS fixture touch (W1-T939, W1-T366/W1-T938). */
+   * obligates a scripts/recovery-drill.mjs RECOVERY_PATHS fixture touch (W1-T939, W1-T366/W1-T938). */
   drillObligating?: boolean;
   /** Defaults to project for legacy entries; read via {@link entryLayer} (P32/W1-T145). */
   layer?: Layer;
