@@ -575,6 +575,51 @@ test("private registry selection defaults and falsifiers forbid live effects: fi
   }
 });
 
+function registryDeletionChildEnv(scratch: string, phase: "intact" | "deleted" | "restored"): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: scratch, NODE_TEST_CONTEXT: undefined };
+  if (env.NODE_V8_COVERAGE) {
+    // These are different programs at one copied pathname, not coverage of the committed tree.
+    // Collect each variant separately rather than contaminating the owning source-map corpus.
+    const coverage = join(scratch, `coverage-${phase}`);
+    mkdirSync(coverage, { recursive: true });
+    env.NODE_V8_COVERAGE = coverage;
+  }
+  return env;
+}
+
+test("mutant coverage is retained per source variant and never mixed into head evidence", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}mutant-coverage-`));
+  const prior = process.env.NODE_V8_COVERAGE, parent = join(root, "parent");
+  mkdirSync(parent);
+  try {
+    process.env.NODE_V8_COVERAGE = parent;
+    const variants = new Set<string>();
+    for (const phase of ["intact", "deleted", "restored"] as const) {
+      const env = registryDeletionChildEnv(root, phase);
+      const child = spawnSync(process.execPath, ["--input-type=module", "-e",
+        `function variantProbe() { return ${JSON.stringify(phase)}; } variantProbe();`],
+        { env, cwd: root, encoding: "utf8", timeout: 10000 });
+      assert.equal(child.status, 0, child.stderr);
+      assert.ok(env.NODE_V8_COVERAGE);
+      const reports = readdirSync(env.NODE_V8_COVERAGE).filter(name => /^coverage-.*[.]json$/.test(name));
+      assert.ok(reports.length > 0, "the real child must retain actual V8 evidence");
+      assert.ok(reports.some(name => JSON.parse(readFileSync(join(env.NODE_V8_COVERAGE!, name), "utf8")).result
+        .some((entry: { functions: Array<{ functionName: string; ranges: Array<{ count: number }> }> }) => entry.functions
+          .some(fn => fn.functionName === "variantProbe" && fn.ranges.some(range => range.count > 0)))));
+      assert.deepEqual(readdirSync(parent), [], "mutant source must never enter the HEAD collector");
+      assert.notEqual(env.NODE_V8_COVERAGE, parent);
+      variants.add(env.NODE_V8_COVERAGE);
+    }
+    assert.equal(variants.size, 3, "intact, deleted and restored each retain their own source-map identity");
+    delete process.env.NODE_V8_COVERAGE;
+    assert.equal(registryDeletionChildEnv(root, "intact").NODE_V8_COVERAGE, undefined,
+      "ordinary uninstrumented proofs preserve genuine absence");
+  } finally {
+    if (prior === undefined) delete process.env.NODE_V8_COVERAGE; else process.env.NODE_V8_COVERAGE = prior;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // Delete actual production mechanisms in isolated copies, then run frozen behavioral proofs.
 test("private registry selection defaults and falsifiers forbid live effects: recorded independent production deletions", { timeout: 600000 }, t => {
   const prefix = "private registry selection defaults and falsifiers forbid live effects";
@@ -629,10 +674,12 @@ test("private registry selection defaults and falsifiers forbid live effects: re
         const pattern = `^${control.title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
         const args = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
           "--test-name-pattern", pattern, control.suite];
+        const env = registryDeletionChildEnv(scratch, phase);
         const result = spawnSync(process.execPath, args, { cwd: sandbox, encoding: "utf8", timeout: 60000,
-          maxBuffer: 4 * 1024 * 1024, env: { ...process.env, TMPDIR: scratch, NODE_TEST_CONTEXT: undefined } });
+          maxBuffer: 4 * 1024 * 1024, env });
         const tap = result.stdout + result.stderr;
         t.diagnostic(JSON.stringify({ control: control.name, phase, source: control.source,
+          variantCoverageDirectory: env.NODE_V8_COVERAGE ?? null,
           sourceDigest: digest(readFileSync(sourcePath)), suiteDigest, args, status: result.status,
           signal: result.signal, error: result.error?.message, tap }));
         assert.equal(result.error, undefined, `${control.name}/${phase}: setup or capacity is not a behavioral result`);
