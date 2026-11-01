@@ -13,8 +13,8 @@ import {
   archiveStaleHoldsSteps, STALE_HOLD_ARCHIVE_CAP, staleHoldRestoreCommand, type StaleHoldCandidate,
 } from "#src/lib/branch-reaper.js";
 import { runStepsSync } from "#src/lib/git-push.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { REPO_ROOT } from "./helpers/repo-root.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { loadPolicy } from "#src/lib/policy.js";
 import { reapBranchesCommand } from "#src/run-task.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
