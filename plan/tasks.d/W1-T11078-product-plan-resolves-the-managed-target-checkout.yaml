@@ -71,13 +71,13 @@
     supplies no live product or gameplay acceptance credit.
   acceptance:
     - claim: The default service resolves the existing managed target with a separate immutable generation source, preserving native and instance target resolution and supported Git layouts
-      proof: "unit test: test/plan/product-case-managed-checkout.test.ts"
+      proof: "unit test: managed product checkout resolves outside an immutable serving generation"
     - claim: Missing, unreadable, identity-mismatched and stale targets refuse before an operation journal commit or handoff, including a deceptive sibling checkout
-      proof: "unit test: test/plan/product-case-managed-checkout.test.ts"
+      proof: "unit test: managed product checkout refuses missing unreadable foreign and stale repositories before journaling"
     - claim: Retrying and reloading the same saved command preserves its durable command and starts at most one native plan
-      proof: "unit test: test/plan/product-case-managed-checkout.test.ts"
+      proof: "unit test: managed product checkout replays a saved command without a second native plan"
     - claim: The served product proposal uses the corrected default resolution through authenticated route composition
-      proof: "unit test: test/console-api/serve/product-routes.test.ts"
+      proof: "unit test: served product proposal uses the verified managed checkout default"
   falsifier: |
     Restore the old sibling resolver: the separate-generation positive fixture must fail.
     Independently remove checkout identity validation: the deceptive foreign-checkout fixture
