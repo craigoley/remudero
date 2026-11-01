@@ -253,6 +253,7 @@ import {
   repairLadderStallFrom,
   type RepairLadderFallback,
 } from "./worker-provider.js";
+import { stalledStageEscalationIdentity, stalledStageIssueIdentity } from "./stage-stall-identity.js";
 import {
   FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
@@ -617,11 +618,6 @@ export function stalledStageEscalationSummary(reason: string): string {
   return reason
     .replace(/^(PR stage stalled: .+?) for \d+ minutes \((?:BACKSTOP \d+|owner: none)\); since [^;]*;/, "$1;")
     .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
-}
-
-/** Read a complete PR/blocker identity from a title or the unabridged reason in its body. */
-function stalledStageEscalationIdentity(text: string): string | undefined {
-  return /(PR stage stalled: #\d+ \S+ — [a-z-]+)(?=;| for \d+ minutes \(|$)/.exec(text)?.[1];
 }
 
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
@@ -3639,9 +3635,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const escalationIssues: AsyncIssueGateway = stallIdentity !== undefined && issues.listOpen
         ? { ...issues, listOpen: async (label) => (await issues.listOpen!(label)).filter(issue => {
           const head = escalationHeadSha(issue.body);
-          const identityText = issue.title?.endsWith("…") ? issue.body : issue.title;
-          return (head !== undefined && head !== pr.headSha) ||
-            stalledStageEscalationIdentity(identityText ?? "") === stallIdentity;
+          return (head !== undefined && head !== pr.headSha) || stalledStageIssueIdentity(issue) === stallIdentity;
         }) }
         : issues;
       const file = async (context: string): Promise<void> => { await escalateAsync(
