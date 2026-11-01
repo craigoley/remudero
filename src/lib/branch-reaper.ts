@@ -76,8 +76,13 @@ export function remoteBranchNames(exec: (cmd: string, args: string[]) => string)
   return runStepsSync(remoteBranchNamesSteps(exec));
 }
 
+/** The reaper's one `git ls-remote` site: `ls-remote <before…> origin <after…>`, read in the managed checkout. */
+function* lsRemoteOriginSteps(exec: BranchReapExec, before: readonly string[], after: readonly string[] = []): Steps<string> {
+  return yield* step(() => exec("git", ["ls-remote", ...before, "origin", ...after]));
+}
+
 export function* remoteBranchNamesSteps(exec: BranchReapExec): Steps<string[]> {
-  return (yield* step(() => exec("git", ["ls-remote", "--heads", "origin"])))
+  return (yield* lsRemoteOriginSteps(exec, ["--heads"]))
     .split("\n")
     .map((l) => l.split("refs/heads/")[1])
     .filter((n): n is string => Boolean(n && n.trim()))
@@ -781,4 +786,99 @@ export function withholdActiveBranches(
   }
 
   return { proceed, withheld };
+}
+
+// ── REPO HYGIENE: STALE HELD RUN BRANCHES (operator ruling 2026-11-01) ──────────────────────
+//
+// planBranchReap holds a no-PR run branch whose task shipped by another attempt as
+// `named_task_credited`, and one whose task has not shipped as `named_task_open`, until someone
+// adjudicates it. Nothing does: on 2026-11-01 remudero carried 506 branches, 311 of them no-PR run
+// branches of shipped tasks (296 older than 7 days) and 83 unshipped ones older than 14 days. This
+// planner names the stale ones. It does NOT change planBranchReap's verdict: the caller archives
+// each tip under STALE_HOLD_ARCHIVE_PREFIX before any delete, so no commit is lost, and the lane
+// starts in shadow mode, which only ledgers what it would reap.
+
+/** BACKSTOP: a held run branch of a SHIPPED task is stale after this long without a new commit. */
+export const STALE_CREDITED_HOLD_MS = 7 * 24 * 3_600_000;
+/** BACKSTOP: a held run branch of an UNSHIPPED task is stale after this long without a new commit. */
+export const STALE_UNSHIPPED_HOLD_MS = 14 * 24 * 3_600_000;
+/** Where a stale branch's tip is archived before its branch is deleted: `<prefix><branch>/<sha>`. */
+export const STALE_HOLD_ARCHIVE_PREFIX = "refs/rmd-recovery/reaped/";
+
+export type StaleHoldReason = "credited_sibling_stale" | "orphan_unshipped_stale";
+
+/** The facts this planner reads, a structural subset of status.ts's BranchFacts (no import: status.ts imports
+ *  this module, and dependency-cruiser counts even a type-only edge as a cycle). */
+export interface StaleHoldFacts {
+  name: string;
+  prState: "merged" | "closed" | "open" | "none" | "unknown";
+  tipInMain: boolean | "unknown";
+  namedInSource: boolean;
+  namedTaskId?: string;
+}
+
+export interface StaleHoldCandidate {
+  name: string;
+  sha: string;
+  reason: StaleHoldReason;
+  ageMs: number;
+  taskId: string;
+}
+
+/**
+ * The held run branches stale enough to archive and reap. PURE. A branch qualifies only when every
+ * fact was READ: a confirmed no-PR state, a tip confirmed not in main, a readable commit age past its
+ * threshold, a resolved task id, and a claim list that was read without a live claim for that task.
+ * An unreadable claim list (`undefined`) yields no candidates at all.
+ */
+export function planStaleHoldArchive(input: {
+  facts: readonly StaleHoldFacts[];
+  reasons: Readonly<Record<string, string>>;
+  tips: ReadonlyMap<string, RemoteBranchTip>;
+  nowMs: number;
+  claimedTaskIds: ReadonlySet<string> | undefined;
+  /** A `run-<taskId>-<epochMs>` branch's plan task, which the slug matcher never reads (it lands `no_pr_ever`). */
+  runTaskByBranch?: ReadonlyMap<string, string>;
+  /** The merge-credited task ids, or `undefined` when unread: a `no_pr_ever` run branch then names nothing. */
+  creditedTaskIds?: ReadonlySet<string>;
+  creditedAfterMs?: number;
+  unshippedAfterMs?: number;
+}): StaleHoldCandidate[] {
+  if (input.claimedTaskIds === undefined) return [];
+  const out: StaleHoldCandidate[] = [];
+  for (const f of input.facts) {
+    const reason = input.reasons[f.name];
+    if (reason !== "named_task_credited" && reason !== "named_task_open" && reason !== "no_pr_ever") continue;
+    if (f.prState !== "none" || f.tipInMain !== false || f.namedInSource || !/^run-.+-[0-9]+$/.test(f.name)) continue;
+    const taskId = f.namedTaskId ?? input.runTaskByBranch?.get(f.name);
+    if (taskId === undefined || input.claimedTaskIds.has(taskId)) continue;
+    if (reason === "no_pr_ever" && input.creditedTaskIds === undefined) continue;
+    const credited = reason === "named_task_credited" || (reason === "no_pr_ever" && input.creditedTaskIds!.has(taskId));
+    const tip = input.tips.get(f.name);
+    if (tip === undefined || tip.committedAtMs === undefined) continue;
+    const ageMs = input.nowMs - tip.committedAtMs;
+    const bound = credited ? (input.creditedAfterMs ?? STALE_CREDITED_HOLD_MS) : (input.unshippedAfterMs ?? STALE_UNSHIPPED_HOLD_MS);
+    if (ageMs < bound) continue;
+    out.push({ name: f.name, sha: tip.sha, reason: credited ? "credited_sibling_stale" : "orphan_unshipped_stale", ageMs, taskId });
+  }
+  return out;
+}
+
+/** The task ids holding a live dispatch claim, or `undefined` when the listing could not be read. */
+export function* readDispatchClaimTaskIdsSteps(exec: BranchReapExec): Steps<Set<string> | undefined> {
+  try {
+    return parseDispatchClaimTaskIds(yield* lsRemoteOriginSteps(exec, [], ["refs/rmd-dispatch/*"]));
+  } catch {
+    return undefined;
+  }
+}
+
+/** The task ids holding a live `refs/rmd-dispatch/<id>` claim, from `git ls-remote origin 'refs/rmd-dispatch/*'`. */
+export function parseDispatchClaimTaskIds(raw: string): Set<string> {
+  const ids = new Set<string>();
+  for (const line of raw.split("\n")) {
+    const ref = line.split("\t")[1]?.trim();
+    if (ref?.startsWith("refs/rmd-dispatch/")) ids.add(ref.slice("refs/rmd-dispatch/".length));
+  }
+  return ids;
 }
