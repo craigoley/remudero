@@ -1204,6 +1204,7 @@ import {
   type PlanPrBodyOpts,
 } from "./lib/plan-pr-emitter.js";
 import {
+  checkoutAdmission,
   findTaskShard,
   parseProofAmendmentProposal,
   type ProofAmendmentValidationInput,
@@ -8585,6 +8586,7 @@ export function buildProofAmendmentWritePorts(
       worktreeAddFn(repoDir, wp, localBranch, "origin/main", { log });
     },
     worktreeRemove: (repoDir, wp) => worktreeRemoveFn(repoDir, wp),
+    machineFilingAdmission: checkoutAdmission, // #15766: hosted lint-plan's admission, judged before any push
     writeFile: writeFileFn,
     gitAdd: gitOps.gitAdd,
     gitCommit: gitOps.gitCommit,
