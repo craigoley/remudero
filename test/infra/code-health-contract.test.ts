@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -136,6 +137,156 @@ function exportOriginal(input: ReturnType<typeof originalOutput> | string, direc
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
+// CodeQL codeql-cli/v2.27.3 (tag ea3abbb6, commit a1575b98):
+// javascript/ql/src/Diagnostics/ExtractedFiles.ql; python equivalent;
+// actions/ql/src/Diagnostics/SuccessfullyExtractedFiles.ql. SARIF 2.1.0 notification locations.
+function extractedOutput(language = "javascript-typescript") {
+  const value = originalOutput(), family = language === "javascript-typescript" ? "js" : language === "python" ? "py" : "actions";
+  const path = family === "py" ? "scripts/example.py" : family === "actions" ? ".github/workflows/ci.yml" : "src/example.ts";
+  value.language = language;
+  const id = `${family}/diagnostics/successfully-extracted-files`;
+  const run = { ...value.sarif.runs[0]!,
+    versionControlProvenance: [{ repositoryUri: "https://github.com/acme/atlas", revisionId: value.analyzedSha, branch: value.ref }],
+    originalUriBaseIds: { "%SRCROOT%": { uri: "file:///checkout/atlas/" } },
+    tool: { driver: { name: "CodeQL", semanticVersion: "2.27.3", rules: [{ id: `${family}/example` }],
+      notifications: [{ id, properties: { tags: ["successfully-extracted-files"] } }] } },
+    artifacts: [{ location: { uri: path, uriBaseId: "%SRCROOT%" }, roles: ["resultFile"] }],
+    invocations: [{ executionSuccessful: true, endTimeUtc: "2026-10-27T04:59:00.000Z",
+      toolExecutionNotifications: [{ descriptor: { id, index: 0 }, level: "note", message: { text: "" },
+        locations: [{ physicalLocation: { artifactLocation: { uri: path, uriBaseId: "%SRCROOT%", index: 0 } } }] }] }],
+  };
+  return { ...value, sarif: { ...value.sarif, runs: [run] } };
+}
+
+test("Code health preserves original extracted-file coverage with its own method identity", () => {
+  for (const language of ["javascript-typescript", "python", "actions"]) {
+    const value = extractedOutput(language), result = exportOriginal(value, true);
+    const path = value.sarif.runs[0]!.artifacts[0]!.location.uri;
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.metadata.state, "complete");
+    assert.deepEqual(result.metadata.scope, { kind: "codeql-extracted-files", fileCount: 1,
+      hash: createHash("sha256").update(JSON.stringify(["codeql-extracted-files", [path]])).digest("hex") });
+    assert.equal(result.metadata.language, language);
+    assert.equal(result.metadata.scanId, `codeql:123:1:${language}:${value.sarifId}`);
+    assert.deepEqual(result.metadata.completion, { kind: "original-invocations", state: "success", at: "2026-10-27T04:59:00.000Z" });
+    const notification = value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!;
+    notification.locations.push({ physicalLocation: { artifactLocation: { uri: path.replace(/[a-z]/, char => `%${char.charCodeAt(0).toString(16)}`), uriBaseId: "%SRCROOT%", index: 0 } } });
+    assert.deepEqual(exportOriginal(value).metadata.scope, result.metadata.scope, "canonical duplicates do not change population identity");
+    const legacy = originalOutput(); legacy.language = language;
+    legacy.sarif.runs[0]!.artifacts[0]!.location.uri = path;
+    assert.notEqual(exportOriginal(legacy).metadata.scope.hash, result.metadata.scope.hash, "equal paths under different methods cannot compare unchanged");
+    assert.ok(!JSON.stringify(result.metadata).includes(path));
+    assert.ok(!result.stdout.includes(path));
+  }
+  for (const reference of [{ index: 0 }, { id: "js/diagnostics/successfully-extracted-files" },
+    { id: "js/diagnostics/successfully-extracted-files", index: 0, toolComponent: { index: -1, name: "CodeQL" } }]) {
+    const value = extractedOutput();
+    Object.assign(value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!, { descriptor: reference });
+    assert.equal(exportOriginal(value).metadata.state, "complete", JSON.stringify(reference));
+  }
+  const indexed = extractedOutput(), indexedRun = indexed.sarif.runs[0]!;
+  Object.assign(indexedRun.versionControlProvenance[0]!, { mappedTo: { uri: "file:///checkout/atlas/" } });
+  Object.assign(indexedRun.invocations[0]!.toolExecutionNotifications[0]!.locations[0]!.physicalLocation.artifactLocation, { uri: undefined });
+  assert.equal(exportOriginal(indexed).metadata.state, "complete", "a consistent indexed location resolves through its original artifact");
+  const value = extractedOutput(), run = value.sarif.runs[0]!;
+  const notification = run.invocations[0]!.toolExecutionNotifications[0]!;
+  notification.message.text = "PRIVATE_RESULT_SENTINEL";
+  notification.locations.push({ physicalLocation: { artifactLocation: { uri: "src/second.ts", uriBaseId: "%SRCROOT%", index: 1 } } });
+  run.artifacts.push({ location: { uri: "src/second.ts", uriBaseId: "%SRCROOT%" }, roles: ["resultFile"] });
+  const first = exportOriginal(value);
+  notification.locations.reverse();
+  assert.equal(first.metadata.scope.fileCount, 2);
+  assert.deepEqual(exportOriginal(value).metadata.scope, first.metadata.scope, "population ordering cannot change identity");
+  assert.ok(!JSON.stringify(first).includes("PRIVATE_RESULT_SENTINEL"));
+  run.artifacts[0]!.roles = ["analysisTarget"];
+  const legacy = exportOriginal(value);
+  assert.equal(legacy.metadata.scope.kind, "explicit-analysis-targets");
+  assert.equal(legacy.metadata.scope.fileCount, 1, "incomparable populations are never unioned");
+});
+
+test("Code health extracted-file evidence refuses inferred foreign and incomplete populations", () => {
+  type Fixture = ReturnType<typeof extractedOutput>;
+  const changes: Array<(value: Fixture) => void> = [
+    value => { value.language = "python"; },
+    value => { value.sarif.runs[0]!.tool.driver.name = "Foreign CodeQL wrapper"; },
+    value => { value.sarif.runs[0]!.tool.driver.semanticVersion = "2.28.0"; },
+    value => { value.sarif.runs[0]!.tool.driver.notifications[0]!.id = "cli/expected-extracted-files/javascript"; },
+    value => { value.sarif.runs[0]!.tool.driver.notifications[0]!.properties.tags = []; },
+    value => { value.sarif.runs[0]!.tool.driver.notifications.push(structuredClone(value.sarif.runs[0]!.tool.driver.notifications[0]!)); },
+    value => { value.sarif.runs[0]!.versionControlProvenance[0]!.repositoryUri = "https://github.com/acme/foreign"; },
+    value => { value.sarif.runs[0]!.versionControlProvenance[0]!.revisionId = "b".repeat(40); },
+    value => { value.sarif.runs[0]!.versionControlProvenance[0]!.branch = "refs/heads/feature"; },
+    value => { value.sarif.runs[0]!.versionControlProvenance = []; },
+    value => { value.sarif.runs[0]!.invocations = []; },
+    value => { value.sarif.runs[0]!.invocations[0]!.executionSuccessful = false; },
+    value => { value.sarif.runs[0]!.invocations[0]!.endTimeUtc = "2026-10-28T00:00:00.000Z"; },
+    value => { value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!.level = "error"; },
+    value => { value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!.descriptor.index = 1; },
+    value => { value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!.locations = []; },
+    value => { value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications = []; },
+    value => { value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!.locations[0]!.physicalLocation.artifactLocation.index = 1; },
+    value => { value.sarif.runs[0]!.artifacts[0]!.location.uri = "src/other.ts"; },
+    value => { value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications = new Array(100_001).fill(value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]); },
+    ...["%bad", "%C0%AFprivate", "../private", "%2E%2E/private", "/private/file", "file:///private/file", "C:/private/file", "src\\private", "src/%00private", "src/file?query", "src/file#fragment", "src/%252e%252e/private"].map(uri =>
+      (value: Fixture) => { value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!.locations.push({ physicalLocation: { artifactLocation: { uri, uriBaseId: "%SRCROOT%", index: 0 } } }); }),
+  ];
+  assert.equal(exportOriginal(extractedOutput()).metadata.state, "complete", "positive corpus control");
+  for (const [index, change] of changes.entries()) {
+    const value = extractedOutput(); change(value);
+    const result = exportOriginal(value);
+    assert.equal(result.status, 0, `case ${index}: ${result.stderr}`);
+    assert.equal(result.metadata.state, "partial", `case ${index}`);
+    assert.equal(result.metadata.scope.hash, null, `case ${index} must not certify a filtered subset`);
+  }
+  const inferred = extractedOutput(), run = inferred.sarif.runs[0]!;
+  run.invocations[0]!.toolExecutionNotifications = [];
+  run.properties = { metricResults: [{ baseline: 999, value: 999 }] };
+  run.results = [{ locations: [{ physicalLocation: { artifactLocation: { uri: "src/example.ts" } } }] }];
+  assert.equal(exportOriginal(inferred).metadata.state, "partial");
+  for (const id of ["cli/expected-extracted-files/javascript", "js/diagnostics/unknown-population"]) {
+    const value = extractedOutput(), original = value.sarif.runs[0]!;
+    original.tool.driver.notifications[0]!.id = id;
+    original.invocations[0]!.toolExecutionNotifications[0]!.descriptor.id = id;
+    const result = exportOriginal(value);
+    assert.equal(result.metadata.state, "partial", id);
+    assert.equal(result.metadata.scope.fileCount, 0, "a resolvable non-measurement descriptor cannot supply processed files");
+    assert.equal(result.metadata.scope.hash, null);
+  }
+  const malformed: Array<(value: Fixture) => void> = [
+    value => { value.analysisSucceeded = false; },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!, { exitCode: 1 }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!, { exitSignalNumber: 9 }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!, { processStartFailureMessage: "failed" }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!, { message: null }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!, { exception: { message: "failed" } }); },
+    value => { Object.assign(value.sarif.runs[0]!, { versionControlProvenance: null }); },
+    value => { Object.assign(value.sarif.runs[0]!.versionControlProvenance[0]!, { repositoryUri: 7 }); },
+    value => { Object.assign(value.sarif.runs[0]!.versionControlProvenance[0]!, { mappedTo: { uri: "file:///foreign/" } }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!, { toolExecutionNotifications: null }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!, { toolConfigurationNotifications: [{ level: "error" }] }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!, { startTimeUtc: "2099-01-01T00:00:00.000Z" }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!, { workingDirectory: { uri: "file:///foreign/" } }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!, { locations: {} }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!.descriptor, { toolComponent: { index: 0, name: "foreign" } }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!.descriptor, { id: "unknown" }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!.locations[0]!.physicalLocation.artifactLocation, { uriBaseId: "unknown" }); },
+    value => { Object.assign(value.sarif.runs[0]!.originalUriBaseIds["%SRCROOT%"], { uriBaseId: "foreign" }); },
+    value => { Object.assign(value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!.locations[0]!.physicalLocation.artifactLocation, { uri: undefined, uriBaseId: "unknown" }); },
+    value => { Object.assign(value.sarif.runs[0]!.artifacts[0]!.location, { index: 1 }); },
+    value => {
+      Object.assign(value.sarif.runs[0]!.tool, { extensions: [{ name: "CodeQL" }] });
+      Object.assign(value.sarif.runs[0]!.invocations[0]!.toolExecutionNotifications[0]!.descriptor, { toolComponent: { name: "CodeQL" } });
+    },
+  ];
+  for (const [index, change] of malformed.entries()) {
+    const value = extractedOutput(); change(value);
+    const result = exportOriginal(value);
+    assert.equal(result.status, 0, `malformed ${index}: ${result.stderr}`);
+    assert.equal(result.metadata.state, "partial", `malformed ${index}`);
+    assert.equal(result.metadata.scope.hash, null);
+  }
+});
+
 test("Code health accepts original semantic tool identity without granting unmeasured scope", () => {
   const input = originalOutput(), run = input.sarif.runs[0]!;
   delete run.tool.driver.version;
@@ -197,7 +348,9 @@ test("Code health exporter keeps original source diagnostics bounded and private
     version: "code-health-original-structure-v1", sourceFormat: "original-sarif", scopeMethod: "explicit-analysis-targets", countLimit: 20_000,
     tool: { codeql: true, semanticVersion: "absent", version: "valid", selected: "version" },
     artifacts: { shape: "array", count: 1, analysisTargets: 1 },
-    codeql: { metricResults: "array", metricCount: 3, baselineMetrics: 1, expectedFileDescriptors: 1, expectedFileNotifications: 1 },
+    codeql: { metricResults: "array", metricCount: 3, baselineMetrics: 1, expectedFileDescriptors: 1, expectedFileNotifications: 1,
+      extractedFileDescriptors: 0, executionNotifications: "array", sourceIdentity: "absent",
+      extractedLocations: { shape: "absent", count: 0, physicalArtifacts: 0 } },
   });
   for (const malformed of [`{"${sentinel}": "${secretPath}", broken`, JSON.stringify({ sarif: sentinel }),
     JSON.stringify({ ...input, sarif: { ...input.sarif, runs: [null] } })]) {

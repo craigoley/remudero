@@ -667,3 +667,34 @@ records; `src/lib/daily-progress-calendar.ts` (`dailyWindow`, `nextDailyDue`);
 `src/lib/daily-progress-store.ts` (`readDailyProgressManifest`, `readDailyProgressRevision`,
 `commitDailyProgressPublication`); `src/lib/read-model-slow-lane.ts` (`dailyProgressUnit`);
 `src/lib/daily-progress-view.ts` (`readDailyProgressReport`); and the serving-switch contract above.
+
+## Code-health processed-file scope
+
+Code-health quality metadata can describe a processed-file subset as `codeql-extracted-files`.
+This method uses CodeQL 2.27.3's original successfully-extracted-files diagnostics for the matching
+JavaScript/TypeScript, Python or Actions language. It requires unambiguous driver descriptor references,
+matching repository/revision/main-branch provenance, successful original invocations and a nonempty,
+bounded population of repository-relative locations. Unsupported versions, missing source identity,
+unknown location bases, malformed members or contradictory completion retain partial evidence. A valid
+subset cannot rescue an invalid member. The producer never unions this population with legacy
+`explicit-analysis-targets`; each method retains its own scope hash. Coverage metadata continues to
+require `instrumented-source-files`.
+
+Processed files do not attest comprehensive security coverage. Expected-file baselines, arbitrary
+artifacts, result locations, finding counts and configured globs cannot establish this population.
+Published `code-health-source-v1` metadata contains only bounded identities, counts and hashes;
+structural diagnostics contain allowlisted shapes and counts, without source paths or result messages.
+Method, tool, rules, configuration or exclusion changes prevent unchanged-measurement comparisons.
+View reads use saved evidence and do not run a scanner.
+
+The source definitions are pinned to CodeQL's annotated tag `ea3abbb69c242cf3b92527b56d32fe3eb7c6919b`
+(commit `a1575b98a8cc19bcfa7bb6cb41be688cb3dae65c`):
+[JavaScript](https://github.com/github/codeql/blob/a1575b98a8cc19bcfa7bb6cb41be688cb3dae65c/javascript/ql/src/Diagnostics/ExtractedFiles.ql),
+[Python](https://github.com/github/codeql/blob/a1575b98a8cc19bcfa7bb6cb41be688cb3dae65c/python/ql/src/Diagnostics/ExtractedFiles.ql),
+and [Actions](https://github.com/github/codeql/blob/a1575b98a8cc19bcfa7bb6cb41be688cb3dae65c/actions/ql/src/Diagnostics/SuccessfullyExtractedFiles.ql).
+[Production run 40728512605](https://github.com/craigoley/remudero/actions/runs/40728512605) confirms
+the query ran, but its job log does not establish the original diagnostic location encoding.
+The bounded schema fixtures test producer-to-reader wiring; they do not qualify that production
+population. Unobserved original structures remain partial. Implementation alone grants no healthy
+score, measured benefit, consumer release or runtime readiness.
+

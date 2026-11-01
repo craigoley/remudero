@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { withTempDir } from "#src/lib/tmp.js";
+import { readCodeHealthArtifactJson } from "#src/lib/code-health-store.js";
+import { validateCodeHealthProvenance } from "#src/lib/code-health-projection.js";
+import { qualityScanFromCollectedEvidence } from "#src/lib/codeql-quality-intake.js";
 const { validateCodeHealthAssessment } = await featureModule(import("#src/lib/code-health-contract.js"), "code-health-contract");
 import type { CodeHealthProjectionInput, CodeHealthScanFinding } from "#src/lib/code-health-projection.js";
 const { compareCodeHealthEvidence, projectCodeHealth } = await featureModule(import("#src/lib/code-health-projection.js"), "code-health-projection");
@@ -19,6 +27,87 @@ function input(): CodeHealthProjectionInput {
 
 const finding = (status: CodeHealthScanFinding["status"] = "open"): CodeHealthScanFinding => ({ id: "42", ruleId: "js/maintainability-example", status,
   severity: "high", category: "maintainability", path: "src/example.ts", title: "Repeated work makes this function hard to change.", effortMinutes: null });
+
+test("Code health source reader preserves extracted-file identity and comparison guards", async () => {
+  await withTempDir("code-health-extracted-reader", dir => {
+    const measured = (runId: string, observedAt: string, legacy = false) => {
+      const root = join(dir, runId + (legacy ? "-legacy" : "")); mkdirSync(root);
+      const id = "js/diagnostics/successfully-extracted-files", sarifId = `${runId.padStart(8, "0")}-1234-1234-1234-123456789abc`;
+      const sarif = { version: "2.1.0", runs: [{
+        versionControlProvenance: [{ repositoryUri: "https://github.com/acme/atlas", revisionId: "a".repeat(40), branch: "refs/heads/main" }],
+        tool: { driver: { name: "CodeQL", semanticVersion: "2.27.3", rules: [{ id: "js/example" }],
+          notifications: [{ id, properties: { tags: ["successfully-extracted-files"] } }] } },
+        artifacts: [{ location: { uri: "src/example.ts" }, roles: [legacy ? "analysisTarget" : "resultFile"] }],
+        invocations: [{ executionSuccessful: true, endTimeUtc: observedAt, toolExecutionNotifications: [
+          { descriptor: { id }, level: "note", message: { text: "" }, locations: [{ physicalLocation: { artifactLocation: { uri: "src/example.ts" } } }] },
+        ] }],
+      }] };
+      writeFileSync(join(root, "original.sarif"), JSON.stringify(sarif));
+      writeFileSync(join(root, "config.yml"), "name: original config\n");
+      writeFileSync(join(root, "workflow.yml"), "original workflow\n");
+      const output = join(root, "metadata.json");
+      const child = spawnSync(process.execPath, [join(REPO_ROOT, "scripts/code-health-provenance.mjs"), "--sarif-dir", root,
+        "--config", join(root, "config.yml"), "--workflow", join(root, "workflow.yml"), "--output", output], {
+        cwd: REPO_ROOT, encoding: "utf8", timeout: 10_000, env: { ...process.env, GITHUB_REPOSITORY: "acme/atlas", GITHUB_SHA: "a".repeat(40),
+          GITHUB_REF: "refs/heads/main", GITHUB_RUN_ID: runId, GITHUB_RUN_ATTEMPT: "1", CODE_HEALTH_LANGUAGE: "javascript-typescript",
+          CODE_HEALTH_SARIF_ID: sarifId, CODE_HEALTH_ANALYSIS_OUTCOME: "success" },
+      });
+      assert.ifError(child.error); assert.equal(child.status, 0, child.stderr);
+      const expected = { repository: "acme/atlas", analyzedSha: "a".repeat(40), runId, kind: "quality" as const };
+      const p = validateCodeHealthProvenance(readCodeHealthArtifactJson(output), expected);
+      assert.equal(p.state, "complete");
+      assert.equal(p.scope.kind, legacy ? "explicit-analysis-targets" : "codeql-extracted-files");
+      const collected = (provenance = p, analysisPatch = {}) => qualityScanFromCollectedEvidence({ ...expected,
+        requiredLanguages: ["javascript-typescript"], artifacts: [provenance], collectedAt: p.observedAt,
+        analyses: [{ sarifId, analyzedSha: p.analyzedSha, category: "/language:javascript-typescript", toolVersion: "2.27.3",
+          analysisKey: "original-workflow", environmentHash: "e".repeat(64), createdAt: observedAt, rulesCount: 1, error: "", warning: "", ...analysisPatch }],
+        source: { ok: true, alerts: [], analysisInstances: [] },
+      });
+      assert.equal(collected().state, "complete");
+      for (const analysisPatch of [{ sarifId: "foreign" }, { analyzedSha: "b".repeat(40) }, { category: "/language:python" },
+        { toolVersion: "2.26.0" }, { rulesCount: 2 }, { warning: "incomplete" }, { error: "failure" }])
+        assert.equal(collected(p, analysisPatch).state, "partial");
+      for (const patch of [{ repository: "acme/foreign" }, { analyzedSha: "b".repeat(40) }, { runId: "999" },
+        { runAttempt: "2" }, { sarifId: "bad" }, { ref: "refs/heads/feature" }, { version: "code-health-source-v2" },
+        { toolVersion: null }, { rulesVersion: null }, { configHash: "bad" }, { reasons: ["unknown"] },
+        { exclusions: new Array(129).fill("excluded") }, { state: "partial", reasons: [] },
+        ...[0, -1, 100_001, 1.5].map(fileCount => ({ scope: { ...p.scope, fileCount } })),
+        { scope: { ...p.scope, hash: null } }, { scope: { ...p.scope, hash: "bad" } }, { scope: { ...p.scope, extra: true } },
+        { completion: null }, ...(!legacy ? [{ completion: { kind: "workflow-analysis-step", state: "success", at: observedAt } }] : []),
+        { completion: { kind: "original-invocations", state: "success", at: new Date(Date.parse(p.observedAt) + 86_400_000).toISOString() } }, { rawPaths: ["private"] }]) {
+        assert.throws(() => validateCodeHealthProvenance({ ...p, ...patch }, expected));
+      }
+      const partial = { ...p, state: "partial", reasons: ["Directly evidenced extracted files are unavailable."], scope: { ...p.scope, fileCount: 0, hash: null } };
+      assert.equal(validateCodeHealthProvenance(partial, expected).state, "partial");
+      assert.equal(collected(partial as typeof p).state, "partial");
+      const { completion: _completion, runAttempt: _attempt, language: _language, sarifId: _sarif, ruleCount: _count, ...common } = p;
+      const coverage = { ...common, kind: "coverage", scanId: `coverage-nightly:${runId}`, scope: { ...p.scope, kind: "instrumented-source-files" },
+        measurement: { branches: { covered: 1, total: 1 }, lines: { covered: 1, total: 1 } },
+        check: { id: "coverage-existing-tier", met: true, reason: "Measured existing tier." } };
+      const coverageExpected = { ...expected, kind: "coverage" as const };
+      assert.equal(validateCodeHealthProvenance(coverage, coverageExpected).state, "complete");
+      assert.throws(() => validateCodeHealthProvenance({ ...coverage, scope: p.scope }, coverageExpected));
+      return collected();
+    };
+    const prior = measured("123", "2026-10-26T04:00:00.000Z"), current = measured("124", "2026-10-27T04:00:00.000Z");
+    const legacy = measured("125", "2026-10-26T03:00:00.000Z", true);
+    const value = input(); value.scans[0] = current; value.baseline!.analyzedSha = current.analyzedSha; value.baseline!.scans[0] = prior;
+    value.observedAt = legacy.observedAt;
+    value.scans[1]!.observedAt = current.observedAt;
+    value.baseline!.scans[1]!.observedAt = prior.observedAt;
+    value.baseline!.scans[1]!.analyzedSha = current.analyzedSha;
+    assert.equal(compareCodeHealthEvidence(value).state, "comparable");
+    value.baseline!.scans[0] = legacy;
+    assert.equal(compareCodeHealthEvidence(value).state, "measurement_changed", "same paths cannot cross scope methods");
+    value.baseline!.scans[0] = prior;
+    for (const key of ["scopeHash", "toolVersion", "rulesVersion", "configHash"] as const) {
+      const changed = structuredClone(value); changed.scans[0]![key] = "different";
+      assert.equal(compareCodeHealthEvidence(changed).state, "measurement_changed", key);
+    }
+    const tooLarge = join(dir, "oversized.json"); writeFileSync(tooLarge, " ".repeat(128 * 1024 + 1));
+    assert.throws(() => readCodeHealthArtifactJson(tooLarge));
+  });
+});
 
 test("code health distinguishes checked code from unassessed newer code", () => {
   const previous = { ...input(), analyzedSha: "a".repeat(40), currentSha: "c".repeat(40) };

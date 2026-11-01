@@ -89,7 +89,7 @@ export interface CodeHealthSourceProvenance {
   rulesVersion: string | null;
   configHash: string;
   exclusions: string[];
-  scope: { kind: "explicit-analysis-targets" | "instrumented-source-files"; fileCount: number; hash: string | null };
+  scope: { kind: "explicit-analysis-targets" | "codeql-extracted-files" | "instrumented-source-files"; fileCount: number; hash: string | null };
   completion?: { kind: "original-invocations" | "workflow-analysis-step"; state: "success"; at: string } | null;
   runAttempt?: string;
   language?: string;
@@ -113,9 +113,12 @@ export function validateCodeHealthProvenance(value: unknown, expected: { reposit
       !(p.toolVersion === null || text(p.toolVersion)) || !(p.rulesVersion === null || digest(p.rulesVersion)) || !digest(p.configHash) ||
       !Array.isArray(p.exclusions) || p.exclusions.length > 128 || p.exclusions.some(path => !text(path)) ||
       !p.scope || typeof p.scope !== "object" || !only(p.scope, "kind fileCount hash") ||
-      p.scope.kind !== (p.kind === "quality" ? "explicit-analysis-targets" : "instrumented-source-files") ||
+      !(p.kind === "quality" ? ["explicit-analysis-targets", "codeql-extracted-files"].includes(p.scope.kind) : p.scope.kind === "instrumented-source-files") ||
       !Number.isSafeInteger(p.scope.fileCount) || p.scope.fileCount < 0 || p.scope.fileCount > 100_000 || !(p.scope.hash === null || digest(p.scope.hash))) return fail();
   if (p.kind === "quality") {
+    if (p.scope.kind === "codeql-extracted-files" && p.state === "complete" &&
+        (p.completion?.kind !== "original-invocations" || p.toolVersion !== "2.27.3" ||
+          !["javascript-typescript", "javascript", "typescript", "python", "actions"].includes(p.language ?? ""))) return fail();
     if (p.completion !== null && (!p.completion || typeof p.completion !== "object" || !only(p.completion, "kind state at") ||
         !["original-invocations", "workflow-analysis-step"].includes(p.completion.kind) || p.completion.state !== "success" || !time(p.completion.at) ||
         Date.parse(p.completion.at) > Date.parse(p.observedAt))) return fail();
