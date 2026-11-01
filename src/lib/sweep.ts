@@ -624,6 +624,23 @@ function stalledStageEscalationIdentity(text: string): string | undefined {
   return /(PR stage stalled: #\d+ \S+ — [a-z-]+)(?=;| for \d+ minutes \(|$)/.exec(text)?.[1];
 }
 
+/** The PR's oldest open stage-stall question, whatever its head, blocker or contract, viewed at the
+ *  episode's head with no contract line so the gateway's own task/PR/cause match appends to it. */
+function openStallQuestionForPr(open: OpenIssue[], pr: { prNumber: number; prUrl: string; headSha: string },
+  key: { class: EscalationClass; taskId: string; cause: EscalationCause }): OpenIssue | undefined {
+  const prefix = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — `;
+  const probe = { ...key, summary: `PR ${pr.prUrl}`, detail: "" };
+  const asked = open.filter(issue => {
+    const identityText = issue.title?.endsWith("…") ? issue.body : issue.title;
+    return stalledStageEscalationIdentity(identityText ?? "")?.startsWith(prefix) === true &&
+      matchDuplicateEscalation(probe, [issue]) !== undefined;
+  }).sort((a, b) => a.number - b.number)[0];
+  if (!asked) return undefined;
+  const body = (asked.body ?? "").replace(/^\*\*Head:\*\*.*$/m, `**Head:** ${pr.headSha}`)
+    .replace(/^\*\*Contract:\*\*.*\n/m, "");
+  return { ...asked, body };
+}
+
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
   // W1-T5866: the `unfiled` branch-shape sentinel is every ad-hoc PR's id, never one PR's — it maps to `PR-<n>` here
   // exactly as it does for the review rows (W1-T5839), so two run-unfiled PRs never share an escalation.
@@ -3634,15 +3651,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const cls: EscalationClass = reason.startsWith("PR stage stalled:") || isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
       const stallIdentity = reason.startsWith("PR stage stalled:") ? stalledStageEscalationIdentity(reason) : undefined;
       const issues = issuesImpl ?? ghIssueGatewayAsync(owner, repo);
-      // All stalled stages share cause `stage-stall`; narrow by blocker before the gateway's
-      // existing PR/head matching. Keep older heads visible to the gateway's supersession cleanup.
+      const cause = question.cause ?? escalationCause(pr.mergeState === "dirty", isBlockedCi(pr));
+      // Operator ruling 2026-11-01: one open stage-stall question per PR. An open one for this task and PR,
+      // at any head or blocker, takes the episode as a comment (the gateway's duplicate append); otherwise
+      // narrow by blocker and keep older heads visible to the gateway's supersession cleanup.
       const escalationIssues: AsyncIssueGateway = stallIdentity !== undefined && issues.listOpen
-        ? { ...issues, listOpen: async (label) => (await issues.listOpen!(label)).filter(issue => {
-          const head = escalationHeadSha(issue.body);
-          const identityText = issue.title?.endsWith("…") ? issue.body : issue.title;
-          return (head !== undefined && head !== pr.headSha) ||
-            stalledStageEscalationIdentity(identityText ?? "") === stallIdentity;
-        }) }
+        ? { ...issues, listOpen: async (label) => {
+          const open = await issues.listOpen!(label);
+          const kept = openStallQuestionForPr(open, pr, { class: cls, taskId: escalationTaskIdFor(pr), cause });
+          return kept ? [kept] : open.filter(issue => {
+            const head = escalationHeadSha(issue.body);
+            const identityText = issue.title?.endsWith("…") ? issue.body : issue.title;
+            return (head !== undefined && head !== pr.headSha) ||
+              stalledStageEscalationIdentity(identityText ?? "") === stallIdentity;
+          });
+        } }
         : issues;
       const file = async (context: string): Promise<void> => { await escalateAsync(
         {
@@ -3663,7 +3686,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           ...(reason === "review failing with no actionable unmet criteria (contradictory) — escalating"
             ? { headDedup: "independent" as const }
             : {}),
-          cause: question.cause ?? escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
+          cause,
           ...contractRevisionFor(pr),
           summary: `PR ${pr.prUrl} needs a clarification — ${stallIdentity ?? stalledStageEscalationSummary(reason)}`,
           detail:
