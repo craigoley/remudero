@@ -388,6 +388,17 @@ export async function assertInstanceRegistryRuntimeCurrent(): Promise<void> {
   if (!scope.active) throw new InstanceRegistryRuntimeError("invocation_closed");
 }
 
+/** Capture only a sanitized reader. Requests retain the original invocation and physical binding. */
+export function captureInstanceRegistryRuntimeProjection(): (() => Promise<RegistryProjection>) | undefined {
+  const scope = selectedRuntime();
+  if (scope?.binding === undefined) return undefined;
+  const binding = scope.binding;
+  return () => runtimeRegistry.run(scope, async () => {
+    await assertInstanceRegistryRuntimeCurrent();
+    return binding.publicProjection();
+  });
+}
+
 /** A trusted harness policy snapshot, never a worker permission or a serialized registry binding. */
 export async function captureInstanceRegistryRuntimeFile(path: string): Promise<{
   readonly canonicalPath: string; readonly text: string; recheck(): Promise<void>;

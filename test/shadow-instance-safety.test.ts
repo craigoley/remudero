@@ -31,7 +31,7 @@ import type { OpenPrView } from "../src/lib/sweep.js";
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import type { WorkerResult } from "../src/lib/worker.js";
-import { withGhShim } from "#test/helpers/gh-shim.js";
+import { withGhShim, withoutRegistrySelection } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import {
   buildSweepEffects,
@@ -1621,5 +1621,42 @@ test("private registry selection preserves owner holds and private-safe boundari
       rmSync(root, { recursive: true, force: true });
       seed.cleanup(); origin.cleanup();
     }
+  });
+});
+
+
+test("private registry selection preserves owner holds and private-safe boundaries: real owner CLI", async () => {
+  await withTempDir("selected-owner-cli", async root => {
+    const home = join(root, "home"), state = join(root, "instance");
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    mkdirSync(state);
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ root: state, claudeBin: "/bin/true" }));
+    const selected = join(root, "private.yaml");
+    writeFileSync(selected, `instances:\n  fixture:\n    github_repo: owner/repo\n    state_dir: ${state}\n    mode: shadow\n`);
+    const child = (verb: string, path: string) => spawnSync(process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e",
+        `import { main } from "#src/run-task.js"; process.argv = [process.execPath, "rmd", ${JSON.stringify(verb)}];
+         await main({ checkFreshness: () => ({ status: "guarded" }) }).catch(error => { console.error(error.message); process.exitCode = 2; });`],
+      { cwd: REPO_ROOT, env: { ...withoutRegistrySelection(process.env), HOME: home, GH_TOKEN: "fixture-not-a-credential", RMD_INSTANCE_REGISTRY: path,
+        GH_CONFIG_DIR: join(home, "gh"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }, encoding: "utf8", timeout: 30000 });
+    for (const path of ["", join(root, "missing-private.yaml"), selected]) {
+      const stopped = child("stop", path);
+      assert.equal(stopped.status, 0, stopped.stderr);
+      assert.ok(stopped.stderr.includes("nothing to stop"), "the actual owner handler is reached");
+      assert.equal(existsSync(join(state, "state", "STOP")), false, "no active fixture drain means no persistent STOP");
+      assert.equal((stopped.stdout + stopped.stderr).includes(root), false);
+    }
+    for (const path of ["", join(root, "missing-private.yaml")]) {
+      const paused = child("pause", path);
+      assert.equal(paused.status, 2, paused.stderr);
+      assert.match(paused.stderr, /REFUSED/);
+      assert.equal((paused.stdout + paused.stderr).includes(root), false);
+      assert.equal(existsSync(join(state, "state", "PAUSE")), false, "an unknown target never becomes a hold on another instance");
+      assert.equal(child("resume", path).status, 2, "resume must still require selected evidence");
+    }
+    const paused = child("pause", selected);
+    assert.equal(paused.status, 0, paused.stderr);
+    assert.equal((paused.stdout + paused.stderr).includes(root), false, "selected success diagnostics hide private state paths");
+    assert.equal(existsSync(join(state, "state", "PAUSE")), true, "the real handler writes only the disposable declared instance");
   });
 });
