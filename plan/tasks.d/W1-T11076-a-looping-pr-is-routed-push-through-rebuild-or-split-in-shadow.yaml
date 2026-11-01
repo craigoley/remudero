@@ -1,0 +1,36 @@
+- id: W1-T11076
+  title: A PR whose review keeps failing reaches one decision point that routes it to push through, close and rebuild, or split, recorded in shadow
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # shadow only: no PR is merged, closed or split by this task
+  origin: operator-session#review-loop-2026-11-01
+  plan_refs:
+    - W1-T5690
+    - W1-T10990
+    - W1-T11077
+  files:
+    - src/lib/loop-decision.ts
+    - src/lib/sweep.ts
+    - test/sweep/a-looping-pr-is-routed-push-through-rebuild-or-split-in-shadow.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A pure decideLoopOutcome fires at the first of: a review failing a claim that already failed before a reviewer-unmet fix round; a fix round ending NEEDS_SCOPE or NEEDS_DESIGN while the review fails; six fix rounds; two change-approach judgements on one red class. It routes the PR to push-through only when every unmet criterion is a semantic downgrade over an executed passing proof, at most half the criteria are unmet, required checks are green and the PR merges cleanly, no review flag of test theatre, tampered criteria, entanglement or reward hacking is set, no finding reproduces a defect, the diff touches no protected path (deploy, .github, hooks, the review, merge, risk and gate engines, credentials, the ledger schema) and the task is not itself a push-through follow-up; to split when at least two distinct claims are unmet across at least four criteria and four files; and to close and rebuild otherwise. The sweep ledgers loop.decision with the trigger, route, unmet classes and tokens spent so far, and acts on none of it"
+      proof: "unit test: test/sweep/a-looping-pr-is-routed-push-through-rebuild-or-split-in-shadow.test.ts"
+    - claim: The sweep calls the loop decision
+      proof: "grep: decideLoopOutcome( in src/lib/sweep.ts"
+  rationale: |
+    Operator, 2026-11-01: "find way to innovate and improve this process ... instead of escalating, either push it through and file follow up tasks to fix things, or close it and submit a task to re-implement it the right way or break it down into multiple smaller tasks".
+    OBSERVED, operator recon 2026-11-01 (2026-10-25 to 11-01):
+    - In 266 of codex's 277 review fails (96 percent), every unmet criterion's proof had executed and passed; the fail was a semantic downgrade. Claude: 30 of 39.
+    - Of 216 consecutive same-claim fails, 74 percent cited a different defect the second time. The pass chance of the next review falls with each same-claim fail: 42, 32, 27, 29 percent.
+    - All 241 reviewer-unmet dispatches logged strike 1 of 2; nothing bounded the rounds (#14793: 37 rounds and 180M tokens; #15845: 20 rounds and 130M).
+    - Replay (INFERRED, regex over truncated reasons): 77 PRs reach this decision point and then spent 1,176M tokens and 305 fix rounds. Push-through would have applied to 25 (22 merged anyway) and saved about 208M net of follow-up builds; split to 9, about 358M; close-and-rebuild to 43, cost-neutral in tokens but ending stalls.
+    This task is the measurement half; W1-T11077 acts on rebuild and split, and push-through waits for a separate operator ruling on the merge gate.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (run-unfiled-1793538128289). Building blocks: pr-blocker.ts judgeSloRebuild and decideSloRung, sweep.ts applyStrikeLadder's rebuild arm, review-findings.ts extractReviewFindings.
