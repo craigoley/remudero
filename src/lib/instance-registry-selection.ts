@@ -388,7 +388,7 @@ export async function assertInstanceRegistryRuntimeCurrent(): Promise<void> {
   if (!scope.active) throw new InstanceRegistryRuntimeError("invocation_closed");
 }
 
-/** Capture only a sanitized reader. Requests retain the original invocation and physical binding. */
+/** Capture only the invocation identity; every deferred public read still awaits its file recheck. */
 export function captureInstanceRegistryRuntimeProjection(): (() => Promise<RegistryProjection>) | undefined {
   const scope = selectedRuntime();
   if (scope?.binding === undefined) return undefined;

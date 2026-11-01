@@ -220,12 +220,12 @@ async function stderrOfMain(t: { mock: { method: Function } }, argv: string[]): 
   writeFileSync(keyPath, ["-----BEGIN", "RSA PRIVATE KEY-----"].join(" ") + "\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n");
 
   const stderr: string[] = [];
-  t.mock.method(console, "error", (...a: unknown[]) => {
+  const errorMock = t.mock.method(console, "error", (...a: unknown[]) => {
     stderr.push(a.map(String).join(" "));
   });
-  t.mock.method(console, "log", () => {});
+  const logMock = t.mock.method(console, "log", () => {});
   class ExitCalled extends Error {}
-  t.mock.method(process, "exit", ((): never => {
+  const exitMock = t.mock.method(process, "exit", ((): never => {
     throw new ExitCalled();
   }) as typeof process.exit);
 
@@ -239,6 +239,11 @@ async function stderrOfMain(t: { mock: { method: Function } }, argv: string[]): 
     await main().catch(() => {}); // the help arms exit; an unknown verb exits too
     return stderr;
   } finally {
+    // Repeated calls must not stack mocks: automatic test cleanup can restore a prior mock,
+    // leaving node's --test-force-exit to call our throwing exit stub after every test passes.
+    exitMock.mock.restore();
+    logMock.mock.restore();
+    errorMock.mock.restore();
     process.argv = saved.argv;
     for (const [k, v] of [
       ["GH_APP_ID", saved.id],
@@ -253,6 +258,16 @@ async function stderrOfMain(t: { mock: { method: Function } }, argv: string[]): 
 }
 
 const mintedIn = (lines: string[]) => lines.some((l) => /github_app/.test(l));
+
+test("CLI mint helper restores process and console mocks after repeated invocations", async (t) => {
+  const saved = { exit: process.exit, error: console.error, log: console.log };
+  for (const argv of [["--help"], ["sweep", "--help"]]) {
+    assert.deepEqual(await stderrOfMain(t, argv), []);
+    assert.equal(process.exit, saved.exit, "the test runner must retain its entry exit function");
+    assert.equal(console.error, saved.error, "stderr capture must end with the invocation");
+    assert.equal(console.log, saved.log, "stdout capture must end with the invocation");
+  }
+});
 
 test("W1-T3071: every help arm completes without minting — the credential a help path cannot use is never asked for", async (t) => {
   // Each arm separately, not one representative: `--help` and `-h` and `help` are three distinct

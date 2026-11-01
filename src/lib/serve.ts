@@ -23,7 +23,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
-import { captureInstanceRegistryRuntimeProjection, InstanceRegistryRuntimeError, readSelectedInstanceRegistry, type RegistrySelectionInput, type RegistryFileIO } from "./instance-registry-selection.js";
+import { captureInstanceRegistryRuntimeProjection, InstanceRegistryRuntimeError,
+  readSelectedInstanceRegistry, type RegistrySelectionInput, type RegistryFileIO } from "./instance-registry-selection.js";
 import { createSelectedRegistryObserver, observeSelectedRegistry, type SelectedRegistryConsumerOptions, type SelectedRegistryObserver, type RegistryConsumerTarget } from "./selected-registry-consumers.js";
 import {
   assertWriteTiersComplete,

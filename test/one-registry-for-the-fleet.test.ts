@@ -30,6 +30,7 @@ import { withInstanceRegistryRuntime } from "#src/lib/instance-registry-selectio
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO } from "../src/lib/instance-registry-selection.js";
+import { withInstanceRegistryRuntime } from "#src/lib/instance-registry-selection.js";
 import type { Route } from "../src/lib/service.js";
 
 const NOW = Date.parse("2026-09-23T12:00:00.000Z");
@@ -619,6 +620,43 @@ test("selected registry route snapshots explicit input and preserves true absenc
   if (initial.kind !== "ready") return;
   writeFileSync(path, FLEET + "future_safety_hold: true\n");
   assert.deepEqual(await initial.binding.recheck(), { kind: "refused", reason: "unsupported_field" });
+});
+
+test("selected runtime registry route retains its invocation and rechecks before each public read", async (t) => {
+  const dir = fixtureDir(t), path = join(dir, "selected-runtime.yaml"), other = join(dir, "other-runtime.yaml");
+  writeFileSync(path, registry(row("private", { github_repo: "selected/project", mode: "shadow" })));
+  writeFileSync(other, registry(row("private", { github_repo: "other/project", mode: "shadow" })));
+  const legacy = await invoke(routeOver(dir, FLEET, FLEET));
+  assert.equal(legacy.body.source, "repo", "healthy absent selection keeps the legacy route");
+  assert.deepEqual(await withInstanceRegistryRuntime(() => invoke(routeOver(dir, FLEET, FLEET)), {}), legacy);
+  let retained!: Route;
+  await withInstanceRegistryRuntime(async () => {
+    retained = routeOver(dir, FLEET, FLEET);
+    const selected = await invoke(retained);
+    assert.equal(selected.status, 200);
+    assert.equal(selected.body.source, "selected");
+    assert.equal(selected.body.publicationPermission, "not-granted");
+    assert.match(selected.text, /selected\/project/);
+    for (const privateValue of [dir, "/home/operator", "azurecr", "mode", "image"]) {
+      assert.equal(selected.text.includes(privateValue), false, privateValue);
+    }
+    assert.deepEqual(await withInstanceRegistryRuntime(() => invoke(retained), { envPath: other }), selected,
+      "a different same-named instance cannot retarget a captured route");
+    const replacement = join(dir, "replacement-runtime.yaml");
+    writeFileSync(replacement, readFileSync(path));
+    renameSync(replacement, path);
+    const revised = await invoke(retained);
+    assert.equal(revised.status, 503, "equal bytes at another inode cannot use the prior binding");
+    assert.deepEqual(revised.body, { error: "selected_registry_unavailable", reason: "revision_changed" });
+    rmSync(path);
+    const missing = await invoke(retained);
+    assert.equal(missing.status, 503);
+    assert.deepEqual(missing.body, { error: "selected_registry_unavailable", reason: "missing" });
+    assert.equal(missing.text.includes(dir), false);
+  }, { envPath: path });
+  assert.deepEqual((await invoke(retained)).body,
+    { error: "selected_registry_unavailable", reason: "invocation_closed" },
+    "a completed invocation cannot lend authority to an escaped route");
 });
 
 function lifecycleRow(root: string): string {
