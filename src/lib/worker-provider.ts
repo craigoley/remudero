@@ -714,7 +714,6 @@ function claudeWeeklyWindows(weekly: readonly WeeklyWindow[]): ProviderCapacityW
   return weekly.map((window) => ({ name: `weekly (${window.label})`, usedPercent: window.percentUsed, resetsAt: window.resetsAt }));
 }
 
-/** W1-T11072: route on whatever real windows a reading carries; a reading with none stays unreadable, naming its case. */
 export function claudeCapacityFromUsageCase(reading: SdkUsageCase, accountLabel?: string): ProviderCapacity {
   if (reading.kind === "session") return claudeCapacityFromUsage(reading.snapshot, accountLabel);
   if (reading.kind !== "weekly-only") {
