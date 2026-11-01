@@ -250,3 +250,25 @@ test("a dispatch failure and a W1-T5919 claim decline void the dedup by one rule
 test("the dispatch-failed row is retained across ledger rotation", () => {
   assert.ok(DECISION_RELEVANT_LEDGER_STEPS.has(FAILED_STEP));
 });
+
+test("a fleet-wide PAUSE refusal never counts toward the dispatch-failure backstop", async () => {
+  // LIVE 2026-10-30: #15679 (W1-T9796, head 0a66a11) hit FIX_DISPATCH_FAILED_BACKSTOP on three refusals reading
+  // "PAUSE: cannot reach origin to read refs/rmd-pause/hold". The hold lifts only on a new head, and only a
+  // dispatch makes one, so the PR was stranded for two days (issue #15885, 43 appends). A fleet hold is no PR's fault.
+  const pause = [
+    "cannot reach origin to read refs/rmd-pause/hold — holding rather than dispatching optimistically (an unreachable remote is never read as clear)",
+    "PAUSE held on refs/rmd-pause/hold — set by pid 4242@vm at 2026-10-30T17:50:00Z; actor: operator — run `rmd resume --fleet` to clear",
+  ];
+  const held = Array.from({ length: FIX_DISPATCH_FAILED_BACKSTOP }, (_, n) => [disposed(HEAD), failed(HEAD, pause[n % 2])]).flat();
+  const after = await pass(view(), held);
+  assert.equal(after.dispatched, 1, "the PR is dispatched once the fleet hold clears");
+  assert.deepEqual(after.escalations, []);
+  assert.notEqual(after.row.fix_dispatch_failed_escalated, true);
+  // Real failures still count, and a fleet refusal between them neither adds to nor resets the count.
+  const real = Array.from({ length: FIX_DISPATCH_FAILED_BACKSTOP }, () => [disposed(HEAD), failed(HEAD), failed(HEAD, pause[0])]).flat();
+  const stopped = await pass(view(), real);
+  assert.equal(stopped.dispatched, 0);
+  assert.equal(stopped.escalations.length, 1);
+  assert.ok(stopped.escalations[0].includes(`failed before fix.dispatch ${FIX_DISPATCH_FAILED_BACKSTOP} times`), stopped.escalations[0]);
+  assert.ok(stopped.escalations[0].includes(ERROR), "the escalation names the PR's own failure, not the fleet hold");
+});

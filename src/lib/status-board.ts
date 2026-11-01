@@ -1,32 +1,27 @@
 /**
  * lib/status-board.ts — `rmd status` (W1-T279, W1-T280; MASTER-PLAN §7/§5D).
  *
- * ONE READ MODEL, TWO RENDERERS. {@link buildStatusBoard} returns {@link StatusBoardModel}; the text
- * renderer and `--json` (a bare `JSON.stringify` of that model) both project it, so the console's Now
- * tab can never disagree with the terminal. FALSIFIER: test/status-board.test.ts.
+ * ONE READ MODEL, TWO RENDERERS. Text, `--json` and the console's Now tab project the same
+ * {@link StatusBoardModel} from {@link buildStatusBoard}. FALSIFIER: test/status-board.test.ts.
  *
- * OFFLINE-SAFE LOCAL HALF. Liveness, latches and last cycle read the filesystem, the ledger, or an
- * injected process query. The `origin/main` comparison is a local `git rev-parse`, never a fetch.
+ * OFFLINE-SAFE LOCAL HALF. Liveness, latches and last cycle use local files, ledger or injected
+ * process queries; `origin/main` uses local `git rev-parse`, never fetch.
  *
- * GITHUB IS DECORATION, NEVER A GATE ({@link StatusBoardDeps.github}). Blockers, queue head and
- * inbox read live merge state through one batched gateway. A gateway failure degrades only the rows
- * that needed it to a stated `unknownReason` — never a throw, never a silently empty section. An
- * unresolvable fact renders `"unknown"`, never a healthy-looking zero.
+ * GITHUB IS DECORATION, NEVER A GATE ({@link StatusBoardDeps.github}). One batched gateway supplies
+ * live merge state. Failure gives affected rows an `unknownReason`, never a throw, silent empty
+ * section or healthy-looking zero; unresolvable facts render `"unknown"`.
  *
- * RENDERS, NEVER SENSES. Every fact here is already written down by fleet-control.ts, deployer.ts,
- * inflight-lock.ts, daemon.ts, status.ts, sweep.ts or config.ts. This module assembles; it invents no
- * sensor and mints no vocabulary those signals do not already carry.
+ * RENDERS, NEVER SENSES. Assemble facts from fleet-control.ts, deployer.ts, inflight-lock.ts,
+ * daemon.ts, status.ts, sweep.ts and config.ts; invent no sensors or signal vocabulary.
  *
- * NEXT ACTION TABLES ARE POLICY AS DATA (rule 2). Each section's `nextAction` is the FIRST match in
- * an ordered `{applies, action}` list, so a new condition is a row and never a buried branch. No
- * rule matches, no line: a board that always prints advice trains the operator to skip it.
+ * NEXT ACTION TABLES ARE POLICY AS DATA (rule 2): FIRST matching `{applies, action}` row wins.
+ * No match, no advice; unconditional advice trains the operator to skip it.
  */
 // Why: the incidents and measured counts behind these rules — docs/forensics/status-board.md
 
 import { execFileSync } from "node:child_process";
 import { isQueueDispatchRunStart } from "./ledger.js";
-// Imported as the DEFAULT export and read as `fs.existsSync(...)` at call time, never destructured. ESM named bindings
-// off `node:fs` are non-configurable, so a spy cannot intercept a call bound at load time; a live lookup it can.
+// Keep DEFAULT fs and call-time lookups: non-configurable ESM named bindings defeat spies.
 // Why: the TOCTOU-race test — docs/forensics/status-board.md
 import fs from "node:fs";
 import { join } from "node:path";
@@ -131,9 +126,8 @@ export interface ServiceLivenessRow {
   service: ServiceName;
   running: boolean;
   pid: number | null;
-  /** False iff the LAUNCHD SENSOR ITSELF could not be asked — `launchctl` absent (W1-T2450) — not launchctl answering
-   *  "not loaded". Defaults to `true`. {@link livenessState} reads it FIRST, so an absent sensor renders `"unknown"`,
-   *  never a wrong `"stopped"`. */
+  /** False only when launchctl cannot be asked (W1-T2450), not when it answers "not loaded".
+   *  Defaults true; {@link livenessState} checks it FIRST so absent sensors render "unknown". */
   sensed?: boolean;
   /** Which host-local sensor answered this row. A process-table answer is weaker than launchd's service-identity read. */
   sensor?: LivenessSensor;
@@ -150,9 +144,8 @@ export interface ServiceLivenessRow {
   /** `launchctl list`'s `Status` column for the job's last completed run — `0` healthy, nonzero a real exit failure,
    *  `undefined` unknown (never bootstrapped, or the query failed). */
   lastExitCode?: number;
-  /** How stale `tickAgeMs` may get before this row reads `"overdue"` — resolved from the INSTALLED unit's own
-   *  `StartInterval`, never a restated constant, so a plist edit cannot desync it. Falls back to {@link
-   *  SUPERVISOR_TICK_OVERDUE_MS}. */
+  /** Overdue bound from the INSTALLED unit's `StartInterval`, so plist edits cannot desync it.
+   *  Falls back to {@link SUPERVISOR_TICK_OVERDUE_MS}. */
   overdueThresholdMs?: number;
 }
 
@@ -169,12 +162,10 @@ export const SUPERVISOR_TICK_OVERDUE_MS = DEFAULT_SUPERVISOR_INTERVAL_S * 3 * 10
  *  included — so the renderer, `--json` and the LIVENESS table derive one state from identical facts. */
 export function livenessState(row: ServiceLivenessRow): LivenessState {
   if (row.running) return "running";
-  // W1-T2450: an absent sensor is read BEFORE the resident/interval split below. Both kinds share one launchd sensor,
-  // and it must win over every downstream inference that sensor never fed.
+  // W1-T2450: sensor absence wins BEFORE either service kind infers a state.
   if (row.sensed === false) return "unknown";
   if (serviceKind(row.service) === "resident") return "stopped";
-  // Interval: a nonzero last exit is a real failure however fresh it was, and no tick ever observed reads as overdue
-  // too — never a healthy "idle" for a supervisor nothing has heard from.
+  // Interval: failed exits and never-observed ticks are overdue, never healthy idle.
   if (row.lastExitCode !== undefined && row.lastExitCode !== 0) return "overdue";
   const overdueMs = row.overdueThresholdMs ?? SUPERVISOR_TICK_OVERDUE_MS;
   if (row.tickAgeMs === undefined || row.tickAgeMs > overdueMs) return "overdue";
@@ -197,9 +188,8 @@ export interface LatchRow {
   name: string;
   ageMs?: number;
   consequence: string;
-  /** Why this latch's RECORD is worth showing while its INSTRUCTION no longer applies. Today `DEPLOY_FAILED` and only
-   *  it: a healthy deploy now unlinks the marker, but until one runs its advice can name a head origin/main passed. Why:
-   *  the measured stale latch and #1639's shape — docs/forensics/status-board.md */
+  /** Superseded advice on a retained `DEPLOY_FAILED` record; healthy deploys unlink it, but until
+   *  then it may name a head origin/main passed. Why: #1639 — docs/forensics/status-board.md */
   superseded?: string;
 }
 
@@ -224,9 +214,8 @@ export interface LastCycleSection {
   summary?: LastCycleSummary;
   ts?: string;
   ageMs?: number;
-  /** The newest `daemon.*` activity STRICTLY AFTER this cycle closed — evidence the loop kept working. A cycle CLOSES
-   *  only when the loop stops, so this would otherwise pin to the last abnormal stop. Why: the 524-summary census —
-   *  docs/forensics/status-board.md */
+  /** Newest `daemon.*` activity STRICTLY AFTER cycle closure (loop stop), avoiding a stale abnormal
+   *  stop. Why: the 524-summary census — docs/forensics/status-board.md */
   supersededByTs?: string;
   /** Age of {@link supersededByTs}, for the renderer. */
   supersededAgeMs?: number;
@@ -1234,9 +1223,7 @@ function buildLatchRows(
           "any in-flight task still completes",
       });
     } else if (sharedPause === "unreachable") {
-      // FAIL SOFT, NEVER SILENT AND NEVER "CLEAR" (Q3): an unreachable remote is scored as `readSharedPause` scores it
-      // for dispatch — held, not absent — but this row says which state it saw rather than asserting a hold it cannot
-      // confirm.
+      // Q3: unreachable means dispatch held; report uncertainty, never "clear" or a confirmed hold.
       rows.push({
         name: "SHARED_PAUSE",
         consequence:
@@ -1246,15 +1233,13 @@ function buildLatchRows(
     }
   }
 
-  // Per-task dispatch claims (W1-T2270) — `refs/rmd-dispatch/<taskId>`, a namespace STATIC_LATCHES cannot see.
-  // `decideDispatchClaimRelease` leaves another lane's claim to an OPERATOR because cross-host liveness is undecidable;
-  // this row makes it findable.
+  // W1-T2270: expose refs/rmd-dispatch/<taskId>, outside STATIC_LATCHES. Cross-host liveness is
+  // undecidable; `decideDispatchClaimRelease` leaves another lane's claim to an OPERATOR.
   const dispatchClaims = readDispatchClaims();
   if (dispatchClaims.status === "held") {
     for (const { taskId, holder, identity, metadataError } of dispatchClaims.claims) {
-      // W1-T2446: "with no landed work observed" was asserted UNCONDITIONALLY, so for a task whose work HAD landed the
-      // board kept saying it had not. `isMerged` is the SAME projection this render already built; the drop stays the
-      // operator's.
+      // W1-T2446: consult this render's merge projection before claiming no landed work;
+      // dropping the claim remains the operator's decision.
       rows.push({
         name: `dispatch-claim:${taskId}`,
         ageMs: dispatchClaimAgeMs(identity, nowMs),
@@ -1269,8 +1254,7 @@ function buildLatchRows(
       });
     }
   } else if (dispatchClaims.status === "unreachable") {
-    // UNDETERMINED, NEVER "NO CLAIM HELD" (Q3's own fail-closed direction, applied here): a failed read must not
-    // silently render as a clear fleet — it names what it could not tell.
+    // Q3 fail-closed: a failed claim read is undetermined, never a clear fleet.
     rows.push({
       name: "DISPATCH_CLAIMS",
       consequence:
@@ -1280,8 +1264,7 @@ function buildLatchRows(
     });
   }
 
-  // Inflight locks — one row per LIVE lock (a dead-pid lock is stale debris, not an active latch — mirrors
-  // run-task.ts's own liveInflightRuns definition of "in flight").
+  // LIVE locks only, matching run-task.ts's liveInflightRuns; dead pids are stale debris.
   const inflightDir = join(root, "state", "inflight");
   try {
     for (const entry of fs.readdirSync(inflightDir)) {
@@ -1310,8 +1293,7 @@ function buildLatchRows(
     });
   }
 
-  // drain-now — PEEK ONLY, never consume (consuming is exclusively the daemon's own job; a status read must never have
-  // the side effect of erasing the very request it reports).
+  // drain-now: PEEK ONLY; only the daemon may consume the request this board reports.
   const drainNowPath = drainNowFilePath(root);
   if (fs.existsSync(drainNowPath)) {
     const json = readJsonMarker(drainNowPath);
@@ -2337,9 +2319,8 @@ const HEADROOM_NEXT_ACTIONS: readonly NextActionRule<HeadroomSection>[] = [
 export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusBoardDeps): StatusBoardModel {
   const now = deps.now ?? Date.now;
   const nowMs = now();
-  // THE BOARD MUST READ ROTATIONS, NOT ONE FILE. `readLedgerLines` opens one path and `rotateLedger` sheds a step
-  // COMPLETELY when it is in no retention set. The predicate names only the three steps measured as shed; every rung
-  // takes the NEWEST row.
+  // Read rotations: rotateLedger can shed unretained steps completely from readLedgerLines' one
+  // file. Seek the three measured steps; every rung takes the NEWEST row.
   // Why: 0 live `daemon.summary` rows against 524 in rotations — docs/forensics/status-board.md
   const readLedger =
     deps.readLedger ??
@@ -2364,8 +2345,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // ── LIVENESS ──
   const services: ServiceLivenessRow[] = (["daemon", "serve", "deploy-supervisor"] as const).map((service) => {
     const q = deps.queryService(service);
-    // W1-T2450: `sensed` defaults to `true` when the caller does not report it — the old, sensor-implicit behaviour —
-    // so every deps bundle predating this field reads exactly as before.
+    // W1-T2450: default sensed=true preserves older deps bundles' implicit-sensor behavior.
     const row: ServiceLivenessRow = { service, running: q.running, pid: q.pid, sensed: q.sensed ?? true, sensor: q.sensor };
     if (service === "daemon") {
       row.bootedAt = boots.ts;
@@ -2384,16 +2364,11 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     return row;
   });
 
-  // "the sha the LIVE process booted at" presupposes a live process — a stopped daemon has no running HEAD to compare,
-  // however recent its last boot. But W1-T3241: "cannot sense the process" is not "observed it stopped" — the boot sha
-  // and origin/main sha are a git question, not a liveness question, so an unsensed daemon (`sensed === false`, the
-  // ONLY state on a host with no launchd sensor) must not suppress this comparison the way a POSITIVELY stopped daemon
-  // still should. `canCompareHeadVsOrigin` is true when the daemon is running OR the sensor could not be asked at all;
-  // it is false only when the sensor answered and said "not running" — that is the one case a boot sha proves nothing.
+  // W1-T3241: suppress boot-sha comparison only for a POSITIVELY stopped daemon. An absent
+  // launchd sensor (`sensed === false`) cannot establish it stopped; git remains answerable.
   const daemonRow = services.find((s) => s.service === "daemon")!;
   const canCompareHeadVsOrigin = daemonRow.running || daemonRow.sensed === false;
-  // HOISTED out of the branch below — one resolution, two consumers. LATCHES needs origin/main to judge a
-  // DEPLOY_FAILED alert, independently of whether a daemon is up; resolving twice would be two git calls for one fact.
+  // Resolve once for staleness and LATCHES' DEPLOY_FAILED judgment, even when the daemon is down.
   const originSha = resolveOriginMainSha(deps.repoDir);
   let headVsOriginMain: StaleFlag = { status: "unknown" };
   if (canCompareHeadVsOrigin && boots.headSha && originSha) {
@@ -2410,8 +2385,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     nextAction: pickNextAction(LIVENESS_NEXT_ACTIONS, livenessCtx),
   };
 
-  // W1-T2446: HOISTED from the derived-half block below — LATCHES needs the merge-credit projection the other sections
-  // build, to correct the held dispatch-claim row's text. It reads only values already in scope.
+  // W1-T2446: share the merge-credit projection with LATCHES to correct held-claim text.
   const plan = deps.plan ?? tryLoadDefaultPlan(deps.repoDir);
   // W1-T6253: one index for the projection and both sections, and none at all while the rows' generation is unchanged.
   const ledgerIndex = buildLedgerIndex(lines);
@@ -2426,9 +2400,8 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const latchesSection: LatchesSection = { rows, nextAction: undefined };
   latchesSection.nextAction = pickNextAction(LATCHES_NEXT_ACTIONS, latchesSection);
 
-  // ── CADENCE (W1-T3381) ── the judge (`cadenceMarkerRows`) gets its own model seat: a marker's age comes off the
-  // SAME `<root>/state` reads LATCHES already uses (`readJsonMarker`/`markerAgeMs`), and its interval comes off the
-  // injected config seam so this stays PURE over its deps, never a second `plan/policy.yaml` loader in lib/.
+  // CADENCE (W1-T3381): cadenceMarkerRows reuses LATCHES' marker reads and injected intervals;
+  // stay PURE over deps, never add a second plan/policy.yaml loader in lib/.
   const resolveCadenceIntervalMinutes = deps.resolveCadenceIntervalMinutes ?? (() => undefined);
   const cadenceSection: CadenceSection = {
     rows: cadenceMarkerRows(
@@ -2450,21 +2423,18 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     ts: lastCycleRaw.ts,
     ageMs: Number.isFinite(lastCycleTsParsed) ? Math.max(0, nowMs - lastCycleTsParsed) : undefined,
   };
-  // W1-T279 follow-up: has the daemon done anything SINCE this cycle closed? If so the cycle is history, and telling
-  // the operator to investigate it competes with the live blockers below.
+  // W1-T279: activity SINCE closure supersedes this historical cycle's advice.
   lastCycle.supersededByTs = newestDaemonActivityAfter(lines, lastCycle.ts);
   const supersededParsed = lastCycle.supersededByTs ? Date.parse(lastCycle.supersededByTs) : NaN;
   lastCycle.supersededAgeMs = Number.isFinite(supersededParsed) ? Math.max(0, nowMs - supersededParsed) : undefined;
   lastCycle.nextAction = pickNextAction(LAST_CYCLE_NEXT_ACTIONS, lastCycle);
 
-  // ── W1-T280 (DERIVED half) ── `plan`/`projections`/`ghUnknownReason` are now hoisted above,
-  // ahead of LATCHES (W1-T2446) — this section reuses them, never re-derives them.
+  // W1-T280/W1-T2446: reuse plan/projections/ghUnknownReason already derived for LATCHES.
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
   const blockedPrSections = deriveBlockedPrSections(lines, deps.github, queueHeadLimit);
   const blockers = deriveBlockers(plan, lines, projections, blockedPrSections, ledgerIndex);
-  // W1-T1205: the SAME `hasPushedRunBranch` predicate the real dispatcher binds, read here rather than shared with it —
-  // this is its own, unbatched call site. ONE sweep per render, never one per candidate.
+  // W1-T1205: dispatcher-equivalent hasPushedRunBranch; ONE unbatched sweep per render.
   const readPushedRunBranches = deps.readPushedRunBranches ?? defaultReadPushedRunBranches;
   const pushedRunBranchIds = runBranchTaskIds(readPushedRunBranches(deps.repoDir));
   const queueHead = deriveQueueHead(plan, lines, projections, ghUnknownReason, queueHeadLimit, nowMs, (id) =>
@@ -2477,13 +2447,11 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const inbox = deriveInbox(plan, lines, projections, ghUnknownReason, readProposalRegistry, readDraftCache, grepAnchorTrue);
   const headroom = deriveHeadroom(lines, nowMs, (deps.resolveHeadroomEnabled ?? (() => true))());
 
-  // ── W1-T929: CACHE HIT — same `lines` window every other section above already read, one
-  // extra traversal (digest.ts's aggregateCacheHitTotals), no second ledger read. ──────────────
+  // W1-T929: CACHE HIT folds the shared lines window, without another ledger read.
   const cacheHitTotals = aggregateCacheHitTotals(lines);
   const cacheHit: CacheHitSection = { found: cacheHitTotals !== undefined, totals: cacheHitTotals };
 
-  // ── W1-T940: LEARNINGS INJECTION — the same `lines` window every section above already read, one
-  // extra traversal (digest.ts's aggregateLearningsInjection), no second ledger read. ─────────────
+  // W1-T940: LEARNINGS INJECTION folds the same window, without another ledger read.
   const learningsInjectionTotals = aggregateLearningsInjection(lines);
   const learningsInjection: LearningsInjectionSection = {
     found: learningsInjectionTotals !== undefined,
@@ -2493,8 +2461,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // ── W1-T4939: IDLE LANE — the same `lines` window, one more pure fold, no second ledger read. ──
   const idleLane = deriveIdleLane(lines, nowMs);
 
-  // ── W1-T931: NEEDS ME — same `lines` window every other section above already read, one
-  // extra pure fold (deriveNeedsMe), no second ledger read. ──────────────────────────────────
+  // W1-T931: NEEDS ME is another pure fold of that window, without another ledger read.
   const operatorReleases = readOperatorReleaseRecordsForBoard(root, plan, lines);
   const needsMe = deriveNeedsMe(lines, blockedPrSections.mergeHeld, projections, plan, operatorReleases.ids, operatorReleases.reason, nowMs);
   needsMe.dispatchClaims = staleDispatchClaimEscalations(
@@ -2934,10 +2901,9 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
 }
 
 // ── OPERATOR MESSAGE STANDARD — the board's presence projection (W1-T2806) ──────────────────────
-// docs/operator-message-standard.md is NORMATIVE and names `renderStatusBoardText` as its FIRST surface. It checks
-// PRESENCE of four slots and nothing else — never a readability, length or vocabulary metric, which the standard
-// forbids being added in its name — and certifies no message TRUE. It never withholds: operator-message.ts fails toward
-// DELIVERY, so no row is hidden, reordered or truncated and one footer line records what was missing.
+// NORMATIVE: docs/operator-message-standard.md. Check four slots' PRESENCE, never truth,
+// readability, length or vocabulary. Fail toward DELIVERY: hide, reorder or truncate no rows;
+// one footer records missing slots. renderStatusBoardText is the standard's FIRST surface.
 // Why: the surface the presence check never saw — docs/forensics/status-board.md
 
 /** A board section as the presence check sees it: its label, and the slots it fills. */
@@ -2997,9 +2963,8 @@ export function boardMessageFooter(sections: readonly BoardSectionMessage[]): st
   );
 }
 
-/** {@link projectBoardSection} under the same guard the check already has (W1-T2826). The projection used to run one
- *  frame out, in the argument expression feeding {@link boardMessageFooter}, where nothing caught it — so a throw took
- *  the whole board down. Returns `undefined` for a section it could not project. */
+/** W1-T2826: guard {@link projectBoardSection} with the check; projecting outside the guard once
+ *  broke the whole board. Return `undefined` for an unprojectable section. */
 function projectBoardSectionSafe(
   label: string,
   renderedLines: readonly string[],
@@ -3008,8 +2973,7 @@ function projectBoardSectionSafe(
   try {
     return projectBoardSection(label, renderedLines, sectionNextAction(section));
   } catch {
-    // Swallowed for the reason the guard exists: the board is the deliverable and its own conformance projection must
-    // not withhold it. Dropping the section keeps the footer's denominator honest.
+    // Deliver the board despite conformance failure; omit the section from the footer denominator.
     return undefined;
   }
 }

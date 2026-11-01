@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -309,6 +309,47 @@ test("a scratch tree becoming live during sizing cancels nested pruning at the f
   } finally {rmSync(fx.base, {recursive: true, force: true});}
 });
 
+function quietLsof(fx: Fixture, executable: string): string {
+  const wrapper = join(fx.base, "lsof-quiet");
+  writeFileSync(wrapper, `#!/bin/bash\nexec '${executable.replaceAll("'", "'\\''")}' -w "$@"\n`, { mode: 0o755 });
+  return wrapper;
+}
+
+test("W1-T9985: real lsof warnings about unrelated mounts do not hold the idle cache", () => {
+  const fx = fixture();
+  try {
+    const warningLsof = join(fx.base, "lsof-mount-warning");
+    writeFileSync(warningLsof, [
+      "#!/bin/bash",
+      'quiet=0; for arg; do [ "$arg" != -w ] || quiet=1; done',
+      `if [ "$quiet" = 0 ]; then echo "lsof: WARNING: can't stat() overlay file system /unrelated/docker" >&2; exit 1; fi`,
+      '[ "${@: -1}" != --fixture-error ] || exit 2',
+      `exec '${fx.lsof}' "$@"`,
+    ].join("\n") + "\n", { mode: 0o755 });
+    const lsof = quietLsof(fx, warningLsof);
+    const files = ["tsx-501", "tsx-502"].map(name => {
+      const cache = join(fx.root, name);
+      mkdirSync(cache);
+      const file = join(cache, `17920-${"e".repeat(40)}`);
+      writeFileSync(file, "compiled cache");
+      age(cache, HOURS_AGO(8));
+      return file;
+    });
+    writeFileSync(fx.open, `${files[0]}\n`);
+    const idle = spawnSync(lsof, ["-nP", "-Fn", "+D", dirname(files[1]!)], { encoding: "utf8" });
+    assert.equal(idle.status, 1);
+    assert.equal(idle.stdout, "");
+    assert.equal(idle.stderr, "", "the held-file probe suppresses unrelated mount warnings");
+    const held = spawnSync(lsof, ["-nP", "-Fn", "+D", dirname(files[0]!)], { encoding: "utf8" });
+    assert.equal(held.status, 0);
+    assert.ok(held.stdout.includes(`n${files[0]}\n`), held.stdout);
+    assert.equal(spawnSync(lsof, ["--fixture-error"]).status, 2, "the wrapper preserves errors too");
+    const { out } = reclaim(fx, 40, true, { RMD_RECLAIM_LSOF: lsof });
+    assert.ok(existsSync(files[0]!), out);
+    assert.equal(existsSync(files[1]!), false, out);
+  } finally { rmSync(fx.base, { recursive: true, force: true }); }
+});
+
 test("real lsof preserves a held nested cache while an idle historical cache is pruned", () => {
   const fx = fixture(); let fd: number | undefined;
   try {
@@ -319,15 +360,20 @@ test("real lsof preserves a held nested cache while an idle historical cache is 
     });
     const lsof = sh(fx.base, "sh", "-c", "command -v lsof").trim();
     fd = openSync(files[0]!, "r");
-    const { out } = reclaim(fx, 40, true, { RMD_RECLAIM_LSOF: lsof });
+    const { out } = reclaim(fx, 40, true, { RMD_RECLAIM_LSOF: quietLsof(fx, lsof) });
     assert.ok(existsSync(files[0]!), out); assert.equal(existsSync(files[1]!), false, out);
     assert.match(out, /open file or lsof scan uncertain/); assert.match(out, /pruned tsx cache files=1.*idle/);
   } finally { if (fd !== undefined) closeSync(fd); rmSync(fx.base, { recursive: true, force: true }); }
 });
 
-test("owner is checked before recursive age scans, and stale safe symlink scratch is reclaimable", () => {
+function checkOwnerBeforeAgeScan(asFormerHost = false): void {
   const fx = fixture();
+  const foreignOwner = `${userInfo().username}-foreign`;
   try {
+    if (asFormerHost) {
+      const id = sh(fx.base, "sh", "-c", "command -v id").trim();
+      writeFileSync(join(fx.bin, "id"), `#!/bin/sh\nif [ "$1" = -un ]; then echo craigoleyagent; else exec '${id}' "$@"; fi\n`, { mode: 0o755 });
+    }
     const foreign = join(fx.root, "foreign-owned");
     const internal = join(fx.root, "internal-link-tree");
     const dangling = join(fx.root, "dangling-temp-link-tree");
@@ -351,14 +397,15 @@ test("owner is checked before recursive age scans, and stale safe symlink scratc
       "#!/bin/sh",
       "last=",
       'for arg do last="$arg"; done',
-      'if [ "${last##*/}" = "foreign-owned" ]; then printf "craigoleyagent\\n"; exit 0; fi',
+      `if [ "\${last##*/}" = "foreign-owned" ]; then printf '%s\\n' '${foreignOwner}'; exit 0; fi`,
       `exec ${JSON.stringify(realStat)} "$@"`,
     ].join("\n") + "\n", { mode: 0o755 });
 
     const applied = reclaim(fx, 40, true);
     assert.ok(existsSync(foreign), "a foreign-owned tree is not traversed or deleted");
-    assert.match(applied.report, /owned by craigoleyagent; age check requires owner account.*foreign-owned/);
+    assert.ok(applied.report.includes(`owned by ${foreignOwner}; age check requires owner account | ${foreign}`), applied.report);
     assert.doesNotMatch(applied.report, /age scan unavailable.*foreign-owned/);
+    if (asFormerHost) return;
     assert.equal(existsSync(internal), false, "an old candidate with only an in-tree link can be removed");
     assert.equal(existsSync(dangling), false, "a dangling alias to a temp-root path can be removed");
     assert.ok(existsSync(external), "a live external symlink target keeps its candidate");
@@ -367,6 +414,14 @@ test("owner is checked before recursive age scans, and stale safe symlink scratc
   } finally {
     rmSync(fx.base, { recursive: true, force: true });
   }
+}
+
+test("owner is checked before recursive age scans, and stale safe symlink scratch is reclaimable", () => {
+  checkOwnerBeforeAgeScan();
+});
+
+test("W1-T9985: the foreign-owner case names an account other than the one running it", () => {
+  checkOwnerBeforeAgeScan(true);
 });
 
 test("an old dir a process is working in, or holds a file open in, is kept and reported", () => {

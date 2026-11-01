@@ -27,11 +27,15 @@ function snapshot(source: string) {
 
 test("W1-T10918: comment compression preserves executable code", () => {
   // Pre-compression source: 811d6e2d19018530bd12c885d307d08f02fb09bc.
-  // W1-T9796 excludes RMD_INSTANCE_REGISTRY from the Codex worker env; the fixed hashes include that edit.
+  // Historical comparison evidence for this edit, not a new comment ceiling.
+  // W1-T10855 intentionally adds price, shape and effort rows plus the effort lookup.
+  // W1-T10954 adds exact settlement, preserves partial counters and reconciles late raw receipts.
+  // W1-T9796 excludes RMD_INSTANCE_REGISTRY from the Codex worker env.
+  // Refresh executable fingerprints for those behaviors; retain the compression bounds below.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
-  assert.equal(actual.tokenCount, 43829);
-  assert.equal(actual.tokenDigest, "66ab84fb2760aa0b0438f81aa813d4b91c74bd463d7fd297834075eeba1b3f52");
-  assert.equal(actual.astDigest, "d85ad2321b659d8d4a0b66d8c3fa1c16079c9ce4e3d91f095797d2d6b7a4d2e6");
+  assert.equal(actual.tokenCount, 45441);
+  assert.equal(actual.tokenDigest, "cb92e48eee3bec2ee7f4979fec3d25718fec3c02b09adcc72d12715dbd41a01c");
+  assert.equal(actual.astDigest, "b62076ed4643314dc1c954533066db668306830d096978ca6970a62557ba130d");
   assert.ok(actual.commentLines < 1357, "comment lines must decrease from the pre-compression source");
   assert.ok(actual.commentBytes < 104858, "comment bytes must decrease; rewrapping alone is insufficient");
 
