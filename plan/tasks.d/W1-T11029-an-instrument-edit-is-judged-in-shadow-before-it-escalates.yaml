@@ -1,0 +1,41 @@
+- id: W1-T11029
+  title: An instrument edit a fix round needs is judged in shadow, additive or not, and saved for the operator's spot-check before it escalates
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the fix lane's instrument-scope stand-down; shadow only, the escalation is unchanged
+  origin: operator-session#fix-lane-effectiveness-2026-10-30
+  plan_refs:
+    - W1-T297
+    - W1-T11030
+  files:
+    - src/lib/instrument-grant.ts
+    - src/cli/commands/fix.ts
+    - test/ci/gates/an-instrument-edit-is-judged-in-shadow-before-it-escalates.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "At an instrument-scope stand-down, the worker's uncommitted diff of each requested instrument path is classified as additive (adds lines, removes none), modifies (any removed or changed line, a deletion, a mode change, a rename or a binary diff) or absent (untouched), and the round is ledgered as instrument_grant.shadow with would_grant only when every path is additive. The patch is saved under state/instrument-grant-shadow for the operator's spot-check, an unreadable diff or unwritable patch is ledgered without throwing, and the escalation is unchanged"
+      proof: "unit test: test/ci/gates/an-instrument-edit-is-judged-in-shadow-before-it-escalates.test.ts"
+    - claim: The fix lane's instrument-scope stand-down calls the shadow judge before it escalates
+      proof: "grep: recordInstrumentGrantShadow( in src/cli/commands/fix.ts"
+  rationale: |
+    Operator, 2026-10-30: "Why aren't fix workings working? How do we make them actually solve issues so I don't keep having to manually go to claude code and codex to clear the pr queue?" Ruling, the same day, on instrument edits: "Judged grant, shadow first".
+    OBSERVED, operator recon 2026-10-30 (fix-lane rows 2026-10-23T15:20Z to 2026-10-30T15:22Z, 274 archives plus the live file; GitHub commit authors of the 151 fleet task PRs closed in that window):
+    - The fleet merges most of its own work: 112 of the 151 closed task PRs carried only fleet commits, and merged PRs took a median of 2 fix rounds.
+    - The stuck ones burn rounds: the 17 still-open task PRs took 106 rounds (median 5, max 19), only 42 of them FIXED and 51 refused for scope.
+    - Instrument paths are the scope a round can never get: isUngrantableInstrumentPath (src/lib/proof-amendment.ts) refuses them in every amendment, and 23 of the 116 paths in this week's fix.scope_needed rows were instrument scripts or baselines. Four PRs stood down on them on 2026-10-30: #15133 (census-precheck), #15046 (diff-class), #15368 (preflight-author) and #15520 (expiring-fixture-census).
+    - The workers had already written and tested those edits. #15520's round: "Saved an uncommitted census registration and regression test ... admit scripts/expiring-fixture-census.mjs to scope so the saved repair can be committed" (issue 15559).
+    Standing rule 25 (MASTER-PLAN §12) names the sanctioned exit for an instrument change: its own PR. This task measures how many stand-downs are purely additive before W1-T11030 automates that split.
+  design: |
+    src/lib/instrument-grant.ts: classifyInstrumentDiff (pure, unified-diff line counts per file) and recordInstrumentGrantShadow (reads git diff HEAD -- <paths> in the round's worktree, saves the patch with writeAtomic, ledgers instrument_grant.shadow, never throws).
+    src/cli/commands/fix.ts: one awaited call in the scope-needed branch when scopeKind is instrument, through the existing deps.scopeAmendmentGit seam, before the escalation.
+  falsifier: |
+    Count removed lines as additive: the modifies cases pass as would_grant and the test fails. Remove the call from fix.ts: the grep proof fails.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (run-unfiled-1793374065372). The operator session hand-builds it on run-W1-T11029-<epochMs>, because the fleet's new-task dispatch is held.
+    It grants nothing: no instrument path is admitted and no escalation changes.

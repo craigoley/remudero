@@ -176,7 +176,7 @@ function ghShim(dir: string, headRefName: string, headSha: string): void {
     [
       "#!/bin/sh",
       'case "$*" in',
-      '  *"headRefName"*) printf \'{"headRefName":"%s","body":""}\\n\' ' + JSON.stringify(headRefName) + " ;;",
+      '  *"headRefName"*) echo ' + JSON.stringify(JSON.stringify({ headRefName, headRefOid: headSha, body: "" })) + " ;;",
       `  *"api"*"pulls/"*) echo '{"state":"open","merged":false,"head":{"sha":"${headSha}"}}' ;;`,
       "  *) echo '{}' ;;",
       "esac",

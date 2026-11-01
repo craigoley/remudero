@@ -120,15 +120,15 @@ export function unmatchedRunRefsRemainBlocking(
   return refs.some((ref) => !planOnlyRunBranchReceipt(ref, receipts) && !orphanRunBranchReleased(ref, orphan));
 }
 
-/** Default grace before a no-PR run branch stops blocking: long past any single run's wall clock. */
-export const ORPHAN_RUN_BRANCH_GRACE_MS = 24 * 60 * 60 * 1000;
-
 /** Orphan release evidence, read once per pass: the reaper's proven no-PR ref/sha cache,
  *  this pass's clock, and live in-flight task locks. */
 export interface OrphanRunBranchEvidence {
   noPrHeadShas: Readonly<Record<string, string>>;
   nowMs: number;
   liveTaskIds: ReadonlySet<string>;
+  endedRunIds?: ReadonlySet<string>;
+  longestSettledRunMs?: number;
+  /** Test-only age override; production uses the observed settled span. */
   graceMs?: number;
   /** W1-T9482: when the sweep last requeued a task (`sweep.strike_ladder.requeued`), epoch ms; absent when
    *  it never did. A requeue is the sweep's order to rebuild, so a ref pushed before it is spent. Lazy so a
@@ -136,19 +136,26 @@ export interface OrphanRunBranchEvidence {
   requeuedAtMs?: (taskId: string) => number | undefined;
 }
 
-/** Release only a proven no-PR tip, without a live task lock, past grace or requeued since push.
- *  Missing evidence/sha/cache or malformed epoch keeps blocking; re-push loses the sha proof.
- *  The branch and its commits stay on origin; only the duplicate-build guard steps aside. */
+/** Release a proven no-PR tip only without a live lock and with evidence the run is over.
+ *  The ref and its commits remain on origin; a changed tip loses the no-PR proof. */
 export function orphanRunBranchReleased(ref: PushedRunRef, orphan: OrphanRunBranchEvidence | undefined): boolean {
-  if (orphan === undefined || ref.sha === undefined) return false;
-  if (orphan.noPrHeadShas[ref.ref] !== ref.sha) return false;
-  if (orphan.liveTaskIds.has(ref.taskId)) return false;
+  return orphanRunBranchReleaseReason(ref, orphan) !== undefined;
+}
+
+function orphanRunBranchReleaseReason(ref: PushedRunRef, orphan: OrphanRunBranchEvidence | undefined):
+  "run-ended-no-pr" | "older-than-observed-runs" | "orphan-run-branch-no-pr" | "requeue-released" | undefined {
+  if (orphan === undefined || ref.sha === undefined) return undefined;
+  if (orphan.noPrHeadShas[ref.ref] !== ref.sha || orphan.liveTaskIds.has(ref.taskId)) return undefined;
   const epoch = /-(\d{13})$/.exec(ref.ref);
-  if (!epoch) return false;
-  return (
-    orphan.nowMs - Number(epoch[1]) >= (orphan.graceMs ?? ORPHAN_RUN_BRANCH_GRACE_MS) ||
-    requeueReleasesRef(ref, Number(epoch[1]), orphan)
-  );
+  if (!epoch) return undefined;
+  if (orphan.endedRunIds?.has(ref.ref.slice("run-".length))) return "run-ended-no-pr";
+  const ageMs = orphan.nowMs - Number(epoch[1]);
+  if (orphan.graceMs !== undefined) {
+    if (Number.isFinite(orphan.graceMs) && orphan.graceMs >= 0 && ageMs >= orphan.graceMs) return "orphan-run-branch-no-pr";
+  } else if (orphan.longestSettledRunMs !== undefined && Number.isFinite(orphan.longestSettledRunMs) &&
+    orphan.longestSettledRunMs >= 0 && ageMs > orphan.longestSettledRunMs) return "older-than-observed-runs";
+  if (requeueReleasesRef(ref, Number(epoch[1]), orphan)) return "requeue-released";
+  return undefined;
 }
 
 /** W1-T9482: true when the sweep requeued `ref`'s task at or after the instant the ref was pushed. Only
@@ -186,6 +193,7 @@ export function logPlanOnlyRunBranchException(
   refs: readonly PushedRunRef[],
   receipts: readonly PlanOnlyRunBranchReceipt[],
   orphan?: OrphanRunBranchEvidence,
+  reportedRefs: Set<string> = new Set(),
 ): void {
   for (const ref of refs) {
     const match = receipts.find((r) => r.ref === ref.ref && r.sha === ref.sha);
@@ -197,13 +205,12 @@ export function logPlanOnlyRunBranchException(
         sha: ref.sha,
         pr_number: match.prNumber,
       });
-    } else if (orphanRunBranchReleased(ref, orphan)) {
-      const epoch = /-(\d{13})$/.exec(ref.ref);
-      const graceElapsed = epoch !== null && orphan !== undefined &&
-        orphan.nowMs - Number(epoch[1]) >= (orphan.graceMs ?? ORPHAN_RUN_BRANCH_GRACE_MS);
-      // W1-T9482: name the requeue when it, and not the 24 h grace, is what released the ref.
-      const reason = graceElapsed ? "orphan-run-branch-no-pr" : "requeue-released";
-      log("dispatch.run_branch_exception", { task: taskId, reason, ref: ref.ref, sha: ref.sha });
+    } else {
+      const reason = orphanRunBranchReleaseReason(ref, orphan);
+      if (reason !== undefined && !reportedRefs.has(ref.ref)) {
+        reportedRefs.add(ref.ref);
+        log("dispatch.run_branch_exception", { task: taskId, reason, ref: ref.ref, sha: ref.sha });
+      }
     }
   }
 }
@@ -1705,6 +1712,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   // never outlives the pass that proved it.
   let planOnlyReceipts: readonly PlanOnlyRunBranchReceipt[] = [];
   let orphanEvidence: OrphanRunBranchEvidence | undefined;
+  const reportedRunBranchReleases = new Set<string>();
   const refreshRunBranchState = (): void => {
     const raw = deps.readPushedRunBranches?.();
     pushedRunBranches = raw !== undefined ? runBranchTaskIds(raw) : undefined;
@@ -1890,7 +1898,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
               );
               if (!stillBlocked) {
                 const refsForTask = currentPushedRunRefs.filter((r) => r.taskId === id);
-                if (refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, currentPlanOnlyReceipts, currentOrphanEvidence);
+                if (refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, currentPlanOnlyReceipts, currentOrphanEvidence, reportedRunBranchReleases);
               }
               return stillBlocked;
             },
@@ -2240,6 +2248,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   // never outlives the pass that proved it.
   let planOnlyReceipts: readonly PlanOnlyRunBranchReceipt[] = [];
   let orphanEvidence: OrphanRunBranchEvidence | undefined;
+  const reportedRunBranchReleases = new Set<string>();
   const refreshRunBranchState = (): void => {
     const raw = deps.readPushedRunBranches?.();
     pushedRunBranches = raw !== undefined ? runBranchTaskIds(raw) : undefined;
@@ -2395,7 +2404,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
               );
               if (!stillBlocked) {
                 const refsForTask = currentPushedRunRefs.filter((r) => r.taskId === id);
-                if (refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, currentPlanOnlyReceipts, currentOrphanEvidence);
+                if (refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, currentPlanOnlyReceipts, currentOrphanEvidence, reportedRunBranchReleases);
               }
               return stillBlocked;
             },

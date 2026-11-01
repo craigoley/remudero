@@ -3,9 +3,9 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { benchmarkCohortCadence, runBenchmarkCohortPass, type BenchmarkCohortCadence,
-  type BenchmarkCohortPassResult } from "../src/lib/benchmark-cohort.js";
-import { clockFromMillisFn } from "../src/lib/clock.js";
+import { benchmarkCohortCadence, runBenchmarkCohortPass,
+  type BenchmarkCohortCadence } from "#src/lib/benchmark-cohort.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 
 const MINUTE = 60_000;
 
@@ -39,7 +39,7 @@ test("W1-T8876: the benchmark cohort runs only when its inputs changed", async (
 
     now += 15 * MINUTE;
     await tick(hooks);
-    assert.equal(runs, 1, "past the 15-minute floor, unchanged inputs still skip the pass");
+    assert.equal(runs, 1, "elapsed time alone does not make a pass due");
 
     const checkpoint = join(stateDir, "benchmark-cohort-index.json");
     const before = { bytes: readFileSync(checkpoint, "utf8"), mtimeMs: statSync(checkpoint).mtimeMs };
@@ -51,41 +51,44 @@ test("W1-T8876: the benchmark cohort runs only when its inputs changed", async (
 
     appendFileSync(join(stateDir, "ledger.ndjson"), assignment("a1"));
     await tick(hooks);
-    assert.equal(runs, 2, "a grown live ledger is a changed input, and the floor has passed");
+    assert.equal(runs, 1, "readers fold live growth without a daemon pass");
 
     appendFileSync(join(stateDir, "ledger.ndjson"), assignment("a2"));
     now += 14 * MINUTE;
     await tick(hooks);
-    assert.equal(runs, 2, "a changed input still waits out the 15-minute floor");
+    assert.equal(runs, 1, "more live growth still skips the daemon pass");
     now += MINUTE;
     await tick(hooks);
-    assert.equal(runs, 3);
+    assert.equal(runs, 1);
 
     writeFileSync(join(stateDir, "ledger.2026-10-16T06-30-00-000Z.ndjson"), assignment("r0"));
-    now += 15 * MINUTE;
     await tick(hooks);
-    assert.equal(runs, 4, "a new rotation is a changed input");
+    assert.equal(runs, 2, "a new rotation is due at the next check");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });
 
-test("W1-T8876: an unfinished cohort pass is retried at the floor even when its inputs are unchanged", async () => {
+test("W1-T8876: an unfinished cohort pass continues immediately and a failed pass waits its cost", async () => {
   const { home, stateDir } = fixture();
   let now = 5_000_000;
   const outcomes: Array<"partial" | "throw" | "complete"> = ["partial", "throw", "complete"];
   let runs = 0;
-  const hooks = benchmarkCohortCadence({ stateDir: () => stateDir, clock: clockFromMillisFn(() => now), run: async () => {
+  const hooks = benchmarkCohortCadence({ stateDir: () => stateDir, clock: clockFromMillisFn(() => now), run: async (dir) => {
     runs += 1;
     const outcome = outcomes.shift();
-    if (outcome === "throw") throw new Error("checkpoint unreadable");
-    return { state: outcome, pendingSources: outcome === "partial" ? 2 : 0 } as BenchmarkCohortPassResult;
+    if (outcome === "throw") { now += 100; throw new Error("checkpoint unreadable"); }
+    const result = await runBenchmarkCohortPass(dir);
+    return { ...result, pendingSources: outcome === "partial" ? 2 : 0 };
   } });
   try {
     for (let pass = 0; pass < 3; pass += 1) {
       assert.equal(hooks.checkBenchmarkCohort(), true, `pass ${pass} is due: the last one left work unfinished`);
-      await hooks.runBenchmarkCohortPass().catch(() => undefined);
-      now += 15 * MINUTE;
+      if (pass === 1) {
+        await assert.rejects(hooks.runBenchmarkCohortPass(), /checkpoint unreadable/);
+        assert.equal(hooks.checkBenchmarkCohort(), false);
+        now += 100;
+      } else await hooks.runBenchmarkCohortPass();
     }
     assert.equal(runs, 3);
     assert.equal(hooks.checkBenchmarkCohort(), false, "a finished pass over unchanged inputs is not repeated");
@@ -98,8 +101,9 @@ test("W1-T8876: an unreadable ledger directory never pins the cohort as unchange
   const { home, stateDir } = fixture();
   let now = 9_000_000;
   let runs = 0;
+  const result = await runBenchmarkCohortPass(stateDir);
   const hooks = benchmarkCohortCadence({ stateDir: () => stateDir, clock: clockFromMillisFn(() => now),
-    run: async () => { runs += 1; return { state: "complete", pendingSources: 0 } as BenchmarkCohortPassResult; } });
+    run: async () => { runs += 1; return result; } });
   try {
     rmSync(stateDir, { recursive: true, force: true });
     assert.equal(hooks.checkBenchmarkCohort(), true);

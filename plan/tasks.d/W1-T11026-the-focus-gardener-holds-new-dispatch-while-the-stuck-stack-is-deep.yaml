@@ -1,0 +1,46 @@
+- id: W1-T11026
+  title: The focus gardener holds new task dispatch while the stuck owned PRs alone fill the base WIP limit, and releases it once they halve
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # new-task admission only; the sweep's fix, review and merge lanes never consult the gate it wraps
+  origin: operator-session#queue-focus-2026-10-30
+  plan_refs:
+    - W1-T121
+    - W1-T4465
+    - W1-T7243
+    - W1-T2655
+  files:
+    - src/lib/focus-gardener.ts
+    - src/lib/sweep.ts
+    - src/cli/commands/daemon.ts
+    - test/gardeners/the-focus-gardener-holds-new-dispatch-while-the-stuck-stack-is-deep.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the queue reading's stuck owned PR count reaches the base WIP limit and stays there for 30 minutes, the focus gardener answers the new-task queue gate with a deferral of tier focus and writes state/FOCUS naming itself and the reading. When the count falls to half the limit or below and stays there for 30 minutes, it clears that file and the gate answers as before. A reading between the two bounds keeps the current state, a reading that flips back before 30 minutes restarts the wait, removing state/FOCUS by hand releases the hold, and the operator's state/QUIET_HOURS file is never written or removed"
+      proof: "unit test: test/gardeners/the-focus-gardener-holds-new-dispatch-while-the-stuck-stack-is-deep.test.ts"
+    - claim: The queue gate the dispatcher consults for new tasks is the focus gardener's wrapper, so fix rounds, reviews and merges, which never consult that gate, keep running while it holds
+      proof: "grep: focusGateFor(queueGovernorGateFor in src/cli/commands/daemon.ts"
+  rationale: |
+    Operator, 2026-10-30, with 27 PRs open and over 20 stuck: "Can we have the fleet focus on fixing and reviewing and not adding more to the stack?" and then "There should be a gardner that smartly turns it on based on the PR queue and dispatches more fix workers. And then switches it off when the queue clears."
+    OBSERVED, operator recon 2026-10-30 (ledger read to 2026-10-30T14:52Z):
+    - The queue governor subtracts stuck owned PRs from its count (adaptive-wip.ts, ruling 2026-10-09: "I hate hard ceilings"; "never be left with stuck prs"), so a deep stuck stack never defers new dispatch. In the 24 h to 14:45Z the fleet opened 39 task PRs while the stuck owned count read 3-16.
+    - The base wipLimit is 10. The stuck owned count on dispatch_admitted_adaptive_wip, dispatch_deferred_wip and dispatch.wip_deferred rows ranged 0-8 from 2026-10-23 to 10-27, then reached 11 (10-28), 16 (10-29) and 15 (10-30). Entering at the base limit therefore never fires on the healthy week and fires on this squeeze; leaving at half of it returns to that week's typical level.
+    - The fix lane is bounded by host worker slots: sweep.fix_capacity reads host_worker_budget 8 minus active_workers. With new builds held, the slots they held become fix capacity, which is how this rung "dispatches more fix workers". Over the same 24 h, host capacity refused a due fix only 34 times; light-pass deferral (175) and review-only passes (168) refused more, which is W1-T11027's lever.
+    - The operator set state/QUIET_HOURS by hand at 2026-10-30T14:44:54Z as the manual form of this hold. A daemon tick governor deferral idles the tick before the retro, auto-triage and intake rungs as well as dispatch (checkDispatchGovernors' caller in daemon.ts), so this hold also stops adding plan work.
+  design: |
+    A new module, src/lib/focus-gardener.ts:
+    - decideFocus(state, reading, nowMs): pure. Enter at stuck >= base limit, leave at stuck <= floor(base / 2), each only after the condition has held continuously for FOCUS_DWELL_MS (30 min). A reading that no longer wants the flip clears the pending start.
+    - focusGateFor(queueGate, { stateDir, log }): wraps the queue gate. It judges every consultation from the reading the gate just made (its deferral, or readAdmission()), writes or clears state/FOCUS (JSON: owner focus-gardener, since, reason, the counts) only on a change, and ledgers focus.entered or focus.exited with the counts. While on, an admitting reading is answered with { ...reading, deferred: true, tier: "focus" } and readAdmission() returns undefined. A deferring reading passes through unchanged. Boot state is the file's presence with owner focus-gardener, so a restart keeps the hold; a missing file while on is the operator releasing it (focus.released).
+    - Wired once, at the daemon's queue gate in src/cli/commands/daemon.ts: focusGateFor(queueGovernorGateFor(...)). The daemon's existing daemon.queue_governor row then names tier focus. src/lib/sweep.ts gains only the "focus" member of QueueGovernorTier.
+    Never read or written: state/QUIET_HOURS, state/PAUSE, the sweep's own gates.
+  falsifier: |
+    Remove the wrapper from the daemon's queue gate: the grep proof fails. Remove the dwell: the test's single-noisy-reading case flips state and fails. Remove the exit branch: the test's halved-stack case still answers focus and fails.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (W1-T11026, W1-T11027, W1-T11028 on run-unfiled-1793371974275). The operator session hand-builds this task on run-W1-T11026-<epochMs> once the filing merges, because the fleet's new-task dispatch is held by QUIET_HOURS. When it is live, the operator session removes the hand-set QUIET_HOURS so this rung owns the hold.
+    No threshold policy row, no gate loosening, and no change to the sweep's fix, review or merge admission is authorized by this task.

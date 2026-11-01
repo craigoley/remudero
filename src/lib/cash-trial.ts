@@ -1,3 +1,4 @@
+import { spendAmountUsd } from "./spend-rows.js";
 import { createHash } from "node:crypto";
 import type { Config } from "./config-schema.js";
 import { fixedClock, systemClock } from "./clock.js";
@@ -99,7 +100,7 @@ export function summarizeCashTrial(rows: Iterable<Row>, today: string): CashTria
       const id = row.selection_assignment_id;
       const current = {
         ts: typeof row.ts === "string" ? row.ts : "",
-        usd: typeof row.total_cost_usd === "number" ? row.total_cost_usd : undefined,
+        usd: spendAmountUsd(row),
         provider: row.provider,
         billingMode: row.billing_mode,
         conflicting: false,

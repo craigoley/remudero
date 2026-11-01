@@ -23,7 +23,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
-import { readSelectedInstanceRegistry, type RegistrySelectionInput, type RegistryFileIO } from "./instance-registry-selection.js";
+import { captureInstanceRegistryRuntimeProjection, InstanceRegistryRuntimeError,
+  readSelectedInstanceRegistry, type RegistrySelectionInput, type RegistryFileIO } from "./instance-registry-selection.js";
 import { createSelectedRegistryObserver, observeSelectedRegistry, type SelectedRegistryConsumerOptions, type SelectedRegistryObserver, type RegistryConsumerTarget } from "./selected-registry-consumers.js";
 import {
   assertWriteTiersComplete,
@@ -1908,6 +1909,7 @@ export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegi
   selectedRegistryObserver?: SelectedRegistryObserver; selectedRegistryTarget?: RegistryConsumerTarget };
 
 export function buildRegistryRoute(deps: RegistryRouteInput): Route {
+  const runtimeProjection = captureInstanceRegistryRuntimeProjection();
   const selectedRegistryObserver = deps.selectedRegistryObserver;
   const selectedRegistryTarget = deps.selectedRegistryTarget && { ...deps.selectedRegistryTarget };
   const selectedInput = deps.selectedRegistry === undefined ? undefined : {
@@ -1930,6 +1932,16 @@ export function buildRegistryRoute(deps: RegistryRouteInput): Route {
     path: "/v1/registry",
     scope: "read",
     handler: (_req, res) => observeSelectedRegistry(selectedRegistryObserver, "serve-registry", selectedRegistryTarget ?? {}, async () => {
+      if (runtimeProjection !== undefined) {
+        try {
+          const projection = await runtimeProjection();
+          sendJson(res, 200, { ...projection, source: "selected", publicationPermission: "not-granted", generatedAt: clock.iso() });
+        } catch (error) {
+          sendJson(res, 503, { error: "selected_registry_unavailable",
+            reason: error instanceof InstanceRegistryRuntimeError ? error.details?.reason : "recheck_failed" });
+        }
+        return;
+      }
       if (selectedInput !== undefined) {
         const selected = await readSelectedInstanceRegistry(selectedInput, deps.selectedRegistryIO);
         if (selected.kind === "unknown" || selected.kind === "refused") {

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { foreignHeadIsStuck } from "../src/run-task.js";
+// The predicate's own module (run-task.ts only re-exports it), so this suite does not reach run-task.ts.
+import { foreignHeadIsStuck } from "../src/lib/sweep.js";
 
 /**
  * W1-T3168 — THE NON-FLEET-HEAD ESCALATION FIRED ON A HEALTHY PR.

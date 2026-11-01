@@ -1,0 +1,43 @@
+id: incident-2756896d6b5bb7df
+ts: 2026-10-31T05:15:27.749Z
+raw: >-
+  Incident 2756896d6b5b: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: merge conflict (mergeState dirty) — rmd-owned branch has captured
+  deletion evidence on src/cli/commands/daemon.ts (ours -<n>, theirs -<n>),
+  src/lib/run-child-contract.ts (ours -<n>, theirs -<n>), src/lib/run-child.ts
+  (ours -<n>, theirs -<n>), src/lib/worker-provider.ts (ours -<n>, theirs -<n>),
+  src/run-task.ts (ours -<n>, theirs -<n>),
+  test/worker/spawn/compress-src-lib-worker-provider-ts.test.ts (ours -<n>,
+  theirs -<n>) — would dispatch the bounded merge-conflict fix worker to inspect
+  actual hunks and preserve both sides' intended behavior; a fresh review and CI
+  gate the new head — NOT DISPATCHED this pass: detached fix dispatch failed
+  before fix.dispatch <n> times on #<pr> at head <sha> (fix dispatch refused:
+  worker admission is held: PAUSE: cannot reach origin to read
+  refs/rmd-pause/hold — holding rather than dispatching optimistically (an
+  unreachable remote is never read as clear)) — FIX_DISPATCH_FAILED_BACKSTOP <n>
+  reached, no further dispatch is attempted at this head
+
+  First seen: 2026-10-31T05:14:10.194Z
+
+  Last seen: 2026-10-31T05:14:10.194Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15679 escalated: already escalated (reason unreadable: no escalation of this PR at head 0a66a11 is in the ledger); this pass: merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on src/cli/commands/daemon.ts (ours -1, theirs -19), src/lib/run-child-contract.ts (ours -1, theirs -16), src/lib/run-child.ts (ours -6, theirs -10), src/lib/worker-provider.ts (ours -1, theirs -177), src/run-task.ts (ours -1, theirs -17), test/worker/spawn/compress-src-lib-worker-provider-ts.test.ts (ours -3, theirs -3) — would dispatch the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head — NOT DISPATCHED this pass: detached fix dispatch failed before fix.dispatch 3 times on #15679 at head 0a66a11 (fix dispatch refused: worker admission is held: PAUSE: cannot reach origin to read refs/rmd-pause/hold — holding rather than dispatching optimistically (an unreachable remote is never read as clear)) — FIX_DISPATCH_FAILED_BACKSTOP 3 reached, no further dispatch is attempted at this head
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#2756896d6b5bb7df1387913b1ba5406e02880c75bac8338888fdb40e3a057c53
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

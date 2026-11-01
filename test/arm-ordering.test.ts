@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appendLedger } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
-import { armAutoMerge, armIfVerdictPermits, armOutcomeReason, type ArmDeps, type ArmOutcome } from "#src/run-task.js";
+// The arm cluster's own module (run-task.ts only re-exports it), so this suite does not reach run-task.ts.
+import { armAutoMerge, armIfVerdictPermits, armOutcomeReason, type ArmDeps, type ArmOutcome } from "#src/lib/arm-auto-merge.js";
 
 // ── THE DEFECT ───────────────────────────────────────────────────────────────────────
 // `armIfVerdictPermits` ran 35 lines ABOVE the `log("review.posted", …)` call in the same

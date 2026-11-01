@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 120.00
+  budget_usd: 9.50
   rationale: "Observed on remudero-console API-T40 PR #1493: the task declared app/api/console/delegations/route.ts, but the worker commit/PR omitted it while it stayed untracked in the registered worktree. CI failed importing the absent route. The fix rung correctly refused to take ownership of the dirty worktree, leaving a known-red PR with no repair path."
   design: |
     TWO HALVES, ONE LIFECYCLE.

@@ -279,8 +279,8 @@ test("dispatchFix REFUSES a synthetic PR whose head claims another task, before 
       "#!/usr/bin/env node",
       'const a = process.argv.slice(2); const i = a.indexOf("--json"); const f = i >= 0 ? a[i+1] : undefined;',
       // A FOREIGN run-branch: this PR carries no task, but its head claims W1-T999.
-      // `dispatchFix` now asks for `headRefName,body` in ONE call (never two `gh pr view`s).
-      'if (f && f.includes("headRefName")) process.stdout.write(JSON.stringify({ headRefName: "run-W1-T999-1785600000000", body: "" }));',
+      // The dispatch reads branch and SHA together before judging the branch's ownership.
+      'if (f && f.includes("headRefName")) process.stdout.write(JSON.stringify({ headRefName: "run-W1-T999-1785600000000", headRefOid: "cafe1234", body: "" }));',
       'else if (f === "state") process.stdout.write(JSON.stringify({ state: "OPEN" }));',
       // W1-T511: `ghLiveState` reads live PR state over REST now (`gh api repos/{o}/{r}/pulls/{n}`),
       // not `gh pr view --json state`. Without this arm the read falls through to the `{}` default,
@@ -368,7 +368,7 @@ test("dispatchFix sends the production RETRO trailer/head shape to a worker unde
     [
       "#!/bin/sh",
       'case "$*" in',
-      '  *"headRefName"*) printf \'{"headRefName":"%s","body":""}\\n\' ' + JSON.stringify(branch) + " ;;",
+      '  *"headRefName"*) echo ' + JSON.stringify(JSON.stringify({ headRefName: branch, headRefOid: branchSha, body: "" })) + " ;;",
       '  *"/check-runs"*) echo \'{"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}\' ;;',
       '  *"/commits/"*"/status"*) echo \'{"statuses":[]}\' ;;',
       '  *"api"*"pulls/"*) echo ' + JSON.stringify(JSON.stringify({ state: "open", merged: false, head: { sha: branchSha } })) + " ;;",

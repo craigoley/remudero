@@ -1,0 +1,33 @@
+id: incident-57c7aea4efe4ddaf
+ts: 2026-10-30T16:24:19.355Z
+raw: >-
+  Incident 57c7aea4efe4: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  Scheduler enrollment moves detection earlier but still dispatches census
+  repair. Meeting zero fix dispatches requires an approved classification repair
+  or prevention mechanism; automatic exemptions would weaken the parity gate.
+
+  First seen: 2026-10-30T10:21:18.140Z
+
+  Last seen: 2026-10-30T10:49:46.872Z
+
+  Count: 3, burn: 3.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15133 escalated: already escalated (reason unreadable: no escalation of this PR at head a00d1f0 is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793351296338:1:1793355124135) — Scheduler enrollment moves detection earlier but still dispatches census repair. Meeting zero fix dispatches requires an approved classification repair or prevention mechanism; automatic exemptions would weaken the parity gate.
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#57c7aea4efe4ddaffd33d38bbc5196c22549ae25922bb930df6f1259bb8140a9
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

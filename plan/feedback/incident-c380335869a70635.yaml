@@ -1,0 +1,33 @@
+id: incident-c380335869a70635
+ts: 2026-10-30T16:27:10.928Z
+raw: >-
+  Incident c380335869a7: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: fix needs design at this exact head (round DAEMON-<sha>:<n>:<sha>) —
+  Harness must apply the saved PR body; implementation repairs and behavioral
+  proofs are saved, but this session cannot write the required evidence to
+  GitHub.
+
+  First seen: 2026-10-30T05:43:59.560Z
+
+  Last seen: 2026-10-30T05:54:55.535Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15317 escalated: already escalated (reason unreadable: no escalation of this PR at head 33078fe is in the ledger); this pass: fix needs design at this exact head (round DAEMON-1793328098219:1:1793337038099) — Harness must apply the saved PR body; implementation repairs and behavioral proofs are saved, but this session cannot write the required evidence to GitHub.
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#c380335869a70635eb46b1d3ed2c565ee2229e3c65db2f54fb50d8652cfcfc2e
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

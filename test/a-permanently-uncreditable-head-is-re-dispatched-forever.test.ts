@@ -61,7 +61,8 @@ function makeHarness(): Harness {
       'const fields = args[args.indexOf("--json") + 1];',
       'if (fields && fields.includes("headRefName")) {',
       '  const headRefName = readFileSync(process.env.RMD_TERMINAL_HEAD_VALUE, "utf8").trim();',
-      '  process.stdout.write(JSON.stringify({ headRefName, body: "Remudero-Task: W1-T2723" }));',
+      '  const headRefOid = readFileSync(process.env.RMD_TERMINAL_HEAD_VALUE + ".sha", "utf8").trim();',
+      '  process.stdout.write(JSON.stringify({ headRefName, headRefOid, body: "Remudero-Task: W1-T2723" }));',
       '} else if (args[0] === "api" && /^repos\\/[^/]+\\/[^/]+\\/pulls\\/\\d+$/.test(args[1] || "")) {',
       '  process.stdout.write(JSON.stringify({ state: "open", merged: false }));',
       '} else {',
@@ -149,6 +150,7 @@ function makeHarness(): Harness {
       writeFileSync(ledgerPath, "");
     },
     dispatch: async (headSha, prState) => {
+      writeFileSync(`${headPath}.sha`, headSha);
       const log = (step: string, extra: Record<string, unknown> = {}): void => {
         appendLedger(ledgerPath, { run_id: `SWEEP-${headSha}`, task_id: "SWEEP", step, ...extra });
       };

@@ -2,10 +2,20 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import type { CashReservation } from "#src/lib/cash-accounting.js";
 import type { Config } from "#src/lib/config.js";
 import { fixedClock } from "#src/lib/clock.js";
-import { OPENWEIGHT_ALLOWANCE_FILENAME, openWeightReservationUsd, openWeightUsageUsd, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
+import { OPENWEIGHT_ALLOWANCE_FILENAME, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+
+function assertHeld(row: CashReservation) {
+  assert.ok(row.reservedUsd > 0);
+  assert.equal(row.settledUsd, null, "no usage receipt can release the output ceiling");
+  assert.equal(row.accountingState, "held-unknown");
+  assert.equal(row.heldUsd, row.reservedUsd);
+  assert.equal(row.usageEstimateUsd, null);
+  assert.equal(row.billedUsd, null);
+}
 
 const fixtureSecret = "cash-accounting-fixture-not-a-credential";
 
@@ -31,7 +41,7 @@ async function attempt(t: TestContext, fetchImpl: typeof fetch, options: {
     cashEndpoint: options.endpoint ?? "https://fixture.openai.azure.com/",
   } } as Config, { model: options.model ?? "gpt-6-luna", effort: "low" });
   const allowance = JSON.parse(readFileSync(join(dir, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "utf8")) as {
-    reservations: Record<string, { reservedUsd: number; settledUsd: number | null; settledReason?: string }>;
+    reservations: Record<string, CashReservation>;
   };
   return { result, rows: Object.values(allowance.reservations), reservations: allowance.reservations };
 }
@@ -93,11 +103,10 @@ test("cash rate-limit accounting keeps retry estimates conservative outside veri
     assert.equal(bodies.length, 2);
     assert.equal(bodies[0], bodies[1]);
     assert.equal(rows.length, 2);
-    const bytes = Buffer.byteLength(bodies[0]!, "utf8");
-    assert.equal(rows[0]!.settledUsd, model === "gpt-6.1-sol"
-      ? openWeightReservationUsd(model, bytes) : openWeightUsageUsd(model, bytes, 0));
-    assert.ok(rows[0]!.settledUsd! > 0);
-    assert.equal(result.budgetSettledUsd, rows[0]!.settledUsd! + rows[1]!.settledUsd!);
+    assertHeld(rows[0]!);
+    assert.equal(result.budgetHeldUsd, rows[0]!.reservedUsd);
+    assert.equal(result.budgetSettledUsd, rows[0]!.reservedUsd + rows[1]!.settledUsd!);
+    assert.equal(result.usageEstimateUsd, null);
   }
 });
 
@@ -130,8 +139,9 @@ test("cash rate-limit accounting keeps unknown endpoint and open-weight refusals
     { endpoint: "https://fixture.openai.azure.com:8443/" }, { model: "gpt-oss-120b" }]) {
     const { result, rows } = await attempt(t, async () => new Response(null, { status: 429 }), options);
     assert.equal(result.isError, true);
-    assert.ok(rows[0]!.settledUsd! > 0);
-    assert.equal(result.budgetSettledUsd, rows[0]!.settledUsd);
+    assertHeld(rows[0]!);
+    assert.equal(result.budgetSettledUsd, rows[0]!.reservedUsd);
+    assert.equal(result.budgetHeldUsd, rows[0]!.reservedUsd);
   }
 });
 
@@ -145,8 +155,9 @@ test("cash rate-limit accounting keeps uncertain transport and spoofed errors ch
   for (const error of [new TypeError("fixture transport unavailable"), Object.assign(new Error("HTTP 429"), { status: 429 })]) {
     const { result, rows } = await attempt(t, async () => { throw error; });
     assert.equal(result.isError, true);
-    assert.ok(rows[0]!.settledUsd! > 0);
-    assert.equal(result.budgetSettledUsd, rows[0]!.settledUsd);
+    assertHeld(rows[0]!);
+    assert.equal(result.budgetSettledUsd, rows[0]!.reservedUsd);
+    assert.equal(result.budgetHeldUsd, rows[0]!.reservedUsd);
   }
 });
 
@@ -155,8 +166,9 @@ test("cash rate-limit accounting keeps other HTTP failures charged", async t => 
     const { result, rows } = await attempt(t, async () => new Response(null, { status }));
     assert.equal(result.isError, true);
     assert.match(result.stderr, new RegExp(`HTTP ${status}`));
-    assert.ok(rows[0]!.settledUsd! > 0);
-    assert.equal(result.budgetSettledUsd, rows[0]!.settledUsd);
+    assertHeld(rows[0]!);
+    assert.equal(result.budgetSettledUsd, rows[0]!.reservedUsd);
+    assert.equal(result.budgetHeldUsd, rows[0]!.reservedUsd);
   }
 });
 
@@ -164,7 +176,8 @@ test("cash rate-limit accounting keeps an unobserved timeout charged", async t =
   const { result, rows } = await attempt(t, async () => new Promise<Response>(() => {}), { requestTimeoutMs: 100 });
   assert.equal(result.isError, true);
   assert.match(result.stderr, /exceeded 100ms/);
-  assert.ok(rows[0]!.settledUsd! > 0);
+  assertHeld(rows[0]!);
+  assert.equal(result.budgetHeldUsd, rows[0]!.reservedUsd);
 });
 
 test("cash rate-limit accounting preserves the existing definite deployment-absence settlement", async t => {

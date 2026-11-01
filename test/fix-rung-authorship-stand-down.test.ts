@@ -710,7 +710,7 @@ function ghShimForCiRollup(dir: string, headRefName: string): void {
     [
       "#!/bin/sh",
       'case "$*" in',
-      '  *"headRefName"*) printf \'{"headRefName":"%s","body":""}\\n\' ' + JSON.stringify(headRefName) + " ;;",
+      '  *"headRefName"*) printf \'{"headRefName":"%s","headRefOid":"cafe0501","body":""}\\n\' ' + JSON.stringify(headRefName) + " ;;",
       // THE closure under test (buildSweepEffects's own `readCiRollup`, run-task.ts) reads
       // exactly this shape: the ONE believed-red required check ("ci") now shows a LATER
       // attempt already IN_PROGRESS on this same head — an OBSERVED supersession, never

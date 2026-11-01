@@ -1331,6 +1331,9 @@ wf9fZr78GszyBAA=
 test("W1-T10918: comment compression preserves executable code", () => {
   // Pre-compression source: 811d6e2d19018530bd12c885d307d08f02fb09bc.
   // Historical comparison evidence for this edit, not a new comment ceiling.
+  // W1-T10855's pricing/effort rows and W1-T10954's settlement changes are later behavior,
+  // covered by their dedicated provider suites. Keep this compression proof pinned to the
+  // shipped historical bytes rather than imposing either fingerprint on today's provider.
   const source = gunzipSync(Buffer.from(HISTORICAL_SOURCE_GZIP, "base64")).toString("utf8");
   assert.equal(createHash("sha256").update(source).digest("hex"),
     "9ea5c3bef13a8e3e1597b49903bb1338d715620ab686ba7c480f8797efa6decc", "the historical shipped source bytes must remain exact");

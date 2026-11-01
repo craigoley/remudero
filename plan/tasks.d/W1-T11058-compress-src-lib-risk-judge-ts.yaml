@@ -1,0 +1,35 @@
+- id: W1-T11058
+  title: "Compress the 449 comment lines in src/lib/risk-judge.ts without changing executable code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "comment-compression:src/lib/risk-judge.ts"
+  files:
+    - src/lib/risk-judge.ts
+    - test/review/compress-src-lib-risk-judge-ts.test.ts
+  acceptance:
+    - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
+      proof: "unit test: W1-T11058: comment compression preserves executable code"
+  rationale: |
+    Observed 449 comment lines in src/lib/risk-judge.ts. This is maintenance debt, never a merge ceiling.
+    Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
+    Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.
+    Add the named regression in test/review/compress-src-lib-risk-judge-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
+    Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
+    Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.96
+    reasons:
+      - "The filed scope is comment compression in one source file plus a regression test; it explicitly requires unchanged executable tokens and preserved behavioral assertions, invariants, traps, and pinned text."
+      - "The plan preserves owners, stops, and deployment holds and forbids a new hard comment ceiling; it requests no policy change or irreversible action."
+      - "The supplied family record reports 17 merged tasks and no declines. This is a filing-time assessment; implementation and test results are not yet supplied."
+    judged_at: "2026-10-31T12:55:18.379Z"
+    pin: "5ae41af5254797280c49ff774ab51f0b2cba03d3b48d696027e284cfb38b8bc5"
