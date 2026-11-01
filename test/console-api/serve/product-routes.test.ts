@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { generateKeyPairSync, sign } from "node:crypto";
+import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -22,6 +24,7 @@ import { createService, type IdentityProvider } from "#src/lib/service.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { declaredBody, violations, SPEC } from "#test/helpers/openapi-strict.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const command = { version: "product-intent-v1", requestId: "route-create-00001", expectedRevision: 0,
   brief: { name: "Wreckterra", idea: "private original mobile combat idea", portfolio: "OleyArcade",
@@ -1017,6 +1020,270 @@ setTimeout(() => {
   assert.ok(readFileSync(argsFile, "utf8").includes(productCasePlanText(command.brief)));
   assert.equal(readFileSync(countFile, "utf8").trim().split("\n").length, 1, "repeated requests spent exactly one native plan child");
   assert.ok(!shim.calls().some((call) => call.includes("-X POST")));
+});
+
+async function ownedServedPlan(t: TestContext) {
+  const scratch = ownedFixtureDir(t, "served-owned-plan").dir;
+  const root = join(scratch, "control");
+  const ledgerPath = join(root, "state", "ledger.ndjson"), release = join(scratch, "release");
+  const receiptPath = join(scratch, "child.json"), countPath = join(scratch, "starts");
+  mkdirSync(join(root, "state"), { recursive: true });
+  const origin = gitRepo({ scope: t, bare: true });
+  const seed = gitRepo({ scope: t });
+  mkdirSync(join(seed.dir, "bin"));
+  mkdirSync(join(seed.dir, "plan"));
+  mkdirSync(join(seed.dir, ".remudero"));
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(seed.dir, ".gitignore"), "node_modules\n");
+  writeFileSync(join(seed.dir, ".remudero", "managed-repos.json"), JSON.stringify({ repos: ["craigoley/wreckterra"] }));
+  writeFileSync(join(seed.dir, ".remudero", "daemon-instances.yaml"), "instances:\n  core:\n    github_repo: craigoley/remudero\n");
+  writeFileSync(join(seed.dir, "bin", "rmd"), `#!/usr/bin/env node
+const fs = require("node:fs"), cp = require("node:child_process");
+const args = process.argv.slice(2), cwd = process.cwd();
+fs.appendFileSync(${JSON.stringify(countPath)}, "start\\n");
+fs.writeFileSync(${JSON.stringify(receiptPath)}, JSON.stringify({ args, cwd, pid: process.pid,
+  sha: cp.execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+  guard: process.env.RMD_SELF_SYNC_DONE, dependencies: fs.existsSync("node_modules"),
+  lease: fs.existsSync(cwd + ".lock") }));
+const timer = setInterval(() => {
+  if (!fs.existsSync(${JSON.stringify(release)})) return;
+  clearInterval(timer);
+  const run_id = "PLAN-clarify-owned-fixture", task_id = "PLAN-clarify";
+  fs.appendFileSync(${JSON.stringify(ledgerPath)}, [
+    { ts: new Date().toISOString(), run_id, task_id, step: "plan.start", lane: "plan", actor_pid: process.pid, mode: "clarify", brief: args[2] },
+    { ts: new Date().toISOString(), run_id, task_id, step: "pr.opened", lane: "plan", pr_url: "https://github.com/craigoley/wreckterra/pull/42" }
+  ].map(row => JSON.stringify(row)).join("\\n") + "\\n");
+}, 20);
+setTimeout(() => process.exit(2), 30000).unref();
+`, { mode: 0o755 });
+  seed.git("add", "."); seed.git("commit", "-qm", "chore: seed owned planner fixture");
+  seed.addRemote("origin", origin.dir); seed.git("push", "-q", "origin", "main");
+  // Keep a stale installed generation while origin/main acquires the actual child revision.
+  const localOrigin = join(scratch, "craigoley", "remudero.git");
+  mkdirSync(join(scratch, "craigoley"));
+  renameSync(origin.dir, localOrigin);
+  const generation = gitRepo({ scope: t, cloneFrom: localOrigin, kind: "immutable-generation" });
+  const source = generation.dir;
+  generation.git("checkout", "--quiet", "--detach");
+  seed.git("remote", "set-url", "origin", localOrigin);
+  writeFileSync(join(seed.dir, "fresh-source.txt"), "fresh main\n");
+  seed.git("add", "."); seed.git("commit", "-qm", "chore: move fixture main");
+  seed.git("push", "-q", "origin", "main");
+  const sourceHead = seed.git("rev-parse", "HEAD");
+  mkdirSync(join(source, "node_modules"));
+  const target = gitRepo({ scope: t });
+  const checkout = join(root, "repos", "wreckterra");
+  mkdirSync(join(root, "repos"));
+  renameSync(target.dir, checkout);
+  seed.git("-C", checkout, "remote", "add", "origin", "https://github.com/craigoley/wreckterra.git");
+  const targetHead = seed.git("-C", checkout, "rev-parse", "HEAD");
+  const shim = ghShim([
+    { when: "commits/main", stdout: JSON.stringify({ sha: targetHead }) },
+    { when: `contents?ref=${targetHead}`, stdout: '[{"name":"src"}]' },
+    { when: "contents/plan/tasks.d?", stdout: '[{"name":"WRECK-T1-first.yaml"}]' },
+    { when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra",
+      owner: { login: "craigoley" }, private: false, default_branch: "main" }) },
+    { when: "api ", stdout: "[]" },
+  ]);
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwk = { ...publicKey.export({ format: "jwk" }), kid: "served-plan", kty: "RSA" };
+  const issuer = "https://served-plan.example", allowedOrigin = "https://console.example";
+  const seconds = Math.floor(Date.now() / 1000);
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const payload = `${encode({ alg: "RS256", kid: jwk.kid })}.${encode({ iss: issuer, azp: allowedOrigin,
+    sub: "alice", iat: seconds, exp: seconds + 3600, fva: [0, 0] })}`;
+  const token = `${payload}.${sign("RSA-SHA256", Buffer.from(payload), privateKey).toString("base64url")}`;
+  const rows = () => existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean)
+    .map(line => JSON.parse(line) as Record<string, unknown>) : [];
+  const wait = async (ready: () => boolean) => {
+    const deadline = Date.now() + 20_000;
+    while (!ready() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+    assert.ok(ready(), "owned served fixture reached the requested observable state");
+  };
+  async function boot() {
+    const probe = createServer();
+    await new Promise<void>(resolve => probe.listen(0, "127.0.0.1", resolve));
+    const port = (probe.address() as AddressInfo).port;
+    await new Promise<void>(resolve => probe.close(() => resolve()));
+    const home = join(scratch, "home");
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({
+      root, installRoot: REPO_ROOT, claudeBin: "/bin/false", serve: { host: "127.0.0.1", port,
+        operatorIdentity: { issuer, jwksUrl: `${issuer}/keys`, allowedOrigins: [allowedOrigin], operatorUserIds: ["alice"] } },
+    }));
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      process.argv.push("--repo-root", ${JSON.stringify(source)});
+      globalThis.fetch = async url => {
+        if (String(url) !== ${JSON.stringify(`${issuer}/keys`)}) throw new Error("unexpected fixture network access: " + url);
+        return new Response(JSON.stringify({ keys: [${JSON.stringify(jwk)}] }), { status: 200 });
+      };
+      const { serveCommand } = await import("#src/run-task.js");
+      const { fakeGitHub } = await import("#test/helpers/fake-github.js");
+      process.exit(await serveCommand([], { buildBatchedGithub: () => fakeGitHub({
+        listMergedHeadBranches: () => [], listOpenHeadBranches: () => [] }), buildInitialBoardSnapshot: () => {} }));
+    `], { cwd: REPO_ROOT, env: { ...process.env, HOME: home, PATH: `${shim.dir}:${process.env.PATH}`,
+      RMD_INSTANCE_REGISTRY: join(source, ".remudero", "daemon-instances.yaml"), RMD_SERVE_ROLE: "",
+      GH_APP_ID: "", GH_APP_INSTALLATION_ID: "", GH_APP_PRIVATE_KEY_PATH: "",
+      GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }, stdio: ["ignore", "pipe", "pipe"] });
+    const exited = once(child, "exit");
+    let output = "";
+    child.stdout.on("data", data => { output += String(data); });
+    child.stderr.on("data", data => { output += String(data); });
+    let stopped = false;
+    const stop = async () => {
+      if (stopped) return;
+      stopped = true;
+      writeFileSync(release, "release\n");
+      if (existsSync(receiptPath)) await wait(() => rows().some(row => row.step === "ratify.cli_exited"));
+      child.kill("SIGTERM");
+      const [code, signal] = await exited;
+      assert.deepEqual([code, signal], [0, null], output);
+    };
+    t.after(stop);
+    await wait(() => output.includes("listening on") || child.exitCode !== null);
+    assert.ok(output.includes("listening on"), output);
+    return { base: `http://127.0.0.1:${port}`, stop };
+  }
+  type Operation = { operationId: string; state: string; targetHead: string; proposal?: string };
+  const send = async (base: string, body: unknown) => {
+    const payload = JSON.stringify(body);
+    const headers = { "content-type": "application/json", "x-rmd-operator-session": token };
+    const confirmed = await fetch(`${base}/v1/confirm`, { method: "POST", headers,
+      body: JSON.stringify({ method: "POST", path: "/v1/products/case", payload }) });
+    assert.equal(confirmed.status, 200);
+    const { nonce } = await confirmed.json() as { nonce: string };
+    const response = await fetch(`${base}/v1/products/case`, { method: "POST", headers: {
+      ...headers, "x-confirm-nonce": nonce }, body: payload });
+    const reply = await response.json() as { error?: string; productId: string; replayed: boolean; planOperation?: Operation };
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/case", "POST", response.status)), []);
+    return { status: response.status, body: reply };
+  };
+  const prepare = async (base: string) => {
+    const saved = await send(base, { version: "product-case-v1", action: "import", command });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    const productId = saved.body.productId;
+    assert.equal((await send(base, { version: "product-case-v1", action: "adopt", command: adopt(productId) })).status, 200);
+    return { version: "product-case-v1", action: "propose", command: { requestId: "owned-propose-0001", productId,
+      expectedRevision: 2, expectedObjectiveRevision: 1 } };
+  };
+  return { root, source, sourceHead, targetHead, checkout, localOrigin, ledgerPath, receiptPath, countPath, release, shim,
+    boot, send, prepare, rows, wait, generation, tree: join(root, "worktrees", `approve-${sourceHead.slice(0, 12)}`) };
+}
+
+test("served product planning receives the owned gateway from production assembly", { timeout: 60_000 }, async t => {
+  const f = await ownedServedPlan(t), app = await f.boot();
+  const proposal = await f.prepare(app.base);
+  const pending = await f.send(app.base, proposal);
+  assert.equal(pending.status, 200, JSON.stringify(pending.body));
+  assert.equal(pending.body.planOperation?.state, "pending");
+  await f.wait(() => existsSync(f.receiptPath));
+  const child = JSON.parse(readFileSync(f.receiptPath, "utf8"));
+  assert.equal(child.cwd, f.tree, "the writable control root owns the fresh tree, separate from the installed generation");
+  assert.equal(child.sha, f.sourceHead);
+  assert.equal(child.guard, "1");
+  assert.equal(child.dependencies, true);
+  assert.equal(child.lease, true);
+  assert.ok(existsSync(`${f.tree}.lock`), "the real child lifetime holds the maintained lease");
+  assert.notEqual(f.generation.git("rev-parse", "HEAD"), child.sha);
+  assert.deepEqual(child.args.slice(0, 2), ["plan", "--mode=clarify"]);
+  assert.deepEqual(child.args.slice(-2), ["--repo-root", f.checkout]);
+  assert.ok(child.args[2].includes(productCasePlanText(command.brief)), "the owned child receives the frozen saved brief");
+  const started = f.rows().find(row => row.step === "ratify.cli_started");
+  assert.equal(started?.pid, child.pid);
+  assert.equal(started?.sha, f.sourceHead);
+  assert.equal(started?.task_id, `product-plan:${pending.body.planOperation!.operationId}`);
+  assert.equal(pending.body.planOperation?.targetHead, f.targetHead);
+  await app.stop();
+  assert.equal(f.rows().find(row => row.step === "ratify.cli_exited")?.code, 0);
+  assert.equal(f.rows().find(row => row.step === "ratify.cli_exited")?.sha, f.sourceHead);
+  assert.equal(existsSync(`${f.tree}.lock`), false);
+  assert.ok(readdirSync(join(f.root, "state", "logs")).some(name => name.startsWith("product-plan-")));
+});
+
+test("served product planning refuses when no owned runner is available", async t => {
+  const root = ownedFixtureDir(t, "served-unowned-plan").dir;
+  const shim = ghShim([{ when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID,
+    name: "wreckterra", owner: { login: "craigoley" }, private: false, default_branch: "main" }) }]);
+  const previous = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${previous}`;
+  t.after(() => { process.env.PATH = previous; rmSync(shim.dir, { recursive: true, force: true }); });
+  const products = assembled(root);
+  const mounted = assembled(root, "/v1/products/case", { panelGraph: { root, planPath: join(root, "plan/tasks.yaml"),
+    ledgerPath: join(root, "state/ledger.ndjson"), github: { prView: () => null }, statusGithub: fakeGitHub() } });
+  const app = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity,
+    routes: [...products, ...mounted] });
+  await new Promise<void>(resolve => app.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => app.close(() => resolve())));
+  const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
+  const send = async (body: unknown) => {
+    const response = await fetch(`${base}/v1/products/case`, { method: "POST", headers: { authorization: "Bearer fixture-write",
+      "x-test-session": "alice", "content-type": "application/json" }, body: JSON.stringify(body) });
+    return { status: response.status, body: await response.json() };
+  };
+  const saved = await send({ version: "product-case-v1", action: "import", command });
+  const productId = saved.body.productId;
+  assert.equal((await send({ version: "product-case-v1", action: "adopt", command: adopt(productId) })).status, 200);
+  const before = readdirSync(root, { recursive: true }).filter(path => String(path).endsWith(".json"));
+  const refused = await send({ version: "product-case-v1", action: "propose", command: { requestId: "unowned-propose-01", productId,
+    expectedRevision: 2, expectedObjectiveRevision: 1 } });
+  assert.deepEqual([refused.status, refused.body.error], [503, "handoff_unavailable"]);
+  assert.equal(refused.body.planOperation, undefined);
+  assert.deepEqual(readdirSync(root, { recursive: true }).filter(path => String(path).endsWith(".json")), before,
+    "no operation journal or model child was created");
+  assert.equal(readFileSync(join(root, "state/ledger.ndjson"), "utf8"), "");
+});
+
+test("served product planning retains fresh source refusal evidence", { timeout: 120_000 }, async t => {
+  for (const failure of ["unavailable", "changed"] as const) await t.test(failure, async t => {
+    const f = await ownedServedPlan(t), app = await f.boot();
+    const command = await f.prepare(app.base);
+    if (failure === "unavailable") renameSync(f.localOrigin, `${f.localOrigin}.offline`);
+    else {
+      // A registered branch at the expected source path must refuse, even at the correct SHA.
+      f.generation.git("fetch", "--quiet", "origin", "main");
+      f.generation.addWorktree(f.tree, "contaminated-owned-tree", f.sourceHead);
+    }
+    const pending = await f.send(app.base, command);
+    assert.equal(pending.status, 200, JSON.stringify(pending.body));
+    await f.wait(() => f.rows().some(row => row.step === "ratify.handoff_failed"));
+    const failureRow = f.rows().find(row => row.step === "ratify.handoff_failed");
+    assert.equal(failureRow?.task_id, `product-plan:${pending.body.planOperation!.operationId}`);
+    assert.match(String(failureRow?.reason), failure === "unavailable" ? /fetch|repository/ : /not an exact clean detached checkout/);
+    const recovered = await f.send(app.base, command);
+    assert.equal(recovered.body.planOperation?.state, "unknown");
+    assert.equal(recovered.body.planOperation?.operationId, pending.body.planOperation?.operationId);
+    assert.equal(recovered.body.replayed, true);
+    assert.equal(existsSync(f.countPath), false, "no detached fallback child ran");
+    assert.equal(f.rows().filter(row => row.step === "ratify.handoff_failed").length, 1, "recovery never retries a failed handoff");
+    assert.equal(f.rows().filter(row => row.step === "ratify.cli_started").length, 0);
+  });
+});
+
+test("served product planning retains owned fresh-source child evidence on recovery", { timeout: 90_000 }, async t => {
+  const f = await ownedServedPlan(t), app = await f.boot();
+  const command = await f.prepare(app.base);
+  const first = await f.send(app.base, command);
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  await f.wait(() => existsSync(f.receiptPath));
+  const replay = await f.send(app.base, command);
+  assert.equal(replay.body.replayed, true);
+  assert.equal(replay.body.planOperation?.operationId, first.body.planOperation?.operationId);
+  assert.equal(replay.body.planOperation?.state, "pending");
+  await app.stop();
+  const restarted = await f.boot();
+  const recovered = await f.send(restarted.base, command);
+  assert.equal(recovered.body.replayed, true);
+  assert.equal(recovered.body.planOperation?.operationId, first.body.planOperation?.operationId);
+  assert.equal(recovered.body.planOperation?.state, "proposed");
+  assert.equal(recovered.body.planOperation?.proposal, "https://github.com/craigoley/wreckterra/pull/42");
+  assert.equal(readFileSync(f.countPath, "utf8"), "start\n");
+  for (const step of ["ratify.cli_started", "ratify.cli_exited"]) {
+    const rows = f.rows().filter(row => row.step === step);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.sha, f.sourceHead);
+    assert.equal(rows[0]?.task_id, `product-plan:${first.body.planOperation!.operationId}`);
+  }
 });
 
 test("W1-T10619: the served product evaluation operation matches the authenticated API contract", async (t) => {
