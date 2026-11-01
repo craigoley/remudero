@@ -58,3 +58,10 @@ test("dep-review engine rearm: a row older than the revision field reads as the 
   assert.equal(depReviewRowEngineRevision({ dep_review_engine_revision: 3 }), DEP_REVIEW_LEGACY_ENGINE_REVISION);
   assert.equal(depReviewRowEngineRevision({ dep_review_engine_revision: "x" }), "x");
 });
+
+test("dep-review engine rearm: the semver fix's revision rearms a terminal row written before rows named their engine", async () => {
+  assert.notEqual(DEP_REVIEW_ENGINE_REVISION, DEP_REVIEW_LEGACY_ENGINE_REVISION);
+  const { reviews, row } = await sweepWith({ dep_review_outcome: "escalate" });
+  assert.equal(reviews, 1, "the #15176 shape: a pre-field escalate is offered to the fixed engine once");
+  assert.equal(row?.acted, true);
+});

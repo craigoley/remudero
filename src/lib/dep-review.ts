@@ -71,8 +71,9 @@ export function isDependabotAuthor(author: DepReviewAuthor): boolean {
 
 export type SemverLevel = "major" | "minor" | "patch" | "unknown";
 
-/** Bumped when this lane's decision contract changes, independently of task-review semantics. */
-export const DEP_REVIEW_ENGINE_REVISION = "dep-review-selected-attempts-v2";
+/** Bumped when this lane's decision contract changes, independently of task-review semantics.
+ *  v3 (PR 15539): a Docker tag bump such as 24.21.0-bookworm-slim parses its semver level. */
+export const DEP_REVIEW_ENGINE_REVISION = "dep-review-docker-tag-semver-v3";
 /** The revision a sweep row written before rows carried one was decided under. */
 export const DEP_REVIEW_LEGACY_ENGINE_REVISION = "dep-review-selected-attempts-v2";
 
