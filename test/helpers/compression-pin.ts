@@ -12,7 +12,7 @@ import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { REPO_ROOT } from "./repo-root.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function gitOutput(root: string, args: string[]): string {
   const result = spawnSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });

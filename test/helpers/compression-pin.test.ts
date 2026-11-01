@@ -3,8 +3,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { compressionPinBase } from "./compression-pin.js";
-import { gitRepo } from "./git-repo.js";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const SOURCE = "src/lib/module.ts";
 const PIN = "test/compress-module.test.ts";
