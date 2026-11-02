@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { DEP_REVIEW_ENGINE_REVISION } from "#src/lib/dep-review.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
@@ -26,7 +27,7 @@ function fixture(scope: TestContext, outcome: () => string | void) {
     seed: (prior: unknown) => appendLedger(ledgerPath, {
       run_id: "prior-attempt", task_id: "SWEEP", step: "sweep.disposed", disposition: "dep-review",
       pr_number: pr.prNumber, head_sha: pr.headSha, acted: true,
-      ...(prior === undefined ? {} : { dep_review_outcome: prior }),
+      ...(prior === undefined ? {} : { dep_review_outcome: prior, dep_review_engine_revision: DEP_REVIEW_ENGINE_REVISION }),
     }),
   };
 }

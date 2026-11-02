@@ -15,8 +15,10 @@
     - src/lib/routing-experiments.ts
     - src/lib/worker-provider.ts
     - test/routing/codex-model-experiment-epoch.test.ts
+    - scripts/expiring-fixture-census.mjs
   status: queued
   attempts: 0
+  note: 'operator grant 2026-11-01 (session) for #15520: scripts/expiring-fixture-census.mjs'
   rationale: |
     VERIFIED ON origin/main 07dbdcc77 (2026-10-27). `ROUTING_EXPERIMENTS` (src/lib/routing-experiments.ts) holds only
     CLAUDE-VS-CODEX epochs: each `RoutingExperiment` has one `claudeModel` and one `codexModel` regex and arms
