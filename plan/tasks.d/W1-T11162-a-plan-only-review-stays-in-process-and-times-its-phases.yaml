@@ -20,6 +20,7 @@
     - src/lib/run-child.ts
     - src/cli/commands/review.ts
     - test/worker/a-plan-only-review-stays-in-process-and-times-its-phases.test.ts
+    - test/reviews-and-detached-actions-run-as-run-children.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -49,6 +50,7 @@
     1. createDetachedWorkHost's spawnReview returns undefined before the shadow probe and before placement when pr.isPlanFiling is
        true, logging review.placement { pr_number, head_sha, placement: "in-process", reason: "plan-only-filing" }. The sweep's
        postReview then takes its existing in-process reviewRunner path, which already passes planOnlyFiling.
+       W1-T9114's host test drives a plan filing as its hosted review; its fixture becomes a code review (isPlanFiling false).
     2. reviewCommand times materialize plus buildBaseProof and hands the figure to runReview. runReview times fetchPrDiff, the
        decision preparation and claim, lintPlanForReview, preparedDecision.judge, the status post and the arm with systemClock.
        When planOnlySkip is true it logs review.plan_only_phases with those milliseconds and total_ms from its own start.
