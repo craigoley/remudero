@@ -24,8 +24,10 @@ import { observeSelectedRegistry, type SelectedRegistryObserver } from "./select
 import { access, readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { coldAnalyticsSnapshot, createAnalyticsSnapshotCache, type AnalyticsSnapshot, type AnalyticsSnapshotCache } from "./analytics-route.js";
-import { buildRecentRoute, buildStatusRoute, STALE_SOURCE_HEADER, type BoardDeps } from "./board.js";
+import { createBoardSnapshotCache, buildRecentRoute, buildStatusRoute, STALE_SOURCE_HEADER, type BoardDeps } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
+import { buildEscalationConversationRoute, createEscalationConversationReader } from "./escalation-conversation.js";
+import { buildEscalationConversationIndexRoute, escalationMailboxBoardFromSnapshot } from "./escalation-conversation-index.js";
 import { escalate, ghIssueGateway, type IssueGateway } from "./escalate.js";
 import { evaluateFleetLiveness, livenessEscalation, readLivenessRows, type InstanceLiveness, type LivenessInstance, type ReadLastRows } from "./fleet-liveness.js";
 import { ghExec } from "./github-transport.js";
@@ -47,6 +49,7 @@ import {
   buildApproveManualRoute,
   buildControlStatusRoute,
   buildEscalationMarkHandledRoute,
+  buildEscalationReplyRoute,
   buildAssistantControlRoute,
   buildAssistantControlCapabilityRoute,
   buildAssistantControlReceiptRoute,
@@ -111,6 +114,8 @@ export interface InstanceGatewayOptions {
   coreInboxRoot?: string;
   /** W1-T5339: one non-core instance's conversation source routes; defaults to the panel routes over its own state. */
   inboxSources?: (root: InstanceStateRoot, repository: string, github: GitHub) => Route[];
+  /** Native issue reads remain repository-checked by each instance reader. */
+  escalationConversation?: { readIssue: (issueUrl: string, fresh?: boolean) => Promise<unknown> };
   /** The serve lifecycle starts and stops each independent, instance-rooted projection. */
   onAnalyticsCache?: (cache: AnalyticsSnapshotCache, instance: { name: string; repo: string; ledgerPath: string }) => void;
 }
@@ -203,7 +208,13 @@ export function instanceRouteSet(
   repository: string,
   currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot,
 ): Route[] {
-  const panel = { root: root.root, ledgerPath: root.ledgerPath, issues: opts.issues ?? { close() {} } };
+  const boardCache = createBoardSnapshotCache();
+  const readBoard = () => escalationMailboxBoardFromSnapshot({ state: "ready", snapshot: boardCache.get(board) });
+  const threadStorePath = inboxThreadStorePath(root.root);
+  const readEscalationConversation = createEscalationConversationReader({ repository, threadStorePath, ledgerPath: root.ledgerPath,
+    knownIssue: (url, identity) => readBoard().flags.some(flag => flag.issueUrl === url && flag.taskId === identity.taskId),
+    ...opts.escalationConversation });
+  const panel = { root: root.root, ledgerPath: root.ledgerPath, issues: opts.issues ?? { close() {} }, threadStorePath, readEscalationConversation };
   const [owner, name] = repository.split("/");
   const reads = [
     buildStatusRoute(board), buildRecentRoute(board), buildTaskCardRoute(board),
@@ -224,6 +235,9 @@ export function instanceRouteSet(
       snapshot: currentAnalyticsSnapshot(),
       inbox: readInboxAnswerEvidence(inboxThreadStorePath(root.root)),
     })),
+    buildEscalationConversationIndexRoute({ repository, threadStorePath, readBoard }),
+    buildEscalationConversationRoute(readEscalationConversation),
+    buildEscalationReplyRoute(panel),
     buildControlStatusRoute({ ...panel, ...opts.controlStatus }),
     buildPauseRoute(panel),
     buildResumeRoute(panel),

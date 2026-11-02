@@ -6472,6 +6472,58 @@ export interface components {
       /** Present on `plan_source_unavailable`: the outcome that refused the read, with its bounded failure reason. */
       planSource?: PlanSource;
     };
+    EscalationConversationIndexItem: {
+      sourceKind: "engineering";
+      issueUrl: string;
+      threadId: string | null;
+      identity: {
+        taskId: string;
+        class: "BLOCKED" | "MANUAL" | "HARD_STOP" | "GRILL";
+        cause?: "review" | "ci" | "conflict" | "stage-stall";
+        prRef?: string;
+      } | null;
+      subject: string;
+      preview: string;
+      attention: "needs_input" | "waiting_for_agent" | "archived" | "unknown";
+      lastActivityAt: string | null;
+      evidence: "saved_conversation" | "source_flag" | "conflicting_sources";
+      sourceText: string;
+    };
+    /** Bounded native engineering conversations from this repository's board and saved source receipts. No issue fan-out or message write occurs. Detail revalidation owns reply capability. Total and byAttention count unique conversations across all folders, never decisions or unread messages. A page's loaded count is separate; incomplete coverage makes total and byAttention null. Explicit no-more-input archives correspondence while work may run; a later question reopens it. */
+    EscalationConversationIndex: {
+      state: "served";
+      version: 1;
+      repository: string;
+      snapshot: string;
+      generatedAt: string;
+      coverage: {
+        state: "complete" | "incomplete";
+        board: "current" | "stale" | "unavailable";
+        history: "complete" | "partial" | "unavailable" | "oversize";
+        detail: string;
+      };
+      items: (EscalationConversationIndexItem)[];
+      counts: {
+        unit: "conversations";
+        loaded: number;
+        total: number | null;
+        byAttention: {
+          needs_input: number;
+          waiting_for_agent: number;
+          archived: number;
+          unknown: number;
+        } | null;
+      };
+      page: {
+        folder: "all" | "needs_input" | "waiting_for_agent" | "archived" | "unknown";
+        nextCursor: string | null;
+        hasMore: boolean;
+      };
+    };
+    EscalationConversationIndexRefusal: {
+      state: "invalid_request" | "refresh_required";
+      detail: string;
+    };
     EscalationConversation: {
       version: 1;
       issueUrl: string;
@@ -8628,6 +8680,53 @@ export interface paths {
           "401": Error;
           "403": Error;
           "413": IncidentIngestBodyTooLarge;
+        };
+    };
+  };
+  "/v1/i/{instance}/escalation/threads": {
+    get: {
+      responses: {
+          "200": EscalationConversationIndex;
+          "400": EscalationConversationIndexRefusal;
+          "401": Error;
+          "403": Error;
+          "409": EscalationConversationIndexRefusal;
+        };
+    };
+  };
+  "/v1/i/{instance}/escalation/thread": {
+    get: {
+      responses: {
+          "200": EscalationConversationRead;
+          "400": EscalationConversationUnavailable;
+          "401": Error;
+          "403": Error;
+          "404": EscalationConversationUnavailable;
+          "422": EscalationConversationUnavailable;
+          "503": EscalationConversationUnavailable;
+        };
+    };
+  };
+  "/v1/i/{instance}/escalation/reply": {
+    post: {
+      responses: {
+          "200": EscalationReplyResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": Error;
+          "503": Error;
+        };
+    };
+  };
+  "/v1/escalation/threads": {
+    get: {
+      responses: {
+          "200": EscalationConversationIndex;
+          "400": EscalationConversationIndexRefusal;
+          "401": Error;
+          "403": Error;
+          "409": EscalationConversationIndexRefusal;
         };
     };
   };

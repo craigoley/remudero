@@ -15063,6 +15063,84 @@ components:
           $ref: "#/components/schemas/PlanSource"
 
 
+    EscalationConversationIndexItem:
+      type: object
+      required: [sourceKind, issueUrl, threadId, identity, subject, preview, attention, lastActivityAt, evidence, sourceText]
+      properties:
+        sourceKind: {type: string, enum: [engineering]}
+        issueUrl: {type: string}
+        threadId: {type: [string, "null"]}
+        identity:
+          type: [object, "null"]
+          required: [taskId, class]
+          properties:
+            taskId: {type: string}
+            class: {type: string, enum: [BLOCKED, MANUAL, HARD_STOP, GRILL]}
+            cause: {type: string, enum: [review, ci, conflict, stage-stall]}
+            prRef: {type: string}
+        subject: {type: string}
+        preview: {type: string}
+        attention: {type: string, enum: [needs_input, waiting_for_agent, archived, unknown]}
+        lastActivityAt: {type: [string, "null"]}
+        evidence: {type: string, enum: [saved_conversation, source_flag, conflicting_sources]}
+        sourceText: {type: string}
+
+    EscalationConversationIndex:
+      type: object
+      description: >
+        Bounded native engineering conversations from this repository's board and saved source
+        receipts. No issue fan-out or message write occurs. Detail revalidation owns reply capability.
+        Total and byAttention count unique conversations across all folders, never decisions or unread
+        messages. A page's loaded count is separate; incomplete coverage makes total and byAttention null.
+        Explicit no-more-input archives correspondence while work may run; a later question reopens it.
+      required: [state, version, repository, snapshot, generatedAt, coverage, items, counts, page]
+      properties:
+        state: {type: string, enum: [served]}
+        version: {type: integer, enum: [1]}
+        repository: {type: string}
+        snapshot: {type: string}
+        generatedAt: {type: string}
+        coverage:
+          type: object
+          required: [state, board, history, detail]
+          properties:
+            state: {type: string, enum: [complete, incomplete]}
+            board: {type: string, enum: [current, stale, unavailable]}
+            history: {type: string, enum: [complete, partial, unavailable, oversize]}
+            detail: {type: string}
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/EscalationConversationIndexItem'}
+        counts:
+          type: object
+          required: [unit, loaded, total, byAttention]
+          properties:
+            unit: {type: string, enum: [conversations]}
+            loaded: {type: integer}
+            total: {type: [integer, "null"]}
+            byAttention:
+              type: [object, "null"]
+              required: [needs_input, waiting_for_agent, archived, unknown]
+              properties:
+                needs_input: {type: integer}
+                waiting_for_agent: {type: integer}
+                archived: {type: integer}
+                unknown: {type: integer}
+        page:
+          type: object
+          required: [folder, nextCursor, hasMore]
+          properties:
+            folder: {type: string, enum: [all, needs_input, waiting_for_agent, archived, unknown]}
+            nextCursor: {type: [string, "null"]}
+            hasMore: {type: boolean}
+
+    EscalationConversationIndexRefusal:
+      type: object
+      required: [state, detail]
+      properties:
+        state: {type: string, enum: [invalid_request, refresh_required]}
+        detail: {type: string}
+
     EscalationConversation:
       type: object
       required: [version, issueUrl, repository, identity, threadId, revision, headline, whatHappened, recommendation, options, source, history, attention, messages, canReply, canStartConversation, details]
@@ -22128,6 +22206,191 @@ paths:
   # threads (W1-T4088) -- src/lib/panel-graph.ts's registrations -- plus the daily digests
   # (src/lib/serve.ts's `buildInboxDigestsRoute`). Every write ledgers with the caller's bearer
   # as `origin`; each names the write tier its route registers (W1-T404).
+
+  /v1/i/{instance}/escalation/threads:
+    get:
+      summary: Read this repository's native engineering conversation mailbox.
+      description: >
+        Read-only, bounded current board and saved conversation receipts. No new issue reads,
+        schedules or writes. Unknown source identity never advertises a reply destination.
+        Cursors bind repository, folder and snapshot; a changed snapshot requires refresh.
+      security:
+        - bearerRead: []
+      parameters:
+        - {name: instance, in: path, required: true, schema: {type: string}}
+        - {name: folder, in: query, schema: {type: string, enum: [all, needs_input, waiting_for_agent, archived, unknown]}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 50}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: A qualified page, with loaded counts separate from complete conversation totals.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EscalationConversationIndex'}
+        "400":
+          description: The repository, folder, page size or cursor is unsupported.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EscalationConversationIndexRefusal'}
+        "409":
+          description: Refresh this folder because its source snapshot changed.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EscalationConversationIndexRefusal'}
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/i/{instance}/escalation/thread:
+    get:
+      summary: Read an escalation recommendation and its exact saved discussion.
+      description: >
+        Read-only, repository-bound native escalation source and history. Unsupported sources do
+        not yield a reply destination. A stale saved source remains readable but cannot enable a reply.
+        Options are evidence only; this route declares no executable choice.
+      security:
+        - bearerRead: []
+      parameters:
+        - {name: instance, in: path, required: true, schema: {type: string}}
+        - name: issueUrl
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Verified or explicitly stale source, with separately qualified history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationRead"
+        "400":
+          description: A canonical issue URL is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationUnavailable"
+        "404":
+          description: The issue is outside the serving repository.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationUnavailable"
+        "422":
+          description: No supported native escalation identity was verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationUnavailable"
+        "503":
+          description: Current escalation source is unavailable or pending.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationUnavailable"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/i/{instance}/escalation/reply:
+    post:
+      summary: Answer an ESCALATION in prose -- recorded as an input on its thread, never a command.
+      description: >
+        Source-bound replies use one immutable native feedback submission identity. A duplicate
+        intent may recover delivery of its exact saved input without appending another answer.
+        Replies to verified intake follow-ups preserve the original thread and carry reply_to
+        for the exact current grilling feedback record. A closed original issue alone never
+        enables a reply. Legacy replies without a native delivery identity remain unverified.
+        W1-T2496, W1-T4471 (src/lib/panel-actions.ts's `buildEscalationReplyRoute`). Write tier:
+        LOW (W1-T404). Derives the escalation's thread id from the body, refuses (400) when no
+        thread store is configured, the thread cannot be read, or it holds no prior message --
+        never files an unattached reply. Otherwise appends the reply, runs the pure reply
+        interpreter (appending a clarifying question or exhaustion report when it is not
+        understood), captures a feedback entry (origin `ui`), records the answer into
+        `plan/questions.ndjson`, and ledgers `panel.escalation_replied`. It never closes an issue,
+        dispatches, ratifies or arms a merge.
+      security:
+        - bearerWrite: []
+      parameters:
+        - {name: instance, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EscalationReplyRequest"
+      responses:
+        "200":
+          description: The reply was saved; input delivery and subsequent work are separately qualified on bound replies.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationReplyResult"
+        "400":
+          description: >
+            `invalid_request` with a `detail` -- the body failed validation, or the thread it names
+            has no store, cannot be read, or holds no existing escalation. No side effect occurred.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The source changed or the intent already belongs to different text; no new answer was saved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Current source binding could not be verified; no new answer was saved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # W1-T2696: signed one-tap answer links on an escalation. Both routes are SELF-AUTHENTICATED
+  # (src/lib/service.ts's `Route.selfAuthenticated`): no bearer token is read -- the HMAC-signed
+  # query (`e` escalation id, `c` class, `r` option route, `x` expiry epoch ms, `s` 64-hex
+  # signature, minted by src/lib/escalate.ts's `mintOptionLink`) is the credential, verified by
+  # `verifyOptionLink` before anything acts. Hence `security: []` and no 401/403 bearer responses.
+
+  /v1/escalation/threads:
+    get:
+      summary: Read this repository's native engineering conversation mailbox.
+      description: >
+        Read-only, bounded current board and saved conversation receipts. No new issue reads,
+        schedules or writes. Unknown source identity never advertises a reply destination.
+        Cursors bind repository, folder and snapshot; a changed snapshot requires refresh.
+      security:
+        - bearerRead: []
+      parameters:
+        - {name: folder, in: query, schema: {type: string, enum: [all, needs_input, waiting_for_agent, archived, unknown]}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 50}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: A qualified page, with loaded counts separate from complete conversation totals.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EscalationConversationIndex'}
+        "400":
+          description: The repository, folder, page size or cursor is unsupported.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EscalationConversationIndexRefusal'}
+        "409":
+          description: Refresh this folder because its source snapshot changed.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EscalationConversationIndexRefusal'}
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
 
   /v1/escalation/thread:
     get:

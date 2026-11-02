@@ -1,5 +1,6 @@
 import { buildImprovementThreadRoutes } from "./improvement-thread.js";
 import { buildEscalationConversationRoute, createEscalationConversationReader } from "./escalation-conversation.js";
+import { buildEscalationConversationIndexRoute, escalationMailboxBoardFromSnapshot } from "./escalation-conversation-index.js";
 /**
  * `rmd serve` assembler: route builders, GET / shell, port resolution and token persistence
  * (W1-T139, MASTER-PLAN §7/§7B). Reuse service.ts, board.ts, panel-actions.ts and panel-graph.ts
@@ -2969,6 +2970,9 @@ function assembleServeRoutes(
     // note below). W1-T4088 gave `fleetControlDeps` its `threadStorePath`, so a reply to an
     // escalation that has a thread is accepted; one with no thread is still refused, never filed
     // unattached.
+    buildEscalationConversationIndexRoute({ repository: deps.assistantRepository ?? "", threadStorePath: inboxThreadStorePath(deps.fleetControlRoot),
+      readBoard: () => escalationMailboxBoardFromSnapshot(deps.boardSnapshotSource?.current()
+        ?? { state: "ready", snapshot: goalBoardCache.get(deps.board) }) }),
     buildEscalationConversationRoute(readEscalationConversation),
     buildEscalationReplyRoute(fleetControlDeps),
     // W1-T2696: the ping's own answer links. MOUNTED for the reason the note above states — a
