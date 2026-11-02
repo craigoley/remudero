@@ -51,7 +51,7 @@
     - claim: Private report renders explicit coverage missingness and inert proposals with safe text handling
       proof: 'unit test: native benchmark report displays unavailable evidence and unmeasured proposals safely'
     - claim: The complete cost and resource ceiling includes repeats retries and graders and refuses unknown inputs
-      proof: 'unit test: native benchmark budget plan includes retries and graders and withholds readiness for unknown ceilings'
+      proof: 'unit test: benchmark ceilings include retries and graders and reject unknown inputs'
   falsifier: >-
     Exercise the real standalone command in a contained subprocess with private temporary
     inputs and outputs. Assert complete physical-file TAP and exact bundle pins. Remove a real
