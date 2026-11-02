@@ -23,8 +23,8 @@
     - src/lib/feedback-record-merge.ts
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
-    - test/feedback/console-feedback-replay.test.ts
-    - test/feedback/console-feedback-intake.test.ts
+    - test/console-api/console-feedback-replay.test.ts
+    - test/console-api/console-feedback-intake.test.ts
     - test/fixtures/console-feedback-replays.json
   status: queued
   attempts: 0
@@ -37,6 +37,8 @@
     The maintained run-task docket rung currently projects rejected feedback to id/ts/raw, and
     triage feedbackEntryBlock carries raw/contribution only. Those real consumers need explicit
     correction metadata; a pure helper plus fixtures would not complete this runtime path.
+    The native test-place selector assigns the console correction module to console-api (primary
+    console-read-model, with inbox-operator as runner-up), so new tests use that computed folder.
   design: |
     Add a closed, explicitly chosen wording-correction kind to the existing conversation feedback
     path, advertised only when this native contract is served. Verify repository, native issue,
