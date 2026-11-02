@@ -83,6 +83,27 @@ export function fastTierHangBoundArgs(manifest) {
   return [`--test-timeout=${thresholdMs * FAST_TIER_TEST_TIMEOUT_FACTOR}`, "--test-force-exit"];
 }
 
+/**
+ * A HUNG SLOW-TIER TEST FAILS BY NAME too. Unbounded, one stuck test held test-slow-shard (2/2) to its
+ * 35-minute cancel on #15181 (2026-10-28): test/worker-containment.test.ts, recorded at 8 s, was still
+ * in flight 5.5 minutes later and the shard reported only "cancelled". The longest top-level test across
+ * seven 2026-10-28 slow-tier logs (~7,500 results) was 71 s; three minutes is 2.5x that, and short enough
+ * that a hang late in a ~30-minute shard still fails inside the job ceiling. A test that sets its own
+ * `timeout` keeps it.
+ */
+export const SLOW_TIER_TEST_TIMEOUT_MS = 180_000;
+
+/** The node flags that bound a slow-tier run: a fixed per-test timeout and an exit once every test has finished. */
+export function slowTierHangBoundArgs() {
+  // Node 24 force-exits file children before their asynchronous result pipe drains. The v8
+  // reporter uses stdout; blocking writes preserve its final results and per-file summary.
+  // A child with file-backed or ignored stdout has no libuv handle; those writes are already
+  // synchronous. Only piped stdout needs its handle switched to blocking mode.
+  const childSetup = 'if (process.env.NODE_TEST_CONTEXT === "child-v8") process.stdout._handle?.setBlocking?.(true);';
+  return [`--test-timeout=${SLOW_TIER_TEST_TIMEOUT_MS}`, "--test-force-exit",
+    `--import=data:text/javascript,${encodeURIComponent(childSetup)}`];
+}
+
 /** A materially different observation is worth naming before it is applied to the next proposal.
  * Two is intentionally a factor, not an absolute-ms tolerance: the ledger ranges from sub-ms
  * fixtures to multi-minute browser suites, and the same absolute delta would be noise in one
@@ -922,7 +943,7 @@ export function main(argv, { spawn = spawnSync, env = process.env, log = (line) 
     // piped run to TAP. Reporters pair with destinations in order, so the duration reporter follows.
     const testArgs = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-reporter=tap", "--test-reporter-destination=stdout"];
     if (pool) testArgs.push(POOL_ISOLATION_FLAG);
-    if (bounded) testArgs.push(...fastTierHangBoundArgs(manifest));
+    if (bounded) testArgs.push(...(bounded === "slow" ? slowTierHangBoundArgs() : fastTierHangBoundArgs(manifest)));
     const durationOutputRaw = env.RMD_TEST_DURATION_OUTPUT;
     if (durationOutputRaw && !quiet) {
       const resolved = resolve(root, durationOutputRaw);
@@ -1232,7 +1253,7 @@ export function main(argv, { spawn = spawnSync, env = process.env, log = (line) 
     if (runTier === "fast" && env.RMD_TEST_POOL !== "0") {
       return runShardWithPool(files, { fast, root, env, log, run: (subset, opts) => spawnTestFiles(subset, { ...opts, bounded: true }) }).status;
     }
-    return spawnTestFiles(files, { bounded: runTier === "fast" });
+    return spawnTestFiles(files, { bounded: runTier });
   }
 
   const { fast, slow } = tierFiles(testFiles, manifest);

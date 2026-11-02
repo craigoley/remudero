@@ -28,3 +28,11 @@
     - PR #14168: 0.15 PR-hours — merge conflict (mergeState dirty) — the plan-scoped conflict round on this fleet plan PR is exhaustedfix rounds refused twice at this head (PR-body proof "grep: # backlog gardener: band=3 evidence=e1b75d0963463b05 in plan/tasks.d/W1-T9538-skill-steps-harness-run-proof-preflight.yaml" fails on this tree) — no strike spent — no further round can add information — escalating
     Previous remedy W1-T10282: src/run-task.ts, src/lib/sweep.ts, test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts, test/a-stood-down-fix-rung-re-derives-its-remedy.test.ts, test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts; did not fall: share of PR-hours 3.4% (82.11858916666658/2429.8411608333367) before, 2.7% (108.79971138888897/3991.7635266666593) after, over 10 day(s) each side. Take a structurally different remedy.
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filed task requests a structurally different remedy in conflict-rebase automation, while its cited episodes include non-owned branches, a fix already dispatched, deletion evidence, and exhausted fix rounds. The record does not specify which mechanism will change or which existing boundaries it will preserve.; on the change's description/files alone, no diff was read — The cited reasons show distinct dispositions, but the record characterizes them collectively as owner failure. That finding cannot be verified from the supplied evidence; changing the associated merge-conflict handling warrants operator assessment under the stated escalation rule."
+    judged_at: "2026-11-01T02:25:11.558Z"
+    pin: "6886e6bb316e22df6c91db1965b69d8e42c9a4ea56acaeec250a8a8d5cae85bf"
