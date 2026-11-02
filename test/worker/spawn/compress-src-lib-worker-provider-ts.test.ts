@@ -33,11 +33,12 @@ test("W1-T10918: comment compression preserves executable code", () => {
   // W1-T11072 adds claudeCapacityFromUsageCase and shares the weekly-window mapping.
   // W1-T10962 carries bounded output, stderr failures and terminal completion evidence into the result.
   // Include its subsequent pipe-closure wait and streaming UTF-8 validation through EOF.
+  // W1-T9796 excludes RMD_INSTANCE_REGISTRY from the Codex worker env.
   // Refresh executable fingerprints for those behaviors; retain the compression bounds below.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
   assert.equal(actual.tokenCount, 46703);
-  assert.equal(actual.tokenDigest, "fa2c4659a035f8345817a726a35daba02eaa1f028192bc543e349090abb94f0b");
-  assert.equal(actual.astDigest, "6403e58851e0c1ad2d1c0fd3a788d53f36db636d04450df9b20b820d38583946");
+  assert.equal(actual.tokenDigest, "deb6df656923feaa428ce0c02560bd95754cd86fd9afb266a50917741adeeac5");
+  assert.equal(actual.astDigest, "5f564a461a6e9be210575a09a8fee4be3896ca69d2a36b03520c29262fa5cd5c");
   assert.ok(actual.commentLines < 1357, "comment lines must decrease from the pre-compression source");
   assert.ok(actual.commentBytes < 104858, "comment bytes must decrease; rewrapping alone is insufficient");
 
