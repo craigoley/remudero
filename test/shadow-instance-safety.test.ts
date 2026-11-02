@@ -5,7 +5,6 @@ import { RUN_CHILD_SCHEMA, writeSpec } from "#src/lib/run-child-contract.js";
 import { applyOperatorMergeHold } from "#src/lib/operator-merge-hold.js";
 import { automergeHoldFromLedger } from "#src/lib/review.js";
 import { readLedgerLines } from "#src/lib/status.js";
-import { ghShim } from "#test/helpers/gh-shim.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
@@ -1688,7 +1687,7 @@ test(selectedContract
   seed.git("commit", "-qm", "test: seed"); seed.git("push", "-q", "origin", "main");
   mkdirSync(join(root, "repos")); git(["clone", "-q", origin.dir, repoDir]);
   for (const args of [["user.name", "selected-mode-fixture"], ["user.email", "selected@example.invalid"]]) git(["-C", repoDir, "config", ...args]);
-  const shim = ghShim([
+  await withGhShim([
     { when: "--json headRefName", stdout: JSON.stringify({ headRefName: branch }) },
     { when: "--json body", stdout: JSON.stringify({ body: "Remudero-Task: T-SELECTED" }) },
     { when: "--json files", stdout: JSON.stringify({ files: [{ path: "src/lib/daemon.ts" }] }) },
@@ -1696,9 +1695,9 @@ test(selectedContract
     { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
     { when: "pulls/1/files", stdout: JSON.stringify([{ filename: "src/lib/daemon.ts" }]) },
     { when: "api repos/owner/remudero/pulls/1", stdout: JSON.stringify({ number: 1, body: "Remudero-Task: T-SELECTED", state: "closed", merged: true, merged_at: new Date(now).toISOString(), mergeable_state: "clean", head: { sha: head } }) },
-  ]);
-  const previous = { path: process.env.PATH, registry: process.env.RMD_INSTANCE_REGISTRY, name: process.env.RMD_INSTANCE_NAME };
-  process.env.PATH = `${shim.dir}:${previous.path}`; delete process.env.RMD_INSTANCE_REGISTRY; delete process.env.RMD_INSTANCE_NAME;
+  ], async (shim) => {
+  const previous = { registry: process.env.RMD_INSTANCE_REGISTRY, name: process.env.RMD_INSTANCE_NAME };
+  delete process.env.RMD_INSTANCE_REGISTRY; delete process.env.RMD_INSTANCE_NAME;
   const clock = t.mock.method(Date, "now", () => now);
   let spawned = 0, attemptedPushes = 0;
   try {
@@ -1821,11 +1820,12 @@ test(selectedContract
       } else assert.deepEqual(inheritedRows, []);
     }
   } finally {
-    clock.mock.restore(); process.env.PATH = previous.path;
+    clock.mock.restore();
     if (previous.registry === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = previous.registry;
     if (previous.name === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = previous.name;
-    rmSync(shim.dir, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
     seed.cleanup(); origin.cleanup();
   }
+  });
 });
 }
