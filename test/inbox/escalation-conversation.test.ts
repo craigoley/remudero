@@ -20,7 +20,7 @@ const URL = "https://github.com/craigoley/remudero/issues/16183";
 const AT = "2026-11-02T12:00:00.000Z";
 
 function fixture(overrides: Partial<Pick<Escalation, "summary" | "detail" | "decisionSummary">> = {}) {
-  const root = mkdtempSync(join(tmpdir(), "escalation-conversation-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-escalation-conversation-"));
   mkdirSync(join(root, "state"));
   const store = join(root, "state", "inbox-threads.jsonl");
   const issue: EscalationIssueSource = { html_url: URL, title: "", body: "", updated_at: AT, state: "open" };

@@ -9,7 +9,7 @@ import { appendThreadMessage } from "#src/lib/inbox-thread.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 test("assembled service serves an authenticated escalation conversation", async t => {
-  const root = mkdtempSync(join(tmpdir(), "escalation-serving-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-escalation-serving-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "state")); mkdirSync(join(root, "plan"));
   const ledgerPath = join(root, "state", "ledger.ndjson"), planPath = join(root, "plan", "tasks.yaml");
