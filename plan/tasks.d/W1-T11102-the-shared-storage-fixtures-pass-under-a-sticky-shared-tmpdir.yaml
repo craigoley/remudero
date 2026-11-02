@@ -1,5 +1,5 @@
 - id: W1-T11102
-  title: The shared-storage and scratch-root fixtures pass on a host whose TMPDIR is a world-writable sticky directory, so the author preflight's verdict carries signal again
+  title: The shared-storage and scratch-root fixtures pass on a host with a group-writable umask and a TMPDIR outside /tmp, so the author preflight's verdict carries signal again
   repo: remudero
   depends_on: []
   priority: 1
@@ -13,12 +13,12 @@
   files:
     - test/review/shared-git-storage.test.ts
     - test/no-test-fixture-state-lands-under-the-real-scratch-root.test.ts
-    - test/ci/suites/the-shared-storage-fixtures-pass-under-a-sticky-shared-tmpdir.test.ts
+    - test/infra/the-shared-storage-fixtures-pass-under-a-sticky-shared-tmpdir.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: With TMPDIR set to a world-writable sticky directory the account does not own, both suites' fixtures build their storage under an account-owned 0700 directory and every case passes, while each production refusal they assert still fires for its own reason
-      proof: "unit test: test/ci/suites/the-shared-storage-fixtures-pass-under-a-sticky-shared-tmpdir.test.ts"
+    - claim: Under a group-writable umask (0002) and with TMPDIR set to a world-writable sticky directory outside /tmp, both suites' fixtures build their storage under an account-owned directory and every case passes, while each production refusal they assert still fires for its own reason
+      proof: "unit test: test/infra/the-shared-storage-fixtures-pass-under-a-sticky-shared-tmpdir.test.ts"
       kind: guard
     - claim: Both suites root their fixture storage through one account-owned helper instead of the shared TMPDIR
       proof: "grep: accountOwnedFixtureRoot( in test/review/shared-git-storage.test.ts"
@@ -29,6 +29,7 @@
     - test/review/shared-git-storage.test.ts cases 4-7 and 2469-2479 of the subset: "The input did not match the regular expression /capacity/. Input: 'storage path is not account-owned and protected'".
     - test/no-test-fixture-state-lands-under-the-real-scratch-root.test.ts case 4: "did not match /temporary state dir.*nothing restored/".
     - This host's TMPDIR is /mnt/rmd/tmp, mode drwxrwxrwt owned by root. The fixtures build their storage under it, and production's ownership check refuses that storage first, so each test reads the wrong refusal. CI's runner tmp passes.
+    - Diagnosis 2026-11-02: 9 of the 10 (shared-git-storage) come from this host's umask 0002. git clone and plain mkdirSync make 0775 directories, which the ownership walk (mode & 0o022) refuses; the suite passes 14/14 under umask 0022. The scratch-root case comes from TMPDIR=/mnt/rmd/tmp, which the probe's hand-built env drops.
     - The fix belongs in the fixtures. Loosening the production ownership check would need the operator's yes and is not in scope.
   design: |
     Each fixture roots its storage through accountOwnedFixtureRoot(), an account-owned 0700 directory it creates (under the account's home or an XDG runtime path it owns, never a shared sticky dir), whatever TMPDIR is. The new suite reruns both fixtures' builders with TMPDIR pointed at a freshly made 1777 directory and asserts the cases pass. Remove each fixture change in turn: its case must fail again on a sticky TMPDIR.
