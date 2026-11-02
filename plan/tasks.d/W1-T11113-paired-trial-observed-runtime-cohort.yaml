@@ -1,0 +1,51 @@
+- id: W1-T11113
+  title: A paired trial excludes unplanned external runtime and harness enforcement differences
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  priority: 2
+  budget_usd: 20
+  risk: high
+  band_meaning: span
+  author_class: machine
+  origin: research:omnigent-2026-11-02
+  plan_refs:
+    - §Self-improvement
+    - W1-T4625
+    - W1-T4669
+  files:
+    - src/lib/benchmark-run.ts
+    - src/lib/paired-trial.ts
+    - test/benchmark-run.test.ts
+    - test/a-paired-dispatch-trial-shares-one-grader.test.ts
+  status: queued
+  attempts: 0
+  rationale: "OBSERVED: benchmark-run.ts already pins harnessRevision, promptRevision, toolRevision, scorerRevision and environmentRevision. executingHarnessRevision attests Remudero source, not necessarily the external Claude/Codex executable. pairedStackEvidence imports four protocol pins. Omnigent advertises cross-harness agents but tests adapter conformance separately; identical model/prompt/source is insufficient when installed runtime or actual policy differs. Sources: https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/omnigent/harness_capabilities.py ; https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/tests/harness_bench/README.md . This extends existing trials rather than adding another optimizer."
+  design: |-
+    Add versioned observed external-runtime and applicable harness-contract/conformance evidence to existing benchmark assignment and pair eligibility. Consume authoritative observed metadata through the existing boundary; absent evidence remains unknown and cannot be invented from current PATH, a protocol declaration or another run. Bind observation to actual executable/adapter revision, policy/settings digest and environment; stale/malformed/unresolved evidence makes the pair unmeasurable with fixed exclusion reasons and denominators. The contract producer is the sibling observed-worker-harness-contract task in this plan: until that evidence exists this consumer remains conservative; do not fabricate a test receipt as a live source.
+    Preserve the five current revision pins, sealed non-dispatch side attempts, explicit paid-arm admission, grader/holdout rules and no production routing. Compare nuisance context according to a versioned preregistered protocol; explicitly named treatment axes such as the tested model, harness or configuration may differ as designed, with each arm still fully identified. Reject unplanned differences; do not require intentionally varied arms to be byte-identical. Report comparable coverage and each exclusion count separately from wins/losses. No paid pair or new live probe is run by implementing this contract. Backward compatibility must retain historical rows as legacy/unmeasurable, not silently assert current conformance. Extend existing verified suites without moving old assertions.
+  acceptance:
+    - claim: a pair with the same source and model but unplanned different observed executable or policy context cannot be comparable
+      proof: "unit test: paired trial excludes unplanned external runtime or policy differences"
+    - claim: predeclared treatment differences remain eligible when both observed arm contexts satisfy the protocol
+      proof: "unit test: paired trial permits declared treatment axes while binding nuisance context"
+    - claim: missing stale fixture-only and legacy conformance evidence stays unmeasurable with explicit exclusion counts
+      proof: "unit test: paired trial counts unresolved runtime evidence without inventing a comparable pair"
+    - claim: adding runtime evidence neither spawns paid work nor changes production routing or sealed trial isolation
+      proof: "unit test: paired runtime cohort metadata preserves inert and sealed trial behavior"
+  falsifier: Delete external-runtime comparison alone; a synthetic pair with identical existing five pins and different actual executable must incorrectly pass and fail its test. Independently relabel absent evidence as current, and reject an explicitly declared treatment; each mutation must fail. Restore and rerun verified physical suites with no paid attempts.
+  note: Operator requested research, plan updates and task filing, not immediate product execution or paid experiments. Normal risk judgment, native capacity, source ownership, proof, review and merge gates remain. No installed Omnigent dependency, new scheduler, automatic guard change, model promotion or live capability proof is authorized by this record. This record is planning custody, not evidence of implementation or benefit.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The description and files list show a narrow, additive change to benchmark pair-eligibility logic (src/lib/benchmark-run.ts, src/lib/paired-trial.ts) plus two test files, all of which exist at base."
+      - "The record states that it does not touch secrets, credentials, auth, deploy, merge or review policy. It does not delete data, and it spawns no paid work or live probes. It also leaves production routing and sealed trial isolation unchanged."
+      - "Acceptance criteria are all unit-test verifiable (verify: auto), so the finding can be checked from what is shown. Backward compatibility is specified: legacy rows stay unmeasurable rather than being rewritten."
+      - "It extends existing trial boundaries rather than adding a new optimizer or authority, and it is coherent with the cited plan refs. The research family has no track record (0 merged, Beta mean 0.50), but nothing in the change shape is concerning. Normal CI and review gates still apply."
+    judged_at: "2026-11-02T18:20:31.395Z"
+    pin: "355ae00a6ae1f8da293052d93ff2a90501bb4bb80d77485aa3502f58c9f2e0b8"
