@@ -82,11 +82,17 @@ function* lsRemoteOriginSteps(exec: BranchReapExec, before: readonly string[], a
 }
 
 export function* remoteBranchNamesSteps(exec: BranchReapExec): Steps<string[]> {
-  return (yield* lsRemoteOriginSteps(exec, ["--heads"]))
-    .split("\n")
-    .map((l) => l.split("refs/heads/")[1])
-    .filter((n): n is string => Boolean(n && n.trim()))
-    .map((n) => n.trim());
+  return [...(yield* remoteBranchHeadsSteps(exec)).keys()];
+}
+
+/** Every remote branch's LIVE tip sha, from the same one `git ls-remote --heads origin` read, in listing order. */
+export function* remoteBranchHeadsSteps(exec: BranchReapExec): Steps<Map<string, string>> {
+  const heads = new Map<string, string>();
+  for (const line of (yield* lsRemoteOriginSteps(exec, ["--heads"])).split("\n")) {
+    const name = line.split("refs/heads/")[1]?.trim();
+    if (name) heads.set(name, line.split(/\s/)[0] ?? "");
+  }
+  return heads;
 }
 
 /**
@@ -827,14 +833,17 @@ export interface StaleHoldCandidate {
 
 /**
  * The held run branches stale enough to archive and reap. PURE. A branch qualifies only when every
- * fact was READ: a confirmed no-PR state, a tip confirmed not in main, a readable commit age past its
- * threshold, a resolved task id, and a claim list that was read without a live claim for that task.
+ * fact was READ: a confirmed no-PR state, a tip confirmed not in main and equal to the live remote sha, a
+ * readable commit age past its threshold, a resolved task id, and a claim list that was read without a
+ * live claim for that task.
  * An unreadable claim list (`undefined`) yields no candidates at all.
  */
 export function planStaleHoldArchive(input: {
   facts: readonly StaleHoldFacts[];
   reasons: Readonly<Record<string, string>>;
   tips: ReadonlyMap<string, RemoteBranchTip>;
+  /** The live `ls-remote --heads` sha per branch. A local remote-tracking tip that differs (or is absent here) is stale: it names nothing. */
+  liveShaByName: ReadonlyMap<string, string>;
   nowMs: number;
   claimedTaskIds: ReadonlySet<string> | undefined;
   /** A `run-<taskId>-<epochMs>` branch's plan task, which the slug matcher never reads (it lands `no_pr_ever`). */
@@ -856,6 +865,7 @@ export function planStaleHoldArchive(input: {
     const credited = reason === "named_task_credited" || (reason === "no_pr_ever" && input.creditedTaskIds!.has(taskId));
     const tip = input.tips.get(f.name);
     if (tip === undefined || tip.committedAtMs === undefined) continue;
+    if (input.liveShaByName.get(f.name) !== tip.sha) continue;
     const ageMs = input.nowMs - tip.committedAtMs;
     const bound = credited ? (input.creditedAfterMs ?? STALE_CREDITED_HOLD_MS) : (input.unshippedAfterMs ?? STALE_UNSHIPPED_HOLD_MS);
     if (ageMs < bound) continue;

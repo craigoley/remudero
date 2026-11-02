@@ -2904,7 +2904,7 @@ import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./l
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { withManagedGardenTokenRefresh } from "./lib/managed-garden-token.js";
 import { runChildCredentialSocket } from "./lib/secret-boundary.js";
-import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, planStaleHoldArchive, readDispatchClaimTaskIdsSteps, pruneDeletableBranchesSteps, readNamedInSourceSteps, readRemoteBranchTipsSteps, readTipInMainMembershipSteps, remoteBranchNamesSteps, tipInMainFor, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
+import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, planStaleHoldArchive, readDispatchClaimTaskIdsSteps, remoteBranchHeadsSteps, pruneDeletableBranchesSteps, readNamedInSourceSteps, readRemoteBranchTipsSteps, readTipInMainMembershipSteps, remoteBranchNamesSteps, tipInMainFor, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
 // initialiser (`resolveRepoRoot`) its own declaration (`repoRoot`) depends on — a move, never
 // an interface change. `resolveRepoRoot` is re-exported below so every existing import path
@@ -14049,7 +14049,8 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   const exec =
     opts.exec ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { cwd: checkoutRoot, encoding: "utf8" }).toString());
 
-  const names = yield* remoteBranchNamesSteps(exec);
+  const liveHeads = yield* remoteBranchHeadsSteps(exec);
+  const names = [...liveHeads.keys()];
   // A POSITIVE CONTROL, not a formality: an empty listing and a repo with only `main` are
   // indistinguishable in the answer, and every bucket would read empty either way.
   if (names.length === 0) {
@@ -14331,7 +14332,7 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   const claims = yield* readDispatchClaimTaskIdsSteps(exec);
   const claimedTaskIds = "ids" in claims ? claims.ids : undefined;
   const hygieneNowMs = (opts.clock ?? systemClock).now();
-  const staleHolds = planStaleHoldArchive({ facts, reasons: plan.reasons, tips: remoteTips,
+  const staleHolds = planStaleHoldArchive({ facts, reasons: plan.reasons, tips: remoteTips, liveShaByName: liveHeads,
     nowMs: hygieneNowMs, claimedTaskIds, runTaskByBranch,
     ...(creditReadSucceeded ? { creditedTaskIds } : {}) });
   const staleCount = (reason: string) => staleHolds.filter((c) => c.reason === reason).length;
