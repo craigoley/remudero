@@ -21,8 +21,9 @@ const { countCommentLines } = await import(COMMENT_LOAD_SCRIPT) as {
 // W1-T10962's reviewed bounded output and incomplete-evidence handling changed it again.
 // Its final stderr drain, error-result subtypes and terminal completion evidence are included here.
 // Include the subsequent pipe-closure wait and stderr failure evidence before judging completeness.
+// W1-T9796 excludes RMD_INSTANCE_REGISTRY from the Claude worker env.
 // Intentional future code edits must review this hash before updating it.
-const REVIEWED_TOKENS_SHA256 = "d5a42dc7b0397933529b3312349398d2be2dd86ce85fd9504a0aa0e9ad0b587c";
+const REVIEWED_TOKENS_SHA256 = "9e145b5e634cb45e91920d6340eed8c3b498727d2e8acc33f042d133d9937b52";
 const BEFORE_COMMENT_LINES = 2018;
 
 function executableTokens(source: string): Array<[SyntaxKind, string, boolean]> {
