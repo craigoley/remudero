@@ -2904,8 +2904,7 @@ import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { withManagedGardenTokenRefresh } from "./lib/managed-garden-token.js";
-import { runChildCredentialSocket } from "./lib/secret-boundary.js";
-import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, planStaleHoldArchive, readDispatchClaimTaskIdsSteps, remoteBranchHeadsSteps, pruneDeletableBranchesSteps, readNamedInSourceSteps, readRemoteBranchTipsSteps, readTipInMainMembershipSteps, remoteBranchNamesSteps, tipInMainFor, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
+import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, planStaleHoldArchive, readDispatchClaimTaskIdsSteps, remoteBranchHeadsSteps, archiveStaleHoldsSteps, staleHoldRestoreCommand, STALE_HOLD_ARCHIVE_CAP, pruneDeletableBranchesSteps, readNamedInSourceSteps, readRemoteBranchTipsSteps, readTipInMainMembershipSteps, remoteBranchNamesSteps, tipInMainFor, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
 // initialiser (`resolveRepoRoot`) its own declaration (`repoRoot`) depends on — a move, never
 // an interface change. `resolveRepoRoot` is re-exported below so every existing import path
@@ -14019,7 +14018,23 @@ export type ReapBranchesOpts = {
   onExitReason?: (reason: string) => void;
   /** The clock the repo-hygiene shadow ages held branches against; the system clock by default. */
   clock?: Pick<Clock, "now">;
+  /** Overrides `sweep.armStaleBranchArchive`, read from `<root>/plan/policy.yaml` only when `--archive-stale` asks. */
+  armStaleBranchArchive?: boolean;
 };
+
+/**
+ * `sweep.armStaleBranchArchive` from the reaped checkout's own `plan/policy.yaml`: the committed row that
+ * decides whether that repository's stale held branches are archived. An unreadable policy is NOT read as
+ * unarmed silently: it returns `{ unreadable }` with the reason, which the caller prints and treats as
+ * shadow (fail closed).
+ */
+function readArmStaleBranchArchive(checkoutRoot: string): boolean | { unreadable: string } {
+  try {
+    return loadPolicy(join(checkoutRoot, "plan", "policy.yaml")).values.sweep.armStaleBranchArchive;
+  } catch (err) {
+    return { unreadable: String((err as Error)?.message ?? err) };
+  }
+}
 
 export function reapBranchesCommand(rest: string[], opts: ReapBranchesOpts = {}): number {
   return runStepsSync(reapBranchesSteps(rest, opts));
@@ -14039,7 +14054,7 @@ function branchReapExec(root: string): BranchReapExec {
 function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<number> {
   const print = opts.quiet ? (..._args: unknown[]) => {} : console.log;
   const printError = opts.quiet ? (..._args: unknown[]) => {} : console.error;
-  const badArg = unknownArgError("reap-branches", rest, [], ["--prune"]);
+  const badArg = unknownArgError("reap-branches", rest, [], ["--prune", "--archive-stale"]);
   if (badArg) {
     printError(badArg);
     printError(`usage: ${commandSyntax("reap-branches")}`);
@@ -14047,6 +14062,16 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   }
   const prune = rest.includes("--prune");
   const checkoutRoot = opts.root ?? repoRoot;
+  // REPO HYGIENE ACT MODE (operator ruling 2026-11-01): only when `--archive-stale` asks (the automatic
+  // rung's prune pass passes it) AND `sweep.armStaleBranchArchive` is on. Not asked, nothing is read.
+  let archiveStale = false;
+  if (rest.includes("--archive-stale")) {
+    const armed = opts.armStaleBranchArchive ?? readArmStaleBranchArchive(checkoutRoot);
+    if (typeof armed === "object") {
+      printError(`rmd reap-branches: --archive-stale: plan/policy.yaml could not be read — staying in shadow mode (${armed.unreadable})`);
+    }
+    archiveStale = armed === true;
+  }
   const target = opts.ownerRepo ?? resolveOwnerRepo();
   const exec =
     opts.exec ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { cwd: checkoutRoot, encoding: "utf8" }).toString());
@@ -14304,7 +14329,9 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
    * Drift still fails the exit code below; it just does not veto the deletions.
    */
   if (!prune) {
-    print("DRY RUN — nothing was deleted. Re-run with --prune to delete the branches above.");
+    print(archiveStale
+      ? "DRY RUN — no deletable branch was deleted. Re-run with --prune to delete the branches above."
+      : "DRY RUN — nothing was deleted. Re-run with --prune to delete the branches above.");
   }
 
   if (opts.ledgerPath) {
@@ -14338,8 +14365,8 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
     nowMs: hygieneNowMs, claimedTaskIds, runTaskByBranch,
     ...(creditReadSucceeded ? { creditedTaskIds } : {}) });
   const staleCount = (reason: string) => staleHolds.filter((c) => c.reason === reason).length;
-  print(`stale:     ${staleHolds.length}  held run branches an archive-then-reap would remove (shadow — nothing deleted)`);
-  if (opts.ledgerPath) {
+  if (!archiveStale) print(`stale:     ${staleHolds.length}  held run branches an archive-then-reap would remove (shadow — nothing deleted)`);
+  if (opts.ledgerPath && !archiveStale) {
     appendLedger(opts.ledgerPath, {
       run_id: opts.runId ?? `REAP-${hygieneNowMs}`,
       task_id: "REAP",
@@ -14403,6 +14430,38 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   // Printing only the first would let an operator read 140 and get 139, which is the kind of gap
   // that makes a dry run stop being trusted.
   if (screen) print(`prunable:  ${screen.proceed.length}  (deletable minus the active-branch screen)`);
+
+  // REPO HYGIENE, ACT (armed only): archive each stale hold's tip and delete its branch in one atomic,
+  // leased push (archiveStaleHoldsSteps), at most STALE_HOLD_ARCHIVE_CAP per pass. It runs AFTER the
+  // independent open-head re-read, so a branch that gained a PR since the fold is left alone, and an
+  // unread open-PR list archives nothing — the same refusal --prune makes. Restore is one line, printed
+  // per branch and carried on the row (staleHoldRestoreCommand): fetch the archive ref, then push it back.
+  if (archiveStale) {
+    const heads = openHeads;
+    const actable = heads ? staleHolds.filter((c) => !heads.has(c.name)) : [];
+    const outcome = yield* archiveStaleHoldsSteps(actable, exec);
+    print(`stale:     ${staleHolds.length} held run branches; archived ${outcome.archived.length}, ` +
+      `${outcome.failed.length} failed, ${outcome.capped} left past the cap of ${STALE_HOLD_ARCHIVE_CAP}` +
+      (openHeads ? "" : " (open pull requests unread — nothing archived)"));
+    for (const a of outcome.archived) print(`  restore: ${staleHoldRestoreCommand(a.name, a.sha)}`);
+    for (const f of outcome.failed) printError(`rmd reap-branches: archive push refused for ${f.name}, branch kept: ${f.error}`);
+    if (opts.ledgerPath) {
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId ?? `REAP-${hygieneNowMs}`,
+        task_id: "REAP",
+        step: "branch_reap.hygiene_archived",
+        mode: "act",
+        claims_read: claimedTaskIds !== undefined,
+        ...("error" in claims ? { claims_error: claims.error } : {}),
+        open_heads_read: openHeads !== undefined,
+        would_reap: staleHolds.length,
+        archived: outcome.archived,
+        failed: outcome.failed,
+        capped: outcome.capped,
+        restore: "git fetch origin refs/rmd-recovery/reaped/<name>/<sha>:refs/rmd-recovery/reaped/<name>/<sha> && git push origin refs/rmd-recovery/reaped/<name>/<sha>:refs/heads/<name>",
+      });
+    }
+  }
 
   if (prune) {
     const outcome = yield* pruneDeletableBranchesSteps(screen!.proceed, exec);
@@ -32437,6 +32496,8 @@ export function runAutomaticBranchReapRung(
     intervalMs?: number;
     exec?: BranchReapExec;
     plan?: () => Plan | undefined;
+    /** Overrides `sweep.armStaleBranchArchive` (read from the target checkout's plan/policy.yaml otherwise). */
+    armStaleBranchArchive?: boolean;
   } = {},
 ): void | Promise<void> {
   const root = opts.root ?? (repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo));
@@ -32470,6 +32531,8 @@ function* automaticBranchReapSteps(
     intervalMs?: number;
     exec?: BranchReapExec;
     plan?: () => Plan | undefined;
+    /** Overrides `sweep.armStaleBranchArchive` (read from the target checkout's plan/policy.yaml otherwise). */
+    armStaleBranchArchive?: boolean;
   } = {},
 ): Steps<void> {
   const checkoutRoot = opts.root ?? (repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo));
@@ -32508,7 +32571,8 @@ function* automaticBranchReapSteps(
   let code = 1;
   let exitReason = "unnamed non-zero exit";
   try {
-    code = yield* reapBranchesSteps(opts.prune === false ? [] : ["--prune"], {
+    // The prune pass also asks for the repo-hygiene act mode; it acts only when sweep.armStaleBranchArchive is on.
+    code = yield* reapBranchesSteps(opts.prune === false ? [] : ["--prune", "--archive-stale"], {
       onExitReason: (why) => {
         exitReason = why;
       },
@@ -32521,6 +32585,7 @@ function* automaticBranchReapSteps(
       runId,
       creditLedgerPath: ledgerPath,
       ...(opts.clock ? { clock: opts.clock } : {}),
+      ...(opts.armStaleBranchArchive !== undefined ? { armStaleBranchArchive: opts.armStaleBranchArchive } : {}),
       // W1-T4476 design (iii)/(iv): the cache this state carries in from the LAST pass, and the
       // update this pass hands back — `state` is the one object the caller (buildSweepHook)
       // persists to disk right after this function returns, so the cache and the cadence fields
@@ -41329,9 +41394,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "reap-branches",
-    syntax: "rmd reap-branches [--prune]",
+    syntax: "rmd reap-branches [--prune] [--archive-stale]",
     summary: "Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.",
-    detail: "W1-T447/W1-T3020: classify every remote branch as deletable, guarded or held, print a sha->name manifest, and delete only with --prune. Deletable = a merged PR head, a closed-unmerged PR head, or a no-PR head whose tip is already in origin/main; guards and the independent open-head reread always win. The CLI defaults to a dry run. The full daemon sweep uses the same command with --prune on first use, when the remote branch set changes, or after six hours; its cheap branch fingerprint runs each full tick, and the light in-flight pass never reaches this remote git write. An unreadable or empty branch listing refuses rather than becoming a healthy zero. Unknown SHAs are skipped, pushes are chunked, and each deletion prints a restore refspec. Guard drift is reported and returns non-zero but does not widen the deletion set.",
+    detail: "W1-T447/W1-T3020: classify every remote branch as deletable, guarded or held, print a sha->name manifest, and delete only with --prune. Deletable = a merged PR head, a closed-unmerged PR head, or a no-PR head whose tip is already in origin/main; guards and the independent open-head reread always win. The CLI defaults to a dry run. The full daemon sweep uses the same command with --prune on first use, when the remote branch set changes, or after six hours; its cheap branch fingerprint runs each full tick, and the light in-flight pass never reaches this remote git write. An unreadable or empty branch listing refuses rather than becoming a healthy zero. Unknown SHAs are skipped, pushes are chunked, and each deletion prints a restore refspec. Guard drift is reported and returns non-zero but does not widen the deletion set. --archive-stale (operator ruling 2026-11-01) asks for the repo-hygiene act mode, which runs only when plan/policy.yaml's sweep.armStaleBranchArchive is on (default off; the daemon's prune pass asks too): each stale held run branch's tip is archived under refs/rmd-recovery/reaped/<name>/<sha> and the branch deleted in one atomic leased push, at most 25 per pass, ledgered as branch_reap.hygiene_archived; restore with git fetch origin refs/rmd-recovery/reaped/<name>/<sha>:refs/rmd-recovery/reaped/<name>/<sha> && git push origin refs/rmd-recovery/reaped/<name>/<sha>:refs/heads/<name>. Unarmed, it only ledgers branch_reap.hygiene_shadow.",
   },
   {
     name: "memory-lint",

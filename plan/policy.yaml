@@ -765,6 +765,22 @@ sweep:
     value: true
     origin: "net-new"
 
+  # ARMS the repo-hygiene branch lane's ACT mode. Operator ruling 2026-11-01: "Build act mode, flag
+  # off". Off, `rmd reap-branches` names the stale held run branches (no PR, tip not in main, not
+  # named in source, task unclaimed; 7 days old when the task is merge-credited, 14 when not) and
+  # ledgers them as `branch_reap.hygiene_shadow`, pushing nothing. On, the automatic rung's prune
+  # pass (or an explicit `rmd reap-branches --archive-stale`) archives each one's tip under
+  # `refs/rmd-recovery/reaped/<name>/<sha>` and deletes the branch in ONE atomic leased push, at
+  # most 25 per pass, ledgered as `branch_reap.hygiene_archived`. Restore is one command:
+  # `git fetch origin refs/rmd-recovery/reaped/<name>/<sha>:refs/rmd-recovery/reaped/<name>/<sha> && git push origin refs/rmd-recovery/reaped/<name>/<sha>:refs/heads/<name>`.
+  #
+  # MEASURED 2026-11-01: 506 branches on origin, 411 of them run branches with no PR; 296 of tasks
+  # already shipped and older than 7 days, 83 of unshipped tasks older than 14 days. Read the
+  # shadow rows before flipping this.
+  armStaleBranchArchive:
+    value: false
+    origin: "net-new"
+
   # W1-T905: "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half). A
   # `sweep.disposed` row already NAMES a classified surface on its own `disposition` field
   # (mergeable/blocked-fixable/stale/blocked-ambiguous/dep-review/post-review/conflicted/wait —
