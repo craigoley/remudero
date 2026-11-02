@@ -118,6 +118,8 @@ test("native truncated summaries and generated context cannot redirect an escala
   const actual = await context.read(URL); assert.equal(actual.state, "served"); if (actual.state !== "served") return;
   assert.equal(actual.conversation.identity.prRef, "15520");
   assert.equal(actual.conversation.canReply, true);
+  writeFileSync(context.store, "");
+  assert.equal((await context.read(URL, true)).state, "unavailable");
   for (const malformed of ["invalid JSON", '"' + "x".repeat(16_385) + '"', "42"]) {
     long.issue.body = long.issue.body.replace(/^\*\*Full summary \(JSON\):\*\*.*$/m, `**Full summary (JSON):** ${malformed}`);
     assert.equal((await long.read(URL, true)).state, "unavailable");
@@ -167,6 +169,9 @@ test("an existing native escalation without saved history starts one conversatio
   await withReplyService(f, async base => {
     const body = { ...source.conversation.identity, text: "Please explain the failed stage first.", issueUrl: URL, expectedRevision: source.conversation.revision, intentId: "start-conversation-01", startConversation: true };
     const post = (input = body) => fetch(`${base}/v1/escalation/reply`, { method: "POST", headers: { authorization: "Bearer fixture-write", "content-type": "application/json" }, body: JSON.stringify(input) });
+    assert.equal((await post({ ...body, startConversation: false })).status, 400);
+    assert.equal((await post({ ...body, expectedRevision: "f".repeat(64) })).status, 409);
+    assert.equal(readFileSync(f.store, "utf8"), "");
     const first = await post(); assert.equal(first.status, 200); assert.equal((await first.json() as { saved: { seq: number } }).saved.seq, 2);
     const duplicate = await post(); assert.equal(duplicate.status, 200); assert.equal((await duplicate.json() as { duplicate: boolean }).duplicate, true);
     const result = await f.read(URL); assert.equal(result.state, "served"); if (result.state !== "served") return;

@@ -132,7 +132,8 @@ function boundedMessages(messages: ThreadMessage[]): EscalationConversation["mes
       || typeof m.body !== "string" || (m.role !== "reply" && m.role !== "escalation"))) return undefined;
   return messages.map(m => ({ seq: m.seq, from: m.role === "reply" ? "operator" : "daemon", text: m.body, ts: m.ts,
     ...(typeof m.extra?.replyId === "string" ? { intentId: m.extra.replyId } : {}),
-    ...(m.extra?.sourceImport ? { sourceImported: true as const } : {}) }));
+    ...(typeof m.extra?.sourceImport?.issueUrl === "string" && escalationIssueLocation(m.extra.sourceImport.issueUrl)
+      && /^[a-f0-9]{64}$/.test(m.extra.sourceImport.revision) ? { sourceImported: true as const } : {}) }));
 }
 
 /** Per-service bounded cache. Revalidating a reply bypasses saved source, while concurrent reads coalesce. */
@@ -203,6 +204,9 @@ export function createEscalationConversationReader(opts: {
       && messages.some(m => m?.role === "escalation" && typeof m.body === "string"
         && m.body.startsWith(`${parsed.headline}\n\n`) && source.body.includes(m.body.slice(parsed.headline.length + 2)))) : [];
     const selected = candidates.length === 1 ? candidates[0] : undefined;
+    if (!selected && /^## Decision Summary\r?$/m.test(source.body)) {
+      return { state: "unavailable", reason: "invalid_source", detail: "The source includes generated context, but no saved native identity could distinguish it from the original escalation. No reply destination is confirmed." };
+    }
     const identity: ThreadIdentity = selected ? { taskId: parsed.identity.taskId, class: parsed.identity.class,
       ...(parsed.identity.cause ? { cause: parsed.identity.cause } : {}),
       ...(selected[0].slice(prefix.length) !== "-" ? { prRef: selected[0].slice(prefix.length) } : {}) } : parsed.identity;
