@@ -1895,7 +1895,7 @@
     "test/deploy-scripts-use-mktemp.test.ts": 310,
     "test/deploy/a-field-trials-refresh-step-failure-keeps-the-other-steps.test.ts": 9800,
     "test/deploy/a-host-worktree-links-its-dependencies-whoever-creates-it.test.ts": 3900,
-    "test/deploy/a-janitor-dry-run-writes-nothing.test.ts": 1900,
+    "test/deploy/a-janitor-dry-run-writes-nothing.test.ts": 5000,
     "test/deploy/check-test-test-the-deploy-tick-runs-current-deploy-code-without-trippin.test.ts": 260,
     "test/deploy/deploy-revival-resource-policy.test.ts": 1600,
     "test/deploy/preserve-retire-discovers-managed-checkouts-anywhere-in-the-home.test.ts": 4800,
