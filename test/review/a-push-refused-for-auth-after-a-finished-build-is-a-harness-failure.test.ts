@@ -87,7 +87,7 @@ test("W1-T10749: a push refused for auth is a non-worker strike", () => {
   const worktree = "/home/node/Remudero/worktrees/run-CONSOLE-T127-1793037108107";
   const reason = `Command failed: git -C ${worktree} push origin HEAD\n${CONSOLE_T127_STDERR}\n${CONSOLE_T127_STDERR}`;
   assert.equal(runErrorCause(new PushAuthRefusedError(new PushFailedError(reason, CONSOLE_T127_STDERR, undefined))), "push-auth-refused");
-  assert.equal(runErrorCause(new Error(reason)), "push-auth-refused");
+  assert.equal(runErrorCause(new Error(reason)), "git-push-failed", "an unretried push keeps its old cause; streakRefusal reads its reason");
   assert.equal(runErrorCause(new Error(`Command failed: git -C ${worktree} push origin HEAD\n ! [rejected] (non-fast-forward)`)), "git-push-failed");
   assert.equal(runErrorCause(new Error("census-precheck: this branch grows 1 census count")), "census-refused-push");
   const rows = [
