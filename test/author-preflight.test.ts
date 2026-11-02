@@ -144,6 +144,13 @@ test('author preflight runs real affected tests without coverage and records exa
   assert.deepEqual(receipt.suites, ['test/leaf.test.ts']);
   assert.deepEqual(receipt.steps.map((s: { ok: boolean }) => s.ok), [true, true, true]);
   assert.deepEqual(receipt.gitHistory, { state: 'complete' });
+  // The suites started under one bound context: the exact head, its tree, the slot owner and every allocation.
+  assert.equal(receipt.nativeContext.intent, 'start');
+  assert.equal(receipt.nativeContext.head, receipt.headSha);
+  assert.equal(receipt.nativeContext.tree, f.git('rev-parse', 'HEAD^{tree}'));
+  assert.match(receipt.nativeContext.ownerNonce, /\S/);
+  assert.deepEqual(receipt.nativeContext.allocations, ['diagnostics', 'scratch', 'workspace']);
+  assert.equal(receipt.slotRetained, undefined, 'every native group closed, so the slot was released');
 });
 
 test('author static preflight lowers real descendant priority and records the actual wrapper', () => {
@@ -504,7 +511,11 @@ test('author preflight refuses static failure, a mutated tree and an unwritable 
   writeFileSync(join(mutated.root, 'src/run-task.ts'), "import { writeFileSync } from 'node:fs'; writeFileSync('untracked.ts', 'export {};');\n");
   mutated.git('add', '.'); mutated.git('commit', '-m', 'test: mutate the author tree');
   assert.equal(mod.main([], { root: mutated.root }), 1);
-  assert.match(mutated.receipt().error, /tree changed during verification/);
+  // The bound author context refuses the changed source before the suites start; the later
+  // post-verification tree check remains the backstop for a change made after they began.
+  assert.match(mutated.receipt().error, /author context NOT_RUN \(start\): source/);
+  assert.equal(mutated.receipt().steps.some((step: { name: string }) => step.name === 'affected-tests'), false);
+  assert.equal(mutated.receipt().nativeContext, undefined, 'a refused context is never recorded as bound');
   const unwritable = fixture();
   writeFileSync(join(unwritable.root, 'coverage'), 'not a directory');
   assert.equal(mod.main([], { root: unwritable.root }), 1, 'unrecordable results must not be reusable greens');
