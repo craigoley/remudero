@@ -34,11 +34,12 @@ test("W1-T10918: comment compression preserves executable code", () => {
   // W1-T10962 carries bounded output, stderr failures and terminal completion evidence into the result.
   // Include its subsequent pipe-closure wait and streaming UTF-8 validation through EOF.
   // W1-T9796 excludes RMD_INSTANCE_REGISTRY from the Codex worker env.
+  // W1-T10842 adds task-level Codex trial selection and assigned/served audit evidence.
   // Refresh executable fingerprints for those behaviors; retain the compression bounds below.
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
-  assert.equal(actual.tokenCount, 46703);
-  assert.equal(actual.tokenDigest, "deb6df656923feaa428ce0c02560bd95754cd86fd9afb266a50917741adeeac5");
-  assert.equal(actual.astDigest, "5f564a461a6e9be210575a09a8fee4be3896ca69d2a36b03520c29262fa5cd5c");
+  assert.equal(actual.tokenCount, 47083);
+  assert.equal(actual.tokenDigest, "71f9184c1c387e56f8eb0257f3a577cd2b947ed1dec4c3d3b4f6eb2a5835e61e");
+  assert.equal(actual.astDigest, "2d3800ac307929e10dce3c442857552bba9eb3e9199f8c19220db1ac916886e3");
   assert.ok(actual.commentLines < 1357, "comment lines must decrease from the pre-compression source");
   assert.ok(actual.commentBytes < 104858, "comment bytes must decrease; rewrapping alone is insufficient");
 

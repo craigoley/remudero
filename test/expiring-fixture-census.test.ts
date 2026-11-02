@@ -6,6 +6,7 @@ import { dirname, join as joinPath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { REPO_ROOT as PROJECT_ROOT } from "#test/helpers/repo-root.js";
+import { PAID_PILOT_WINDOW_MS } from "#src/lib/benchmark-paid-pilot.js";
 
 // @source-text-subject — this suite tests a census whose subject is source-code text.
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a STATIC import of the .mjs is a TS7016 and
@@ -103,6 +104,35 @@ function tree(files: Record<string, string>) {
 }
 
 const at = (msFromNow: number) => new Date(NOW + msFromNow).toISOString();
+
+test("W1-T10842: the census measures the Codex trial stopping clock", () => {
+  const file = "src/lib/routing-experiments.ts";
+  const source = readFileSync(joinPath(PROJECT_ROOT, file), "utf8");
+  const input = { files: [file], readFile: () => source };
+  assert.ok(discoverClockAgedFields(input).some(row => row.field === "registeredAt"),
+    "positive control discovers the live stopping clock");
+  assert.throws(() => assertFieldListComplete({ ...input,
+    agedFields: [...AGED_FIELDS.filter(row => row.field !== "registeredAt"), ...KNOWN_UNCOVERED_CLOCK_FIELDS],
+  }), /INCOMPLETE TABLE.*registeredAt/s);
+  assert.doesNotThrow(() => assertFieldListComplete(input));
+  const row = AGED_FIELDS.find(row => row.field === "registeredAt" && row.source === file);
+  assert.ok(row, "the trial clock needs a source-pinned census registration");
+  assert.equal(Number(row.offsetDays) * DAY, PAID_PILOT_WINDOW_MS);
+  assert.doesNotThrow(() => assertFieldsStillAged());
+  assert.throws(() => assertFieldsStillAged(path => {
+    const text = readFileSync(joinPath(PROJECT_ROOT, path), "utf8");
+    return path === file ? text.replace("now < Date.parse(protocol.registeredAt) + protocol.cash.windowMs", "true") : text;
+  }), /STALE TABLE.*registeredAt/s);
+  const fixture = `const protocol = { registeredAt: "${at(-6 * DAY)}" };`;
+  for (const consumer of ["codexExperimentArmForTask", "spawnCodexWorker"]) {
+    const measured = censusExpiringFixtures(tree({ "test/trial-clock.test.ts": `${consumer}();\n${fixture}` }));
+    assert.equal(measured.population, 1);
+    assert.equal(measured.reported.length, 1);
+    assert.equal(measured.reported[0].expiresAt, NOW + DAY);
+    assert.equal(measured.reported[0].daysLeft, 1);
+  }
+  assert.equal(censusExpiringFixtures(tree({ "test/unrelated-clock.test.ts": fixture })).population, 0);
+});
 
 
 test("Code health scope clocks are registered without weakening the fixture census", () => {

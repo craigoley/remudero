@@ -75,6 +75,14 @@ export const STALE_DAYS_OFFSET = "sweep.staleDays";
  */
 export const AGED_FIELDS = [
   {
+    field: "registeredAt",
+    threshold: "Codex balanced trial fixed horizon (7 days)",
+    source: "src/lib/routing-experiments.ts",
+    evidence: ["Date.parse(protocol.registeredAt)", "now < Date.parse(protocol.registeredAt) + protocol.cash.windowMs"],
+    offsetDays: 7,
+    consumers: ["codexExperimentArmForTask", "spawnCodexWorker"],
+  },
+  {
     field: "nextDueAt",
     threshold: "daily progress collection due time",
     source: "src/lib/daily-progress-collector.ts",
