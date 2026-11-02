@@ -42,6 +42,15 @@
     line is unchanged. The after-window measurement still decides whether the cause's share fell.
     verify is set to human so the machine-filing judge re-rules the amended record (its ruling pin
     is stale once the claim changes); the judge's ruling, not this edit, releases it.
+    2026-11-02, operator disposition ("Work on 15434 and 15520 in parallel next", under the 2026-11-01
+    standing preference to close a looping PR and re-file it the right way rather than escalate): withdrawn.
+    The five hand fixes this cause groups by filename (#12820, #12796, #11834, #11602, #9855) share no
+    failure mechanism: evidence identity, compression, an ESM harness, source-map placement and a
+    dual-loader erasure. The machine-filing judge escalated the amended record at confidence 0.94 for
+    exactly that. PR #15434's only change is a spread-to-loop overflow hardening that no recorded round
+    needed. Its fix lane looped about 19 rounds because the declared test sat under test/ci/coverage/,
+    which the old unanchored coverage/ ignore hid from the harness commit (fixed by #16036; the class is
+    W1-T11124). The ruling pin is left untouched.
   risk_ruling:
     verdict: "high"
     action: escalate
