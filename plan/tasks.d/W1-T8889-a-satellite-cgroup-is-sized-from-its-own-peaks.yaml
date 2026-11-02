@@ -1,7 +1,7 @@
 - id: W1-T8889
-  title: "SITE AND CONSOLE HAVE NO REAL MEMORY CAP AND THE WRONG SOFT ONE — both carry memory.max 9.25 GB (core's), so nothing bounds a runaway, while console throttles (high 2.0 GB, peak 2.61 GB, 553 high events) and site never does (high 1.75 GB, p90 1.25 GB, 0 events, no worker in 31 h): each satellite's memory.high is self-tuned from its own observed peaks, as core's already is, and its memory.max is bounded"
+  title: "SITE AND CONSOLE HAVE NO REAL MEMORY CAP AND THE WRONG SOFT ONE — both carry memory.max 9.25 GB (core's), so nothing bounds a runaway, while console throttles (high 2.0 GB, peak 2.61 GB, 553 high events) and site never does (high 1.75 GB, p90 1.25 GB, 0 events, no worker in 31 h): each satellite's memory.high is self-tuned from its own learned peaks, as core's already is, inside the shared host budget that sets memory.max (operator ruling R2, 2026-10-27)"
   repo: remudero
-  depends_on: []
+  depends_on: []  # R2: memory.max is W1-T11130's (PR #16256); this task tunes memory.high and records the peak that budget reads
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern — the satellites' cgroup sizing follows their measured use; core is unchanged
   band_meaning: span
   origin: "operator ruling 2026-10-12: no VM resize; right-size what we have"
-  plan_refs: []
+  plan_refs: [W1-T11130]
   files: [deploy/recycle-container.sh, deploy/install-host-units.sh, test/a-satellite-cgroup-is-sized-from-its-own-peaks.test.ts]
   status: queued
   priority: 3
@@ -25,13 +25,24 @@
     - Core's memory.high is already self-tuned (#10486, `host.memory_high`, memory-high-tuned-remudero-daemon.json).
     OWNERSHIP: none for the satellites.
   design: |
-    Extend core's memory.high self-tuner to site and console:
-    - high = clamp(p95 of the satellite's own current over 7 days × 1.15, floor 1.25 GB);
-    - max = high × 1.5, bounded at 3 GB.
-    The sum of satellite highs must not exceed their current sum: a rebalance, not a raise. Applied at the next recycle
-    through the existing recycle path. Ledgered.
+    RE-SCOPED 2026-11-02 under operator ruling R2 (2026-10-27): "Re-scope queued W1-T8889 (fixed console/site bounds:
+    3 GB max, 1.25 GB floor) to learned peaks inside that budget", the budget being R1's shared host budget (W1-T11130).
+    The fixed 3 GB max, the 1.25 GB floor and the x1.15 / x1.5 multipliers are dropped.
+    - memory.high: core's self-tuner (deploy/memory-high-tuner.sh) runs for site and console too, starting from each
+      satellite's own learned peak (its recorded memory.peak and current p95 over the tuner's window), with its
+      RMD_MEMORY_HIGH_FLOORS entry as the floor until a peak is learned. It grows, holds and shrinks by the tuner's
+      existing tiers, never above its memory.max.
+    - memory.max: not set here. It is W1-T11130's shared budget, host - reserve - the other containers' learned
+      peaks. This task records each satellite's learned peak (its cgroup memory.peak, beside
+      memory-high-tuned-<container>.json) so that budget can read it, and adds no bound of its own. The two tasks can
+      land in either order: without W1-T11130 the satellites keep today's memory.max.
+    Applied at the next recycle through the existing recycle path. Ledgered on host.memory_high.adjusted.
   acceptance:
-    - claim: "each satellite's memory.high is derived from its own measured peaks and its memory.max is bounded, without raising the satellites' combined soft limit"
+    - claim: "each satellite's memory.high is self-tuned from its own learned peaks with no fixed max or floor of its own, and its learned peak is recorded where W1-T11130's shared budget reads it"
       proof: 'grep: test("W1-T8889: a satellite cgroup is sized from its own peaks" in test/a-satellite-cgroup-is-sized-from-its-own-peaks.test.ts'
   falsifier: |
-    Leave memory.max at the core value: the fixture asserts a satellite max ≤ 3 GB and fails.
+    Leave the satellites' memory.high fixed: the fixture grows a throttled, refaulting satellite and fails. Skip the
+    peak record: the fixture reads no learned peak for the satellite and fails.
+  note: |
+    Re-scoped 2026-11-02 per operator ruling R2, filed with the 2026-10-27 efficiency findings (item 3). The R1 shared
+    budget it sits inside is W1-T11130. Still queued and undispatched at the edit (no run- branch, no dispatch ref).
