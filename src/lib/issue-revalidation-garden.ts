@@ -28,7 +28,9 @@ import { parse as parseYaml } from "yaml";
 import { attemptAssignmentJoin, benchmarkEvidenceLedgerPath, benchmarkNonDispatchSpawn, benchmarkWorkerAttemptResources, withReceiptIdentity } from "./benchmark-run.js";
 import type { Config } from "./config.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { ghIssueGatewayAsync, splitConcatenatedJsonPages, type AsyncIssueGateway } from "./escalate.js";
+import {
+  escalationHeadSha, ghIssueGatewayAsync, prReferentFromIssueText, splitConcatenatedJsonPages, type AsyncIssueGateway,
+} from "./escalate.js";
 import { feedbackCaptured, stageFeedbackCapture } from "./feedback.js";
 import { overseerStatePath } from "./gardener-overseer.js";
 import { ghTextAsync } from "./github-transport.js";
@@ -37,6 +39,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { appendLedger } from "./ledger.js";
 import type { Mount } from "./mounts.js";
 import { installPolicyPath } from "./policy.js";
+import { stalledStageIssueIdentity } from "./stage-stall-identity.js";
 import type { spawnWorker, WorkerResult } from "./worker.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 
@@ -168,6 +171,11 @@ export function issueEscalationClass(issue: Pick<RevalidationIssue, "body">): st
   return /^\*\*Class:\*\*\s*(\S+)\s*$/m.exec(issue.body)?.[1];
 }
 
+/** The `**Cause:**` an escalation body names: stage-stall, review, ci, conflict... */
+export function issueEscalationCause(issue: Pick<RevalidationIssue, "body">): string | undefined {
+  return /^\*\*Cause:\*\*\s*(\S+)\s*$/m.exec(issue.body)?.[1];
+}
+
 /** Classify one issue. Producer classes are named by the task id their producer mints; an escalation
  *  with a plan-task or PR referent is the reconciler's shape; an issue with no `**Class:**` line was
  *  filed by hand. `hasReferent` is the reconciler's own derivation (plan task, `PR-<n>`, or a PR URL). */
@@ -242,6 +250,9 @@ export interface RevalidationVerdict {
   /** Required for `resolved`: the evidence a reader can check. A `resolved` without one is unknown. */
   citation?: string;
   judgeEvidence?: JudgeReceipt;
+  /** A referent verdict's OPEN PR and its current head, read from the batched open-PR view the referent
+   *  derivation already holds. Absent when the PR is not open or its head is unknown. */
+  openPrHead?: { prNumber: number; sha: string };
 }
 
 export type RevalidationAction = "close" | "refresh" | "convert" | "keep";
@@ -314,6 +325,8 @@ export function decideAction(input: {
   operatorSpokeLast: boolean | undefined;
   /** The fleet re-observed this escalation within the window (conditionReobserved). */
   reobserved?: boolean;
+  /** The resolution is the garden's own deterministic stage-stall rule ({@link stageStallResolution}). */
+  stageStallResolved?: boolean;
   prior: PriorVerdict | undefined;
   nowMs: number;
 }): { action: RevalidationAction; guard?: RevalidationGuard } {
@@ -325,7 +338,10 @@ export function decideAction(input: {
   if (verdict.verdict === "resolved") {
     if (!verdict.citation) return { action: "keep", guard: "no-citation" };
     if (isAbsenceOnlyCitation(verdict.citation)) return { action: "keep", guard: "absence-only-citation" };
-    if (operatorOwned) return refreshUnlessRecent(input.prior, input.nowMs, "operator-owned-class");
+    // A stall report is the fleet's own observation, not an operator capacity decision: its two deterministic
+    // resolutions may close a MANUAL issue. A GRILL, and any other MANUAL resolution, still only refreshes.
+    const fleetObservation = input.stageStallResolved === true && input.escalationClass === "MANUAL";
+    if (operatorOwned && !fleetObservation) return refreshUnlessRecent(input.prior, input.nowMs, "operator-owned-class");
     if (input.reobserved) return { action: "keep", guard: "condition-reobserved" };
     return { action: "close" };
   }
@@ -343,6 +359,45 @@ function refreshUnlessRecent(prior: PriorVerdict | undefined, nowMs: number, gua
     return { action: "keep", guard: guard ?? "refresh-not-due" };
   }
   return guard === undefined ? { action: "refresh" } : { action: "refresh", guard };
+}
+
+// ── Stage-stall reports ──────────────────────────────────────────────────────────────────────────
+
+export const STAGE_STALL_CAUSE = "stage-stall";
+const FULL_SHA = /^[0-9a-f]{40}$/;
+
+/** A stage-stall report's deterministic resolution, or `undefined` when neither rule decides it:
+ *  (1) the PR's current head is not the head the stall was reported at, so the report no longer describes
+ *  the PR (a stall at the new head files its own issue); or (2) a NEWER open stage-stall issue reports the
+ *  same PR, head and blocker, W1-T11031's dedup key read through its own parsers. Different blockers at
+ *  one head are distinct questions and both stay. Only a MANUAL stall report is decided here. */
+export function stageStallResolution(
+  issue: RevalidationIssue, open: readonly RevalidationIssue[], openPrHead: RevalidationVerdict["openPrHead"],
+): RevalidationVerdict | undefined {
+  // Stall reports are filed MANUAL; any other class (a GRILL above all) is never decided here.
+  if (issueEscalationClass(issue) !== "MANUAL" || issueEscalationCause(issue) !== STAGE_STALL_CAUSE) return undefined;
+  const head = escalationHeadSha(issue.body);
+  const pr = prReferentFromIssueText(issue.body) ?? prReferentFromIssueText(issue.title);
+  if (head === undefined || !FULL_SHA.test(head) || pr === undefined) return undefined;
+  if (openPrHead !== undefined && openPrHead.prNumber === pr && FULL_SHA.test(openPrHead.sha) && openPrHead.sha !== head) {
+    return {
+      verdict: "resolved",
+      reason: `the stalled stage was reported at a head PR #${pr} has since moved off`,
+      citation: `PR #${pr} head is now ${openPrHead.sha}; this stall was reported at ${head}`,
+    };
+  }
+  const identity = stalledStageIssueIdentity(issue);
+  if (identity === undefined) return undefined;
+  const newer = open
+    .filter((o) => o.number > issue.number && issueEscalationCause(o) === STAGE_STALL_CAUSE &&
+      escalationHeadSha(o.body) === head && stalledStageIssueIdentity(o) === identity)
+    .sort((a, b) => b.number - a.number)[0];
+  if (newer === undefined) return undefined;
+  return {
+    verdict: "resolved",
+    reason: `a newer open stage-stall issue reports the same PR, head and blocker`,
+    citation: `duplicate of ${newer.url}: same ${identity} at head ${head}`,
+  };
 }
 
 // ── The pass ─────────────────────────────────────────────────────────────────────────────────────
@@ -480,8 +535,15 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     let verdict: RevalidationVerdict;
     let judged = false;
     let receiptSource: JudgeReceipt["source"] = "deterministic";
+    let stageStallResolved = false;
     if (issueClass === "referent") {
       verdict = referents.get(issue.number) ?? { verdict: "unknown", reason: "the referent could not be derived this pass" };
+      // A terminal referent keeps its own citation; an open or unread one may still be a stale stall report.
+      const stall = verdict.verdict === "resolved" ? undefined : stageStallResolution(issue, issues, verdict.openPrHead);
+      if (stall !== undefined) {
+        verdict = stall;
+        stageStallResolved = true;
+      }
     } else if (issueClass === "liveness") {
       verdict = ports.livenessVerdict((issueTaskId(issue) ?? "").replace(/-gardener-liveness$/, ""));
     } else if (issueClass === "read-model") {
@@ -519,7 +581,7 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
         ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "comments", issue_number: issue.number, error: String((e as Error)?.message ?? e) });
       }
     }
-    let { action, guard } = decideAction({ verdict, escalationClass, operatorSpokeLast: spokeLast, reobserved, prior: before, nowMs });
+    let { action, guard } = decideAction({ verdict, escalationClass, operatorSpokeLast: spokeLast, reobserved, stageStallResolved, prior: before, nowMs });
     if (action === "close" && closes >= policy.maxClosesPerPass) {
       action = "keep";
       guard = "close-cap";

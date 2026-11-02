@@ -17,6 +17,35 @@ import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "#src/lib/learnings.js";
 import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import fs from "node:fs";
+import { readFileTail, readPeakSamples } from "#src/lib/host-memory-learning.js";
+
+test("W1-T10962: learning reads bound bytes and discard incomplete or malformed evidence", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}bounded-learning-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "estimates"));
+  const path = join(dir, "estimates", "garden.ndjson");
+  writeFileSync(path, `${"prefix".repeat(1000)}\n🙂é終\n`);
+  const read = fs.readSync;
+  let bytes = 0;
+  t.mock.method(fs, "readSync", (fd: number, buffer: Buffer, offset: number, length: number, position: number) => {
+    bytes += length;
+    return read(fd, buffer, offset, length, position);
+  });
+  assert.equal(readFileTail(path, 14), "🙂é終\n");
+  assert.ok(bytes <= 14);
+  writeFileSync(path, "one unbroken record");
+  assert.equal(readFileTail(path, 8), "");
+  writeFileSync(path, "whole\n");
+  assert.equal(readFileTail(path, 8), "whole\n");
+  writeFileSync(path, Buffer.from([0xff]));
+  assert.throws(() => readFileTail(path, 8), /malformed/);
+  assert.throws(() => readFileTail(join(dir, "absent"), 8), /absent/);
+  assert.throws(() => readFileTail(dir, 8), /unreadable/);
+  const diagnostics: Array<Record<string, unknown>> = [];
+  assert.deepEqual(readPeakSamples("garden", { location: () => ({ dir }), log: (row) => diagnostics.push(row) }), []);
+  assert.ok(diagnostics.some((row) => row.op === "read" && String(row.reason).includes("malformed")));
+});
 
 const NOW_MS = Date.parse("2026-10-01T12:00:00.000Z");
 const WINDOW = { rotationWindowMs: 60 * 24 * 3600 * 1000, minRotations: 4 };
