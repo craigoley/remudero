@@ -28,7 +28,7 @@ export interface Episode {
   charges: Charge[];
 }
 export interface Price { key: string; hours: number; prs: number; owners: string[]; thresholdHours?: number }
-interface Prior { task: CiFrictionRemedyTask; effect?: RemedyEffect }
+export interface Prior { task: CiFrictionRemedyTask; effect?: RemedyEffect }
 export interface FlowAction extends GardenAction<"draft"> {
   price: Price; origin: string; rung: number; prior?: Prior; escalation?: string;
   charges: Charge[]; population: number[];
@@ -77,6 +77,8 @@ export interface LadderKind {
   shadowAdmission?: boolean;
   /** W1-T9597: a `<PR blocker>:<reason>` key is owned by its declared owner's module, never by a text search. */
   declaredOwners?: boolean;
+  /** W1-T11097: the modules that measure this ladder's own cause; a remedy scoped to one is a relabel, so it escalates. */
+  ownModules?: readonly string[];
 }
 
 function flowCauseLabel(cause: string): string {
@@ -92,6 +94,7 @@ export const FLOW_LADDER: LadderKind = {
   evidenceLine: (pr, hours, reason) => `- PR #${pr}: ${hours.toFixed(2)} PR-hours — ${reason}`,
   escalationSummary: cause => `Flow blocker: ${cause} still costs PR-hours`,
   declaredOwners: true,
+  ownModules: ["src/lib/flow-remedy-gardener.ts"],
 };
 
 export const ADMISSION_FLOW_LADDER: LadderKind = { ...FLOW_LADDER, prefix: "admission-flow", shadowAdmission: true };
@@ -400,7 +403,8 @@ function declaredOwnerFile(action: FlowAction, kind: LadderKind): { file: string
   return { file, line: `${owners[0]} → ${file}` };
 }
 
-export function draftShard(action: FlowAction, taskId: string, search: OwnerSearch, kind: LadderKind): string {
+/** The owner choice, factored out of {@link draftShard} so a ladder can read the owner file before it drafts. */
+function chooseOwner(action: FlowAction, search: OwnerSearch, kind: LadderKind): { owner?: { file: string; line: string }; files: { file: string; hits: number }[] } {
   const [blocker, ...reason] = action.price.key.split(":");
   const owner = kind.declaredOwners && PR_BLOCKERS.includes(blocker as PrBlocker) ? declaredOwnerFile(action, kind) : undefined;
   const matches = owner ? [{ file: owner.file, hits: 0 }] : search.filesContaining(reason.join(":"));
@@ -408,6 +412,29 @@ export function draftShard(action: FlowAction, taskId: string, search: OwnerSear
   const files = (found.length ? found : (kind.fallbackFiles ?? []).filter(f => search.fileExists(f)).map(file => ({ file, hits: 0 })))
     .sort((a, b) => b.hits - a.hits || a.file.localeCompare(b.file));
   if (!files.length) throw new Error(`${kind.stem} gardener: no source owner found for ${action.price.key}`);
+  return { ...(owner ? { owner } : {}), files };
+}
+
+/**
+ * W1-T11097 — a reason the ladder cannot scope a remedy to `ownerFile`, or undefined when it can: the file is not a
+ * source module (a data file, a test, a doc), is one of the ladder's own measuring modules (the remedy would only
+ * relabel the classifier), or is the file a prior remedy whose effect did not fall already used.
+ */
+export function remedyScopeRefusal(ownerFile: string, kind: LadderKind, prior?: Prior): string | undefined {
+  if (!/^(src|scripts)\/.+\.(ts|mts|js|mjs)$/.test(ownerFile)) {
+    return `the owner file ${ownerFile} is not a source module (a .ts, .mts, .js or .mjs file under src/ or scripts/)`;
+  }
+  if (kind.ownModules?.includes(ownerFile)) {
+    return `the owner file ${ownerFile} is the ${kind.name} ladder's own classifier; a remedy scoped to it only relabels the cause`;
+  }
+  if (prior && prior.task.files[0] === ownerFile) {
+    return `the owner file ${ownerFile} is the file previous remedy ${prior.task.id} already used and its effect did not fall`;
+  }
+  return undefined;
+}
+
+export function draftShard(action: FlowAction, taskId: string, search: OwnerSearch, kind: LadderKind): string {
+  const { owner, files } = chooseOwner(action, search, kind);
   const stem = slug(flowCauseLabel(action.price.key), 80);
   const testPath = newTestPath(`${kind.stem}-${stem}`, [files[0]!.file], "flow-remedy-gardener");
   const evidence = new Map<number, { hours: number; reason: string }>();
@@ -448,6 +475,16 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
   const { kind, sources } = input;
   const clock = deps.clock ?? systemClock;
   const bucket = input.bucket ?? gardenLedgerBucket;
+  const searchOf = (): OwnerSearch => sources.ownerSearch ?? gitCiFrictionOwnerSearch(args => execFileSync("git", ["-C", deps.repoRoot, ...args], { encoding: "utf8", timeout: 60_000 }));
+  // An owner the search cannot name is left to draftShard, which throws its own "no source owner" error.
+  const scopeRefusalOf = (action: FlowAction): string | undefined => {
+    let file: string;
+    try { file = chooseOwner(action, searchOf(), kind).files[0]!.file; } catch (err) {
+      // No nameable owner is not a scope refusal: draftShard re-runs the same choice and throws "no source owner found" itself.
+      void err; return undefined;
+    }
+    return remedyScopeRefusal(file, kind, action.prior);
+  };
   return {
     name: kind.name, landingRefusal: machineShardLandingGuard(deps, sources.ownerSearch?.fileExists), classes: ["draft"], review: { draft: "a remedy task is a judgement call for the machine-filing judge or a person" },
     cheapFingerprint: () => {
@@ -469,23 +506,24 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
       input.onScorecard?.(inv, scorecard);
       return scorecard;
     },
-    prepare: (ws, plan, async) => prepareGardenTaskIds(ws, plan.actions[0] && !plan.actions[0].admissionShadow && !plan.actions[0].escalation ? 1 : 0, sources.mintTaskId, async),
+    prepare: (ws, plan, async) => prepareGardenTaskIds(ws, plan.actions[0] && !plan.actions[0].admissionShadow && !plan.actions[0].escalation && scopeRefusalOf(plan.actions[0]) === undefined ? 1 : 0, sources.mintTaskId, async),
     apply: (ws, plan, _scorecard, heldIds) => {
       const action = plan.actions[0];
       if (!action) return undefined;
       if (action.admissionShadow) { recordAdmissionFlowProposal(deps, action); return undefined; }
-      if (action.escalation) {
+      const escalationReason = action.escalation ?? scopeRefusalOf(action);
+      if (escalationReason !== undefined) {
         const escalation: Escalation = { class: "BLOCKED", taskId: `${kind.stem}-${slug(action.price.key, 60)}`,
-          summary: kind.escalationSummary(action.price.key), detail: `${action.reason}\n${action.escalation}\n${action.prior?.effect?.reason ?? ""}`,
+          summary: kind.escalationSummary(action.price.key), detail: `${action.reason}\n${escalationReason}\n${action.prior?.effect?.reason ?? ""}`,
           options: [{ label: "design-remedy", detail: "name a structural remedy and file it" }, { label: "accept-cost", detail: `retire ${action.origin}` }],
           recommendation: "design-remedy", headDedup: "independent" };
         const issue = sources.escalate ? sources.escalate(escalation) : deps.escalate?.(escalation);
-        deps.log(kind.escalatedStep, { origin: action.origin, rung: action.rung, reason: action.escalation, issue_url: issue ?? null });
+        deps.log(kind.escalatedStep, { origin: action.origin, rung: action.rung, reason: escalationReason, issue_url: issue ?? null });
         return undefined;
       }
       if (!ws.branch) throw new Error(`${kind.stem} gardener: filing workspace has no reservation branch`);
       const id = (heldIds ?? prepareGardenTaskIds(ws, 1, sources.mintTaskId) as string[])[0]!;
-      const search = sources.ownerSearch ?? gitCiFrictionOwnerSearch(args => execFileSync("git", ["-C", deps.repoRoot, ...args], { encoding: "utf8", timeout: 60_000 }));
+      const search = searchOf();
       const contents = sources.draftShard ? sources.draftShard(action, id) : draftShard(action, id, search, kind);
       const verdict = ciFrictionRecordVerdict(contents, `${kind.stem}:${id}`);
       if (!verdict.ok) throw new Error(`${kind.stem} gardener: drafted record failed lint (${verdict.reason})`);
