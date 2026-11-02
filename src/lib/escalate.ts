@@ -320,6 +320,10 @@ export interface IssueGateway {
    *  OBSERVER of an already-open escalation appends here rather than opening a sibling. A gateway
    *  omitting it still dedupes, but silently drops the second observation. */
   comment?(url: string, body: string): void;
+  /** Replace an OPEN issue's body. The sweep keeps a PR's one stall issue's `**Head:**` line on the newest
+   *  head it appended (operator ruling 2026-11-01), so a reader of the stored body, such as the
+   *  issue-revalidation garden's head-moved rule, never judges that issue against a head it superseded. */
+  editBody?(url: string, body: string): void;
   /** Ensure ONE label exists on the repo (create-if-missing, tolerate-already-exists). Returns false
    *  when provisioning failed. Optional: a gateway omitting it is treated as "every label already
    *  exists". TRAP: an unprovisioned label used to fail the WHOLE create, losing the rendered
@@ -1864,6 +1868,12 @@ function issueGatewaySteps(
       drive(
         (function* () {
           yield* gh(["issue", "comment", url, "--repo", repoArg, "--body", body]);
+        })(),
+      ),
+    editBody: (url, body) =>
+      drive(
+        (function* () {
+          yield* gh(["issue", "edit", url, "--repo", repoArg, "--body", body]);
         })(),
       ),
   } as AsyncIssueGateway;

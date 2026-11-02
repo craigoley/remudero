@@ -87,7 +87,6 @@ jobs:
         "api-client-drift",
         "no-hand-rolled-fetch",
         "prompt-surface-gate",
-        "scan-pr / osv-scan",
         "License Review",
         "leak-grep",
         "assertion-discrimination",
@@ -169,6 +168,7 @@ jobs:
       # Its failure skips the matrix and the existing REQUIRED coverage-ratchet refuses that.
       # Runtime compatibility is enforced for lock changes by the trusted exact-head security
       # consumer, not the generic aggregator. Scan findings remain advisory.
+      GATE_RATIONALE: "W1-T4116 gate gardener: scan-pr / osv-scan refused 0 of 115 runs on 75 pull requests (measured 2026-11-01T13:17:28.924Z, 74.6 min)."
       ADVISORY: >-
         [
         "squash-trailer-gate",
@@ -214,7 +214,8 @@ jobs:
         "clock-sweep-report (merge the shards, classify, deliver)",
         "heartbeat-watch (reads every host's beat branch off-machine; silent per host until installed)",
         "probe-path-filter",
-        "recovery-drill (throwaway fixtures, real recovery code, no live fleet touched)"
+        "recovery-drill (throwaway fixtures, real recovery code, no live fleet touched)",
+        "scan-pr / osv-scan"
         ]
       # W1-T261 re-aggregate grace window — the mechanism is in the step below. Env, not literals,
       # so tests shrink both to seconds.
