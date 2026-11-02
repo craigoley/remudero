@@ -291,7 +291,7 @@ test("W1-T11162 criterion 2: a plan-only review ledgers one row of its phases af
   const phases = plan.rows.filter((row) => row.step === "review.plan_only_phases");
   assert.equal(phases.length, 1, `one phase row per plan-only review; saw ${plan.steps.join(", ")}`);
   const row = phases[0]!;
-  assert.equal(row.pr_url, "https://github.com/acme/remudero/pull/1");
+  assert.equal(typeof row.head_sha, "string", "the row names the head it timed; the run id names the PR");
   assert.equal(row.materialize_ms, 1_234, "the caller's materialization time rides on the row");
   for (const field of ["diff_ms", "decision_ms", "lint_ms", "judge_ms", "post_ms", "arm_ms", "total_ms"]) {
     assert.equal(typeof row[field], "number", `${field} is measured`);

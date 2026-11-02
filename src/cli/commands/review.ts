@@ -1341,7 +1341,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   await armIfVerdictPermitsAsync(verdict, armCtx, { arm: args.arm });
   // Record after both authoritative posting and auto-merge eligibility. The recorder
   // swallows telemetry write failures; replay returns above before reaching this call.
-  if (planOnlySkip) log("review.plan_only_phases", { pr_url: prUrl, head_sha: headSha, ...planOnlyPhaseFields(phases, systemClock.now(), args.materializeMs) });
+  if (planOnlySkip) log("review.plan_only_phases", { head_sha: headSha, ...planOnlyPhaseFields(phases, systemClock.now(), args.materializeMs) });
   recordReviewFindings(findingCapture, { taskId: task.id, prUrl, headSha, decisionDigest,
     provenance: evaluatorProvenance, log });
   if (verdict.capped) {
