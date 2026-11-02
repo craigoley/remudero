@@ -283,9 +283,8 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2500, stepMs = 10):
 
 // ── W1-T193: buildServeServer defaults panelGraph.ratify to a REAL ratifyCliGateway ─────────
 //
-// run-task.ts's serveCommand (the ONLY real `rmd serve` CLI wiring) deliberately never
-// constructs a RatifyCliGateway itself — see ServeDeps.panelGraph's own doc (lib/serve.ts):
-// buildServeServer defaults `ratify` to a real ratifyCliGateway, rooted at panelGraph.root +
+// The production CLI supplies the maintained owned fleet gateway. Library assembly still
+// defaults `ratify` to an unowned ratifyCliGateway, rooted at panelGraph.root +
 // fleetControlRoot/state/logs, whenever the caller omits it. Every OTHER test in this file
 // injects fakeRatifyGateway() explicitly (never exercising the default), so this is the one
 // place that default construction — and the REAL detached `bin/rmd` spawn it wires POST

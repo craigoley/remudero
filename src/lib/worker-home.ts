@@ -34,29 +34,21 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { systemClock, type Clock } from "./clock.js";
 
 /**
- * The general shell-isolation mechanism (W1-T18, the OSS blocker). Every worker's HOME is redirected
- * to a Remudero-controlled scratch directory whose rc files this module writes empty, so a worker
- * shell can never source the operator's own dotfiles.
+ * Isolate worker shells with a scratch HOME and empty rc files (W1-T18).
  *
- * INVARIANT: a worker HOME holds ONLY empty rc files Remudero wrote ({@link WORKER_HOME_RC_FILES})
- * plus the named grants symlinked back from the real HOME ({@link WORKER_HOME_SYMLINKS}) — never a
- * wholesale copy. Same allowlist discipline as env.ts's ANTHROPIC_* boundary.
- * INVARIANT: a worker home is never inside a git work tree. {@link materializeWorkerHome} refuses via
- * {@link gitWorkTreeAncestor} before writing anything, for a clone's `.git` directory and a linked
- * worktree's `.git` file alike.
- * TRAP: W1-T17's probe proves isolation per run but cannot manufacture it. Isolation used to hold
- * only because this host has no `~/.bashrc`; a populated one gave zero isolation (FIELD FINDING 11b).
- * TRAP: the macOS login keychain holding the OAuth token is HOME-relative, so the redirect hid it and
- * Claude Code exited "Not logged in" at $0 before any turn. Only that one keychain DB file is granted
- * back, never the whole `~/Library` (FIELD FINDING 11c).
+ * Only {@link WORKER_HOME_RC_FILES} and named {@link WORKER_HOME_SYMLINKS} grants belong here,
+ * never a wholesale HOME copy (env.ts's ANTHROPIC_* discipline).
+ * {@link materializeWorkerHome} refuses before writing when {@link gitWorkTreeAncestor} finds
+ * a clone's `.git` directory or a linked worktree's `.git` file.
+ * TRAPS: a populated `~/.bashrc` defeated W1-T17's probe-only isolation (FIELD FINDING 11b).
+ * Redirecting HOME hid macOS OAuth and caused "Not logged in" at $0; grant only the keychain DB,
+ * never all of `~/Library` (FIELD FINDING 11c).
  *
  * FALSIFIER: test/worker-home.test.ts, test/worker-home-per-run.test.ts. // Why:
  * docs/forensics/worker-home.md#module-header (W1-T18, W1-T2633, PR #8, PR #100).
  */
 
-/** Empty-by-construction rc files a worker's HOME must hold — bash AND zsh conventions, so isolation
- *  does not depend on which shell a worker sources. INVARIANT: Remudero writes each as a zero-byte
- *  file and never consults the operator's real dotfiles. */
+/** Zero-byte bash and zsh rc files; never consult the operator's dotfiles. */
 export const WORKER_HOME_RC_FILES: readonly string[] = [
   ".bashrc",
   ".bash_profile",
@@ -77,10 +69,8 @@ export interface WorkerHomeSymlink {
   reason: string;
 }
 
-/** W1-T505: the credential-only sibling of the operator's real `.claude` that a worker's `.claude`
- *  grant prefers when no explicitly provisioned shared child exists. {@link workerHomePlan}
- *  uses the shared child first, then `<realHome>/.claude-fleet`, then the legacy `.claude`, so
- *  upgrading before shared authority is provisioned preserves the existing grant. // Why: docs/forensics/worker-home.md#the-claude-grant. */
+/** W1-T505: prefer the shared child, then this credential-only sibling, then legacy `.claude`.
+ *  This preserves the grant before provisioning. Why: docs/forensics/worker-home.md#the-claude-grant. */
 export const WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH = ".claude-fleet";
 
 const claudeFleetSeedFsOps = { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, chmodSync };
@@ -93,15 +83,11 @@ export interface ClaudeCredentialSeedEvent {
   priorVerdict: string;
 }
 
-/** W1-T6252: provision, and heal, the ONE shared credential store every fleet Claude process resolves.
- * Inside a container `<realHome>/.claude` is the host's bind mount, so every container creates and then
- * resolves the SAME `.claude/fleet-auth/claude/.credentials.json`, and the CLI's own refresh lock beside
- * it serialises renewals. A private `.claude-fleet` fork per container made three refreshing copies of one
- * OAuth lineage, so any holder's refresh rotated the token out from under the others. An existing fork is
- * left on disk for recovery and is no longer resolved once the store exists; no new fork is created.
- * The exclusive directory create makes concurrent containers converge on one winner. A store holding a
- * usable credential is owned by the CLI's refresh and is never copied over; an unusable one heals from a
- * usable owner credential instead of refusing every spawn until someone intervenes. */
+/** W1-T6252: provision or heal one shared store under the host's `.claude` bind mount.
+ * The CLI's refresh lock serializes renewals; private per-container OAuth forks invalidated peers.
+ * Keep old forks for recovery, but never create or resolve them once the shared store exists.
+ * Exclusive mkdir selects one provisioner. Never overwrite usable CLI-owned credentials;
+ * heal unusable credentials only from a usable owner copy. */
 export function seedClaudeFleetCredentials(opts: {
   realHome: string;
   fsImpl?: Partial<ClaudeFleetSeedFsOps>;
@@ -357,12 +343,8 @@ export async function replaceClaudeFleetCredential(opts: {
   }
 }
 
-/** Where Playwright keeps its browser builds. `PLAYWRIGHT_BROWSERS_PATH` wins when set to a real path, which is how CI
- *  images relocate the cache; the literal `"0"` means "inside node_modules" and is NOT a directory, so it falls
- *  through to the platform default exactly as Playwright's own resolution does.
- *  W1-T2895: moved here from `review.ts` (its `ensureBrowsersOnce` imports it back) — this module is
- *  {@link playwrightCacheRoot}'s only OTHER consumer, and `worker-home.ts -> review.ts` was the closing edge of
- *  four of the thirteen import cycles `npm run cycle-ratchet` tolerated. */
+/** Resolve Playwright's cache: a real `PLAYWRIGHT_BROWSERS_PATH` wins; empty or `"0"` uses the platform default.
+ *  W1-T2895: shared with review.ts's `ensureBrowsersOnce` here to avoid four import cycles. */
 export function playwrightCacheRoot(
   env: NodeJS.ProcessEnv = process.env,
   platform: string = process.platform,
@@ -375,13 +357,9 @@ export function playwrightCacheRoot(
   return join(home, ".cache", "ms-playwright");
 }
 
-/** The explicit allowlist of real-HOME paths a worker needs back, symlinked individually. Mirrors
- *  env.ts's ALLOWLIST discipline: name each grant and its reason, never inherit HOME wholesale. */
-/** The browser cache's path relative to HOME, derived from {@link playwrightCacheRoot} above
- *  rather than a second copy of its platform branch, so grant and resolver cannot disagree. INVARIANT:
- *  the empty env and sentinel HOME are deliberate — `ALLOWLIST` (lib/env.ts) passes no
- *  `PLAYWRIGHT_BROWSERS_PATH` into a spawn, so only the no-override branch is reachable.
- *  // Why: docs/forensics/worker-home.md#playwrightcacherelpath. */
+/** Derive the HOME-relative grant from {@link playwrightCacheRoot} so grant and resolver agree.
+ *  Empty env and sentinel HOME model lib/env.ts's `ALLOWLIST`, which omits `PLAYWRIGHT_BROWSERS_PATH`.
+ *  Why: docs/forensics/worker-home.md#playwrightcacherelpath. */
 export function playwrightCacheRelPath(platform: string = process.platform): string {
   const sentinel = "/__rmd_home__";
   return relative(sentinel, playwrightCacheRoot({}, platform, sentinel)).split(sep).join("/");
@@ -466,9 +444,7 @@ export interface WorkerHomeGrantOutcome {
   reason?: string;
 }
 
-/** The grants that were LOST or HEALED. INVARIANT: `absent` and the two healthy states are excluded
- *  deliberately — materialisation runs per spawn and per probe tick, so reporting every grant would be
- *  four rows a spawn, while `failed`/`displaced` are rare by construction. */
+/** Report lost or healed grants only; optional absences and healthy grants would flood per-spawn logs. */
 export function lostWorkerHomeGrants(plan: WorkerHomePlan): WorkerHomeGrantOutcome[] {
   return (plan.outcomes ?? []).filter((o) => o.state === "failed" || o.state === "displaced");
 }
@@ -589,26 +565,15 @@ export function sweepClaudeConfigBackups(
   return { removed, kept };
 }
 
-/** `lstat`, not `stat`: a SYMLINK named `.git` must be judged as itself, never followed.
- *  `throwIfNoEntry: false` rather than a catch — a vanished entry answers "not a directory", which
- *  {@link isRepositoryShaped} reads as a worktree pointer and DISQUALIFIES, the fail-closed
- *  direction. A genuine read error (EACCES) still throws and reaches the caller: refusing loudly is
- *  this guard's contract, and swallowing it here would erase the one signal saying the answer is
- *  unknown. */
+/** Inspect `.git` symlinks themselves with `lstat`. A vanished entry fails closed as a worktree
+ *  pointer in {@link isRepositoryShaped}; genuine read errors such as EACCES still throw. */
 function defaultIsDirectory(path: string): boolean {
   return lstatSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false;
 }
 
-/** Is this `.git` entry actually a repository? A linked worktree's `.git` is a FILE carrying a
- *  `gitdir:` pointer, so anything that is not a directory disqualifies (fail-closed). A clone's
- *  `.git` DIRECTORY always carries `HEAD`.
- *
- *  AN EMPTY DIRECTORY NAMED `.git` IS NOT A REPOSITORY, and git itself agrees — `git -C /tmp
- *  rev-parse` on such a tree exits "not a repository". MEASURED 2026-09-06: an empty `/tmp/.git` on
- *  the fleet host made ALL of `/tmp` read as a work tree, so every worker home under it was refused
- *  with WorkerHomePlacementError. CI was green and the reviewer red, because only the fleet host
- *  carried the stray directory — a host-wide outage of worker-home materialization, invisible except
- *  as unexplained proof failures. */
+/** Non-directories disqualify as linked-worktree `gitdir:` pointers (fail-closed); clone directories
+ *  must contain `HEAD`. TRAP: an empty `/tmp/.git` refused every fleet worker home on 2026-09-06,
+ *  despite green CI. Falsifier: test/worker-home.test.ts. */
 function isRepositoryShaped(
   gitEntry: string,
   exists: (path: string) => boolean,
@@ -687,8 +652,7 @@ export function materializeWorkerHome(opts: {
 
   mkdirSync(plan.workerHome, { recursive: true });
   for (const rc of plan.rcFiles) {
-    // Zero-byte by construction, every time — never appended to, never trusted to have been left
-    // empty by something else.
+    // Truncate every time; prior emptiness is not trusted.
     writeFileSync(rc, "");
   }
 
@@ -696,9 +660,7 @@ export function materializeWorkerHome(opts: {
   for (const link of plan.symlinks) {
     const relFrom = relative(plan.workerHome, link.from);
     if (!existsSync(link.to)) {
-      // THE OPTIONAL-GRANT SKIP, deliberate and unchanged: the target genuinely is not on this host,
-      // so there is nothing to grant. INVARIANT: this path stays silent — an error here would break
-      // every host where a grant is unavailable by design.
+      // Missing optional targets are silently skipped; isolation must work without those tools.
       outcomes.push({ relFrom, to: link.to, state: "absent" });
       continue;
     }
@@ -710,10 +672,8 @@ export function materializeWorkerHome(opts: {
         continue; // already correct
       }
       if (st.isDirectory() && !st.isSymbolicLink()) {
-        // A REAL DIRECTORY IN THE SLOT. `unlinkSync` cannot remove one and `symlinkSync` then throws
-        // EEXIST, so before this the directory won permanently and silently. MOVED ASIDE, NEVER
-        // DELETED: it is written by the CLI we are granting to and is the only evidence of what
-        // poisoned the slot. // Why: docs/forensics/worker-home.md#a-real-directory-in-the-slot.
+        // A directory defeats unlink + symlink with EEXIST. Move it aside, never delete CLI evidence.
+        // Why: docs/forensics/worker-home.md#a-real-directory-in-the-slot.
         displacedTo = `${link.from}.displaced-${Date.now()}-${randomBytes(3).toString("hex")}`;
         renameSync(link.from, displacedTo);
       } else {
@@ -734,9 +694,7 @@ export function materializeWorkerHome(opts: {
           : { relFrom, to: link.to, state: "linked" },
       );
     } catch (e) {
-      // Racing another worker materializing the same shared home, or debris that could not be
-      // cleared — never fatal to isolation itself, since the rc files are what isolate. NO LONGER
-      // SILENT: the target exists and we failed to reach it, which is a lost capability.
+      // Races or uncleared debris lose capability, so report failure; rc files still isolate.
       outcomes.push({
         relFrom,
         to: link.to,
@@ -1463,12 +1421,8 @@ export function keychainProvisionLockPath(keychainPath: string): string {
 
 interface KeychainProvisionLockInfo {
   pid: number;
-  /** `os.hostname()` of the process that wrote the lock. RECORDED SINCE R-3, and the reason is
-   *  {@link isHolderStale}'s rung 1: a pid is only ever meaningful on the host that assigned it,
-   *  so without this field every liveness probe below answers a question about OUR process table
-   *  that says nothing about the recorded holder. OPTIONAL on the READ side — a lock written
-   *  before this field existed carries none, and `isHolderStale` skips its host rung for exactly
-   *  that shape rather than inventing an identity for it. */
+  /** R-3: writer's `os.hostname()`; pids mean nothing across hosts.
+   *  {@link isHolderStale} skips its host rung for legacy records without this field. */
   host?: string;
   startedAt: string;
 }
@@ -1519,12 +1473,8 @@ export interface AcquireKeychainProvisionLockOpts {
    *  plan/policy.yaml's `keychainProvisionLockWaitMs` row, falling back to
    *  {@link DEFAULT_KEYCHAIN_PROVISION_LOCK_WAIT_MS} when that file cannot be read at all. */
   waitDeadlineMs?: number;
-  /** TEST-ONLY seam standing in for the committed-policy READ itself, so a test can drive the
-   *  branch where that read FAILS. `loadDefaultPolicy` resolves from `import.meta.url` and
-   *  memoizes for the process lifetime, so its failure path is unreachable from a test by any
-   *  other means — and an unreachable catch arm is this repo's own recorded coverage trap
-   *  (#978). Same `__`-prefixed convention `acquireInflightLock`'s `__beforeReclaimDelete` uses;
-   *  never set outside tests. */
+  /** Test-only committed-policy reader: module-relative, memoized `loadDefaultPolicy` otherwise
+   *  hides read failures (#978). Follows `acquireInflightLock`'s `__beforeReclaimDelete` convention. */
   __readCommittedWaitMs?: () => number;
 }
 
@@ -1673,17 +1623,13 @@ interface ProvisionGate {
   credentialSidecarBroken: boolean;
   treatAsAbsent: boolean;
   needsProvisioning: boolean;
-  /** W1-T2398: the sidecar's recorded expiry (epoch ms), parsed independently of the skew comparison —
-   *  present whenever the store exists, identity hasn't changed, and the sidecar holds a well-formed
-   *  number, even when the credential is nowhere near stale. `undefined` when there is nothing
-   *  parseable; never invented. Lets a caller measure headroom on the steady-state path. */
+  /** W1-T2398: parsed sidecar epoch ms for an existing, identity-matched store, independent of skew.
+   *  Measures steady-state headroom; unparseable expiry stays `undefined`, never invented. */
   recordedExpiresAtMs?: number;
 }
 
-/** Pure(ish) — reads `identityPath`/`expiryPath` but writes nothing — the W1-T265 identity gate and
- *  W1-T293 expiry gate, extracted (W1-T339) so they can be evaluated TWICE: before the provisioning
- *  lock, to decide whether this call needs it at all, and again after acquiring it, because a
- *  concurrent winner may have re-provisioned meanwhile. That is what lets a loser CONVERGE. */
+/** Read-only W1-T265 identity and W1-T293 expiry gates. W1-T339: evaluate before locking, then
+ *  recheck under the lock so losers converge on a concurrent provisioner's result. */
 function deriveProvisionGate(opts: EnsureWorkerKeychainOpts, storeExists: boolean): ProvisionGate {
   let identityChanged = false;
   if (storeExists && opts.accountId !== undefined) {
@@ -1712,9 +1658,7 @@ function deriveProvisionGate(opts: EnsureWorkerKeychainOpts, storeExists: boolea
     if (opts.priorSpawnCredentialExpired) {
       credentialExpired = true;
     } else {
-      // W1-T2398: the skew constant (or a caller override) is a FLOOR, never the whole margin —
-      // widened to the caller's expected run length so a credential that would expire mid-run reads
-      // "expired" here exactly like one already stale, and takes the same re-provision path.
+      // W1-T2398: skew is a floor; include run length to re-provision credentials expiring mid-run.
       const skewMs = Math.max(opts.credentialExpirySkewMs ?? DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS, opts.expectedRunMs ?? 0);
       const verdict = classifyCredentialSidecar(recorded, { nowMs: (opts.now ?? Date.now)(), skewMs });
       if (verdict === "expired") credentialExpired = true;
@@ -1733,20 +1677,15 @@ function deriveProvisionGate(opts: EnsureWorkerKeychainOpts, storeExists: boolea
   };
 }
 
-/** Guarantee the dedicated worker keychain exists, holds the credential item, never auto-locks, and
- *  is UNLOCKED — the invariant a headless spawn needs. INVARIANT: provisioning reads the item out of
- *  the login keychain, which must therefore be unlocked AT THAT MOMENT. It runs on the first call
- *  ever, and — when `opts.accountId` is supplied (W1-T265) — on any later call whose `accountId` no
- *  longer matches what the store was provisioned for. Every other call, including a cold-boot daemon
- *  while the login keychain is LOCKED, touches only the worker keychain. */
+/** Ensure an unlocked, non-auto-locking worker keychain with its credential item.
+ *  Provisioning requires an unlocked login keychain, initially and after account changes (W1-T265).
+ *  Steady-state calls touch only the worker store, even when login is locked at cold boot. */
 export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeychainSummary {
   const runner = opts.runner ?? defaultSecurityRunner;
   const exists = opts.exists ?? existsSync;
 
-  // ATOMIC create-or-read (CodeQL alert #71, js/file-system-race). TRAP: a check-then-act let two
-  // concurrent first-provisioners each generate a DIFFERENT password — last writer wins the file and
-  // the keychain ends up keyed to a password the file no longer holds. `flag: "wx"` makes creation
-  // exclusive in ONE syscall at mode 0600, so the loser gets EEXIST and reads the winner's password.
+  // CodeQL #71 (js/file-system-race): exclusive 0600 create makes losers read the winner's password.
+  // Check-then-act let concurrent provisioners overwrite the password without re-keying the store.
   let password = randomBytes(32).toString("hex");
   mkdirSync(dirname(opts.passwordPath), { recursive: true });
   try {
@@ -1759,13 +1698,9 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
   let provisioned = false;
   const storeExists = exists(opts.keychainPath);
 
-  // W1-T265 identity gate + W1-T293 expiry gate, folded into `deriveProvisionGate` (W1-T339). This
-  // FIRST evaluation is read-only and lock-free: the steady-state majority find
-  // `needsProvisioning: false` here and never touch the lock below.
+  // W1-T265/W1-T293 gates via W1-T339: read-only evaluation keeps steady-state calls lock-free.
   let gate = deriveProvisionGate(opts, storeExists);
-  // W1-T2398: the expiry of the credential THIS call will hand out — starts as whatever the pre-lock
-  // gate read, is refreshed after a peer-converge re-derive, and is overwritten with the freshly
-  // copied secret's OWN expiry when this call is the one that (re-)provisions.
+  // W1-T2398: track expiry from the gate, then peer convergence or our own replacement credential.
   let finalExpiresAtMs = gate.recordedExpiresAtMs;
 
   // Arm (6): fail fast, without touching the login keychain again, once a credential-expiry recovery
@@ -1784,14 +1719,11 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
     }
   }
 
-  // W1-T339: SERIALIZE ONLY THE PROVISIONING BRANCH. A call whose gate above says "nothing to do"
-  // never acquires this lock — the steady-state path stays as lock-free as it was before.
+  // W1-T339: lock only provisioning; steady-state calls stay lock-free.
   if (gate.needsProvisioning) {
     const lock = acquireKeychainProvisionLock(opts.keychainPath);
     try {
-      // RE-DERIVE, now holding the lock: a concurrent winner may have finished (re-)provisioning this
-      // exact store while this call was waiting for it. A loser that skipped this re-check would
-      // redundantly re-provision on top of what its peer just wrote — the hazard this lock prevents.
+      // Recheck under lock: a peer may have provisioned while we waited; do not overwrite its work.
       gate = deriveProvisionGate(opts, exists(opts.keychainPath));
       finalExpiresAtMs = gate.recordedExpiresAtMs;
 
@@ -1888,18 +1820,14 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
         // below must reason about, not the possibly-stale pre-provision reading.
         finalExpiresAtMs = expiresAtMs;
       }
-      // else: a concurrent peer already (re-)provisioned this exact store while this call waited —
-      // CONVERGE on its result rather than redoing the work. `gate` was just re-derived, so the
-      // `reason` below correctly reports the peer's outcome.
+      // Otherwise converge on the peer's result; the re-derived gate supplies the reported reason.
     } finally {
       lock.release();
     }
   }
 
-  // W1-T2398: the LAST gate, after any (re-)provisioning above has had its chance to fetch a fresher
-  // copy — refuse BEFORE this credential is unlocked or handed to a spawn, never after.
-  // `finalExpiresAtMs` is `undefined` exactly when no numeric expiry is known, and the comparison is
-  // then skipped rather than inventing a deadline.
+  // W1-T2398: check the freshest expiry before unlock or spawn, after provisioning can replace it.
+  // Skip unknown expiry rather than inventing a deadline.
   let observedHeadroomMs: number | undefined;
   if (finalExpiresAtMs !== undefined) {
     observedHeadroomMs = finalExpiresAtMs - (opts.now ?? Date.now)();

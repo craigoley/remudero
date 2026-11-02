@@ -67,9 +67,7 @@ export function ghRateLimitRefusalFromReading(
   operation: string,
 ): GhRateLimitRefusal | undefined {
   if (reading.remaining !== 0) return undefined;
-  // W1-T2897: routed through the Clock port's millis adapter rather than a bare constructor call
-  // here, so this file's own text carries none of the four legacy clock shapes the census in
-  // test/clock-signature-census.test.ts holds — src/lib/clock.ts owns the one Date construction.
+  // W1-T2897: Clock owns Date construction; keep legacy clock shapes out of this module's census.
   const resetMs = reading.reset !== undefined ? reading.reset * 1000 : undefined;
   return {
     bucket: reading.resource ?? GH_RATE_LIMIT_BUCKET_UNKNOWN,
@@ -147,16 +145,11 @@ export function refuseSentinelGhToken(file: string, args: readonly string[], env
   );
 }
 
-// ── W1-T10279 — A LIVE MAC BROKER TAKES THE READ INSTEAD OF THE FLOOR ───────────────────────────
-//
-// When the account's GitHub read broker (src/lib/gh-read-broker.ts) is live, a read goes to it and the
-// 180 s floor is not applied here: the broker paces every session's reads from GitHub's own headers.
-// Writes and the budget probe never move. With no live broker every path below is unchanged, which is
-// every host but an operator's Mac.
+// W1-T10279: a live Mac broker paces reads from GitHub headers instead of the 180 s floor.
+// Writes and budget probes stay direct; without a broker, reads retain the floor.
 
-/** W1-T10279: one `gh` run for the Mac read broker's upstream calls, as a direct call would make it,
- *  answering its stdout, stderr and exit code rather than throwing — the broker paces and caches
- *  on all three. It lives here because this module owns every `gh` spawn (gh-transport census). */
+/** W1-T10279: broker upstream spawn; return stdout, stderr and exit code for pacing/caching.
+ * This module owns every `gh` spawn (gh-transport census). */
 export function ghRunForBroker(args: string[], opts: { cwd?: string; maxBuffer: number }): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve) => {
     execFile("gh", args, { cwd: opts.cwd, encoding: "utf8", maxBuffer: opts.maxBuffer, timeout: DEFAULT_GH_CALL_TIMEOUT_MS }, (err, stdout, stderr) => {
@@ -196,8 +189,7 @@ async function ghBrokeredAsync(args: readonly string[], readOpts: GhJsonReadOpti
   try {
     result = await brokerGhRead(socket, args, { class: ghBrokerClassOf(env), ...(readOpts.fresh === true ? { fresh: true } : {}) });
   } catch {
-    // The broker went away between the liveness read and the request: take the direct path, paced
-    // by the floor as before, rather than fail a read the direct path could still make.
+    // Broker disappeared after liveness check: fall back to the direct, floored read.
     return undefined;
   }
   if (result.exitCode !== 0) throw ghBrokerExecError(args, result);
@@ -231,8 +223,7 @@ export function ghJson(
     opts: { encoding: "utf8"; maxBuffer: number; timeout: number; killSignal?: NodeJS.Signals | number },
   ) => string = execFileSync,
 ): unknown {
-  // W1-T3297: an injected `exec` reaches no network, so pacing it would spend a shared window
-  // on a call that never touched the limiter.
+  // W1-T3297: injected exec reaches no network and must not spend a shared window.
   const isApiCall = args[0] === "api";
   const execArgs = isApiCall ? [...args, "-i"] : args;
   let spawned = { file: "gh", args: execArgs };
@@ -302,14 +293,8 @@ export function withGhKillEscalation<T extends { stdout: string; stderr: string 
   return execPromise;
 }
 
-/**
- * ONE IN-FLIGHT READ PER EXACT REQUEST. The daemon, review lane, and console can all wake for the
- * same head at once; without this map each caller reaches the cadence gate independently and the
- * first allowed caller still leaves a burst of identical subprocesses queued behind it. This is
- * deliberately transport-local: every async consumer gets the protection without having to agree
- * on a higher-level cache, and a rejected read is removed in `finally` so an outage never poisons
- * later attempts.
- */
+/** Coalesce exact async reads across daemon, review and console before cadence admission.
+ * Remove rejected reads in `finally` so outages cannot poison later attempts. */
 const asyncReadInFlight = new Map<string, Promise<unknown>>();
 
 function ghArgsAreCoalescibleRead(args: readonly string[]): boolean {
@@ -391,16 +376,13 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     execArgs,
     DEFAULT_GH_CALL_TIMEOUT_MS,
   )).stdout;
-  // Injected executors are test/offline seams and may have independent side effects, so only the
-  // real `gh` transport participates in production single-flight coalescing.
+  // Only real transport coalesces; injected executors may have independent side effects.
   if (execAsync !== execFileAsync) return run();
   const key = ghArgsAreCoalescibleRead(args) ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
-    // Keep the async poll path behind the same transport floor as ghJson/ghExec. The daemon and
-    // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
-    // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
+    // Async CI/review polls must share ghJson/ghExec's floor to prevent rapid read bursts.
     refuseSentinelGhToken("gh", args, undefined);
     const brokered = await ghBrokeredAsync(execArgs, readOpts);
     if (brokered !== undefined) return brokered;
@@ -563,10 +545,7 @@ export function createGhCallPacer(
     rateLimitGapMs?: number;
     lowWaterFraction?: number;
     floorFraction?: number;
-    // W1-T2897: a method signature, not an arrow-typed field — structurally identical for every
-    // existing `{ now: () => n }` caller, but outside test/clock-signature-census.test.ts's four
-    // tracked legacy-shape patterns, so this port-facing seam does not itself re-grow the count
-    // src/lib/clock.ts's Clock exists to retire.
+    // W1-T2897: method syntax preserves callers without regrowing legacy clock-signature patterns.
     now?(): number;
     sleepSync?: (ms: number) => void;
     sleep?: (ms: number) => Promise<void>;
@@ -757,30 +736,12 @@ export async function paceGhEntryAsync<T>(
   }
 }
 
-// ── W1-T3297 — THE SECONDARY LIMIT, AND THE CADENCE FLOOR THAT SEES `rmd` VERBS ──────────────
-//
-// `ghRateLimitRefusalFromReading` above refuses only at `remaining === 0`, and is correct to: that
-// is the PRIMARY hourly budget. But every 403 measured on 2026-09-09 arrived with core AND graphql
-// reading 5000/5000, because the limit that fires here is the SECONDARY one, which counts request
-// RATE rather than volume and sends no `X-Ratelimit-Remaining: 0`. Everything below is ADDITIVE;
-// the primary refusal is untouched.
-//
-// WHY IT LIVES HERE AND NOT ONLY IN THE HOOK. `hooks/deny-floor.sh` rule 9 (W1-T3275) matches `gh`
-// in a command's TEXT, so `./bin/rmd review 4862` — which contains none — is invisible to it while
-// making the same GitHub calls in-process through `ghExec`. The two surfaces are disjoint by
-// construction, so no call is paced twice.
-//
-// RATIFIED SCOPE WIDENING (operator, 2026-09-09), recorded here per Rule 15 rather than in the
-// shard: the SEARCH bucket. `search/issues` is a separate limiter with a far lower ceiling (~30
-// requests/minute against core's 5000/hour), and the measured 403 that widened this task arrived on
-// search while both core and graphql read full. Two consequences: a search burst inside ONE Bash
-// tool call is stamped once by the hook but makes N requests, which only a per-request floor can
-// see; and search must be accounted SEPARATELY, because a shared stamp would let general reads
-// consume a budget an order of magnitude smaller than the one they are sized against.
-//
-// ONE STAMP PER LIMITER is therefore the rule, and it is the same rule that forbids a second stamp
-// for general reads: the general read stamp is SHARED with the hook (two windows against one
-// limiter halve the effective cadence), and search gets its own because it IS a second limiter.
+// W1-T3297: secondary limits count rate, independently of the primary hourly budget.
+// On 2026-09-09, 403s arrived while core/graphql still read 5000/5000.
+// The W1-T3275 hook sees literal `gh`, missing in-process `rmd review` calls; pace those here.
+// Operator ratified SEARCH scope on 2026-09-09 (Rule 15): ~30/min needs its own stamp.
+// The hook stamps a Bash call once; per-request pacing also sees bursts inside that call.
+// One stamp per limiter: general reads share the hook's stamp; search uses a separate one.
 
 /** SHARED with `hooks/deny-floor.sh` rule 9's default. The two must agree or the windows diverge. */
 export const DEFAULT_GH_READ_CADENCE_S = 180;
@@ -800,30 +761,11 @@ function resolveGhSharedReadGapMs(env: NodeJS.ProcessEnv): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_GH_SHARED_READ_GAP_MS;
 }
 
-/**
- * How many further reads ONE enforce-mode invocation may make after its first read is admitted.
- *
- * WHY A BURST EXISTS AT ALL. `withGhTransportFloor`'s own doc calls it a "standalone" command
- * wrapper, and the per-read floor only makes sense under that assumption: one invocation, one read.
- * `rmd review` — the ONLY command wrapped in enforce mode — makes TWELVE reads (measured on a live
- * invocation, 2026-09-22). So the floor refused the verb's own second read four seconds in, every
- * time, and the verb could never complete. It protected nothing: its sole caller was the only thing
- * it ever refused, and the documented escape (`RMD_GH_TRANSPORT_FLOOR=advisory`) disables the floor
- * for the WHOLE process, which is a strictly broader relaxation than the verb needs.
- *
- * WHAT THE FLOOR IS ACTUALLY FOR, AND WHAT THIS PRESERVES. GitHub's secondary limit counts request
- * CADENCE, and the hazard the floor was built against is a POLLING LOOP — `hooks/deny-floor.sh`
- * says so in its own words ("a run of cheap reads trips it", "a wait is the operator's to
- * schedule"). Spacing between INVOCATIONS is what defeats a polling loop; spacing between the reads
- * inside one bounded verb defeats only the verb. So the first read of an invocation is still gated
- * at the full window, and only then is a burst granted.
- *
- * THE SIZE IS A SEPARATION, NOT A TUNING. The two populations are a bounded verb (12 reads,
- * measured) and an unbounded loop (hundreds). Any value between them separates them, so this is set
- * at 32 — well over 2.5x the only measured need, and small enough that a runaway loop is refused
- * within seconds. It is deliberately NOT fitted to 12: a bound sitting exactly on the observed
- * value fires the first time a healthy caller does one more read than it did last week.
- */
+/** Further reads allowed after one enforce-mode invocation's first read passes the full floor.
+ * Measured 2026-09-22: `rmd review` needs 12 reads; per-read enforcement refused its second.
+ * Gate invocations to stop polling loops, then allow a bounded verb to finish.
+ * 32 separates the measured 12-read verb from loops of hundreds, with healthy growth room;
+ * fitting the bound to 12 would refuse the next healthy caller that needs one more read. */
 export const DEFAULT_GH_READ_BURST = 32;
 
 /** The `search` limiter — a separate bucket with its own, far lower ceiling. */
@@ -1015,15 +957,8 @@ export function ghReadBurst(env: NodeJS.ProcessEnv = process.env): number {
   return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_GH_READ_BURST;
 }
 
-/**
- * The burst belongs to the FLOOR SCOPE, not to the process.
- *
- * `undefined` means "no scope is open", and then nothing bursts — a direct `applyGhReadCadence`
- * call behaves exactly as it did before this existed. That is deliberate: scoping the burst to
- * `withGhTransportFloorMode`'s dynamic extent is what makes "one invocation is one burst" true by
- * construction rather than by a counter nobody remembers to clear. A process-global counter leaked
- * between callers the first time it was tried, which is how this shape was found.
- */
+/** Burst belongs to withGhTransportFloorMode's dynamic scope; undefined means no burst.
+ * A process-global counter leaked between callers; direct cadence calls must never inherit it. */
 let ghReadBurstScope: { remaining: number } | undefined;
 
 export function ghReadCadenceStampPath(env: NodeJS.ProcessEnv = process.env, bucket?: string): string | undefined {
@@ -1039,15 +974,8 @@ export function resolveGhTransportFloorMode(env: NodeJS.ProcessEnv = process.env
   return mode === "enforce" || mode === "wait" ? mode : "advisory";
 }
 
-/**
- * Run a command with its default read-floor mode and a fresh invocation burst.
- *
- * The transport keeps advisory mode as its library default so injected callers and interactive
- * diagnostics cannot be turned into a hard stop accidentally. CLI handlers use this boundary to
- * select enforcement or waiting, and the daemon selects advisory mode. An explicit environment
- * choice remains authoritative. The restore
- * makes this safe for in-process tests and for a caller that runs more than one verb.
- */
+/** Fresh invocation burst and default mode: CLI enforces/waits, daemon stays advisory.
+ * Explicit env wins; restoring env and scope isolates sequential and nested invocations. */
 export async function withGhTransportFloorMode<T>(
   mode: "advisory" | "enforce" | "wait",
   fn: () => T | Promise<T>,
@@ -1106,15 +1034,9 @@ export function ghReadCadenceDecision(opts: {
   if (opts.isWrite || opts.isExempt) return { allow: true, paced: false, windowS };
   if (opts.lastReadMs === undefined) return { allow: true, paced: false, windowS };
   const ageMs = opts.nowMs - opts.lastReadMs;
-  // A STAMP IN THE FUTURE SPLITS TWO WAYS, and conflating them is a live defect: the first draft
-  // allowed on ANY negative age, so a stamp written microseconds earlier — whose `mtimeMs` can
-  // round just past `now()` — fell open and let a real `gh` spawn through mid-window. MEASURED: the
-  // wiring test hit GitHub and got a 404 on 3 runs in 6.
-  //   * a SMALL future offset is ordinary jitter, not skew: clamp to age 0 and pace it, because the
-  //     safe direction for an unreadable clock is to pace, never to allow.
-  //   * an offset beyond the whole window cannot be a read that already happened (a restored cache,
-  //     a wrong clock). Refusing on it would block every read for as long as the skew lasts, so it
-  //     is undecidable and falls open.
+  // Small future offsets are mtime rounding: clamp to age 0 and pace. Allowing all negative ages
+  // hit live GitHub mid-window (404 on 3/6 wiring runs). Beyond a whole window, treat as clock skew
+  // or a restored cache and fail open; otherwise the skew would block reads indefinitely.
   if (-ageMs > windowS * 1000) return { allow: true, paced: false, windowS };
   const ageS = Math.floor(Math.max(0, ageMs) / 1000);
   if (ageS >= windowS) return { allow: true, paced: false, ageS, windowS };
@@ -1167,21 +1089,12 @@ export function readGhStampText(path: string | undefined): string | undefined {
   }
 }
 
-// ── W1-T10271 — A WAITING GH READ GETS A FAIR TURN ──────────────────────────────────────────────
-//
-// OBSERVED 2026-10-20: an operator's `rmd review` in core, with RMD_GH_TRANSPORT_FLOOR=wait, waited
-// 30 min and never got a slot. The wait was measured from the NEWEST stamp, and core's advisory reads
-// restamp it about three times a second (median 2.94 req/s from `daemon.quota` deltas, 10-18..10-20),
-// so a 180 s quiet stretch never came. The floor exists to space INVOCATIONS (see DEFAULT_GH_READ_BURST);
-// the daemon's sweeps are paced by GhCallPacer and the shared gap. Counting them against a gated
-// caller's window served neither limiter. Two rules, one limiter:
-//   * every read still waits the shared gap after the NEWEST stamp, which the hook shares;
-//   * a gated first read (enforce or wait) is floored from the newest read that COUNTS: an admitted
-//     gated read (`<stamp>.gated`), a burst read, or a session's hook-paced read. A daemon's advisory
-//     read marks the shared stamp's text and CARRIES the last counted read forward, so overwriting a
-//     hook's `: >` cannot erase it.
-// A gated read that must wait takes a FIFO ticket, operators first, and sleeps OUTSIDE the lock; the
-// first reader that finds a due head ticket yields it one shared gap, so the slot is reserved.
+// W1-T10271, observed 2026-10-20: `rmd review` waited 30 min while advisory reads restamped
+// at median 2.94 req/s (daemon.quota, 10-18..10-20); a 180 s quiet stretch never arrived.
+// Every read shares the newest stamp's gap. Only gated, burst and hook reads restart the floor;
+// advisory text carries the last counted read forward so overwriting a hook stamp cannot erase it.
+// Waiting reads take FIFO tickets, operators first, and sleep OUTSIDE the lock.
+// The first reader finding a due head yields one shared gap to reserve its slot.
 
 const GH_ADVISORY_STAMP_MARK = "advisory";
 
@@ -1418,19 +1331,12 @@ export interface GhReadCadenceDeps {
  *  would bury, and noise is how a floor stops being read. Reset only for tests. */
 let ghCadenceAdvisoryEmitted = false;
 let ghCadenceAsyncContentionAdvisoryEmitted = false;
-// A daemon can perform several read-shaped calls in one process. The shared file is for
-// coordination with sibling processes; sleeping after our own stamp would turn every normal
-// sweep into a 1.5s-per-read queue (and made the instrumented CI suite hit its timeout). Keep the
-// last value this process wrote so only a newer, foreign stamp consumes the cross-process gap.
+// Only newer foreign stamps consume the cross-process gap; sleeping after our own made daemon
+// sweeps queue at 1.5s/read and timed out instrumented CI. Remember our last stamp.
 const ghCadenceOwnStampMs = new Map<string, number>();
 
-/**
- * Serialise the read-and-stamp critical section across daemon processes. A process-local pacer
- * cannot protect two launchd jobs (or a worker and the daemon) from both seeing an old stamp. The
- * lock is a tiny directory because mkdir is atomic on the filesystems Remudero supports. It is
- * fail-open after a bounded wait, and stale locks are reclaimed so a killed process cannot freeze
- * GitHub access permanently. One attempt is shared by the sync and async lock loops below.
- */
+/** Atomic mkdir serialises cross-process read-and-stamp; process-local pacing cannot.
+ * Sync/async share this attempt. Bound waits and reclaim stale locks so dead owners cannot freeze reads. */
 function tryGhCadenceLock(lockPath: string, startedAt: number): "locked" | "reclaimed" | "wait" | "give-up" {
   try {
     mkdirSync(lockPath);
@@ -1767,20 +1673,10 @@ function ghReadCadenceTurn(
   return slept instanceof Promise ? slept.then(finish) : finish();
 }
 
-/**
- * THE WIRING — applied by `ghJson`/`ghExec` to a call that will REALLY spawn `gh`.
- *
- * A caller that injected its own `exec` is paced by nothing: it reaches no network, so pacing it
- * would stamp a shared window for a call that never spent from the limiter. That guard is also what
- * keeps this inert across the suite instead of writing a real stamp on every unit test.
- *
- * FAIL OPEN EVERYWHERE (design (v)). Every io path below already swallows its own errors, and the
- * pure decision treats an undecidable stamp as "allow", so the worst case is no pacing at all.
- *
- * W1-T10271: a read that must wait sleeps OUTSIDE the lock and takes the lock again for each turn.
- * Sleeping inside it made every sibling give up after GH_CADENCE_LOCK_MAX_WAIT_MS, fail open and
- * restamp, which is how the waiter's window kept restarting.
- */
+/** ghJson/ghExec wire only real spawns: injected exec must not stamp a window it never spent.
+ * FAIL OPEN (design (v)): IO errors and undecidable stamps allow unpaced reads.
+ * W1-T10271: sleep OUTSIDE the lock and reacquire each turn; sleeping inside made siblings
+ * exhaust GH_CADENCE_LOCK_MAX_WAIT_MS, fail open and restamp, restarting the waiter's window. */
 export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps = {}): GhReadCadenceDecision {
   const plan = planGhReadCadence(args, deps);
   const stampPath = plan.coordinatedStampPath;
@@ -1850,24 +1746,12 @@ export async function applyGhReadCadenceAsync(
   });
 }
 
-// ── W1-T4085 — INTERACTIVE READS SPEND THE OPERATOR'S OWN GITHUB BUDGET ─────────────────────────
-//
-// `applyGhReadCadence`'s stamp is deliberately SHARED across every session on the host — the
-// secondary limit counts per USER, not per process. But that also refuses one session's own read
-// behind another session's, seconds apart and unrelated. OBSERVED 2026-09-22: two interactive
-// sessions, reads refused "0s after the last one" repeatedly, escaped only by the on-the-record
-// override `RMD_GH_COOLDOWN_S=0`, spent several times in one session.
-//
-// FIX: the fleet's GitHub App installation (github-app.ts) already carries `core`/`graphql`
-// buckets wholly separate from any interactive identity, using ids/key the host already has
-// (`GH_APP_ID`/`GH_APP_INSTALLATION_ID`/`GH_APP_PRIVATE_KEY_PATH`). Routing a READ through a
-// freshly minted installation token spends against THAT budget, paced on its own stamp
-// (`GH_APP_READ_BUCKET`) so it can never fight the shared window (design i).
-//
-// WRITES NEVER MOVE (design ii): authorship matters, and a write is already cadence-exempt, so
-// `routeInteractiveGhRead` short-circuits BEFORE ever calling `mint` — provably unattempted, not
-// merely unused. A FAILED MINT IS NOT A FAILURE (design iii): every unconfigured host (no
-// `GH_APP_*`) falls straight back to `applyGhReadCadence`'s ordinary shared floor, unchanged.
+// W1-T4085, observed 2026-09-22: two interactive sessions repeatedly refused each other's reads
+// at "0s after the last one", requiring RMD_GH_COOLDOWN_S=0 overrides. Secondary limits are per user.
+// Design (i): mint an installation token (github-app.ts, GH_APP_* config) for READS and pace its
+// separate core/graphql budget on GH_APP_READ_BUCKET, never the interactive identity's stamp.
+// Design (ii): WRITES NEVER MOVE; short-circuit before mint to preserve authorship.
+// Design (iii): absent config or failed mint falls back to the ordinary shared floor.
 
 /** The separate limiter an app-token-routed read spends against — never `search`, never the
  *  bucket-less general one. */
