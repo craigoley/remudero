@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -23,3 +23,13 @@
     Add the named regression in test/review/compress-src-lib-verdict-calibration-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.95
+    reasons:
+      - "The filed scope limits work to comment compression in one source file plus a regression test requiring executable-token preservation and measurable comment reduction."
+      - "The rationale requires preserving behavioral assertions, invariants, historical citations, owners, stops and deployment holds, and prohibits a new hard comment ceiling."
+      - "The supplied family record reports 26 merged tasks and no declined tasks; the filing-time gates report no concerning condition. Implementation compliance remains for CI and review to verify."
+    judged_at: "2026-11-02T02:54:27.598Z"
+    pin: "aee945c904217de28edf174281bee040a702b717702565cc8eb720d99daaa11b"
