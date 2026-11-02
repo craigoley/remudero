@@ -10,12 +10,14 @@ export interface DraftDeploymentStats {
 
 export type DraftStats = Record<string, DraftDeploymentStats>;
 export interface DraftArm { deployment: string; estimatedCostUsd: number }
+export interface DraftSkip { deployment: string; attempts: number; cleanRate: number }
 export interface DraftPosterior extends DraftArm {
   alpha: number;
   beta: number;
   sampledCleanRate: number;
   costPerAttemptUsd: number;
   cleanPerDollar: number;
+  skipped?: DraftSkip[];
 }
 export interface DraftChoice {
   deployment: string;
@@ -79,7 +81,15 @@ function gamma(shape: number, random: () => number): number {
 /** Row order supplies a weak Beta prior; measured outcomes and dollars determine traffic. */
 export function chooseDraftDeployment(stats: DraftStats, candidates: readonly DraftArm[], random: () => number = Math.random): DraftChoice {
   if (candidates.length === 0) throw new Error("draft routing has no eligible deployments");
-  const arms = candidates.map((arm, index): DraftPosterior => {
+  const belowFloor = candidates.flatMap(({ deployment }): DraftSkip[] => {
+    const measured = stats[deployment];
+    return measured && measured.attempts >= 50 && measured.clean / measured.attempts < 0.05
+      ? [{ deployment, attempts: measured.attempts, cleanRate: measured.clean / measured.attempts }] : [];
+  });
+  const skipped = belowFloor.length < candidates.length ? belowFloor : [];
+  const excluded = new Set(skipped.map((arm) => arm.deployment));
+  const arms = candidates.flatMap((arm, index): DraftPosterior[] => {
+    if (excluded.has(arm.deployment)) return [];
     const measured = stats[arm.deployment];
     const attempts = measured?.attempts ?? 0;
     const clean = Math.min(attempts, measured?.clean ?? 0);
@@ -91,9 +101,11 @@ export function chooseDraftDeployment(stats: DraftStats, candidates: readonly Dr
     const costPerAttemptUsd = measured && measured.costUsd > 0 && attempts > 0
       ? measured.costUsd / attempts : arm.estimatedCostUsd;
     if (!(costPerAttemptUsd > 0) || !Number.isFinite(costPerAttemptUsd)) throw new Error(`invalid draft cost for ${arm.deployment}`);
-    return { ...arm, alpha, beta, sampledCleanRate, costPerAttemptUsd, cleanPerDollar: sampledCleanRate / costPerAttemptUsd };
+    return [{ ...arm, alpha, beta, sampledCleanRate, costPerAttemptUsd, cleanPerDollar: sampledCleanRate / costPerAttemptUsd }];
   });
   const posterior = arms.reduce((best, arm) => arm.cleanPerDollar > best.cleanPerDollar ? arm : best);
+  // The worker already ledgers this posterior in draft.routing.choice.
+  if (skipped.length > 0) posterior.skipped = skipped;
   return { deployment: posterior.deployment, reason: "thompson-clean-per-dollar", posterior, arms };
 }
 
