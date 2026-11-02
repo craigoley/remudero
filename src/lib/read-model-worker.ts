@@ -84,7 +84,7 @@ import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowPopulation, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ShadowSampleIdentity, type ViewShadow } from "./view-shadow.js";
-import { INBOX_VIEW_NAME, INBOX_QUALIFICATION_ERROR_META, INBOX_QUALIFICATION_PENDING, INBOX_QUALIFICATION_POPULATION_META, inboxQualificationPolicy, inboxShadowPopulation, inboxShadowSampleKey, parseInboxShadowPopulation, restoreInboxShadowPopulation, type InboxQualificationScope } from "./inbox-view.js";
+import { INBOX_VIEW_NAME, INBOX_VIEW_SECTIONS, INBOX_QUALIFICATION_ERROR_META, INBOX_QUALIFICATION_PENDING, INBOX_QUALIFICATION_POPULATION_META, inboxQualificationPolicy, inboxShadowPopulation, inboxShadowSampleKey, parseInboxShadowPopulation, restoreInboxShadowPopulation, type InboxQualificationScope } from "./inbox-view.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeLedgerReads, judgeSource, type SourcePhase } from "./view-freshness.js";
 import { forkWorkerEntry, startWorker, type WorkerEntryFork } from "./child-entry-argv.js";
@@ -2511,6 +2511,29 @@ export function readModelBodyKey(view: string, key = ""): string {
   return `${view}\u0000${key}`;
 }
 
+/**
+ * The shape every committed producer population has: per filter group, every section, each paged
+ * 0..of-1 exactly once. A batch missing a page, or carrying a malformed one, is not yet a population.
+ */
+function completeInboxPages(entries: readonly ReadModelBodyEntry[]): boolean {
+  const groups = new Map<string, Map<string, { of: number; seen: Set<number> }>>();
+  for (const entry of entries) {
+    const data = entry.body.data as { section?: unknown; page?: { index?: unknown; of?: unknown } } | null;
+    const section = data?.section, index = data?.page?.index, of = data?.page?.of;
+    if (typeof section !== "string" || typeof index !== "number" || typeof of !== "number" || !Number.isSafeInteger(index) || !Number.isSafeInteger(of) || index < 0 || index >= of) return false;
+    const filters = new URLSearchParams(entry.key);
+    filters.delete("section"); filters.delete("cursor"); filters.sort();
+    const sections = groups.get(filters.toString()) ?? new Map<string, { of: number; seen: Set<number> }>();
+    groups.set(filters.toString(), sections);
+    const pages = sections.get(section) ?? { of, seen: new Set<number>() };
+    sections.set(section, pages);
+    if (pages.of !== of || pages.seen.has(index)) return false;
+    pages.seen.add(index);
+  }
+  return groups.size > 0 && [...groups.values()].every(sections => sections.size === INBOX_VIEW_SECTIONS.length &&
+    INBOX_VIEW_SECTIONS.every(section => sections.get(section)?.seen.size === sections.get(section)?.of));
+}
+
 /** Serve's side: warm bodies now, one worker on `start()`, respawned with back-off if it dies. */
 export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWorkerHandle {
   const clock = opts.clock ?? systemClock;
@@ -2536,6 +2559,25 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   if (warm.inboxQualificationReason) opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: warm.inboxQualificationReason });
   /** Keys the running worker has posted: newer than anything committed, so a reload leaves them alone. */
   const posted = new Set<string>();
+  /** A retired body leaves with all its per-key bookkeeping, so neither a reload nor a respawned producer resurrects it. */
+  const forget = (key: string): void => {
+    bodies.delete(key);
+    bodyReadings.delete(key);
+    posted.delete(key);
+  };
+  /**
+   * A complete current population retires every other cached Inbox page, including the pages an earlier
+   * producer posted and a replacement, finding them already gone from the store, has no drop for.
+   */
+  const convergeInbox = (generation: string, snapshotKey: string): boolean => {
+    const own = [...bodies].filter(([, entry]) => entry.view === INBOX_VIEW_NAME);
+    const current = own.filter(([, entry]) => entry.qualificationGeneration === generation && (entry.body.data as { snapshotKey?: unknown } | null)?.snapshotKey === snapshotKey);
+    if (!completeInboxPages(current.map(([, entry]) => entry))) return false;
+    const keep = new Set(current.map(([key]) => key)), retired = own.filter(([key]) => !keep.has(key));
+    for (const [key] of retired) forget(key);
+    if (retired.length > 0) opts.log?.("read_model.inbox_converged", { generation, kept: keep.size, retired: retired.length });
+    return true;
+  };
   let committedAt = committedTickTimes(opts.stateDir, opts.instances);
   const switchesPath = readModelSwitchesPath(opts.stateDir);
   let mainSwitches = DEFAULT_READ_MODEL_SWITCHES;
@@ -2690,8 +2732,11 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     if (msg.type === "progress") phase = { instance: msg.instance, phase: msg.phase };
     else if (msg.type !== "log") phase = undefined;
     if (msg.type === "qualification") {
-      if (inboxScope && msg.scope?.instance === inboxScope.instance && msg.scope.repository === inboxScope.repository &&
-        (msg.generation === INBOX_QUALIFICATION_PENDING || (/^inbox-current-pages-v1:[a-f0-9]{64}$/.test(msg.generation) && typeof msg.snapshotKey === "string" && /^[a-f0-9]{64}$/.test(msg.snapshotKey)))) {
+      const matches = inboxScope && msg.scope?.instance === inboxScope.instance && msg.scope.repository === inboxScope.repository &&
+        (msg.generation === INBOX_QUALIFICATION_PENDING || (/^inbox-current-pages-v1:[a-f0-9]{64}$/.test(msg.generation) && typeof msg.snapshotKey === "string" && /^[a-f0-9]{64}$/.test(msg.snapshotKey)));
+      // Only a matching, complete current batch may retire pages; anything less retires nothing and stays unqualified.
+      const complete = matches && (msg.generation === INBOX_QUALIFICATION_PENDING || convergeInbox(msg.generation, msg.snapshotKey!));
+      if (complete) {
         inboxQualification = msg.generation;
         inboxQualificationSnapshot = msg.generation === INBOX_QUALIFICATION_PENDING ? undefined : msg.snapshotKey;
         noteAutoModes();
@@ -2699,17 +2744,14 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
         inboxQualification = INBOX_QUALIFICATION_PENDING;
         inboxQualificationSnapshot = undefined;
         noteAutoModes();
-        opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: "population message does not match configured scope or generation" });
+        opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: matches ? "population message arrived without its complete page batch" : "population message does not match configured scope or generation" });
       }
     } else if (msg.type === "body") {
       bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
       posted.add(readModelBodyKey(msg.entry.view, msg.entry.key));
       for (const listener of bodyListeners) listener(msg.entry);
     } else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
-    else if (msg.type === "drop") {
-      bodies.delete(readModelBodyKey(msg.view, msg.key));
-      bodyReadings.delete(readModelBodyKey(msg.view, msg.key));
-    } else if (msg.type === "sources") {
+    else if (msg.type === "drop") forget(readModelBodyKey(msg.view, msg.key)); else if (msg.type === "sources") {
       for (const source of msg.sources) sourceClocks.set(source.name, source);
       for (const [view, reads] of Object.entries(msg.ledgerReads ?? {})) ledgerReads.set(view, reads);
       for (const body of msg.bodies ?? []) bodyReadings.set(readModelBodyKey(body.view, body.key), new Map(body.sources.map((source) => [source.name, source])));
@@ -2784,9 +2826,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       let removed = 0;
       if (again.reason === undefined) {
         const committed = new Set(again.bodies.map(entry => readModelBodyKey(entry.view, entry.key)));
-        for (const key of bodies.keys()) if (!posted.has(key) && !committed.has(key)) {
-          bodies.delete(key);
-          bodyReadings.delete(key);
+        // Inbox pages are posted only after their commit, so a qualified committed population bounds even posted ones.
+        const members = inboxQualification === INBOX_QUALIFICATION_PENDING ? undefined : new Set(again.inboxPopulation?.pages.map(page => readModelBodyKey(INBOX_VIEW_NAME, page.key)));
+        for (const [key, entry] of bodies) if ((!posted.has(key) && !committed.has(key)) || (members && entry.view === INBOX_VIEW_NAME && !members.has(key))) {
+          forget(key);
           removed++;
         }
       }
