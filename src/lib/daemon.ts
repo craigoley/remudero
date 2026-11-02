@@ -2357,6 +2357,9 @@ export function startInterphaseReviewClock(
   return {
     stop: async () => {
       active = false;
+      // Preserve the old zero-work fast path: Promise.race adds an event-loop turn even when
+      // there is no runner or admitted pass to wait for, which can release unrelated work.
+      if (!runner && activePasses.size === 0) return { eventWakeSeen, passes, held };
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
