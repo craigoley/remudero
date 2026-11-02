@@ -1,7 +1,7 @@
 - id: W1-T11117
   title: Controlled canaries enumerate effective configurations and shard the complete comparison matrix
   repo: remudero
-  depends_on: [W1-T10957]
+  depends_on: []
   plan_refs: [W1-T10956, W1-T10957, W1-T100001]
   type: implement
   verify: auto
@@ -36,8 +36,9 @@
     membership and disclose any panel too large for one bounded block. Feed existing schedule
     contracts without changing their 128-slot bound, concurrency, owner or execution semantics.
     Add a bounded offline preparation path in the existing model-canary command that calls both
-    helpers and writes a private manifest without invoking any provider. This packet follows
-    W1-T10957 so shared command wiring has one native owner at a time.
+    helpers and writes a private manifest without invoking any provider. This offline foundation
+    does not depend on coding execution. Reconcile native overlap and serialize shared command
+    edits with W1-T10957; do not create an artificial execution dependency for pure preparation.
   note: >-
     The human explicitly adopted the implementation plan with 'go with all of your
     recommendations - get this all done'. This is source preparation under normal qualification,
