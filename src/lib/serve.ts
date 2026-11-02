@@ -2759,7 +2759,7 @@ function assembleServeRoutes(
     knownIssue: (url, identity) => {
       const state = deps.boardSnapshotSource?.current();
       return state?.state === "ready" && state.snapshot.tasks.some(task => task.escalationIssueUrl === url
-        && task.taskId === identity.taskId && task.escalationClass === identity.class && task.escalationUnverified !== true);
+        && task.taskId === identity.taskId && task.escalationUnverified !== true);
     }, ...deps.escalationConversation });
   const fleetControlDeps: PanelActionDeps = {
     root: deps.fleetControlRoot,

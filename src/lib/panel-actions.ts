@@ -900,8 +900,9 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
       if (input.intentId) {
         const prior = existing.messages.find(message => message.role === "reply" && message.extra?.replyId === input.intentId);
         if (prior) {
-          if (prior.body !== input.text || prior.extra?.escalation?.issueUrl !== input.issueUrl
-            || prior.extra.escalation.revision !== input.expectedRevision) return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to a different answer or source. Your draft was not sent." });
+          const binding = prior.extra?.escalation;
+          if (prior.body !== input.text || binding?.issueUrl !== input.issueUrl
+            || binding?.revision !== input.expectedRevision) return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to a different answer or source. Your draft was not sent." });
           return void sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, duplicate: true,
             saved: { intentId: input.intentId, seq: prior.seq }, inputDelivery: "unverified", work: "not_observed" });
         }
@@ -914,10 +915,12 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
       }
       const saved = input.intentId
         ? appendThreadReplyOnce(identity, input.text, input.intentId, { threadStorePath: deps.threadStorePath }, { escalation: { issueUrl: input.issueUrl!, revision: input.expectedRevision! } })
-        : { kind: "appended" as const, seq: appendThreadMessage(identity, "reply", input.text, { threadStorePath: deps.threadStorePath }).seq };
-      if (saved.kind === "conflict") return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to different text. Your draft was not sent." });
-      if (saved.kind === "existing") return void sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, duplicate: true,
+        : undefined;
+      if (!saved) appendThreadMessage(identity, "reply", input.text, { threadStorePath: deps.threadStorePath });
+      if (saved?.kind === "conflict") return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to different text. Your draft was not sent." });
+      if (saved?.kind === "existing") return void sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, duplicate: true,
         saved: { intentId: input.intentId, seq: saved.seq }, inputDelivery: "unverified", work: "not_observed" });
+      const savedReceipt = saved ? { intentId: input.intentId!, seq: saved.seq } : undefined;
       // Once the answer is durable, a later capture failure is partial delivery, never a reason to append again.
       try {
 
@@ -957,10 +960,10 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         ...(staged.queued ? { landing: "queued" } : { landing_error: staged.error }),
       });
       sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry, interpretation, ...(staged.queued ? { landing: "queued" } : {}),
-        ...(input.intentId ? { saved: { intentId: input.intentId, seq: saved.seq }, inputDelivery: recordedToQuestionStore ? "recorded" : "unverified", work: "not_observed" } : {}) });
+        ...(savedReceipt ? { saved: savedReceipt, inputDelivery: recordedToQuestionStore ? "recorded" : "unverified", work: "not_observed" } : {}) });
       } catch (error) {
-        if (!input.intentId) throw error;
-        sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, saved: { intentId: input.intentId, seq: saved.seq },
+        if (!savedReceipt) throw error;
+        sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, saved: savedReceipt,
           inputDelivery: "unverified", work: "not_observed", detail: "Your answer was saved. Delivery to the fleet could not be confirmed. Do not send it again." });
       }
     }),
