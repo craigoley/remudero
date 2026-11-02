@@ -3,8 +3,10 @@ import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { computeBoardSnapshot } from "#src/lib/board.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { appendThreadMessage, appendThreadReplyOnce, deriveThreadId } from "#src/lib/inbox-thread.js";
-import { readEscalationConversationIndex, type EscalationMailboxBoard } from "#src/lib/escalation-conversation-index.js";
+import { readEscalationConversationIndex, escalationMailboxBoardFromSnapshot, type EscalationMailboxBoard } from "#src/lib/escalation-conversation-index.js";
 
 function fixture(t: { after: (fn: () => void) => void }) {
   const root = mkdtempSync(join(tmpdir(), "rmd-escalation-mailbox-"));
@@ -131,4 +133,35 @@ test("a failed current board read preserves saved conversation evidence and unkn
   const result = readEscalationConversationIndex({ ...f.deps, repository: "craigoley/remudero", readBoard: () => { throw new Error("fixture outage"); } });
   assert.ok(result.state === "served"); assert.equal(result.items.length, 1); assert.equal(result.items[0]!.attention, "waiting_for_agent");
   assert.equal(result.coverage.board, "unavailable"); assert.equal(result.counts.total, null);
+});
+
+
+test("the mailbox reuses native board facts and preserves their unavailable state", t => {
+  const f = fixture(t), ledgerPath = join(f.root, "board-ledger.ndjson"); writeFileSync(ledgerPath, "");
+  const snapshot = computeBoardSnapshot({ plan: { tasks: [], byId: new Map() }, ledgerPath, github: fakeGitHub() });
+  snapshot.tasks.push({ taskId: f.identity.taskId, title: "A native source flag", risk: "high", status: "blocked",
+    escalationIssueUrl: f.issueUrl, lastActivityAt: "2026-11-02T12:10:00Z" } as typeof snapshot.tasks[number]);
+  const board = escalationMailboxBoardFromSnapshot({ state: "ready", snapshot });
+  assert.equal(board.flags[0]!.issueUrl, f.issueUrl); assert.equal(board.flags[0]!.taskId, f.identity.taskId);
+  assert.equal(board.flags[0]!.sourceText, "A native source flag"); assert.equal(board.flags[0]!.lastActivityAt, "2026-11-02T12:10:00Z");
+  assert.equal(escalationMailboxBoardFromSnapshot(undefined).state, "unavailable");
+  snapshot.github_unreachable = true; assert.equal(escalationMailboxBoardFromSnapshot({ state: "ready", snapshot }).state, "unavailable");
+});
+
+test("over-bound board flags cannot claim a complete collection", t => {
+  const f = fixture(t); f.answer();
+  f.setBoard({ state: "current", observedAt: "2026-11-02T12:10:00Z", flags: Array.from({ length: 1001 }, () => ({
+    taskId: f.identity.taskId, issueUrl: f.issueUrl, sourceText: "Repeated source flag",
+  })) });
+  const result = f.read(); assert.equal(result.items.length, 1); assert.equal(result.counts.total, null);
+  assert.equal(result.coverage.board, "unavailable"); assert.equal(result.coverage.state, "incomplete");
+});
+
+test("proposal history stays with its inbox while malformed engineering identity withholds totals", t => {
+  const f = fixture(t);
+  const message = { threadId: "thread:proposal-a::INBOX::-::-", seq: 1, role: "escalation", ts: 1793621400000, body: "A proposal conversation" };
+  writeFileSync(f.deps.threadStorePath, JSON.stringify(message) + "\n");
+  assert.equal(f.read().items.length, 1); assert.equal(f.read().counts.total, 1);
+  writeFileSync(f.deps.threadStorePath, JSON.stringify({ ...message, threadId: "thread:bad task::MANUAL::-::-" }) + "\n");
+  const result = f.read(); assert.equal(result.counts.total, null); assert.equal(result.coverage.state, "incomplete");
 });
