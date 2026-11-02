@@ -362,7 +362,7 @@ import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
+import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, selectorShadowMainFailures, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
@@ -1204,6 +1204,7 @@ import {
   type PlanPrBodyOpts,
 } from "./lib/plan-pr-emitter.js";
 import {
+  checkoutAdmission,
   findTaskShard,
   parseProofAmendmentProposal,
   type ProofAmendmentValidationInput,
@@ -8585,6 +8586,7 @@ export function buildProofAmendmentWritePorts(
       worktreeAddFn(repoDir, wp, localBranch, "origin/main", { log });
     },
     worktreeRemove: (repoDir, wp) => worktreeRemoveFn(repoDir, wp),
+    machineFilingAdmission: checkoutAdmission, // #15766: hosted lint-plan's admission, judged before any push
     writeFile: writeFileFn,
     gitAdd: gitOps.gitAdd,
     gitCommit: gitOps.gitCommit,
@@ -27429,8 +27431,19 @@ export function issueRevalidationRunTaskPorts(
     },
     referentVerdicts: async (issues) => {
       const served = issues.map((i) => ({ number: i.number, url: i.url, title: i.title, body: i.body }));
+      // Held here so the open PR's current head is read from the SAME batched view the derivation filled:
+      // an in-memory lookup, never a per-issue API call.
+      const github = seams.reconcile?.github ?? buildBatchedGithub(owner, repo, { log });
+      const byNumber = new Map(issues.map((i) => [i.number, i]));
+      const openPrHead = (n: number | undefined): RevalidationVerdict["openPrHead"] => {
+        const issue = n === undefined ? undefined : byNumber.get(n);
+        const pr = issue === undefined ? undefined : prReferentFromIssueText(issue.body) ?? prReferentFromIssueText(issue.title);
+        const ref = pr === undefined ? undefined : github.prByRef(pr);
+        return ref?.state?.toUpperCase() === "OPEN" && ref.headRefOid ? { prNumber: ref.number, sha: ref.headRefOid } : undefined;
+      };
       const candidates = buildEscalationReconcileCandidates(owner, repo, planNow(), join(stateDir, LEDGER_FILENAME), log, {
         ...seams.reconcile,
+        github,
         issues: { create: () => { throw new Error("issue-revalidation never opens issues"); }, listOpen: () => served },
       });
       return new Map(candidates.filter((c) => c.issueNumber !== undefined).map((c): [number, RevalidationVerdict] => {
@@ -27438,7 +27451,8 @@ export function issueRevalidationRunTaskPorts(
         if (c.derived.indeterminate) return [c.issueNumber!, { verdict: "unknown", reason: `the referent of ${c.taskId} could not be derived` }];
         if (c.derived.merged) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId} is merged`, citation: `${pr} merged${c.derived.prUrl ? ` (${c.derived.prUrl})` : ""}` }];
         if (c.derived.closed) return [c.issueNumber!, { verdict: "resolved", reason: `${c.taskId}'s PR closed without merging`, citation: `${pr} closed without merging` }];
-        return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open` }];
+        const head = openPrHead(c.issueNumber);
+        return [c.issueNumber!, { verdict: "still-true", reason: `${c.taskId} is still open`, ...(head ? { openPrHead: head } : {}) }];
       }));
     },
     judgeText: (prompt, issueNumber, observe) => {
@@ -27481,6 +27495,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     repoRoot,
     openWorkspace: daemonGardenWorkspace(ctx, garden),
     prState: (prUrl: string) => gardenPrState(owner, repo, prUrl, ghJson),
+    closePr: (prUrl: string, reason: string) => gardenClosePr(owner, repo, prUrl, reason, (args) => ghJsonAsync(args)),
     // The daemon's tick persists the open-PR list; reading it and origin/main's ref is two file reads, no gh call.
     pendingSignal: (prUrl: string) => {
       const open = readOpenBoardSnapshot(config.root, owner, repo);

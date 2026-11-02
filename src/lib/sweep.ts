@@ -212,7 +212,7 @@ import type {
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
-import { isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
+import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import {
@@ -253,6 +253,7 @@ import {
   repairLadderStallFrom,
   type RepairLadderFallback,
 } from "./worker-provider.js";
+import { stalledStageEscalationIdentity, stalledStageIssueIdentity } from "./stage-stall-identity.js";
 import {
   FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
@@ -617,11 +618,6 @@ export function stalledStageEscalationSummary(reason: string): string {
   return reason
     .replace(/^(PR stage stalled: .+?) for \d+ minutes \((?:BACKSTOP \d+|owner: none)\); since [^;]*;/, "$1;")
     .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
-}
-
-/** Read a complete PR/blocker identity from a title or the unabridged reason in its body. */
-function stalledStageEscalationIdentity(text: string): string | undefined {
-  return /(PR stage stalled: #\d+ \S+ — [a-z-]+)(?=;| for \d+ minutes \(|$)/.exec(text)?.[1];
 }
 
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
@@ -3646,9 +3642,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const escalationIssues: AsyncIssueGateway = stallIdentity !== undefined && issues.listOpen
         ? { ...issues, listOpen: async (label) => (await issues.listOpen!(label)).filter(issue => {
           const head = escalationHeadSha(issue.body);
-          const identityText = issue.title?.endsWith("…") ? issue.body : issue.title;
-          return (head !== undefined && head !== pr.headSha) ||
-            stalledStageEscalationIdentity(identityText ?? "") === stallIdentity;
+          return (head !== undefined && head !== pr.headSha) || stalledStageIssueIdentity(issue) === stallIdentity;
         }) }
         : issues;
       const file = async (context: string): Promise<void> => { await escalateAsync(
@@ -15605,8 +15599,11 @@ function priorActionsFromLedger(
         // Only an explicit completed decision dedups. A retitle can return without deciding,
         // recorded as "unknown"; missing/unrecognized outcomes are not terminal either.
         // They, like "hold", must re-run at the SAME sha (see SweepDeps.depReview).
-        if (line.dep_review_outcome === "arm" || line.dep_review_outcome === "escalate" ||
-            line.dep_review_outcome === "refuse" || line.dep_review_outcome === "migrate") {
+        // A terminal decided by an OLDER dep-review engine does not dedup: an engine fix (W1-T2872's
+        // revision) rearms the same head once, exactly as it changes the review input digest.
+        if ((line.dep_review_outcome === "arm" || line.dep_review_outcome === "escalate" ||
+            line.dep_review_outcome === "refuse" || line.dep_review_outcome === "migrate") &&
+            depReviewRowEngineRevision(line) === DEP_REVIEW_ENGINE_REVISION) {
           depReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
         break;
@@ -19619,7 +19616,7 @@ export async function runSweep(
         // time (a re-derived PR: minus its fresh read), read at the write, never at the pass's start.
         snapshot_age_ms: snapshotAgeMs(index),
         ...(rederivedIndices.has(index) ? { rederived: true } : {}),
-        ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
+        ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome, dep_review_engine_revision: DEP_REVIEW_ENGINE_REVISION } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason && !deliveredStandDownLogged ? { stand_down_reason: standDownReason } : {}),
         ...(deliveredStandDownLogged ? { stand_down_unchanged: true } : {}),
@@ -20725,7 +20722,7 @@ export async function runSweep(
         if (alreadyDone) {
           dedupStandDownReason =
             `dependency review already reached a TERMINAL outcome at this head ` +
-            `(${pr.headSha.slice(0, 7)}) — a hold would have re-run instead of deduping`;
+            `(${pr.headSha.slice(0, 7)}) under engine ${DEP_REVIEW_ENGINE_REVISION} — a hold would have re-run instead of deduping`;
         }
         break;
       case "post-review": {
