@@ -57,6 +57,8 @@ export function captureStepSync(file, args, { cwd, env = process.env, stdoutPath
     stdout: existsSync(stdoutPath) ? readFileSync(stdoutPath, 'utf8') : '',
     stderr: outcome.error && transport.stderr ? stepStderr + transport.stderr : stepStderr,
     outputComplete: outcome.outputComplete,
+    // Missing or unreadable proof is an unclosed group: the owner must keep its slot.
+    groupClosed: outcome.processGroup?.closed === true,
   };
 }
 
@@ -146,15 +148,16 @@ async function spool(config) {
   while (escalation && child.pid && process.platform !== 'win32' && groupAlive() &&
     !(killedAt !== undefined && performance.now() - killedAt > GROUP_SHUTDOWN_GRACE_MS)) await new Promise((resolve) => setTimeout(resolve, 50));
   closed = true;
-  if (heartbeat) {
-    // Withdraw the cadence only once the step's whole process group is gone (signal 0 delivers nothing).
-    let groupEnded = process.platform === 'win32' || !child.pid;
-    if (!groupEnded) {
-      try { process.kill(-child.pid, 0); }
-      catch (cause) { groupEnded = cause.code === 'ESRCH'; }
-    }
-    heartbeat.stop(groupEnded);
+  // The recorded group is closed only when signal 0 finds no member (it delivers nothing).
+  // A failed spawn never created a group; a group that is still alive is a failed closure.
+  let groupEnded = spawnFailed || process.platform === 'win32' || !child.pid;
+  if (!groupEnded) {
+    try { process.kill(-child.pid, 0); }
+    catch (cause) { groupEnded = cause.code === 'ESRCH'; }
   }
+  if (!groupEnded) error ??= { message: 'native process group did not close; the slot must not be freed', code: 'ERR_AUTHOR_GROUP_NOT_CLOSED' };
+  // Withdraw the cadence only once the step's whole process group is gone.
+  if (heartbeat) heartbeat.stop(groupEnded);
   clearTimeout(timer);
   clearTimeout(escalation);
   clearInterval(parentWatch);
@@ -165,6 +168,7 @@ async function spool(config) {
   writeFileSync(config.resultPath + '.pending', JSON.stringify({ version: 1, status: spawnFailed ? null : native.status,
     startedAt, finishedAt:new Date().toISOString(), durationMs:Math.ceil(performance.now()-started),
     signal: native.signal, spawnCloseCode: spawnFailed ? native.status : null, error: error ?? null,
+    processGroup: { pid: child.pid ?? null, closed: groupEnded },
     ...(config.trackParent ? { parentTracking: { ownerPid: config.parentPid, helperPid: process.pid,
       childPid: child.pid ?? null, ownerLost: parentLost } } : {}),
     outputComplete: !error && !native.signal, storedBytes, observedBytes }) + '\n', { mode: 0o600, flag: 'wx', flush: true });
