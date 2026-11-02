@@ -8,8 +8,8 @@ import {
   OPENWEIGHT_RESPONSE_FORMATS,
   openWeightUnfence,
   spawnOpenWeightWorker,
-} from "../src/lib/worker-provider.js";
-import type { Config } from "../src/lib/config-schema.js";
+} from "#src/lib/worker-provider.js";
+import type { Config } from "#src/lib/config-schema.js";
 
 // OPENWEIGHT_OUTPUT_CONTRACT already tells the model to emit a raw document "without Markdown
 // fences". That instruction is right, and it is not a guarantee. This adapter has less margin than

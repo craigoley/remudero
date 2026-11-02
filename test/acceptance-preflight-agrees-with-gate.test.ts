@@ -1,4 +1,3 @@
-// test/acceptance-preflight-agrees-with-gate.test.ts
 //
 // W1-T2251. `checkAcceptanceCommand` (`rmd check-acceptance`) used to read a PR body's own
 // `## Acceptance` block ALONE — `acceptanceBlockDiagnostics(body)` / `parseAcceptanceBlock(body)`,
@@ -24,7 +23,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { checkAcceptanceCommand } from "../src/run-task.js";
+import { checkAcceptanceCommand } from "#src/run-task.js";
 
 function tmpFile(contents: string): { path: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "rmd-accept-preflight-body-"));

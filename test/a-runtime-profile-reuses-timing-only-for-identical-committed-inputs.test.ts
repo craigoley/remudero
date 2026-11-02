@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { makeRuntimeFixture } from "./helpers/native-runtime-fixture.js";
+import { makeRuntimeFixture } from "#test/helpers/native-runtime-fixture.js";
 
 const ROOT = join(import.meta.dirname, "..");
 const runtime = await import(pathToFileURL(join(ROOT, "scripts/lib/native-author-runtime.mjs")).href);

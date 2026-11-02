@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { outputContractLines } from "../src/lib/compaction.js";
-import { parseQuestion } from "../src/lib/worker.js";
+import { outputContractLines } from "#src/lib/compaction.js";
+import { parseQuestion } from "#src/lib/worker.js";
 
 // parseQuestion and run-task.ts's non-blocking `question.logged` existed with no prompt teaching the
 // format, so the channel had no input. These pin that the implement contract teaches it, and that

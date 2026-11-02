@@ -12,10 +12,10 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import * as affected from "../src/lib/affected-suites.js";
-import * as runTask from "../src/run-task.js";
-import { gitRepo } from "./helpers/git-repo.js";
-import { usePassThroughProofSandbox } from "./helpers/pass-through-proof-sandbox.js";
+import * as affected from "#src/lib/affected-suites.js";
+import * as runTask from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { usePassThroughProofSandbox } from "#test/helpers/pass-through-proof-sandbox.js";
 
 // W1-T6156 runs the coverage runner in the proof sandbox; a pass-through stands in for bwrap off Linux.
 usePassThroughProofSandbox();

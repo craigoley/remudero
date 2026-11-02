@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd } from "../src/lib/worker.js";
+import { excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd } from "#src/lib/worker.js";
 
 // W1-T137 (#842) shipped `hooks/commit-msg` and wired it into every worktree via
 // `core.hooksPath`, but `worktreeAdd` never supplied the `node_modules` that hook

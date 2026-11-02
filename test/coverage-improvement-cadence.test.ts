@@ -15,12 +15,12 @@ import {
   workflowJobsForRunRestArgs,
   workflowRunsForHeadRestArgs,
   type FetchMergedCoverageArtifactResult,
-} from "../src/lib/coverage-improvement.js";
-import { runMeasurementCadenceReport } from "../src/lib/measurement-cadence.js";
-import { coverageImproveCommand } from "../src/run-task.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { FeedbackEntry } from "../src/lib/feedback.js";
-import type { LedgerLine } from "../src/lib/ledger.js";
+} from "#src/lib/coverage-improvement.js";
+import { runMeasurementCadenceReport } from "#src/lib/measurement-cadence.js";
+import { coverageImproveCommand } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
+import type { LedgerLine } from "#src/lib/ledger.js";
 
 const OWNER = "owner";
 const REPO = "repo";

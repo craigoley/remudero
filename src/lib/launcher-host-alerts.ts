@@ -62,7 +62,8 @@ export type LauncherAlertCondition =
   | "units-diverged"
   | "deploy-code-fetch-failed"
   | "deploy-code-diverged"
-  | "deploy-run-problem";
+  | "deploy-run-problem"
+  | "tunnel-roll-failed";
 
 interface ConditionSpec {
   persistingAt: number;
@@ -115,6 +116,16 @@ const SPECS: Record<LauncherAlertCondition, ConditionSpec> = {
     summary: (i) => `the host watchdog's deploy-run for ${i} keeps reporting a problem`,
     recovered: "`rmd deploy-run --image-drift-only` exiting cleanly",
     remedy: "read the deploy-run output in the watchdog's journal (rmd-fleet-watchdog.service) and fix what it names",
+  },
+  // W1-T10844: deploy/edge-heal.sh exits 3 when the console tunnel is off its pin and the
+  // replica-first roll failed (or is held for an hour after one). Silent, 2026.8.3 lasted seven weeks.
+  "tunnel-roll-failed": {
+    ...REFUSAL_TIERS,
+    summary: (i) => `the console tunnel on ${i}'s host is off its pinned cloudflared image: the roll failed`,
+    recovered: "the cloudflared tunnel running on its pin from deploy/cloudflared/Dockerfile",
+    remedy:
+      "read edge-heal's journal lines (rmd-fleet-watchdog.service) for the failed step; check the pin in " +
+      "deploy/cloudflared/Dockerfile pulls and registers, then remove <state>/state/tunnel-roll-failed to retry now",
   },
 };
 

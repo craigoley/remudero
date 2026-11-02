@@ -114,6 +114,11 @@ export interface PolicyValues {
      *  the call site passed no `enabled` at all, so there was nothing an operator could decide.
      *  This row is that decision, made settable. Same shape as `armSessionPrs`. */
     armAdhocLaneReap: boolean;
+    /** ARMS the repo-hygiene branch lane's act mode (operator ruling 2026-11-01: "Build act mode, flag
+     *  off"). Off, `rmd reap-branches` only ledgers `branch_reap.hygiene_shadow`; on, the automatic
+     *  rung's prune pass (or `--archive-stale`) archives each stale held run branch's tip under
+     *  `refs/rmd-recovery/reaped/` and deletes the branch in one atomic leased push. Net-new. */
+    armStaleBranchArchive: boolean;
     /** W1-T1038: the dispatch-path `/proc/meminfo` `MemAvailable` floor (MiB); below it, new
      *  dispatch defers. Ships at 0. See {@link checkMemoryGovernor}. Why:
      *  docs/forensics/policy.md#sweepmemoryfloormib. */
@@ -299,6 +304,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.dailyCostCeilingUsd": "lifted",
   "sweep.armSessionPrs": "net-new",
   "sweep.armAdhocLaneReap": "net-new",
+  "sweep.armStaleBranchArchive": "net-new",
   "sweep.repairFilingThreshold": "net-new",
   "sweep.repairFilingWindowDays": "net-new",
   "sweep.supersessionDisposal": "net-new",
@@ -787,6 +793,7 @@ export function validatePolicy(raw: unknown): Policy {
   const dailyCostCeilingUsd = numberField("sweep.dailyCostCeilingUsd", sweepRaw.dailyCostCeilingUsd, origin, bounds);
   const armSessionPrs = booleanField("sweep.armSessionPrs", sweepRaw.armSessionPrs, origin);
   const armAdhocLaneReap = booleanField("sweep.armAdhocLaneReap", sweepRaw.armAdhocLaneReap, origin);
+  const armStaleBranchArchive = booleanField("sweep.armStaleBranchArchive", sweepRaw.armStaleBranchArchive, origin);
   const repairFilingThreshold = numberField("sweep.repairFilingThreshold", sweepRaw.repairFilingThreshold, origin);
   const repairFilingWindowDays = numberField("sweep.repairFilingWindowDays", sweepRaw.repairFilingWindowDays, origin);
   const supersessionDisposal = booleanField("sweep.supersessionDisposal", sweepRaw.supersessionDisposal, origin);
@@ -963,6 +970,7 @@ export function validatePolicy(raw: unknown): Policy {
         dailyCostCeilingUsd,
         armSessionPrs,
         armAdhocLaneReap,
+        armStaleBranchArchive,
         repairFilingThreshold,
         repairFilingWindowDays,
         supersessionDisposal,
@@ -1111,6 +1119,42 @@ export function loadLaneGovernorMode(path: string = installPolicyPath()): LaneGo
     throw new PolicyError(`policy.yaml is not valid YAML (${path}): ${String(err)}`);
   }
   return parseLaneGovernorMode(isPlainObject(raw) ? raw.sweep : undefined);
+}
+
+// ── sweep.observedOverlap.mode ──────────────────────────────────────────────────────────────
+// Read optionally, exactly like `sweep.laneGovernor.mode` above. An absent block reads as `shadow`.
+
+/** `shadow` ledgers what open PRs' changed files would hold back and changes nothing; `enforce`
+ *  holds those candidates out of the pass (lib/observed-overlap.ts). */
+export const OBSERVED_OVERLAP_MODES = ["shadow", "enforce"] as const;
+export type ObservedOverlapMode = (typeof OBSERVED_OVERLAP_MODES)[number];
+
+/** Validate `sweep.observedOverlap.mode` out of the `sweep` mapping. An absent block reads as `shadow`. */
+export function parseObservedOverlapMode(sweep: unknown): ObservedOverlapMode {
+  const block = isPlainObject(sweep) ? sweep.observedOverlap : undefined;
+  if (block === undefined) return "shadow";
+  if (!isPlainObject(block)) throw new PolicyError("policy.yaml: 'sweep.observedOverlap' must be a mapping.");
+  const row = block.mode;
+  if (!isPlainObject(row)) throw new PolicyError("policy.yaml: 'sweep.observedOverlap.mode' must be a mapping with 'value'/'origin'.");
+  if (row.origin !== "proposal") {
+    throw new PolicyError(`policy.yaml: 'sweep.observedOverlap.mode.origin' must be "proposal", got ${JSON.stringify(row.origin)}.`);
+  }
+  const found = OBSERVED_OVERLAP_MODES.find((mode) => mode === row.value);
+  if (found === undefined) {
+    throw new PolicyError(`policy.yaml: 'sweep.observedOverlap.mode' accepts only "shadow", "enforce", got ${JSON.stringify(row.value)}.`);
+  }
+  return found;
+}
+
+/** `sweep.observedOverlap.mode` from the policy at `path` (default: this installation's). A missing or unparseable file throws. */
+export function loadObservedOverlapMode(path: string = installPolicyPath()): ObservedOverlapMode {
+  let raw: unknown;
+  try {
+    raw = parseYaml(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new PolicyError(`policy.yaml is not valid YAML (${path}): ${String(err)}`);
+  }
+  return parseObservedOverlapMode(isPlainObject(raw) ? raw.sweep : undefined);
 }
 
 // ── Daily-cost-ceiling override store (W1-T332) ─────────────────────────────────────────────

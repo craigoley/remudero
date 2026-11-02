@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { fullRunTrigger } from "../src/lib/affected-suites.js";
+import { fullRunTrigger } from "#src/lib/affected-suites.js";
 
 test("read-mapped path alternatives have whole-path anchors without narrowing the safety fallback", () => {
   const source = readFileSync(new URL("../src/lib/affected-suites.ts", import.meta.url), "utf8");

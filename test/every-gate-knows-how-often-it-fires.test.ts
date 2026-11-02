@@ -10,10 +10,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { renderGateFireRates, summarizeGateFireRates, measureGateFireRates, gateFireRatesPath, type GateWindowPr } from "../src/lib/gate-fire-rate.js";
-import { renderDigest, summarize } from "../src/lib/digest.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildCiLearningCadenceRunner } from "../src/run-task.js";
+import { renderGateFireRates, summarizeGateFireRates, measureGateFireRates, gateFireRatesPath, type GateWindowPr } from "#src/lib/gate-fire-rate.js";
+import { renderDigest, summarize } from "#src/lib/digest.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { buildCiLearningCadenceRunner } from "#src/run-task.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 

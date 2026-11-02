@@ -1,7 +1,8 @@
 /**
  * A stage-stall report (`**Cause:** stage-stall`, class MANUAL) is the fleet's own observation of one PR at
  * one head and one blocker, not an operator capacity decision. The issue-revalidation garden therefore
- * resolves it deterministically, and may close it despite class MANUAL, in exactly two cases:
+ * resolves it deterministically, and may close it despite class MANUAL, in exactly three cases:
+ *   - the PR is merged or closed (no stage of it can still be stalled);
  *   - the PR's head has moved off the head the stall was reported at (a stall at the new head files its own);
  *   - a NEWER open stage-stall issue reports the same PR, head and blocker (W1-T11031's dedup key).
  * Every other guard still holds, and every other MANUAL or GRILL issue still only refreshes.
@@ -152,4 +153,76 @@ test("the run-task referent derivation carries an open PR's current head from th
   assert.deepEqual(verdicts.get(1)?.openPrHead, { prNumber: 15065, sha: NEW_HEAD });
   assert.equal(verdicts.get(2)?.verdict, "resolved");
   assert.equal(verdicts.get(2)?.openPrHead, undefined, "a merged PR's head describes no live stall");
+});
+
+/** The referent derivation for a stall whose PR went terminal: resolved by the reconciler, carrying the PR's state. */
+const terminalAt = (pr: number, state: "merged" | "closed") => async (issues: readonly RevalidationIssue[]) => new Map(issues.map((i): [number, RevalidationVerdict] =>
+  [i.number, { verdict: "resolved", reason: state === "merged" ? "W1-T10781 is merged" : "W1-T10781's PR closed without merging",
+    citation: state === "merged" ? `PR #${pr} merged (${pull(pr)})` : `PR #${pr} closed without merging`, terminalPr: { prNumber: pr, state } }]));
+
+test("a stage-stall issue whose PR merged closes despite class MANUAL, citing PR #n is merged", async () => {
+  // #15956: a stall report for PR #15268, which merged at 14:34Z on 2026-11-01.
+  const f = run([stall(15956, { pr: 15268 })], { referentVerdicts: terminalAt(15268, "merged") });
+  await runIssueRevalidationGarden(f.ports);
+  const row = f.row(15956);
+  assert.equal(row.verdict, "resolved");
+  assert.equal(row.citation, "PR #15268 is merged");
+  assert.equal(row.action, "close");
+  assert.deepEqual(f.closes.map((c) => c.url), ["https://github.com/acme/remudero/issues/15956"]);
+  assert.match(f.closes[0]!.comment, /\*\*Evidence:\*\* PR #15268 is merged/);
+});
+
+test("a stage-stall issue whose PR closed unmerged closes, citing PR #n is closed, even while its task is open", async () => {
+  const f = run([stall(15957, { pr: 15269 }), stall(15958, { pr: 15270 })], {
+    referentVerdicts: async (issues) => new Map(issues.map((i): [number, RevalidationVerdict] => i.number === 15957
+      ? [i.number, { verdict: "resolved", reason: "closed", citation: "PR #15269 closed without merging", terminalPr: { prNumber: 15269, state: "closed" } }]
+      : [i.number, { verdict: "still-true", reason: "W1-T10781 is still open", terminalPr: { prNumber: 15270, state: "closed" } }])),
+  });
+  await runIssueRevalidationGarden(f.ports);
+  assert.equal(f.row(15957).citation, "PR #15269 is closed");
+  assert.equal(f.row(15957).action, "close");
+  assert.equal(f.row(15958).citation, "PR #15270 is closed");
+  assert.equal(f.row(15958).action, "close");
+  assert.deepEqual(f.closes.map((c) => c.url.replace(/.*\//, "")), ["15957", "15958"]);
+});
+
+test("a terminal PR closes only a stage stall: a non-stall MANUAL terminal referent still only refreshes", async () => {
+  const f = run([stall(15959, { pr: 15268, cause: "review" }), stall(15960, { pr: 15268, cls: "GRILL" }), stall(15961, { pr: 15271 })],
+    { referentVerdicts: terminalAt(15268, "merged") });
+  await runIssueRevalidationGarden(f.ports);
+  assert.deepEqual(f.closes, []);
+  assert.equal(f.row(15959).action, "refresh");
+  assert.equal(f.row(15959).guard, "operator-owned-class");
+  assert.equal(f.row(15959).citation, "PR #15268 merged (https://github.com/acme/remudero/pull/15268)");
+  assert.equal(f.row(15960).action, "refresh", "a GRILL is never closed by the stage-stall rule");
+  assert.equal(f.row(15961).action, "refresh", "a terminal state names another PR: the stall's own PR is not shown terminal");
+});
+
+test("a merged-PR stage stall keeps every other guard: the operator spoke last, and the close cap", async () => {
+  const spoke = run([stall(15956, { pr: 15268 })], { referentVerdicts: terminalAt(15268, "merged"), listComments: async () => [fleetRefresh(-5), operator(-1)] });
+  await runIssueRevalidationGarden(spoke.ports);
+  assert.equal(spoke.row(15956).guard, "newer-operator-comment");
+  assert.deepEqual(spoke.closes, []);
+  const capped = run([16011, 16012, 16013].map((n) => stall(n, { pr: 15268 })),
+    { referentVerdicts: terminalAt(15268, "merged"), policy: () => ({ mode: "act", maxClosesPerPass: 2 }) });
+  await runIssueRevalidationGarden(capped.ports);
+  assert.deepEqual(capped.closes.map((c) => c.url.replace(/.*\//, "")), ["16011", "16012"]);
+  assert.equal(capped.row(16013).guard, "close-cap");
+});
+
+test("the run-task referent derivation carries a merged or closed PR's state from the batched view", async (t) => {
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}stage-stall-terminal-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const rows: Record<number, { state: string; headRefOid: string }> = {
+    15065: { state: "OPEN", headRefOid: NEW_HEAD }, 15268: { state: "MERGED", headRefOid: NEW_HEAD }, 15269: { state: "CLOSED", headRefOid: NEW_HEAD },
+  };
+  const github = { prByRef: (n: number) => (n in rows ? { number: n, url: pull(n), ...rows[n] } : undefined) } as never;
+  const p = issueRevalidationRunTaskPorts({ owner: "acme", repo: "remudero", repoRoot: REPO_ROOT, stateDir, log: () => {} }, {
+    loadPlan: () => ({ tasks: [], byId: new Map() }) as never,
+    reconcile: { github, evidenceRootFor: () => undefined },
+  });
+  const verdicts = await p.referentVerdicts([stall(1, { pr: 15065 }), stall(2, { pr: 15268 }), stall(3, { pr: 15269 })]);
+  assert.equal(verdicts.get(1)?.terminalPr, undefined, "an open PR is not terminal");
+  assert.deepEqual(verdicts.get(2)?.terminalPr, { prNumber: 15268, state: "merged" });
+  assert.deepEqual(verdicts.get(3)?.terminalPr, { prNumber: 15269, state: "closed" });
 });

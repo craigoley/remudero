@@ -4,14 +4,14 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runTask } from "../src/run-task.js";
-import { spawnDetachedGroup } from "../src/lib/worker-containment.js";
-import { killProcessGroup } from "../src/lib/worker-containment.js";
-import type { Config } from "../src/lib/config.js";
-import type { GitHub } from "../src/lib/status.js";
-import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
+import { runTask } from "#src/run-task.js";
+import { spawnDetachedGroup } from "#src/lib/worker-containment.js";
+import { killProcessGroup } from "#src/lib/worker-containment.js";
+import type { Config } from "#src/lib/config.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
 
 /**
  * W1-T442 — `spawnDetachedGroup` threw `child process has no pid` and DISCARDED the
@@ -243,7 +243,7 @@ async function runFixture(
   process.env.PATH = `${fakeBinDir}:${savedPath}`;
   t.mock.method(Date, "now", () => FIXED_TS);
 
-  const { withLiveWritesAllowed } = await import("../src/lib/live-write-guard.js");
+  const { withLiveWritesAllowed } = await import("#src/lib/live-write-guard.js");
   try {
     await withLiveWritesAllowed(() =>
       runTask("T-NOPID", {

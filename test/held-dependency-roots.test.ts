@@ -5,11 +5,11 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { heldDependencyRoots } from "../src/lib/held-dependency-roots.js";
-import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { GitHub } from "../src/lib/status.js";
-import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
+import { heldDependencyRoots } from "#src/lib/held-dependency-roots.js";
+import { loadPlanFromYaml, type Plan } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { GitHub } from "#src/lib/status.js";
+import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "#src/lib/status-board.js";
 
 // Shapes measured on the live plan at b5c2804: W1-T3762 (verify: human, status: blocked) stalled five
 // dependents, some through an intermediate task, and W1-T3570 (verify: human, itself waiting on a

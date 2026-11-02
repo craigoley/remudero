@@ -11,7 +11,7 @@ import {
   ensureWorkerKeychain,
   keychainProvisionLockPath,
   workerKeychainPaths,
-} from "../src/lib/worker-home.js";
+} from "#src/lib/worker-home.js";
 
 /**
  * W1-T265 — the worker credential store becomes IDENTITY-AWARE and per-account.

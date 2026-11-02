@@ -3,20 +3,20 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { loadMounts, MountsError, mountsPath, type CapabilityLadder } from "../src/lib/mounts.js";
+import { loadMounts, MountsError, mountsPath, type CapabilityLadder } from "#src/lib/mounts.js";
 import {
   policyForCapability,
   selectWorkerProviderForPolicy,
   type EffectiveProviderRoutingPolicy,
-} from "../src/lib/provider-routing-policy.js";
-import { selectCodexModel, type CodexModelInfo, type ProviderCapacity } from "../src/lib/worker-provider.js";
+} from "#src/lib/provider-routing-policy.js";
+import { selectCodexModel, type CodexModelInfo, type ProviderCapacity } from "#src/lib/worker-provider.js";
 import {
   createClaudeExecutableCache,
   spawnWorker,
   type WorkerResult,
   type WorkerSelectionAssignment,
-} from "../src/lib/worker.js";
-import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+} from "#src/lib/worker.js";
+import { gitWorkTreeAncestor } from "#src/lib/worker-home.js";
 
 // 2026-09-22 model change: Opus 5 -> Opus 5.5, GPT-5.6 Luna -> GPT-6 Luna, Terra phased out, and
 // Sol 6 "only if absolutely necessary". Measured before this change: 84 of 127 Opus-requested runs

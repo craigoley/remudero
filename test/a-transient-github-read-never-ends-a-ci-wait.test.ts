@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isGhReadFailure, retryPollRead } from "../src/lib/poll-read-retry.js";
-import { ciGateState, pollToGate, waitForCiGreen } from "../src/run-task.js";
+import { isGhReadFailure, retryPollRead } from "#src/lib/poll-read-retry.js";
+import { ciGateState, pollToGate, waitForCiGreen } from "#src/run-task.js";
 
 // MEASURED 2026-09-28..30: 14 build runs ended "github-read-failed" on ONE unreadable response or failed
 // `gh api .../check-runs` call while waiting on CI for a PR that was already open — every one of those PRs

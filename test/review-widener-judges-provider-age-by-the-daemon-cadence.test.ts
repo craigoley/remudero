@@ -7,9 +7,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { HEADROOM_SAMPLE_MAX_AGE_MS } from "../src/lib/daemon.js";
-import type { ProviderRoutingStatus } from "../src/lib/provider-routing-status.js";
-import * as reviewCapacity from "../src/lib/review-capacity.js";
+import { HEADROOM_SAMPLE_MAX_AGE_MS } from "#src/lib/daemon.js";
+import type { ProviderRoutingStatus } from "#src/lib/provider-routing-status.js";
+import * as reviewCapacity from "#src/lib/review-capacity.js";
 import {
   initialReviewCapacityState,
   reviewProviderObservation,
@@ -17,7 +17,7 @@ import {
   type ReviewCapacityDecision,
   type ReviewCapacityObservation,
   type ReviewCapacityPolicy,
-} from "../src/lib/review-capacity.js";
+} from "#src/lib/review-capacity.js";
 
 const POLICY: ReviewCapacityPolicy = {
   hostWorkerBudget: 8,

@@ -8,7 +8,7 @@ import type { RatifyCliGateway } from "../../lib/panel-graph.js";
  * and delegates here, so HANDLERS and every caller are unchanged.
  */
 import type { tickReadProducer, TickReadFacts, TickReadRequest } from "../../lib/tick-read-worker.js";
-import { registeredGardenEnabled } from "../../lib/garden-registry.js";
+import { registeredGardenEnabled, registeredGardenTargetArgs } from "../../lib/garden-registry.js";
 import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "../../lib/read-plane.js";
 import { remeasureSettledGoals, withGoalRemeasurement } from "../../lib/goals.js";
 import { judgeCiEscalation, productionCiJudgePorts, singleFlightCiJudge, withCiJudgeAfterSweep, type CiJudgeIo } from "../../lib/ci-escalation-judge.js";
@@ -110,7 +110,8 @@ import { resolveRepoLayout } from "../../lib/repo-layout.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { liveInflightRuns, readCheckoutDepth } from "../../lib/report-commands.js";
 import { adoptRunChildren, createAdmittedPlanSlot, runChildModeIsOn, startRunChildProbe, tapPlanSnapshot, type AdoptedRunChild } from "../../lib/run-child.js";
-import { loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
+import { loadObservedOverlapMode, loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
+import { observedScopeFromOpenPrs } from "../../lib/observed-overlap.js";
 import {
   bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor,
   type RunChildContractEscalation, type RunChildModeDecision,
@@ -238,6 +239,12 @@ export interface GardenBuildContext {
   repo: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
   raiseDuplicate: (e: Escalation) => string;
+  /** False for a per-target garden built over a non-self managed target (`owner`/`repo` name it); absent is self. */
+  isSelf?: boolean;
+  /** That target's checkout, whose origin/main the garden reads; absent, `repoRoot`. */
+  targetRoot?: string;
+  /** That target's plan file, the one its daemon reads (an explicit `--plan` included); absent, `targetRoot`'s layout. */
+  planPath?: string;
 }
 
 /** One production composition, using the boot's existing gateway and its in-flight ownership. */
@@ -574,6 +581,8 @@ export async function daemonCommand(
     runDaemon?: typeof runDaemon;
     runTask?: DaemonCommandHost["runTask"];
     readRunChildMode?: () => RunChildMode;
+    /** Stand-in for `sweep.observedOverlap.mode` (policy.ts); absent reads the installation's policy. */
+    readObservedOverlapMode?: () => "shadow" | "enforce";
     /** W1-T9089: delivers `run_child.contract_failing`'s escalation; production raises it through `escalate`. */
     runChildContractEscalate?: (escalation: RunChildContractEscalation) => string | null | undefined;
     /** Command seams for the selected-repository PR-action wiring test. Production keeps the
@@ -922,9 +931,13 @@ export async function daemonCommand(
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
   const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
   const gardenContext: GardenBuildContext = { config, repoRoot: effectiveRepoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs, codeSha: daemonLoadedCodeSha };
+  // A per-target garden on a non-self target reads THAT repository and its checkout; every other garden reads self.
+  const gardenContextFor = (name: RegisteredGardenName): GardenBuildContext => registeredGardenTargetArgs(name, target).length === 0 ? gardenContext
+    : { ...gardenContext, owner: target.owner, repo: target.repo, isSelf: false, targetRoot: daemonTargetCheckoutRoot(target, config.root), planPath: resolve(target.planPath) };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
-    ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
-  const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
+    ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContextFor(name), signal) : undefined);
+  const boundedPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
+  const gardenPassSpawn: GardenPassSpawn = (name, args, signal) => boundedPassSpawn(name, [...args, ...registeredGardenTargetArgs(name, target)], signal);
   const gardenerRuntime = createGardenerRuntimeWriter({ stateDir: join(config.root, "state"), repository: `${target.owner}/${target.repo}`,
     daemonRunId: runId, codeSha: daemonLoadedCodeSha, log,
     gardens: REGISTERED_GARDEN_NAMES.map((name) => ({ name, enabled: registeredGardenEnabled(name, target.isSelf),
@@ -932,7 +945,7 @@ export async function daemonCommand(
       scope: name === "host-resource" ? "host" : name === "overseer" ? "fleet" : "repository" })) });
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
     registeredGardenEnabled(name, target.isSelf)
-      ? startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) })
+      ? startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContextFor(name)) }) })
       : { stop() {} };
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
@@ -1021,6 +1034,9 @@ export async function daemonCommand(
   const activePlanRef: { current: Plan } = { current: plan };
   const projectionGithub = githubFactory(target.owner, target.repo);
   const boardOpenPrCount = createOpenPrCountObservation();
+  // The open rows `projectPlan` observed this pass, kept for the observed-scope producer below:
+  // the SAME batch the WIP governor counts, never a second read.
+  let lastOpenRows: readonly PrRef[] | undefined;
   const refreshMerged: (planOverride?: Plan) => MergedSet = (planOverride = activePlanRef.current) => {
     if (freshReadGeneration(tickReadGeneration, { consumer: "refresh_merged", log })) {
       const projection = lastProj;
@@ -1030,9 +1046,11 @@ export async function daemonCommand(
     // loop body opens with `deps.refreshMerged()` (lib/daemon.ts) exactly as `runDrain`'s two do.
     projectionGithub.resetFailureFlags?.();
     boardOpenPrCount.reset();
+    lastOpenRows = undefined;
     const proj = projectPlan(
       planOverride,
-      { ledgerPath, github: projectionGithub, observeOpenPrCount: boardOpenPrCount.observe, skipUncreditedBuildWarning: true },
+      { ledgerPath, github: projectionGithub, skipUncreditedBuildWarning: true,
+        observeOpenPrCount: (rows) => { lastOpenRows = rows; boardOpenPrCount.observe(rows); } },
       statusPath,
     );
     lastProj = proj;
@@ -1674,6 +1692,8 @@ export async function daemonCommand(
             tickReadGeneration = snapshot;
             lastProj = new Map(snapshot.facts.projection);
             boardOpenPrCount.reset();
+            // The same open rows the synchronous `refreshMerged` keeps: production ticks take this path.
+            lastOpenRows = snapshot.facts.openBranches;
             boardOpenPrCount.observe(snapshot.facts.openBranches);
           },
           ledgerPath, statusPath, log,
@@ -1805,6 +1825,10 @@ export async function daemonCommand(
         // Separate from tick/retro/triage/SRE governors; consulted only at NEW implement start.
         checkHeavyNewBuild: deps.checkHeavyNewBuild ?? captureHeavyNewBuildStartupGate(log, config),
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
+        // Open PR heads' changed files as observed scope: this pass's rows, and the file lists the
+        // projection gateway's head-keyed cache already holds for `openSiblingBuild`. No new read.
+        observedOpenPrScope: () => observedScopeFromOpenPrs(lastOpenRows, (url, pr) => projectionGithub.changedFiles?.(url, pr)),
+        observedOverlapMode: deps.readObservedOverlapMode ?? (() => loadObservedOverlapMode()),
         // W1-T1062: `owner: target.owner` must reach `runTask`, else a FOREIGN `--repo owner/name` run
         // falls back to this checkout's owner and opens its PR there (test/owner-dispatch-threading).
         // W1-T9924: the same mode read `runInChildWhenOn` makes below; a run it would keep in-process reads false.
@@ -2084,7 +2108,8 @@ export async function daemonCommand(
                 }),
               ],
             }
-          : {}),
+          // Operator 2026-11-01: a managed target runs its per-target gardens (the issue-revalidation garden, shadow).
+          : { gardens: REGISTERED_GARDEN_NAMES.filter((name) => registeredGardenEnabled(name, false)).map(offLoopGarden) }),
         clearPrAction: (action, prNumber) => clearPrAction(config.root, action, prNumber),
         plainBackfill: {
           stateDir: join(config.root, "state"),

@@ -17,16 +17,16 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runTask, type RunResult } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { ProbeExecResult } from "../src/lib/containment.js";
-import type { DispatchClaimReserver } from "../src/lib/dispatch-claim.js";
-import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { GitHub } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { DEFAULT_PRUNE_GRACE_MS, pruneStaleRuns, type PruneSummary, type spawnWorker } from "../src/lib/worker.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { runTask, type RunResult } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { ProbeExecResult } from "#src/lib/containment.js";
+import type { DispatchClaimReserver } from "#src/lib/dispatch-claim.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { GitHub } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { DEFAULT_PRUNE_GRACE_MS, pruneStaleRuns, type PruneSummary, type spawnWorker } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const TASK_ID = "T-ADD-IS-ALIVE";
 const ANCHOR = "t5280-anchor";

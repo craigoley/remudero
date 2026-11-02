@@ -5,19 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 // Namespace reads, never named imports: at a base without this task the suite must still LOAD and
 // fail subtest by subtest, which is what makes the proof discriminate.
-import * as sweepModule from "./helpers/sweep-test.js";
-import * as restModule from "../src/lib/open-prs-rest.js";
-import * as riskModule from "../src/lib/risk-judge.js";
-import * as runTaskModule from "../src/run-task.js";
-import type { CodeScanningJudgment, OpenPrView, SweepDeps } from "./helpers/sweep-test.js";
-import type { RiskJudgeVerdict } from "../src/lib/risk-judge.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
-import { readLedgerLines } from "../src/lib/status.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { readLedgerUnionBounded } from "../src/lib/status.js";
+import * as sweepModule from "#test/helpers/sweep-test.js";
+import * as restModule from "#src/lib/open-prs-rest.js";
+import * as riskModule from "#src/lib/risk-judge.js";
+import * as runTaskModule from "#src/run-task.js";
+import type { CodeScanningJudgment, OpenPrView, SweepDeps } from "#test/helpers/sweep-test.js";
+import type { RiskJudgeVerdict } from "#src/lib/risk-judge.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { readLedgerUnionBounded } from "#src/lib/status.js";
 
 // W1-T5633 — GitHub's `CodeQL` results check failed on #9034 ("1 new alert including 1 high") and the PR
 // merged 31 minutes later: ci-gate never waits on that check and nothing in the sweep read it. A head

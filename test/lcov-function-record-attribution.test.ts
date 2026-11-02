@@ -19,7 +19,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // acceptance criterion.
 //
 // `scripts/**` sits OUTSIDE tsconfig's `include` (see tsconfig.json), so a static
-// `import … from "../scripts/diff-coverage.mjs"` is a TS7016 -- the same reason
+// `import … from "#scripts/diff-coverage.mjs"` is a TS7016 -- the same reason
 // test/clock-sweep.test.ts reaches its script through a runtime import rather than a typed one.
 // A dynamic specifier is not statically resolved, so this loads the REAL module with no shadow
 // copy to drift from it.

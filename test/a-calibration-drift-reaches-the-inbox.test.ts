@@ -16,10 +16,10 @@ import {
   type VerdictCalibrationReport,
   type VerdictClass,
   type UnmeasurableCause,
-} from "../src/lib/verdict-calibration.js";
-import { parseProposalRegistry } from "../src/lib/inbox.js";
-import { installPolicyPath } from "../src/lib/policy.js";
-import { makeTempDir } from "../src/lib/tmp.js";
+} from "#src/lib/verdict-calibration.js";
+import { parseProposalRegistry } from "#src/lib/inbox.js";
+import { installPolicyPath } from "#src/lib/policy.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 
 /**
  * test/a-calibration-drift-reaches-the-inbox.test.ts — W1-T3082.

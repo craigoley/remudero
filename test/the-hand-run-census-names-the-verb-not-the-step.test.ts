@@ -15,7 +15,7 @@ import {
   parseOperatorLedgerRows,
   alreadyProposedForSignature,
   HAND_RUN_SEQUENCE_SCHEMA_VERSION,
-} from "../src/lib/hand-run-census.js";
+} from "#src/lib/hand-run-census.js";
 
 /** One raw `cli.invoked` ledger line, `verb` omitted entirely when `undefined` — never written
  *  as a literal `null`/placeholder, matching how a real pre-verb-field row (or a torn one) would

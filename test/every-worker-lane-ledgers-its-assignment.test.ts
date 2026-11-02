@@ -3,9 +3,9 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildInboxDraftSpawnArgs, ledgeredNonDispatchSpawn } from "../src/run-task.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
+import { buildInboxDraftSpawnArgs, ledgeredNonDispatchSpawn } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
 
 test("W1-T4457 criterion 1: a non-dispatch worker spawn ledgers its worker assignment", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-nondispatch-assignment-"));
@@ -22,7 +22,7 @@ test("W1-T4457 criterion 1: a non-dispatch worker spawn ledgers its worker assig
     const raw = (async (args: SpawnWorkerArgs) => {
       args.onSelectionAssignment?.(assignment);
       return result;
-    }) as typeof import("../src/lib/worker.js").spawnWorker;
+    }) as typeof import("#src/lib/worker.js").spawnWorker;
     const spawn = ledgeredNonDispatchSpawn("triage", raw);
     assert.equal(await spawn({
       cwd: root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt: "x",

@@ -7,8 +7,8 @@ import { test } from "node:test";
 
 // @ts-expect-error — `scripts/**` sits outside tsconfig's `include`, so this executable .mjs has no
 // declaration output (TS7016). The seam is typed below, the idiom the acceptance-author-gate tests use.
-import * as census from "../scripts/no-draft-pull-request-census.mjs";
-import { gitRepo } from "./helpers/git-repo.js";
+import * as census from "#scripts/no-draft-pull-request-census.mjs";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 type DraftHit = { path: string; line: number; pattern: string; text: string };
 const findDraftPullRequestCreators = census.findDraftPullRequestCreators as (

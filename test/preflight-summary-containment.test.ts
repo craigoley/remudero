@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { preflightSummaryPath, type PreflightSummary } from "../src/lib/ci-parity.js";
-import { preflightCommand, preflightSummaryTarget } from "../src/run-task.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
+import { preflightSummaryPath, type PreflightSummary } from "#src/lib/ci-parity.js";
+import { preflightCommand, preflightSummaryTarget } from "#src/run-task.js";
 
 /**
  * W1-T455 — THE FORGED-SUMMARY DEFECT, AND THE CONTAINMENT THAT CLOSES IT.

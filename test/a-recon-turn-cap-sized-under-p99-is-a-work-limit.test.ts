@@ -3,9 +3,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { RECON_MAX_TURNS, workerErrorVerdict } from "../src/run-task.js";
-import { frontierPeerWorkerRow, loadMounts, mountsPath } from "../src/lib/mounts.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { RECON_MAX_TURNS, workerErrorVerdict } from "#src/run-task.js";
+import { frontierPeerWorkerRow, loadMounts, mountsPath } from "#src/lib/mounts.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MOUNTS_PATH = mountsPath(REPO_ROOT);
