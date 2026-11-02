@@ -9,8 +9,9 @@ dist/
 *.tsbuildinfo
 
 # generated coverage reports (W1-T25 coverage-ratchet gate consumes coverage/lcov.info,
-# regenerated fresh every run — never committed)
-coverage/
+# regenerated fresh every run — never committed). Anchored at the root: an unanchored
+# `coverage/` also ignored test/ci/coverage/, so git add skipped those tests (#15434, #14176).
+/coverage/
 
 # generated mutation-testing reports (W1-T96 mutation-ratchet gate consumes
 # reports/mutation/mutation.json, regenerated fresh every run — never committed) + Stryker's

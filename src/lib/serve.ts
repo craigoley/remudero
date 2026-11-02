@@ -336,7 +336,8 @@ export interface ServeDeps {
    * {@link buildServeRoutes} owns `inboxRoot` (= fleetControlRoot/config.root); omitting it from
    * this shape prevents callers from supplying a drifting duplicate.
    * W1-T193: absent an injected `ratify`, build a real {@link ratifyCliGateway} rooted at
-   * `panelGraph.root` with logs in `<fleetControlRoot>/state/logs`; serveCommand need not build it.
+   * `panelGraph.root` with logs in `<fleetControlRoot>/state/logs`. This unowned fallback
+   * supports approve/reframe; product planning requires the CLI's owned gateway.
    */
   panelGraph: Omit<PanelGraphDeps, "inboxRoot" | "ratify"> & { ratify?: PanelGraphDeps["ratify"] };
   /** `<root>/state/ledger.ndjson` — SAME path board.ts tails and every panel route ledgers into. */
@@ -2778,8 +2779,8 @@ function assembleServeRoutes(
   // under state/, same as fleet-control's own flags) -- `fleetControlRoot` IS config.root
   // (module header), so it is the same root, never a THIRD independently-resolved path.
   // W1-T193: `ratify` defaults to a REAL ratifyCliGateway (see ServeDeps.panelGraph's own doc)
-  // when the caller doesn't inject one -- rmd serve's own CLI wiring relies on this default;
-  // a test supplies `ratify` explicitly to inject a fake instead.
+  // when the caller doesn't inject one. The CLI supplies the owned fleet gateway; the
+  // unowned default keeps product planning explicitly unavailable.
   const projectionWorker = deps.projectionWorker;
   const panelGraphDeps = {
     ...deps.panelGraph,

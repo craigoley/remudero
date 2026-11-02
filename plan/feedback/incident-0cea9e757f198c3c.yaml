@@ -1,0 +1,34 @@
+id: incident-0cea9e757f198c3c
+ts: 2026-11-01T23:13:39.942Z
+raw: >-
+  Incident 0cea9e757f19: flow pr-stage-stall:escalated:already escalated at
+  <n>-<n>-01T14:<n>:<n>.411Z, still awaiting an operator: detached fix dispatch
+  failed before fix.dispatch <n> times on #<pr> at head <sha> (fix dispatch
+  refused: worker admission is held: PAUSE: cannot reach origin to read
+  refs/rmd-pause/hold — holding rather than dispatching optimistically (an
+  unreachable remote is never read as clear)) — FIX_DISPATCH_FAILED_BACKSTOP <n>
+  reached, no further dispatch is attempted at this head
+
+  First seen: 2026-11-01T14:27:27.958Z
+
+  Last seen: 2026-11-01T14:27:27.958Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15679 escalated: already escalated at 2026-11-01T14:27:40.411Z, still awaiting an operator: detached fix dispatch failed before fix.dispatch 3 times on #15679 at head 0a66a11 (fix dispatch refused: worker admission is held: PAUSE: cannot reach origin to read refs/rmd-pause/hold — holding rather than dispatching optimistically (an unreachable remote is never read as clear)) — FIX_DISPATCH_FAILED_BACKSTOP 3 reached, no further dispatch is attempted at this head
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#0cea9e757f198c3c74228321cc7f6847ceb2f6b9b0900a725250e343290a83c0
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

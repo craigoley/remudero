@@ -1,0 +1,22 @@
+id: incident-b3af7945c6c637d0
+ts: 2026-11-02T02:47:08.969Z
+raw: |-
+  Incident b3af7945c6c6: flow pr-stage-stall:awaiting-arm:review loop
+  First seen: 2026-11-01T23:54:43.640Z
+  Last seen: 2026-11-01T23:54:43.640Z
+  Count: 1, burn: 1.00/hr
+  Deploy sha(s): unknown
+  Instance(s): core
+  Sample events:
+    - pr=15988 awaiting-arm: review loop
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#b3af7945c6c637d0af2c08e8e848d5988f6e46b295f4c5c41331d35760dd4754
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

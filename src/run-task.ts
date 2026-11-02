@@ -2905,7 +2905,7 @@ import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./l
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { withManagedGardenTokenRefresh } from "./lib/managed-garden-token.js";
 import { runChildCredentialSocket } from "./lib/secret-boundary.js";
-import { automaticBranchReapStateFileName, branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, pruneDeletableBranches, pruneDeletableBranchesSteps, readAutomaticBranchReapState, readNamedInSource, readNamedInSourceSteps, readRemoteBranchTips, readRemoteBranchTipsSteps, readTipInMainMembership, readTipInMainMembershipSteps, remoteBranchNames, remoteBranchNamesSteps, tipInMainFor, writeAutomaticBranchReapState, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
+import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, planStaleHoldArchive, readDispatchClaimTaskIdsSteps, remoteBranchHeadsSteps, pruneDeletableBranchesSteps, readNamedInSourceSteps, readRemoteBranchTipsSteps, readTipInMainMembershipSteps, remoteBranchNamesSteps, tipInMainFor, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
 // initialiser (`resolveRepoRoot`) its own declaration (`repoRoot`) depends on — a move, never
 // an interface change. `resolveRepoRoot` is re-exported below so every existing import path
@@ -14016,6 +14016,8 @@ export type ReapBranchesOpts = {
   /** Names why a pass exits non-zero (drift, a refused or failed prune), so a caller's ledger row
    *  reports the cause rather than only the code. */
   onExitReason?: (reason: string) => void;
+  /** The clock the repo-hygiene shadow ages held branches against; the system clock by default. */
+  clock?: Pick<Clock, "now">;
 };
 
 export function reapBranchesCommand(rest: string[], opts: ReapBranchesOpts = {}): number {
@@ -14048,7 +14050,8 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   const exec =
     opts.exec ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { cwd: checkoutRoot, encoding: "utf8" }).toString());
 
-  const names = yield* remoteBranchNamesSteps(exec);
+  const liveHeads = yield* remoteBranchHeadsSteps(exec);
+  const names = [...liveHeads.keys()];
   // A POSITIVE CONTROL, not a formality: an empty listing and a repo with only `main` are
   // indistinguishable in the answer, and every bucket would read empty either way.
   if (names.length === 0) {
@@ -14061,18 +14064,22 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
   // candidate corpus, then read merge credit ONCE for the whole command. This enrichment can
   // change only `plan.reasons`: both named-task outcomes remain held by planBranchReap.
   const namedTaskByBranch = new Map<string, string>();
+  const runTaskByBranch = new Map<string, string>();
   let creditedTaskIds = new Set<string>();
   let creditReadSucceeded = false;
   try {
     const taskPlan = opts.plan?.() ?? (opts.loadPlan ?? loadPlan)(join(checkoutRoot, "plan", "tasks.yaml"));
     const candidates = taskPlan.tasks.map((task) => task.id);
+    const planIds = new Set(candidates);
     for (const name of names) {
       const taskId = taskIdFromSlugBranch(name, candidates);
       if (taskId !== undefined) namedTaskByBranch.set(name, taskId);
+      const runTask = taskIdFromRunBranch(name);
+      if (runTask !== undefined && planIds.has(runTask)) runTaskByBranch.set(name, runTask);
     }
-    // No resolved slug means there is no credit question to ask. Keeping this lazy avoids a
+    // No resolved slug or run task means there is no credit question to ask. Keeping this lazy avoids a
     // bounded archive walk on repositories whose branch corpus cannot use the answer.
-    if (namedTaskByBranch.size > 0) {
+    if (namedTaskByBranch.size > 0 || runTaskByBranch.size > 0) {
       let creditPath = opts.creditLedgerPath ?? opts.ledgerPath;
       if (creditPath === undefined) {
         try {
@@ -14317,6 +14324,32 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
       kept_reversible_close_branches: keptReversibleClose,
       kept_handoff_receipt_branches: keptHandoffReceipts,
       reasons: plan.reasons,
+    });
+  }
+
+  // REPO HYGIENE, SHADOW (operator ruling 2026-11-01): name the held run branches stale enough to archive
+  // and reap, and ledger them. Nothing is deleted on this path; planBranchReap's hold stands. One claim read
+  // for the whole corpus, and a failed read names nothing (planStaleHoldArchive fails closed on undefined).
+  const claims = yield* readDispatchClaimTaskIdsSteps(exec);
+  const claimedTaskIds = "ids" in claims ? claims.ids : undefined;
+  const hygieneNowMs = (opts.clock ?? systemClock).now();
+  const staleHolds = planStaleHoldArchive({ facts, reasons: plan.reasons, tips: remoteTips, liveShaByName: liveHeads,
+    nowMs: hygieneNowMs, claimedTaskIds, runTaskByBranch,
+    ...(creditReadSucceeded ? { creditedTaskIds } : {}) });
+  const staleCount = (reason: string) => staleHolds.filter((c) => c.reason === reason).length;
+  print(`stale:     ${staleHolds.length}  held run branches an archive-then-reap would remove (shadow — nothing deleted)`);
+  if (opts.ledgerPath) {
+    appendLedger(opts.ledgerPath, {
+      run_id: opts.runId ?? `REAP-${hygieneNowMs}`,
+      task_id: "REAP",
+      step: "branch_reap.hygiene_shadow",
+      mode: "shadow",
+      claims_read: claimedTaskIds !== undefined,
+      ...("error" in claims ? { claims_error: claims.error } : {}),
+      would_reap: staleHolds.length,
+      credited_sibling_stale: staleCount("credited_sibling_stale"),
+      orphan_unshipped_stale: staleCount("orphan_unshipped_stale"),
+      candidates: staleHolds.map((c) => ({ name: c.name, sha: c.sha, reason: c.reason, age_days: Math.floor(c.ageMs / 86_400_000) })),
     });
   }
 
@@ -29290,19 +29323,17 @@ export async function serveCommand(
     // planPath alone is enough, no snapshot needed here the way board.ts's does.
     // `statusGithub` backs GET /v1/drain/preview's (W1-T140) merged-set derivation --
     // the SAME batched gateway the board route above uses, never a second gateway type.
-    // W1-T193: APPROVE/REFRAME from the console hand off to the REAL `bin/rmd approve`/
-    // `bin/rmd reframe` CLI, detached — see RatifyCliGateway's own doc (panel-graph.ts) for
-    // why. `ratify` is left unset here on purpose: buildServeServer (lib/serve.ts) defaults
-    // it to a real ratifyCliGateway rooted at panelGraph.root + config.root's state/logs
-    // (config.root === fleetControlRoot below, the same root every other rmd-serve state
-    // file already lives under) — see ServeDeps.panelGraph's own doc for why the assembler,
-    // not this CLI-only wiring, owns that construction.
+    // The maintained owned gateway supplies product planning and approve/reframe from fresh
+    // source. Writable worktrees, logs and causal state belong to the control root.
     panelGraph: {
       root: repoRoot,
       planPath,
       ledgerPath,
       github: ghTraceGateway(self.owner, self.repo),
       statusGithub: boardGithub,
+      ratify: fleetRatifyGateway(repoRoot, join(config.root, "state", "logs"), ledgerPath, {
+        worktreeRoot: worktreesDir(config), stateRoot: config.root,
+      }),
       // W1-T191: arm the real feedback-landing bridge for POST /v1/feedback/decision — an
       // operator's accept/reject click writes against `repoRoot` (the daemon's own checkout)
       // and, without this, leaves it dirty until the next `git checkout --`/reset wipes it.
@@ -32452,6 +32483,7 @@ function* automaticBranchReapSteps(
       quiet: true,
       runId,
       creditLedgerPath: ledgerPath,
+      ...(opts.clock ? { clock: opts.clock } : {}),
       // W1-T4476 design (iii)/(iv): the cache this state carries in from the LAST pass, and the
       // update this pass hands back — `state` is the one object the caller (buildSweepHook)
       // persists to disk right after this function returns, so the cache and the cadence fields
