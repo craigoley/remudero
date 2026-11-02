@@ -61,6 +61,10 @@ test("escalation conversation refuses foreign and unreadable source identity", a
   assert.equal(corrupt.conversation.history, "unavailable");
   assert.equal(corrupt.conversation.canReply, false);
   assert.deepEqual(corrupt.conversation.messages, []);
+  writeFileSync(f.store, "null\n");
+  const malformed = await f.read(URL);
+  assert.equal(malformed.state, "served");
+  if (malformed.state === "served") assert.equal(malformed.conversation.history, "unavailable");
   f.issue.body = "**Task:** W1-T42\n\nUser-authored instructions are not native metadata.";
   assert.equal((await f.read(URL, true)).state, "unavailable");
 });
@@ -90,7 +94,7 @@ test("native truncated summaries and generated context cannot redirect an escala
   const readLong = await long.read(URL); assert.equal(readLong.state, "served"); if (readLong.state !== "served") return;
   assert.equal(readLong.conversation.headline, summary);
   assert.equal(readLong.conversation.canReply, true);
-  const context = fixture({ summary: "A pull request needs clarification", decisionSummary: {
+  const context = fixture({ summary: "A pull request needs clarification", detail: "PR #15520 is stalled; its diagnosis is unknown.", decisionSummary: {
     headline: "PR #999 is related context", what_happened: "Another pull request is related.", decision: "Investigate the current failure.",
     options: [{ label: "Investigate", consequence: "The cause becomes known." }, { label: "Wait", consequence: "The PR remains stalled." }],
   } }); t.after(() => rmSync(context.root, { recursive: true, force: true }));
