@@ -1,0 +1,33 @@
+- id: W1-T11116
+  title: The dep-review node-pin sync reads and commits a Dependabot image bump's head in the target clone, so a Node patch bump gets its .nvmrc synced instead of holding red forever
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one wiring call: which checkout the existing node-pin IO runs git in
+  origin: operator-session#pr-queue-2026-11-02
+  plan_refs:
+    - W1-T6258
+    - W1-T6064
+  files:
+    - src/run-task.ts
+    - test/daemon/a-dependabot-node-pin-sync-reads-the-target-clone.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: The node-pin IO runs in repos/<repo> under the state root and reads a Dependabot head's .nvmrc there, while the state root itself, which is not a git checkout, reads nothing
+      proof: "unit test: test/daemon/a-dependabot-node-pin-sync-reads-the-target-clone.test.ts"
+    - claim: The dep-review command wires the node-pin IO to the target clone, not to the state root
+      proof: "grep: defaultNodePinSyncIo(depReviewNodePinCheckout(config\\.root, repo)) in src/run-task.ts"
+  rationale: |
+    OBSERVED 2026-11-02, PR #15176 (Dependabot: node 24.21.0-bookworm-slim -> 24.22.0-bookworm-slim in deploy/Dockerfile):
+    - Red since 2026-10-28 on ci-shard 3/8 (W1-T2770) and 5/8 (W1-T5883). Both require deploy/Dockerfile's Node version to equal .nvmrc, and Dependabot edits the FROM line only (cao825's PR comments, 10-28).
+    - W1-T6258 exists for exactly this: the dep-review lane commits a synced .nvmrc on the Dependabot head. Every pass since logs dep-review.node_pin_refused "deploy/Dockerfile, .nvmrc or the head ref could not be read" (07:46Z, 14:29Z, 16:52Z), then dep-review.decided hold on red checks.
+    - depReviewCommand passes config.root to defaultNodePinSyncIo, whose readAtHead runs git show <sha>:<path> there. config.root is /home/node/Remudero (host: ~/rmd-state2), which is not a git repository ("fatal: not a git repository"). repos/remudero under it is the target clone, and it holds the PR head d017fa762.
+    - The W1-T6258 suite passes a git checkout to defaultNodePinSyncIo directly, so it never exercised this wiring.
+  note: |
+    reservation hand-off: run-unfiled-1793645341459 -> run-unfiled-1793645341459
+    Reserved with rmd next-task-id (W1-T11116 on run-unfiled-1793645341459). The operator session hand-builds it on run-W1-T11116-<epochMs>.

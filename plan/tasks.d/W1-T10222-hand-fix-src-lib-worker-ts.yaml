@@ -3,10 +3,10 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   risk: low
-  priority: 1.24
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "ci-friction:hand_fix:src/lib/worker.ts"
@@ -33,6 +33,18 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  amendment: |
+    2026-11-02, operator disposition (the coordinator's go-ahead on the #15434 track, under the 2026-11-01
+    standing preference to retire a remedy that cannot converge rather than loop it): withdrawn before any
+    dispatch (no refs/rmd-dispatch/W1-T10222 claim and no run-W1-T10222-* branch at withdrawal).
+    The five hand fixes this cause groups by filename share no failure mechanism: #11342 (SDK init
+    evidence), #12384 (Semgrep runtime compatibility), #12658 (the lockfile guard), #12910 (dependency
+    links outside private engine aliases) and #12960 (live review checkouts during cleanup).
+    #14530 (2026-10-27) made the ci-friction gardener escalate every hand_fix cause instead of filing it;
+    this record predates it. Replay over origin/main: of 22 hand_fix shards, 14 were retired or withdrawn
+    without a remedy (12 under rule 2, cause stopped), the same shape as W1-T10186 (PR #15434, about 19
+    no-op fix rounds). verify is set to human because this edit stales the ruling pin, which is left
+    untouched (never recomputed by hand); the machine-filing judge re-rules a stale pin.
   risk_ruling:
     verdict: "low"
     action: proceed
