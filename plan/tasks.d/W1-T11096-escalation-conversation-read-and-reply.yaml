@@ -47,6 +47,8 @@
     malformed/oversize bodies, wrong repository/thread, changed source, duplicate/conflicting intent,
     partial side effects, and source-read timeout. No test may post on a real escalation.
   acceptance:
+    - claim: the production serve assembly calls the new native conversation reader
+      proof: 'grep: buildEscalationConversationRoute( in src/lib/serve.ts'
     - claim: native escalation detail preserves the recommendation and exact conversation identity
       proof: 'unit test: escalation conversation preserves the native recommendation and exact identity'
     - claim: foreign or unreadable escalation sources never enable a reply
