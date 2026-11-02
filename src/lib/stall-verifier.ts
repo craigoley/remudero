@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { fixedClock } from "./clock.js";
 import { RUNNER_CONFIG_PATHS } from "./dispatch-repair.js";
 import type { FixProgressVerdict } from "./fix-progress-judge.js";
 import { appendLedger, matchesRepoScopedTask } from "./ledger.js";
@@ -259,7 +260,7 @@ export function mainEvidenceReader(repoDir: string, git: typeof hostWorktreeGitA
     try {
       const listing = await git(repoDir, ["ls-tree", "origin/main", "--", ...paths]);
       const changed = sinceMs === undefined ? "" : await git(repoDir,
-        ["log", `--since=${new Date(sinceMs).toISOString()}`, "--format=", "--name-only", "origin/main", "--", ...paths]);
+        ["log", `--since=${fixedClock(sinceMs).iso()}`, "--format=", "--name-only", "origin/main", "--", ...paths]);
       return { digest: createHash("sha256").update(listing).digest("hex").slice(0, 16),
         changedPaths: [...new Set(changed.split("\n").map((line) => line.trim()).filter(Boolean))].sort() };
     } catch (error) {
