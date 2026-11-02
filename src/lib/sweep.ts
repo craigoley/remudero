@@ -1,4 +1,4 @@
-import type { DependencyMainIdentity } from "./dependency-main-identity.js";
+import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
@@ -3184,10 +3184,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           user?: { login?: unknown }; changed_files?: unknown;
         } | undefined;
         if (main?.sha !== proof.mainSha || live?.state !== "open" || live.merged !== false || live.draft !== false ||
-            live.head?.sha !== proof.headSha || live.head.ref !== pr.headRefName || live.base?.ref !== "main" || live.base.sha !== proof.mainSha ||
+            live.head?.sha !== proof.headSha || live.head.ref !== pr.headRefName || live.base?.ref !== "main" ||
             typeof live.user?.login !== "string" || !isDependabotAuthor({ login: live.user.login }) || live.changed_files !== proof.files.length)
           return { closed: false, reason: "fresh dependency close lifecycle/head/main evidence changed or unavailable" };
-        await close();
+        // A human's review, review comment or Conversation-tab comment is a conversation this close would end:
+        // stand down. The Conversation tab is the issue-comments endpoint; the pulls endpoints never list it.
+        const conversation = [
+          { path: `pulls/${pr.prNumber}/reviews`, label: "PR review reviews" },
+          { path: `pulls/${pr.prNumber}/comments`, label: "PR review comments" },
+          { path: `issues/${pr.prNumber}/comments`, label: "PR conversation comments" },
+        ] as const;
+        for (const { path, label } of conversation) {
+          const rows = await readJsonImpl(["api", `repos/${owner}/${repo}/${path}?per_page=100`], { fresh: true });
+          if (!Array.isArray(rows) || rows.length >= 100) return { closed: false, reason: `${label} unreadable or unbounded` };
+          if (hasNonBotAuthor(rows)) return { closed: false, reason: `${label} include a non-bot author; a human conversation is open` };
+        }
+        await close(await namePathLanding(readJsonImpl, owner, repo, proof.mainSha, proof.files[0]?.path));
         return { closed: true };
       } catch (error) {
         return { closed: false, reason: `dependency close claim or fresh read/effect refused: ${String(error)}` };
@@ -14113,7 +14125,7 @@ export interface SweepDeps {
   draftRefusalAmendments?: (candidates: readonly RefusalCandidate[]) => Promise<readonly RefusalAmendmentResult[]>;
   /** Close superseded/abandoned PRs with a reason; the dependency fence alone holds the existing branch mutex through fresh reads and close. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
-  withDependencyCloseFence?: (pr: OpenPrView, close: () => Promise<void>) => Promise<{ closed: boolean; reason?: string }>;
+  withDependencyCloseFence?: (pr: OpenPrView, close: (supersededBy?: string) => Promise<void>) => Promise<{ closed: boolean; reason?: string }>;
   /** Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
    *  line records the outcome and dedup can tell TERMINAL outcomes — never re-run for the same
    *  head — from "hold" or an incomplete/unknown result, which re-run next sweep because a red
@@ -22344,7 +22356,9 @@ export async function runSweep(
                 }
               }
               if (dependencyMainSupersession) {
-                const fenced = await deps.withDependencyCloseFence?.(pr, async () => { await deps.close(pr, reason); });
+                const fenced = await deps.withDependencyCloseFence?.(pr, async (supersededBy) => {
+                  await deps.close(pr, supersededBy === undefined ? reason : `${reason}; superseded by ${supersededBy}`);
+                });
                 acted = fenced?.closed === true;
                 if (!acted) standDownReason = fenced?.reason ?? "dependency close requires a strict fresh lifecycle/main/owner fence";
                 extraDisposedFields = { ...extraDisposedFields, dependency_main_identity: dependencyIdentity };
