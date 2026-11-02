@@ -124,7 +124,8 @@ on_pin() {
   echo "edge-heal: tunnel on pin ${TUNNEL_IMAGE}"
 }
 
-# A present tunnel off its pin ($1 = its image), rolled replica-first so the console never darkens.
+# A present tunnel off its pin ($1 = its image, $2 = 1 when a replica is left over), rolled
+# replica-first so the console never darkens.
 roll_tunnel() {
   local stamped
   stamped="$(cat "${ROLL_STAMP}" 2>/dev/null || true)"
@@ -141,7 +142,7 @@ roll_tunnel() {
   token_file_ok || { echo "edge-heal: tunnel roll failed -- token file ${TOKEN_FILE} is missing or empty"; return "${ROLL_FAILED}"; }
   echo "edge-heal: ${TUNNEL_NAME} runs $1, not the pin ${TUNNEL_IMAGE} -- rolling replica-first"
   docker pull "${TUNNEL_IMAGE}" >/dev/null || { roll_failed "pull ${TUNNEL_IMAGE} failed; ${TUNNEL_NAME} untouched"; return; }
-  docker rm -f "${REPLICA_NAME}" >/dev/null 2>&1 || true
+  [ "${2:-0}" -eq 0 ] || docker rm -f "${REPLICA_NAME}" >/dev/null 2>&1 || true
   if ! run_tunnel "${REPLICA_NAME}" || ! wait_registered "${REPLICA_NAME}"; then
     docker rm -f "${REPLICA_NAME}" >/dev/null 2>&1 || true
     roll_failed "replica ${REPLICA_NAME} never registered within ${REGISTER_TIMEOUT_S}s; removed it, ${TUNNEL_NAME} untouched"
@@ -175,7 +176,7 @@ heal_tunnel() {
   present="$(printf '%s\n' "${seen}" | grep -c "^/${TUNNEL_NAME} ")"
   replica="$(printf '%s\n' "${seen}" | grep -c "^/${REPLICA_NAME} ")"
   if [ "${present}" -gt 0 ]; then
-    [ "${main}" = "${TUNNEL_IMAGE}" ] || { roll_tunnel "${main}"; return; }
+    [ "${main}" = "${TUNNEL_IMAGE}" ] || { roll_tunnel "${main}" "${replica}"; return; }
     if [ "${replica}" -gt 0 ]; then
       registered "${TUNNEL_NAME}" || {
         echo "edge-heal: tunnel roll failed -- ${TUNNEL_NAME} is on its pin but not registered; ${REPLICA_NAME} left serving"
