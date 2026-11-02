@@ -26,6 +26,9 @@
     - test/console-api/console-feedback-replay.test.ts
     - test/console-api/console-feedback-intake.test.ts
     - test/fixtures/console-feedback-replays.json
+    - test/auto-triage-wiring.test.ts
+    - test/feedback-docket.test.ts
+    - test/triage.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -39,6 +42,8 @@
     correction metadata; a pure helper plus fixtures would not complete this runtime path.
     The native test-place selector assigns the console correction module to console-api (primary
     console-read-model, with inbox-operator as runner-up), so new tests use that computed folder.
+    Existing runtime integration suites already import run-task and prove default selection and
+    weekly publication; extend those suites without adding a new direct run-task test importer.
   design: |
     Add a closed, explicitly chosen wording-correction kind to the existing conversation feedback
     path, advertised only when this native contract is served. Verify repository, native issue,
@@ -61,6 +66,11 @@
     through the real run-task feedback-docket rung and triage feedback envelope; neither may
     discard it by projecting only raw text. Keep the existing untrusted-input envelope and normal
     weekly docket/proposal limits. Do not add a run-task test importer or another intake pipeline.
+    Route explicit, structurally valid UI wording reports to that weekly docket instead of one
+    autonomous triage run per report. Derive ordinary candidate count and age from the same filtered
+    population. Missing or malformed correction metadata must preserve legacy selection. Require
+    matching native capture receipts before synthesizing a correction proposal; report missing
+    evidence as unverified, never as a verified empty source.
     A correction may propose a fixture/template repair, not automatic changes to CLAUDE.md or
     unrelated operational policy. Preserve legacy feedback behavior when this kind is absent.
     The normal pipeline prepares and reviews any
