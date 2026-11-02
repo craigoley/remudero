@@ -879,8 +879,9 @@ const isBotLogin = (user: unknown): boolean => {
   return u !== undefined && (u.type === "Bot" || (typeof u.login === "string" && u.login.endsWith("[bot]")));
 };
 
-/** Closes a released garden PR only when it is still open, bot-authored, and no review or review
- *  comment by a non-bot author exists: a person's open conversation is never ended by a garden. */
+/** Closes a released garden PR only when it is still open, bot-authored, and no review, review comment
+ *  or Conversation-tab comment by a non-bot author exists: a person's open conversation is never ended
+ *  by a garden. The Conversation tab is the issue-comments endpoint; the pulls endpoints never list it. */
 export async function gardenClosePr(
   owner: string, repo: string, prUrl: string, reason: string,
   fetch: (args: string[]) => unknown | Promise<unknown>, run: (args: readonly string[]) => Promise<void> = defaultGardenGhRun,
@@ -890,11 +891,16 @@ export async function gardenClosePr(
   const pr = await fetch(["api", `repos/${owner}/${repo}/pulls/${n}`]) as { state?: unknown; merged?: unknown; user?: unknown } | null;
   if (pr?.state !== "open" || pr.merged === true) return { closed: false, reason: "the PR is no longer open" };
   if (!isBotLogin(pr.user)) return { closed: false, reason: "the PR has a non-bot author" };
-  for (const kind of ["reviews", "comments"] as const) {
-    const rows = await fetch(["api", `repos/${owner}/${repo}/pulls/${n}/${kind}?per_page=100`]);
-    if (!Array.isArray(rows) || rows.length >= 100) return { closed: false, reason: `review ${kind} unreadable or unbounded` };
+  const sources = [
+    { path: `pulls/${n}/reviews`, label: "reviews" },
+    { path: `pulls/${n}/comments`, label: "review comments" },
+    { path: `issues/${n}/comments`, label: "conversation comments" },
+  ] as const;
+  for (const { path, label } of sources) {
+    const rows = await fetch(["api", `repos/${owner}/${repo}/${path}?per_page=100`]);
+    if (!Array.isArray(rows) || rows.length >= 100) return { closed: false, reason: `${label} unreadable or unbounded` };
     if (rows.some((row) => isBotLogin((row as { user?: unknown } | null)?.user) === false))
-      return { closed: false, reason: `a non-bot author's review ${kind} keep a conversation open` };
+      return { closed: false, reason: `a non-bot author's ${label} keep a conversation open` };
   }
   await run(["pr", "close", prUrl, "--comment", reason]);
   return { closed: true };

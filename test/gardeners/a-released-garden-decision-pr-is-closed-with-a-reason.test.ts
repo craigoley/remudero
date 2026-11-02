@@ -110,6 +110,7 @@ function closer(over: Record<string, unknown> = {}) {
     "repos/acme/demo/pulls/15551": { state: "open", merged: false, user: { login: "remudero-fleet[bot]", type: "Bot" } },
     "repos/acme/demo/pulls/15551/reviews?per_page=100": [{ user: { login: "remudero-fleet[bot]", type: "Bot" }, state: "COMMENTED" }],
     "repos/acme/demo/pulls/15551/comments?per_page=100": [],
+    "repos/acme/demo/issues/15551/comments?per_page=100": [{ user: { login: "remudero-fleet[bot]", type: "Bot" }, body: "stall report" }],
     ...over,
   };
   const runs: string[][] = [];
@@ -132,6 +133,7 @@ test("gardenClosePr never ends a human's open conversation or touches a PR it do
     ["human review", { "repos/acme/demo/pulls/15551/reviews?per_page=100": [{ user: human, state: "CHANGES_REQUESTED" }] }],
     ["human review comment", { "repos/acme/demo/pulls/15551/comments?per_page=100": [{ user: human, body: "hold on" }] }],
     ["unreadable author", { "repos/acme/demo/pulls/15551/comments?per_page=100": [{ body: "who" }] }],
+    ["human conversation comment", { "repos/acme/demo/issues/15551/comments?per_page=100": [{ user: human, body: "please keep this open" }] }],
     ["non-bot author", { "repos/acme/demo/pulls/15551": { state: "open", merged: false, user: human } }],
     ["already closed", { "repos/acme/demo/pulls/15551": { state: "closed", merged: false, user: { login: "x[bot]" } } }],
     ["merged", { "repos/acme/demo/pulls/15551": { state: "open", merged: true, user: { login: "x[bot]" } } }],
@@ -146,6 +148,19 @@ test("gardenClosePr never ends a human's open conversation or touches a PR it do
   }
   const bad = await gardenClosePr("acme", "demo", "https://github.com/acme/demo/issues/1", "r", () => assert.fail("no read"), async () => assert.fail("no run"));
   assert.deepEqual(bad, { closed: false, reason: "no PR number in the url" });
+});
+
+test("gardenClosePr never closes a PR whose Conversation tab carries a human comment", async () => {
+  const human = { login: "craigoley", type: "User" };
+  const talked = closer({ "repos/acme/demo/issues/15551/comments?per_page=100": [
+    { user: { login: "remudero-fleet[bot]", type: "Bot" }, body: "stall report" },
+    { user: human, body: "I am still looking at this" },
+  ] });
+  assert.deepEqual(await talked.close(), { closed: false, reason: "a non-bot author's conversation comments keep a conversation open" });
+  assert.deepEqual(talked.runs, []);
+  const unread = closer({ "repos/acme/demo/issues/15551/comments?per_page=100": { message: "rate limited" } });
+  assert.deepEqual(await unread.close(), { closed: false, reason: "conversation comments unreadable or unbounded" });
+  assert.deepEqual(unread.runs, []);
 });
 
 test("defaultGardenGhRun really shells out to gh with the close argv, and rejects on a nonzero exit", async () => {
