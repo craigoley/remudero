@@ -1,0 +1,64 @@
+id: fb-dep-review-a922ff48df1fec3e
+ts: 2026-11-02T14:29:48.106Z
+raw: |-
+  Land the dependency bump(s) of Dependabot PR #15176, whose red is its own: chore(deps): bump node from 24.21.0-bookworm-slim to 24.22.0-bookworm-slim in /deploy
+
+  Dependabot proposed a minor/patch update whose head fails a required check that main's newest run passes.
+  A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest
+  allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:
+  tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked
+  SDK's claudeCodeVersion), and the bumps of every sibling Dependabot PR named below that the fix needs.
+  Do not edit or close the Dependabot PRs: the superseded-by row closes them once the owned PR carries
+  their hunks, or Dependabot does once main carries the versions.
+
+  PR: https://github.com/craigoley/remudero/pull/15176
+  Head: d017fa762ea9a15e51b59f85fd3f15bd2c0a3d92
+  Bumps: node 24.21.0-bookworm-slim -> 24.22.0-bookworm-slim
+  Red checks: ci-gate, ci
+  Sibling Dependabot PRs folded in: none
+
+  Dependabot proposal body:
+
+  Bumps node from 24.21.0-bookworm-slim to 24.22.0-bookworm-slim.
+
+  <details>
+  <summary>Most Recent Ignore Conditions Applied to This Pull Request</summary>
+
+  | Dependency Name | Ignore Conditions |
+  | --- | --- |
+  | node | [>= 26.a, < 27] |
+  </details>
+
+
+  [![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=node&package-manager=docker&previous-version=24.21.0-bookworm-slim&new-version=24.22.0-bookworm-slim)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)
+
+  Dependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.
+
+  [//]: # (dependabot-automerge-start)
+  [//]: # (dependabot-automerge-end)
+
+  ---
+
+  <details>
+  <summary>Dependabot commands and options</summary>
+  <br />
+
+  You can trigger Dependabot actions by commenting on this PR:
+  - `@dependabot rebase` will rebase this PR
+  - `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it
+  - `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency
+  - `@dependabot ignore this major version` will close this PR and stop Dependabot creating any more for this major version (unless you reopen the PR or upgrade to it yourself)
+  - `@dependabot ignore this minor version` will close this PR and stop Dependabot creating any more for this minor version (unless you reopen the PR or upgrade to it yourself)
+  - `@dependabot ignore this dependency` will close this PR and stop Dependabot creating any more for this dependency (unless you reopen the PR or upgrade to it yourself)
+
+
+  </details>
+attachments: []
+origin: repair#dep-review
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: dep-review:own-red:craigoley/remudero:node@24.22.0-bookworm-slim
+thread_id: null
