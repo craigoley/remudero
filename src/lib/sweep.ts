@@ -212,7 +212,7 @@ import type {
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
-import { isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
+import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import {
@@ -15605,8 +15605,11 @@ function priorActionsFromLedger(
         // Only an explicit completed decision dedups. A retitle can return without deciding,
         // recorded as "unknown"; missing/unrecognized outcomes are not terminal either.
         // They, like "hold", must re-run at the SAME sha (see SweepDeps.depReview).
-        if (line.dep_review_outcome === "arm" || line.dep_review_outcome === "escalate" ||
-            line.dep_review_outcome === "refuse" || line.dep_review_outcome === "migrate") {
+        // A terminal decided by an OLDER dep-review engine does not dedup: an engine fix (W1-T2872's
+        // revision) rearms the same head once, exactly as it changes the review input digest.
+        if ((line.dep_review_outcome === "arm" || line.dep_review_outcome === "escalate" ||
+            line.dep_review_outcome === "refuse" || line.dep_review_outcome === "migrate") &&
+            depReviewRowEngineRevision(line) === DEP_REVIEW_ENGINE_REVISION) {
           depReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
         break;
@@ -19619,7 +19622,7 @@ export async function runSweep(
         // time (a re-derived PR: minus its fresh read), read at the write, never at the pass's start.
         snapshot_age_ms: snapshotAgeMs(index),
         ...(rederivedIndices.has(index) ? { rederived: true } : {}),
-        ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
+        ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome, dep_review_engine_revision: DEP_REVIEW_ENGINE_REVISION } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason && !deliveredStandDownLogged ? { stand_down_reason: standDownReason } : {}),
         ...(deliveredStandDownLogged ? { stand_down_unchanged: true } : {}),
@@ -20725,7 +20728,7 @@ export async function runSweep(
         if (alreadyDone) {
           dedupStandDownReason =
             `dependency review already reached a TERMINAL outcome at this head ` +
-            `(${pr.headSha.slice(0, 7)}) — a hold would have re-run instead of deduping`;
+            `(${pr.headSha.slice(0, 7)}) under engine ${DEP_REVIEW_ENGINE_REVISION} — a hold would have re-run instead of deduping`;
         }
         break;
       case "post-review": {

@@ -71,8 +71,17 @@ export function isDependabotAuthor(author: DepReviewAuthor): boolean {
 
 export type SemverLevel = "major" | "minor" | "patch" | "unknown";
 
-/** Bumped when this lane's decision contract changes, independently of task-review semantics. */
-export const DEP_REVIEW_ENGINE_REVISION = "dep-review-selected-attempts-v2";
+/** Bumped when this lane's decision contract changes, independently of task-review semantics.
+ *  v3 (PR 15539): a Docker tag bump such as 24.21.0-bookworm-slim parses its semver level. */
+export const DEP_REVIEW_ENGINE_REVISION = "dep-review-docker-tag-semver-v3";
+/** The revision a sweep row written before rows carried one was decided under. */
+export const DEP_REVIEW_LEGACY_ENGINE_REVISION = "dep-review-selected-attempts-v2";
+
+/** The engine revision a `sweep.disposed` dep-review row was decided under; a row older than the
+ *  field reads as {@link DEP_REVIEW_LEGACY_ENGINE_REVISION}. */
+export function depReviewRowEngineRevision(row: { dep_review_engine_revision?: unknown }): string {
+  return typeof row.dep_review_engine_revision === "string" ? row.dep_review_engine_revision : DEP_REVIEW_LEGACY_ENGINE_REVISION;
+}
 
 function parseVersion(v: string): [number, number, number] | null {
   const m = v.trim().match(/^v?(\d+)\.(\d+)(?:\.(\d+))?/);
