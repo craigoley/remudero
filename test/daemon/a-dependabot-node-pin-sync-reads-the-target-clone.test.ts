@@ -4,8 +4,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { withTempDir } from "#src/lib/tmp.js";
-import { defaultNodePinSyncIo, depReviewNodePinCheckout } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+// Through the shared re-export seam: the affected-suite reach ratchet is at its ceiling, so this suite adds no
+// new direct importer of src/run-task.ts.
+import { defaultNodePinSyncIo, depReviewNodePinCheckout } from "#test/helpers/run-task-test.js";
 
 test("W1-T11116 criterion 1: the node-pin sync reads a Dependabot head in the target clone under the state root, which the state root itself cannot", async () => {
   await withTempDir("node-pin-target-clone", (stateRoot) => {
