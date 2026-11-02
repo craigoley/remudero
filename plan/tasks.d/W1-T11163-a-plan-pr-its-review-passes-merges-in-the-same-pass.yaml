@@ -26,7 +26,7 @@
       proof: "unit test: test/review/a-plan-pr-its-review-passes-merges-in-the-same-pass.test.ts"
     - claim: readChecksGreenReviewedAtHead is true only when branch protection's required contexts read, every one of them is green at that head by checksStateFromRollup, and remudero-review reads success there; a pending required check, a pending review or an unreadable required list is false, so no green is ever manufactured
       proof: "grep: W1-T11163 criterion 2 in test/review/a-plan-pr-its-review-passes-merges-in-the-same-pass.test.ts"
-    - claim: The review's default arm (reviewVerdictArm, used by runReview when no arm is injected) is the production arm with that seam wired to readChecksGreenReviewedAtHead for the review's own owner and repo, so a review that posts success reads its own head when GitHub still says blocked
+    - claim: runReview's arm context carries readChecksGreenReviewed bound to readChecksGreenReviewedAtHead for its own owner and repo, and armIfVerdictPermitsAsync's default arm (verdictArmDeps over realArmDepsAsync) hands it to the plan-PR path, so a review that posts success reads its own head when GitHub still says blocked; an injected arm and a context without the read are unchanged
       proof: "grep: W1-T11163 criterion 3 in test/review/a-plan-pr-its-review-passes-merges-in-the-same-pass.test.ts"
   rationale: |
     MEASURED 2026-11-02 (Mac ledger ~/Remudero/state, and the core host ledger's live window read-only):
@@ -50,8 +50,9 @@
        directMergePreflightSteps (so a behind head is still refreshed or ruled by W1-T5748). A throw becomes the hold's error.
     2. readChecksGreenReviewedAtHead (src/cli/commands/review.ts) reads readRequiredStatusCheckContextsAsync and rollupForAsync,
        and judges with the sweep's own checksStateFromRollup and tick-read-worker's reviewStateFromRollup. No new predicate.
-    3. reviewVerdictArm(owner, repo) wraps armAutoMergeDetailedAsync over realArmDepsAsync plus that seam. runReview passes it as
-       the arm when none is injected. The REST merge itself is unchanged: branch protection still refuses a head that is not green.
+    3. VerdictArmCtx gains an optional readChecksGreenReviewed; runReview's armCtx sets it. armIfVerdictPermitsAsync's default arm
+       builds verdictArmDeps(ctx) (realArmDepsAsync plus that seam). runReview's call stays `{ arm: args.arm }`, which
+       test/operator-gated-default-reachability.test.ts locks. The REST merge is unchanged: protection still refuses a non-green head.
   falsifier: |
     At origin/main a plan PR whose review has just posted success, with GitHub reading mergeable=MERGEABLE mergeable_state=blocked,
     ends that review with automerge.plan_pr_held retry-later and no merge, even when its required checks read green at the head.
