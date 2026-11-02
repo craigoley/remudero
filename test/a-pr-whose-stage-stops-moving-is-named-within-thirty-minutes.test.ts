@@ -72,15 +72,17 @@ test("a blocker changing before its bound raises nothing, and a fresh or dry-run
   assert.equal(f.rows("pr.stuck").length, 0);
 });
 
-test("a moved blocker clock resolves its old stall and can raise a new episode", async () => {
+test("a moved blocker clock resolves its old stall but does not re-escalate the same blocker at the same head", async () => {
+  // Operator ruling 2026-11-01: a blocker_since that restarts at one head is a flap (#14763 filed three issues in ten
+  // minutes), not a new episode; a new head, a different blocker, or STAGE_STALL_RENOTIFY_MS later still escalates.
   const f = fixture();
   await runSweep([pr], f.deps);
   f.ledger.append([{ ts: ago(35), step: "sweep.disposed", pr_number: pr.prNumber,
     blocker: "awaiting-arm", blocker_since: ago(35) }]);
   await runSweep([pr], f.deps);
   assert.equal(f.rows("pr.stuck.resolved").length, 1);
-  assert.equal(f.rows("pr.stuck").length, 2);
-  assert.equal(f.escalations.length, 2);
+  assert.equal(f.rows("pr.stuck").length, 1);
+  assert.equal(f.escalations.length, 1);
 });
 
 test("an observed arm excludes the review-loop diagnosis and a sibling run diagnoses duplicate build", async () => {

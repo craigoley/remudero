@@ -17507,6 +17507,9 @@ const LIVE_REVIEW_CLOSING_STEPS: ReadonlySet<string> = new Set(["review.posted",
  *  live review is announced once, not on every pass. Bounded; a restart re-announces once, which is harmless. */
 const deferredStageKeys = new Set<string>();
 const DEFERRED_STAGE_KEYS_CAP = 1000;
+/** BACKSTOP: a stage stall already reported for this PR, head and blocker is not reported again until this much
+ *  time has passed, however often its blocker_since restarts; a stall nobody acted on for a day earns one more. */
+export const STAGE_STALL_RENOTIFY_MS = 24 * 60 * 60_000;
 
 /** PURE. How long a review may run before it counts as overdue: the longest of the observed durations
  *  (the window's upper bound), or undefined when none are observed so the caller keeps its stand-in. */
@@ -17910,6 +17913,16 @@ export async function runSweep(
     }
     const reportedStage = currentRows.find(row => row.step === "pr.stuck" && stageKey(row) === key);
     if (reportedStage) { stuckStages.set(key, reportedStage); return; }
+    // A blocker that flaps between passes at one head restarts blocker_since, so the stage key above is new on
+    // every flip: #14763 filed #14777, #14779 and #14783 in ten minutes at head 50628d6. One report per PR, head
+    // and blocker; a new head or a different blocker is a new stage, and an unacted stall re-reports after
+    // STAGE_STALL_RENOTIFY_MS.
+    const reportedAtHead = currentRows.findLast(row => row.step === "pr.stuck" && row.pr_number === pr.prNumber &&
+      row.head_sha === pr.headSha && row.blocker === fields.blocker);
+    if (reportedAtHead && now - Date.parse(String(reportedAtHead.ts)) < STAGE_STALL_RENOTIFY_MS) {
+      stuckStages.set(key, reportedAtHead);
+      return;
+    }
     const stageRows = currentRows.filter(row => belongs(row) && Date.parse(String(row.ts)) >= since);
     // W1-T9433: the backstop counts only the time the stage's owner could act, so a stand-down the fleet placed
     // on itself (a PAUSE hold, capacity, a light pass) is read back from the stage's own rows and excluded.

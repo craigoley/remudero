@@ -17,7 +17,7 @@
     - test/plan/product-case-managed-checkout.test.ts
     - test/console-api/serve/product-routes.test.ts
   status: queued
-  dispatch_hold: true
+  dispatch_hold: false
   attempts: 0
   rationale: >-
     The captured feedback reports both serving generations resolving a nonexistent sibling
