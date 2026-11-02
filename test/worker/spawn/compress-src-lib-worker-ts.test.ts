@@ -1,3 +1,4 @@
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 // @source-text-subject: historical worker.ts comment compression preserves its pre-compression code.
 // @census-reads: src/lib/worker.ts
 import assert from "node:assert/strict";
@@ -3637,4 +3638,28 @@ test("W1-T10879: current worker retains the maintained comment reduction", () =>
   const source = readFileSync(join(REPO_ROOT, "src/lib/worker.ts"), "utf8");
   const { comments } = countCommentLines(source, "src/lib/worker.ts");
   assert.ok(comments < BEFORE_COMMENT_LINES, `expected a real reduction from ${BEFORE_COMMENT_LINES} comment lines, observed ${comments}`);
+});
+
+// Retain the normally merged PR-base rule alongside the original immutable historical proofs.
+test("W1-T10879: comment compression preserves executable code: current PR-base comparison", () => {
+  const source = readFileSync(join(REPO_ROOT, "src/lib/worker.ts"), "utf8");
+  const { comments } = countCommentLines(source, "src/lib/worker.ts");
+  assert.ok(comments < BEFORE_COMMENT_LINES,
+    `expected a real reduction from ${BEFORE_COMMENT_LINES} comment lines, observed ${comments}`);
+  const before = compressionPinBase("src/lib/worker.ts", import.meta.url);
+  if (before === undefined) return;
+  // Only on the PR that adds this pin: later feature edits to the module stay free.
+  assert.deepEqual(executableTokens(source), executableTokens(before),
+    "all PR-base executable tokens, literals and line-break boundaries must remain unchanged");
+  assert.ok(comments < countCommentLines(before, "src/lib/worker.ts").comments,
+    "comment lines decrease from the PR base");
+});
+
+test("worker compression fingerprint ignores comments and catches executable edits", () => {
+  const control = 'const re = /https?:\\/\\//; const s = `// ${name} /* text */`;';
+  assert.deepEqual(executableTokens(control), executableTokens(`/* explanation */ ${control}`));
+  for (const [before, after] of [["name", "other"], ["text", "changed"], ["https?", "http"]]) {
+    assert.notDeepEqual(executableTokens(control), executableTokens(control.replace(before, after)));
+  }
+  assert.notDeepEqual(executableTokens("return value"), executableTokens("return\nvalue"));
 });

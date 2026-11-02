@@ -1,3 +1,4 @@
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 // @source-text-subject: historical worker-provider.ts comment compression and executable-token preservation.
 // @census-reads: src/lib/worker-provider.ts
 import assert from "node:assert/strict";
@@ -2706,4 +2707,33 @@ test("W1-T10918: current provider retains the maintained comment reduction", () 
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
   assert.ok(actual.commentLines < 1357, "comment lines must decrease from the pre-compression source");
   assert.ok(actual.commentBytes < 104858, "comment bytes must decrease; rewrapping alone is insufficient");
+});
+
+// Retain the normally merged PR-base rule alongside the original immutable historical proofs.
+test("W1-T10918: comment compression preserves executable code: current PR-base comparison", () => {
+  // Pre-compression source: 811d6e2d19018530bd12c885d307d08f02fb09bc.
+  // Historical comparison evidence for this edit, not a new comment ceiling.
+  const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
+  const before = compressionPinBase("src/lib/worker-provider.ts", import.meta.url);
+  if (before !== undefined) {
+    // Only on the PR that adds this pin: later feature edits to the module stay free.
+    const base = snapshot(before);
+    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
+      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
+    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+  }
+  assert.ok(actual.commentLines < 1357, "comment lines must decrease from the pre-compression source");
+  assert.ok(actual.commentBytes < 104858, "comment bytes must decrease; rewrapping alone is insufficient");
+
+  const fixture = 'const re = /https?:\\/\\//; const s = "// kept"; const t = `/* ${`// ${1}`} */`;';
+  const original = snapshot(fixture);
+  const commented = snapshot(`/** extra */\n${fixture}\n// extra`);
+  assert.equal(commented.tokenDigest, original.tokenDigest);
+  assert.equal(commented.astDigest, original.astDigest);
+  for (const changed of [fixture.replace("https?", "http"), fixture.replace("// kept", "// changed"),
+    fixture.replace("${1}", "${2}")]) {
+    assert.notEqual(snapshot(changed).tokenDigest, original.tokenDigest);
+  }
+  assert.notEqual(snapshot("function f() { return 1; }").astDigest,
+    snapshot("function f() { return\n1; }").astDigest);
 });

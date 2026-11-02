@@ -1,3 +1,4 @@
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 // @source-text-subject: historical serve.ts comment compression and executable-token preservation.
 // @census-reads: none — the source text is an embedded immutable historical fixture.
 import assert from "node:assert/strict";
@@ -1010,6 +1011,37 @@ test("W1-T10905: comment compression preserves executable code", () => {
   assert.equal(actual.tokenCount, 25040);
   assert.equal(actual.tokenDigest, "5360a943406a970130927db86b2580b3e4c452bd06aec0f7ca9af9eef6cd010a");
   assert.equal(actual.astDigest, "1ceb7ff455253f374082ac2234261613219f61e9e93af69d124ca8eae1b01fa3");
+  assert.ok(actual.commentLines < 1381,
+    "comment lines must decrease from the measured pre-compression source");
+  assert.ok(actual.commentBytes < 106468,
+    "comment bytes must decrease too; rewrapping alone is insufficient");
+
+  const fixture = 'const re = /https?:\\/\\//; const s = "// kept"; const t = `/* ${`// ${1}`} */`;';
+  const original = snapshot(fixture);
+  const commented = snapshot(`/** extra */\n${fixture}\n// extra`);
+  assert.equal(commented.tokenDigest, original.tokenDigest);
+  assert.equal(commented.astDigest, original.astDigest);
+  for (const changed of [fixture.replace("https?", "http"), fixture.replace("// kept", "// changed"),
+    fixture.replace("${1}", "${2}")]) {
+    assert.notEqual(snapshot(changed).tokenDigest, original.tokenDigest);
+  }
+  assert.notEqual(snapshot("function f() { return 1; }").astDigest,
+    snapshot("function f() { return\n1; }").astDigest);
+});
+
+// Retain the normally merged PR-base rule alongside the original immutable historical proofs.
+test("W1-T10905: comment compression preserves executable code: current PR-base comparison", () => {
+  // Pre-compression source: 8f587c4fe86d2ca60776f7a1a25cc261f41463a2.
+  // These measurements prove this edit's reduction; they introduce no policy ceiling.
+  const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/serve.ts"), "utf8"));
+  const before = compressionPinBase("src/lib/serve.ts", import.meta.url);
+  if (before !== undefined) {
+    // Only on the PR that adds this pin: later feature edits to the module stay free.
+    const base = snapshot(before);
+    assert.deepEqual([actual.tokenCount, actual.tokenDigest, actual.astDigest],
+      [base.tokenCount, base.tokenDigest, base.astDigest], "executable tokens and syntax match the PR base");
+    assert.ok(actual.commentLines < base.commentLines, "comment lines decrease from the PR base");
+  }
   assert.ok(actual.commentLines < 1381,
     "comment lines must decrease from the measured pre-compression source");
   assert.ok(actual.commentBytes < 106468,
