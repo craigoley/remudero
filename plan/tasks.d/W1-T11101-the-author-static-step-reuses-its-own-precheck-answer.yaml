@@ -15,14 +15,14 @@
   files:
     - scripts/preflight-author.mjs
     - src/lib/ci-parity.ts
-    - test/ci/the-author-static-step-reuses-its-own-precheck-answer.test.ts
+    - test/ci/parity/the-author-static-step-reuses-its-own-precheck-answer.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: When the author preflight's own census-precheck step answered for HEAD, its static stage records census-precheck as answered by that step (naming the head sha and the author step's outcome) without spawning census-precheck again
-      proof: "unit test: test/ci/the-author-static-step-reuses-its-own-precheck-answer.test.ts"
+      proof: "unit test: test/ci/parity/the-author-static-step-reuses-its-own-precheck-answer.test.ts"
     - claim: An answer recorded for a different head, an absent answer, and every run outside the author preflight (rmd preflight run directly, the fleet pre-open gate) still spawn census-precheck exactly as before
-      proof: "grep: W1-T11101 criterion 2 in test/ci/the-author-static-step-reuses-its-own-precheck-answer.test.ts"
+      proof: "grep: W1-T11101 criterion 2 in test/ci/parity/the-author-static-step-reuses-its-own-precheck-answer.test.ts"
   rationale: |
     MEASURED 2026-11-02, coverage/preflight-author-static.json of W1-T11094's author run (staticTiming per check):
     - static-preflight took 3,085 s. census-precheck inside it took 1,896 s (61%), rule-checks 924 s (30%), claims 82 s, and the other 25 checks about 3 min together.
