@@ -1333,9 +1333,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   //
   // The gate still does real work: `armAutoMerge` re-reads the PR's CURRENT head and refuses a push
   // that landed after this verdict. No `posted.posted` guard is needed: that branch already returned.
+  phases.armStart = systemClock.now();
   reappendLostReviewPosted({ ledgerPath: args.ledgerPath, runId: args.runId, headSha, decisionDigest, prUrl,
     row: reviewPostedRow, log, say });
-  phases.armStart = systemClock.now();
   const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
   // W1-T9549: AWAITED. The daemon runs this review (`trackInFlightReview`), so the arm's gh and git leave its loop free.
   await armIfVerdictPermitsAsync(verdict, armCtx, { arm: args.arm });

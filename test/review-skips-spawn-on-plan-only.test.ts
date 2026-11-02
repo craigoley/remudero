@@ -132,7 +132,7 @@ test("reviewerOutcome reports the plan-only skip DISTINCTLY, without disturbing 
 
 // ── The driven halves: a real runReview on each side of the boundary, with the spawn COUNTED ──
 
-type Driven = { spawns: number; outcome: string; steps: string[]; summary: string };
+type Driven = { spawns: number; outcome: string; steps: string[]; summary: string; rows: Array<Record<string, unknown>> };
 
 async function driveReview(diffText: string): Promise<Driven> {
   const root = mkdtempSync(join(tmpdir(), "rmd-plan-only-spawn-"));
@@ -176,6 +176,7 @@ esac
 
     let spawns = 0;
     const steps: string[] = [];
+    const rows: Array<Record<string, unknown>> = [];
     const reviewerQueryFn = (() => {
       spawns += 1;
       return (async function* () {
@@ -199,7 +200,7 @@ esac
       report: REPORT,
       settingsFile: join(root, "settings.json"),
       config: { claudeBin: "/bin/true", root } as never,
-      log: (step: string) => steps.push(step),
+      log: (step: string, extra?: Record<string, unknown>) => { steps.push(step); rows.push({ step, ...extra }); },
       say: () => {},
       account: (r: never) => r,
       spawnReviewer: true,
@@ -217,6 +218,7 @@ esac
       headCheckoutDir: REPO_ROOT,
       // W1-T4423: the plan-only lint seam, so this harness never fetches or lints the real checkout.
       lintPlanForReviewFn: async () => CLEAN_PLAN_LINT,
+      materializeMs: 1_234,
       ledgerPath,
       runId: "REVIEW-PLAN-ONLY-SPAWN-1",
     } as never);
@@ -224,7 +226,7 @@ esac
     // The ledger is the durable record the outcome claim rests on — read it back rather than
     // trusting only the in-process `log` callback.
     const ledgerSteps = readLedgerLines(ledgerPath).map((l) => String(l.step));
-    return { spawns, outcome: verdict.reviewerOutcome, steps: [...steps, ...ledgerSteps], summary: verdict.summary };
+    return { spawns, outcome: verdict.reviewerOutcome, steps: [...steps, ...ledgerSteps], summary: verdict.summary, rows };
   } finally {
     process.env.PATH = oldPath;
     if (oldClaudeBin === undefined) delete process.env[CLAUDE_BIN_ENV_OVERRIDE];
@@ -282,4 +284,22 @@ test("DRIVEN: the plan-only verdict summary still reads as deterministically gat
       "(1 checked, 0 failing); no proof run",
     "the plan-only verdict string must be byte-identical to what it was before the spawn was skipped",
   );
+});
+
+test("W1-T11162 criterion 2: a plan-only review ledgers one row of its phases after its arm; a code review writes none", async () => {
+  const plan = await driveReview(PLAN_ONLY_DIFF);
+  const phases = plan.rows.filter((row) => row.step === "review.plan_only_phases");
+  assert.equal(phases.length, 1, `one phase row per plan-only review; saw ${plan.steps.join(", ")}`);
+  const row = phases[0]!;
+  assert.equal(row.pr_url, "https://github.com/acme/remudero/pull/1");
+  assert.equal(row.materialize_ms, 1_234, "the caller's materialization time rides on the row");
+  for (const field of ["diff_ms", "decision_ms", "lint_ms", "judge_ms", "post_ms", "arm_ms", "total_ms"]) {
+    assert.equal(typeof row[field], "number", `${field} is measured`);
+    assert.ok((row[field] as number) >= 0 && (row[field] as number) <= (row.total_ms as number), `${field} lies inside the review`);
+  }
+  assert.ok(plan.steps.indexOf("review.posted") < plan.steps.indexOf("review.plan_only_phases"), "the row is written after the post");
+
+  const code = await driveReview(PLAN_PLUS_SRC_DIFF);
+  assert.equal(code.rows.filter((r) => r.step === "review.plan_only_phases").length, 0, "a review that is not plan-only writes no phase row");
+  assert.ok(code.steps.includes("review.posted"), "the control review did post, so its missing row is not a crash");
 });
