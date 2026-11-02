@@ -1,0 +1,23 @@
+id: incident-2f651d104d3ee4b8
+ts: 2026-11-01T23:18:57.888Z
+raw: |-
+  Incident 2f651d104d3e: flow pr-stage-stall:conflict:unknown signature
+  First seen: 2026-11-01T14:50:35.082Z
+  Last seen: 2026-11-01T22:40:51.074Z
+  Count: 2, burn: 0.26/hr
+  Deploy sha(s): unknown
+  Instance(s): core
+  Sample events:
+    - pr=15532 conflict: unknown signature
+    - pr=16044 conflict: unknown signature
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#2f651d104d3ee4b8a161cc27e67a2f8895a4b738ec4717621eea0da4a2527e16
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

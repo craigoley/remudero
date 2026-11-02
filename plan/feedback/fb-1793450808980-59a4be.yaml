@@ -69,7 +69,7 @@ raw: >-
   completed C3 or Console branches.
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/16024
 summary: null

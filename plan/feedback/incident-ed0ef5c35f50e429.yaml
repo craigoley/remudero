@@ -1,0 +1,40 @@
+id: incident-ed0ef5c35f50e429
+ts: 2026-11-01T23:17:26.952Z
+raw: >-
+  Incident ed0ef5c35f50: flow pr-stage-stall:escalated:already escalated (reason
+  unreadable: no escalation of this PR at head <sha> is in the ledger); this
+  pass: merge conflict (mergeState dirty) — rmd-owned branch has captured
+  deletion evidence on
+  test/worker/spawn/compress-src-lib-worker-provider-ts.test.ts (ours -<n>,
+  theirs -<n>) — would dispatch the bounded merge-conflict fix worker to inspect
+  actual hunks and preserve both sides' intended behavior; a fresh review and CI
+  gate the new head — NOT DISPATCHED this pass: detached fix dispatch failed
+  before fix.dispatch <n> times on #<pr> at head <sha> (fix dispatch refused:
+  worker admission is held: PAUSE: cannot reach origin to read
+  refs/rmd-pause/hold — holding rather than dispatching optimistically (an
+  unreachable remote is never read as clear)) — FIX_DISPATCH_FAILED_BACKSTOP <n>
+  reached, no further dispatch is attempted at this head
+
+  First seen: 2026-11-01T15:21:40.165Z
+
+  Last seen: 2026-11-01T15:21:40.165Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - pr=15679 escalated: already escalated (reason unreadable: no escalation of this PR at head 0a66a11 is in the ledger); this pass: merge conflict (mergeState dirty) — rmd-owned branch has captured deletion evidence on test/worker/spawn/compress-src-lib-worker-provider-ts.test.ts (ours -3, theirs -3) — would dispatch the bounded merge-conflict fix worker to inspect actual hunks and preserve both sides' intended behavior; a fresh review and CI gate the new head — NOT DISPATCHED this pass: detached fix dispatch failed before fix.dispatch 3 times on #15679 at head 0a66a11 (fix dispatch refused: worker admission is held: PAUSE: cannot reach origin to read refs/rmd-pause/hold — holding rather than dispatching optimistically (an unreachable remote is never read as clear)) — FIX_DISPATCH_FAILED_BACKSTOP 3 reached, no further dispatch is attempted at this head
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#ed0ef5c35f50e429770e8c4375f406bfa71b71c442b5c003f9c3f54fb295f611
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
