@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import type { Socket } from "node:net";
 import { generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
 import {
@@ -173,13 +174,15 @@ test("malformed JSON and rejected exchanges with interrupted bodies are not retr
 
 for (const duringBody of [false, true]) {
 test(`a real socket reset ${duringBody ? "during the body" : "before headers"} retries on a distinct closed connection`, { timeout: 15000 }, async t => {
-  const sockets: object[] = [];
+  const sockets: Socket[] = [];
   const server = createServer((req, res) => {
     sockets.push(req.socket);
     assert.equal(req.headers.connection, "close");
     if (sockets.length === 1) {
       if (duringBody) {
-        res.writeHead(201, { "content-type": "application/json" });
+        // This peer ignores our close request, so undici preserves the reset code rather than
+        // finalizing the HTTP parser at EOF and replacing the socket error with a parser error.
+        res.writeHead(201, { "content-type": "application/json", Connection: "keep-alive" });
         res.write(`{"token":"${TOKEN}",`);
       } else {
         req.socket.destroy();
@@ -193,7 +196,10 @@ test(`a real socket reset ${duringBody ? "during the body" : "before headers"} r
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolve);
   });
-  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  t.after(() => new Promise<void>(resolve => {
+    server.closeAllConnections();
+    server.close(() => resolve());
+  }));
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   const rows: LogRow[] = [];
@@ -201,7 +207,7 @@ test(`a real socket reset ${duringBody ? "during the body" : "before headers"} r
   const opts = options(async (_url, init) => {
     calls++;
     const response = await fetch(`http://127.0.0.1:${address.port}/token`, init);
-    if (duringBody && calls === 1) server.closeAllConnections();
+    if (duringBody && calls === 1) sockets[0]!.resetAndDestroy();
     return response;
   }, rows);
   const result = await refreshInstallationToken(opts);
@@ -212,7 +218,7 @@ test(`a real socket reset ${duringBody ? "during the body" : "before headers"} r
   assert.notEqual(sockets[0], sockets[1], "the retry uses a newly accepted TCP connection");
   const failures = rows.filter(row => row.step === TOKEN_REFRESH_FAILED_STEP);
   assert.equal(failures.length, 1);
-  assert.equal(failures[0]?.extra.reason, "exchange request failed: UND_ERR_SOCKET");
+  assert.equal(failures[0]?.extra.reason, `exchange request failed: ${duringBody ? "ECONNRESET" : "UND_ERR_SOCKET"}`);
   assert.equal(failures[0]?.extra.retry_attempt, 2);
   assert.equal(JSON.stringify(rows).includes(TOKEN), false);
 });
