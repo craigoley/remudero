@@ -1,24 +1,10 @@
 /**
- * THE READ-AND-PRINT CLI VERBS — moved out of `src/run-task.ts` (W1-T2888, decomposition step 5).
- *
- * `receiptCommand`, `replayCommand`, `ledgerGrepCommand`, `digestPlistCommand`, `doctorCommand`,
- * `statusCommand`, `digestCommand`, `learningsCommand`/`learningsExportCommand`/
- * `learningsImportCommand`, and `traceCommand` each take a deps object, read the ledger/plan/
- * GitHub through it, print, and return an exit code — none dispatches a worker, holds a lock, or
- * mutates the plan, the cheapest large cluster of `run-task.ts`'s 75 `*Command` handlers to move.
- *
- * A MOVE, NOT A REDESIGN — same discipline `lib/cli-args.ts`'s `unknownArgError` move (W1-T2260)
- * established: every function below is byte-identical in behaviour to the one it replaces.
- * `run-task.ts` re-imports/re-exports every name under its original identifier, so every
- * pre-existing call site and test import keeps working unchanged.
- *
- * USAGE TEXT IS INJECTED, NEVER IMPORTED: `USAGE`/`commandSyntax(name)` derive from `COMMANDS`,
- * which stays in `run-task.ts` — importing them here would be the `lib -> run-task` edge this
- * decomposition exists to avoid, and would drag the 38k-line dispatcher into
- * `test/report-commands.test.ts`'s import graph. The handful of verbs that print it instead
- * accept `usage`/`syntax` as optional strings; `run-task.ts`'s CLI dispatch passes the real
- * values, so production output is unchanged, while a caller that supplies neither degrades to
- * an empty appended listing.
+ * Report CLI verbs extracted without behavior changes (W1-T2888; W1-T2260 move discipline).
+ * `run-task.ts` re-exports the original names; these handlers never dispatch workers, hold
+ * locks, or mutate the plan. Dependencies supply their reads and output.
+ * Inject `usage`/`syntax`, never import the dispatcher-owned `COMMANDS`/`USAGE`: that would
+ * recreate the lib -> run-task edge. CLI dispatch supplies them; library callers may omit
+ * them for an empty appended listing. Historical extraction detail: W1-T2888 review record.
  */
 
 import { execFileSync } from "node:child_process";
@@ -146,22 +132,11 @@ function reportOwnerRepo(context: ReportRepoContext, root = reportRepoRoot(conte
   return { owner: match[1], repo: match[2] };
 }
 
-// ── launchd query cluster (statusCommand's `queryService`, shared with up/down's own queries) ──
-//
-// Read-only `launchctl print`/`launchctl list` queries — moved alongside `statusCommand`, which
-// needs `realUid`/`queryLaunchdServiceSensed`/`queryLaunchdListStatusSensed` for its default
-// `queryService` closure. `queryLaunchdService`/`queryLaunchdListStatus` (the non-sensor-aware
-// siblings) and `LaunchdServiceState`/`LaunchdListStatus` are also used by `upCommand`/
-// `downCommand`, which stay in `run-task.ts` and import them back from here — never duplicated.
-// Deliberately NOT in `lib/launchd.ts`: that module's own header states it "never shells out to
-// `launchctl`" (a documented invariant test/launchd.test.ts and test/serve-plist.test.ts hold it
-// to); these functions do exactly that, so they belong beside the report verb that reads them.
+// launchd queries shared by status/up/down (W1-T2888). Keep subprocesses here:
+// lib/launchd.ts "never shells out to launchctl" (launchd/serve-plist tests).
 
-/** `launchctl print`'s pid line ("	pid = 61234"). Absent — a job bootstrapped but not yet
- *  spawned, or one that just exited — means "loaded, not (yet) running", distinct from "not
- *  loaded at all" (the caller tells those apart via {@link LaunchdServiceState.loaded}). Exported
- *  (W1-T2888) solely so test/report-commands.test.ts can drive its unhealthy arm by identifier —
- *  negative-reachability-ratchet.test.ts's own census. */
+/** Missing pid means loaded but idle; {@link LaunchdServiceState.loaded} distinguishes absence.
+ * Exported for report-commands.test.ts's unhealthy-arm census (W1-T2888). */
 export const LAUNCHCTL_PID_RE = /"?pid"?\s*=\s*(\d+)/;
 
 export interface LaunchdServiceState {
@@ -171,40 +146,24 @@ export interface LaunchdServiceState {
   pid: number | null;
 }
 
-/** The one real subprocess seam every lifecycle helper below defaults to — a test fakes THIS
- *  one function and every helper obeys it, rather than each helper importing `execFileSync`
- *  for itself (the same one-seam discipline deployer.ts's `realDeployDeps` established for
- *  its own `launchctl kickstart` call). */
+/** Shared subprocess seam for every lifecycle helper, injectable without separate exec fakes. */
 export function defaultLifecycleExec(cmd: string, args: string[]): string {
   return execFileSync(cmd, args, { encoding: "utf8" }).toString();
 }
 
-/** This process's real UID, or 0 when `process.getuid` is unavailable (non-POSIX — launchd
- *  itself is macOS-only, so that branch never actually runs in production; mirrors
- *  `deployRunCommand`'s own `process.getuid` guard). */
+/** Real UID; 0 on non-POSIX hosts without getuid (as in deployRunCommand). */
 export function realUid(): number {
   return typeof process.getuid === "function" ? process.getuid() : 0;
 }
 
-/** True iff `e` is the ENOENT `execFileSync` throws when `launchctl` ITSELF cannot be found —
- *  every non-macOS host, this container included (W1-T2450 recon: `command -v launchctl`
- *  measured absent here, `uname -s` Linux). Distinct from `execFileSync` throwing because
- *  `launchctl` ran and exited non-zero (a real "not loaded"/"not found" answer, which carries
- *  no `.code === "ENOENT"`) — the ONE bit that tells "I have no sensor here" apart from "the
- *  answer is no" (recon rationale Q1). */
+/** ENOENT means launchctl itself is absent; a nonzero exit is a sensed negative (W1-T2450). */
 function isLaunchctlAbsent(e: unknown): boolean {
   return typeof e === "object" && e !== null && (e as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 /**
- * `launchctl print gui/<uid>/<label>` — the SAME query both `rmd down`'s "already down" check
- * and `rmd up`'s "already up" check read, so the two verbs can never disagree about whether a
- * service is loaded. A non-bootstrapped label exits non-zero ("Could not find service..."),
- * which `execFileSync` turns into a throw — caught here as `loaded: false`, never a crash.
- * Deliberately drops the `sensed` bit {@link queryLaunchdServiceSensed} carries: `rmd down`/
- * `rmd up` treat "no launchd here" and "not loaded" identically on purpose (idempotent
- * unload-when-absent is the right degrade for THEM) — only the status panel must not fold the
- * two together (W1-T2450), so it calls the `*Sensed` sibling below instead.
+ * Shared up/down load check: non-bootstrapped labels become loaded:false.
+ * These idempotent verbs deliberately drop `sensed`; status must retain it (W1-T2450).
  */
 export function queryLaunchdService(
   label: string,
@@ -215,9 +174,7 @@ export function queryLaunchdService(
   return state;
 }
 
-/** Sensor-aware sibling of {@link queryLaunchdService}, for the status panel's `queryService`
- *  (W1-T2450) — the one caller that must distinguish "launchctl itself is unavailable" from "a
- *  bootstrapped-but-unloaded/absent service". Same query, same catch, ONE extra bit. */
+/** Status distinguishes an unavailable launchctl from an absent service (W1-T2450). */
 export function queryLaunchdServiceSensed(
   label: string,
   uid: number,
@@ -235,14 +192,8 @@ export function queryLaunchdServiceSensed(
   return { loaded: true, pid: m ? Number(m[1]) : null, sensed: true };
 }
 
-/** `launchctl list <label>`'s one-line, tab-separated `PID\tStatus\tLabel` — the SAME fact the
- *  W1-T301 rationale read by hand off a real box (`launchctl list` showing `-  0
- *  com.remudero.supervisor`, i.e. not running, last exit 0) to prove a healthy periodic one-shot
- *  was being mis-reported "not running" by a pid-presence-only check. `PID` is `-` when not
- *  currently running (interval jobs rest between ticks); `Status` is the job's LAST completed
- *  run's exit code (0 healthy, nonzero a real failure) — exactly the datum a resident-service pid
- *  check can never surface for a periodic job. A non-bootstrapped label, or any unparseable
- *  output, is caught/returned as "unknown" — never a throw, never a fabricated healthy `0`. */
+/** launchctl list's PID/Status/Label: '-' means idle, Status is the last exit code (W1-T301).
+ * Periodic jobs can be healthy without a pid. Absent/unparseable output stays unknown, never 0. */
 export interface LaunchdListStatus {
   pid: number | null;
   lastExitCode: number | undefined;
@@ -260,9 +211,7 @@ export function queryLaunchdListStatus(
   return status;
 }
 
-/** Sensor-aware sibling of {@link queryLaunchdListStatus} — see
- *  {@link queryLaunchdServiceSensed}'s doc for why the status panel needs this and `rmd down`/
- *  `rmd up` (which have no caller for this function at all) do not. */
+/** Status retains the sensor bit, as in {@link queryLaunchdServiceSensed}. */
 export function queryLaunchdListStatusSensed(
   label: string,
   exec: (cmd: string, args: string[]) => string = defaultLifecycleExec,
@@ -1212,9 +1161,8 @@ export async function caseFileCommand(rest: string[], deps: CaseFileCommandInput
 // ── receiptCommand ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Resolve which `owner/repo` a `rmd review`/`rmd receipt` targets: a `--repo <name>` or
- * `--repo <owner>/<name>` flag OVERRIDES the checkout's default (a bare name keeps the
- * default owner). Pure so the sandbox-gating path is unit-tested without a `gh` call.
+ * Resolve review/receipt's --repo override; a bare name keeps the default owner.
+ * Pure so sandbox gating can be tested without gh.
  */
 export function resolveReviewTarget(
   defaults: { owner: string; repo: string },
@@ -1235,11 +1183,7 @@ export function reviewTaskIdFromBody(body: string): string | undefined {
 }
 
 /**
- * The PR NUMBER `prArg` names, or `undefined` when it names something REST cannot address.
- *
- * `gh pr view` accepts a number, a URL, OR a bare branch name; `GET /repos/{o}/{r}/pulls/{n}`
- * accepts only a number. So the transport swap below is conditional on this resolving, and the
- * branch-name form deliberately keeps its existing `gh pr view` path — see {@link reviewViewArgs}.
+ * Resolve a number or PR URL for REST; branches return undefined and keep gh pr view.
  */
 export function reviewPrNumber(prArg: string): number | undefined {
   const bare = /^#?(\d+)$/.exec(prArg.trim());
@@ -1251,10 +1195,8 @@ export function reviewPrNumber(prArg: string): number | undefined {
 }
 
 /**
- * THE ARGV `receiptCommand`/`reviewCommand` READ A PR WITH — REST when the PR is addressable by
- * number, `gh pr view` otherwise. Reuses {@link singlePrRestArgs}/{@link mapRestPr} (lib/review.ts)
- * so the four load-bearing translations (html_url→url, `body` null→"", headRefName
- * ""-not-undefined, auto_merge passthrough) are the ones already proven and tested there.
+ * Receipt/review use REST for resolved PR numbers, gh pr view for branches.
+ * Reuse singlePrRestArgs/mapRestPr's tested html_url, null body, headRefName and auto_merge mapping.
  */
 export function reviewViewArgs(owner: string, repo: string, prArg: string): string[] {
   const n = reviewPrNumber(prArg);
@@ -1267,29 +1209,15 @@ export function reviewViewArgs(owner: string, repo: string, prArg: string): stri
 export interface ReceiptCommandDeps extends ReportRepoContext {
   gh?: (args: string[]) => unknown;
   config?: Config;
-  /** W1-T2257: defaults to the real {@link resolveReceiptLedgerLines} — the archive∪live UNION,
-   *  scoped to the steps `buildReceipt` reads, NEVER the live `ledger.ndjson` file alone (which
-   *  rotation empties). A test overrides this to drive both the resolved-lines and the refused
-   *  (`ok: false`) path without touching a real state dir. */
+  /** W1-T2257: archive∪live union, scoped to receipt steps; injectable for success/refusal tests. */
   resolveReceiptLedgerLines?: (stateDir: string) => ReceiptLedgerRead;
 }
 
 /**
- * `rmd receipt <pr>` (W1-T71, ratifies P17) — the deterministic in-toto-style run receipt,
- * printed for a merged (or open) PR. Resolves the task id from the PR body's trailer via
- * {@link reviewTaskIdFromBody} (the SAME #119-hardened extractor `rmd review` already uses —
- * never a second dialect), reads this checkout's ledger via {@link resolveReceiptLedgerLines}
- * (src/lib/receipt.ts) and hands the result to the pure {@link buildReceipt}. READ-ONLY: writes
- * no ledger line, no state file, posts nothing.
- *
- * A PR whose body carries no resolvable task id (a hand-opened PR, or one predating the
- * trailer contract) REFUSES rather than guessing — never fabricates a receipt for the wrong task.
- *
- * W1-T2257: the ledger read is the archive∪live UNION, never `ledger.ndjson` alone — that live
- * file is exactly the slice ledger rotation empties, keeping only the newest row per step and
- * archiving the rest. A refused union (see {@link resolveReceiptLedgerLines}) REFUSES here too
- * (non-zero exit, a named reason) rather than silently printing a receipt of null leaves that
- * would look indistinguishable from "this run never emitted anything".
+ * Read-only deterministic receipt for open/merged PRs (W1-T71/P17). Reuse review's hardened
+ * task-trailer extractor (#119); missing task ids refuse rather than guess.
+ * W1-T2257: resolveReceiptLedgerLines reads archive∪live, since rotation empties the live slice.
+ * A refused union exits nonzero with its reason, never a misleading receipt of null leaves.
  */
 export async function receiptCommand(prArg: string, rest: string[] = [], deps: ReceiptCommandDeps = {}): Promise<number> {
   const badArg = unknownArgError("receipt", rest, ["--repo"]);
@@ -1331,15 +1259,8 @@ export async function receiptCommand(prArg: string, rest: string[] = [], deps: R
 // ── replayCommand ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * `rmd replay <since> <until> [--task <id>] [--step <prefix>]` (W1-T2296) — a deterministic,
- * plain-text narration of a LEDGER WINDOW, printed to stdout. Between two instants, what did the
- * fleet decide, in what order, and for what recorded reasons. Mirrors `receiptCommand`'s wiring:
- * this stays a thin shell around the pure {@link buildReplay} (src/lib/ledger-replay.ts), never
- * the business logic itself.
- *
- * READ-ONLY: no GitHub call, no write, no state mutation — resolves the corpus via
- * {@link resolveReplayLedgerLines}, the archive∪live UNION (never the live `ledger.ndjson` alone,
- * which rotation empties), and REFUSES rather than narrating a partial corpus.
+ * W1-T2296: read-only narration of a ledger window via buildReplay, without GitHub or writes.
+ * resolveReplayLedgerLines reads archive∪live and refuses a partial corpus; rotation empties live.
  */
 export interface ReplayCommandOpts {
   /** Injectable so a test drives both branches against a synthetic state root — same seam
@@ -1503,18 +1424,9 @@ export async function digestPlistCommand(rest: string[], opts: { usage?: string 
 // ── digestCommand ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * W1-T163 (MARKER-AWARE by default): with NO `--since`, the window is the operator's own
- * `lib/last-seen.ts` marker — the SAME per-token marker the console's `GET /v1/status` recap
- * advances on a board view (lib/board.ts) — keyed off the write token's id (the write token is
- * the operator's real credential; a read-only caller never sends this digest). A first-ever send
- * (no marker yet) falls back to the pre-existing 24h-ago default. Sending (never `--dry-run`,
- * which previews without any side effect) then ADVANCES that same marker to now, so "push and
- * pull tell one story": whichever of a digest send or a console view happens next only reports
- * what's left since THIS send, never re-reporting what it already covered.
- *
- * An EXPLICIT `--since` is an operator-directed override/inspection tool — it builds/sends
- * exactly that window (old behavior, unchanged) and deliberately never touches the marker, so a
- * one-off "show me since <date>" never resets the shared push/pull window out from under it.
+ * W1-T163: without --since, share the console recap's per-write-token last-seen marker,
+ * falling back to 24h ago on first use. Send advances it; --dry-run has no side effects.
+ * Explicit --since uses that window without changing the shared push/pull marker.
  */
 export async function digestCommand(
   rest: string[],
@@ -1571,11 +1483,7 @@ export async function digestCommand(
 // ── learningsCommand / learningsExportCommand / learningsImportCommand ──────────────────────────
 
 /**
- * `rmd learnings export|import` — the §6 transport (W1-T425): dispatches to
- * the export (sending) or import (receiving) subcommand, both thin CLI
- * wrappers over the pure functions in lib/learnings.ts that carry the actual
- * privacy/pin logic and are unit-tested independently (same split as
- * `rmd correct`'s wrapper over `applyCorrection`).
+ * §6 transport (W1-T425): route export/import to wrappers over learnings.ts privacy/pin logic.
  */
 export interface LearningsCommandOpts extends ReportRepoContext {
   usage?: string;
@@ -1593,24 +1501,11 @@ export function learningsCommand(rest: string[], opts: LearningsCommandOpts = {}
 }
 
 /**
- * `rmd learnings export <out>` — the SENDING side (§6, W1-T425): collects
- * this checkout's ACTIVE, `share: public` project-layer entries, stamps
- * provenance (this repo, HEAD sha, export date), and writes the hash-pinned
- * `learnings-v2` bundle {@link buildExportBundle} produces to `<out>`. V2
- * binds its public provenance projection: author `src` and Git locators never
- * leave the checkout. Refuses (writes
- * nothing) when zero entries opted in, or when a candidate matches the
- * leak-grep tripwire — either refusal is reported via the SAME
- * {@link buildExportBundle} this command is a thin wrapper over, never
- * reimplemented here.
- *
- * `opts.projectDir` is injectable (defaults to this checkout's real
- * `learnings/` directory) — same seam `ledgerGrepCommand` uses for its
- * state/ledger dirs — so a test can exercise the real success path over a
- * fixture corpus without ever writing `share: public` into this repo's own
- * committed shards. `opts.headSha` is injectable the same way {@link
- * readHeadShaForSummary} injects `exec` — the ONLY way to drive the
- * degrade-to-"unknown" catch arm from a test without an unreadable-git host.
+ * Export ACTIVE, share:public project entries as a pinned learnings-v2 bundle (§6, W1-T425).
+ * buildExportBundle binds public provenance, excludes author src/Git locators, and refuses
+ * zero opt-ins or leak-grep matches without writing. Keep privacy logic in that builder.
+ * Injectable projectDir/headSha allow fixture exports and unreadable-git tests without
+ * changing this checkout's shards.
  */
 export function learningsExportCommand(
   rest: string[],
@@ -1659,17 +1554,10 @@ export function learningsExportCommand(
 }
 
 /**
- * `rmd learnings import <file> --pin <hash>` — the RECEIVING side (§6,
- * W1-T425): checks the bundle's own declared hash against the
- * operator-supplied `--pin` ({@link verifyBundlePin}) and, only on a match,
- * writes the bundle VERBATIM to the RMD-GLOBAL artifact path the injector
- * already reads ({@link globalArtifactPath}) — an import overwrites only its
- * own prior bundle there, never the project or user-overall layers. Import
- * deliberately does NOT re-derive the hash from `entries` itself; that
- * content-vs-hash tamper check is {@link loadGlobalArtifact}'s job, run
- * again the next time a prompt is assembled, so a bundle hand-edited AFTER
- * passing the pin check here is still refused there — the existing guard,
- * never a reimplementation of it.
+ * Import (§6, W1-T425) writes the bundle VERBATIM to globalArtifactPath only if verifyBundlePin
+ * matches --pin. Overwrite only the imported global bundle, never project/user-overall layers.
+ * loadGlobalArtifact rechecks content against the hash at prompt assembly, catching later edits;
+ * this wrapper checks only the declared pin.
  */
 export function learningsImportCommand(rest: string[], opts: { usage?: string } = {}): number {
   const file = rest[0];
@@ -1716,12 +1604,9 @@ export function learningsImportCommand(rest: string[], opts: { usage?: string } 
 // ── traceCommand ──────────────────────────────────────────────────────────────────────────────
 
 /**
- * `rmd trace <id>` — render the provenance chain (MASTER-PLAN §7B / Standing rule 17,
- * W1-T43): feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha. `<id>` is
- * resolved as a TASK id first (an exact `plan/tasks.yaml` id — reverse direction, task
- * back to its origin); only if that fails is it read as a FEEDBACK id
- * (`plan/feedback/<id>.yaml` — forward direction, feedback out to every task it
- * produced). Neither resolving is a fail-loud usage error, not a silent empty chain.
+ * W1-T43 / MASTER-PLAN §7B / Standing rule 17: trace feedback → proposal → tasks → runs → PRs → sha.
+ * Resolve task id first (reverse to origin), then feedback id (forward to tasks).
+ * If neither resolves, emit a fail-loud usage error, never an empty chain.
  */
 export async function traceCommand(
   rest: string[],
