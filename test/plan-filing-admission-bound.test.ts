@@ -84,12 +84,11 @@ test("W1-T2439 (acceptance 2): the non-spawning lane admits more than one plan f
   assert.deepEqual(planFilings.map((p) => p.prNumber), [10, 11, 12], "and oldest-first by the immutable key");
 });
 
-test("W1-T2439 (acceptance 2): the cheap lane is BOUNDED — a queue deeper than the bound is truncated", () => {
-  const q = [10, 11, 12, 13, 14].map((n, i) => filing(n, `2026-08-0${i + 1}T00:00:00Z`));
+test("W1-T11148: the cheap lane admits every eligible filing in one pass, oldest first", () => {
+  const q = [14, 12, 10, 13, 11].map((n) => filing(n, `2026-08-0${n - 9}T00:00:00Z`));
   const { planFilings } = selectReviewAdmissions(q, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(planFilings.length, DEFAULT_SWEEP_POLICY.planFilingAdmissionBound,
-    "a lane with no bound would spend the budget faster than the one this unblocks");
-  assert.deepEqual(planFilings.map((p) => p.prNumber), [10, 11, 12], "the OLDEST three, never an arbitrary three");
+  assert.deepEqual(planFilings.map((p) => p.prNumber), [10, 11, 12, 13, 14],
+    "each head is admitted once by its outcome key, so the queue itself bounds the lane");
 });
 
 // ── acceptance 3: the spawning lane uses the configured review budget ───────────────────────
@@ -177,17 +176,10 @@ test("W1-T2439 (acceptance 6): W1-T528's shared comparator is untouched", () => 
 
 // ── acceptance 7 & 8: no lane unbounded, no bound raised, nothing paces ─────────────────────
 
-test("W1-T2439 (acceptance 7): no lane is unbounded and no existing bound is raised", () => {
-  assert.equal(DEFAULT_SWEEP_POLICY.planFilingAdmissionBound, 3, "the derived number, not a picked one");
-  assert.ok(DEFAULT_SWEEP_POLICY.planFilingAdmissionBound > 1, "it must admit more than one to be worth building");
+test("W1-T2439 (acceptance 7): no existing bound is raised (W1-T11148 replaced the plan-filing count with the queue)", () => {
   assert.equal(DEFAULT_SWEEP_POLICY.repeatDispositionBound, 50, "the repeat bound is untouched");
   assert.equal(DEFAULT_SWEEP_POLICY.strikeCap, 2, "the strike cap is untouched");
-  // A zero/negative bound must not become "unbounded" through a sign slip.
-  const q = [filing(70, "2026-08-01T00:00:00Z"), filing(71, "2026-08-02T00:00:00Z")];
-  const zero = selectReviewAdmissions(q, { ...DEFAULT_SWEEP_POLICY, planFilingAdmissionBound: 0 }, NOW);
-  assert.equal(zero.planFilings.length, 0, "bound 0 admits none — never all");
-  const neg = selectReviewAdmissions(q, { ...DEFAULT_SWEEP_POLICY, planFilingAdmissionBound: -5 }, NOW);
-  assert.equal(neg.planFilings.length, 0, "a negative bound clamps to none, never to unbounded");
+  assert.ok(!("planFilingAdmissionBound" in DEFAULT_SWEEP_POLICY), "the literal count is gone, not left beside the queue");
 });
 
 test("W1-T2439 (acceptance 8): nothing added paces, sleeps, or arms auto-merge earlier", () => {
