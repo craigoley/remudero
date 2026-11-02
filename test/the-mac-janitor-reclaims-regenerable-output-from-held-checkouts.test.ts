@@ -2,8 +2,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { ghFailing } from "#test/helpers/gh-stub.js";
 import { age, fixture, git, type Fixture } from "#test/helpers/host-cleanup-fixture.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -23,7 +24,9 @@ exec '${stat}' "$@"
   writeFileSync(join(bin, "ps"), '#!/bin/bash\nprintf "1 /bin/sh\\n"\n', { mode: 0o755 });
   writeFileSync(join(bin, "lsof"), '#!/bin/bash\ncase " $* " in *" -d cwd "*) exit 0 ;; esac\nexit 1\n', { mode: 0o755 });
   // No test may reach the real GitHub API through an installed gh.
-  writeFileSync(join(bin, "gh"), '#!/bin/bash\nexit 1\n', { mode: 0o755 });
+  // The shared stub (test/helpers/gh-stub.ts) is copied in, not re-hand-written: the fixture-copy
+  // census counts a hand-rolled gh PATH shim per file, and its ceiling is not ours to raise.
+  cpSync(ghFailing(), bin, { recursive: true });
   mkdirSync(join(fx.home, "Remudero"), { recursive: true });
   return fx;
 }
