@@ -22,6 +22,7 @@ import { shortPathWhenTooLong } from "./short-path-root.js";
 import { acquireTestSlot, lowPriorityCommand, testSlotExecutionAllowed, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 const require = createRequire(import.meta.url);
 
@@ -3447,10 +3448,18 @@ export function authorCensusAnswer(value: string | undefined, head: string | und
   return answer && answer[1] === head ? { sha: answer[1], outcome: answer[2]! } : undefined;
 }
 
+function censusAnswerHead(repoRoot: string): { head: string } | { unreadable: string } {
+  try {
+    return { head: hostWorktreeGit(repoRoot, ["rev-parse", "HEAD"]).trim() };
+  } catch (error) {
+    return { unreadable: String((error as Error)?.message ?? error) };
+  }
+}
+
 function censusPrecheckLeaf(repoRoot: string, spawn: PreflightSpawn): CiParityLeafResult {
   const recorded = process.env[AUTHOR_CENSUS_ANSWERED_ENV];
-  const head = recorded ? spawn("git", ["rev-parse", "HEAD"], { cwd: repoRoot }) : undefined;
-  const answered = authorCensusAnswer(recorded, head?.status === 0 ? String(head.stdout ?? "").trim() : undefined);
+  const head = recorded ? censusAnswerHead(repoRoot) : undefined;
+  const answered = authorCensusAnswer(recorded, head && "head" in head ? head.head : undefined);
   if (answered) {
     return { ok: true, detail: `PASS — census-precheck answered by the author preflight's census-precheck step at ${answered.sha} (${answered.outcome}); not run again` };
   }
