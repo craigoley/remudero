@@ -75,6 +75,8 @@ on:
       - src/lib/git-lock-reclaim.ts
       - src/lib/host-identity.ts
       - src/lib/install-hash.ts
+      - src/lib/instance-registry-selection.ts
+      - src/lib/instance-registry.ts
       - src/lib/ledger-carry.ts
       - src/lib/ledger-path.ts
       - src/lib/ledger-union.ts
@@ -85,6 +87,7 @@ on:
       - src/lib/plan-scope.ts
       - src/lib/producer-identity.ts
       - src/lib/repo-layout.ts
+      - src/lib/selected-registry-consumers.ts
       - src/lib/self-sync.ts
       - src/lib/serve-generation.ts
       - src/lib/serve-slots.ts
