@@ -857,6 +857,15 @@ export interface ProductionIssueRevalidationOpts {
   readLedgerRows?: (steps: readonly string[], sinceIso: string) => Array<Record<string, unknown>>;
   /** W1-T9696: the daemon's state root; a conversion stages in its landing queue, never landed on the loop. */
   landingStateRoot?: string;
+  /** A non-self managed target: its verdict history is only rows whose `issue_url` names `owner/repo`. */
+  managedTarget?: boolean;
+}
+
+/** Whether a verdict row belongs to this repository's history: a row naming another repository's issue never
+ *  does, and a row naming none (no `issue_url`) only on the self repo, whose history predates per-target passes. */
+function verdictRowNamesRepository(row: Record<string, unknown>, repoArg: string, managedTarget: boolean): boolean {
+  const named = typeof row.issue_url === "string" ? /github\.com\/([^/]+\/[^/]+)\/issues\//i.exec(row.issue_url)?.[1] : undefined;
+  return named === undefined ? !managedTarget : named.toLowerCase() === repoArg.toLowerCase();
 }
 
 /** The garden's ports as the daemon builds them. Reads are lazy and read once per pass. */
@@ -908,7 +917,7 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
       }
     },
     readModelVerdict: (taskId) => readModelVerdictFromRows(taskId, rows()),
-    priorVerdicts: () => priorVerdictsFromRows(rows()),
+    priorVerdicts: () => priorVerdictsFromRows(rows().filter((r) => verdictRowNamesRepository(r, repoArg, opts.managedTarget === true))),
     evidence: (issue) => {
       const facts: string[] = [];
       for (const name of evidenceNames(issue)) {
