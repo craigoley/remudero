@@ -140,7 +140,11 @@ test("a native bound answer preserves archived conversation provenance after res
   const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
   const identity = { taskId: "W1-T42", class: "MANUAL", cause: "stage-stall", prRef: "15520" };
   const before = await f.read(URL); assert.equal(before.state, "served"); if (before.state !== "served") return;
-  appendThreadMessage(identity, "reply", "Please investigate first.", { threadStorePath: f.store }, { replyId: "durable-answer-01", escalation: { issueUrl: URL, revision: before.conversation.revision } });
+  await withReplyService(f, async base => {
+    const reply = await fetch(`${base}/v1/escalation/reply`, { method: "POST", headers: { authorization: "Bearer fixture-write", "content-type": "application/json" },
+      body: JSON.stringify({ ...identity, text: "Please investigate first.", issueUrl: URL, expectedRevision: before.conversation.revision, intentId: "durable-answer-01" }) });
+    assert.equal(reply.status, 200);
+  });
   appendThreadMessage(identity, "escalation", "I need no more input. The investigation is running.", { threadStorePath: f.store }, { question: false });
   rmSync(join(f.root, "state", "ledger.ndjson"));
   const restarted = createEscalationConversationReader({ repository: "craigoley/remudero", threadStorePath: f.store, readIssue: async () => f.issue });
@@ -149,6 +153,32 @@ test("a native bound answer preserves archived conversation provenance after res
   const foreignUrl = URL.replace("16183", "16184");
   const foreign = createEscalationConversationReader({ repository: "craigoley/remudero", threadStorePath: f.store, readIssue: async () => ({ ...f.issue, html_url: foreignUrl }) });
   assert.equal((await foreign(foreignUrl)).state, "unavailable");
+});
+
+test("an existing native escalation without saved history starts one conversation on the first reply", async t => {
+  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  writeFileSync(f.store, "");
+  const source = await f.read(URL); assert.equal(source.state, "served"); if (source.state !== "served") return;
+  assert.equal(source.conversation.history, "absent"); assert.equal(source.conversation.canReply, false);
+  assert.equal(source.conversation.canStartConversation, true);
+  assert.equal(readFileSync(f.store, "utf8"), "");
+  assert.equal(readThread(source.conversation.threadId, { threadStorePath: f.store }).status, "ok");
+  assert.equal(readFileSync(join(f.root, "state", "ledger.ndjson"), "utf8").includes("panel.escalation_replied"), false);
+  await withReplyService(f, async base => {
+    const body = { ...source.conversation.identity, text: "Please explain the failed stage first.", issueUrl: URL, expectedRevision: source.conversation.revision, intentId: "start-conversation-01", startConversation: true };
+    const post = (input = body) => fetch(`${base}/v1/escalation/reply`, { method: "POST", headers: { authorization: "Bearer fixture-write", "content-type": "application/json" }, body: JSON.stringify(input) });
+    const first = await post(); assert.equal(first.status, 200); assert.equal((await first.json() as { saved: { seq: number } }).saved.seq, 2);
+    const duplicate = await post(); assert.equal(duplicate.status, 200); assert.equal((await duplicate.json() as { duplicate: boolean }).duplicate, true);
+    const result = await f.read(URL); assert.equal(result.state, "served"); if (result.state !== "served") return;
+    assert.equal(result.conversation.messages.length, 2); assert.equal(result.conversation.messages[0]?.sourceImported, true);
+    assert.equal(result.conversation.messages[1]?.text, body.text); assert.equal(result.conversation.attention, "waiting_for_agent");
+  });
+  writeFileSync(f.store, "not JSON\n");
+  const corrupt = await f.read(URL); assert.equal(corrupt.state, "served"); if (corrupt.state === "served") assert.equal(corrupt.conversation.canStartConversation, false);
+  await withReplyService(f, async base => {
+    const refused = await fetch(`${base}/v1/escalation/reply`, { method: "POST", headers: { authorization: "Bearer fixture-write", "content-type": "application/json" }, body: JSON.stringify({ ...source.conversation.identity, text: "Keep my draft.", startConversation: true, issueUrl: URL, expectedRevision: source.conversation.revision, intentId: "corrupt-start-01" }) });
+    assert.equal(refused.status, 400);
+  });
 });
 
 test("oversized or ambiguous saved discussions remain explicitly partial", async t => {
@@ -190,6 +220,7 @@ test("escalation conversation bounds malformed sources and distinguishes absent 
   assert.equal(absent.state, "served"); if (absent.state !== "served") return;
   assert.equal(absent.conversation.history, "absent");
   assert.equal(absent.conversation.canReply, false);
+  assert.equal(absent.conversation.canStartConversation, false);
   f.issue.state = "closed";
   const closed = await f.read(URL, true);
   assert.equal(closed.state, "served"); if (closed.state !== "served") return;

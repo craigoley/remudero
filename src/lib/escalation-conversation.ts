@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { ghTextAsync } from "./github-transport.js";
@@ -38,8 +39,10 @@ export interface EscalationConversation {
   source: { state: "current" | "stale"; observedAt: string; updatedAt: string; revision: string };
   history: "verified" | "absent" | "unavailable" | "partial";
   attention: "needs_input" | "waiting_for_agent" | "archived" | "unknown";
-  messages: { seq: number; from: "operator" | "daemon"; text: string; ts: number; intentId?: string }[];
+  messages: { seq: number; from: "operator" | "daemon"; text: string; ts: number; intentId?: string; sourceImported?: true }[];
   canReply: boolean;
+  canStartConversation: boolean;
+  initialMessage?: string;
   replyUnavailableReason?: string;
   details: string;
 }
@@ -128,7 +131,8 @@ function boundedMessages(messages: ThreadMessage[]): EscalationConversation["mes
     || messages.some(m => !Number.isSafeInteger(m.seq) || m.seq < 1 || !Number.isSafeInteger(m.ts)
       || typeof m.body !== "string" || (m.role !== "reply" && m.role !== "escalation"))) return undefined;
   return messages.map(m => ({ seq: m.seq, from: m.role === "reply" ? "operator" : "daemon", text: m.body, ts: m.ts,
-    ...(typeof m.extra?.replyId === "string" ? { intentId: m.extra.replyId } : {}) }));
+    ...(typeof m.extra?.replyId === "string" ? { intentId: m.extra.replyId } : {}),
+    ...(m.extra?.sourceImport ? { sourceImported: true as const } : {}) }));
 }
 
 /** Per-service bounded cache. Revalidating a reply bypasses saved source, while concurrent reads coalesce. */
@@ -204,7 +208,8 @@ export function createEscalationConversationReader(opts: {
       ...(selected[0].slice(prefix.length) !== "-" ? { prRef: selected[0].slice(prefix.length) } : {}) } : parsed.identity;
     const threadId = deriveThreadId(identity);
     const messages = selected ? boundedMessages(selected[1]) : undefined;
-    const history = stored?.status !== "ok" ? "unavailable" : candidates.length === 0 ? "absent" : !messages ? "partial" : "verified";
+    const history = stored?.status !== "ok" ? "unavailable" : candidates.length === 0
+      ? stored.threads.get(threadId)?.length ? "partial" : "absent" : !messages ? "partial" : "verified";
     // A bound answer in this native store is a durable receipt of the route's prior
     // origin check. Archived correspondence must remain readable after a restart and
     // ledger rotation; an unbound legacy message or another issue's receipt proves nothing.
@@ -222,14 +227,20 @@ export function createEscalationConversationReader(opts: {
       : last.extra?.question === false && ordered.some(message => message.role === "reply") ? "archived"
         : source.state === "closed" ? "unknown" : "needs_input";
     const canReply = !stale && source.state === "open" && history === "verified";
+    // Starting is a separate, explicit write. Unknown/corrupt history never qualifies,
+    // and generated summaries cannot supply an unstored native PR referent.
+    const canStartConversation = !stale && source.state === "open" && history === "absent"
+      && Boolean(opts.threadStorePath && existsSync(opts.threadStorePath))
+      && !/^## Decision Summary\r?$/m.test(source.body);
     const sourceRevision = digest([source.html_url, source.body, source.title, source.updated_at, source.state]);
     return { state: "served", conversation: {
       version: 1, issueUrl, repository: location.repository, identity, threadId,
-      revision: digest([sourceRevision, threadId, messages ?? history, attention]), headline: parsed.headline,
+      revision: digest([sourceRevision, threadId, messages ?? history, attention, canStartConversation]), headline: parsed.headline,
       whatHappened: parsed.detail, recommendation: parsed.recommendation, options: parsed.options,
       source: { state: stale ? "stale" : "current", observedAt: evidence.observedAt, updatedAt: source.updated_at, revision: sourceRevision },
-      history, attention, messages: messages ?? [], canReply,
-      ...(!canReply ? { replyUnavailableReason: stale ? "The saved source is stale. Refresh before replying."
+      history, attention, messages: messages ?? [], canReply, canStartConversation,
+      ...(canStartConversation ? { initialMessage: `${parsed.headline}\n\n${parsed.detail}` } : {}),
+      ...(!canReply && !canStartConversation ? { replyUnavailableReason: stale ? "The saved source is stale. Refresh before replying."
         : source.state === "closed" ? "This escalation is closed. Earlier messages remain readable."
           : "The complete saved discussion could not be verified. No reply destination is confirmed." } : {}),
       details: source.body,

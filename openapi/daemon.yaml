@@ -15065,7 +15065,7 @@ components:
 
     EscalationConversation:
       type: object
-      required: [version, issueUrl, repository, identity, threadId, revision, headline, whatHappened, recommendation, options, source, history, attention, messages, canReply, details]
+      required: [version, issueUrl, repository, identity, threadId, revision, headline, whatHappened, recommendation, options, source, history, attention, messages, canReply, canStartConversation, details]
       properties:
         version: {type: integer, enum: [1]}
         issueUrl: {type: string}
@@ -15118,7 +15118,10 @@ components:
               text: {type: string}
               ts: {type: integer}
               intentId: {type: string}
+              sourceImported: {type: boolean, enum: [true]}
         canReply: {type: boolean}
+        canStartConversation: {type: boolean, description: True only for a current native source with positively observed absent history and unambiguous native identity. Starting is an explicit bound write; reads never create messages.}
+        initialMessage: {type: string, description: Verified original source text copied only when the operator explicitly starts this conversation. Earlier GitHub comments are not included.}
         replyUnavailableReason: {type: string}
         details: {type: string}
 
@@ -15149,6 +15152,10 @@ components:
         - class
         - text
       properties:
+        startConversation:
+          type: boolean
+          enum: [true]
+          description: Opt in to recording the verified original issue body and first answer in the native store. Requires the current canStartConversation capability and all reply binding fields.
         taskId:
           type: string
         class:

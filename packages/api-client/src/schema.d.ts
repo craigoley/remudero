@@ -6507,8 +6507,13 @@ export interface components {
         text: string;
         ts: number;
         intentId?: string;
+        sourceImported?: true;
       })[];
       canReply: boolean;
+      /** True only for a current native source with positively observed absent history and unambiguous native identity. Starting is an explicit bound write; reads never create messages. */
+      canStartConversation: boolean;
+      /** Verified original source text copied only when the operator explicitly starts this conversation. Earlier GitHub comments are not included. */
+      initialMessage?: string;
       replyUnavailableReason?: string;
       details: string;
     };
@@ -6523,6 +6528,8 @@ export interface components {
     };
     /** POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`). `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`). */
     EscalationReplyRequest: {
+      /** Opt in to recording the verified original issue body and first answer in the native store. Requires the current canStartConversation capability and all reply binding fields. */
+      startConversation?: true;
       taskId: string;
       class: string;
       cause?: string;

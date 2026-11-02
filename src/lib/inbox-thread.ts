@@ -93,6 +93,8 @@ export interface ThreadMessageExtra {
   replyId?: string;
   /** Immutable source binding of a native escalation reply intent. */
   escalation?: { issueUrl: string; revision: string };
+  /** A verified issue body copied when an operator starts a native conversation. */
+  sourceImport?: { issueUrl: string; revision: string };
   input?: InboxInputReference;
   response?: InboxResponseReference;
 }
@@ -332,6 +334,7 @@ export function appendThreadReplyOnce(
   replyId: string,
   deps: ThreadStoreDeps,
   extra: ThreadMessageExtra = {},
+  initialEscalation?: { body: string; extra: ThreadMessageExtra },
 ): { kind: "appended" | "existing" | "conflict"; seq: number; ts?: number } {
   return withThreadStoreMutation(deps, (owns) => {
   const current = readThread(deriveThreadId(identity), deps);
@@ -339,6 +342,9 @@ export function appendThreadReplyOnce(
   const prior = current.messages.find((message) => message.role === "reply" && message.extra?.replyId === replyId);
   if (prior) return { kind: prior.body === body && (extra.escalation === undefined || isDeepStrictEqual(prior.extra?.escalation, extra.escalation))
     ? "existing" : "conflict", seq: prior.seq, ts: prior.ts };
+  if (current.messages.length === 0 && initialEscalation) {
+    appendThreadMessageHeld(identity, "escalation", initialEscalation.body, deps, initialEscalation.extra, owns);
+  }
   const saved = appendThreadMessageHeld(identity, "reply", body, deps, { ...extra, replyId }, owns);
   return { kind: "appended", seq: saved.seq };
   });
