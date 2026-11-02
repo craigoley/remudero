@@ -239,8 +239,10 @@ export interface GardenBuildContext {
   raiseDuplicate: (e: Escalation) => string;
   /** False for a per-target garden built over a non-self managed target (`owner`/`repo` name it); absent is self. */
   isSelf?: boolean;
-  /** That target's checkout, whose plan and origin/main the garden reads; absent, `repoRoot`. */
+  /** That target's checkout, whose origin/main the garden reads; absent, `repoRoot`. */
   targetRoot?: string;
+  /** That target's plan file, the one its daemon reads (an explicit `--plan` included); absent, `targetRoot`'s layout. */
+  planPath?: string;
 }
 
 /** One production composition, using the boot's existing gateway and its in-flight ownership. */
@@ -924,7 +926,7 @@ export async function daemonCommand(
   const gardenContext: GardenBuildContext = { config, repoRoot: effectiveRepoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs, codeSha: daemonLoadedCodeSha };
   // A per-target garden on a non-self target reads THAT repository and its checkout; every other garden reads self.
   const gardenContextFor = (name: RegisteredGardenName): GardenBuildContext => registeredGardenTargetArgs(name, target).length === 0 ? gardenContext
-    : { ...gardenContext, owner: target.owner, repo: target.repo, isSelf: false, targetRoot: daemonTargetCheckoutRoot(target, config.root) };
+    : { ...gardenContext, owner: target.owner, repo: target.repo, isSelf: false, targetRoot: daemonTargetCheckoutRoot(target, config.root), planPath: resolve(target.planPath) };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContextFor(name), signal) : undefined);
   const boundedPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);

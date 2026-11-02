@@ -14,14 +14,16 @@ import { fixedClock } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
 import type { DaemonSummary } from "#src/lib/daemon.js";
 import {
-  gardenPacingPath, GARDEN_REPO_FLAG, issueRevalidationGardenPass, issueRevalidationPolicyForTarget, registeredGardenEnabled,
+  gardenChildNodeArgv, gardenPacingPath, GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationGardenPass, issueRevalidationPolicyForTarget, registeredGardenEnabled,
   registeredGardenTargetArgs, REGISTERED_GARDEN_NAMES, type RegisteredGardenName,
 } from "#src/lib/garden-registry.js";
 import {
   ISSUE_REVALIDATION_VERDICT_STEP, productionIssueRevalidationPorts, runIssueRevalidationGarden, type IssueRevalidationPolicy,
 } from "#src/lib/issue-revalidation-garden.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { daemonCommand, gardenTargetContext, registeredGardenDueProbe, type GardenBuildContext } from "#src/run-task.js";
+import {
+  daemonCommand, gardenTargetContext, issueRevalidationRunTaskPorts, parseGardenRunArgs, registeredGardenDueProbe, type GardenBuildContext,
+} from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const NOW = Date.parse("2026-11-01T12:00:00.000Z");
@@ -76,9 +78,55 @@ test("a managed repo runs the issue garden in shadow: the daemon on a non-self t
     },
   });
   assert.equal(code, 0);
-  assert.deepEqual(spawned, [{ name: "issue-revalidation", args: [GARDEN_REPO_FLAG, "acme/consumer"] }]);
+  assert.deepEqual(spawned, [{ name: "issue-revalidation", args: [GARDEN_REPO_FLAG, "acme/consumer", GARDEN_PLAN_FLAG, planPath] }]);
   const inventory = JSON.parse(readFileSync(join(root, "state", "gardener-runtime.json"), "utf8")) as { gardens: Array<{ name: string; enabled: boolean }> };
   assert.deepEqual(inventory.gardens.filter((g) => g.enabled).map((g) => g.name), ["issue-revalidation"]);
+});
+
+// The reviewer's counterexample (#16084): `rmd daemon --repo acme/consumer --plan <file>` reads <file> and never clones,
+// but its garden child got only `--repo`, so it read `<root>/repos/consumer/plan/tasks.yaml` (absent: ENOENT on the
+// first issue). The daemon's real spawn argv, through the real child node argv and the child's own parse, must name
+// the target and resolve the --plan file, whose task is then the issue's referent.
+test("a managed repo runs the issue garden in shadow: the daemon's garden child argv carries its --plan and the child reads it", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}managed-garden-plan-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  const planPath = join(home, "consumer-tasks.yaml");
+  writeFileSync(planPath, "- id: W9-T1\n  title: one\n  repo: consumer\n  type: implement\n  status: queued\n  attempts: 0\n");
+  const originalHomedir = os.homedir;
+  t.mock.method(os, "homedir", () => home);
+  syncBuiltinESMExports();
+  t.after(() => { os.homedir = originalHomedir; syncBuiltinESMExports(); rmSync(home, { recursive: true, force: true }); });
+  const spawned: Array<{ name: RegisteredGardenName; args: readonly string[] }> = [];
+  const code = await daemonCommand(["--repo", "acme/consumer", "--plan", planPath, "--max", "0"], {
+    gardenPassSpawn: async (name, args) => { spawned.push({ name, args }); return 0; },
+    runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+      const started = (deps.gardens ?? []).map((start) => start(60_000));
+      await flush(); await flush();
+      for (const garden of started) garden.stop();
+      return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(spawned.length, 1);
+  const { name, args } = spawned[0]!;
+  const entry = "/opt/rmd/run-task.js";
+  const argv = gardenChildNodeArgv(name, args, 512, { execArgv: [], entry }, false, () => {});
+  const childRest = argv.slice(argv.indexOf(entry) + 2);
+  assert.deepEqual(argv.slice(argv.indexOf(entry) + 1, argv.indexOf(entry) + 4), ["garden", "run", "issue-revalidation"]);
+  const parsed = parseGardenRunArgs(childRest);
+  assert.ok(!("error" in parsed), JSON.stringify(parsed));
+  const target = gardenTargetContext(parsed.name, parsed.repoFlag, { owner: "craigoley", repo: "remudero" }, root, parsed.planFlag);
+  assert.deepEqual(target, { owner: "acme", repo: "consumer", isSelf: false, targetRoot: join(root, "repos", "consumer"), planPath });
+  assert.equal(existsSync(target.targetRoot!), false, "a --plan daemon never clones: the checkout's plan is not the target's");
+  const ports = issueRevalidationRunTaskPorts({ owner: target.owner!, repo: target.repo!, repoRoot: REPO_ROOT, stateDir: join(root, "state"),
+    log: () => {}, planRoot: target.targetRoot, planPath: target.planPath });
+  const issue = { number: 1, url: "https://github.com/acme/consumer/issues/1", title: "t", body: "**Task:** W9-T1\n", labels: [] };
+  assert.equal(ports.hasReferent(issue as never), true, "the --plan file's task is the issue's referent");
+  assert.equal(ports.hasReferent({ ...issue, body: "**Task:** W9-T2\n" } as never), false);
+  assert.deepEqual(parseGardenRunArgs(["run", "issue-revalidation", GARDEN_PLAN_FLAG, planPath]),
+    { error: `rmd garden: ${GARDEN_PLAN_FLAG} names a managed target's plan and needs ${GARDEN_REPO_FLAG}` });
 });
 
 test("a managed repo runs the issue garden in shadow: it reads the target's issues, ledgers verdicts and closes nothing", async (t) => {

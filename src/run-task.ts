@@ -172,7 +172,7 @@ export {
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
 import { runInboxGardener } from "./lib/inbox-gardener.js";
 import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-retirement.js";
-import { GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, registeredGardenEnabled } from "./lib/garden-registry.js";
+import { GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, registeredGardenEnabled } from "./lib/garden-registry.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
@@ -27376,10 +27376,10 @@ export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => 
 /** W1-T8864: the issue-revalidation garden's ports that live here: the plan, the reconciler's referent
  *  derivation over the garden's own issue list, and the judge on the escalation judge's mount. Each loads
  *  on first use, never at build time. `seams` stand in for the plan, the reconciler's GitHub reads and the
- *  judge's spawn in tests. `planRoot` is a managed target's checkout, whose plan the referents come from;
- *  the judge's mount and settings stay the harness checkout's (`repoRoot`). */
+ *  judge's spawn in tests. `planPath` is a managed target's plan file (its daemon's), else `planRoot`'s layout, a
+ *  managed target's checkout; the judge's mount and settings stay the harness checkout's (`repoRoot`). */
 export function issueRevalidationRunTaskPorts(
-  ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; log: (step: string, extra?: Record<string, unknown>) => void; planRoot?: string },
+  ctx: { owner: string; repo: string; repoRoot: string; stateDir: string; log: (step: string, extra?: Record<string, unknown>) => void; planRoot?: string; planPath?: string },
   seams: {
     loadPlan?: () => Plan;
     reconcile?: Pick<NonNullable<Parameters<typeof buildEscalationReconcileCandidates>[5]>, "github" | "evidenceRootFor" | "creditIo">;
@@ -27388,7 +27388,7 @@ export function issueRevalidationRunTaskPorts(
 ): Pick<IssueRevalidationPorts, "hasReferent" | "referentVerdicts"> & { judgeText: ReturnType<typeof issueRevalidationJudgeText> } {
   const { owner, repo, repoRoot, stateDir, log } = ctx;
   let plan: Plan | undefined;
-  const planNow = (): Plan => (plan ??= (seams.loadPlan ?? (() => loadPlan(resolveRepoLayout(ctx.planRoot ?? repoRoot).planMonolith)))());
+  const planNow = (): Plan => (plan ??= (seams.loadPlan ?? (() => loadPlan(ctx.planPath ?? resolveRepoLayout(ctx.planRoot ?? repoRoot).planMonolith)))());
   return {
     hasReferent: (issue) => {
       const taskId = issueTaskId(issue) ?? "";
@@ -27661,7 +27661,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       return issueRevalidationGardenPass(stateDir, productionIssueRevalidationPorts({
         owner, repo, stateDir, repoRoot: checkout, landingStateRoot: config.root, operatorLogins: config.operatorGithubLogins, log: gardenLog,
         ...(managed ? { managedTarget: true, policy: () => issueRevalidationPolicyForTarget(loadIssueRevalidationPolicy(), false) } : {}),
-        ...issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log: gardenLog, planRoot: checkout }),
+        ...issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log: gardenLog, planRoot: checkout, planPath: managed ? ctx.planPath : undefined }),
       }), undefined, managed ? repository : undefined);
     }
     case "evidence-coverage":
@@ -27823,26 +27823,41 @@ export function gardenReplayCommand(rest: string[], opts: GardenReplayOptions = 
   return 0;
 }
 
-/** The context a garden child's `--repo <owner/repo>` names: a per-target garden over that managed repository and its
- *  checkout (`daemonTargetCheckoutRoot`). Absent, naming self, or naming a self-only garden, nothing changes. */
-export function gardenTargetContext(name: RegisteredGardenName, repoFlag: string | undefined, self: { owner: string; repo: string }, configRoot: string): Partial<GardenBuildContext> {
+/** The context a garden child's `--repo <owner/repo> [--plan <file>]` names: a per-target garden over that managed
+ *  repository, its checkout (`daemonTargetCheckoutRoot`) and the plan file its daemon reads. Absent, naming self, or
+ *  naming a self-only garden, nothing changes. */
+export function gardenTargetContext(name: RegisteredGardenName, repoFlag: string | undefined, self: { owner: string; repo: string }, configRoot: string,
+  planFlag?: string): Partial<GardenBuildContext> {
   const [owner, repo] = (repoFlag ?? "").split("/");
   if (!owner || !repo || !registeredGardenEnabled(name, false) || `${owner}/${repo}`.toLowerCase() === `${self.owner}/${self.repo}`.toLowerCase()) return {};
-  return { owner, repo, isSelf: false, targetRoot: daemonTargetCheckoutRoot({ repo, isSelf: false }, configRoot) };
+  return { owner, repo, isSelf: false, targetRoot: daemonTargetCheckoutRoot({ repo, isSelf: false }, configRoot),
+    ...(planFlag === undefined ? {} : { planPath: resolve(planFlag) }) };
 }
 
-/** `rmd garden run <name> [--hourly] [--repo <owner/repo>]` — one pass of one registered garden, the daemon's off-loop
- *  child (W1-T5114); `--repo` names the managed target a per-target garden reads. */
-export async function gardenCommand(rest: string[], source: { repoRoot?: string } = {}): Promise<number> {
+/** The garden child's argv after `garden`: `run <name>` and its flags, or the usage error `gardenCommand` prints. */
+export function parseGardenRunArgs(rest: readonly string[]): { name: RegisteredGardenName; repoFlag?: string; planFlag?: string } | { error: string } {
   const [sub, name] = rest;
-  if (sub === "replay") return gardenReplayCommand(rest.slice(1));
-  const repoFlag = flagValue(rest.slice(2), GARDEN_REPO_FLAG);
-  const badArg = unknownArgError("garden", rest.slice(2), [GARDEN_REPO_FLAG], [GARDEN_HOURLY_FLAG]) ??
-    (repoFlag !== undefined && !/^[^/\s]+\/[^/\s]+$/.test(repoFlag) ? `rmd garden: ${GARDEN_REPO_FLAG} takes <owner/repo>, got '${repoFlag}'` : null);
+  const flags = rest.slice(2);
+  const repoFlag = flagValue(flags, GARDEN_REPO_FLAG), planFlag = flagValue(flags, GARDEN_PLAN_FLAG);
+  const badArg = unknownArgError("garden", flags, [GARDEN_REPO_FLAG, GARDEN_PLAN_FLAG], [GARDEN_HOURLY_FLAG]) ??
+    (repoFlag !== undefined && !/^[^/\s]+\/[^/\s]+$/.test(repoFlag) ? `rmd garden: ${GARDEN_REPO_FLAG} takes <owner/repo>, got '${repoFlag}'` : null) ??
+    (planFlag !== undefined && repoFlag === undefined ? `rmd garden: ${GARDEN_PLAN_FLAG} names a managed target's plan and needs ${GARDEN_REPO_FLAG}` : null);
   if (sub !== "run" || name === undefined || !isRegisteredGardenName(name) || badArg) {
-    console.error(`${badArg ?? `rmd garden: usage: ${commandSyntax("garden")} — gardens: ${REGISTERED_GARDEN_NAMES.join(", ")}`}\n` + USAGE);
+    return { error: badArg ?? `rmd garden: usage: ${commandSyntax("garden")} — gardens: ${REGISTERED_GARDEN_NAMES.join(", ")}` };
+  }
+  return { name, repoFlag, planFlag };
+}
+
+/** `rmd garden run <name> [--hourly] [--repo <owner/repo> [--plan <file>]]` — one pass of one registered garden, the
+ *  daemon's off-loop child (W1-T5114); `--repo` names the managed target a per-target garden reads, `--plan` its plan. */
+export async function gardenCommand(rest: string[], source: { repoRoot?: string } = {}): Promise<number> {
+  if (rest[0] === "replay") return gardenReplayCommand(rest.slice(1));
+  const parsed = parseGardenRunArgs(rest);
+  if ("error" in parsed) {
+    console.error(`${parsed.error}\n` + USAGE);
     return 2;
   }
+  const { name, repoFlag, planFlag } = parsed;
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const self = resolveOwnerRepo();
@@ -27852,7 +27867,7 @@ export async function gardenCommand(rest: string[], source: { repoRoot?: string 
   const raiseDuplicate = (e: Escalation): string =>
     escalate({ ...e, runId }, { issues: ghIssueGateway(self.owner, self.repo), ledgerPath, runId });
   const ctx: GardenBuildContext = { config, repoRoot: source.repoRoot ?? repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
-  return await runRegisteredGardenPass(name, rest.slice(2), { ...ctx, ...gardenTargetContext(name, repoFlag, self, config.root) });
+  return await runRegisteredGardenPass(name, rest.slice(2), { ...ctx, ...gardenTargetContext(name, repoFlag, self, config.root, planFlag) });
 }
 
 export function sweepPrTerminalRung(github: Pick<GitHub, "prByRef">, ledgerPath: string, runId: string, // W1-T5318
@@ -41635,7 +41650,7 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "garden",
-    syntax: "rmd garden run <name> [--hourly] [--repo <owner/repo>] | rmd garden replay ci-friction [--days <n>] [--step-hours <h>]",
+    syntax: "rmd garden run <name> [--hourly] [--repo <owner/repo> [--plan <file>]] | rmd garden replay ci-friction [--days <n>] [--step-hours <h>]",
     summary: "Run one pass of one registered gardener (the daemon's off-loop child).",
     detail: "W1-T5114: builds the named garden from the shared registry (buildRegisteredGarden) and runs exactly one pass, appending to the same ledger the daemon does. The daemon spawns this per gardener pass so no pass runs on its event loop; --hourly also refreshes the test garden's hourly CI evidence. `replay ci-friction` replays the ci-friction remedy ladder over the past --days (default 7) at --step-hours (default 6) from the ledger union and main's plan history, read-only.",
   },

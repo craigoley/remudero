@@ -17,7 +17,7 @@ import { inboxGardenerMode } from "./inbox-retirement.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { readFileSync } from "node:fs";
 import { homedir, setPriority as osSetPriority } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CHILD_ENTRY_SPAWNED_STEP, childEntryArgv, childEntrySpawnedRow } from "./child-entry-argv.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -93,10 +93,15 @@ export function registeredGardenEnabled(name: RegisteredGardenName, isSelf: bool
 /** The child's flag naming the managed repository a per-target garden's pass reads (`owner/repo`). */
 export const GARDEN_REPO_FLAG = "--repo";
 
-/** The extra child args a garden's pass carries on this target: the repository, only for a per-target garden
- *  on a non-self target, so a self pass's argv is exactly what it always was. */
-export function registeredGardenTargetArgs(name: RegisteredGardenName, target: { owner: string; repo: string; isSelf: boolean }): string[] {
-  return !target.isSelf && PER_TARGET_GARDEN_NAMES.includes(name) ? [GARDEN_REPO_FLAG, `${target.owner}/${target.repo}`] : [];
+/** The child's flag naming the plan file a per-target garden's pass reads: the daemon's own (`--plan` or derived). */
+export const GARDEN_PLAN_FLAG = "--plan";
+
+/** The extra child args a garden's pass carries on this target: the repository and the plan the daemon reads (absolute,
+ *  so an explicit relative `--plan` survives the child's cwd), only for a per-target garden on a non-self target, so a
+ *  self pass's argv is exactly what it always was. */
+export function registeredGardenTargetArgs(name: RegisteredGardenName, target: { owner: string; repo: string; isSelf: boolean; planPath?: string }): string[] {
+  if (target.isSelf || !PER_TARGET_GARDEN_NAMES.includes(name)) return [];
+  return [GARDEN_REPO_FLAG, `${target.owner}/${target.repo}`, ...(target.planPath === undefined ? [] : [GARDEN_PLAN_FLAG, resolve(target.planPath)])];
 }
 
 /** The issue-revalidation policy on a target. No per-target block exists in plan/policy.yaml, so a non-self
