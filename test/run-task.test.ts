@@ -5123,15 +5123,13 @@ test("W1-T193: buildInboxDraftHook — the in-flight file is cleared even when t
   );
 });
 
-test("W1-T193: rmd serve leaves panelGraph.ratify UNSET in its own CLI wiring — buildServeServer (lib/serve.ts) owns defaulting it to a real ratifyCliGateway, proven behaviorally in test/serve.test.ts; the console's APPROVE/REFRAME routes are reachable from the real CLI, never left with no gateway", () => {
+test("rmd serve supplies the maintained owned fleet gateway for product planning and approve/reframe", () => {
   const serveBody = extractFunctionBody(runTaskSrc, "async function serveCommand(");
   assert.match(serveBody, /panelGraph: \{/, "serveCommand must still assemble a panelGraph deps object");
-  assert.doesNotMatch(
+  assert.match(
     serveBody,
-    /ratify:/,
-    "serveCommand must NOT construct its own ratify gateway — that would bypass buildServeServer's " +
-      "single default-construction site (lib/serve.ts), the same 'one assembler, not two divergent " +
-      "wiring sites' discipline inboxRoot's own auto-fill already follows",
+    /ratify: fleetRatifyGateway\(repoRoot, join\(config.root, "state", "logs"\), ledgerPath, \{\s*worktreeRoot: worktreesDir\(config\), stateRoot: config.root,/,
+    "the production CLI must use the maintained fresh-source runner with writable control-root paths",
   );
 });
 
