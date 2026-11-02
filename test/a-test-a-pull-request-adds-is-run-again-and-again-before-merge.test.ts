@@ -88,6 +88,60 @@ test("the screen repeats every added file until the budget is spent, and stops a
   assert.equal(red.passes.get("test/a.test.ts"), 3, "nothing new starts after a failure");
 });
 
+test("slow passing screen runs reserve completion time inside the ci window", async () => {
+  let clock = 0;
+  let starts = 0;
+  const result = await flake.screen({
+    files: ["test/selected-registry-shell-consumers.test.ts"],
+    budgetMs: 1_886_000,
+    concurrency: 8,
+    now: () => clock,
+    runFile: async () => {
+      starts++;
+      const at = clock;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      clock = Math.max(clock, at + 800_000);
+      return { ok: true, output: "ok" };
+    },
+  });
+  assert.equal(result.failure, undefined);
+  assert.equal(starts, 16, "each of eight slots completes two runs; a third would exceed the window");
+  assert.equal(result.passes.get("test/selected-registry-shell-consumers.test.ts"), starts,
+    "every started run finishes and is judged");
+  assert.equal(clock, 1_600_000);
+});
+
+test("the screen reserves the longest observed duration rather than its latest faster run", async () => {
+  let clock = 0;
+  let starts = 0;
+  const result = await flake.screen({
+    files: ["test/a.test.ts"], budgetMs: 80, concurrency: 1, now: () => clock,
+    runFile: async () => {
+      clock += starts++ === 1 ? 10 : 40;
+      return { ok: true, output: "ok" };
+    },
+  });
+  assert.equal(result.failure, undefined);
+  assert.equal(result.passes.get("test/a.test.ts"), 2);
+  assert.equal(clock, 50, "the first 40 ms run still bounds the next start after a 10 ms run");
+});
+
+test("a screen run that outlasts its reservation is still judged and fails the shard", async () => {
+  let clock = 0;
+  let starts = 0;
+  const result = await flake.screen({
+    files: ["test/a.test.ts"], budgetMs: 100, concurrency: 1, now: () => clock,
+    runFile: async () => {
+      starts++;
+      clock += starts === 1 ? 30 : 90;
+      return { ok: starts === 1, output: starts === 1 ? "ok" : "not ok - late failure" };
+    },
+  });
+  assert.equal(starts, 2);
+  assert.equal(clock, 120, "the screen awaits the whole run even after its window closes");
+  assert.deepEqual(result.failure, { file: "test/a.test.ts", passesBefore: 1, output: "not ok - late failure" });
+});
+
 test("the budget is the predicted coverage makespan, never shorter than the heaviest file it packs", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-flake-budget-"));
   try {

@@ -89,18 +89,26 @@ export function runTestFile(file, root = ROOT) {
 }
 
 /**
- * Runs `files` round-robin on `concurrency` slots until `budgetMs` has passed and every file has
- * run once, or until a run fails. Returns each file's pass count and the first failure.
+ * Runs every file once, then repeats round-robin while another run fits in `budgetMs`, using
+ * each file's longest observed run. Started runs always finish and are judged, even past the
+ * window; one failure stops new starts. Returns each file's pass count and the first failure.
  */
 export async function screen({ files, budgetMs, concurrency, runFile, now = Date.now }) {
   const passes = new Map(files.map((f) => [f, 0]));
+  const durations = new Map();
   const started = now();
   let next = 0;
   let failure;
   const slot = async () => {
     while (failure === undefined && (next < files.length || now() - started < budgetMs)) {
       const file = files[next++ % files.length];
+      const runStarted = now();
+      const duration = durations.get(file);
+      // Spending the whole window on starts leaves a slow final run beyond the job's cap.
+      // First runs remain mandatory, including when earlier job steps spent the budget.
+      if (passes.get(file) > 0 && duration > budgetMs - (runStarted - started)) break;
       const result = await runFile(file);
+      durations.set(file, Math.max(durations.get(file) ?? 0, now() - runStarted));
       if (result.ok) passes.set(file, passes.get(file) + 1);
       else failure ??= { file, passesBefore: passes.get(file), output: result.output };
     }
