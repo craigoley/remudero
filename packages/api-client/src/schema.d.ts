@@ -6472,6 +6472,53 @@ export interface components {
       /** Present on `plan_source_unavailable`: the outcome that refused the read, with its bounded failure reason. */
       planSource?: PlanSource;
     };
+    EscalationConversation: {
+      version: 1;
+      issueUrl: string;
+      repository: string;
+      identity: {
+        taskId: string;
+        class: "BLOCKED" | "MANUAL" | "HARD_STOP" | "GRILL";
+        cause?: "review" | "ci" | "conflict" | "stage-stall";
+        prRef?: string;
+      };
+      threadId: string;
+      revision: string;
+      headline: string;
+      whatHappened: string;
+      recommendation: string;
+      options: ({
+        label: string;
+        detail: string;
+        executable: false;
+      })[];
+      source: {
+        state: "current" | "stale";
+        observedAt: string;
+        updatedAt: string;
+        revision: string;
+      };
+      history: "verified" | "absent" | "unavailable" | "partial";
+      messages: ({
+        seq: number;
+        from: "operator" | "daemon";
+        text: string;
+        ts: number;
+        intentId?: string;
+      })[];
+      canReply: boolean;
+      replyUnavailableReason?: string;
+      details: string;
+    };
+    EscalationConversationRead: {
+      state: "served";
+      conversation: EscalationConversation;
+    };
+    EscalationConversationUnavailable: {
+      state: "unavailable";
+      reason: "invalid_request" | "wrong_repository" | "source_unavailable" | "invalid_source";
+      detail: string;
+    };
     /** POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`). `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`). */
     EscalationReplyRequest: {
       taskId: string;
@@ -6481,6 +6528,10 @@ export interface components {
       prRef?: string;
       /** The prose reply; must be non-blank. */
       text: string;
+      /** Native issue URL; required together with expectedRevision and intentId for a bound reply. */
+      issueUrl?: string;
+      expectedRevision?: string;
+      intentId?: string;
     };
     /** One clarification the reply interpreter asks (src/lib/reply-interpreter.ts's `ClarifyingQuestion`). */
     ClarifyingQuestion: {
@@ -6500,8 +6551,17 @@ export interface components {
       ok: boolean;
       taskId: string;
       threadId: string;
-      feedback: FeedbackEntry;
-      interpretation: ReplyInterpretation;
+      /** Present on a bound reply once its answer is durably stored. Does not establish fleet work. */
+      saved?: {
+        intentId: string;
+        seq: number;
+      };
+      inputDelivery?: "recorded" | "unverified";
+      work?: "not_observed";
+      duplicate?: boolean;
+      detail?: string;
+      feedback?: FeedbackEntry;
+      interpretation?: ReplyInterpretation;
       /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
       landing?: "queued";
     };
@@ -8544,6 +8604,19 @@ export interface paths {
         };
     };
   };
+  "/v1/escalation/thread": {
+    get: {
+      responses: {
+          "200": EscalationConversationRead;
+          "400": EscalationConversationUnavailable;
+          "401": Error;
+          "403": Error;
+          "404": EscalationConversationUnavailable;
+          "422": EscalationConversationUnavailable;
+          "503": EscalationConversationUnavailable;
+        };
+    };
+  };
   "/v1/escalation/reply": {
     post: {
       responses: {
@@ -8551,6 +8624,8 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+          "409": Error;
+          "503": Error;
         };
     };
   };

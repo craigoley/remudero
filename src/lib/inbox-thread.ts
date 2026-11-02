@@ -91,6 +91,8 @@ export interface ThreadMessageExtra {
   question?: boolean;
   operator?: string;
   replyId?: string;
+  /** Immutable source binding of a native escalation reply intent. */
+  escalation?: { issueUrl: string; revision: string };
   input?: InboxInputReference;
   response?: InboxResponseReference;
 }
@@ -335,7 +337,8 @@ export function appendThreadReplyOnce(
   const current = readThread(deriveThreadId(identity), deps);
   if (current.status === "unresolved") throw new Error(`inbox-thread: ${current.reason}`);
   const prior = current.messages.find((message) => message.role === "reply" && message.extra?.replyId === replyId);
-  if (prior) return { kind: prior.body === body ? "existing" : "conflict", seq: prior.seq, ts: prior.ts };
+  if (prior) return { kind: prior.body === body && (extra.escalation === undefined || isDeepStrictEqual(prior.extra?.escalation, extra.escalation))
+    ? "existing" : "conflict", seq: prior.seq, ts: prior.ts };
   const saved = appendThreadMessageHeld(identity, "reply", body, deps, { ...extra, replyId }, owns);
   return { kind: "appended", seq: saved.seq };
   });
