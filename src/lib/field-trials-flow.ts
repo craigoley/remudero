@@ -44,6 +44,10 @@ import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedge
 import { deriveReviewFindingOutcomes, type FindingOutcomeReport, type VerifiedFindingEvidence } from "./review-finding-outcomes.js";
 import { deriveVerifiedReviewFindingEvidence, readReviewFindingEvidence, type FindingEvidenceInput, type FindingEvidenceReport } from "./review-finding-evidence.js";
 import type { TaskCaseFile } from "./task-case-file.js";
+import { attributeAttemptOutcome } from "./attempt-outcome-attribution.js";
+import { publicCategoryOfLane, publicGuardrailClassOf, type GuardrailSignal, type PublicCategory,
+  type PublicGuardrailClass } from "./public-model-vocabulary.js";
+import { OpenWeightTruncatedReplyError } from "./worker-provider.js";
 
 export const FIELD_TRIALS_FLOW_VERSION = "field-trials-flow-v1" as const;
 export const FIELD_TRIALS_RELEASE_VERSION = "field-trials-release-v1" as const;
@@ -67,6 +71,8 @@ export const SAFE_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const DAY_MS = 86_400_000;
 const FLOW_STEPS = new Set(["run.start", "worker.assignment", "worker.attempt", "verdict", "pr.opened", "review.posted", "review.reviewer", "review.finding",
   "fix.dispatch", "fix.remedy_path_execution", "escalation.issue_opened", "daemon.boot", "evidence_coverage.filed"]);
+/** W1-T10877: rows read only by the guardrails family; they stay out of every per-task family. */
+const GUARDRAIL_STEPS = new Set(["inbox.drafted", "fix.done", "fix.exhausted", "fix.commit_refused", "fix.stood_down"]);
 const STAGES = ["eligible", "assigned", "worker", "pr", "review", "merge", "deployment", "verified"] as const;
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -110,6 +116,9 @@ export interface FlowRow {
   servedModelReason?: string | null;
   /** W1-T10875: bounded worker.attempt fields the cohort's attribution reads (see projectOutcomeSignals). */
   outcomeSignals?: Readonly<Record<string, unknown>>;
+  /** W1-T10877: a non-dispatch worker.attempt's own `lane`, and an inbox draft's lint verdict. */
+  lane?: string;
+  lintClean?: boolean;
   notionalCostUsd?: number | null;
   notionalCostReported?: boolean;
   repair?: RepairCostContext;
@@ -142,7 +151,7 @@ export interface FlowRow {
 
 function flowRelevant(row: Record<string, unknown>): boolean {
   const step = String(row.step);
-  return FLOW_STEPS.has(step) || step.endsWith(".scorecard") || step.endsWith(".gardener_judged")
+  return FLOW_STEPS.has(step) || GUARDRAIL_STEPS.has(step) || step.endsWith(".scorecard") || step.endsWith(".gardener_judged")
     || (row.actor === "operator" && typeof row.task_id === "string");
 }
 
@@ -193,12 +202,15 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
     fingerprint, ts: iso(row.ts), step: String(row.step), host: text(row.host), actor: text(row.actor),
     taskId: text(row.task_id), runId: text(row.run_id),
     assignmentId: text(assignment?.id) ?? text(row.selection_assignment_id),
-    requestedModel: text(record(assignment?.requested)?.model), selectedModel: text(record(assignment?.selected)?.model),
+    requestedModel: text(record(assignment?.requested)?.model) ?? (GUARDRAIL_STEPS.has(String(row.step)) ? text(row.requested_model) : null),
+    selectedModel: text(record(assignment?.selected)?.model),
     selectedEffort: text(record(assignment?.selected)?.effort), stackRevisions: trialRevisionPins(stack),
     provider: text(row.provider) ?? text(record(assignment?.selected)?.provider),
     servedModel: text(row.served_model),
     servedModelReason: text(row.served_model_reason),
     ...(projectOutcomeSignals(row) ? { outcomeSignals: projectOutcomeSignals(row) } : {}),
+    ...(row.step === "worker.attempt" && text(row.lane) ? { lane: row.lane as string } : {}),
+    ...(row.step === "inbox.drafted" && typeof row.lint_clean === "boolean" ? { lintClean: row.lint_clean } : {}),
     notionalCostReported: Object.hasOwn(row, "notional_cost_usd"),
     repair: projectRepairCostContext(row),
     importedModule: importedModuleOf(benchmark?.loadedModule),
@@ -451,6 +463,14 @@ function learningCells(units: LearningUnit[]) {
     humanEffort: { state: "unavailable" as const, reason: "no-independent-human-effort-estimate" } };
 }
 
+type GuardrailUnit = Unit & { modelId: string; category: PublicCategory; guardrailClass: PublicGuardrailClass; fired: boolean; row: string };
+
+function guardrailCells(units: GuardrailUnit[]) {
+  const [first] = units;
+  return { modelId: first!.modelId, category: first!.category, guardrailClass: first!.guardrailClass,
+    opportunities: units.length, fires: units.filter((unit) => unit.fired).length };
+}
+
 function withDigest<U extends Omit<Unit, "digest">>(unit: U): U & Unit {
   return { ...unit, digest: sha256(JSON.stringify(unit)) };
 }
@@ -521,6 +541,8 @@ export interface FieldTrialsFlowSnapshot {
     repair: Record<string, Partition<ReturnType<typeof repairCells>>>;
     flow: Record<string, Partition<ReturnType<typeof flowCells>>>;
     learning: Record<string, Partition<ReturnType<typeof learningCells>>>;
+    /** W1-T10877: private fires and opportunities per model|public category|public guardrail class. */
+    guardrails: Record<string, Partition<ReturnType<typeof guardrailCells>>>;
   };
   rebuild: { rebuiltPartitions: string[]; reusedPartitions: number };
   /** Every private join key this snapshot saw, so a release can be refused if one leaks. */
@@ -731,6 +753,53 @@ function adoptionUnits(ctx: SourceContext, caseFiles: readonly TaskCaseFile[] | 
   return { units, transitions: [...transitions.values()].sort((a, b) => `${a.host}\n${a.model}`.localeCompare(`${b.host}\n${b.model}`)) };
 }
 
+/** The lanes whose public unit is a draft (inbox.drafted), never the calls that produced it. */
+const DRAFT_UNIT_LANES = new Set(["inbox-draft"]);
+
+/**
+ * W1-T10877: one unit per (attributable call, draft or fix round) x guardrail class it could fire. Only a
+ * worker.attempt attributeAttemptOutcome reads as success or model counts, so a pre-request refusal or an
+ * infrastructure kill is neither a fire nor an opportunity; a lane that maps to no public category is excluded.
+ */
+function guardrailUnits(rows: FlowRow[]): GuardrailUnit[] {
+  const assignments = new Map(rows.filter((row) => row.step === "worker.assignment" && row.assignmentId !== null)
+    .map((row) => [row.assignmentId!, row]));
+  const units: GuardrailUnit[] = [];
+  const add = (row: FlowRow, modelId: string, lane: string | null, signals: Partial<Record<GuardrailSignal, boolean>>) => {
+    const category = publicCategoryOfLane(lane);
+    if (category === null) return;
+    for (const [signal, fired] of Object.entries(signals)) {
+      const guardrailClass = publicGuardrailClassOf(signal)!;
+      units.push(withDigest({ key: `${modelId}|${category}|${guardrailClass}`, modelId, category, guardrailClass,
+        fired: fired === true, row: row.fingerprint }));
+    }
+  };
+  for (const row of rows) {
+    if (row.step === "worker.attempt") {
+      const assignment = row.assignmentId === null ? undefined : assignments.get(row.assignmentId);
+      const lane = row.lane ?? row.workLane ?? assignment?.workLane ?? null;
+      if (lane === null || DRAFT_UNIT_LANES.has(lane)) continue;
+      const { outcome, signal } = attributeAttemptOutcome({ ...row.outcomeSignals, success: row.success, served_model: row.servedModel,
+        ...(row.servedModelReason != null ? { served_model_reason: row.servedModelReason } : {}),
+        ...(row.costUsd != null ? { total_cost_usd: row.costUsd } : {}) });
+      if (outcome !== "success" && outcome !== "model") continue;
+      add(row, row.servedModel ?? assignment?.selectedModel ?? row.selectedModel ?? "unknown", lane, {
+        "draft-contract-dirty": signal === "draft-contract",
+        "truncated-reply": signal === `reply-${OpenWeightTruncatedReplyError.name}`,
+        "served-model-unnamed": row.servedModel === null });
+    } else if (row.step === "inbox.drafted") {
+      const modelId = row.servedModel ?? row.requestedModel;
+      if (modelId !== null) add(row, modelId, "inbox-draft", { "draft-contract-dirty": row.lintClean === false,
+        "served-model-unnamed": row.servedModel === null });
+    } else if (GUARDRAIL_STEPS.has(row.step)) {
+      // A fix round's own worker.attempt already counts its call; the round adds only whether its bounded rounds ran out.
+      const modelId = row.servedModel ?? row.requestedModel;
+      if (modelId !== null) add(row, modelId, "fix", { "fix-rounds-exhausted": row.step === "fix.exhausted" });
+    }
+  }
+  return units;
+}
+
 function learningUnits(ctx: SourceContext, pullsByRepo: (repo: string) => GithubRepoStore | undefined): LearningUnit[] {
   const units: LearningUnit[] = [];
   for (const row of ctx.rows) {
@@ -756,7 +825,7 @@ function learningUnits(ctx: SourceContext, pullsByRepo: (repo: string) => Github
  */
 export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): FieldTrialsFlowSnapshot {
   const units = { adoption: [] as AdoptionUnit[], funnel: [] as FunnelUnit[], flow: [] as FlowUnit[], repair: [] as RepairUnit[],
-    learning: [] as LearningUnit[] };
+    learning: [] as LearningUnit[], guardrails: [] as GuardrailUnit[] };
   const transitions: ModelTransition[] = [];
   const preventionExecutions: NonNullable<FieldTrialsFlowSnapshot["preventionExecution"]> = [];
   const preventionSources: NonNullable<FieldTrialsFlowSnapshot["preventionAdoption"]> = [];
@@ -841,6 +910,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
         assignmentTelemetry.set(key, counts);
       }
       for (const key of [row.taskId, row.runId, row.assignmentId, row.host, row.headSha]) if (key !== null) privateKeys.add(key);
+      if (GUARDRAIL_STEPS.has(row.step)) continue;
       if (row.remedyExecution?.state === "observed") for (const key of [row.remedyExecution.invocationId,
         row.remedyExecution.processInstanceId, row.remedyExecution.callerRunId]) privateKeys.add(key);
       if (row.taskId !== null) {
@@ -894,6 +964,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     units.adoption.push(...adoption.units);
     transitions.push(...adoption.transitions);
     units.learning.push(...learningUnits(ctx, storeOf));
+    units.guardrails.push(...guardrailUnits(ledgerRows));
   }
   const rebuilt: string[] = [];
   const reused = { count: 0 };
@@ -905,6 +976,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     repair: rebuildFamily("repair", units.repair, prior?.repair, repairCells, rebuilt, reused),
     flow: rebuildFamily("flow", units.flow, prior?.flow, flowCells, rebuilt, reused),
     learning: rebuildFamily("learning", units.learning, prior?.learning, learningCells, rebuilt, reused),
+    guardrails: rebuildFamily("guardrails", units.guardrails, prior?.guardrails, guardrailCells, rebuilt, reused),
   };
   const githubFresh = (input.githubPass?.pagesRead ?? 0) > 0;
   const anyObserved = githubFresh || provenance.some((source) => source.ledger.state !== "unavailable");
