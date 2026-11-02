@@ -13,8 +13,13 @@ export function escalationReplySubmissionKey(threadId: string, intentId: string,
 }
 
 export function escalationThreadIdentity(threadId: string): ThreadIdentity | undefined {
-  const m = /^thread:([^\s:]+)::(BLOCKED|MANUAL|HARD_STOP|GRILL)::(-|review|ci|conflict|stage-stall)::(-|[1-9][0-9]*)$/.exec(threadId);
-  return m ? { taskId: m[1]!, class: m[2]!, ...(m[3] !== "-" ? { cause: m[3] } : {}), ...(m[4] !== "-" ? { prRef: m[4] } : {}) } : undefined;
+  if (!threadId.startsWith("thread:")) return undefined;
+  const [taskId, cls, cause, prRef, extra] = threadId.slice(7).split("::");
+  if (!taskId || taskId.length > 256 || /[\s\u0000-\u001f]/.test(taskId) || extra !== undefined
+    || !cls || !["BLOCKED", "MANUAL", "HARD_STOP", "GRILL"].includes(cls)
+    || !cause || !["-", "review", "ci", "conflict", "stage-stall"].includes(cause)
+    || !prRef || !/^(?:-|[1-9][0-9]*)$/.test(prRef)) return undefined;
+  return { taskId, class: cls, ...(cause !== "-" ? { cause } : {}), ...(prRef !== "-" ? { prRef } : {}) };
 }
 
 /** Current merged feedback metadata, through the existing paced read transport. */

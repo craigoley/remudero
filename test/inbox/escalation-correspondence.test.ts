@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendThreadMessage, appendThreadReplyOnce, deriveThreadId, readThread } from "#src/lib/inbox-thread.js";
-import { escalationReplySubmissionKey, recordEscalationIntakeOutcome } from "#src/lib/escalation-correspondence.js";
+import { escalationThreadIdentity, escalationReplySubmissionKey, recordEscalationIntakeOutcome } from "#src/lib/escalation-correspondence.js";
 import type { FeedbackEntry } from "#src/lib/feedback.js";
 import { mergeFeedbackRecord } from "#src/lib/feedback-record-merge.js";
 import { parse, stringify } from "yaml";
@@ -179,4 +179,15 @@ for (const failedCapture of [false, true]) test(`concurrent identical escalation
     }
     assert.equal(readQueuedFeedbackRecords(f.root).size, 1);
   } finally { release(); service.closeAllConnections(); await new Promise<void>(resolve => service.close(() => resolve())); }
+});
+
+
+test("correspondence preserves every bounded native task identity including a single colon", () => {
+  const identity = { taskId: "PR:15520", class: "MANUAL", cause: "stage-stall", prRef: "15520" };
+  assert.deepEqual(escalationThreadIdentity(deriveThreadId(identity)), identity);
+  assert.deepEqual(escalationThreadIdentity(deriveThreadId({ taskId: "A".repeat(256), class: "GRILL" })), { taskId: "A".repeat(256), class: "GRILL" });
+  for (const invalid of ["other:W1-T42::MANUAL::-::-", "thread:W1-T42::UNKNOWN::-::-", "thread:W1-T42::MANUAL::other::-",
+    "thread:W1-T42::MANUAL::-::0", "thread:W1-T42::MANUAL::-", "thread:W1-T42::MANUAL::-::-::extra",
+    "thread:bad task::MANUAL::-::-", `thread:${"A".repeat(257)}::MANUAL::-::-`, "thread:bad\u0000task::MANUAL::-::-"])
+    assert.equal(escalationThreadIdentity(invalid), undefined, JSON.stringify(invalid));
 });
