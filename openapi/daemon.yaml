@@ -15063,6 +15063,102 @@ components:
           $ref: "#/components/schemas/PlanSource"
 
 
+    EscalationConversation:
+      type: object
+      required: [version, issueUrl, repository, identity, threadId, revision, headline, whatHappened, recommendation, options, source, history, attention, messages, canReply, canStartConversation, details]
+      properties:
+        version: {type: integer, enum: [1]}
+        issueUrl: {type: string}
+        repository: {type: string}
+        identity:
+          type: object
+          required: [taskId, class]
+          properties:
+            taskId: {type: string}
+            class: {type: string, enum: [BLOCKED, MANUAL, HARD_STOP, GRILL]}
+            cause: {type: string, enum: [review, ci, conflict, stage-stall]}
+            prRef: {type: string}
+        threadId: {type: string}
+        revision: {type: string, pattern: '^[a-f0-9]{64}$'}
+        headline: {type: string}
+        whatHappened: {type: string}
+        recommendation: {type: string, nullable: true}
+        options:
+          type: array
+          maxItems: 24
+          items:
+            type: object
+            required: [label, detail, executable]
+            properties:
+              label: {type: string}
+              detail: {type: string}
+              executable: {type: boolean, enum: [false]}
+        source:
+          type: object
+          required: [state, observedAt, updatedAt, revision]
+          properties:
+            state: {type: string, enum: [current, stale]}
+            observedAt: {type: string, format: date-time}
+            updatedAt: {type: string, format: date-time}
+            revision: {type: string}
+        history: {type: string, enum: [verified, absent, unavailable, partial]}
+        attention:
+          type: string
+          enum: [needs_input, waiting_for_agent, archived, unknown]
+          description: Correspondence state, separate from work completion. Archived requires an explicit agent message with question false after an operator reply. A later agent question reopens the conversation.
+        messages:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [seq, from, text, ts]
+            properties:
+              seq: {type: integer}
+              from: {type: string, enum: [operator, daemon]}
+              text: {type: string}
+              ts: {type: integer, minimum: -8640000000000000, maximum: 8640000000000000}
+              intentId: {type: string}
+              sourceImported: {type: boolean, enum: [true]}
+        canReply: {type: boolean}
+        canStartConversation: {type: boolean, description: True only for a current native source with positively observed absent history and unambiguous native identity. Starting is an explicit bound write; reads never create messages.}
+        activeQuestion:
+          type: object
+          description: A current native intake question bound to this preserved conversation. Its canonical feedback record must still be grilling. May enable a reply after the original escalation closes; conveys no executor authority.
+          required: [issueUrl, feedbackId, revision, seq, observedAt, updatedAt]
+          properties:
+            issueUrl: {type: string}
+            feedbackId: {type: string}
+            revision: {type: string, pattern: '^[a-f0-9]{64}$'}
+            seq: {type: integer, minimum: 1}
+            observedAt: {type: string, format: date-time}
+            updatedAt: {type: string, format: date-time}
+        initialMessage: {type: string, description: Verified original source text copied only when the operator explicitly starts this conversation. Earlier GitHub comments are not included.}
+        recommendationReplies:
+          type: object
+          description: Native acceptance or decline text for recording an operator answer through the bound reply route. These are input, never task approval or repair execution.
+          required: [decline]
+          properties:
+            accept: {type: string, maxLength: 4000}
+            decline: {type: string, maxLength: 4000}
+        replyUnavailableReason: {type: string}
+        details: {type: string}
+
+    EscalationConversationRead:
+      type: object
+      required: [state, conversation]
+      properties:
+        state: {type: string, enum: [served]}
+        conversation:
+          $ref: "#/components/schemas/EscalationConversation"
+
+    EscalationConversationUnavailable:
+      type: object
+      required: [state, reason, detail]
+      properties:
+        state: {type: string, enum: [unavailable]}
+        reason: {type: string, enum: [invalid_request, wrong_repository, source_unavailable, invalid_source]}
+        detail: {type: string}
+
     EscalationReplyRequest:
       type: object
       description: >
@@ -15074,6 +15170,14 @@ components:
         - class
         - text
       properties:
+        startConversation:
+          type: boolean
+          enum: [true]
+          description: Opt in to recording the verified original issue body and first answer in the native store. Requires the current canStartConversation capability and all reply binding fields.
+        recommendationResponse:
+          type: string
+          enum: [accept, decline]
+          description: Record acceptance or decline as the exact currently advertised recommendation reply. This records an answer and grants no task approval or execution.
         taskId:
           type: string
         class:
@@ -15086,6 +15190,16 @@ components:
         text:
           type: string
           description: The prose reply; must be non-blank.
+          maxLength: 4000
+        issueUrl:
+          type: string
+          description: Native issue URL; required together with expectedRevision and intentId for a bound reply.
+        expectedRevision:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        intentId:
+          type: string
+          pattern: '^[A-Za-z0-9._:-]{8,128}$'
 
     ClarifyingQuestion:
       type: object
@@ -15137,8 +15251,6 @@ components:
         - ok
         - taskId
         - threadId
-        - feedback
-        - interpretation
       properties:
         ok:
           type: boolean
@@ -15146,6 +15258,18 @@ components:
           type: string
         threadId:
           type: string
+        saved:
+          type: object
+          description: Present on a bound reply once its answer is durably stored. Does not establish fleet work.
+          required: [intentId, seq, text]
+          properties:
+            intentId: {type: string}
+            seq: {type: integer}
+            text: {type: string, description: The exact saved reply, suitable for showing beneath the message.}
+        inputDelivery: {type: string, enum: [recorded, unverified]}
+        work: {type: string, enum: [not_observed]}
+        duplicate: {type: boolean}
+        detail: {type: string}
         feedback:
           $ref: "#/components/schemas/FeedbackEntry"
         interpretation:
@@ -22005,10 +22129,65 @@ paths:
   # (src/lib/serve.ts's `buildInboxDigestsRoute`). Every write ledgers with the caller's bearer
   # as `origin`; each names the write tier its route registers (W1-T404).
 
+  /v1/escalation/thread:
+    get:
+      summary: Read an escalation recommendation and its exact saved discussion.
+      description: >
+        Read-only, repository-bound native escalation source and history. Unsupported sources do
+        not yield a reply destination. A stale saved source remains readable but cannot enable a reply.
+        Options are evidence only; this route declares no executable choice.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: issueUrl
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Verified or explicitly stale source, with separately qualified history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationRead"
+        "400":
+          description: A canonical issue URL is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationUnavailable"
+        "404":
+          description: The issue is outside the serving repository.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationUnavailable"
+        "422":
+          description: No supported native escalation identity was verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationUnavailable"
+        "503":
+          description: Current escalation source is unavailable or pending.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationConversationUnavailable"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /v1/escalation/reply:
     post:
       summary: Answer an ESCALATION in prose -- recorded as an input on its thread, never a command.
       description: >
+        Source-bound replies use one immutable native feedback submission identity. A duplicate
+        intent may recover delivery of its exact saved input without appending another answer.
+        Replies to verified intake follow-ups preserve the original thread and carry reply_to
+        for the exact current grilling feedback record. A closed original issue alone never
+        enables a reply. Legacy replies without a native delivery identity remain unverified.
         W1-T2496, W1-T4471 (src/lib/panel-actions.ts's `buildEscalationReplyRoute`). Write tier:
         LOW (W1-T404). Derives the escalation's thread id from the body, refuses (400) when no
         thread store is configured, the thread cannot be read, or it holds no prior message --
@@ -22027,7 +22206,7 @@ paths:
               $ref: "#/components/schemas/EscalationReplyRequest"
       responses:
         "200":
-          description: The reply was appended, interpreted and recorded.
+          description: The reply was saved; input delivery and subsequent work are separately qualified on bound replies.
           content:
             application/json:
               schema:
@@ -22036,6 +22215,18 @@ paths:
           description: >
             `invalid_request` with a `detail` -- the body failed validation, or the thread it names
             has no store, cannot be read, or holds no existing escalation. No side effect occurred.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The source changed or the intent already belongs to different text; no new answer was saved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Current source binding could not be verified; no new answer was saved.
           content:
             application/json:
               schema:

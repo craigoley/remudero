@@ -45,9 +45,11 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { hashToken } from "./last-seen.js";
 import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from "./status.js";
 import { deriveLastPoll } from "./daemon-health.js";
-import { deriveThreadId, readThread, appendThreadMessage, type ThreadIdentity } from "./inbox-thread.js";
-import { captureFeedback, feedbackEntryRepoPath } from "./feedback.js";
-import { queueFeedbackRecord } from "./feedback-landing.js";
+import { deriveThreadId, readThread, appendThreadMessage, appendThreadReplyOnce, type ThreadIdentity, type ThreadMessageExtra } from "./inbox-thread.js";
+import type { EscalationConversationReader } from "./escalation-conversation.js";
+import { captureFeedback, feedbackEntryRepoPath, listFeedback, setFeedbackStatus } from "./feedback.js";
+import { escalationReplySubmissionKey, readEscalationQuestionFeedback } from "./escalation-correspondence.js";
+import { queueFeedbackRecord, readQueuedFeedbackRecords } from "./feedback-landing.js";
 import { applyOperatorMergeHold, type OperatorMergeHoldAction } from "./operator-merge-hold.js";
 import {
   interpretReply,
@@ -78,6 +80,8 @@ export interface PanelActionDeps {
    *  every route predating this task keeps compiling; unset means that route refuses every reply
    *  loud rather than filing one unattached. Why: docs/forensics/panel-actions.md#panelactiondeps--threadstorepath-and-interpretreplydeps */
   threadStorePath?: string;
+  /** Native source revalidation for a console reply bound to an issue revision. */
+  readEscalationConversation?: EscalationConversationReader;
   /** Rules {@link buildEscalationReplyRoute} hands `interpretReply` to decide whether a reply is
    *  understood; unset runs its default, always "understood", so unconfigured behavior is unchanged. */
   interpretReplyDeps?: InterpretReplyDeps;
@@ -823,6 +827,11 @@ interface EscalationReplyInput {
   cause?: string;
   prRef?: string;
   text: string;
+  issueUrl?: string;
+  expectedRevision?: string;
+  intentId?: string;
+  startConversation?: true;
+  recommendationResponse?: "accept" | "decline";
 }
 
 function validateEscalationReply(body: unknown): { error: string } | EscalationReplyInput {
@@ -832,13 +841,59 @@ function validateEscalationReply(body: unknown): { error: string } | EscalationR
   if (body.cause !== undefined && typeof body.cause !== "string") return { error: "cause must be a string" };
   if (body.prRef !== undefined && typeof body.prRef !== "string") return { error: "prRef must be a string" };
   if (typeof body.text !== "string" || !body.text.trim()) return { error: "text is required" };
+  if (body.text.length > 4000) return { error: "text must be 4000 characters or fewer" };
+  const bound = body.issueUrl !== undefined || body.expectedRevision !== undefined || body.intentId !== undefined;
+  if (body.startConversation !== undefined && (body.startConversation !== true || !bound)) return { error: "starting a conversation requires a bound reply" };
+  if (body.recommendationResponse !== undefined && (!bound || body.recommendationResponse !== "accept" && body.recommendationResponse !== "decline")) return { error: "a recommendation answer requires a bound accept or decline reply" };
+  if (bound && (typeof body.issueUrl !== "string" || body.issueUrl.length > 512
+    || typeof body.expectedRevision !== "string" || !/^[a-f0-9]{64}$/.test(body.expectedRevision)
+    || typeof body.intentId !== "string" || !/^[A-Za-z0-9._:-]{8,128}$/.test(body.intentId))) {
+    return { error: "a bound reply requires issueUrl, expectedRevision and a valid intentId" };
+  }
   return {
     taskId: body.taskId,
     class: body.class,
     cause: body.cause as string | undefined,
     prRef: body.prRef as string | undefined,
     text: body.text,
+    ...(body.startConversation === true ? { startConversation: true as const } : {}),
+    ...(body.recommendationResponse ? { recommendationResponse: body.recommendationResponse as "accept" | "decline" } : {}),
+    ...(bound ? { issueUrl: body.issueUrl as string, expectedRevision: body.expectedRevision as string, intentId: body.intentId as string } : {}),
   };
+}
+
+const boundFeedbackId = (submissionKey: string): string => `fb-escalation-${createHash("sha256").update(submissionKey).digest("hex")}`;
+
+function feedbackQuestionHasAnotherAnswer(root: string, feedbackId: string, ownId: string): boolean {
+  const queued = readQueuedFeedbackRecords(root), parent = queued.get(feedbackEntryRepoPath(feedbackId));
+  return Boolean(parent && !["new", "grilling"].includes(parent.status) && !(parent.status === "answered" && parent.answered_by === ownId))
+    || [...listFeedback(root), ...queued.values()].some(entry => entry.reply_to === feedbackId && entry.id !== ownId);
+}
+
+async function captureBoundEscalationFeedback(root: string, threadId: string, input: EscalationReplyInput,
+  question?: NonNullable<ThreadMessageExtra["escalation"]>["question"]) {
+  const submissionKey = escalationReplySubmissionKey(threadId, input.intentId!, input.issueUrl!);
+  const id = boundFeedbackId(submissionKey);
+  const parentInQueue = question ? readQueuedFeedbackRecords(root).get(feedbackEntryRepoPath(question.feedbackId)) : undefined;
+  if (parentInQueue && !["new", "grilling"].includes(parentInQueue.status) && !(parentInQueue.status === "answered" && parentInQueue.answered_by === id))
+    throw new Error("The current feedback question already has another answer.");
+  const parent = question && parentInQueue?.status !== "answered"
+    ? await readEscalationQuestionFeedback(/^https:\/\/github\.com\/([^/]+\/[^/]+)\//.exec(input.issueUrl!)![1]!, question.feedbackId, true) : undefined;
+  if (parent && (parent.status !== "grilling" || parent.thread_id !== threadId)) throw new Error("The current feedback question is no longer awaiting this answer.");
+  // Recheck after the awaited canonical read, including partially landed answers whose
+  // parent status has not caught up. This is the existing feedback reply refusal rule.
+  if (question && feedbackQuestionHasAnotherAnswer(root, question.feedbackId, id)) throw new Error("The current feedback question already has another input.");
+  const entry = captureFeedback(root, { id, raw: input.text, origin: "ui", threadId, submissionKey,
+    ...(question ? { replyTo: question.feedbackId } : {}), land: { stateRoot: root } });
+  if (entry.submission_key !== submissionKey || entry.thread_id !== threadId || entry.raw !== input.text.trim() || (entry.reply_to ?? undefined) !== question?.feedbackId)
+    throw new Error("The saved feedback identity belongs to different input.");
+  const rel = feedbackEntryRepoPath(entry.id), queued = readQueuedFeedbackRecords(root).get(rel);
+  if (queued && (queued.submission_key !== submissionKey || queued.thread_id !== threadId || queued.raw !== input.text.trim()))
+    throw new Error("The queued feedback identity belongs to different input.");
+  const staged = queued ? { landed: false, files: [], queued: [rel] } : queueFeedbackRecord(root, rel, root);
+  if (!staged.queued && staged.error) throw new Error(staged.error);
+  if (question && parent) setFeedbackStatus(root, question.feedbackId, "answered", { answeredBy: entry.id, canonicalBase: parent, land: { stateRoot: root } });
+  return { entry, staged };
 }
 
 /** POST /v1/escalation/reply (W1-T2496, W1-T4471) — a human answering an ESCALATION in prose.
@@ -858,7 +913,7 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
     // W1-T404: LOW — bookkeeping (files a feedback entry + a thread message); reversible, and
     // grants no new authority — see this route's own doc for the "input, never a command" line.
     tier: "low",
-    handler: jsonAction(validateEscalationReply, (input, req, res) => {
+    handler: jsonAction(validateEscalationReply, async (input, req, res) => {
       const identity: ThreadIdentity = { taskId: input.taskId, class: input.class, cause: input.cause, prRef: input.prRef };
       const threadId = deriveThreadId(identity);
       if (!deps.threadStorePath) {
@@ -876,14 +931,74 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         });
         return;
       }
-      if (existing.messages.length === 0) {
+      if (existing.messages.length === 0 && !input.startConversation) {
         sendJson(res, 400, {
           error: "invalid_request",
           detail: `thread "${threadId}" names no existing escalation — refusing to file an unattached reply`,
         });
         return;
       }
-      appendThreadMessage(identity, "reply", input.text, { threadStorePath: deps.threadStorePath });
+      let opening: { body: string; extra: ThreadMessageExtra } | undefined;
+      let currentQuestion: NonNullable<ThreadMessageExtra["escalation"]>["question"];
+      if (input.intentId) {
+        const prior = existing.messages.find(message => message.role === "reply" && message.extra?.replyId === input.intentId);
+        if (prior) {
+          const binding = prior.extra?.escalation;
+          if (prior.body !== input.text || binding?.issueUrl !== input.issueUrl
+            || binding?.revision !== input.expectedRevision || binding?.recommendationResponse !== input.recommendationResponse) return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to a different answer or source. Your draft was not sent." });
+          // The durable answer is already authenticated. Recover only its original input,
+          // using the same native feedback identity; never append or interpret it again.
+          let deliveryDetail: string | undefined;
+          try { if (binding?.inputVersion === 1) await captureBoundEscalationFeedback(deps.root, threadId, input, binding.question); }
+          catch (error) {
+            deliveryDetail = "Your answer is saved. Delivery to the fleet remains unverified.";
+            ledgerPanelAction(deps, "panel.escalation_input_unverified", input.taskId, bearerTokenId(req),
+              { thread_id: threadId, intent_id: input.intentId, reason: String((error as Error)?.message ?? error).slice(0, 1000) });
+          }
+          return void sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, duplicate: true,
+            ...(deliveryDetail ? { detail: deliveryDetail } : {}),
+            saved: { intentId: input.intentId, seq: prior.seq, text: prior.body }, inputDelivery: "unverified", work: "not_observed" });
+        }
+        const current = await deps.readEscalationConversation?.(input.issueUrl!, true);
+        if (!current || current.state !== "served") return void sendJson(res, 503, { error: "source_unavailable", detail: "The current escalation could not be verified. Your draft was not sent." });
+        if (!(current.conversation.canReply || input.startConversation && current.conversation.canStartConversation)
+          || current.conversation.threadId !== threadId
+          || current.conversation.revision !== input.expectedRevision
+          || input.recommendationResponse && current.conversation.recommendationReplies?.[input.recommendationResponse] !== input.text) {
+          return void sendJson(res, 409, { error: "source_changed", detail: "This conversation changed. Read its current version before sending your saved draft." });
+        }
+        if (input.startConversation && current.conversation.canStartConversation && current.conversation.initialMessage) {
+          opening = { body: current.conversation.initialMessage, extra: { sourceImport: { issueUrl: input.issueUrl!, revision: input.expectedRevision! } } };
+        }
+        currentQuestion = current.conversation.activeQuestion;
+        if (currentQuestion) {
+          const ownId = boundFeedbackId(escalationReplySubmissionKey(threadId, input.intentId, input.issueUrl!));
+          if (feedbackQuestionHasAnotherAnswer(deps.root, currentQuestion.feedbackId, ownId)) return void sendJson(res, 409,
+            { error: "source_changed", detail: "The agent's question already has an answer. Your draft was retained." });
+        }
+      }
+      const saved = input.intentId
+        ? appendThreadReplyOnce(identity, input.text, input.intentId, { threadStorePath: deps.threadStorePath }, { escalation: { issueUrl: input.issueUrl!, revision: input.expectedRevision!, inputVersion: 1,
+          ...(input.recommendationResponse ? { recommendationResponse: input.recommendationResponse } : {}),
+          ...(currentQuestion ? { question: { issueUrl: currentQuestion.issueUrl, feedbackId: currentQuestion.feedbackId, revision: currentQuestion.revision, seq: currentQuestion.seq } } : {}) } }, opening)
+        : undefined;
+      if (!saved) appendThreadMessage(identity, "reply", input.text, { threadStorePath: deps.threadStorePath });
+      if (saved?.kind === "conflict") return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to different text. Your draft was not sent." });
+      if (saved?.kind === "existing") {
+        let deliveryDetail: string | undefined;
+        try { await captureBoundEscalationFeedback(deps.root, threadId, input, currentQuestion); }
+        catch (error) {
+          deliveryDetail = "Your answer is saved. Delivery to the fleet remains unverified.";
+          ledgerPanelAction(deps, "panel.escalation_input_unverified", input.taskId, bearerTokenId(req),
+            { thread_id: threadId, intent_id: input.intentId, reason: String((error as Error)?.message ?? error).slice(0, 1000) });
+        }
+        return void sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, duplicate: true,
+          ...(deliveryDetail ? { detail: deliveryDetail } : {}),
+          saved: { intentId: input.intentId, seq: saved.seq, text: input.text }, inputDelivery: "unverified", work: "not_observed" });
+      }
+      const savedReceipt = saved ? { intentId: input.intentId!, seq: saved.seq, text: input.text } : undefined;
+      // Once the answer is durable, a later capture failure is partial delivery, never a reason to append again.
+      try {
 
       // Is this reply understood, or does it leave an ambiguity worth asking about?
       // `interpretReply` is pure — it never dispatches, ratifies, or arms a merge.
@@ -898,13 +1013,14 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
             ? formatExhaustionReport(interpretation.unresolved)
             : undefined;
       if (followUp) {
-        appendThreadMessage(identity, "escalation", followUp, { threadStorePath: deps.threadStorePath });
+        appendThreadMessage(identity, "escalation", followUp, { threadStorePath: deps.threadStorePath }, { question: true });
       }
 
       const origin = bearerTokenId(req);
       // W1-T5525: serve mounts this route on config.root, the state root the daemon's landing sweep drains.
-      const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId, land: { stateRoot: deps.root } });
-      const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.root);
+      const recovered = input.intentId ? await captureBoundEscalationFeedback(deps.root, threadId, input, currentQuestion) : undefined;
+      const entry = recovered?.entry ?? captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId, land: { stateRoot: deps.root } });
+      const staged = recovered?.staged ?? queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.root);
       // W1-T4471: the store `operatorVerdictEvidence` (lib/sweep.ts) reads; `input.taskId` is required above.
       const recordedToQuestionStore = appendQuestionAnswer(deps.root, {
         ts: (deps.clock ?? systemClock).iso(),
@@ -918,9 +1034,16 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         interpretation: interpretation.status,
         flows_to: "plan/questions.ndjson",
         recorded_to_question_store: recordedToQuestionStore,
+        ...(input.recommendationResponse ? { recommendation_response: input.recommendationResponse } : {}),
         ...(staged.queued ? { landing: "queued" } : { landing_error: staged.error }),
       });
-      sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry, interpretation, ...(staged.queued ? { landing: "queued" } : {}) });
+      sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry, interpretation, ...(staged.queued ? { landing: "queued" } : {}),
+        ...(savedReceipt ? { saved: savedReceipt, inputDelivery: recordedToQuestionStore ? "recorded" : "unverified", work: "not_observed" } : {}) });
+      } catch (error) {
+        if (!savedReceipt) throw error;
+        sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, saved: savedReceipt,
+          inputDelivery: "unverified", work: "not_observed", detail: "Your answer was saved. Delivery to the fleet could not be confirmed. Do not send it again." });
+      }
     }),
   };
 }
