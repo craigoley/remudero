@@ -1,9 +1,10 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -13,6 +14,8 @@ import { runStepsAsync, runStepsSync, step, type StepEffect, type Steps } from "
 import { parseTasksFromYaml } from "./plan.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import { sampleBeta, seededRandom } from "./knowledge-value.js";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * lib/gardener.ts (W1-T4110) — the general half of every gardener.
@@ -337,7 +340,14 @@ export interface GardenerDeps<W extends GardenCheckout = GardenCheckout, P exten
   /** W1-T5457: lints the plan change on top of FRESH origin/main just before it lands; a fixture injects it.
    *  Absent, {@link freshMergedPlanLint} fetches and merges for real. */
   mergedPlanLint?: (root: string, paths: readonly string[]) => MergedPlanLintFailure | undefined | Promise<MergedPlanLintFailure | undefined>;
+  /** Closes a held decision PR the pass releases unjudged, with `reason` as its comment, so a released
+   *  PR never sits open beside the fresh refresh that supersedes it. Production wires
+   *  {@link gardenClosePr}; absent, the release is ledgered and the PR is left open. */
+  closePr?: (prUrl: string, reason: string) => GardenCloseOutcome | Promise<GardenCloseOutcome>;
 }
+
+/** What closing a released garden PR did; a refusal names why the PR was left open. */
+export type GardenCloseOutcome = { closed: true } | { closed: false; reason: string };
 
 /** The first plan file whose merged result would not load, and why. */
 export interface MergedPlanLintFailure {
@@ -859,6 +869,43 @@ function* gardenPrStateSteps(owner: string, repo: string, prUrl: string, fetch: 
   }
 }
 
+/** The real `gh` write a garden close makes, off the event loop. */
+export async function defaultGardenGhRun(args: readonly string[]): Promise<void> {
+  await execFileAsync("gh", [...args], { encoding: "utf8" });
+}
+
+const isBotLogin = (user: unknown): boolean => {
+  const u = user !== null && typeof user === "object" ? user as { login?: unknown; type?: unknown } : undefined;
+  return u !== undefined && (u.type === "Bot" || (typeof u.login === "string" && u.login.endsWith("[bot]")));
+};
+
+/** Closes a released garden PR only when it is still open, bot-authored, and no review, review comment
+ *  or Conversation-tab comment by a non-bot author exists: a person's open conversation is never ended
+ *  by a garden. The Conversation tab is the issue-comments endpoint; the pulls endpoints never list it. */
+export async function gardenClosePr(
+  owner: string, repo: string, prUrl: string, reason: string,
+  fetch: (args: string[]) => unknown | Promise<unknown>, run: (args: readonly string[]) => Promise<void> = defaultGardenGhRun,
+): Promise<GardenCloseOutcome> {
+  const n = /\/pull\/(\d+)/.exec(prUrl)?.[1];
+  if (!n) return { closed: false, reason: "no PR number in the url" };
+  const pr = await fetch(["api", `repos/${owner}/${repo}/pulls/${n}`]) as { state?: unknown; merged?: unknown; user?: unknown } | null;
+  if (pr?.state !== "open" || pr.merged === true) return { closed: false, reason: "the PR is no longer open" };
+  if (!isBotLogin(pr.user)) return { closed: false, reason: "the PR has a non-bot author" };
+  const sources = [
+    { path: `pulls/${n}/reviews`, label: "reviews" },
+    { path: `pulls/${n}/comments`, label: "review comments" },
+    { path: `issues/${n}/comments`, label: "conversation comments" },
+  ] as const;
+  for (const { path, label } of sources) {
+    const rows = await fetch(["api", `repos/${owner}/${repo}/${path}?per_page=100`]);
+    if (!Array.isArray(rows) || rows.length >= 100) return { closed: false, reason: `${label} unreadable or unbounded` };
+    if (rows.some((row) => isBotLogin((row as { user?: unknown } | null)?.user) === false))
+      return { closed: false, reason: `a non-bot author's ${label} keep a conversation open` };
+  }
+  await run(["pr", "close", prUrl, "--comment", reason]);
+  return { closed: true };
+}
+
 /** How long a ledger-reading gardener's cheap fingerprint holds. The live ledger grows every second, so
  *  a fingerprint over its size or mtime never matched, and each poll re-read the whole union on the
  *  event loop — 2026-09-29 profile: 57 s of every 300 s in the ci-friction and test gardeners. */
@@ -1213,6 +1260,18 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
         ...(decision ? { reason: `open PR ${held.prUrl} exceeded the decision backstop` } : {}),
         ...("trials" in judged && "difference" in judged ? { trials: judged.trials, difference: judged.difference } : {}),
       });
+      if (decision && deps.closePr) {
+        const comment = `Closed by the ${spec.name} gardener: this decision PR stayed open past its ` +
+          `${GARDEN_DECISION_PENDING_RELEASE_MS / 3_600_000}h backstop unjudged, so the garden released it and files any ` +
+          "refresh afresh from current main, which supersedes this one.";
+        let outcome: GardenCloseOutcome;
+        try {
+          outcome = yield* step(() => deps.closePr!(held.prUrl, comment));
+        } catch (e) {
+          outcome = { closed: false, reason: `close failed: ${String((e as Error)?.message ?? e)}` };
+        }
+        deps.log(`${spec.name}.pending_closed`, { pr_url: held.prUrl, ...outcome });
+      }
     }
   }
   const trusted = state.pending !== undefined || state.lastPass?.landed !== undefined || !spec.unfinished?.(inventory);

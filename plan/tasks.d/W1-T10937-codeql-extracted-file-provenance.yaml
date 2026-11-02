@@ -4,6 +4,11 @@
   type: implement
   verify: auto
   author_class: machine
+  # refusal-amendment (W1-T10937, run DAEMON-1793585257603@f91f51ff4f9adbd3ebad3973b11513a66f70b5c9, 2026-11-02T05:03:15.568Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: An original production SARIF sample or trusted structural witness is needed to verify the descriptor and location encoding before certifying processed files.
+  # refusal-amendment (W1-T10937, run DAEMON-1793585257603@f91f51ff4f9adbd3ebad3973b11513a66f70b5c9, 2026-11-02T05:03:15.568Z): the worker refused criterion 3 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Real production producer-to-reader wiring cannot be demonstrated from the retained metadata and job log alone.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   priority: 1

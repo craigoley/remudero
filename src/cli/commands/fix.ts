@@ -3891,7 +3891,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       let deliveryError: { error: string } | undefined;
       if (!issueUrl) try {
         issueUrl = (await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
-          headSha: priorHeadSha, cause: "ci", contractRevision: `needs-design:${prNumber}:${priorHeadSha}`,
+          headSha: priorHeadSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: `needs-design:${prNumber}:${priorHeadSha}`,
           summary: `PR #${prNumber}'s fix lane handed it back NEEDS_DESIGN and stands down every pass — ${opts.prUrl}`,
           detail: `${opts.prUrl} at ${priorHeadSha}: a fix worker answered NEEDS_DESIGN, so every later pass stands down ` +
             `at this head without a round. The worker's diagnosis:\n\n${reason}`,
@@ -4744,7 +4744,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         let deliveryError: { error: string } | undefined;
         if (!issueUrl) try {
           issueUrl = await escalateWithJudge({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
-            headSha: priorHeadSha, cause: "ci", contractRevision: identityKey,
+            headSha: priorHeadSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: identityKey,
             ...(headIndependent ? { headDedup: "independent" as const } : {}),
             summary: scopeKind === "workflow"
               ? `PR #${prNumber} needs a workflow repair outside the fix lane — ${opts.prUrl}`

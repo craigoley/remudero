@@ -4,14 +4,17 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
+import { compressionPinBase } from "#test/helpers/compression-pin.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // @source-text-subject: this task preserves status.ts tokens while compressing its comments.
-// Frozen before compression at dde8a92c463ea090413f985c5d7d8c6a67f6c5e3; no moving git ref.
-// Regenerated for the observed-overlap producer, which moves prOwningTaskIds out of projectPlan (operator ruling
-// 2026-11-01). The comment-reduction threshold stays fixed.
-// Refreshed for forwarding the observed open row's state and head to changed-files lookup.
-const BEFORE = { comments: 1798, tokens: "267795470b47bc7e3b260ff31449ae28762ac715eacdc3607da88190d67f688e" };
+// Comment floor at dde8a92c463ea090413f985c5d7d8c6a67f6c5e3, before compression.
+const BEFORE = { comments: 1798 };
+
+// For a .ts file, the comment-load measure counts lines starting with //, /*, or *.
+function commentLines(text: string): number {
+  return text.split("\n").filter((line) => /^(?:\/\/|\/\*|\*)/.test(line.trim())).length;
+}
 
 function executableDigest(text: string): string {
   const scanner = createScanner(true, undefined, text);
@@ -46,8 +49,12 @@ test("W1-T10884: comment compression preserves executable code", () => {
   assert.notEqual(executableDigest(control), executableDigest(control.replace("name", "other")));
   assert.notEqual(executableDigest(control), executableDigest(control.replace("text", "changed")));
   assert.notEqual(executableDigest(control), executableDigest(control.replace("https?", "http")));
-  assert.equal(executableDigest(source), BEFORE.tokens, "all executable token kinds and spellings must survive");
-  // For a .ts file, the comment-load measure counts lines starting with //, /*, or *.
-  const comments = source.split("\n").filter((line) => /^(?:\/\/|\/\*|\*)/.test(line.trim())).length;
+  const comments = commentLines(source);
   assert.ok(comments < BEFORE.comments, `comments must decrease from ${BEFORE.comments}, found ${comments}`);
+  const before = compressionPinBase("src/lib/status.ts", import.meta.url);
+  if (before === undefined) return;
+  // Only on the PR that adds this pin: later feature edits to the module stay free.
+  assert.equal(executableDigest(source), executableDigest(before),
+    "all executable token kinds and spellings must survive");
+  assert.ok(comments < commentLines(before), "comment lines decrease from the PR base");
 });

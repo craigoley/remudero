@@ -60,12 +60,23 @@ raw: >-
   freshness refusal, then clean Mac operator missing
   daemon-install/settings/worker.json. Preserve those failures and all original
   claims; do not fabricate a running or qualified planner.
+
+
+  CORRECTION 2026-11-01: the bare instancePlan ratify call cited earlier belongs
+  to inboxActionCliCommand. The actual served path is serveCommand leaving
+  panelGraph.ratify unset, lib/serve.ts defaulting it with two arguments, and
+  product routes receiving that default. Serving A9ddc4d59 and B695b8f30 were
+  read directly. Native no_task PR16025 cites the intended W1-T10823 design;
+  Root requested changes because it does not supply the omitted production
+  wiring. This approved bounded follow-up preserves that decision and the
+  separate W1-T11078 resolver prerequisite.
 attachments: []
 origin: cli
-status: new
+status: accepted
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/16047
 summary: null
 expansion: null
 submission_key: 487a077d-7e6d-4713-9fe4-57cd06a21541
 thread_id: null
+answered_by: null
