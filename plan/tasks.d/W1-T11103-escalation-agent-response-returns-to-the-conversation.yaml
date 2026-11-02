@@ -1,0 +1,79 @@
+- id: W1-T11103
+  title: An agent response returns to the escalation conversation and says whether more input is needed
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  priority: 1.15
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 25
+  origin: human#2026-11-02-console-email-conversation
+  plan_refs: [W1-T2494, W1-T2496, W1-T2499, W1-T2500, W1-T11096, CONSOLE-T164]
+  files:
+    - src/lib/escalation-correspondence.ts
+    - src/lib/escalation-conversation.ts
+    - src/lib/inbox-thread.ts
+    - src/lib/panel-actions.ts
+    - src/lib/feedback.ts
+    - src/lib/feedback-record-merge.ts
+    - src/run-task.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/inbox/escalation-correspondence.test.ts
+    - test/inbox/escalation-correspondence-serving.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The operator clarified the email interaction on 2026-11-02: show the exact sent answer, clear
+    Action required, then show the agent response in the same discussion. Archive when the agent
+    needs no more input even while work continues; a later question reopens the same thread.
+    W1-T11096 owns the read/reply projection and explicit correspondence states. Current feedback
+    entries carry thread_id, but triage's runtime does not append its outcome to that escalation.
+    W1-T2500's merged PR3389 explicitly excluded live wiring. Its pure handoff is not adoption.
+    A 27-open-head subject sweep at core 4edd4e937 found no added runtime bridge; its positive
+    controls were 40 runtime subject lines and 86 plan subject lines. W1-T8887 remains execution's owner.
+  design: |
+    Join the existing native reply intent, feedback entry and real agent intake outcome; add no
+    parallel message store, timer, agent, executor or model call. Preserve existing source owners.
+    Bind feedback capture idempotently to the original native thread and immutable reply intent,
+    using the existing submission-key mechanism or equally durable native identity. Preserve that
+    binding through feedback merge/landing. A retry must not mint another feedback record.
+    Wire the REAL triage/intake outcome path to append one agent response on that canonical thread,
+    keyed by the exact feedback/outcome receipt. Candidate worktree status alone is not an outcome.
+    A proposed plan PR can be acknowledged as proposed and waiting for review, never as merged work.
+    An explicit no-more-input response sets question false; a clarification sets question true.
+    Do not produce no-more-input from an unconfigured interpreter, capture success or absent evidence.
+    Keep conversation resolution separate from work completion. Preserve all messages and raw receipts.
+    A later native question reopens the original conversation and binds the next reply to that exact
+    current question. Carry feedback reply_to when the question is an intake grill; do not start an
+    unrelated intake for every round. Retain each question's actual source and destination.
+    If the original issue closes before a follow-up arrives, allow a new answer only after verifying
+    the active native follow-up question and its current source. Never infer authority from a closed
+    issue, reroute to a guessed thread, close an issue merely because correspondence archived, or
+    auto-approve/dispatch. Unavailable/conflicting causal evidence remains unknown and read-only.
+    Extend the mounted read/reply contract and generated client for these evidence-backed states.
+    Use real stores and the assembled authenticated service for save, intake acknowledgement,
+    needs-input, no-more-input while work runs, archive, reopen, repeated outcome, lost response,
+    failed publication, foreign thread and closed-origin follow-up cases. No live fixture writes.
+  acceptance:
+    - claim: the real intake outcome path reports to the original escalation conversation
+      proof: 'grep: recordEscalationIntakeOutcome( in src/run-task.ts'
+    - claim: agent acknowledgement archives correspondence without claiming work is complete
+      proof: 'unit test: an intake response ends the ask while work remains pending'
+    - claim: a new question and its answer remain on the same preserved native conversation
+      proof: 'unit test: a later intake question reopens the original escalation thread'
+    - claim: replay and failed publication cannot duplicate or fabricate an agent response
+      proof: 'unit test: escalation intake outcome replay preserves one causal response'
+    - claim: the assembled authenticated service supports the reply and follow-up round trip
+      proof: 'unit test: assembled service preserves the escalation correspondence lifecycle'
+  falsifier: |
+    Remove the runtime outcome call, replace a failed publication with no-more-input, or route the
+    clarification answer to another thread: named fixtures must fail. Keep control/mutant/restored
+    receipts. An exported helper with only test callers does not satisfy the first criterion.
+  note: |
+    Held until W1-T11096 is merged/served and its native contract and source ownership are reconciled.
+    Filing this task does not release the current host recycle PAUSE, change budgets or prove runtime
+    adoption. Preserve W1-T8887 and CONSOLE-T128 execution scope and holds.
