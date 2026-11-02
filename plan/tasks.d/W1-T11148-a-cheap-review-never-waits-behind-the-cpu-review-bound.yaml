@@ -1,0 +1,73 @@
+- id: W1-T11148
+  title: A cheap review never waits behind the CPU review bound; plan-filing reviews run in their own lane on both passes, never count as code reviews in flight, are routed by the reviewer's own plan-only predicate when the files read misses, and are latched on their own measured length
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the review admission both sweep passes share, the review child registry and the restart latch; one concern: plan-filing reviews are admitted apart from the CPU-gated code bound
+  origin: operator-session#review-lane-findings-2026-11-02
+  plan_refs:
+    - W1-T2439
+    - W1-T5931
+    - W1-T9114
+    - W1-T9808
+    - W1-T9824
+    - W1-T10992
+  files:
+    - src/lib/sweep.ts
+    - src/lib/daemon.ts
+    - src/lib/tick-read-worker.ts
+    - src/lib/open-prs-rest.ts
+    - src/cli/commands/sweep.ts
+    - test/sweep/a-cheap-review-never-waits-behind-the-cpu-review-bound.test.ts
+    - test/a-latched-restart-admits-no-work-its-drain-would-abandon.test.ts
+    - test/plan-filing-admission-bound.test.ts
+    - test/reviewer-code-freshness-recovery.test.ts
+    - test/review-clock-new-green-backlog.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A full pass admits plan-lane reviews through their own pool, which never reads reviewAdmissionBound, so a plan filing starts while every CPU-gated code slot is taken; a light pass already does this
+      proof: "unit test: test/sweep/a-cheap-review-never-waits-behind-the-cpu-review-bound.test.ts"
+    - claim: A running plan-lane review child does not count toward reviewAdmissionBound's in-flight, in process or after a boot adopts it from its spec, and a code review child still does
+      proof: "grep: W1-T11148 criterion 2 in test/sweep/a-cheap-review-never-waits-behind-the-cpu-review-bound.test.ts"
+    - claim: When the files read leaves a PR's plan-filing classification unreadable, the sweep reads that head's diff once through the reviewer's own diff source and judges it with review.ts's planOnlyDiff, so a plan-only diff joins the plan lane and never the code lane; a diff that is not plan-only, or an unread one, stays in the code lane as today
+      proof: "grep: W1-T11148 criterion 3 in test/sweep/a-cheap-review-never-waits-behind-the-cpu-review-bound.test.ts"
+    - claim: The restart latch admits a plan-lane review against the measured median length of plan reviews and a code review against that of code reviews, each falling back to the all-review median when its own class has no history
+      proof: "grep: W1-T11148 criterion 4 in test/a-latched-restart-admits-no-work-its-drain-would-abandon.test.ts"
+    - claim: The literal planFilingAdmissionBound is gone; a pass admits every eligible plan-lane review, each once per head under the existing outcome keys, and the files-read miss cap it doubled as keeps its value under its own name for W1-T9824 to learn
+      proof: "grep: W1-T11148 criterion 5 in test/sweep/a-cheap-review-never-waits-behind-the-cpu-review-bound.test.ts"
+  rationale: |
+    MEASURED 2026-11-02 over the 7-day core ledger union (read-only; ~/Remudero-notes/review-lane-findings-2026-11-02.md):
+    - #16191, a run-unfiled single-shard filing, waited 6.3 h for a review that took 1.2 min.
+    - 60 of 438 plan reviews (14%) waited 68.3 h in the code lane, 68% of all plan-review wait.
+    - Plan reviews: median 82 s. Code reviews: median 379 s, p90 855 s.
+    - The review width was 1 for 64% of the week and 75% of the last 24 h; core CPU PSI full median 29%.
+    - 62 refusals had a plan review as the only thing running. The restart latch refused 313 rows.
+    THREE ROUTES PUT A PLAN REVIEW BEHIND THE CPU BOUND (re-read at origin/main 557a16722):
+    1. The full pass has one pool. orderPendingReviews holds plan and code jobs together (sweep.ts:22926), and every pull asks reviewAdmissionBound (sweep.ts:23117-23128). Only the light pass splits lanes (selectReviewAdmissions, sweep.ts:24369-24405).
+    2. Every hosted full review registers kind "review" child work (sweep.ts:3129). reviewAdmissionBound counts childWorkCount("review") (sweep.ts:23741-23745), so a running plan child takes a code slot.
+    3. classifyPlanFiling (tick-read-worker.ts:1611) is false when the files read is unreadable. The read is capped at 3 misses a pass (tick-read-worker.ts:2121-2136), and its cache is lost on every boot (53 boots in the week). The 60 plan reviews that waited in the code lane were these misses.
+    THE LATCH (daemon.ts:4613-4645) judges every review against medianReviewRunMs over all reviews, so a 1-minute plan review is held as if it were a 6-minute code review. review.posted carries plan_only, so the per-class median is readable from the rows the latch already reads.
+    THE BOUND, AND WHY IT IS SAFE TO DROP THE COUNT. planFilingAdmissionBound: 3 (sweep.ts:6909) was derived on 2026-08-27 from the gh budget: 5 calls a review x 60 passes an hour x 3 = 900 calls/h. That figure assumed a pass could admit 3 new reviews every pass. Two things have changed since:
+    - Outcome keys (W1-T2583) admit each plan head once.
+    - Hosted review children take the learned run-child memory reservation before they start (spawnRunChild).
+    So plan-review spend is bounded by plan heads pushed, not by passes: 584 plan reviews in 7 days is about 3.5 an hour, about 17 gh calls an hour. A provider floor stand-down still closes admissions on both passes.
+    The count itself is replaced by the eligible queue.
+    W1-T2439's acceptance 7 ("no lane is unbounded") is superseded by this measurement. The lane is still bounded, by the open plan heads and the per-head outcome key.
+    The same literal is also tick-read-worker's files-read miss cap. That is a different concern and W1-T9824's to learn, so it keeps its value under its own name (PLAN_FILING_FILE_MISS_CAP). W1-T9824's design item 2 (the admission count) is done here.
+  design: |
+    1. One predicate, reviewsInPlanLane(pr): isPlanFiling === true, or planFilingSource "unreadable" with a remembered plan-only head diff for this exact head. selectReviewAdmissions, reviewAdmissionCandidates and publishLightPassReviewDemand route on it instead of isPlanFiling. isPlanFiling itself is unchanged, so crediting, merges and the reviewer's own flags are unchanged.
+    2. Head-diff fallback: a new optional SweepDeps.readPrHeadDiff, wired in src/cli/commands/sweep.ts to fetchPrDiff with prDiffSourceAsync (the reviewer's own source). Each pass, before selection, every review-eligible PR whose classification is unreadable and whose head has no answer yet is read once. Its answer is planOnlyDiff(diff), from review.ts, remembered by PR and head for the process. A failed read is remembered as unknown, so the PR stays in the code lane, as today.
+    3. Full pass: orderedReviews is split by the predicate. Code jobs keep today's pool, width and reviewAdmissionBound. Plan jobs run in a second pool that never reads reviewAdmissionBound and never moves fullPassReviewsInFlight or the fix-admission reservations. A provider floor or worker hold closes both pools. The continuation gate is asked per class, so a latch that refuses a code review can still admit a plan review.
+    4. Child registry: a review's registration carries planLane (from the predicate; after a boot, from the spec's planOnlyFiling input). reviewAdmissionBound counts only review children without it.
+    5. Latch: RestartAdmission and ReviewAdmissionGate take the class ("review" | "plan-review"). measuredReviewLength reads medianReviewRunMs per class from review.posted's plan_only. Each class falls back to the all-review median, then to the memo, as today.
+    6. planFilingAdmissionBound leaves SweepPolicy. The light pass's plan reservations counter and its "at most N plan-filing" stand-down go with it. tick-read-worker's miss cap reads PLAN_FILING_FILE_MISS_CAP (open-prs-rest.ts), with the same value.
+  falsifier: |
+    At origin/main a full pass at width 1 with a code review in flight and one eligible plan filing stands the filing down with "semantic post-review admission bound 0, in-flight 1". The same happens to a light pass whose only running work is a registered plan-filing review child. An unreadable-classified plan-only head is selected into the spawning lane. A latch with 5 min left and plan reviews of 1 min holds a plan review because code reviews run 12 min.
+  note: |
+    reservation hand-off: plan-file-1793657873600 -> plan-file-1793657873600
+    Reserved with rmd next-task-id --branch plan-file-1793657873600. Operator ruling 2026-11-02 (Q1): file and hand-build "cheap reviews never wait behind the CPU bound" on the Mac now. W1-T10992 is the recon of the light-pass admission order, not this change. The test path is where rmd test-place puts a suite importing src/lib/sweep.ts. Criterion 4's test joins the existing W1-T9808 latch suite, which owns the daemon fixture.
