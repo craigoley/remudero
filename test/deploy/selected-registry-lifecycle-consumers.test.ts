@@ -12,6 +12,8 @@ import { createSelectedRegistryObserver, observeSelectedRegistry, withSelectedRe
 import { readSelectedInstanceRegistry } from "#src/lib/instance-registry-selection.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 
+const GENEROUS_DEADLINE_MS = 10000;
+
 function fixture(t: TestContext) {
   const root = makeTempDir("selected-lifecycle");
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -22,7 +24,8 @@ function fixture(t: TestContext) {
   const text = (retired = false, state = stateRoot) => `instances:\n  owner:\n    github_repo: fixture/owner\n    primary: true\n    state_dir: ${state}\n    container_name: owner-container\n${retired ? "    retired: true\n" : ""}  other:\n    github_repo: fixture/other\n    state_dir: ${otherRoot}\n`;
   writeFileSync(registry, text()); writeFileSync(selected, text());
   const rows: Record<string, unknown>[] = [], effects: string[][] = [];
-  const options = { settings: { mode: "shadow" as const, registryPath: selected },
+  // The real bounded reader keeps its deadline; the control just must not depend on host CPU load.
+  const options = { settings: { mode: "shadow" as const, registryPath: selected, timeoutMs: GENEROUS_DEADLINE_MS },
     record: (_step: string, fields: Readonly<Record<string, unknown>>) => { rows.push({ ...fields }); } };
   const observer = createSelectedRegistryObserver(options)!;
   t.after(() => observer.close());
@@ -63,9 +66,8 @@ test("selected lifecycle shadow reaches actual deploy pause and daemon consumers
 
 test("selected lifecycle effects observe current immutable instance targets", async t => {
   const f = fixture(t), action = "deploy-recycle" as RegistryConsumerAction;
-  const bound = await readSelectedInstanceRegistry({ cliPath: f.selected });
-  assert.equal(bound.kind, "ready");
-  if (bound.kind !== "ready") assert.fail("positive registry control");
+  const bound = await readSelectedInstanceRegistry({ cliPath: f.selected, timeoutMs: GENEROUS_DEADLINE_MS });
+  if (bound.kind !== "ready") assert.fail(`positive registry control read ${bound.kind}: ${"reason" in bound ? bound.reason : ""}`);
   const observer = createSelectedRegistryObserver(f.options, async () => bound)!;
   t.after(() => observer.close());
   const target = { instanceName: "owner", repository: "fixture/owner", stateRoot: f.stateRoot, namespace: "host" as const,
@@ -117,7 +119,7 @@ test("selected lifecycle scanner ignores same-name targets after version ends th
     `    state_dir: ${f.otherRoot}\n    container_name: other-container\n`,
   ]) {
     writeFileSync(f.selected, f.text() + "version: 1\n" + suffix);
-    const binding = await readSelectedInstanceRegistry({ cliPath: f.selected });
+    const binding = await readSelectedInstanceRegistry({ cliPath: f.selected, timeoutMs: GENEROUS_DEADLINE_MS });
     assert.equal(binding.kind, "ready");
     if (binding.kind !== "ready") assert.fail("the real bounded reader must parse the fixture");
     assert.equal(binding.binding.matchesLifecycleTarget!("owner", f.stateRoot, "owner-container"), true);
@@ -198,7 +200,7 @@ test("selected lifecycle recovery never retargets or promotes unknown evidence",
   assert.equal(f.rows.at(-1)?.selected_state, "retired");
   assert.equal(f.rows.at(-1)?.reason, "target_retired");
   writeFileSync(f.selected, f.text());
-  const pinned = await readSelectedInstanceRegistry({ cliPath: f.selected });
+  const pinned = await readSelectedInstanceRegistry({ cliPath: f.selected, timeoutMs: GENEROUS_DEADLINE_MS });
   const recovery = createSelectedRegistryObserver(f.options, async () => pinned)!;
   t.after(() => recovery.close());
   await observeSelectedRegistry(recovery, action, target, () => "legacy");
