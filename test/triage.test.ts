@@ -1565,3 +1565,22 @@ test("W1-T4203: a refused triage commit is not re-triaged", async () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test("explicit wording context stays inside the native triage untrusted envelope without inventing source verification", async () => {
+  const { feedbackEntryBlock } = await import("#src/lib/triage.js");
+  const { bindConsoleCorrection, consoleCorrectionSubmissionKey } = await import("#src/lib/console-feedback.js");
+  const source = { repository: "craigoley/remudero", issueUrl: "https://github.com/craigoley/remudero/issues/16183",
+    threadId: "thread:W1-T42::MANUAL::stage-stall::15520", revision: "a".repeat(64), source: { state: "current" }, history: "verified", attention: "needs_input" };
+  const bound = bindConsoleCorrection({ kind: "wording_correction", intentId: "wording-test-001", text: "State the question first.",
+    issueUrl: source.issueUrl, threadId: source.threadId, expectedRevision: source.revision, symptom: "unclear_request",
+    reportedTemplate: { id: "escalation-conversation", version: "1", renderedDigest: "b".repeat(64) } }, source);
+  assert.ok(bound.state === "bound");
+  const block = feedbackEntryBlock({ ...ENTRY, raw: bound.value.correction, origin: "ui", thread_id: null, reply_to: null,
+    submission_key: consoleCorrectionSubmissionKey(bound.value), console_correction: bound.value });
+  assert.match(block, /operator_reported/); assert.match(block, /16183/);
+  assert.match(block, /capture_evidence_unverified/); assert.match(block, /not_run/);
+  assert.match(block, /untrusted/i); assert.doesNotMatch(block, /capture_evidence_verified/);
+  const plain = feedbackEntryBlock({ ...ENTRY, raw: "Ordinary feedback without explicit metadata" });
+  assert.doesNotMatch(plain, /wording_correction|candidateRevision/);
+});

@@ -3533,6 +3533,8 @@ components:
           description: >
             W1-T2302 -- the console-minted per-submission key a repeat of the same submit is
             recognised by. Null when none was supplied.
+        console_correction:
+          $ref: "#/components/schemas/ConsoleWordingCorrection"
         proposal_pr:
           type:
             - string
@@ -15120,6 +15122,15 @@ components:
               intentId: {type: string}
               sourceImported: {type: boolean, enum: [true]}
         canReply: {type: boolean}
+        wordingFeedback:
+          type: object
+          description: Explicit wording reports are supported for this current native source and readable history. They never answer or archive the business discussion.
+          required: [version, kind, templateId]
+          additionalProperties: false
+          properties:
+            version: {type: integer, enum: [1]}
+            kind: {type: string, enum: [wording_correction]}
+            templateId: {type: string, enum: [escalation-conversation]}
         canStartConversation: {type: boolean, description: True only for a current native source with positively observed absent history and unambiguous native identity. Starting is an explicit bound write; reads never create messages.}
         activeQuestion:
           type: object
@@ -15158,6 +15169,81 @@ components:
         state: {type: string, enum: [unavailable]}
         reason: {type: string, enum: [invalid_request, wrong_repository, source_unavailable, invalid_source]}
         detail: {type: string}
+
+    ConsoleWordingCorrectionRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, intentId, text, issueUrl, threadId, expectedRevision, reportedTemplate, symptom]
+      properties:
+        kind: {type: string, enum: [wording_correction]}
+        intentId: {type: string, pattern: '^[A-Za-z0-9._:-]{8,128}$'}
+        text: {type: string, minLength: 1, maxLength: 4000}
+        issueUrl: {type: string, format: uri}
+        threadId: {type: string, pattern: '^thread:', maxLength: 768}
+        repository: {type: string}
+        expectedRevision: {type: string, pattern: '^[a-f0-9]{64}$'}
+        symptom: {type: string, enum: [unclear_request, unclear_status, unclear_recommendation, incorrect_fact]}
+        reportedTemplate:
+          type: object
+          additionalProperties: false
+          description: Browser-reported display context; the server does not attest what was rendered.
+          required: [id, version, renderedDigest]
+          properties:
+            id: {type: string, enum: [escalation-conversation]}
+            version: {type: string, maxLength: 80, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'}
+            renderedDigest: {type: string, pattern: '^[a-f0-9]{64}$'}
+
+    ConsoleWordingCorrection:
+      type: object
+      additionalProperties: false
+      required: [version, sourceKind, intentId, source, reportedTemplate, symptom, correction, facts]
+      properties:
+        version: {type: integer, enum: [1]}
+        sourceKind: {type: string, enum: [engineering_escalation]}
+        intentId: {type: string, pattern: '^[A-Za-z0-9._:-]{8,128}$'}
+        correction: {type: string, minLength: 1, maxLength: 4000}
+        symptom: {type: string, enum: [unclear_request, unclear_status, unclear_recommendation, incorrect_fact]}
+        source:
+          type: object
+          additionalProperties: false
+          required: [repository, issueUrl, threadId, revision]
+          properties:
+            repository: {type: string}
+            issueUrl: {type: string, format: uri}
+            threadId: {type: string, pattern: '^thread:', maxLength: 768}
+            revision: {type: string, pattern: '^[a-f0-9]{64}$'}
+        reportedTemplate:
+          type: object
+          additionalProperties: false
+          required: [id, version, renderedDigest, authority]
+          properties:
+            id: {type: string, enum: [escalation-conversation]}
+            version: {type: string, maxLength: 80, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'}
+            renderedDigest: {type: string, pattern: '^[a-f0-9]{64}$'}
+            authority: {type: string, enum: [operator_reported]}
+        facts:
+          type: object
+          additionalProperties: false
+          required: [sourceState, history, attention, work]
+          properties:
+            sourceState: {type: string, enum: [current]}
+            history: {type: string, enum: [verified, absent]}
+            attention: {type: string, enum: [needs_input, waiting_for_agent, archived, unknown]}
+            work: {type: string, enum: [not_observed]}
+
+    ConsoleWordingCorrectionResult:
+      type: object
+      additionalProperties: false
+      required: [ok, kind, state, feedbackId, correctionDigest, duplicate, businessAnswer, work]
+      properties:
+        ok: {type: boolean, enum: [true]}
+        kind: {type: string, enum: [wording_correction]}
+        state: {type: string, enum: [recorded]}
+        feedbackId: {type: string}
+        correctionDigest: {type: string, pattern: '^[a-f0-9]{64}$'}
+        duplicate: {type: boolean}
+        businessAnswer: {type: string, enum: [not_sent]}
+        work: {type: string, enum: [not_observed]}
 
     EscalationReplyRequest:
       type: object
@@ -22196,6 +22282,8 @@ paths:
         understood), captures a feedback entry (origin `ui`), records the answer into
         `plan/questions.ndjson`, and ledgers `panel.escalation_replied`. It never closes an issue,
         dispatches, ratifies or arms a merge.
+      # An explicit wording_correction records a separate feedback receipt. It never invokes
+      # the business reply interpreter or appends a message, grill answer, archive or work effect.
       security:
         - bearerWrite: []
       requestBody:
@@ -22203,14 +22291,18 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/EscalationReplyRequest"
+              oneOf:
+                - $ref: "#/components/schemas/EscalationReplyRequest"
+                - $ref: "#/components/schemas/ConsoleWordingCorrectionRequest"
       responses:
         "200":
           description: The reply was saved; input delivery and subsequent work are separately qualified on bound replies.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/EscalationReplyResult"
+                oneOf:
+                  - $ref: "#/components/schemas/EscalationReplyResult"
+                  - $ref: "#/components/schemas/ConsoleWordingCorrectionResult"
         "400":
           description: >
             `invalid_request` with a `detail` -- the body failed validation, or the thread it names

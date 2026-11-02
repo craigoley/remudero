@@ -39,6 +39,9 @@ import { dirname } from "node:path";
 
 // ── The five capture surfaces ────────────────────────────────────────────────────────────────
 
+import { consoleCorrectionCandidates, consoleCorrectionCaptureReceipts, type ConsoleCorrectionCarrier, type ConsoleCorrectionCandidate } from "./console-feedback.js";
+import { envelope } from "./untrusted-envelope.js";
+
 export type DocketSource = "reframe" | "operator_feedback" | "rejected_feedback" | "question_answer" | "operator_note";
 
 export const DOCKET_SOURCES: readonly DocketSource[] = [
@@ -57,6 +60,7 @@ export interface DocketItem {
   ts: string;
   verbatim: string;
   referent: string;
+  wordingCorrection?: ConsoleCorrectionCandidate;
 }
 
 export interface FeedbackDocketWindow {
@@ -73,6 +77,8 @@ export interface FeedbackDocket {
   countsBySource: Record<DocketSource, number>;
   /** Sources with ZERO items in this window — named, not silently omitted (design i). */
   emptySources: DocketSource[];
+  wording?: { verifiedCandidates: number; unverified: number };
+  unknownSources?: DocketSource[];
 }
 
 /** Already-read, unnormalized records for each surface — the caller (run-task.ts's rung) does
@@ -82,6 +88,7 @@ export interface FeedbackDocket {
 export interface RawFeedbackDocketInputs {
   ledgerLines: ReadonlyArray<Record<string, unknown>>;
   rejectedFeedback: ReadonlyArray<{ id: string; ts: string; raw: string }>;
+  wordingCorrections?: ReadonlyArray<ConsoleCorrectionCarrier & { ts: string }>;
   questionLines: ReadonlyArray<Record<string, unknown>>;
   operatorNotes: ReadonlyArray<{ ts: string; taskId: string; note: string }>;
   window: FeedbackDocketWindow;
@@ -176,9 +183,15 @@ function operatorNoteItems(notes: RawFeedbackDocketInputs["operatorNotes"]): Doc
  * `[window.sinceIso, window.untilIso)`, and returns counts per source WITH EMPTY SOURCES NAMED.
  */
 export function buildFeedbackDocket(inputs: RawFeedbackDocketInputs): FeedbackDocket {
+  const reports = (inputs.wordingCorrections ?? []).filter(entry => isInWindow(entry.ts, inputs.window));
+  const wording = consoleCorrectionCandidates(reports, consoleCorrectionCaptureReceipts(inputs.ledgerLines));
+  const correctionItems: DocketItem[] = wording.candidates.map(candidate => ({ source: "operator_feedback",
+    ts: reports.filter(entry => candidate.evidence.some(evidence => evidence.feedbackId === entry.id)).map(entry => entry.ts).sort()[0]!,
+    referent: candidate.id, wordingCorrection: candidate,
+    verbatim: `Explicit wording correction: ${candidate.evidence.length} verified report(s).` }));
   const bySource: Record<DocketSource, DocketItem[]> = {
     reframe: reframeItems(inputs.ledgerLines),
-    operator_feedback: operatorFeedbackItems(inputs.ledgerLines),
+    operator_feedback: [...operatorFeedbackItems(inputs.ledgerLines), ...correctionItems],
     rejected_feedback: rejectedFeedbackItems(inputs.rejectedFeedback),
     question_answer: questionAnswerItems(inputs.questionLines),
     operator_note: operatorNoteItems(inputs.operatorNotes),
@@ -195,7 +208,10 @@ export function buildFeedbackDocket(inputs: RawFeedbackDocketInputs): FeedbackDo
   }
   items.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 
-  return { window: inputs.window, items, countsBySource, emptySources };
+  return { window: inputs.window, items, countsBySource,
+    emptySources: wording.unverified > 0 ? emptySources.filter(source => source !== "operator_feedback") : emptySources,
+    ...(reports.length > 0 ? { wording: { verifiedCandidates: wording.candidates.length, unverified: wording.unverified } } : {}),
+    ...(wording.unverified > 0 ? { unknownSources: ["operator_feedback" as const] } : {}) };
 }
 
 // ── Synthesis: at most ONE inbox proposal per cycle (design ii, v) ─────────────────────────
@@ -272,6 +288,22 @@ export function synthesizeFeedbackDocketProposal(
 
   const idFor = opts.idFor ?? ((referent, window) => `FD-${window.untilIso.slice(0, 10)}-${slug(referent)}`);
   const id = idFor(winnerReferent, docket.window);
+  const correction = winnerItems.length === 1 ? winnerItems[0].wordingCorrection : undefined;
+  if (correction) {
+    // Preserve every source anchor, but bound prose sent into the existing draft rung.
+    const shown = correction.evidence.slice(0, 8).map(evidence => ({ ...evidence,
+      correction: evidence.correction.slice(0, 800), textComplete: evidence.correction.length <= 800 }));
+    const packet = { ...correction, evidence: shown, evidenceCoverage: { total: correction.evidence.length,
+      loaded: shown.length, state: shown.length === correction.evidence.length ? "complete" : "partial" } };
+    return { kind: "proposal", referent: winnerReferent, consumed: winnerItems, candidate: { id,
+      summary: `Wording correction: ${correction.evidence.length} verified report(s) about one template version and symptom.\n`
+        + "Prepare a bounded fixture/template repair through normal native ownership and review. A repeated symptom does not prove one cause. "
+        + "Preserve source facts, unknowns, action authority and delivery receipts. Do not alter operational policy, holds, budgets or gates. "
+        + "Replay evaluation is not_run until measured against the proposed immutable revision; automated checks do not certify human comprehension.\n"
+        + envelope(JSON.stringify(packet), "feedback-entry"),
+      evidenceAnchors: correction.evidence.map(evidence => ({ description: `Wording report ${evidence.feedbackId}: ${evidence.source.issueUrl}`,
+        pattern: evidence.feedbackId, path: `plan/feedback/${evidence.feedbackId}.yaml` })) } };
+  }
   const quotes = winnerItems.map((i) => `- [${i.source} ${i.ts}] ${i.verbatim}`).join("\n");
 
   const candidate: DocketProposalCandidate = {

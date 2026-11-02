@@ -6,6 +6,7 @@ import { shapeCommitMessage } from "./commit-message.js";
 import { loadPlan } from "./plan.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { diffEmptyAgainstScope } from "./review.js";
+import { consoleCorrectionCandidates, readConsoleCorrection, type ConsoleCorrectionCaptureReceipt } from "./console-feedback.js";
 import { feedbackEntryRepoPath } from "./feedback.js";
 import { envelope } from "./untrusted-envelope.js";
 import { feedbackLineagePayload } from "./contributor-admission.js";
@@ -83,8 +84,16 @@ export function missingFeedbackMessage(
  * to both render the prompt AND fingerprint what the worker saw must build the block once and pass
  * it to {@link triagePrompt}, or the manifest would attest bytes the worker never received.
  */
-export function feedbackEntryBlock(entry: FeedbackEntry): string {
-  return envelope(feedbackLineagePayload(entry.raw, entry.contribution ? [entry.contribution] : []), "feedback-entry");
+export function feedbackEntryBlock(entry: FeedbackEntry, receipts: readonly ConsoleCorrectionCaptureReceipt[] = []): string {
+  let payload = entry.raw;
+  if (entry.console_correction !== undefined) {
+    const projected = consoleCorrectionCandidates([entry], receipts);
+    payload += "\nExplicit wording feedback context (reported at capture; not a live work instruction):\n" + JSON.stringify({
+      kind: "wording_correction", captureEvidence: projected.candidates.length === 1 ? "capture_evidence_verified" : "capture_evidence_unverified",
+      reportedContext: readConsoleCorrection(entry.console_correction) ?? null, candidates: projected.candidates,
+      evaluation: { state: "not_run", candidateRevision: null } });
+  }
+  return envelope(feedbackLineagePayload(payload, entry.contribution ? [entry.contribution] : []), "feedback-entry");
 }
 
 /**

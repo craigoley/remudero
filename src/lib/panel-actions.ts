@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import { bindConsoleCorrection, readConsoleCorrection, consoleCorrectionDigest, consoleCorrectionIntentKey, type ConsoleWordingCorrection } from "./console-feedback.js";
 /**
  * lib/panel-actions.ts — the control panel's human-in-the-loop write actions (MASTER-PLAN §7,
  * "editing capability tiers": answer questions, approve MANUAL items, pause/resume/stop, the
@@ -47,7 +49,7 @@ import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from ".
 import { deriveLastPoll } from "./daemon-health.js";
 import { deriveThreadId, readThread, appendThreadMessage, appendThreadReplyOnce, type ThreadIdentity, type ThreadMessageExtra } from "./inbox-thread.js";
 import type { EscalationConversationReader } from "./escalation-conversation.js";
-import { captureFeedback, feedbackEntryRepoPath, listFeedback, setFeedbackStatus } from "./feedback.js";
+import { captureFeedback, findFeedbackBySubmissionKey, feedbackEntryRepoPath, listFeedback, setFeedbackStatus } from "./feedback.js";
 import { escalationReplySubmissionKey, readEscalationQuestionFeedback } from "./escalation-correspondence.js";
 import { queueFeedbackRecord, readQueuedFeedbackRecords } from "./feedback-landing.js";
 import { applyOperatorMergeHold, type OperatorMergeHoldAction } from "./operator-merge-hold.js";
@@ -896,6 +898,59 @@ async function captureBoundEscalationFeedback(root: string, threadId: string, in
   return { entry, staged };
 }
 
+
+async function recordConsoleWordingCorrection(body: Record<string, unknown>, deps: PanelActionDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!deps.readEscalationConversation || typeof body.issueUrl !== "string" || typeof body.threadId !== "string"
+    || typeof body.intentId !== "string" || !/^[A-Za-z0-9._:-]{8,128}$/.test(body.intentId))
+    return void sendJson(res, 400, { error: "invalid_request", detail: "Open the conversation again before sending wording feedback." });
+  try {
+    const current = await deps.readEscalationConversation(body.issueUrl, true);
+    if (current.state !== "served") return void sendJson(res, current.reason === "wrong_repository" ? 404 : 503,
+      { error: "wording_source_unavailable", detail: "This conversation could not be verified. Refresh it before sending wording feedback." });
+    const c = current.conversation;
+    if (body.issueUrl !== c.issueUrl || body.threadId !== c.threadId) return void sendJson(res, 409,
+      { error: "source_changed", detail: "The wording report does not match this conversation. Refresh it before sending." });
+    const key = consoleCorrectionIntentKey(c.repository, body.issueUrl, body.threadId, body.intentId);
+    const previous = findFeedbackBySubmissionKey(deps.root, key, deps.root);
+    let correction: ConsoleWordingCorrection;
+    if (previous) {
+      const stored = readConsoleCorrection(previous.console_correction);
+      if (!stored || stored.source.repository !== c.repository || stored.source.issueUrl !== c.issueUrl || stored.source.threadId !== c.threadId
+        || previous.origin !== "ui" || previous.thread_id != null || previous.reply_to != null)
+        return void sendJson(res, 409, { error: "intent_conflict", detail: "This report conflicts with wording feedback that was already saved." });
+      const replay = bindConsoleCorrection(body, { ...stored.source, source: { state: stored.facts.sourceState }, history: stored.facts.history, attention: stored.facts.attention });
+      if (replay.state !== "bound" || !isDeepStrictEqual(replay.value, stored) || previous.raw !== stored.correction)
+        return void sendJson(res, 409, { error: "intent_conflict", detail: "A different wording report was already saved for this submission. Check the saved report before sending." });
+      correction = stored;
+    } else {
+      const bound = bindConsoleCorrection(body, c);
+      if (bound.state !== "bound") return void sendJson(res, 409, { error: "source_changed", detail: bound.reason });
+      correction = bound.value;
+    }
+    const id = `fb-console-wording-${createHash("sha256").update(key).digest("hex")}`;
+    const entry = previous ?? captureFeedback(deps.root, { id, raw: correction.correction, origin: "ui", submissionKey: key,
+      consoleCorrection: correction, land: { stateRoot: deps.root } });
+    if (entry.submission_key !== key || entry.raw !== correction.correction || !isDeepStrictEqual(entry.console_correction, correction))
+      throw new Error("The saved correction identity conflicts.");
+    const rel = feedbackEntryRepoPath(entry.id), queued = readQueuedFeedbackRecords(deps.root).get(rel);
+    if (queued && (queued.submission_key !== key || queued.raw !== entry.raw || !isDeepStrictEqual(queued.console_correction, correction)))
+      throw new Error("The queued correction identity conflicts.");
+    const staged = queued ? { queued: [rel] } : queueFeedbackRecord(deps.root, rel, deps.root);
+    if (!staged.queued?.includes(rel)) throw new Error("Correction delivery is unverified.");
+    const inputDigest = consoleCorrectionDigest(correction);
+    ledgerPanelAction(deps, "panel.console_wording_corrected", c.identity.taskId, bearerTokenId(req), {
+      state: "recorded", feedback_id: entry.id, correction_digest: inputDigest, repository: correction.source.repository,
+      issue_url: correction.source.issueUrl, thread_id: correction.source.threadId, conversation_revision: correction.source.revision,
+      business_answer: "not_sent", work: "not_observed" });
+    sendJson(res, 200, { ok: true, kind: "wording_correction", state: "recorded", feedbackId: entry.id, correctionDigest: inputDigest,
+      duplicate: Boolean(previous), businessAnswer: "not_sent", work: "not_observed" });
+  } catch {
+    // A failed source, capture, queue or receipt cannot claim delivery. The same input identity is retained for retry.
+    sendJson(res, 503, { error: "wording_feedback_unverified", kind: "wording_correction", state: "unknown",
+      detail: "The wording report could not be confirmed. Keep your draft and try again.", businessAnswer: "not_sent", work: "not_observed" });
+  }
+}
+
 /** POST /v1/escalation/reply (W1-T2496, W1-T4471) — a human answering an ESCALATION in prose.
  *  Derives the same {@link ThreadIdentity} escalate.ts keys this by; a thread with no prior
  *  message, or an unset `threadStorePath`, refuses (400) rather than filing unattached feedback.
@@ -913,7 +968,12 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
     // W1-T404: LOW — bookkeeping (files a feedback entry + a thread message); reversible, and
     // grants no new authority — see this route's own doc for the "input, never a command" line.
     tier: "low",
-    handler: jsonAction(validateEscalationReply, async (input, req, res) => {
+    handler: jsonAction<EscalationReplyInput | { kind: "wording_correction"; body: Record<string, unknown> }>(body => {
+      if (isRecord(body) && body.kind !== undefined) return body.kind === "wording_correction"
+        ? { kind: "wording_correction", body } : { error: "That feedback action is not available." };
+      return validateEscalationReply(body);
+    }, async (input, req, res) => {
+      if ("kind" in input) return recordConsoleWordingCorrection(input.body, deps, req, res);
       const identity: ThreadIdentity = { taskId: input.taskId, class: input.class, cause: input.cause, prRef: input.prRef };
       const threadId = deriveThreadId(identity);
       if (!deps.threadStorePath) {

@@ -1543,6 +1543,7 @@ export interface components {
       thread_id?: string | null;
       /** W1-T2302 -- the console-minted per-submission key a repeat of the same submit is recognised by. Null when none was supplied. */
       submission_key?: string | null;
+      console_correction?: ConsoleWordingCorrection;
       /** Set once `rmd triage` opens a proposal PR for this entry; null until then. */
       proposal_pr: string | null;
       /** W1-T313 -- src/lib/feedback.ts's `DecisionSummary`, the plain-language decision card generated once when the entry moves to `proposed`; null until then or on a summarizer failure. */
@@ -6510,6 +6511,12 @@ export interface components {
         sourceImported?: true;
       })[];
       canReply: boolean;
+      /** Explicit wording reports are supported for this current native source and readable history. They never answer or archive the business discussion. */
+      wordingFeedback?: {
+        version: 1;
+        kind: "wording_correction";
+        templateId: "escalation-conversation";
+      };
       /** True only for a current native source with positively observed absent history and unambiguous native identity. Starting is an explicit bound write; reads never create messages. */
       canStartConversation: boolean;
       /** A current native intake question bound to this preserved conversation. Its canonical feedback record must still be grilling. May enable a reply after the original escalation closes; conveys no executor authority. */
@@ -6539,6 +6546,57 @@ export interface components {
       state: "unavailable";
       reason: "invalid_request" | "wrong_repository" | "source_unavailable" | "invalid_source";
       detail: string;
+    };
+    ConsoleWordingCorrectionRequest: {
+      kind: "wording_correction";
+      intentId: string;
+      text: string;
+      issueUrl: string;
+      threadId: string;
+      repository?: string;
+      expectedRevision: string;
+      symptom: "unclear_request" | "unclear_status" | "unclear_recommendation" | "incorrect_fact";
+      /** Browser-reported display context; the server does not attest what was rendered. */
+      reportedTemplate: {
+        id: "escalation-conversation";
+        version: string;
+        renderedDigest: string;
+      };
+    };
+    ConsoleWordingCorrection: {
+      version: 1;
+      sourceKind: "engineering_escalation";
+      intentId: string;
+      correction: string;
+      symptom: "unclear_request" | "unclear_status" | "unclear_recommendation" | "incorrect_fact";
+      source: {
+        repository: string;
+        issueUrl: string;
+        threadId: string;
+        revision: string;
+      };
+      reportedTemplate: {
+        id: "escalation-conversation";
+        version: string;
+        renderedDigest: string;
+        authority: "operator_reported";
+      };
+      facts: {
+        sourceState: "current";
+        history: "verified" | "absent";
+        attention: "needs_input" | "waiting_for_agent" | "archived" | "unknown";
+        work: "not_observed";
+      };
+    };
+    ConsoleWordingCorrectionResult: {
+      ok: true;
+      kind: "wording_correction";
+      state: "recorded";
+      feedbackId: string;
+      correctionDigest: string;
+      duplicate: boolean;
+      businessAnswer: "not_sent";
+      work: "not_observed";
     };
     /** POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`). `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`). */
     EscalationReplyRequest: {
@@ -8647,7 +8705,7 @@ export interface paths {
   "/v1/escalation/reply": {
     post: {
       responses: {
-          "200": EscalationReplyResult;
+          "200": (EscalationReplyResult) | (ConsoleWordingCorrectionResult);
           "400": Error;
           "401": Error;
           "403": Error;

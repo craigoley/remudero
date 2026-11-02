@@ -1,3 +1,4 @@
+import { consoleCorrectionCaptureReceipts } from "./lib/console-feedback.js";
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
@@ -32176,7 +32177,7 @@ export function orphanWorkerKillLedger(ledgerPath: string): OrphanSweepDeps["led
  * `resolveLedgerUnion` greps the WHOLE raw line, so this pre-filters the corpus to candidate rows
  * before anything is parsed — the same shape `rule-efficacy.ts` builds for the same reader.
  */
-const DOCKET_LEDGER_STEPS = /"step":"(?:ratify\.reframed|operator_feedback)"/;
+const DOCKET_LEDGER_STEPS = /"step":"(?:ratify\.reframed|operator_feedback|panel\.console_wording_corrected)"/;
 
 /**
  * W1-T1273 — the docket's ledger corpus: EVERY rotation plus the live file, not the live file alone.
@@ -32268,7 +32269,10 @@ export function runFeedbackDocketRung(
 
     const window = feedbackDocketLookbackWindow(now);
     const ledgerLines = readDocketLedgerCorpus(ledgerPath, log);
-    const rejectedFeedback = listFeedback(root, { status: "rejected" }).map((e) => ({ id: e.id, ts: e.ts, raw: e.raw }));
+    const allFeedback = listFeedback(root);
+    const wordingCorrections = allFeedback.filter(entry => entry.console_correction !== undefined);
+    const rejectedFeedback = allFeedback.filter(entry => entry.status === "rejected" && entry.console_correction === undefined)
+      .map(entry => ({ id: entry.id, ts: entry.ts, raw: entry.raw }));
     const questionLines = readQuestionsNdjson(root);
     const noteStore = Object.hasOwn(deps, "noteStore") ? deps.noteStore :
       deps.root && !deps.repository ? root : configuredOperatorNoteStore(config, deps.repository, root);
@@ -32276,7 +32280,9 @@ export function runFeedbackDocketRung(
       .filter((n) => typeof n.note === "string" && typeof n.taskId === "string" && typeof n.ts === "string")
       .map((n) => ({ ts: n.ts as string, taskId: n.taskId as string, note: n.note as string }));
 
-    const docket = buildFeedbackDocket({ ledgerLines, rejectedFeedback, questionLines, operatorNotes, window });
+    const docket = buildFeedbackDocket({ ledgerLines, rejectedFeedback, wordingCorrections, questionLines, operatorNotes, window });
+    if (docket.wording) log("feedback_docket.wording_evidence", { ...docket.wording, unknown_sources: docket.unknownSources ?? [],
+      unit: "verified_candidate_groups_and_unverified_reports" });
     if (docket.items.length === 0) {
       // Recorded before returning, deliberately — mirrors auto-triage's "record the fire first"
       // discipline while retaining the per-surface counts doctor judges after ledger rotation.
@@ -34415,7 +34421,9 @@ async function triageCommandLocked(
     let worker!: WorkerResult;
     // Built ONCE: the envelope's boundary is fresh per call, so a second `feedbackEntryBlock`
     // would fingerprint bytes this worker never saw. See its own doc.
-    const triageFeedbackBlock = feedbackEntryBlock(entry);
+    const correctionReceipts = entry.console_correction === undefined ? []
+      : consoleCorrectionCaptureReceipts(readDocketLedgerCorpus(ledgerPath, (step, extra) => log(step, extra)));
+    const triageFeedbackBlock = feedbackEntryBlock(entry, correctionReceipts);
 
     // W1-T2700: the SAME per-part fingerprint the implement rung already ledgers (W1-T2297), now on
     // the lane that actually ingests OUTSIDE text. `feedback_raw` is DECLARED external, so its

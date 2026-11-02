@@ -40,7 +40,7 @@ const STATUS_RANK = new Map<string, number>(FEEDBACK_RECORD_STATUSES.map((status
  * — it is a capture-time copy that has not caught up. Field names mirror `feedback.ts`'s
  * `FeedbackEntry` verbatim; duplicated here for the same no-import reason as the status list.
  */
-const HISTORY_FIELDS = ["answered_by", "reply_to", "thread_id", "submission_key", "proposal_pr", "summary", "expansion"] as const;
+const HISTORY_FIELDS = ["answered_by", "reply_to", "thread_id", "submission_key", "console_correction", "proposal_pr", "summary", "expansion"] as const;
 
 /** The minimal shape this module reads off a parsed record — a structural subset of
  *  `feedback.ts`'s `FeedbackEntry`, never that type itself (see the module doc). */
@@ -124,7 +124,7 @@ export function mergeFeedbackRecord(upstreamBytes: string | undefined, localByte
   }
   const upstream = upstreamParsed.record;
   const local = localParsed.record;
-  const causalFields = ["submission_key", "thread_id", "reply_to"] as const;
+  const causalFields = ["submission_key", "thread_id", "reply_to", "console_correction"] as const;
   const changedIdentity = causalFields.find(field => upstream[field] != null && local[field] != null && !isDeepStrictEqual(upstream[field], local[field]));
   if (changedIdentity) return { kind: "refuse", reason: `immutable feedback identity "${changedIdentity}" changed` };
   const takeLocal = (): FeedbackRecordMergeDecision => {

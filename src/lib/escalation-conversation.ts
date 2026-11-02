@@ -43,6 +43,7 @@ export interface EscalationConversation {
   messages: { seq: number; from: "operator" | "daemon"; text: string; ts: number; intentId?: string; sourceImported?: true }[];
   canReply: boolean;
   canStartConversation: boolean;
+  wordingFeedback?: { version: 1; kind: "wording_correction"; templateId: "escalation-conversation" };
   initialMessage?: string;
   recommendationReplies?: { accept?: string; decline: string };
   activeQuestion?: { issueUrl: string; feedbackId: string; revision: string; seq: number; observedAt: string; updatedAt: string };
@@ -316,6 +317,7 @@ export function createEscalationConversationReader(opts: {
       whatHappened: parsed.detail, recommendation: parsed.recommendation, options: parsed.options,
       source: { state: stale ? "stale" : "current", observedAt: evidence.observedAt, updatedAt: source.updated_at, revision: sourceRevision },
       history, attention, messages: messages ?? [], canReply, canStartConversation,
+      ...(!stale && (history === "verified" || history === "absent") ? { wordingFeedback: { version: 1 as const, kind: "wording_correction" as const, templateId: "escalation-conversation" as const } } : {}),
       ...(activeQuestion ? { activeQuestion } : {}),
       ...(canStartConversation ? { initialMessage: `${parsed.headline}\n\n${parsed.detail}` } : {}),
       ...(recommendationReplies ? { recommendationReplies } : {}),

@@ -1,3 +1,4 @@
+import type { ConsoleWordingCorrection } from "./console-feedback.js";
 import { execFileSync } from "node:child_process";
 import { ghExec } from "./github-transport.js";
 import { createHash, randomBytes } from "node:crypto";
@@ -75,6 +76,7 @@ export type FeedbackStatus = (typeof FEEDBACK_STATUSES)[number];
 
 /** One `plan/feedback/<id>.yaml` entry — the exact §7B schema shape. */
 export interface FeedbackEntry {
+  console_correction?: ConsoleWordingCorrection;
   id: string;
   ts: string;
   raw: string;
@@ -825,6 +827,7 @@ export function inheritFeedbackLineage(
 }
 
 export interface CaptureFeedbackOptions {
+  consoleCorrection?: ConsoleWordingCorrection;
   raw: string;
   attachments?: string[];
   origin?: FeedbackOrigin;
@@ -954,6 +957,7 @@ function writeCapture(root: string, opts: CaptureFeedbackOptions): FeedbackEntry
     expansion: opts.expansion ?? null,
     submission_key: opts.submissionKey ?? null,
     thread_id: opts.threadId ?? null,
+    ...(opts.consoleCorrection ? { console_correction: opts.consoleCorrection } : {}),
     ...(contribution === null ? {} : { contribution }),
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));

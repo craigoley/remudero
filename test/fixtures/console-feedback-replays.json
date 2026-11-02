@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "purpose": "Independent semantic packets for controlled console wording; no natural-language certification or human-comprehension claim.",
+  "cases": [
+    {"id":"stale-source","expectedFacts":{"source_state":"stale","can_reply":false,"work":"not_observed"},"allowedActions":["refresh"]},
+    {"id":"unknown-diagnosis","expectedFacts":{"diagnosis":"unknown","attention":"needs_input","work":"not_observed"},"allowedActions":["reply"]},
+    {"id":"units-and-source-time","expectedFacts":{"quantity":5,"unit":"jobs","denominator":12,"source_time":"12:09 UTC"},"allowedActions":[]},
+    {"id":"changed-recommendation","expectedFacts":{"recommendation_changed":true,"can_reply":false,"work":"not_observed"},"allowedActions":["refresh"]},
+    {"id":"saved-unverified-delivery","expectedFacts":{"reply":"saved","input_delivery":"unverified","work":"not_observed","attention":"waiting_for_agent"},"allowedActions":["refresh"]},
+    {"id":"lost-response","expectedFacts":{"reply":"unknown","draft":"retained","retry_intent":"same","work":"not_observed"},"allowedActions":["refresh","retry_same_intent"]},
+    {"id":"proposal-acknowledgement","expectedFacts":{"plan":"proposed_not_merged","work":"pending","attention":"archived"},"allowedActions":[]},
+    {"id":"archive-while-work-runs","expectedFacts":{"agent_needs_input":false,"work":"running","attention":"archived"},"allowedActions":[]},
+    {"id":"reopened-question","expectedFacts":{"attention":"needs_input","same_thread":true,"new_agent_question":true},"allowedActions":["reply"]},
+    {"id":"unauthorized-read","expectedFacts":{"authorized":false,"can_reply":false,"work":"not_observed"},"allowedActions":["sign_in"]},
+    {"id":"failed-publication","expectedFacts":{"agent_response":"unverified","attention":"waiting_for_agent","work":"not_observed"},"allowedActions":["refresh"]},
+    {"id":"incomplete-history","expectedFacts":{"history":"partial","can_reply":false,"work":"not_observed"},"allowedActions":["refresh"]},
+    {"id":"decline-is-input","expectedFacts":{"sent_text":"I decline this recommendation. Please suggest another approach.","work":"not_observed","attention":"waiting_for_agent"},"allowedActions":["refresh"]},
+    {"id":"duplicate-reply","expectedFacts":{"operator_reply_count":1,"feedback_submission_count":1,"same_intent":true,"work":"not_observed"},"allowedActions":["refresh"]}
+  ]
+}
