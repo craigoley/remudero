@@ -15,16 +15,16 @@
   files:
     - scripts/census-precheck.mjs
     - scripts/preflight-author.mjs
-    - test/ci/gates/the-author-preflight-answers-the-cheap-counts-first.test.ts
+    - test/ci/the-author-preflight-answers-the-cheap-counts-first.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: census-precheck --counts-only runs the static counts (clock, comment load, fixture copy, house layout, deps interface, repo root, census parity) without starting the instrument child or any census suite, and exits 1 naming each caused row or 0 when clean
-      proof: "unit test: test/ci/gates/the-author-preflight-answers-the-cheap-counts-first.test.ts"
+      proof: "unit test: test/ci/the-author-preflight-answers-the-cheap-counts-first.test.ts"
     - claim: In full mode a branch whose static counts already refuse prints those rows and exits 1 before any census suite starts
-      proof: "grep: W1-T11098 criterion 2 in test/ci/gates/the-author-preflight-answers-the-cheap-counts-first.test.ts"
+      proof: "grep: W1-T11098 criterion 2 in test/ci/the-author-preflight-answers-the-cheap-counts-first.test.ts"
     - claim: preflight-author runs census-counts as its first step, before the dependency precheck, and a refusal there ends the run without starting census suites, static-preflight or tests
-      proof: "grep: W1-T11098 criterion 3 in test/ci/gates/the-author-preflight-answers-the-cheap-counts-first.test.ts"
+      proof: "grep: W1-T11098 criterion 3 in test/ci/the-author-preflight-answers-the-cheap-counts-first.test.ts"
   rationale: |
     MEASURED 2026-11-02 over 12 author preflight receipts (progress.json under each worktree's coverage/rmd-author-*):
     - Wall time per run 45-90 min. census-precheck alone took 536-2,336 s, static-preflight 828-3,120 s, the affected subset 699-937 s.
