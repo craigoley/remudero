@@ -1,8 +1,10 @@
 import {lstatSync, realpathSync, statfsSync} from 'node:fs';
+import {isAbsolute, relative} from 'node:path';
 import {authorDependencyProvenance} from './author-dependency-provenance.mjs';
 
 export const AUTHOR_CONTEXT_FORMAT = 'rmd-author-execution-context-v1';
 export const AUTHOR_CONTEXT_PARENT_ENV = 'RMD_TEST_SLOT_PARENT';
+export const AUTHOR_CONTEXT_SLOT_DIR_ENV = 'RMD_TEST_SLOT_DIR';
 const SHA = /^[a-f0-9]{40}$/;
 
 /** The slot owner a native phase runs under: the lease's own parent claim, never a new identity. */
@@ -34,7 +36,10 @@ export function observeAuthorContext({root, git, slot, allocations = {}, depende
   const context = {format: AUTHOR_CONTEXT_FORMAT, source: null, dependency: null, owner: null, allocations: {}};
   try {
     const head = git(['rev-parse', 'HEAD']).trim(), tree = git(['rev-parse', 'HEAD^{tree}']).trim();
-    const clean = git(['status', '--porcelain']).trim() === '';
+    const slotDir = slot?.childEnvironment?.[AUTHOR_CONTEXT_SLOT_DIR_ENV];
+    const slotPath = typeof slotDir === 'string' && slotDir && root ? relative(realpathSync(root), slotDir) : '';
+    const insideRoot = slotPath !== '' && !slotPath.startsWith('..') && !isAbsolute(slotPath);
+    const clean = git(['status', '--porcelain', ...(insideRoot ? ['--', '.', `:(exclude)${slotPath}`] : [])]).trim() === '';
     context.source = SHA.test(head) && SHA.test(tree) ? {head, tree, clean} : {state: 'unresolved'};
   } catch (error) { context.source = {state: 'unavailable', reason: error.message}; }
   context.dependency = dependency(root);

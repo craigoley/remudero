@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import {mkdirSync, mkdtempSync, rmSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {test} from 'node:test';
+
+import {gitRepo} from '#test/helpers/git-repo.js';
 
 const contextModule = '#scripts/lib/author-context-compatibility.mjs';
 const {AUTHOR_CONTEXT_FORMAT, observeAuthorContext, requireAuthorContext} = await import(contextModule);
@@ -62,4 +64,21 @@ test("W1-T10961: only matching exact source dependency allocation and owner cont
   assert.equal(unavailable.allocations.output.state, 'unavailable');
   assert.throws(() => requireAuthorContext(expected, unavailable, 'reuse'), /allocation:output/);
   assert.throws(() => requireAuthorContext(expected, expected, 'resume'), /intent must be start or reuse/);
+});
+
+test("W1-T10961: the harness's own test-slot directory inside the checkout is not author source, and any other untracked file still is", (t) => {
+  const repo = gitRepo({kind: 'author-context-slot-dir'});
+  t.after(() => repo.cleanup());
+  writeFileSync(join(repo.dir, 'tracked.txt'), 'tracked\n');
+  repo.git('add', '.'); repo.git('commit', '-q', '-m', 'tracked');
+  const slots = join(repo.dir, 'slots');
+  mkdirSync(slots); writeFileSync(join(slots, 'slot-1.json'), '{}\n');
+  const dependency = () => ({state: 'present', lockSha256: 'fixture-lock', toolsSha256: 'fixture-tools'});
+  const observe = (slotDir?: string) => observeAuthorContext({root: repo.dir, dependency,
+    slot: slotDir === undefined ? undefined : {outcome: 'acquired', childEnvironment: {RMD_TEST_SLOT_DIR: slotDir}},
+    git: (args: string[]) => repo.git(...args)});
+  assert.equal(observe(slots).source.clean, true, 'the slot directory the lease names is the harness\'s, not the author tree');
+  assert.equal(observe().source.clean, false, 'control: without the lease the same untracked directory is dirt');
+  writeFileSync(join(repo.dir, 'stray.txt'), 'untracked\n');
+  assert.equal(observe(slots).source.clean, false, 'any other untracked file still makes the source unclean');
 });
