@@ -630,14 +630,8 @@ export function readCredentialReceipt(path: string, nowMs: number): PushCredenti
     age_ms: Number.isFinite(minted) ? Math.max(0, nowMs - minted) : null };
 }
 
-export interface PushAuthRetryDeps {
-  consumer: string;
-  log?: PushGateLog;
-  clock?: Clock;
-  refreshAmbient?: () => Promise<unknown>;
-}
-
-export async function pushWithAuthRetry(push: (env: NodeJS.ProcessEnv) => Promise<void>, deps: PushAuthRetryDeps): Promise<void> {
+export async function pushWithAuthRetry(push: (env: NodeJS.ProcessEnv) => Promise<void>,
+  deps: { consumer: string; log?: PushGateLog; clock?: Clock; refreshAmbient?: () => Promise<unknown> }): Promise<void> {
   const clock = deps.clock ?? systemClock;
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}push-credential-`));
   const receipt = join(dir, "receipt");

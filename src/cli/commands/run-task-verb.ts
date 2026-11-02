@@ -1926,7 +1926,7 @@ function unresolvedMainConflicts(worktreePath: string, paths: readonly string[])
   });
 }
 
-async function restoreBoundaryCheckpoint(
+export async function restoreBoundaryCheckpoint(
   checkpoint: { branch: string; headSha: string },
   taskId: string,
   git: (args: string[]) => Promise<string>,

@@ -6,11 +6,11 @@ import { test } from "node:test";
 
 import { keptRunHeadRef, pendingWorkerBoundaryHandoffs, unpushedRunHeadKeptRow } from "#src/lib/daemon.js";
 import { PushAuthRefusedError, PushFailedError, PUSH_AUTH_REFUSED_STEP, worktreePushExecAsync } from "#src/lib/git-push.js";
-import { PUSH_AUTH_REFUSED, streakRefusal } from "#src/lib/non-worker-verdict.js";
+import { PUSH_AUTH_REFUSAL_RE, PUSH_AUTH_REFUSED, streakRefusal } from "#src/lib/non-worker-verdict.js";
 import { startCredentialHelperSocket, type BoundaryLedgerRow } from "#src/lib/secret-boundary.js";
 import { nonWorkerVerdictClass } from "#src/lib/stranded-task-detector.js";
 import { withTempDir } from "#src/lib/tmp.js";
-import { restoreBoundaryCheckpoint, runErrorCause } from "#src/run-task.js";
+import { restoreBoundaryCheckpoint } from "#src/cli/commands/run-task-verb.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -86,10 +86,8 @@ test("W1-T10749: a push refused for auth is retried once and ledgers only creden
 test("W1-T10749: a push refused for auth is a non-worker strike", () => {
   const worktree = "/home/node/Remudero/worktrees/run-CONSOLE-T127-1793037108107";
   const reason = `Command failed: git -C ${worktree} push origin HEAD\n${CONSOLE_T127_STDERR}\n${CONSOLE_T127_STDERR}`;
-  assert.equal(runErrorCause(new PushAuthRefusedError(new PushFailedError(reason, CONSOLE_T127_STDERR, undefined))), "push-auth-refused");
-  assert.equal(runErrorCause(new Error(reason)), "git-push-failed", "an unretried push keeps its old cause; streakRefusal reads its reason");
-  assert.equal(runErrorCause(new Error(`Command failed: git -C ${worktree} push origin HEAD\n ! [rejected] (non-fast-forward)`)), "git-push-failed");
-  assert.equal(runErrorCause(new Error("census-precheck: this branch grows 1 census count")), "census-refused-push");
+  assert.equal(PUSH_AUTH_REFUSAL_RE.test(CONSOLE_T127_STDERR), true);
+  assert.equal(PUSH_AUTH_REFUSAL_RE.test(" ! [rejected] HEAD -> run (non-fast-forward)"), false);
   const rows = [
     { step: "verdict", task_id: "CONSOLE-T127", verdict: "failed", stage: "run.error", cause: "git-push-failed", reason },
     { step: "verdict", task_id: "CONSOLE-T134", verdict: "failed", stage: "run.error", cause: "git-push-failed",

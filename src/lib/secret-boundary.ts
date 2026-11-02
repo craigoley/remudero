@@ -28,7 +28,7 @@ import { createServer as createNetServer, type Socket } from "node:net";
 import { chmodSync, existsSync, lstatSync, mkdirSync, rmdirSync, rmSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isMainThread, parentPort, Worker, workerData, type MessagePort } from "node:worker_threads";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { mintScopedToken } from "./github-app.js";
 import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "./short-path-root.js";
 import { setHarnessCredentialSocket } from "./worktree-git.js";
@@ -355,8 +355,8 @@ export function startCredentialHelperSocket(opts: {
           return;
         }
         const use: CredentialUseFields | undefined = consumer === undefined ? undefined : { consumer, scoped_repo: repo,
-          minted_at: new Date(clock.now()).toISOString(),
-          ...(result.expiresAtMs === undefined ? {} : { expires_at: new Date(result.expiresAtMs).toISOString() }) };
+          minted_at: clock.iso(),
+          ...(result.expiresAtMs === undefined ? {} : { expires_at: fixedClock(result.expiresAtMs).iso() }) };
         log({ ...boundaryLedgerRow(host, "allow", "minted", `scoped token minted for ${repo}`), ...(use ? { credential: use } : {}) });
         const receipt = use ? Object.entries(use).map(([key, value]) => `rmd_${key}=${value}\n`).join("") : "";
         socket.end(`username=x-access-token\npassword=${result.token}\n${receipt}`);
