@@ -10,7 +10,8 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // Frozen before compression at dde8a92c463ea090413f985c5d7d8c6a67f6c5e3; no moving git ref.
 // Regenerated for the observed-overlap producer, which moves prOwningTaskIds out of projectPlan (operator ruling
 // 2026-11-01). The comment-reduction threshold stays fixed.
-const BEFORE = { comments: 1798, tokens: "e6e0928d925dcde36a3d9b3952597e25c1c3c551e0e4f36a0ec3a27370f8570c" };
+// Refreshed for forwarding the observed open row's state and head to changed-files lookup.
+const BEFORE = { comments: 1798, tokens: "267795470b47bc7e3b260ff31449ae28762ac715eacdc3607da88190d67f688e" };
 
 function executableDigest(text: string): string {
   const scanner = createScanner(true, undefined, text);

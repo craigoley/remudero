@@ -4,7 +4,6 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createChangedFilesCache } from "#src/lib/changed-files-cache.js";
 import type { DaemonDeps, DaemonSummary } from "#src/lib/daemon.js";
 import { runDaemon } from "#src/lib/daemon.js";
 import { partitionByFileOverlap } from "#src/lib/dispatch-overlap.js";
@@ -127,29 +126,6 @@ test("sweep.observedOverlap.mode: absent reads shadow, so the act switch is off 
   assert.throws(() => parseObservedOverlapMode({ observedOverlap: { mode: { value: "on", origin: "proposal" } } }));
 });
 
-test("changed-files cache: an open PR's list is keyed on its head, so a push re-reads it once", async () => {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}observed-overlap-cache-`));
-  try {
-    let reads = 0;
-    const cache = createChangedFilesCache(root, "acme", "remudero", { fetch: async () => [`v${++reads}.ts`] });
-    const headA = "a".repeat(40);
-    const headB = "b".repeat(40);
-    cache.lookup(URL(7), "OPEN", headA);
-    await cache.settle();
-    assert.deepEqual(cache.lookup(URL(7), "OPEN", headA), ["v1.ts"]);
-    await cache.settle();
-    assert.equal(reads, 1, "the same head is never re-read");
-    assert.deepEqual(cache.lookup(URL(7), "OPEN", headB), ["v1.ts"], "the older list is served meanwhile");
-    await cache.settle();
-    assert.equal(reads, 2, "a moved head re-reads once");
-    assert.deepEqual(cache.lookup(URL(7), "OPEN", headB), ["v2.ts"]);
-    await cache.settle();
-    assert.equal(reads, 2);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 test("observed scope producer: the daemon composition root builds it from the projection's open rows", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}observed-overlap-root-`));
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}observed-overlap-home-`));
@@ -263,7 +239,7 @@ test("dispatch.overlap_shadow: a file only the second of two overlapping open PR
   assert.deepEqual([...ran].sort(), ["W1-T1", "W1-T2"], "shadow changes no dispatch");
 });
 
-test("observed scope producer: the async read-plane refresh publishes the open rows the producer reads", async () => {
+test("observed scope producer: the async read-plane refresh publishes the open rows the producer reads; changed-files cache: an open PR's list is keyed on its head, so a push re-reads it once", async () => {
   // Production ticks call `refreshMergedAsync` (the read plane), never the synchronous `refreshMerged`.
   // No `githubFactory` here, so the read plane is live; its read is injected, and the changed-files
   // read goes through the shared `gh` shim on PATH.
@@ -290,6 +266,8 @@ test("observed scope producer: the async read-plane refresh publishes the open r
   delete process.env.CI;
   delete process.env.GITHUB_ACTIONS;
   let reads = 0;
+  let headRefOid = "a".repeat(40);
+  const fileReads = () => gh.calls().filter((c) => c.includes("pulls/15679/files")).length;
   try {
     let captured: DaemonDeps | undefined;
     const code = await daemonCommand(["--repo", "acme/remudero", "--plan", planPath, "--max", "0"], {
@@ -302,7 +280,7 @@ test("observed scope producer: the async read-plane refresh publishes the open r
         read: async (input: { plan?: Plan }) => {
           reads++;
           return { generation: reads, source: "inline", publishedAtMs: Date.now(), settledAtMs: Date.now(),
-            facts: { plan: input.plan, projection: [], openBranches: [openPr(15679, "run-W1-T9796-1793544678400")],
+            facts: { plan: input.plan, projection: [], openBranches: [{ ...openPr(15679, "run-W1-T9796-1793544678400"), headRefOid }],
               creditUpdates: [] } };
         },
         stop: async () => {},
@@ -325,7 +303,30 @@ test("observed scope producer: the async read-plane refresh publishes the open r
     }
     assert.deepEqual(scope?.observedByTask.get("W1-T9796")?.files, ["src/a.ts"]);
     assert.equal(scope?.sourcesByTask.get("W1-T9796")?.[0]?.pr, 15679);
-    assert.ok(gh.calls().some((c) => c.includes("pulls/15679/files")), "the files came from the gateway's own read");
+    assert.equal(fileReads(), 1, "the files came from the gateway's own read once");
+    await captured.refreshMergedAsync();
+    assert.deepEqual(captured.observedOpenPrScope?.()?.observedByTask.get("W1-T9796")?.files, ["src/a.ts"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(fileReads(), 1, "another snapshot of the same head reuses the files");
+
+    gh.addRoute({ when: "pulls/15679/files", stdout: "src/b.ts\n" });
+    headRefOid = "b".repeat(40);
+    await captured.refreshMergedAsync();
+    scope = captured.observedOpenPrScope?.();
+    assert.deepEqual(scope?.observedByTask.get("W1-T9796")?.files, ["src/a.ts"], "the prior list is served during refresh");
+    for (let i = 0; i < 200 && scope?.observedByTask.get("W1-T9796")?.files[0] !== "src/b.ts"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      scope = captured.observedOpenPrScope?.();
+    }
+    assert.deepEqual(scope?.observedByTask.get("W1-T9796")?.files, ["src/b.ts"], "the async snapshot's new head invalidates the list");
+    assert.equal(scope?.sourcesByTask.get("W1-T9796")?.[0]?.headRefOid, headRefOid);
+    assert.equal(fileReads(), 2, "a pushed head triggers exactly one additional read");
+    await captured.refreshMergedAsync();
+    assert.deepEqual(captured.observedOpenPrScope?.()?.observedByTask.get("W1-T9796")?.files, ["src/b.ts"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(fileReads(), 2, "another snapshot of the pushed head reuses the new list");
+    assert.equal(gh.calls().some((c) => c.includes("pulls?") || c.includes("pr list")), false,
+      "the projection gateway's separate PR index stays cold");
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];

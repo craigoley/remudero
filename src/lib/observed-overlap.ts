@@ -56,7 +56,7 @@ export interface ObservedOpenPrScope {
  */
 export function observedScopeFromOpenPrs(
   openPrs: readonly PrRef[] | null | undefined,
-  changedFiles: (prUrl: string) => readonly string[] | undefined,
+  changedFiles: (prUrl: string, pr: PrRef) => readonly string[] | undefined,
 ): ObservedOpenPrScope | undefined {
   if (!openPrs) return undefined;
   const files = new Map<string, Set<string>>();
@@ -68,7 +68,7 @@ export function observedScopeFromOpenPrs(
     const owners = prOwningTaskIds(pr);
     if (owners.length === 0) continue;
     openPrsMapped++;
-    const changed = changedFiles(pr.url);
+    const changed = changedFiles(pr.url, pr);
     if (!changed || changed.length === 0) {
       unreadablePrs.push(pr.number);
       continue;

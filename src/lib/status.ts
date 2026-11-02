@@ -263,7 +263,7 @@ export interface GitHub {
   creditedByCommitTrailer?(taskId: string, prUrl: string): boolean;
   /** W1-T413: changed paths for rung (c)'s plan-only refusal. undefined means unavailable, not no files:
    *  retain today's answer; absent heads cannot add credit, but withdrawing credit redispatches finished work. */
-  changedFiles?(prUrl: string): string[] | undefined;
+  changedFiles?(prUrl: string, snapshotPr?: Pick<PrRef, "state" | "headRefOid">): string[] | undefined;
   /** Qualified merged-head evidence, or named unknown; this read never schedules GitHub work. */
   changedFileEvidence?(prUrl: string): ChangedFileEvidence;
   /** Configured repository and immutable implementation evidence. A cold read may request only the
@@ -5634,13 +5634,13 @@ export function buildBatchedGithub(
     creditedByCommitTrailer(taskId, prUrl) {
       return commitCreditsFor(taskId, prUrl);
     },
-    changedFiles(prUrl) {
+    changedFiles(prUrl, snapshotPr) {
       // W1-T413, AND THE O(N) QUESTION ANSWERED RATHER THAN DODGED. The REST PR *list* does not carry changed
       // files at any page size, so this cannot ride the one fetch the way body, head ref and title do. It is
       // O(1) per PR that reaches the refusal, MEMOISED for the gateway's lifetime, and pre-filtered by the free
       // own-run-branch test.
       if (opts.changedFilesCache) {
-        const row = cache?.byUrl.get(prUrl);
+        const row = snapshotPr ?? cache?.byUrl.get(prUrl);
         return opts.changedFilesCache.lookup(prUrl, row?.state, row?.headRefOid);
       }
       const cached = changedFilesByUrl.get(prUrl);

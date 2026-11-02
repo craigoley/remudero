@@ -1813,7 +1813,7 @@ export async function daemonCommand(
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         // Open PR heads' changed files as observed scope: this pass's rows, and the file lists the
         // projection gateway's head-keyed cache already holds for `openSiblingBuild`. No new read.
-        observedOpenPrScope: () => observedScopeFromOpenPrs(lastOpenRows, (url) => projectionGithub.changedFiles?.(url)),
+        observedOpenPrScope: () => observedScopeFromOpenPrs(lastOpenRows, (url, pr) => projectionGithub.changedFiles?.(url, pr)),
         observedOverlapMode: deps.readObservedOverlapMode ?? (() => loadObservedOverlapMode()),
         // W1-T1062: `owner: target.owner` must reach `runTask`, else a FOREIGN `--repo owner/name` run
         // falls back to this checkout's owner and opens its PR there (test/owner-dispatch-threading).
