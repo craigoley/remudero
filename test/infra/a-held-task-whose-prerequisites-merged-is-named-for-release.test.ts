@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { assessHold, HOLD_READINESS_PASS_STEP, HOLD_READINESS_STEP, mergedTaskIds, observeHoldReadiness } from "#src/lib/hold-readiness.js";
 import { withTempDir } from "#src/lib/tmp.js";
-import { GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const heldShard = (id: string, cites: string, extra = "") => `- id: ${id}
   title: held fixture
@@ -40,13 +39,10 @@ test("W1-T11094 criterion 1: a hold reads prerequisites-merged only when every i
 
 test("W1-T11094 criterion 2: one pass over origin/main names each held queued shard once, and an unchanged picture writes no new row", async () => {
   await withTempDir("hold-readiness", async (dir) => {
-    const repo = join(dir, "console");
+    const fixture = gitRepo({ seedCommit: false, kind: "hold-readiness-plan" });
+    const repo = fixture.dir;
+    const git = (...args: string[]) => fixture.git(...args);
     mkdirSync(join(repo, "plan", "tasks.d"), { recursive: true });
-    const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
-      GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
-      GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email };
-    const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { env, encoding: "utf8" });
-    git("init", "-q", "-b", "main");
     writeFileSync(join(repo, "plan", "tasks.d", "CONSOLE-T143-ready.yaml"), heldShard("CONSOLE-T143", "W1-T10559"));
     writeFileSync(join(repo, "plan", "tasks.d", "CONSOLE-T104-waiting.yaml"), heldShard("CONSOLE-T104", "W1-T5060"));
     writeFileSync(join(repo, "plan", "tasks.d", "CONSOLE-T90-retired.yaml"), heldShard("CONSOLE-T90", "W1-T10559", "  retirement: retired\n"));
@@ -69,6 +65,7 @@ test("W1-T11094 criterion 2: one pass over origin/main names each held queued sh
     rows.length = 0;
     await observeHoldReadiness(deps, seen);
     assert.deepEqual(rows.map((row) => row.step), [HOLD_READINESS_PASS_STEP], "an unchanged hold is not re-reported");
+    fixture.cleanup();
   });
 });
 

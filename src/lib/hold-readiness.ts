@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 
+import { resolveRepoLayout } from "./repo-layout.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /**
@@ -24,7 +26,7 @@ export const HOLD_READINESS_FIRST_DELAY_MS = 600_000;
 const TASK_ID = /\b[A-Z][A-Z0-9]*-T\d+\b/g;
 const TRAILER_ID = /^Remudero-Task: ([A-Z][A-Z0-9]*-T\d+)\s*$/gm;
 const SUBJECT_ID = /\(([A-Z][A-Z0-9]*-T\d+)\) \(#\d+\)\s*$/gm;
-const HELD_LINE = /^plan\/tasks\.d\/[^:]+\.yaml:\d+:\s*dispatch_hold:\s*true\b/;
+const HELD_LINE = /^[^:]+\.yaml:\d+:\s*dispatch_hold:\s*true\b/;
 const CONDITION_MAX_CHARS = 400;
 
 export type HoldReadinessState = "prerequisites-merged" | "waiting" | "cites-nothing";
@@ -84,20 +86,20 @@ export function readinessFingerprint(readiness: HoldReadiness): string {
   return createHash("sha256").update(JSON.stringify([readiness.state, readiness.unmerged, readiness.condition])).digest("hex").slice(0, 16);
 }
 
-export interface HoldReadinessDeps {
+export type HoldReadinessTarget = {
   planCheckout: string;
   creditCheckouts: readonly string[];
   log: (step: string, fields: Record<string, unknown>) => void;
-  git?: typeof hostWorktreeGitAsync;
-}
+};
 
 export type HoldReadinessPass = { readiness: HoldReadiness[] } | { unreadable: string };
 
-export async function observeHoldReadiness(deps: HoldReadinessDeps, seen: Map<string, string>): Promise<HoldReadinessPass> {
-  const git = deps.git ?? hostWorktreeGitAsync;
+export async function observeHoldReadiness(deps: HoldReadinessTarget, seen: Map<string, string>,
+  git: typeof hostWorktreeGitAsync = hostWorktreeGitAsync): Promise<HoldReadinessPass> {
   let pass: HoldReadinessPass;
   try {
-    const listing = await git(deps.planCheckout, ["grep", "-n", "-e", "^  dispatch_hold: true", "-e", "^- id:", "origin/main", "--", "plan/tasks.d"],
+    const shardDir = relative(deps.planCheckout, join(resolveRepoLayout(deps.planCheckout).planDir, "tasks.d"));
+    const listing = await git(deps.planCheckout, ["grep", "-n", "-e", "^  dispatch_hold: true", "-e", "^- id:", "origin/main", "--", shardDir],
       { maxBuffer: 64 * 1024 * 1024 });
     const paths = heldShardPaths(listing.replace(/^origin\/main:/gm, ""));
     const texts = await Promise.all(paths.map(async (path) => ({ path, text: await git(deps.planCheckout, ["show", `origin/main:${path}`]) })));
@@ -125,7 +127,7 @@ export async function observeHoldReadiness(deps: HoldReadinessDeps, seen: Map<st
   return pass;
 }
 
-export function startHoldReadinessObserver(deps: HoldReadinessDeps, intervalMs = HOLD_READINESS_INTERVAL_MS,
+export function startHoldReadinessObserver(deps: HoldReadinessTarget, intervalMs = HOLD_READINESS_INTERVAL_MS,
   firstDelayMs = HOLD_READINESS_FIRST_DELAY_MS): { close: () => void } {
   const seen = new Map<string, string>();
   let running = false;
