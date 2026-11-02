@@ -16,6 +16,8 @@ const held = (name: string, taskId: string, over: Partial<StaleHoldFacts> = {}):
   ({ name, prState: "none", tipInMain: false, namedInSource: false, namedTaskId: taskId, ...over });
 const tip = (ageDays: number | undefined): RemoteBranchTip =>
   ({ sha: `sha-${ageDays}`, committedAtMs: ageDays === undefined ? undefined : NOW - ageDays * DAY });
+/** The live `ls-remote` sha for every tip: what a fresh remote-tracking read agrees with. */
+const liveOf = (tips: ReadonlyMap<string, RemoteBranchTip>) => new Map([...tips].map(([n, t]) => [n, t.sha]));
 
 test("a held run branch is named only once it is stale for its kind, with every fact read", () => {
   const facts = [
@@ -35,7 +37,7 @@ test("a held run branch is named only once it is stale for its kind, with every 
     ["run-W1-T5-5", tip(undefined)], ["run-W1-T6-6", tip(30)], ["run-W1-T7-7", tip(30)], ["run-W1-T8-8", tip(30)],
     ["probe-W1-T9", tip(30)], ["run-W1-T10-10", tip(30)],
   ]);
-  const named = planStaleHoldArchive({ facts, reasons, tips, nowMs: NOW, claimedTaskIds: new Set() });
+  const named = planStaleHoldArchive({ facts, reasons, tips, liveShaByName: liveOf(tips), nowMs: NOW, claimedTaskIds: new Set() });
   assert.deepEqual(named.map((c) => [c.name, c.reason]), [
     ["run-W1-T1-1", "credited_sibling_stale"],
     ["run-W1-T3-3", "orphan_unshipped_stale"],
@@ -43,9 +45,9 @@ test("a held run branch is named only once it is stale for its kind, with every 
   assert.equal(named[0]!.sha, "sha-8");
   assert.ok(STALE_CREDITED_HOLD_MS === 7 * DAY && STALE_UNSHIPPED_HOLD_MS === 14 * DAY);
   // A live dispatch claim keeps its task's branch, and an unread claim list names nothing.
-  assert.deepEqual(planStaleHoldArchive({ facts, reasons, tips, nowMs: NOW, claimedTaskIds: new Set(["W1-T1"]) })
+  assert.deepEqual(planStaleHoldArchive({ facts, reasons, tips, liveShaByName: liveOf(tips), nowMs: NOW, claimedTaskIds: new Set(["W1-T1"]) })
     .map((c) => c.name), ["run-W1-T3-3"]);
-  assert.deepEqual(planStaleHoldArchive({ facts, reasons, tips, nowMs: NOW, claimedTaskIds: undefined }), []);
+  assert.deepEqual(planStaleHoldArchive({ facts, reasons, tips, liveShaByName: liveOf(tips), nowMs: NOW, claimedTaskIds: undefined }), []);
 });
 
 test("a run branch the slug matcher never names is read from its run shape, credited or not", () => {
@@ -54,12 +56,23 @@ test("a run branch the slug matcher never names is read from its run shape, cred
   const reasons = { "run-W1-T20-1": "no_pr_ever", "run-W1-T21-2": "no_pr_ever", "run-W1-T22-3": "no_pr_ever" };
   const tips = new Map<string, RemoteBranchTip>([["run-W1-T20-1", tip(8)], ["run-W1-T21-2", tip(8)], ["run-W1-T22-3", tip(15)]]);
   const runTaskByBranch = new Map([["run-W1-T20-1", "W1-T20"], ["run-W1-T21-2", "W1-T21"], ["run-W1-T22-3", "W1-T22"]]);
-  const input = { facts, reasons, tips, nowMs: NOW, claimedTaskIds: new Set<string>(), runTaskByBranch };
+  const input = { facts, reasons, tips, liveShaByName: liveOf(tips), nowMs: NOW, claimedTaskIds: new Set<string>(), runTaskByBranch };
   assert.deepEqual(planStaleHoldArchive({ ...input, creditedTaskIds: new Set(["W1-T20"]) }).map((c) => [c.name, c.reason]), [
     ["run-W1-T20-1", "credited_sibling_stale"],
     ["run-W1-T22-3", "orphan_unshipped_stale"],
   ]);
   assert.deepEqual(planStaleHoldArchive(input), [], "an unread merge credit names no no_pr_ever branch");
+});
+
+test("a stale remote-tracking tip names nothing: the live remote sha must match the tip it ages", () => {
+  const facts = [held("run-W1-T30-1", "W1-T30"), held("run-W1-T31-2", "W1-T31")];
+  const reasons = { "run-W1-T30-1": "named_task_open", "run-W1-T31-2": "named_task_open" };
+  const tips = new Map<string, RemoteBranchTip>([["run-W1-T30-1", tip(30)], ["run-W1-T31-2", tip(30)]]);
+  // The remote moved run-W1-T30-1 past the local tip, and run-W1-T31-2 is gone from the live listing.
+  const liveShaByName = new Map([["run-W1-T30-1", "pushed-since"]]);
+  assert.deepEqual(planStaleHoldArchive({ facts, reasons, tips, liveShaByName, nowMs: NOW, claimedTaskIds: new Set() }), []);
+  assert.deepEqual(planStaleHoldArchive({ facts, reasons, tips, liveShaByName: liveOf(tips), nowMs: NOW, claimedTaskIds: new Set() })
+    .map((c) => c.name), ["run-W1-T30-1", "run-W1-T31-2"], "the same branches are named once the live sha agrees");
 });
 
 test("the dispatch-claim listing yields the claimed task ids", () => {
@@ -74,13 +87,13 @@ test("a reap pass ledgers the stale held run branch in shadow and deletes nothin
   const { join } = await import("node:path");
   const { reapBranchesCommand } = await import("#src/run-task.js");
   const { RMD_TMP_PREFIX } = await import("#src/lib/tmp.js");
-  const pass = (claims: string) => {
+  const pass = (claims: string, liveSha = "b2b2b2") => {
     const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reap-hygiene-`));
     const ledgerPath = join(dir, "ledger.ndjson");
     const calls: string[][] = [];
     const exec = (cmd: string, args: string[]): string => {
       calls.push([cmd, ...args]);
-      if (args[0] === "ls-remote") return args.includes("refs/rmd-dispatch/*") ? claims : "a1\trefs/heads/main\nb2\trefs/heads/run-W1-T5-1700000000000\n";
+      if (args[0] === "ls-remote") return args.includes("refs/rmd-dispatch/*") ? claims : `a1\trefs/heads/main\n${liveSha}\trefs/heads/run-W1-T5-1700000000000\n`;
       if (args[0] === "for-each-ref") return args.includes("--merged=origin/main") ? "origin/main\n" : `origin/main\ta1\t1\norigin/run-W1-T5-1700000000000\tb2b2b2\t${Math.floor((NOW - 30 * DAY) / 1000)}\n`;
       if (args[0] === "merge-base") throw new Error("not an ancestor");
       if (args[0] === "rev-parse") return "b2b2b2\n";
@@ -105,6 +118,7 @@ test("a reap pass ledgers the stale held run branch in shadow and deletes nothin
   assert.deepEqual(row.candidates, [{ name: "run-W1-T5-1700000000000", sha: "b2b2b2", reason: "orphan_unshipped_stale", age_days: 30 }]);
   assert.ok(!calls.some((c) => c.includes("--delete") || c.includes("update-ref")), "shadow deletes and archives nothing");
   assert.equal(pass("ff\trefs/rmd-dispatch/W1-T5\n").row?.would_reap, 0, "a live dispatch claim keeps the branch");
+  assert.equal(pass("", "c3c3c3").row?.would_reap, 0, "a live remote sha past the local tracking tip names nothing");
 });
 
 test("an unreadable dispatch-claim listing names nothing and ledgers why", async () => {
