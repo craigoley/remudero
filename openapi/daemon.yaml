@@ -15121,6 +15121,17 @@ components:
               sourceImported: {type: boolean, enum: [true]}
         canReply: {type: boolean}
         canStartConversation: {type: boolean, description: True only for a current native source with positively observed absent history and unambiguous native identity. Starting is an explicit bound write; reads never create messages.}
+        activeQuestion:
+          type: object
+          description: A current native intake question bound to this preserved conversation. Its canonical feedback record must still be grilling. May enable a reply after the original escalation closes; conveys no executor authority.
+          required: [issueUrl, feedbackId, revision, seq, observedAt, updatedAt]
+          properties:
+            issueUrl: {type: string}
+            feedbackId: {type: string}
+            revision: {type: string, pattern: '^[a-f0-9]{64}$'}
+            seq: {type: integer, minimum: 1}
+            observedAt: {type: string, format: date-time}
+            updatedAt: {type: string, format: date-time}
         initialMessage: {type: string, description: Verified original source text copied only when the operator explicitly starts this conversation. Earlier GitHub comments are not included.}
         recommendationReplies:
           type: object
@@ -22172,6 +22183,11 @@ paths:
     post:
       summary: Answer an ESCALATION in prose -- recorded as an input on its thread, never a command.
       description: >
+        Source-bound replies use one immutable native feedback submission identity. A duplicate
+        intent may recover delivery of its exact saved input without appending another answer.
+        Replies to verified intake follow-ups preserve the original thread and carry reply_to
+        for the exact current grilling feedback record. A closed original issue alone never
+        enables a reply. Legacy replies without a native delivery identity remain unverified.
         W1-T2496, W1-T4471 (src/lib/panel-actions.ts's `buildEscalationReplyRoute`). Write tier:
         LOW (W1-T404). Derives the escalation's thread id from the body, refuses (400) when no
         thread store is configured, the thread cannot be read, or it holds no prior message --

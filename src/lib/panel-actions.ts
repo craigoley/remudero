@@ -47,8 +47,9 @@ import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from ".
 import { deriveLastPoll } from "./daemon-health.js";
 import { deriveThreadId, readThread, appendThreadMessage, appendThreadReplyOnce, type ThreadIdentity, type ThreadMessageExtra } from "./inbox-thread.js";
 import type { EscalationConversationReader } from "./escalation-conversation.js";
-import { captureFeedback, feedbackEntryRepoPath } from "./feedback.js";
-import { queueFeedbackRecord } from "./feedback-landing.js";
+import { captureFeedback, feedbackEntryRepoPath, setFeedbackStatus } from "./feedback.js";
+import { escalationReplySubmissionKey, readEscalationQuestionFeedback } from "./escalation-correspondence.js";
+import { queueFeedbackRecord, readQueuedFeedbackRecords } from "./feedback-landing.js";
 import { applyOperatorMergeHold, type OperatorMergeHoldAction } from "./operator-merge-hold.js";
 import {
   interpretReply,
@@ -861,6 +862,29 @@ function validateEscalationReply(body: unknown): { error: string } | EscalationR
   };
 }
 
+async function captureBoundEscalationFeedback(root: string, threadId: string, input: EscalationReplyInput,
+  question?: NonNullable<ThreadMessageExtra["escalation"]>["question"]) {
+  const submissionKey = escalationReplySubmissionKey(threadId, input.intentId!, input.issueUrl!);
+  const id = `fb-escalation-${createHash("sha256").update(submissionKey).digest("hex")}`;
+  const parentInQueue = question ? readQueuedFeedbackRecords(root).get(feedbackEntryRepoPath(question.feedbackId)) : undefined;
+  if (parentInQueue && !["new", "grilling"].includes(parentInQueue.status) && !(parentInQueue.status === "answered" && parentInQueue.answered_by === id))
+    throw new Error("The current feedback question already has another answer.");
+  const parent = question && parentInQueue?.status !== "answered"
+    ? await readEscalationQuestionFeedback(/^https:\/\/github\.com\/([^/]+\/[^/]+)\//.exec(input.issueUrl!)![1]!, question.feedbackId, true) : undefined;
+  if (parent && (parent.status !== "grilling" || parent.thread_id !== threadId)) throw new Error("The current feedback question is no longer awaiting this answer.");
+  const entry = captureFeedback(root, { id, raw: input.text, origin: "ui", threadId, submissionKey,
+    ...(question ? { replyTo: question.feedbackId } : {}), land: { stateRoot: root } });
+  if (entry.submission_key !== submissionKey || entry.thread_id !== threadId || entry.raw !== input.text.trim() || (entry.reply_to ?? undefined) !== question?.feedbackId)
+    throw new Error("The saved feedback identity belongs to different input.");
+  const rel = feedbackEntryRepoPath(entry.id), queued = readQueuedFeedbackRecords(root).get(rel);
+  if (queued && (queued.submission_key !== submissionKey || queued.thread_id !== threadId || queued.raw !== input.text.trim()))
+    throw new Error("The queued feedback identity belongs to different input.");
+  const staged = queued ? { landed: false, files: [], queued: [rel] } : queueFeedbackRecord(root, rel, root);
+  if (!staged.queued && staged.error) throw new Error(staged.error);
+  if (question && parent) setFeedbackStatus(root, question.feedbackId, "answered", { answeredBy: entry.id, canonicalBase: parent, land: { stateRoot: root } });
+  return { entry, staged };
+}
+
 /** POST /v1/escalation/reply (W1-T2496, W1-T4471) — a human answering an ESCALATION in prose.
  *  Derives the same {@link ThreadIdentity} escalate.ts keys this by; a thread with no prior
  *  message, or an unset `threadStorePath`, refuses (400) rather than filing unattached feedback.
@@ -904,13 +928,24 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         return;
       }
       let opening: { body: string; extra: ThreadMessageExtra } | undefined;
+      let currentQuestion: NonNullable<ThreadMessageExtra["escalation"]>["question"];
       if (input.intentId) {
         const prior = existing.messages.find(message => message.role === "reply" && message.extra?.replyId === input.intentId);
         if (prior) {
           const binding = prior.extra?.escalation;
           if (prior.body !== input.text || binding?.issueUrl !== input.issueUrl
             || binding?.revision !== input.expectedRevision || binding?.recommendationResponse !== input.recommendationResponse) return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to a different answer or source. Your draft was not sent." });
+          // The durable answer is already authenticated. Recover only its original input,
+          // using the same native feedback identity; never append or interpret it again.
+          let deliveryDetail: string | undefined;
+          try { if (binding?.inputVersion === 1) await captureBoundEscalationFeedback(deps.root, threadId, input, binding.question); }
+          catch (error) {
+            deliveryDetail = "Your answer is saved. Delivery to the fleet remains unverified.";
+            ledgerPanelAction(deps, "panel.escalation_input_unverified", input.taskId, bearerTokenId(req),
+              { thread_id: threadId, intent_id: input.intentId, reason: String((error as Error)?.message ?? error).slice(0, 1000) });
+          }
           return void sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, duplicate: true,
+            ...(deliveryDetail ? { detail: deliveryDetail } : {}),
             saved: { intentId: input.intentId, seq: prior.seq, text: prior.body }, inputDelivery: "unverified", work: "not_observed" });
         }
         const current = await deps.readEscalationConversation?.(input.issueUrl!, true);
@@ -924,15 +959,32 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         if (input.startConversation && current.conversation.canStartConversation && current.conversation.initialMessage) {
           opening = { body: current.conversation.initialMessage, extra: { sourceImport: { issueUrl: input.issueUrl!, revision: input.expectedRevision! } } };
         }
+        currentQuestion = current.conversation.activeQuestion;
+        if (currentQuestion) {
+          const pendingAnswer = readQueuedFeedbackRecords(deps.root).get(feedbackEntryRepoPath(currentQuestion.feedbackId));
+          if (pendingAnswer && !["new", "grilling"].includes(pendingAnswer.status)) return void sendJson(res, 409,
+            { error: "source_changed", detail: "The agent's question already has an answer. Your draft was retained." });
+        }
       }
       const saved = input.intentId
-        ? appendThreadReplyOnce(identity, input.text, input.intentId, { threadStorePath: deps.threadStorePath }, { escalation: { issueUrl: input.issueUrl!, revision: input.expectedRevision!,
-          ...(input.recommendationResponse ? { recommendationResponse: input.recommendationResponse } : {}) } }, opening)
+        ? appendThreadReplyOnce(identity, input.text, input.intentId, { threadStorePath: deps.threadStorePath }, { escalation: { issueUrl: input.issueUrl!, revision: input.expectedRevision!, inputVersion: 1,
+          ...(input.recommendationResponse ? { recommendationResponse: input.recommendationResponse } : {}),
+          ...(currentQuestion ? { question: { issueUrl: currentQuestion.issueUrl, feedbackId: currentQuestion.feedbackId, revision: currentQuestion.revision, seq: currentQuestion.seq } } : {}) } }, opening)
         : undefined;
       if (!saved) appendThreadMessage(identity, "reply", input.text, { threadStorePath: deps.threadStorePath });
       if (saved?.kind === "conflict") return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to different text. Your draft was not sent." });
-      if (saved?.kind === "existing") return void sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, duplicate: true,
-        saved: { intentId: input.intentId, seq: saved.seq, text: input.text }, inputDelivery: "unverified", work: "not_observed" });
+      if (saved?.kind === "existing") {
+        let deliveryDetail: string | undefined;
+        try { await captureBoundEscalationFeedback(deps.root, threadId, input, currentQuestion); }
+        catch (error) {
+          deliveryDetail = "Your answer is saved. Delivery to the fleet remains unverified.";
+          ledgerPanelAction(deps, "panel.escalation_input_unverified", input.taskId, bearerTokenId(req),
+            { thread_id: threadId, intent_id: input.intentId, reason: String((error as Error)?.message ?? error).slice(0, 1000) });
+        }
+        return void sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, duplicate: true,
+          ...(deliveryDetail ? { detail: deliveryDetail } : {}),
+          saved: { intentId: input.intentId, seq: saved.seq, text: input.text }, inputDelivery: "unverified", work: "not_observed" });
+      }
       const savedReceipt = saved ? { intentId: input.intentId!, seq: saved.seq, text: input.text } : undefined;
       // Once the answer is durable, a later capture failure is partial delivery, never a reason to append again.
       try {
@@ -955,8 +1007,9 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
 
       const origin = bearerTokenId(req);
       // W1-T5525: serve mounts this route on config.root, the state root the daemon's landing sweep drains.
-      const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId, land: { stateRoot: deps.root } });
-      const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.root);
+      const recovered = input.intentId ? await captureBoundEscalationFeedback(deps.root, threadId, input, currentQuestion) : undefined;
+      const entry = recovered?.entry ?? captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId, land: { stateRoot: deps.root } });
+      const staged = recovered?.staged ?? queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.root);
       // W1-T4471: the store `operatorVerdictEvidence` (lib/sweep.ts) reads; `input.taskId` is required above.
       const recordedToQuestionStore = appendQuestionAnswer(deps.root, {
         ts: (deps.clock ?? systemClock).iso(),

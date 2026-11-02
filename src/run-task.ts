@@ -631,6 +631,7 @@ import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, spoolingStarvationAlert } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
 import { testPlaceOutcome } from "./lib/test-placement.js";
+import { recordEscalationIntakeOutcome } from "./lib/escalation-correspondence.js";
 import { readPlanBase } from "./lib/plan-base-reader.js";
 import { bakedClosureCatalogDetails, bakedClosureCatalogFiles } from "./lib/baked-closure-catalog.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
@@ -34682,6 +34683,19 @@ async function triageCommandLocked(
     }
     log("pr.opened", { pr_url: prUrl, plan_only: true, action: decision.action });
     say(`triage PR (plan-only, ${decision.action}): ${prUrl}`);
+    // Publication ownership, plan-only scope and feedback provenance were verified above.
+    // Acknowledging intake ends the ask; it does not claim CI, merge or work completion.
+    try {
+      const outcome = decision.action === "grill"
+        ? grillIssueUrl ? { action: "grill" as const, publicationPr: prUrl, detail: decision.detail, questionIssueUrl: grillIssueUrl }
+          : { action: "error" as const, reason: "The intake question has no verified publication." }
+        : { action: decision.action, publicationPr: prUrl, detail: decision.detail };
+      const response = recordEscalationIntakeOutcome(entry, outcome,
+        { threadStorePath: inboxThreadStorePath(config.root), repository: `${owner}/${repo}` });
+      log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
+    } catch (error) {
+      log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });
+    }
 
     // Gate: ci green -> post remudero-review -> arm auto-merge (identical shape to every other
     // Architect skill's output — "PROPOSES anything, MERGES nothing" until the gate clears it).

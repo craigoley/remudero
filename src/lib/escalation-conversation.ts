@@ -6,6 +6,8 @@ import { ghTextAsync } from "./github-transport.js";
 import { deriveThreadId, readAllThreads, type ThreadIdentity, type ThreadMessage } from "./inbox-thread.js";
 import type { Route } from "./service.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { escalationReplySubmissionKey, readEscalationQuestionFeedback } from "./escalation-correspondence.js";
+import type { FeedbackEntry } from "./feedback.js";
 
 const MAX_SOURCE_BYTES = 65_536;
 const MAX_HISTORY_MESSAGES = 100;
@@ -43,6 +45,7 @@ export interface EscalationConversation {
   canStartConversation: boolean;
   initialMessage?: string;
   recommendationReplies?: { accept?: string; decline: string };
+  activeQuestion?: { issueUrl: string; feedbackId: string; revision: string; seq: number; observedAt: string; updatedAt: string };
   replyUnavailableReason?: string;
   details: string;
 }
@@ -64,11 +67,11 @@ export function escalationIssueLocation(value: string): { repository: string; nu
 }
 
 /** Uses the native paced transport, including its sentinel, broker and process timeout. */
-export async function readEscalationIssueSource(issueUrl: string): Promise<unknown> {
+export async function readEscalationIssueSource(issueUrl: string, fresh = false): Promise<unknown> {
   const location = escalationIssueLocation(issueUrl);
   if (!location) throw new Error("A canonical escalation issue is required.");
   return JSON.parse(await ghTextAsync(["api", `repos/${location.repository}/issues/${location.number}`], {
-    maxBuffer: MAX_SOURCE_BYTES * 2, timeout: 10_000,
+    maxBuffer: MAX_SOURCE_BYTES * 2, timeout: 10_000, ...(fresh ? { fresh: true } : {}),
   })) as unknown;
 }
 
@@ -142,45 +145,74 @@ function boundedMessages(messages: ThreadMessage[]): EscalationConversation["mes
 
 /** Per-service bounded cache. Revalidating a reply bypasses saved source, while concurrent reads coalesce. */
 export function createEscalationConversationReader(opts: {
-  repository?: string; threadStorePath?: string; ledgerPath?: string; clock?: Clock; readIssue?: (issueUrl: string) => Promise<unknown>;
+  repository?: string; threadStorePath?: string; ledgerPath?: string; clock?: Clock; readIssue?: (issueUrl: string, fresh?: boolean) => Promise<unknown>;
+  readFeedback?: (repository: string, feedbackId: string, fresh?: boolean) => Promise<FeedbackEntry>;
   knownIssue?: (issueUrl: string, identity: ThreadIdentity) => boolean;
 }): EscalationConversationReader {
   const clock = opts.clock ?? systemClock;
-  const cache = new Map<string, { source: EscalationIssueSource; observedAt: string; at: number }>();
-  const pending = new Map<string, Promise<unknown>>();
+  const cache = new Map<string, { source: EscalationIssueSource; observedAt: string; at: number; generation: number }>();
+  const pending = new Map<string, Promise<{ value: unknown; generation: number }>>();
+  let nextGeneration = 0;
   const nativeReceipts = new Set<string>();
+  const feedbackCache = new Map<string, { entry: FeedbackEntry; at: number; generation: number }>();
+  const loadSource = async (issueUrl: string, fresh: boolean) => {
+    const saved = cache.get(issueUrl);
+    const pendingKey = `${fresh ? "fresh:" : ""}${issueUrl}`;
+    let evidence = saved;
+    let stale = false;
+    if (fresh || !saved || clock.now() - saved.at >= SOURCE_CACHE_MS || clock.now() < saved.at) {
+      if (!pending.has(pendingKey) && pending.size >= MAX_CACHED_ISSUES) {
+        return { state: "unavailable" as const, reason: "source_unavailable" as const, detail: "Escalation reads are busy. No current conversation was confirmed." };
+      }
+      let reading = pending.get(pendingKey);
+      if (!reading) {
+        const generation = ++nextGeneration;
+        reading = Promise.resolve().then(() => (opts.readIssue ?? readEscalationIssueSource)(issueUrl, fresh)).then(value => ({ value, generation }));
+        pending.set(pendingKey, reading);
+      }
+      try {
+        const result = await reading, source = sourceOf(result.value, issueUrl);
+        if (!source) return { state: "unavailable" as const, reason: "invalid_source" as const, detail: "The escalation source could not be verified." };
+        evidence = { source, observedAt: clock.iso(), at: clock.now(), generation: result.generation };
+        if (cache.size >= MAX_CACHED_ISSUES && !cache.has(issueUrl)) cache.delete(cache.keys().next().value!);
+        if ((cache.get(issueUrl)?.generation ?? 0) <= result.generation) cache.set(issueUrl, evidence);
+      } catch {
+        if (!saved || fresh) return { state: "unavailable" as const, reason: "source_unavailable" as const, detail: "The current escalation source could not be read. No reply was sent." };
+        stale = true;
+      } finally {
+        if (pending.get(pendingKey) === reading) pending.delete(pendingKey);
+      }
+    }
+    if (!evidence) return { state: "unavailable" as const, reason: "source_unavailable" as const, detail: "No escalation source is available." };
+    return { state: "loaded" as const, evidence, stale };
+  };
+  const loadFeedback = async (repository: string, feedbackId: string, fresh: boolean): Promise<FeedbackEntry> => {
+    const key = `feedback:${repository}:${feedbackId}`, saved = feedbackCache.get(key);
+    const pendingKey = `${fresh ? "fresh:" : ""}${key}`;
+    if (!fresh && saved && clock.now() >= saved.at && clock.now() - saved.at < SOURCE_CACHE_MS) return saved.entry;
+    let reading = pending.get(pendingKey);
+    if (!reading) {
+      if (pending.size >= MAX_CACHED_ISSUES) throw new Error("Native question reads are busy.");
+      const generation = ++nextGeneration;
+      reading = Promise.resolve().then(() => (opts.readFeedback ?? readEscalationQuestionFeedback)(repository, feedbackId, fresh)).then(value => ({ value, generation }));
+      pending.set(pendingKey, reading);
+    }
+    try {
+      const result = await reading, entry = result.value as FeedbackEntry;
+      if (feedbackCache.size >= MAX_CACHED_ISSUES && !feedbackCache.has(key)) feedbackCache.delete(feedbackCache.keys().next().value!);
+      if ((feedbackCache.get(key)?.generation ?? 0) <= result.generation) feedbackCache.set(key, { entry, at: clock.now(), generation: result.generation });
+      return entry;
+    } finally { if (pending.get(pendingKey) === reading) pending.delete(pendingKey); }
+  };
   return async (issueUrl, fresh = false) => {
     const location = escalationIssueLocation(issueUrl);
     if (!location) return { state: "unavailable", reason: "invalid_request", detail: "Choose a canonical GitHub escalation issue." };
     if (!opts.repository || location.repository.toLowerCase() !== opts.repository.toLowerCase()) {
       return { state: "unavailable", reason: "wrong_repository", detail: "This escalation does not belong to the selected repository." };
     }
-    const saved = cache.get(issueUrl);
-    let evidence = saved;
-    let stale = false;
-    if (fresh || !saved || clock.now() - saved.at >= SOURCE_CACHE_MS || clock.now() < saved.at) {
-      if (!pending.has(issueUrl) && pending.size >= MAX_CACHED_ISSUES) {
-        return { state: "unavailable", reason: "source_unavailable", detail: "Escalation reads are busy. No current conversation was confirmed." };
-      }
-      let reading = pending.get(issueUrl);
-      if (!reading) {
-        reading = Promise.resolve().then(() => (opts.readIssue ?? readEscalationIssueSource)(issueUrl));
-        pending.set(issueUrl, reading);
-      }
-      try {
-        const source = sourceOf(await reading, issueUrl);
-        if (!source) return { state: "unavailable", reason: "invalid_source", detail: "The escalation source could not be verified." };
-        evidence = { source, observedAt: clock.iso(), at: clock.now() };
-        if (cache.size >= MAX_CACHED_ISSUES && !cache.has(issueUrl)) cache.delete(cache.keys().next().value!);
-        cache.set(issueUrl, evidence);
-      } catch {
-        if (!saved || fresh) return { state: "unavailable", reason: "source_unavailable", detail: "The current escalation source could not be read. No reply was sent." };
-        stale = true;
-      } finally {
-        if (pending.get(issueUrl) === reading) pending.delete(issueUrl);
-      }
-    }
-    if (!evidence) return { state: "unavailable", reason: "source_unavailable", detail: "No escalation source is available." };
+    const loaded = await loadSource(issueUrl, fresh);
+    if (loaded.state === "unavailable") return loaded;
+    const { evidence, stale } = loaded;
     const source = evidence.source;
     const parsed = parseEscalationConversationSource(source);
     if (!parsed) return { state: "unavailable", reason: "invalid_source", detail: "This issue has no supported native escalation identity. It cannot be used as a reply destination." };
@@ -233,12 +265,39 @@ export function createEscalationConversationReader(opts: {
     nativeReceipts.add(receiptKey);
     const ordered = history === "verified" ? [...selected![1]].sort((a, b) => a.seq - b.seq) : [];
     const last = ordered.at(-1);
+    let activeQuestion: EscalationConversation["activeQuestion"];
+    let questionFailure: "invalid" | "unavailable" | undefined;
+    const intake = last?.role === "escalation" && last.extra?.question === true ? last.extra.intake : undefined;
+    if (intake?.questionIssueUrl) {
+      const parent = ordered.find(message => message.role === "reply" && message.seq === intake.replySeq && message.extra?.replyId === intake.replyId);
+      const questionLocation = escalationIssueLocation(intake.questionIssueUrl);
+      if (!parent?.extra?.escalation || questionLocation?.repository.toLowerCase() !== location.repository.toLowerCase()) questionFailure = "invalid";
+      else {
+        try {
+          const questionSource = await loadSource(intake.questionIssueUrl, fresh);
+          const feedback = await loadFeedback(location.repository, intake.feedbackId, fresh);
+          const question = questionSource.state === "loaded" ? parseEscalationConversationSource(questionSource.evidence.source) : undefined;
+          if (questionSource.state !== "loaded" || questionSource.stale) questionFailure = "unavailable";
+          else if (questionSource.evidence.source.state !== "open" || question?.identity.class !== "GRILL"
+            || question.identity.taskId !== `TRIAGE-${intake.feedbackId}` || feedback.id !== intake.feedbackId
+            || feedback.status !== "grilling" || feedback.thread_id !== threadId || feedback.raw !== parent.body.trim()
+            || feedback.submission_key !== escalationReplySubmissionKey(threadId, intake.replyId, parent.extra.escalation.issueUrl)) questionFailure = "invalid";
+          else activeQuestion = { issueUrl: intake.questionIssueUrl, feedbackId: intake.feedbackId, seq: last!.seq,
+            revision: digest([questionSource.evidence.source, feedback.id, feedback.status, feedback.submission_key]),
+            observedAt: questionSource.evidence.observedAt, updatedAt: questionSource.evidence.source.updated_at };
+        } catch {
+          // A failed canonical source read differs from a source that positively contradicts
+          // this question. Both preserve history and withhold a current reply destination.
+          questionFailure = "unavailable";
+        }
+      }
+    }
     // Only an explicit agent message can end correspondence. Saving an answer or an
     // unconfigured interpreter's "understood" does not establish that the agent needs no input.
-    const attention = !last ? "unknown" : last.role === "reply" ? "waiting_for_agent"
+    const attention = questionFailure ? "unknown" : !last ? "unknown" : last.role === "reply" ? "waiting_for_agent"
       : last.extra?.question === false && ordered.some(message => message.role === "reply") ? "archived"
-        : source.state === "closed" ? "unknown" : "needs_input";
-    const canReply = !stale && source.state === "open" && history === "verified";
+        : activeQuestion ? "needs_input" : source.state === "closed" ? "unknown" : "needs_input";
+    const canReply = !stale && !questionFailure && (source.state === "open" || Boolean(activeQuestion)) && history === "verified";
     // Starting is a separate, explicit write. Unknown/corrupt history never qualifies,
     // and generated summaries cannot supply an unstored native PR referent.
     const canStartConversation = !stale && source.state === "open" && history === "absent"
@@ -252,13 +311,17 @@ export function createEscalationConversationReader(opts: {
     } : undefined;
     return { state: "served", conversation: {
       version: 1, issueUrl, repository: location.repository, identity, threadId,
-      revision: digest([sourceRevision, threadId, messages ?? history, attention, canStartConversation, recommendationReplies ?? null]), headline: parsed.headline,
+      revision: digest([sourceRevision, threadId, messages ?? history, attention, canStartConversation, recommendationReplies ?? null,
+        activeQuestion ? [activeQuestion.issueUrl, activeQuestion.feedbackId, activeQuestion.revision, activeQuestion.seq] : null]), headline: parsed.headline,
       whatHappened: parsed.detail, recommendation: parsed.recommendation, options: parsed.options,
       source: { state: stale ? "stale" : "current", observedAt: evidence.observedAt, updatedAt: source.updated_at, revision: sourceRevision },
       history, attention, messages: messages ?? [], canReply, canStartConversation,
+      ...(activeQuestion ? { activeQuestion } : {}),
       ...(canStartConversation ? { initialMessage: `${parsed.headline}\n\n${parsed.detail}` } : {}),
       ...(recommendationReplies ? { recommendationReplies } : {}),
-      ...(!canReply && !canStartConversation ? { replyUnavailableReason: stale ? "The saved source is stale. Refresh before replying."
+      ...(!canReply && !canStartConversation ? { replyUnavailableReason: questionFailure === "invalid" ? "The current question no longer matches this conversation. Refresh before answering."
+        : questionFailure === "unavailable" ? "The current agent question could not be verified. Earlier messages remain readable."
+        : stale ? "The saved source is stale. Refresh before replying."
         : source.state === "closed" ? "This escalation is closed. Earlier messages remain readable."
           : "The complete saved discussion could not be verified. No reply destination is confirmed." } : {}),
       details: source.body,

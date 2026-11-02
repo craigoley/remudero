@@ -6512,6 +6512,15 @@ export interface components {
       canReply: boolean;
       /** True only for a current native source with positively observed absent history and unambiguous native identity. Starting is an explicit bound write; reads never create messages. */
       canStartConversation: boolean;
+      /** A current native intake question bound to this preserved conversation. Its canonical feedback record must still be grilling. May enable a reply after the original escalation closes; conveys no executor authority. */
+      activeQuestion?: {
+        issueUrl: string;
+        feedbackId: string;
+        revision: string;
+        seq: number;
+        observedAt: string;
+        updatedAt: string;
+      };
       /** Verified original source text copied only when the operator explicitly starts this conversation. Earlier GitHub comments are not included. */
       initialMessage?: string;
       /** Native acceptance or decline text for recording an operator answer through the bound reply route. These are input, never task approval or repair execution. */
