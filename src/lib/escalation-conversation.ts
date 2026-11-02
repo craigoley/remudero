@@ -4,7 +4,6 @@ import { dirname } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { ghTextAsync } from "./github-transport.js";
 import { deriveThreadId, readAllThreads, type ThreadIdentity, type ThreadMessage } from "./inbox-thread.js";
-import { sendJson } from "./panel-actions.js";
 import type { Route } from "./service.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 
@@ -183,7 +182,9 @@ export function createEscalationConversationReader(opts: {
     if (!parsed) return { state: "unavailable", reason: "invalid_source", detail: "This issue has no supported native escalation identity. It cannot be used as a reply destination." };
     const receiptKey = `${issueUrl}|${parsed.identity.taskId}|${parsed.identity.class}`;
     let known = nativeReceipts.has(receiptKey);
-    try { known ||= opts.knownIssue?.(issueUrl, parsed.identity) === true; } catch { /* Unreadable provenance grants nothing. */ }
+    let provenanceFailure: { reason: "board_unavailable" | "ledger_unavailable" } | undefined;
+    try { known ||= opts.knownIssue?.(issueUrl, parsed.identity) === true; }
+    catch { provenanceFailure = { reason: "board_unavailable" }; }
     if (!known && opts.ledgerPath) {
       try {
         // A bounded positive search proves native origin. A negative or incomplete search proves nothing.
@@ -193,11 +194,11 @@ export function createEscalationConversationReader(opts: {
           onRecord: row => { if (row.issue_url === issueUrl && row.task_id === parsed.identity.taskId && row.class === parsed.identity.class) known = true; },
           satisfied: () => known,
         });
-      } catch { known = false; }
+      } catch { known = false; provenanceFailure = { reason: "ledger_unavailable" }; }
     }
     let stored: ReturnType<typeof readAllThreads> | undefined;
     try { stored = opts.threadStorePath ? readAllThreads({ threadStorePath: opts.threadStorePath }) : undefined; }
-    catch { /* Malformed saved history is unavailable, never an empty conversation. */ }
+    catch { stored = { status: "unresolved", reason: "The saved discussion could not be read." }; }
     const prefix = `thread:${parsed.identity.taskId}::${parsed.identity.class}::${parsed.identity.cause ?? "-"}::`;
     // Match the writer's saved summary/detail, rather than infer a PR from a generated decision summary.
     const candidates = stored?.status === "ok" ? [...stored.threads].filter(([id, messages]) => typeof id === "string"
@@ -221,7 +222,9 @@ export function createEscalationConversationReader(opts: {
     known ||= history === "verified" && selected![1].some(message => message.role === "reply"
       && typeof message.extra?.replyId === "string" && /^[A-Za-z0-9._:-]{8,128}$/.test(message.extra.replyId)
       && message.extra.escalation?.issueUrl === issueUrl && /^[a-f0-9]{64}$/.test(message.extra.escalation.revision));
-    if (!known) return { state: "unavailable", reason: "invalid_source", detail: "Remudero's own record of this escalation could not be verified. No reply destination is confirmed." };
+    if (!known) return { state: "unavailable", reason: provenanceFailure ? "source_unavailable" : "invalid_source", detail: provenanceFailure
+      ? "Native escalation evidence is unavailable. No reply destination is confirmed."
+      : "Remudero's own record of this escalation could not be verified. No reply destination is confirmed." };
     if (nativeReceipts.size >= MAX_CACHED_ISSUES && !nativeReceipts.has(receiptKey)) nativeReceipts.delete(nativeReceipts.values().next().value!);
     nativeReceipts.add(receiptKey);
     const ordered = history === "verified" ? [...selected![1]].sort((a, b) => a.seq - b.seq) : [];
@@ -265,6 +268,7 @@ export function buildEscalationConversationRoute(read: EscalationConversationRea
     const result = await read(params.get("issueUrl") ?? "");
     const status = result.state === "served" ? 200 : result.reason === "invalid_request" ? 400
       : result.reason === "wrong_repository" ? 404 : result.reason === "invalid_source" ? 422 : 503;
-    sendJson(res, status, result);
+    res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(result));
   } };
 }
