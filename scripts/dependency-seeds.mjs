@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registerHooks } from 'node:module';
 // Standalone installs use Node's native type stripping, including the repository Clock port.
@@ -60,11 +60,152 @@ export function seedIsOpen(seed, uid = process.getuid?.(), exec = execFileSync, 
   catch (error) { if (error.status === 1 && !error.stdout?.length && !error.stderr?.length) return false; throw error; }
 }
 
+const OWNED_SCRATCH = '.rmd-owned-disposable.json';
+const SCRATCH_KINDS = ['coverage', 'v8', 'dependency', 'browser'];
+const pin = path => {
+  const st = lstatSync(path);
+  if (!st.isDirectory() || st.isSymbolicLink() || realpathSync(path) !== path ||
+      st.uid !== process.getuid?.() || (st.mode & 0o077)) throw new Error('scratch is not a private owned directory');
+  return { dev: st.dev, ino: st.ino, uid: st.uid };
+};
+const samePin = (a, b) => a.dev === b.dev && a.ino === b.ino && a.uid === b.uid;
+const namespace = () => process.platform === 'linux'
+  ? `${readlinkSync('/proc/self/ns/mnt')}:${readlinkSync('/proc/self/ns/pid')}` : 'host';
+
+function durableJson(path, value) {
+  const fd = openSync(path, 'wx', 0o600);
+  try { writeFileSync(fd, JSON.stringify(value)); fsyncSync(fd); } finally { closeSync(fd); }
+  const dir = openSync(dirname(path), constants.O_RDONLY);
+  try { fsyncSync(dir); } finally { closeSync(dir); }
+}
+
+function privateJson(path) {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.uid !== process.getuid?.() || st.nlink !== 1 || (st.mode & 0o077) || st.size > 16384)
+      throw new Error('unverified private receipt or ownership record');
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd), named = lstatSync(path);
+    if ([after, named].some(s => !samePin(s, st) || s.size !== st.size || s.mtimeMs !== st.mtimeMs || s.ctimeMs !== st.ctimeMs))
+      throw new Error('receipt or ownership record changed');
+    fsyncSync(fd);
+    return { value: JSON.parse(bytes.toString('utf8')), sha256: createHash('sha256').update(bytes).digest('hex') };
+  } finally { closeSync(fd); }
+}
+
+/** Only newly allocated scratch is eligible. Existing producer trees never acquire deletion authority. */
+export function allocateOwnedScratch(path, { owner, kind, consumers } = {}) {
+  if (!isAbsolute(path) || resolve(path) !== path || !/^[a-zA-Z0-9_-]{1,100}$/.test(owner ?? '') ||
+      !SCRATCH_KINDS.includes(kind) || !Array.isArray(consumers) || consumers.length < 1 || consumers.length > 64 ||
+      consumers.some(pid => !Number.isSafeInteger(pid) || pid <= 1)) throw new Error('invalid owner scratch allocation');
+  pin(dirname(path));
+  // A seed or checkout is never a scratch parent, including a path nested inside one.
+  for (let p = dirname(path); ; p = dirname(p)) {
+    for (const name of ['.git', '.rmd-dependency-seed-root.json', '.rmd-dependency-seed.json']) {
+      try {
+        const st = lstatSync(join(p, name));
+        if (name === '.git' && st.isDirectory()) lstatSync(join(p, name, 'HEAD'));
+        throw new Error('protected scratch ancestor');
+      }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    if (p === dirname(p)) break;
+  }
+  mkdirSync(path, { mode: 0o700 });
+  const payload = join(path, 'payload'); mkdirSync(payload, { mode: 0o700 });
+  const record = { version: 1, owner, kind, consumers, namespace: namespace(), root: pin(path), payload: pin(payload) };
+  durableJson(join(path, OWNED_SCRATCH), record);
+  return { scratch: path, payload, owner, kind, scratchRoot: { path: payload, ...record.payload } };
+}
+
+/** A producer attests closure/publication; the kernel and open-file scan independently veto activity. */
+export function cleanupOwnedScratch(path, { owner, receipt, apply = false, isOpen = seedIsOpen } = {}) {
+  if (!isAbsolute(path) || resolve(path) !== path) throw new Error('scratch path must be absolute and canonical');
+  const root = pin(path), record = privateJson(join(path, OWNED_SCRATCH)).value, payload = join(path, 'payload');
+  if (record.version !== 1 || record.owner !== owner || !samePin(root, record.root ?? {}) ||
+      record.namespace !== namespace() || !SCRATCH_KINDS.includes(record.kind)) throw new Error('scratch owner or identity mismatch');
+  if (!samePin(pin(payload), record.payload ?? {})) throw new Error('scratch payload identity changed');
+  const cwd = realpathSync(process.cwd());
+  if (cwd === payload || cwd.startsWith(payload + sep)) throw new Error('protected current working directory');
+  if (!isAbsolute(receipt ?? '') || realpathSync(receipt) !== receipt || receipt.startsWith(path + sep))
+    throw new Error('durable receipt must be outside scratch');
+  const evidence = privateJson(receipt), r = evidence.value;
+  if (r.version !== 1 || r.owner !== owner || r.scratch !== path || r.completed !== true || r.published !== true ||
+      r.disposable !== true || r.exclusive !== true) throw new Error('receipt must attest completed exclusive disposable work and published evidence');
+  const receiptDir = openSync(dirname(receipt), constants.O_RDONLY);
+  try { fsyncSync(receiptDir); } finally { closeSync(receiptDir); }
+  if (!Array.isArray(record.consumers) || !record.consumers.length || record.consumers.length > 64 ||
+      record.consumers.some(pid => !Number.isSafeInteger(pid) || pid <= 1)) throw new Error('invalid consumer ownership record');
+  for (const pid of record.consumers) {
+    try { process.kill(pid, 0); return { action: 'keep', reason: 'consumer still active' }; }
+    catch (error) { if (error.code !== 'ESRCH') return { action: 'keep', reason: `consumer unverified: ${error.message}` }; }
+  }
+  if (process.platform === 'linux') {
+    const mounted = readFileSync('/proc/self/mountinfo', 'utf8').trim().split('\n').some(line => {
+      const mount = line.split(' ')[4]?.replace(/\\([0-7]{3})/g, (_, digits) => String.fromCharCode(parseInt(digits, 8)));
+      if (!mount) throw new Error('unverified mount inventory');
+      return mount === payload || mount.startsWith(payload + sep);
+    });
+    if (mounted) throw new Error('scratch contains borrowed mount');
+  }
+  // Bound traversal before deletion; linked, mounted, special or reserved content is never disposable.
+  let entries = 0, observedPathBytes = 0;
+  const inventory = [];
+  const walk = item => {
+    if (++entries > 10000) throw new Error('scratch inspection bound');
+    const st = lstatSync(item);
+    if (st.isSymbolicLink() || (st.isFile() && st.nlink !== 1)) throw new Error('scratch contains borrowed link');
+    if (st.dev !== root.dev || st.uid !== root.uid || (!st.isFile() && !st.isDirectory())) throw new Error('scratch contains unverified payload');
+    observedPathBytes += st.blocks * 512;
+    inventory.push([item, st]);
+    if (st.isDirectory()) {
+      const dir = opendirSync(item);
+      try {
+        for (let entry = dir.readSync(); entry; entry = dir.readSync()) {
+          const name = entry.name;
+          if (['.git', 'state', 'evidence', 'receipts', 'ready.json', '.rmd-dependency-seed-root.json', '.rmd-dependency-seed.json'].includes(name.toLowerCase()) || /(?:^|[.-])(lock|claim|reservation)s?$/i.test(name))
+            throw new Error('scratch contains protected material');
+          walk(join(item, name));
+        }
+      } finally { dir.closeSync(); }
+    }
+  };
+  walk(payload);
+  if (!apply) return { action: 'would-remove', reason: 'completed owner-disposable payload', observedPathBytes, entries };
+  try {
+    const open = isOpen(payload);
+    if (open !== false) return { action: 'keep', reason: open === true ? 'open file or lent payload' : 'open-file scan unverified' };
+  }
+  catch (error) { return { action: 'keep', reason: `open-file scan unverified: ${error.message}` }; }
+  // Record deletion intent durably before unlinking; partial failures never become confirmed cleanup.
+  const result = { action: 'remove', receipt, receiptSha256: evidence.sha256, payload, entries, observedPathBytes };
+  durableJson(join(path, 'cleanup-intent.json'), result);
+  for (const [item, before] of inventory) {
+    const current = lstatSync(item);
+    if (!samePin(current, before) || current.mtimeMs !== before.mtimeMs || current.ctimeMs !== before.ctimeMs || current.nlink !== before.nlink)
+      throw new Error('scratch changed before cleanup');
+  }
+  if (!samePin(pin(path), root) || !samePin(pin(payload), record.payload)) throw new Error('scratch identity changed before cleanup');
+  rmSync(payload, { recursive: true });
+  renameSync(join(path, 'cleanup-intent.json'), join(path, 'cleanup.json'));
+  const dir = openSync(path, constants.O_RDONLY);
+  try { fsyncSync(dir); } finally { closeSync(dir); }
+  return result;
+}
+
 export function main(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
-  const checkout = command === 'prime' ? args.shift() : undefined;
+  const checkout = ['prime', 'allocate', 'cleanup'].includes(command) ? args.shift() : undefined;
   const flag = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
   try {
+  if (command === 'allocate' || command === 'cleanup') {
+    if (!checkout) throw new Error('owner scratch path required');
+    const result = command === 'allocate'
+      ? allocateOwnedScratch(checkout, { owner: flag('--owner'), kind: flag('--kind'), consumers: flag('--consumers')?.split(',').map(Number) })
+      : cleanupOwnedScratch(checkout, { owner: flag('--owner'), receipt: flag('--receipt'), apply: args.includes('--apply') });
+    console.log(JSON.stringify(result)); return 0;
+  }
   const root = flag('--root') ?? configuredDependencySeedRoot() ?? defaultDependencySeedRoot();
   if (command === 'enable') {
     if (!isAbsolute(root)) throw new Error('seed root must be absolute');
@@ -80,7 +221,7 @@ export function main(argv = process.argv.slice(2)) {
     console.log(JSON.stringify(observeDependencySeedReuse(root), null, 2));
   } else if (command === 'sweep') {
     console.log(JSON.stringify(sweepDependencySeeds(root, { apply: args.includes('--apply'), isOpen: seedIsOpen }), null, 2));
-  } else throw new Error('usage: dependency-seeds.mjs enable [--root PATH] | prime CHECKOUT [--source DONOR] [--proof] [--root PATH] | report [--root PATH] | sweep [--root PATH] [--apply]');
+  } else throw new Error('usage: dependency-seeds.mjs enable [--root PATH] | prime CHECKOUT [--source DONOR] [--proof] [--root PATH] | report [--root PATH] | sweep [--root PATH] [--apply] | allocate PATH --owner ID --kind coverage|v8|dependency|browser --consumers PID,... | cleanup PATH --owner ID --receipt FILE [--apply]');
     return 0;
   } catch (error) { console.error(`dependency-seeds: ${error.message}`); return 1; }
 }

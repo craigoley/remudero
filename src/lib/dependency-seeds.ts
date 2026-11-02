@@ -273,6 +273,35 @@ function verifyPackages(checkout: string, modules: string): void {
   }
 }
 
+/** Reuse must not lend a writable or escaping payload. Never repair a published seed in place. */
+function verifyImmutableGeneration(seed: string, files: Record<string, string>): void {
+  ownedDirectory(seed);
+  if (realpathSync(seed) !== resolve(seed)) throw new Error("immutable dependency generation traverses a link");
+  const seen = new Set<string>();
+  const visit = (path: string): void => {
+    if (seen.has(path)) return;
+    seen.add(path);
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) {
+      const target = realpathSync(path);
+      if (!target.startsWith(`${seed}${sep}`)) throw new Error("immutable dependency link escapes generation");
+      visit(target);
+      return;
+    }
+    if ((!st.isDirectory() && !st.isFile()) || (st.mode & 0o222) || st.uid !== process.getuid?.())
+      throw new Error("immutable dependency payload is writable or unverified");
+    if (st.isDirectory()) for (const name of readdirSync(path)) visit(join(path, name));
+  };
+  visit(join(seed, "node_modules"));
+  for (const [name, content] of Object.entries(files)) {
+    if (readFileSync(join(seed, name), "utf8") !== content) throw new Error("immutable dependency inputs changed");
+  }
+  for (const name of Object.keys(files).filter(name => name.endsWith(`${sep}package.json`))) {
+    const local = join(seed, dirname(name), "node_modules");
+    if (existsSync(local)) visit(local);
+  }
+}
+
 /** An occupied destination is never replaced. Validate it before calling it available: a dangling
  * borrower or stale generation must not silently become an install/retry storm. Legacy installs
  * have no generation identity; package checks do not claim their unrecorded toolchain is proven. */
@@ -293,6 +322,7 @@ function verifyExistingDependencies(checkout: string, modules: string, opts: Dep
   }
   const ready = JSON.parse(readFileSync(join(reference.seed, "ready.json"), "utf8")) as SeedMetadata;
   if (ready.version !== VERSION || ready.key !== expected.key) throw new Error("occupied dependency generation is not ready");
+  verifyImmutableGeneration(reference.seed, expected.files);
 }
 
 function linkPackages(seedModules: string, dest: string): void {
@@ -378,9 +408,9 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
       verifyPackages(stage, join(stage, "node_modules"));
       setWritable(join(stage, "node_modules"), false);
       for (const name of Object.keys(meta.files).filter(name => name.endsWith(`${sep}package.json`))) {
-        const local = join(stage, dirname(name), "node_modules");
-        if (existsSync(local)) setWritable(local, false);
+        setWritable(join(stage, dirname(name)), false);
       }
+      for (const name of Object.keys(meta.files)) setWritable(join(stage, name), false);
       mkdirSync(join(stage, "consumers"), { mode: 0o700 });
       writeJsonAtomic(join(stage, "ready.json"), meta);
       renameSync(stage, seed);
@@ -388,6 +418,7 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
     ownedDirectory(seed);
     const ready = JSON.parse(readFileSync(join(seed, "ready.json"), "utf8")) as SeedMetadata;
     if (ready.version !== VERSION || ready.key !== meta.key) throw new Error("dependency seed readiness metadata mismatch");
+    verifyImmutableGeneration(seed, meta.files);
     verifyPackages(checkout, join(seed, "node_modules"));
     const method: SeedMethod = meta.platform === "darwin" ? "apfs-clone" : opts.proof ? "private-copy" : "readonly-links";
     if (method === "readonly-links") { linkPackages(join(seed, "node_modules"), targetStage); setWritable(targetStage, true); }
