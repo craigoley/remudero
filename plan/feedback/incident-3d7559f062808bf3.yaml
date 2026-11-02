@@ -1,0 +1,29 @@
+id: incident-3d7559f062808bf3
+ts: 2026-11-01T23:14:59.930Z
+raw: >-
+  Incident 3d7559f06280: intervention
+  conflict:conflict-rebase:merge-conflict-the-plan-scoped-conflict
+
+  First seen: 2026-11-01T23:12:35.868Z
+
+  Last seen: 2026-11-01T23:14:56.856Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=pr action=close target=pr#14168@2026-10-25T18:05:00Z actor=cao825 cause=conflict:conflict-rebase:merge-conflict-the-plan-scoped-conflict — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#3d7559f062808bf3f2fb179d58698be4fc4dc6c11ff787f5419ebc04581d9b6e
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
