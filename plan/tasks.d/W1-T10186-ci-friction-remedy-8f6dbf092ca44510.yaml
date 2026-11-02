@@ -5,8 +5,8 @@
   type: implement
   verify: human
   risk: low
-  priority: 1.26
-  status: queued
+  status: blocked
+  retirement: withdrawn
   attempts: 0
   author_class: machine
   origin: "ci-friction:hand_fix:scripts/coverage-merge-ratchet.mjs"
