@@ -19,6 +19,7 @@
     - src/lib/panel-actions.ts
     - src/lib/feedback.ts
     - src/lib/feedback-record-merge.ts
+    - src/lib/github-transport.ts
     - src/run-task.ts
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
@@ -55,6 +56,12 @@
     issue, reroute to a guessed thread, close an issue merely because correspondence archived, or
     auto-approve/dispatch. Unavailable/conflicting causal evidence remains unknown and read-only.
     Extend the mounted read/reply contract and generated client for these evidence-backed states.
+    The existing bounded ghTextAsync read must accept an optional fresh flag and pass it to the
+    SAME native broker's conditional revalidation. Keep fresh and ordinary in-flight reads
+    distinct, preserving default caching, sentinel, cadence, timeout, output bounds and offline
+    executor seams. Fresh reply guards must revalidate both the issue and canonical feedback;
+    bypassing only the per-service cache does not establish a current native question. Add no
+    broker bypass, credential path, transport floor override, retry loop or additional service.
     Use real stores and the assembled authenticated service for save, intake acknowledgement,
     needs-input, no-more-input while work runs, archive, reopen, repeated outcome, lost response,
     failed publication, foreign thread and closed-origin follow-up cases. No live fixture writes.
