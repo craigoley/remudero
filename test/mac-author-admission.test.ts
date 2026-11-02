@@ -102,7 +102,7 @@ test('Mac author phase refusals save OVER-CAPACITY, start no refused phase, and 
   const authorModule = '#scripts/preflight-author.mjs';
   const {main} = await import(authorModule) as {
     main: (argv: string[], options: {root: string; select: () => {fullRun: boolean; suites: string[]; reasons: string[]};
-      admitHost: (stage: string) => {stage: string; state: string}}) => number;
+      admitHost: (stage: string, workload?: object) => {stage: string; state: string}}) => number;
   };
   const {resolveTestSlotDir} = await import('#src/lib/test-slot.js');
   for (const refusedStage of ['static-preflight', 'affected-tests']) {
@@ -114,12 +114,25 @@ test('Mac author phase refusals save OVER-CAPACITY, start no refused phase, and 
       [`node_modules/${name}`, {version: JSON.parse(readFileSync(join(fixture.dir, 'node_modules', name, 'package.json'), 'utf8')).version}]));
     writeFileSync(join(fixture.dir, 'package-lock.json'), JSON.stringify({lockfileVersion: 3, packages}));
     fixture.git('add', 'package-lock.json'); fixture.git('commit', '-m', 'test: lock the native fixture tools');
-    const status = main([], {root: fixture.dir,
+    // W1-T10947: the affected-tests phase forwards an explicit profile with the context its slot was bound to.
+    const profileArgs = refusedStage === 'affected-tests' ? ['--author-profile', 'coverage/bounded-author-profile.json'] : [];
+    const declared = {format: 'rmd-bounded-author-profile-v1', bounded: true, budgets: {}};
+    if (profileArgs.length) { mkdirSync(join(fixture.dir, 'coverage'), {recursive: true});
+      writeFileSync(join(fixture.dir, 'coverage/bounded-author-profile.json'), JSON.stringify(declared)); }
+    const workloads: Record<string, {boundedProfile?: unknown; context?: {owner?: {state?: string}}; bound?: unknown}> = {};
+    const status = main(profileArgs, {root: fixture.dir,
       select: () => ({fullRun: false, suites: ['test/a.test.ts', 'test/b.test.ts'], reasons: ['physical fixture']}),
-      admitHost: (stage: string) => {
+      admitHost: (stage: string, workload?: object) => {
+        workloads[stage] = workload ?? {};
         if (stage === refusedStage) throw new MacAuthorCapacityRefusal(stage, {state: 'not-run', pressure: 'warning'});
         return {stage, state: 'admitted'};
       }});
+    if (profileArgs.length) {
+      assert.deepEqual(workloads['affected-tests'].boundedProfile, declared);
+      assert.equal(workloads['affected-tests'].context?.owner?.state, 'held');
+      assert.ok(workloads['affected-tests'].bound, 'the slot-bound context travels with the profile');
+      assert.equal(Object.hasOwn(workloads['static-preflight'], 'boundedProfile'), false, 'no slot is held before static');
+    }
     const receipt = JSON.parse(readFileSync(join(fixture.dir, 'coverage/preflight-author.json'), 'utf8'));
     assert.equal(status, 3, JSON.stringify(receipt));
     assert.equal(receipt.verdict, 'over-capacity'); assert.equal(receipt.hostCapacity.at(-1).stage, refusedStage);
