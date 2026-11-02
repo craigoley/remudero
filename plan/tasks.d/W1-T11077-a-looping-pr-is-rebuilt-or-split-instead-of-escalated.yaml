@@ -27,3 +27,11 @@
     Operator direction 2026-11-01: instead of escalating a looping PR, close it and re-implement it the right way, or break it down into smaller tasks (see W1-T11076 for the measurements and replay). Filed at verify: human: release it once W1-T11076 has seven days of loop.decision rows and the operator has spot-checked the routes it chose.
   note: |
     Reserved with rmd next-task-id from the operator checkout (run-unfiled-1793538128289). Push-through with follow-up tasks (merging with waived criteria) is NOT authorized here; it changes the merge gate and needs its own operator ruling.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.98
+    reasons:
+      - "high-risk verdict at confidence 0.98 — on the change's description/files alone, no diff was read — The record specifies verify: auto, but its rationale requires release only after seven days of W1-T11076 loop.decision rows and an operator spot-check; the supplied gates do not establish that either prerequisite was satisfied.; on the change's description/files alone, no diff was read — Acceptance moves automated PR closure to the rebuild/split decision point instead of waiting for the SLO ladder's age, changing the policy for disposition of reviewed PRs."
+    judged_at: "2026-11-01T15:10:07.088Z"
+    pin: "61428e0c2151e5be6cd08ff6e39b49bea20b572de862e9a38fc45ec2e2df724c"
