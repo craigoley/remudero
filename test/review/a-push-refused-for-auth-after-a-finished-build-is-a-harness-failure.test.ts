@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -10,6 +11,9 @@ import { startCredentialHelperSocket, type BoundaryLedgerRow } from "#src/lib/se
 import { nonWorkerVerdictClass } from "#src/lib/stranded-task-detector.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { restoreBoundaryCheckpoint } from "#src/cli/commands/run-task-verb.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { runTask } from "#test/helpers/run-task-test.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -100,6 +104,97 @@ test("W1-T10749: a push refused for auth is a non-worker strike", () => {
   const workerMiss = { step: "verdict", verdict: "failed", stage: "run.error", cause: "git-push-failed", reason: "Command failed: git push\n ! [rejected] (non-fast-forward)" };
   assert.equal(streakRefusal(workerMiss), undefined);
   assert.equal(nonWorkerVerdictClass(workerMiss), undefined);
+});
+
+const RUN_TASK = "W1-T10749";
+const authRefusal = () => new PushAuthRefusedError(new PushFailedError(
+  `Command failed: git -C /home/node/Remudero/worktrees/run-${RUN_TASK}-1 push origin HEAD\n${CONSOLE_T127_STDERR}`, CONSOLE_T127_STDERR, undefined));
+const workerResult = (text: string): WorkerResult => ({ sessionId: "fixture", costUsd: 0, numTurns: 1, text, blocks: [], stderr: "", subtype: "success",
+  isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: "test", effort: "test",
+  tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false });
+
+/** One real runTask dispatch in a managed checkout whose implement worker the caller scripts; the run then throws. */
+async function dispatchThatThrows(implement: (cwd: string) => Promise<WorkerResult>, after: (repo: string) => void = () => undefined) {
+  const origin = gitRepo({ bare: true });
+  const seed = gitRepo();
+  seed.git("config", "user.name", "auth fixture");
+  seed.git("config", "user.email", "auth@fixture.invalid");
+  seed.addRemote("origin", origin.dir);
+  seed.git("push", "--quiet", "origin", "main");
+  const clone = gitRepo({ cloneFrom: `file://${origin.dir}` });
+  clone.git("config", "user.name", "auth fixture");
+  clone.git("config", "user.email", "auth@fixture.invalid");
+  const root = gitRepo();
+  mkdirSync(join(root.dir, "repos"));
+  renameSync(clone.dir, join(root.dir, "repos", "remudero"));
+  mkdirSync(join(root.dir, "state"));
+  const ledgerPath = join(root.dir, "state", "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  const planPath = join(root.dir, "tasks.yaml");
+  writeFileSync(planPath, `- id: ${RUN_TASK}\n  title: auth fixture\n  repo: remudero\n  type: implement\n  verify: auto\n` +
+    `  risk: high\n  origin: test\n  status: queued\n  files: [built.txt]\n`);
+  let calls = 0;
+  try {
+    await assert.rejects(withLiveWritesAllowed(() => runTask(RUN_TASK, {
+      config: { claudeBin: "/bin/true", root: root.dir, installRoot: process.cwd() },
+      skipGitSync: true, planPath,
+      github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+      claimReserver: { mintAnchor: () => "auth-anchor", attempt: () => "created", holder: () => undefined, drop: () => true },
+      containmentExec: async (token) => ({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
+      isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
+      externalWaitFreshness: () => undefined,
+      spawn: async (args) => (++calls === 1 ? workerResult("RECON REPORT\nOBSERVED: nothing\n") : implement((args as { cwd: string }).cwd)),
+    })), /Repository not found/);
+    const rows = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((raw) => JSON.parse(raw) as Record<string, unknown>);
+    after(join(root.dir, "repos", "remudero"));
+    return { rows };
+  } finally {
+    for (const repo of [root, clone, seed, origin]) repo.cleanup();
+  }
+}
+
+test("W1-T10749: a run whose push is refused for auth keeps its own unpushed head under a durable ref", async () => {
+  let own = "";
+  let built = "";
+  let keptRefHead = "";
+  const { rows } = await dispatchThatThrows(async (cwd) => {
+    own = execFileSync("git", ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim();
+    const git = (...args: string[]) => execFileSync("git", ["-C", cwd, "-c", "user.name=auth", "-c", "user.email=auth@fixture.invalid", ...args], { encoding: "utf8" }).trim();
+    writeFileSync(join(cwd, "built.txt"), "the finished build\n");
+    git("add", "built.txt");
+    git("commit", "--quiet", "-m", "the finished build");
+    built = git("rev-parse", "HEAD");
+    throw authRefusal();
+  }, (repo) => {
+    keptRefHead = execFileSync("git", ["-C", repo, "rev-parse", "--verify", keptRunHeadRef(own)], { encoding: "utf8" }).trim();
+  });
+  const verdict = rows.find((row) => row.step === "verdict");
+  assert.equal(verdict?.stage, "run.error");
+  assert.equal(verdict?.cause, "push-auth-refused");
+  const kept = rows.filter((row) => row.step === "implement.checkpoint_kept");
+  assert.equal(kept.length, 1, "one kept row");
+  assert.equal(kept[0]?.source_branch, own, "this run's own branch");
+  assert.equal(kept[0]?.head_sha, built, "this run's own head, not a restored one");
+  assert.equal(kept[0]?.failed_cause, "push-auth-refused");
+  assert.equal(kept[0]?.resume_at, "push");
+  assert.equal(kept[0]?.pushed, false);
+  assert.equal(kept[0]?.kept_ref, keptRunHeadRef(own));
+  assert.equal(rows.some((row) => row.step === "implement.checkpoint_keep_unproven"), false);
+  assert.deepEqual(pendingWorkerBoundaryHandoffs(rows.map((row) => JSON.stringify(row))).get(RUN_TASK), { branch: own, headSha: built, resumePhase: "preopen" });
+  assert.equal(keptRefHead, built, "the head survives the worktree's removal under refs/rmd-kept");
+});
+
+test("W1-T10749: an unreadable worktree keeps nothing and ledgers the unproven keep, not a swallowed error", async () => {
+  const { rows } = await dispatchThatThrows(async (cwd) => {
+    rmSync(join(cwd, ".git"), { force: true });
+    throw authRefusal();
+  });
+  assert.equal(rows.find((row) => row.step === "verdict")?.cause, "push-auth-refused");
+  const unproven = rows.find((row) => row.step === "implement.checkpoint_keep_unproven");
+  assert.equal(unproven?.failed_stage, "run.error");
+  assert.equal(typeof unproven?.error, "string");
+  assert.ok(String(unproven?.error).length > 0, "the failure carries its reason");
+  assert.equal(rows.some((row) => row.step === "implement.checkpoint_kept"), false);
 });
 
 test("W1-T10749: an auth-refused build resumes straight to push", async () => {
