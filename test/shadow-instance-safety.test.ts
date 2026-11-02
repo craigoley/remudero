@@ -6,7 +6,7 @@ import { applyOperatorMergeHold } from "#src/lib/operator-merge-hold.js";
 import { automergeHoldFromLedger } from "#src/lib/review.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -1581,7 +1581,7 @@ test("private registry selection preserves owner holds and private-safe boundari
     const previous = { registry: process.env.RMD_INSTANCE_REGISTRY, name: process.env.RMD_INSTANCE_NAME };
     delete process.env.RMD_INSTANCE_REGISTRY; delete process.env.RMD_INSTANCE_NAME;
     const clock = t.mock.method(Date, "now", () => now);
-    let spawned = 0;
+    let spawned = 0, attemptedPushes = 0;
     try {
       const selectedConfig: Config = { root, claudeBin: "/bin/true", installRoot: SELECTED_INSTALL_ROOT,
         selectedRegistryMode: { mode: "shadow", instanceName: "fixture", registryPath: selected } };
@@ -1596,6 +1596,7 @@ test("private registry selection preserves owner holds and private-safe boundari
       const res = await withLiveWritesAllowed(() => runTask("T-SELECTED", {
         owner: "owner", skipGitSync: true, planPath,
         config: selectedConfig,
+        implementPush: async () => { attemptedPushes++; },
         github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
         spawn: async () => {
           spawned++;
@@ -1616,6 +1617,7 @@ test("private registry selection preserves owner holds and private-safe boundari
         },
       }));
       assert.equal(res.verdict, "merged", "the contained independent legacy run still finishes normally");
+      assert.ok(attemptedPushes > 0, "the run reaches its push through the injected seam, never a real pre-push gate");
       const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
       const observed = rows.filter(row => row.step === "instance_mode.shadow_observed");
       assert.ok(observed.length > 0, "the REAL runTaskBody deferred arm must carry the original selected binding");
@@ -1640,28 +1642,50 @@ test("private registry selection preserves owner holds and private-safe boundari
     writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ root: state, claudeBin: "/bin/true" }));
     const selected = join(root, "private.yaml");
     writeFileSync(selected, `instances:\n  fixture:\n    github_repo: owner/repo\n    state_dir: ${state}\n    mode: shadow\n`);
-    const child = (verb: string, path: string) => spawnSync(process.execPath,
-      ["--import", "tsx", "--input-type=module", "-e",
-        `import { main } from "#src/run-task.js"; process.argv = [process.execPath, "rmd", ${JSON.stringify(verb)}];
-         await main({ checkFreshness: () => ({ status: "guarded" }) }).catch(error => { console.error(error.message); process.exitCode = 2; });`],
-      { cwd: REPO_ROOT, env: { ...withoutRegistrySelection(process.env), HOME: home, GH_TOKEN: "fixture-not-a-credential", RMD_INSTANCE_REGISTRY: path,
-        GH_CONFIG_DIR: join(home, "gh"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }, encoding: "utf8", timeout: 30000 });
-    for (const path of ["", join(root, "missing-private.yaml"), selected]) {
-      const stopped = child("stop", path);
+    // Each child is a cold tsx start of the whole CLI graph, so its wall time is the host's load, not the verb's.
+    // The first child is the measurement; every later one may take the slowest seen times the spawns after the first.
+    const stopPaths = ["", join(root, "missing-private.yaml"), selected], refusedPaths = ["", join(root, "missing-private.yaml")];
+    const spawnsAfterFirst = stopPaths.length + refusedPaths.length * 2;
+    let slowestMs: number | undefined;
+    const child = async (verb: string, path: string) => {
+      const bound = slowestMs === undefined ? undefined : slowestMs * spawnsAfterFirst;
+      const started = process.hrtime.bigint();
+      const proc = spawn(process.execPath,
+        ["--import", "tsx", "--input-type=module", "-e",
+          `import { main } from "#src/run-task.js"; process.argv = [process.execPath, "rmd", ${JSON.stringify(verb)}];
+           await main({ checkFreshness: () => ({ status: "guarded" }) }).catch(error => { console.error(error.message); process.exitCode = 2; });`],
+        { cwd: REPO_ROOT, env: { ...withoutRegistrySelection(process.env), HOME: home, GH_TOKEN: "fixture-not-a-credential", RMD_INSTANCE_REGISTRY: path,
+          GH_CONFIG_DIR: join(home, "gh"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }, stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "", stderr = "";
+      proc.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
+      proc.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+      const timer = bound === undefined ? undefined : setTimeout(() => proc.kill("SIGKILL"), bound);
+      const [status, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve, reject) => {
+        proc.once("error", reject);
+        proc.once("close", (code, sig) => resolve([code, sig]));
+      }).finally(() => clearTimeout(timer));
+      const ms = Number(process.hrtime.bigint() - started) / 1e6;
+      slowestMs = Math.max(slowestMs ?? 0, ms);
+      const cause = bound !== undefined && ms >= bound ? `timed out against ${Math.round(bound)}ms derived from the slowest spawn` : "was killed";
+      assert.equal(signal, null, `rmd ${verb} ${cause}: ${signal} after ${Math.round(ms)}ms\n${stderr}`);
+      return { status, stdout, stderr };
+    };
+    for (const path of stopPaths) {
+      const stopped = await child("stop", path);
       assert.equal(stopped.status, 0, stopped.stderr);
       assert.ok(stopped.stderr.includes("nothing to stop"), "the actual owner handler is reached");
       assert.equal(existsSync(join(state, "state", "STOP")), false, "no active fixture drain means no persistent STOP");
       assert.equal((stopped.stdout + stopped.stderr).includes(root), false);
     }
-    for (const path of ["", join(root, "missing-private.yaml")]) {
-      const paused = child("pause", path);
+    for (const path of refusedPaths) {
+      const paused = await child("pause", path);
       assert.equal(paused.status, 2, paused.stderr);
       assert.match(paused.stderr, /REFUSED/);
       assert.equal((paused.stdout + paused.stderr).includes(root), false);
       assert.equal(existsSync(join(state, "state", "PAUSE")), false, "an unknown target never becomes a hold on another instance");
-      assert.equal(child("resume", path).status, 2, "resume must still require selected evidence");
+      assert.equal((await child("resume", path)).status, 2, "resume must still require selected evidence");
     }
-    const paused = child("pause", selected);
+    const paused = await child("pause", selected);
     assert.equal(paused.status, 0, paused.stderr);
     assert.equal((paused.stdout + paused.stderr).includes(root), false, "selected success diagnostics hide private state paths");
     assert.equal(existsSync(join(state, "state", "PAUSE")), true, "the real handler writes only the disposable declared instance");
