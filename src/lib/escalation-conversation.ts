@@ -104,7 +104,10 @@ export function parseEscalationConversationSource(source: EscalationIssueSource)
       const parsed: unknown = JSON.parse(fullSummary);
       if (typeof parsed !== "string" || parsed.length > 16_384) return undefined;
       headline = parsed;
-    } catch { return undefined; }
+    } catch {
+      // Malformed JSON and an invalid summary both mean an unsupported native source; neither can select a reply destination.
+      return undefined;
+    }
   }
   const optionsHeaders = [...source.body.matchAll(/^## Options\r?$/gm)];
   const recommendationHeaders = [...source.body.matchAll(/^## Recommendation\r?$/gm)];
@@ -242,7 +245,7 @@ export function createEscalationConversationReader(opts: {
       && !/^## Decision Summary\r?$/m.test(source.body);
     const sourceRevision = digest([source.html_url, source.body, source.title, source.updated_at, source.state]);
     const acceptedText = parsed.recommendation ? `I accept this recommendation: ${parsed.recommendation}` : undefined;
-    const recommendationReplies = (canReply && attention === "needs_input" || canStartConversation) && !messages?.some(message => message.from === "operator") && acceptedText ? {
+    const recommendationReplies = (canReply && attention === "needs_input" || canStartConversation) && (messages === undefined || messages.every(message => message.from !== "operator")) && acceptedText ? {
       ...(acceptedText.length <= 4000 ? { accept: acceptedText } : {}),
       decline: "I decline this recommendation. Please suggest another approach.",
     } : undefined;
