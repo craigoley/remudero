@@ -28,6 +28,7 @@ import { createServer as createNetServer, type Socket } from "node:net";
 import { chmodSync, existsSync, lstatSync, mkdirSync, rmdirSync, rmSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isMainThread, parentPort, Worker, workerData, type MessagePort } from "node:worker_threads";
+import { systemClock, type Clock } from "./clock.js";
 import { mintScopedToken } from "./github-app.js";
 import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "./short-path-root.js";
 import { setHarnessCredentialSocket } from "./worktree-git.js";
@@ -84,7 +85,10 @@ export interface BoundaryLedgerRow {
   readonly decision: "allow" | "refuse";
   readonly status: string;
   readonly reason: string;
+  readonly credential?: CredentialUseFields;
 }
+
+export interface CredentialUseFields { consumer: string; scoped_repo: string; minted_at: string; expires_at?: string }
 
 export function boundaryLedgerRow(
   host: string,
@@ -278,7 +282,7 @@ export function runChildCredentialSocket(daemonSocket?: string): string | undefi
 }
 
 /** One mint outcome the socket server relays — never the failure's internals, only a named reason. */
-export type ScopedTokenMint = (repo: string) => Promise<{ ok: true; token: string } | { ok: false; reason: string }>;
+export type ScopedTokenMint = (repo: string) => Promise<{ ok: true; token: string; expiresAtMs?: number } | { ok: false; reason: string }>;
 
 /**
  * Parse git's own credential-helper request body (`key=value` lines, blank-line terminated) into
@@ -299,6 +303,14 @@ export function repoFromCredentialRequest(raw: string): string {
   return fields.get("host") ?? "unknown";
 }
 
+export const CREDENTIAL_CONSUMER_FIELD = "rmd_consumer";
+
+export function consumerFromCredentialRequest(raw: string): string | undefined {
+  const line = raw.split("\n").find((entry) => entry.startsWith(`${CREDENTIAL_CONSUMER_FIELD}=`));
+  const value = line?.slice(CREDENTIAL_CONSUMER_FIELD.length + 1).trim();
+  return value && /^[\w.:-]{1,200}$/.test(value) ? value : undefined;
+}
+
 /**
  * Start the git credential-helper socket (design (iii)): a unix domain socket that, on each
  * connection, reads git's own credential-request body, mints a fresh scoped token for the named
@@ -313,8 +325,10 @@ export function startCredentialHelperSocket(opts: {
   log?: (row: BoundaryLedgerRow) => void;
   /** The host named in the ledger row — the credential's OWN identity, never a value. */
   host?: string;
+  clock?: Clock;
 }): Promise<CredentialHelperSocketHandle> {
   const log = opts.log ?? (() => {});
+  const clock = opts.clock ?? systemClock;
   const host = opts.host ?? "github.com";
   if (existsSync(opts.socketPath)) unlinkSync(opts.socketPath);
 
@@ -332,6 +346,7 @@ export function startCredentialHelperSocket(opts: {
     });
     async function respond(): Promise<void> {
       const repo = repoFromCredentialRequest(buf);
+      const consumer = consumerFromCredentialRequest(buf);
       try {
         const result = await opts.mint(repo);
         if (!result.ok) {
@@ -339,8 +354,12 @@ export function startCredentialHelperSocket(opts: {
           socket.end("");
           return;
         }
-        log(boundaryLedgerRow(host, "allow", "minted", `scoped token minted for ${repo}`));
-        socket.end(`username=x-access-token\npassword=${result.token}\n`);
+        const use: CredentialUseFields | undefined = consumer === undefined ? undefined : { consumer, scoped_repo: repo,
+          minted_at: new Date(clock.now()).toISOString(),
+          ...(result.expiresAtMs === undefined ? {} : { expires_at: new Date(result.expiresAtMs).toISOString() }) };
+        log({ ...boundaryLedgerRow(host, "allow", "minted", `scoped token minted for ${repo}`), ...(use ? { credential: use } : {}) });
+        const receipt = use ? Object.entries(use).map(([key, value]) => `rmd_${key}=${value}\n`).join("") : "";
+        socket.end(`username=x-access-token\npassword=${result.token}\n${receipt}`);
       } catch (err) {
         log(boundaryLedgerRow(host, "refuse", "error", `mint threw: ${String(err)}`));
         socket.end("");
@@ -387,14 +406,14 @@ type SocketThreadMessage =
   | { type: "closed" };
 
 function rowFields(row: BoundaryLedgerRow): Record<string, unknown> {
-  return { host: row.host, decision: row.decision, status: row.status, reason: row.reason };
+  return { host: row.host, decision: row.decision, status: row.status, reason: row.reason, ...(row.credential ?? {}) };
 }
 
 export function realScopedMint(log: DaemonLog, mint: typeof mintScopedToken = mintScopedToken): ScopedTokenMint {
   return async (repo) => {
     const minted = await mint(repo, SCOPED_TOKEN_TTL_MS, { log: (step, extra) => log(step, extra ?? {}) });
     return minted.ok && minted.token
-      ? { ok: true, token: minted.token }
+      ? { ok: true, token: minted.token, ...(minted.expiresAtMs === undefined ? {} : { expiresAtMs: minted.expiresAtMs }) }
       : { ok: false, reason: minted.reason ?? "mint returned no token" };
   };
 }

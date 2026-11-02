@@ -2858,12 +2858,14 @@ import {
   gitPushEmptyCommit,
   isNonFastForwardRejection,
   LanePushForeignHeadError,
+  PushAuthRefusedError,
   runStepsAsync,
   runStepsSync,
   step,
   type PushRunBranchAsyncOpts,
   type Steps,
 } from "./lib/git-push.js";
+import { PUSH_AUTH_REFUSAL_RE } from "./lib/non-worker-verdict.js";
 import { materializeWorkerHome, perRunWorkerHomeDir, sweepStaleWorkerHomes, sweepStaleWorkerHomesAsync, workerKeychainPaths, type ClaudeCredentialSeedEvent } from "./lib/worker-home.js";
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
@@ -10503,7 +10505,9 @@ export function runErrorCause(err: unknown): RunErrorCause {
   if (err instanceof SubscriptionOnlyRefusedError) return "subscription-only-refused";
   const text = String((err as Error)?.message ?? err);
   if (/^census-precheck:/m.test(text)) return "census-refused-push";
-  if (/^Command failed: git (?:-C \S+ )?push /m.test(text)) return "git-push-failed";
+  const pushFailed = /^Command failed: git (?:-C \S+ )?push /m.test(text);
+  if (err instanceof PushAuthRefusedError || (pushFailed && PUSH_AUTH_REFUSAL_RE.test(text))) return "push-auth-refused";
+  if (pushFailed) return "git-push-failed";
   if (/^Command failed: git (?:-C \S+ )?commit /m.test(text)) return "git-commit-failed";
   if (/^Command failed: gh (?:api --method POST \S+\/pulls |pr create)/m.test(text)) return "pr-create-failed";
   if (/^Command failed: gh |^gh api response body was unreadable/m.test(text)) return "github-read-failed";

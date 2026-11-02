@@ -467,6 +467,13 @@ export interface WorkerBoundaryCheckpoint {
   resumePhase?: "preopen";
 }
 
+export const keptRunHeadRef = (branch: string): string => `refs/rmd-kept/${branch}`;
+
+export function unpushedRunHeadKeptRow(taskId: string, branch: string, headSha: string, stage: string): Record<string, unknown> {
+  return { task_id: taskId, source_branch: branch, head_sha: headSha, failed_stage: stage, failed_cause: "push-auth-refused",
+    resume_at: "push", resume_phase: "preopen", pushed: false, kept_ref: keptRunHeadRef(branch) };
+}
+
 const checkpointPhase = (row: Record<string, unknown>): { resumePhase?: "preopen" } =>
   row.reason === "orphaned-by-restart" || row.resume_phase === "preopen" ? { resumePhase: "preopen" } : {};
 
