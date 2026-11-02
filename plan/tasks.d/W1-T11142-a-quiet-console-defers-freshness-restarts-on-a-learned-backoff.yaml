@@ -1,0 +1,35 @@
+- id: W1-T11142
+  title: "A quiet daemon's freshness restart waits on a learned back-off, as W1-T9031 gave site's engine wakes — the console daemon booted 110 times in a week (86 for freshness, about 12 a day) while it had little or no work, and each boot is a full daemon start (62 s p50 to daemon.boot) on a CPU-bound host, for an engine change it had nothing to run on"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: deploy-judge.ts's freshness coalescer holds a quiet instance's restart longer, from its own record
+  origin: operator-session#efficiency-findings-2026-10-27
+  plan_refs:
+    - W1-T9031
+    - W1-T4945
+    - W1-T6093
+  files:
+    - src/lib/deploy-judge.ts
+    - test/deploy/a-quiet-console-defers-freshness-restarts-on-a-learned-backoff.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When an instance's recent lifetimes admitted no work (no dispatch.claim between their boots), coalesceFreshnessRestart holds a change-driven restart past the minimum lifetime by a back-off each empty lifetime earns from its own measured boot cost, and one lifetime that admits work resets it
+      proof: "unit test: test/deploy/a-quiet-console-defers-freshness-restarts-on-a-learned-backoff.test.ts"
+    - claim: An install-input change, withheld reviews, an unreadable advance or a claimable task still releases the restart at once, and an instance that admitted work keeps today's decision exactly
+      proof: "grep: W1-T11142 criterion 2 in test/deploy/a-quiet-console-defers-freshness-restarts-on-a-learned-backoff.test.ts"
+  rationale: |
+    MEASURED, restart census 2026-10-20 → 10-27 (source: ~/Remudero-notes/efficiency-findings-2026-10-27.md, re-filed 2026-11-02):
+    - Console booted 110 times, 86 of them for freshness (about 12 a day). Its lane cost is about 0, because it has little to run.
+    - The cost is CPU and memory on a CPU-bound host: process start to daemon.boot is 62 s p50 / 108 s p90, with the archive scan alone about 28 s over 610 archives, and load was 24–30 then and 34–47 by 11-02.
+    - Site went quiet after W1-T9031's learned back-off.
+    READ at origin/main d04469fa2: coalesceFreshnessRestart (src/lib/deploy-judge.ts:478) holds a change-driven restart for FRESHNESS_COALESCE_WINDOW_MS (10 min) and FRESHNESS_MIN_LIFETIME_MS (90 min, operator ruling 2026-10-17). Neither depends on whether the instance has work, so a quiet console restarts roughly every 90–120 minutes on core's merge rate. W1-T9031's back-off lives in deploy/idle-starved-probe.sh and governs only an instance in idle_starved, which a console with a trickle of work never enters.
+  design: |
+    Feed the coalescer the instance's recent lifetimes from its ledger: boot times and whether each admitted a dispatch.claim. Count the consecutive empty lifetimes ending at this one. For n > 0 the hold is the minimum lifetime plus the sum of the measured boot costs of those n lifetimes (daemon.boot's own start-to-boot ms), so a boot that finds nothing earns its own cost as the next delay, as idle-starved-probe.sh does. One admitted claim resets n to 0. The fast paths stay ahead of it. The decision row carries `quiet_lifetimes` and `quiet_hold_ms`. No new constant.
+  note: |
+    Filed 2026-11-02 from the 2026-10-27 efficiency findings, item 11 (p3). The mechanism is per instance, not console-specific. The console is where it was measured.
