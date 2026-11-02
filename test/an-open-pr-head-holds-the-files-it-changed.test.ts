@@ -13,6 +13,7 @@ import { parseObservedOverlapMode } from "#src/lib/policy.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import type { GitHub, PrRef } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 // A NAMESPACE import, read inside each test: at a base without the producer the file still LOADS
 // and every test fails on its own assertion, so the proof discriminates instead of erroring.
@@ -227,5 +228,113 @@ test("observed overlap policy: the mode is read from a real policy file, and a m
     assert.throws(() => policy.loadObservedOverlapMode(file), /not valid YAML/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch.overlap_shadow: a file only the second of two overlapping open PRs changed is still held on that PR", async () => {
+  // The reviewer's counterexample: PR A changes x, PR B changes x and y, the candidate declares y.
+  // Both PRs are open, so both hold their files; B overlapping A must not release y.
+  const { plan, dir } = twoTaskPlan();
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let ticks = 0;
+  const files: Record<string, string[]> = { [URL(16001)]: ["src/x.ts"], [URL(16002)]: ["src/a.ts", "src/x.ts"] };
+  const scope = observedOverlap.observedScopeFromOpenPrs?.([
+    openPr(16001, "run-W1-T9001-1793544678400"),
+    openPr(16002, "run-W1-T9002-1793544678401"),
+  ], (url) => files[url]);
+  try {
+    await runDaemon(plan, {
+      refreshMerged: () => (id: string) => merged.has(id),
+      checkStop: () => (++ticks > 3 ? "tick cap" : undefined),
+      log: (step: string, extra?: Record<string, unknown>) => lines.push({ step, extra }),
+      runOne: async (id: string) => { ran.push(id); merged.add(id); return okResult(id); },
+      sleep: async () => {},
+      observedOpenPrScope: () => scope,
+      observedOverlapMode: () => "shadow",
+    } as unknown as DaemonDeps, { max: 2, laneCount: 2 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const rows = lines.filter((l) => l.step === "dispatch.overlap_shadow");
+  assert.equal(rows.length, 1, "the hold is ledgered");
+  assert.deepEqual(rows[0].extra?.holds, [{ task: "W1-T1", blocked_by: "W1-T9002", pr: 16002, paths: ["src/a.ts"], path_count: 1 }]);
+  assert.deepEqual([...ran].sort(), ["W1-T1", "W1-T2"], "shadow changes no dispatch");
+});
+
+test("observed scope producer: the async read-plane refresh publishes the open rows the producer reads", async () => {
+  // Production ticks call `refreshMergedAsync` (the read plane), never the synchronous `refreshMerged`.
+  // No `githubFactory` here, so the read plane is live; its read is injected, and the changed-files
+  // read goes through the shared `gh` shim on PATH.
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}observed-overlap-async-root-`));
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}observed-overlap-async-home-`));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, ["- id: W1-T1", "  title: wiring fixture", "  repo: remudero", "  type: implement", "  verify: auto", "  risk: medium", "  files: [src/a.ts]", "  origin: test", "  status: queued", ""].join("\n"));
+  const origin = gitRepo({ bare: true, kind: "observed-overlap-async-origin" });
+  const seed = gitRepo({ seedCommit: false, kind: "observed-overlap-async-seed" });
+  seed.addRemote("origin", origin.dir);
+  writeFileSync(join(seed.dir, "README.md"), "seed\n");
+  seed.git("add", "-A");
+  seed.git("commit", "-q", "-m", "seed");
+  seed.git("push", "-q", "-u", "origin", "main");
+  const repoRoot = join(root, "repos", "remudero");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "-q", origin.dir, repoRoot]);
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  const gh = ghShim([{ when: "pulls/15679/files", stdout: "src/a.ts\n" }], { kind: "observed-overlap-async-gh" });
+  const previous = { HOME: process.env.HOME, CI: process.env.CI, GITHUB_ACTIONS: process.env.GITHUB_ACTIONS, PATH: process.env.PATH };
+  process.env.HOME = home;
+  process.env.PATH = `${gh.dir}:${process.env.PATH ?? ""}`;
+  delete process.env.CI;
+  delete process.env.GITHUB_ACTIONS;
+  let reads = 0;
+  try {
+    let captured: DaemonDeps | undefined;
+    const code = await daemonCommand(["--repo", "acme/remudero", "--plan", planPath, "--max", "0"], {
+      repoRoot,
+      readObservedOverlapMode: () => "shadow",
+      wireSweepWake: () => ({ sleep: async () => "timeout", acknowledge: () => {}, close: () => {} }),
+      startGitCredentialSocket: async () => ({ socketPath: "/fixture/socket", close: async () => {} }),
+      startMemoryCensus: () => () => {},
+      startReadPlane: (() => ({
+        read: async (input: { plan?: Plan }) => {
+          reads++;
+          return { generation: reads, source: "inline", publishedAtMs: Date.now(), settledAtMs: Date.now(),
+            facts: { plan: input.plan, projection: [], openBranches: [openPr(15679, "run-W1-T9796-1793544678400")],
+              creditUpdates: [] } };
+        },
+        stop: async () => {},
+      })) as never,
+      runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0);
+    assert.ok(captured?.refreshMergedAsync, "the read plane is live, so production's async refresh is wired");
+    await captured.refreshMergedAsync();
+    assert.equal(reads, 1, "the async refresh read the plane");
+    let scope = captured.observedOpenPrScope?.();
+    assert.ok(scope, "the async publish handed the producer this pass's open rows");
+    // The first lookup schedules the off-loop files read; it lands on a later turn.
+    for (let i = 0; i < 200 && !scope?.observedByTask.has("W1-T9796"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      scope = captured.observedOpenPrScope?.();
+    }
+    assert.deepEqual(scope?.observedByTask.get("W1-T9796")?.files, ["src/a.ts"]);
+    assert.equal(scope?.sourcesByTask.get("W1-T9796")?.[0]?.pr, 15679);
+    assert.ok(gh.calls().some((c) => c.includes("pulls/15679/files")), "the files came from the gateway's own read");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    origin.cleanup();
+    seed.cleanup();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(gh.dir, { recursive: true, force: true });
   }
 });

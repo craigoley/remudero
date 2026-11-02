@@ -24,6 +24,7 @@ import {
   type ObservedScope,
   type ObservedScopeByTask,
   type OverlapPartition,
+  type SerializedDeferral,
 } from "./dispatch-overlap.js";
 import type { Task } from "./plan.js";
 import { prOwningTaskIds, type PrRef } from "./status.js";
@@ -106,9 +107,14 @@ function openPrHolder(id: string, files: readonly string[]): Task {
 }
 
 /**
- * Re-partitions the pass with every open PR's task placed first, holding its observed files, and
- * names each candidate `base` dispatched that this partition defers. `base` must be the
- * declared-only partition of `[...occupied, ...candidates]` the caller already acts on.
+ * Places every open PR's task and every occupied task first, each holding its scope, and names
+ * each candidate `base` dispatched that one of them, or an earlier admitted candidate, would
+ * defer. `base` must be the declared-only partition of `[...occupied, ...candidates]` the caller
+ * already acts on.
+ *
+ * An open PR and a running task hold their files whether or not they overlap EACH OTHER: they
+ * are not choosing a slot. So each is compared to the candidate PAIRWISE, never partitioned
+ * together, where PR B overlapping PR A on x would defer B and release the y only B changed.
  */
 export function observedOverlapShadow(
   candidates: readonly Task[],
@@ -121,14 +127,24 @@ export function observedOverlapShadow(
     .filter(([id]) => !inPass.has(id))
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([id, s]) => openPrHolder(id, s.files));
-  const shadow = partitionByFileOverlap([...holders, ...occupied, ...candidates], scope.observedByTask);
+  const placed: Task[] = [...holders, ...occupied];
   const occupiedIds = new Set(occupied.map((t) => t.id));
+  const baseIds = new Set(base.dispatch.map((t) => t.id));
   const holds: OverlapShadowHold[] = [];
-  for (const task of base.dispatch) {
-    if (occupiedIds.has(task.id) || shadow.dispatch.some((t) => t.id === task.id)) continue;
-    const deferral = shadow.serialized.find((d) => d.task === task.id);
-    const blockedBy = deferral?.blockedBy ?? "";
-    const paths = deferral?.paths ?? [];
+  for (const task of candidates) {
+    // A candidate `base` already deferred dispatches nothing, so it holds nothing either.
+    if (occupiedIds.has(task.id) || !baseIds.has(task.id)) continue;
+    let deferral: SerializedDeferral | undefined;
+    for (const holder of placed) {
+      deferral = partitionByFileOverlap([holder, task], scope.observedByTask).serialized[0];
+      if (deferral) break;
+    }
+    if (!deferral) {
+      placed.push(task);
+      continue;
+    }
+    const blockedBy = deferral.blockedBy;
+    const paths = deferral.paths;
     const pr = (scope.sourcesByTask.get(blockedBy) ?? scope.sourcesByTask.get(task.id) ?? [])
       .find((s) => s.files.some((f) => paths.includes(f)))?.pr ?? null;
     holds.push({ task: task.id, blockedBy, pr, paths });

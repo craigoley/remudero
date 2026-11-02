@@ -1678,6 +1678,8 @@ export async function daemonCommand(
             tickReadGeneration = snapshot;
             lastProj = new Map(snapshot.facts.projection);
             boardOpenPrCount.reset();
+            // The same open rows the synchronous `refreshMerged` keeps: production ticks take this path.
+            lastOpenRows = snapshot.facts.openBranches;
             boardOpenPrCount.observe(snapshot.facts.openBranches);
           },
           ledgerPath, statusPath, log,
