@@ -630,15 +630,15 @@ export function readCredentialReceipt(path: string, nowMs: number): PushCredenti
     age_ms: Number.isFinite(minted) ? Math.max(0, nowMs - minted) : null };
 }
 
-export async function pushWithAuthRetry(push: (env: NodeJS.ProcessEnv) => Promise<void>,
-  deps: { consumer: string; log?: PushGateLog; clock?: Clock; refreshAmbient?: () => Promise<unknown> }): Promise<void> {
-  const clock = deps.clock ?? systemClock;
+export async function pushWithAuthRetry(push: (env: NodeJS.ProcessEnv) => Promise<void>, consumer: string,
+  verdicts?: Pick<PushGateVerdicts, "log" | "clock">, refreshAmbient: () => Promise<unknown> = () => refreshInstallationToken()): Promise<void> {
+  const clock = verdicts?.clock ?? systemClock;
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}push-credential-`));
   const receipt = join(dir, "receipt");
   const attempt = async (): Promise<{ failure?: PushFailedError; use: PushCredentialUse }> => {
     rmSync(receipt, { force: true });
     try {
-      await push({ [CREDENTIAL_CONSUMER_ENV]: deps.consumer, [CREDENTIAL_RECEIPT_ENV]: receipt });
+      await push({ [CREDENTIAL_CONSUMER_ENV]: consumer, [CREDENTIAL_RECEIPT_ENV]: receipt });
       return { use: readCredentialReceipt(receipt, clock.now()) };
     } catch (error) {
       return { failure: error instanceof PushFailedError ? error : pushFailure(error), use: readCredentialReceipt(receipt, clock.now()) };
@@ -648,10 +648,10 @@ export async function pushWithAuthRetry(push: (env: NodeJS.ProcessEnv) => Promis
     const first = await attempt();
     if (!first.failure) return;
     if (!PUSH_AUTH_REFUSAL_RE.test(first.failure.message)) throw first.failure;
-    deps.log?.(PUSH_AUTH_REFUSED_STEP, { attempt: 1, ...first.use, consumer: deps.consumer, outcome: "retrying" });
-    if (first.use.credential_path === "ambient") await (deps.refreshAmbient ?? (() => refreshInstallationToken()))();
+    verdicts?.log(PUSH_AUTH_REFUSED_STEP, { attempt: 1, ...first.use, consumer: consumer, outcome: "retrying" });
+    if (first.use.credential_path === "ambient") await refreshAmbient();
     const second = await attempt();
-    deps.log?.(PUSH_AUTH_REFUSED_STEP, { attempt: 2, ...second.use, consumer: deps.consumer, outcome: second.failure ? "refused" : "pushed" });
+    verdicts?.log(PUSH_AUTH_REFUSED_STEP, { attempt: 2, ...second.use, consumer: consumer, outcome: second.failure ? "refused" : "pushed" });
     if (!second.failure) return;
     throw PUSH_AUTH_REFUSAL_RE.test(second.failure.message) ? new PushAuthRefusedError(second.failure) : second.failure;
   } finally {
@@ -820,7 +820,7 @@ export function worktreePushExecAsync(
         if (opts.stdio !== "ignore") writeThrough(err);
         throw pushFailure(err);
       }
-    }, { consumer: basename(worktreePath), log: verdicts?.log, refreshAmbient });
+    }, basename(worktreePath), verdicts, refreshAmbient);
   };
 }
 
