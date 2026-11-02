@@ -1,0 +1,83 @@
+- id: W1-T11110
+  title: Engineering conversations have a native mailbox index with honest correspondence states
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 20
+  origin: human#2026-11-02-console-email-inbox
+  plan_refs: [W1-T11096, W1-T11103, CONSOLE-T164]
+  files:
+    - src/lib/escalation-conversation-index.ts
+    - src/lib/escalation-conversation.ts
+    - src/lib/serve.ts
+    - src/lib/instance-gateway.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/inbox/escalation-conversation-index.test.ts
+    - test/inbox/escalation-conversation-index-serving.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The reported attention flag now has prepared read/reply source, but existing Inbox list/detail
+    producers select proposal identities. A separate reading page does not make engineering asks
+    discoverable in the mailbox or remove an answered ask from Action required. The operator says
+    archive when the agent needs no more input, while work can continue, and reopen on a new question.
+    A sweep of all 29 current core open PR heads at e572bfa648014f1b96bddf34e06d2159338af00c
+    found no added engineering mailbox index signatures. Positive controls were 71 runtime and 99
+    plan lines; added matches were the held correspondence task and an unrelated bake-off comment.
+  design: |
+    Add one authenticated, repository-scoped, bounded GET /v1/escalation/threads index in the real
+    serve assembly and generated contract. Mount the index and existing conversation read/reply
+    contract for each supported selected instance over its own repository, ledger and thread store;
+    never forward an unknown instance to core or share a different repository's message store.
+    Preserve unsupported or unreadable instance capabilities explicitly. Reuse the existing native thread store, current board,
+    immutable source-bound reply/import receipts and W1-T11103 correspondence outcomes. Add no new
+    store, executor, model call, scheduler or bulk GitHub fan-out. A list read never writes messages.
+    Preserve current native issue URLs for initial flags without saved history; mark their identity
+    or correspondence unknown until positively verified rather than inventing a class or destination.
+    Verified saved conversations retain the original canonical issue URL and exact native identity
+    after their original issue closes or disappears from the board. Deduplicate that issue/thread
+    across sources; reject conflicting mappings rather than silently choose a different discussion.
+    Use one shared correspondence projection with the detail reader: saved answer means waiting for
+    agent; explicit no-more-input means archived even while work runs; a later question means needs
+    input on the same thread. An open source flag cannot resurrect an already answered ask. Issue
+    disappearance, a successful capture or empty interpreter rules cannot archive correspondence.
+    Publish source kind, short source facts, canonical issue/thread identity, last activity and
+    correspondence state with source time and coverage. Do not invent unread state or expose proposal
+    approval/triage controls for an engineering row. Detail revalidation still owns reply capability.
+    Bound item/preview/response size and pagination. Bind cursors to repository and snapshot version;
+    a changed snapshot requires refresh, not an inconsistent merged page. Missing, corrupt, partial
+    or truncated history remains visible as incomplete/unknown coverage. Counts name the same unit
+    (unique conversations) and their complete scope; a partial page or unreadable source cannot claim
+    an empty folder, zero asks, complete history or a verified global total. Keep loaded counts distinct.
+    Exercise healthy and legacy source-only rows, exact native issue binding, saved answer while the
+    board flag remains open, archive while work runs, reopen, closed-origin preserved history, page
+    changes, duplicate/conflicting source rows and absent/corrupt/oversize sources in real-store tests.
+    Prove the repository-prefixed read through the assembled authenticated service, including foreign
+    scope refusal, bounded reads and no source fan-out or live fixture write.
+  acceptance:
+    - claim: the real service mounts the native engineering conversation index
+      proof: 'grep: buildEscalationConversationIndexRoute( in src/lib/serve.ts'
+    - claim: a saved answer clears the ask while its original flag remains open
+      proof: 'unit test: an answered escalation stays out of action required while its source flag remains open'
+    - claim: correspondence archives and reopens without claiming work is complete
+      proof: 'unit test: the engineering mailbox preserves archive and reopen on one native conversation'
+    - claim: incomplete sources and pagination cannot fabricate complete folder counts
+      proof: 'unit test: the engineering conversation index preserves incomplete coverage and count units'
+    - claim: the selected repository read is served through the real authenticated gateway
+      proof: 'unit test: assembled service serves the repository scoped engineering conversation index'
+  falsifier: |
+    Restore the open flag as Action required after a saved answer, archive on capture, substitute a
+    foreign issue/thread, remove the actual mount, or count a partial page as the whole mailbox:
+    named tests must fail. Keep control/mutant/restored receipts and verify served adoption separately.
+  note: |
+    Reserved W1-T11110 through the operator checkout for codex/console-mailbox-integration-plan-20261102.
+    Held until W1-T11096 and W1-T11103 are merged/served and current source custody is reconciled.
+    A separate console consumer must pin this actual served index before mailbox/folder adoption.
+    Existing proposal inbox, W1-T8887 execution and CONSOLE-T128 scope remain with their native owners.
