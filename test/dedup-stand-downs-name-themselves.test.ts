@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 import { readLedgerLines } from "#src/lib/status.js";
+import { DEP_REVIEW_ENGINE_REVISION } from "#src/lib/dep-review.js";
 
 // ── W1-T2427 ──────────────────────────────────────────────────────────────────────────────────
 //
@@ -139,7 +140,7 @@ test("a dedup that suppresses an escalation names itself on the row it already w
 // ── Acceptance 3: dep-review ──────────────────────────────────────────────────────────────────
 
 test("a dedup that suppresses a dependency review names itself on the row it already writes", async () => {
-  const prior = priorDisposal("dep-review", { dep_review_outcome: "escalate" });
+  const prior = priorDisposal("dep-review", { dep_review_outcome: "escalate", dep_review_engine_revision: DEP_REVIEW_ENGINE_REVISION });
   const { row } = await disposeOne(pr({ isDependabot: true }), [prior], { depReview: async () => "escalate" });
 
   assert.equal(row.disposition, "dep-review");
@@ -238,7 +239,7 @@ test("no disposition and no acted value changes: every fixture's tuple is what i
     ["post-review deduped", pr(), [{ step: "review.posted", task_id: TASK, head_sha: HEAD }], { postReview: async () => {} }, "post-review", false],
     ["post-review fresh", pr(), [], { postReview: async () => {} }, "post-review", true],
     ["escalation deduped", pr({ reviewState: "failure" }), [priorDisposal("blocked-ambiguous")], {}, "blocked-ambiguous", false],
-    ["dep-review deduped", pr({ isDependabot: true }), [priorDisposal("dep-review", { dep_review_outcome: "escalate" })], { depReview: async () => "escalate" }, "dep-review", false],
+    ["dep-review deduped", pr({ isDependabot: true }), [priorDisposal("dep-review", { dep_review_outcome: "escalate", dep_review_engine_revision: DEP_REVIEW_ENGINE_REVISION })], { depReview: async () => "escalate" }, "dep-review", false],
     ["dep-review hold", pr({ isDependabot: true }), [priorDisposal("dep-review", { dep_review_outcome: "hold" })], { depReview: async () => "hold" }, "dep-review", true],
     ["stale deduped", pr({ lastActivityAt: ANCIENT, createdAt: ANCIENT }), [priorDisposal("stale")], {}, "stale", false],
     ["mergeable deduped", pr({ reviewState: "success" }), [priorDisposal("mergeable")], {}, "mergeable", false],

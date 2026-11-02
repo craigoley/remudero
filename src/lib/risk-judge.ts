@@ -8,26 +8,19 @@ import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import { argmaxTypedJudgmentOption, runTypedJudgment, type TypedJudgmentResult } from "./typed-judgment.js";
 
 /**
- * Risk judge — P34 clause (b), MASTER-PLAN §4B/§9, W1-T248. A lightweight judge on the
- * dispatch path that assesses each CANDIDATE CHANGE — never the static `task.risk` field,
- * a sizing artifact (W1-T5/§9) that says nothing about a change's danger; {@link
- * RiskJudgeInput} has no field that could carry it in.
+ * Risk judge — P34 clause (b), MASTER-PLAN §4B/§9, W1-T248. Assesses candidate changes;
+ * RiskJudgeInput excludes static `task.risk`, a sizing artifact (W1-T5/§9).
  *
- * DECISION SHAPE: low-risk-and-confident PROCEEDS; high-risk or low-confidence ESCALATES,
- * naming the OBSERVED blocker (W1-T186). Judgment ({@link RiskJudgeVerdict}) and action
- * ({@link planRiskJudgeAction}) stay separate — the mapping is pure, no LLM call inside it.
+ * Low-risk-and-confident PROCEEDS; high-risk or low-confidence ESCALATES with the observed
+ * blocker (W1-T186). Verdict and action stay separate; planRiskJudgeAction is pure.
  *
- * JUDGE-UNAVAILABLE (spawn error, timeout, unparseable response) is represented as a distinct
- * availability state. The reusable/default controller remains fail-closed to ESCALATE (W1-T130),
- * while an explicitly configured autonomous caller may retain its deterministic gate behavior
- * without manufacturing an LLM risk decision.
+ * Unavailable (spawn error, timeout, unparseable response) is distinct from an LLM verdict.
+ * Default: ESCALATE (W1-T130); explicit autonomous callers may retain deterministic gates.
  *
- * STABLE ON UNCHANGED INPUT (W1-T178): an optional {@link RiskJudgeCache}, keyed on {@link
- * canonicalRiskJudgeInputKey}, reuses a prior verdict rather than risking a flapped re-judgment.
+ * W1-T178: optional RiskJudgeCache reuses verdicts by canonicalRiskJudgeInputKey.
  *
- * REUSABLE (for P28's future auto-ratification): {@link assessRisk} takes `{change,
- * gatesState, planContext}` and returns `{verdict, reasons, confidence}` with no dispatch-only
- * coupling; dispatch orchestration lives one layer up, in {@link runRiskJudge}.
+ * P28 reuse: assessRisk takes {change, gatesState, planContext}, returns
+ * {verdict, reasons, confidence}; runRiskJudge owns dispatch orchestration.
  */
 // Why: the mount-resolution rule and every measured incident behind these invariants are
 // archived at docs/forensics/risk-judge.md#module-header.
@@ -45,8 +38,7 @@ export const RISK_JUDGE_GATE_CONSEQUENCES: readonly RiskJudgeGateConsequence[] =
   "STOP",
 ];
 
-/** What the judge returns for one candidate change — the reusable shape acceptance
- *  criterion 6 names verbatim: `{verdict, reasons, confidence}`. */
+/** Reusable verdict (criterion 6): `{verdict, reasons, confidence}`. */
 export interface RiskJudgeVerdict {
   verdict: RiskJudgeVerdictLabel;
   /** Absent for the historical parsed shape; present when no LLM decision was available. */
@@ -57,41 +49,33 @@ export interface RiskJudgeVerdict {
   confidence: number;
   /** Optional gate-posture consequence. Absent for ordinary change-risk judgments. */
   gateConsequence?: RiskJudgeGateConsequence;
-  /** W1-T478 — the raw judge text that failed to parse, capped at {@link REPORT_EXCERPT_CAP} via
-   *  {@link capStderrExcerpt} (the #1584 "absent, never empty" precedent this copies). Present ONLY
-   *  on {@link MALFORMED_RESPONSE_VERDICT}: a read that FAILED kept its evidence, distinct from a
-   *  read that SAID NO. Never present on a genuine parsed verdict, adverse or not — there is no
-   *  unparsed text to keep once `RISK_VERDICT` was actually read. */
+  /** W1-T478: raw failed-parse evidence, only on MALFORMED_RESPONSE_VERDICT, never parsed verdicts.
+   *  capStderrExcerpt enforces REPORT_EXCERPT_CAP and #1584's "absent, never empty" precedent. */
   unparseableExcerpt?: string;
 }
 
 // ── What the judge is shown — the candidate CHANGE, never task.risk ──────
 
-/** One touched file's bounded change-SHAPE (W1-T1031): path plus added/deleted LINE
- *  COUNTS only — never the lines themselves, never a hunk, never a patch. */
+/** W1-T1031: bounded change shape (path and line counts); tier 1 never sees patch text. */
 export interface RiskJudgeChangedFile {
   path: string;
   additions: number;
   deletions: number;
-  /** W1-T7724 — the REST row's own `patch`, kept so the DIFF tier needs no second GitHub read. Absent when
-   *  GitHub omitted it (very large or binary files). The tier-1 prompt never renders it, and the caller
-   *  strips it ({@link withoutRiskJudgePatches}) before the tier-1 judge input is built. */
+  /** W1-T7724: REST patch reused by the diff tier; absent for large/binary omissions.
+   *  withoutRiskJudgePatches strips it before tier-1 input; that prompt never renders it. */
   patch?: string;
 }
 
 /**
- * A bounded, REST-sourced view of the change's actual diff shape (W1-T1031) — distinct
- * from {@link RiskJudgeChange.files}, the caller's DECLARED file list. Capped at {@link
- * RISK_JUDGE_CHANGE_VIEW_FILE_CAP} files via {@link boundRiskJudgeChangeView}; `truncated`
- * says so honestly when the cap fires. Still not a diff — a line count, never code read.
+ * W1-T1031: actual REST diff shape, distinct from RiskJudgeChange.files (declared paths).
+ * boundRiskJudgeChangeView caps at RISK_JUDGE_CHANGE_VIEW_FILE_CAP and marks truncation.
+ * Counts only, never code read.
  *
- * Why: the measured incident this view exists to fix, and the file-cap's sizing
- * argument, are archived at docs/forensics/risk-judge.md#riskjudgechangeview.
+ * Why: docs/forensics/risk-judge.md#riskjudgechangeview.
  */
 export interface RiskJudgeChangeView {
   files: RiskJudgeChangedFile[];
-  /** True when the file list was longer than the cap and had to be cut — an honest
-   *  admission, never a silent truncation. */
+  /** True when the file cap cut the list; truncation must remain explicit. */
   truncated: boolean;
 }
 
@@ -164,13 +148,11 @@ export function declaredFilesAbsentFromChange(
   return declared.filter((d) => !touched.has(d)).sort();
 }
 
-/** File cap {@link boundRiskJudgeChangeView} enforces — sized well under the judge's
- *  cheapest-tier context floor; a PR touching more files just reads `truncated: true`.
+/** boundRiskJudgeChangeView's cap fits the cheapest-tier context; excess marks truncation.
  *  Why: docs/forensics/risk-judge.md#risk_judge_change_view_file_cap. */
 export const RISK_JUDGE_CHANGE_VIEW_FILE_CAP = 60;
 
-/** Apply the cap to a REST-sourced file list — the ONE place both the real REST reader
- *  and any test-built list apply the SAME bound, so the two can never drift apart. */
+/** Shared file cap for REST readers and test-built lists. */
 export function boundRiskJudgeChangeView(files: RiskJudgeChangedFile[]): RiskJudgeChangeView {
   return {
     files: files.slice(0, RISK_JUDGE_CHANGE_VIEW_FILE_CAP),
@@ -214,20 +196,17 @@ export interface RiskJudgeDiffEvidence {
   budgetChars: number;
 }
 
-/** Where the diff tier reads the diff from — a seam the caller supplies. `read` returns the change view
- *  the caller ALREADY fetched (patches kept), so the tier adds no GitHub call. `inputBudgetChars` is the
- *  judge mount's own input budget, given the rendered tier-1 prompt's length; never a literal here. */
+/** Caller seam: reuse fetched patches without another GitHub call; inputBudgetChars derives
+ *  room from the mount budget and rendered tier-1 prompt length, never a fixed literal. */
 export interface RiskJudgeDiffSource {
   read: () => RiskJudgeChangeView | Promise<RiskJudgeChangeView>;
   inputBudgetChars: (tier1PromptChars: number) => number;
 }
 
-/** Characters per token assumed when turning a mount's token context into a character budget. Code
- *  tokenises worse than prose, so this errs low: a diff that fits is a diff the mount can hold. */
+/** Conservative code characters per token for mount context budgets. */
 export const RISK_JUDGE_CHARS_PER_TOKEN = 3;
 
-/** The default {@link RiskJudgeDiffSource.inputBudgetChars}: the resolved mount's context size, less the
- *  rendered tier-1 prompt the diff rides beside. */
+/** Default diff budget: mount context minus rendered tier-1 prompt. */
 export function riskJudgeDiffInputBudget(mount: Pick<Mount, "contextBudget">): (tier1PromptChars: number) => number {
   return (tier1PromptChars) => Math.max(0, mount.contextBudget * RISK_JUDGE_CHARS_PER_TOKEN - tier1PromptChars);
 }
@@ -255,10 +234,9 @@ function patchHunkHeaders(patch: string, room: number): string[] {
 }
 
 /**
- * Bound a change view's patches to an input budget (W1-T7724), deterministically. A diff inside the budget
- * is shown whole. A larger one gives each file a share of what is left, taking source files before tests
- * and the largest changes first; a file whose patch does not fit its share, or whose row has no `patch`,
- * is SUMMARISED (path, counts, hunk headers). Every summarised file is listed — nothing is dropped silently.
+ * W1-T7724: show fitting diffs whole; otherwise share remaining budget, source before tests,
+ * largest changes first. Missing/over-share patches become path/count/hunk-header summaries;
+ * every summarised file remains listed.
  */
 export function boundRiskJudgeDiff(view: RiskJudgeChangeView, budgetChars: number): RiskJudgeDiffEvidence {
   const budget = Math.max(0, Math.floor(budgetChars));
@@ -298,8 +276,7 @@ export function boundRiskJudgeDiff(view: RiskJudgeChangeView, budgetChars: numbe
   return { full, summarised, budgetChars: budget };
 }
 
-/** The candidate change under assessment. Deliberately has no `risk` field — nowhere to
- *  put the static sizing artifact, so a caller cannot leak it in even by mistake. */
+/** Candidate change; excludes the static sizing `risk` field. */
 export interface RiskJudgeChange {
   /** Human-readable description of the change (diff summary, PR title/body, etc). */
   description: string;
@@ -314,8 +291,7 @@ export interface RiskJudgeChange {
   diff?: RiskJudgeDiffEvidence;
 }
 
-/** Loose/string-keyed by design: dispatch today and P28 tomorrow each track their own
- *  gates under whatever keys make sense to them — only that it gets shown. */
+/** Caller-defined gate keys support dispatch and P28 reuse. */
 export interface RiskJudgeGatesState {
   [key: string]: unknown;
 }
