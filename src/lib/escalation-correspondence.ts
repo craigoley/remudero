@@ -56,7 +56,7 @@ export function recordEscalationIntakeOutcome(entry: FeedbackEntry, outcome: Esc
   const answers = current.messages.filter(message => message.role === "reply" && message.extra?.replyId
     && message.extra.escalation && escalationReplySubmissionKey(entry.thread_id!, message.extra.replyId, message.extra.escalation.issueUrl) === entry.submission_key);
   const answer = answers.length === 1 ? answers[0] : undefined;
-  if (!answer || answer.body.trim() !== entry.raw.trim() || !answer.extra?.escalation
+  if (!answer || answer.body.trim() !== entry.raw.trim() || answer.extra?.escalation === undefined
     || issue(answer.extra.escalation.issueUrl)?.toLowerCase() !== deps.repository.toLowerCase()
     || !/^[a-f0-9]{64}$/.test(answer.extra.escalation.revision)) return unknown("The intake does not match one exact saved answer.");
   if (outcome.action === "error") return unknown(outcome.reason);

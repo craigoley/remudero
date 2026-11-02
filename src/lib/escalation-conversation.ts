@@ -271,7 +271,7 @@ export function createEscalationConversationReader(opts: {
     if (intake?.questionIssueUrl) {
       const parent = ordered.find(message => message.role === "reply" && message.seq === intake.replySeq && message.extra?.replyId === intake.replyId);
       const questionLocation = escalationIssueLocation(intake.questionIssueUrl);
-      if (!parent?.extra?.escalation || questionLocation?.repository.toLowerCase() !== location.repository.toLowerCase()) questionFailure = "invalid";
+      if (parent?.extra?.escalation === undefined || questionLocation?.repository.toLowerCase() !== location.repository.toLowerCase()) questionFailure = "invalid";
       else {
         try {
           const questionSource = await loadSource(intake.questionIssueUrl, fresh);
