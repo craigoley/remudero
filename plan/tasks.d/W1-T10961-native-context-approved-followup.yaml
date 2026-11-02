@@ -19,6 +19,7 @@
     - scripts/lib/author-step-resources.mjs
     - scripts/lib/author-low-footprint.mjs
     - scripts/lib/native-author-runtime.mjs
+    - scripts/preflight-author.mjs
     - test/ci/author-context-compatibility.test.ts
     - test/infra/author-step-resources.test.ts
     - test/author-step-capture.test.ts
@@ -43,7 +44,8 @@
     HOME/TMP/auth and no fleet-state/real credential mounts. No arbitrary ended-reservation
     recovery, signal to another owner, time grant, private lower-floor adoption or test-gate change
     is part of this task.
-  note: Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
+  note: >-
+    Operator explicitly approved these follow-ups and their filing on 2026-10-28; Codex drafted
     this record. Prepared source/old receipts are evidence only, not current-head PASS. This record
     grants no extra private allowance, unchanged-failure retry, spend-cap increase, install,
     schedule, worker stop or live/public release. Before building, reconcile current
@@ -53,6 +55,8 @@
     coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
     requirements. Filing neither supplies a missing qualification route nor resets or transfers any
     old head-bound allowance.
+
+    operator grant 2026-11-01 (session) for #15368: scripts/preflight-author.mjs
   acceptance:
     - claim: only matching exact source dependency allocation and owner context can start or reuse a
         native phase

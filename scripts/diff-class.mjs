@@ -476,10 +476,42 @@ export function sourceTextPathsRead(content) {
 }
 
 /**
- * Relative import/require specifiers a file names — never a bare package name. The only kind
- * {@link importedWalkerWalksArea} follows: one hop, matching the floor's own restraint.
+ * The repository's own `#alias/*` subpath imports (package.json `imports`, e.g. `"#src/*": "./src/*"`),
+ * read once from THIS checkout, as `[aliasPrefix, targetPrefix]` pairs. A suite written
+ * `import { walk } from "#scripts/walker.mjs"` names the same module as `"../scripts/walker.mjs"`;
+ * #15046 moved the test tree onto these aliases and the one-hop arms below, which saw only a
+ * `.`-relative specifier, stopped reaching the walkers those suites import. An alias resolves from
+ * the enumeration ROOT, never from the importing file's directory.
  */
-export function relativeImportSpecifiers(content) {
+function readImportAliases() {
+  /** @type {Record<string, unknown>} */
+  const imports = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).imports ?? {};
+  return Object.entries(imports)
+    .filter(([key, target]) => key.startsWith("#") && key.endsWith("/*") && typeof target === "string" &&
+      target.startsWith("./") && target.endsWith("/*"))
+    .map(([key, target]) => [key.slice(0, -1), /** @type {string} */ (target).slice(2, -1)]);
+}
+const IMPORT_ALIASES = readImportAliases();
+
+/**
+ * The absolute path a relative or `#alias/` specifier names, read from `fromDir` (relative) or
+ * `root` (alias), with its extension left exactly as written: `"#src/lib/x.js"` names
+ * `src/lib/x.js`, as `"../src/lib/x.js"` always has. `undefined` for a bare package name.
+ */
+export function repoImportPath(spec, fromDir, root) {
+  if (spec.startsWith(".")) return normalize(join(fromDir, spec));
+  for (const [alias, target] of IMPORT_ALIASES) {
+    if (spec.startsWith(alias)) return normalize(join(root, target, spec.slice(alias.length)));
+  }
+  return undefined;
+}
+
+/**
+ * Relative import/require specifiers a file names — never a bare package name. The only kind
+ * {@link importedWalkerWalksArea} follows: one hop, matching the floor's own restraint. With
+ * `aliases`, a repository `#alias/` specifier ({@link repoImportPath}) counts too.
+ */
+export function relativeImportSpecifiers(content, { aliases = false } = {}) {
   const out = [];
   const patterns = [
     /\b(?:import|export)\s[^'"`;]*?\bfrom\s*["']([^"']+)["']/g,
@@ -488,7 +520,7 @@ export function relativeImportSpecifiers(content) {
   ];
   for (const re of patterns) {
     for (const m of content.matchAll(re)) {
-      if (m[1].startsWith(".")) out.push(m[1]);
+      if (m[1].startsWith(".") || (aliases && IMPORT_ALIASES.some(([alias]) => m[1].startsWith(alias)))) out.push(m[1]);
     }
   }
   return out;
@@ -521,8 +553,8 @@ export function namesAreaLoosely(content, areas) {
  * that imports it a census suite too, exactly as if it had walked the tree inline.
  */
 export function importedWalkerWalksArea(content, testDir, root, areas) {
-  for (const spec of relativeImportSpecifiers(content)) {
-    const abs = normalize(join(testDir, spec));
+  for (const spec of relativeImportSpecifiers(content, { aliases: true })) {
+    const abs = /** @type {string} */ (repoImportPath(spec, testDir, root));
     const rel = relative(root, abs).split(sep).join("/");
     if (!/^(?:scripts|src|bin)\//.test(rel)) continue;
     let moduleContent;
@@ -569,11 +601,12 @@ function clonesRepoArgv(content) {
 export function clonesTheRepository(content, testDir, root) {
   const bare = withoutRelativePathLiterals(content);
   if (clonesRepoArgv(bare)) return true;
-  for (const m of content.matchAll(/\bimport\s*\{([^}]*)\}\s*from\s*["'](\.[^"']+)["']/g)) {
+  for (const m of content.matchAll(/\bimport\s*\{([^}]*)\}\s*from\s*["']([.#][^"']+)["']/g)) {
     const names = m[1].split(",").map((n) => n.trim().replace(/^type\s+/, "").split(/\s+as\s+/).pop() ?? "")
       .filter((n) => /^[A-Za-z_$][\w$]*$/.test(n));
     if (names.length === 0) continue;
-    const abs = normalize(join(testDir, m[2]));
+    const abs = repoImportPath(m[2], testDir, root);
+    if (abs === undefined) continue;
     // Only a SHARED TEST HELPER: an imported src or scripts module is a suite's subject, not its walker.
     if (!relative(root, abs).split(sep).join("/").startsWith("test/helpers/")) continue;
     let moduleContent;

@@ -566,6 +566,20 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
       "branch_reap.hygiene_shadow. Armed, at most 25 per pass; --force-with-lease on the planned sha refuses a " +
       "moved branch, --atomic lands archive and delete together, and the archive ref restores it.",
   },
+  // ── src/lib/gardener.ts ──────────────────────────────────────────────────────────────────
+  {
+    id: "garden-close-released-decision-pr",
+    action: "close a garden's own decision PR once the pass releases it unjudged past its backstop",
+    module: "src/lib/gardener.ts",
+    symbol: "gardenClosePr (decision-backstop release)",
+    boundary: "gh-pr-close",
+    gate: "always",
+    ledgerSteps: [],
+    verb: "rmd daemon (every registered garden, `rmd garden run <name>`)",
+    note:
+      "Fires only on the pending PR a garden itself opened and holds, only when it is still open and bot-authored, " +
+      "and never while a non-bot review or review comment exists. Closing preserves the branch, so it is reversible.",
+  },
   // ── src/lib/machine-filing-judge.ts ──────────────────────────────────────────────────────
   {
     id: "machine-judge-withdraw-stale-pr",
