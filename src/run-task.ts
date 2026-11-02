@@ -29382,19 +29382,17 @@ export async function serveCommand(
     // planPath alone is enough, no snapshot needed here the way board.ts's does.
     // `statusGithub` backs GET /v1/drain/preview's (W1-T140) merged-set derivation --
     // the SAME batched gateway the board route above uses, never a second gateway type.
-    // W1-T193: APPROVE/REFRAME from the console hand off to the REAL `bin/rmd approve`/
-    // `bin/rmd reframe` CLI, detached — see RatifyCliGateway's own doc (panel-graph.ts) for
-    // why. `ratify` is left unset here on purpose: buildServeServer (lib/serve.ts) defaults
-    // it to a real ratifyCliGateway rooted at panelGraph.root + config.root's state/logs
-    // (config.root === fleetControlRoot below, the same root every other rmd-serve state
-    // file already lives under) — see ServeDeps.panelGraph's own doc for why the assembler,
-    // not this CLI-only wiring, owns that construction.
+    // The maintained owned gateway supplies product planning and approve/reframe from fresh
+    // source. Writable worktrees, logs and causal state belong to the control root.
     panelGraph: {
       root: repoRoot,
       planPath,
       ledgerPath,
       github: ghTraceGateway(self.owner, self.repo),
       statusGithub: boardGithub,
+      ratify: fleetRatifyGateway(repoRoot, join(config.root, "state", "logs"), ledgerPath, {
+        worktreeRoot: worktreesDir(config), stateRoot: config.root,
+      }),
       // W1-T191: arm the real feedback-landing bridge for POST /v1/feedback/decision — an
       // operator's accept/reject click writes against `repoRoot` (the daemon's own checkout)
       // and, without this, leaves it dirty until the next `git checkout --`/reset wipes it.
