@@ -691,6 +691,9 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   let text = shard.text.slice(0, insert) + extra + shard.text.slice(insert);
   if (parseDocument(text).errors.length > 0) return refuse("shard-drifted", "appending paths would invalidate the files sequence");
   const reparked = isMap(task) && String(task.get("author_class")) === "machine";
+  // #15855: a second amendment of a task an earlier one already reparked set nothing new, so its
+  // `verify: human` proof matched base too and proof-discrimination refused the writer's own PR.
+  const newlyReparked = reparked && String(task.get("verify")) !== "human";
   if (reparked) {
     const amended = parseDocument(text);
     const index = (isSeq(amended.contents) ? amended.contents.items : []).findIndex(item => isMap(item) && String(item.get("id")) === request.taskId);
@@ -729,7 +732,7 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
     deps.gitAdd(wp, shard.path);
     const target = build ? "its build" : `#${request.prNumber}`;
     const title = `fix(plan): extend ${request.taskId.toLowerCase()}'s files for ${target}`;
-    const reparkNote = reparked ? "\n\nSet verify: human and remove the stale risk ruling so the amended machine task returns to the judge." : "";
+    const reparkNote = newlyReparked ? "\n\nSet verify: human and remove the stale risk ruling so the amended machine task returns to the judge." : "";
     const sha = deps.gitCommit(wp, (riskRaise
       ? `${title}\n\nAppend validated worker paths to files and raise risk to high: the task linter counted ` +
         `${riskRaise.subsystems} (Rule 19 sizing). band_meaning: span is added only when none was declared.`
@@ -740,11 +743,11 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
         ? `Scope amendment for ${target}. ${shard.path}'s files list changes and its risk is raised to high ` +
           `because the task linter counted ${riskRaise.subsystems} (Rule 19 sizing); band_meaning: span is added only when none was declared.\n\n`
         : `Scope amendment for ${target}. ${reparked ? shard.path + "'s files list changes" : "Only " + shard.path + "'s files list changes"}.\n\n`) +
-        (reparked ? "Set verify: human and remove the stale risk ruling so the amended machine task returns to the judge.\n\n" : "") +
+        (newlyReparked ? "Set verify: human and remove the stale risk ruling so the amended machine task returns to the judge.\n\n" : "") +
         renderAcceptanceBlock([...additions.map((path) => ({ claim: `files includes ${path}`,
           proof: `grep: ${addedFilesEntryPattern(path, files.flow === true, !shard.text.slice(start, end).includes("\n"))} in ${shard.path}` })),
           ...(riskRaise ? [{ claim: `risk is raised to high for ${riskRaise.subsystems}`, proof: `grep: ^ *risk: high in ${shard.path}` }] : []),
-          ...(reparked ? [{ claim: "the amended machine task returns to the judge", proof: `grep: ^ *verify: human in ${shard.path}` }] : [])]) });
+          ...(newlyReparked ? [{ claim: "the amended machine task returns to the judge", proof: `grep: ^ *verify: human in ${shard.path}` }] : [])]) });
     deps.recordIdentity(key, { amendmentUrl: created.prUrl, amendmentNumber: created.prNumber, merged: false });
     return { kind: "created", amendmentUrl: created.prUrl, amendmentNumber: created.prNumber };
   } finally {
