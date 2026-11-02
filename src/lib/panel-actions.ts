@@ -904,7 +904,7 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
           if (prior.body !== input.text || binding?.issueUrl !== input.issueUrl
             || binding?.revision !== input.expectedRevision) return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to a different answer or source. Your draft was not sent." });
           return void sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, duplicate: true,
-            saved: { intentId: input.intentId, seq: prior.seq }, inputDelivery: "unverified", work: "not_observed" });
+            saved: { intentId: input.intentId, seq: prior.seq, text: prior.body }, inputDelivery: "unverified", work: "not_observed" });
         }
         const current = await deps.readEscalationConversation?.(input.issueUrl!, true);
         if (!current || current.state !== "served") return void sendJson(res, 503, { error: "source_unavailable", detail: "The current escalation could not be verified. Your draft was not sent." });
@@ -919,8 +919,8 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
       if (!saved) appendThreadMessage(identity, "reply", input.text, { threadStorePath: deps.threadStorePath });
       if (saved?.kind === "conflict") return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to different text. Your draft was not sent." });
       if (saved?.kind === "existing") return void sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, duplicate: true,
-        saved: { intentId: input.intentId, seq: saved.seq }, inputDelivery: "unverified", work: "not_observed" });
-      const savedReceipt = saved ? { intentId: input.intentId!, seq: saved.seq } : undefined;
+        saved: { intentId: input.intentId, seq: saved.seq, text: input.text }, inputDelivery: "unverified", work: "not_observed" });
+      const savedReceipt = saved ? { intentId: input.intentId!, seq: saved.seq, text: input.text } : undefined;
       // Once the answer is durable, a later capture failure is partial delivery, never a reason to append again.
       try {
 
@@ -937,7 +937,7 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
             ? formatExhaustionReport(interpretation.unresolved)
             : undefined;
       if (followUp) {
-        appendThreadMessage(identity, "escalation", followUp, { threadStorePath: deps.threadStorePath });
+        appendThreadMessage(identity, "escalation", followUp, { threadStorePath: deps.threadStorePath }, { question: true });
       }
 
       const origin = bearerTokenId(req);

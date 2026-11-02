@@ -37,6 +37,7 @@ export interface EscalationConversation {
   options: { label: string; detail: string; executable: false }[];
   source: { state: "current" | "stale"; observedAt: string; updatedAt: string; revision: string };
   history: "verified" | "absent" | "unavailable" | "partial";
+  attention: "needs_input" | "waiting_for_agent" | "archived" | "unknown";
   messages: { seq: number; from: "operator" | "daemon"; text: string; ts: number; intentId?: string }[];
   canReply: boolean;
   replyUnavailableReason?: string;
@@ -207,14 +208,21 @@ export function createEscalationConversationReader(opts: {
     const threadId = deriveThreadId(identity);
     const messages = selected ? boundedMessages(selected[1]) : undefined;
     const history = stored?.status !== "ok" ? "unavailable" : candidates.length === 0 ? "absent" : !messages ? "partial" : "verified";
+    const ordered = history === "verified" ? [...selected![1]].sort((a, b) => a.seq - b.seq) : [];
+    const last = ordered.at(-1);
+    // Only an explicit agent message can end correspondence. Saving an answer or an
+    // unconfigured interpreter's "understood" does not establish that the agent needs no input.
+    const attention = !last ? "unknown" : last.role === "reply" ? "waiting_for_agent"
+      : last.extra?.question === false && ordered.some(message => message.role === "reply") ? "archived"
+        : source.state === "closed" ? "unknown" : "needs_input";
     const canReply = !stale && source.state === "open" && history === "verified";
     const sourceRevision = digest([source.html_url, source.body, source.title, source.updated_at, source.state]);
     return { state: "served", conversation: {
       version: 1, issueUrl, repository: location.repository, identity, threadId,
-      revision: digest([sourceRevision, threadId, messages ?? history]), headline: parsed.headline,
+      revision: digest([sourceRevision, threadId, messages ?? history, attention]), headline: parsed.headline,
       whatHappened: parsed.detail, recommendation: parsed.recommendation, options: parsed.options,
       source: { state: stale ? "stale" : "current", observedAt: evidence.observedAt, updatedAt: source.updated_at, revision: sourceRevision },
-      history, messages: messages ?? [], canReply,
+      history, attention, messages: messages ?? [], canReply,
       ...(!canReply ? { replyUnavailableReason: stale ? "The saved source is stale. Refresh before replying."
         : source.state === "closed" ? "This escalation is closed. Earlier messages remain readable."
           : "The complete saved discussion could not be verified. No reply destination is confirmed." } : {}),

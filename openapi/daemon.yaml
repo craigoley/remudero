@@ -15065,7 +15065,7 @@ components:
 
     EscalationConversation:
       type: object
-      required: [version, issueUrl, repository, identity, threadId, revision, headline, whatHappened, recommendation, options, source, history, messages, canReply, details]
+      required: [version, issueUrl, repository, identity, threadId, revision, headline, whatHappened, recommendation, options, source, history, attention, messages, canReply, details]
       properties:
         version: {type: integer, enum: [1]}
         issueUrl: {type: string}
@@ -15102,6 +15102,10 @@ components:
             updatedAt: {type: string, format: date-time}
             revision: {type: string}
         history: {type: string, enum: [verified, absent, unavailable, partial]}
+        attention:
+          type: string
+          enum: [needs_input, waiting_for_agent, archived, unknown]
+          description: Correspondence state, separate from work completion. Archived requires an explicit agent message with question false after an operator reply. A later agent question reopens the conversation.
         messages:
           type: array
           maxItems: 100
@@ -15228,10 +15232,11 @@ components:
         saved:
           type: object
           description: Present on a bound reply once its answer is durably stored. Does not establish fleet work.
-          required: [intentId, seq]
+          required: [intentId, seq, text]
           properties:
             intentId: {type: string}
             seq: {type: integer}
+            text: {type: string, description: The exact saved reply, suitable for showing beneath the message.}
         inputDelivery: {type: string, enum: [recorded, unverified]}
         work: {type: string, enum: [not_observed]}
         duplicate: {type: boolean}

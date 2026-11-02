@@ -9,7 +9,7 @@ import type { AddressInfo } from "node:net";
 import { fixedClock } from "#src/lib/clock.js";
 import { createEscalationConversationReader, buildEscalationConversationRoute, readEscalationIssueSource, type EscalationIssueSource } from "#src/lib/escalation-conversation.js";
 import { escalate, type Escalation } from "#src/lib/escalate.js";
-import { readThread } from "#src/lib/inbox-thread.js";
+import { readThread, appendThreadMessage } from "#src/lib/inbox-thread.js";
 import { buildEscalationReplyRoute } from "#src/lib/panel-actions.js";
 import { createService } from "#src/lib/service.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -44,10 +44,25 @@ test("escalation conversation preserves the native recommendation and exact iden
   assert.equal(c.recommendation, "Investigate the failed stage and repair the problem.");
   assert.equal(c.messages[0]?.text, "PR #15520 needs clarification\n\nPR stage stalled: #15520 — own-red. The diagnosis is unknown.");
   assert.equal(c.canReply, true);
+  assert.equal(c.attention, "needs_input");
   assert.equal(c.options[0]?.executable, false);
   assert.equal(c.source.observedAt, AT);
   assert.equal(c.source.updatedAt, AT);
   assert.equal(c.source.state, "current");
+});
+
+test("an answered escalation archives only on an explicit agent response and a later question reopens it", async t => {
+  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  const identity = { taskId: "W1-T42", class: "MANUAL", cause: "stage-stall", prRef: "15520" };
+  const attention = async () => { const r = await f.read(URL); assert.equal(r.state, "served"); return r.state === "served" ? r.conversation.attention : undefined; };
+  assert.equal(await attention(), "needs_input");
+  appendThreadMessage(identity, "reply", "Please investigate the Linux check.", { threadStorePath: f.store });
+  assert.equal(await attention(), "waiting_for_agent");
+  appendThreadMessage(identity, "escalation", "I have enough information. The investigation is still running.", { threadStorePath: f.store }, { question: false });
+  assert.equal(await attention(), "archived");
+  appendThreadMessage(identity, "escalation", "Which Linux version should I compare?", { threadStorePath: f.store }, { question: true });
+  assert.equal(await attention(), "needs_input");
+  const r = await f.read(URL); if (r.state === "served") assert.equal(r.conversation.messages.length, 4);
 });
 
 test("escalation conversation refuses foreign and unreadable source identity", async t => {
@@ -186,8 +201,10 @@ test("escalation reply intent records once without claiming completed work", asy
     assert.equal((await post({ ...body, intentId: "bad" })).status, 400);
     const first = await post(); assert.equal(first.status, 200);
     const receipt = await first.json() as Record<string, unknown>;
-    assert.deepEqual(receipt.saved, { intentId: "reply-fixture-01", seq: 2 });
+    assert.deepEqual(receipt.saved, { intentId: "reply-fixture-01", seq: 2, text: body.text });
     assert.equal(receipt.work, "not_observed");
+    const after = await f.read(URL); assert.equal(after.state, "served");
+    if (after.state === "served") { assert.equal(after.conversation.attention, "waiting_for_agent"); assert.equal(after.conversation.messages.at(-1)?.text, body.text); }
     const repeat = await post(); assert.equal(repeat.status, 200);
     assert.equal((await repeat.json() as { duplicate: boolean }).duplicate, true);
     assert.equal((await post({ ...body, text: "Different direction" })).status, 409);

@@ -6499,6 +6499,8 @@ export interface components {
         revision: string;
       };
       history: "verified" | "absent" | "unavailable" | "partial";
+      /** Correspondence state, separate from work completion. Archived requires an explicit agent message with question false after an operator reply. A later agent question reopens the conversation. */
+      attention: "needs_input" | "waiting_for_agent" | "archived" | "unknown";
       messages: ({
         seq: number;
         from: "operator" | "daemon";
@@ -6555,6 +6557,8 @@ export interface components {
       saved?: {
         intentId: string;
         seq: number;
+        /** The exact saved reply */
+        text: string;
       };
       inputDelivery?: "recorded" | "unverified";
       work?: "not_observed";
