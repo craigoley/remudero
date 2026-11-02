@@ -22,6 +22,7 @@ import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
 import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
 import { guardedAuthorEntry, MacAuthorCapacityRefusal } from './lib/mac-author-admission.mjs';
+import { readBoundedJsonFile } from './lib/coverage-disk-profile.mjs';
 import { scanRepo as scanCoverageBlanking } from './coverage-session-blanking-check.mjs';
 
 /** The exit status of a run whose selection the host cannot carry: distinct from pass (0) and fail (1). */
@@ -294,6 +295,12 @@ export function authorPublicationIdentity({ headRef, headSha, baseSha, publicati
   }
 }
 
+/** W1-T10947: an unreadable profile is an UNKNOWN one (its reason kept), never an absent or a bounded one. */
+export function readAuthorProfile(root, path) {
+  try { return readBoundedJsonFile(resolve(root, path)); }
+  catch (error) { return { unreadable: String(error.code ?? error.message) }; }
+}
+
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined,
   testSlot = {} } = {}) {
@@ -301,9 +308,10 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     'dry-run': { type: 'boolean' },
     deadline: { type: 'string' },
     'runtime-profile': { type: 'string' },
+    'author-profile': { type: 'string' },
     'head-ref': { type: 'string' },
     'head-sha': { type: 'string' },
-  }, { allowPositionals: false, helpText: 'preflight-author.mjs [--dry-run] [--head-ref <publication destination branch> [--head-sha <committed HEAD sha>]] [--deadline <ISO> --runtime-profile <path>]: fresh-base affected tests + default static preflight; unknown publication target is NOT identity assurance; full hosted CI remains required.' });
+  }, { allowPositionals: false, helpText: 'preflight-author.mjs [--dry-run] [--head-ref <publication destination branch> [--head-sha <committed HEAD sha>]] [--deadline <ISO> --runtime-profile <path>] [--author-profile <bounded profile JSON>]: fresh-base affected tests + default static preflight; unknown publication target is NOT identity assurance; full hosted CI remains required.' });
   if (helpRequested) return 0;
   const startedAt = Date.now();
   const receipt = { version: 1, assurance: 'author-only', hostedFullSuiteAndCoverage: 'required-pending',
@@ -708,7 +716,10 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const testsName = receipt.tiered ? 'affected-tests-subset' : 'affected-tests';
             admitRuntime('before-tests', 0, ranSuites, executionWorkers);
             // An over-capacity subset is sized by the arm it was cut from: a narrow arm's subset is narrower still.
-            const testCapacity = admitHost('affected-tests', { selection: receipt.selectedArm ?? receipt.selection, workers: executionWorkers });
+            // W1-T10947: an explicit bounded profile is priced against the context this slot was bound to.
+            const testCapacity = admitHost('affected-tests', { selection: receipt.selectedArm ?? receipt.selection, workers: executionWorkers,
+              ...(values['author-profile'] === undefined ? {} : { boundedProfile: readAuthorProfile(root, values['author-profile']),
+                context: boundContext ? observeContext() : undefined, bound: boundContext }) });
             if (testCapacity) (receipt.hostCapacity ??= []).push(testCapacity);
             // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
             // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).

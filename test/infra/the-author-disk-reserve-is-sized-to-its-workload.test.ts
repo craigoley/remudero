@@ -73,3 +73,77 @@ test("W1-T10765: a full or unmeasured selection still requires 20 GiB", () => {
     runAuthor: (_argv, {admitHost}) => { admitHost('static-preflight', {selection: 'full-fallback'}); ran = true; return 0; }});
   assert.equal(ran, true, 'exactly the full reserve still admits a full run');
 });
+
+test("W1-T10947: unbounded profiles, full coverage, missing allocation evidence and stale identity retain their existing refusals", async (t) => {
+  const contextModule = '#scripts/lib/author-context-compatibility.mjs';
+  const coverageModule = '#scripts/lib/coverage-disk-profile.mjs';
+  const preflightModule = '#scripts/preflight-author.mjs';
+  const {requireMacAuthorCapacity, boundedAuthorProfileBinding, BOUNDED_AUTHOR_PROFILE_FORMAT,
+    MAC_AUTHOR_BOUNDED_MINIMUM_BYTES} = await import(admissionModule);
+  const {AUTHOR_CONTEXT_FORMAT} = await import(contextModule);
+  const {coverageDiskAdmission, coverageDiskProfile} = await import(coverageModule);
+  const {readAuthorProfile} = await import(preflightModule);
+  const {ownedFixtureDir} = await import('#test/helpers/owned-fixture-dir.js');
+  const {mkdirSync, writeFileSync} = await import('node:fs');
+  const {join} = await import('node:path');
+  const {dir} = ownedFixtureDir(t, 'bounded-author-refusals');
+  const allocation = (path: string, dev: number) => ({path, dev, ino: dev * 10, fsType: 1, blockSize: 4096, blocks: 1e6});
+  const context = {format: AUTHOR_CONTEXT_FORMAT, source: {head: 'a'.repeat(40), tree: 'b'.repeat(40), clean: true},
+    dependency: {state: 'present', dependencyRoot: '/deps', dev: 1, ino: 2},
+    owner: {state: 'held', path: '/slot.json', pid: 7, processStart: 'start', ownerNonce: 'owner-1'},
+    allocations: {diagnostics: allocation('/w/coverage', 1), scratch: allocation('/scratch', 2), workspace: allocation('/w', 1)}};
+  const budget = {allocationBytes: GiB, scratchBytes: 0, outputBytes: 0, nativeBytes: 0, runtimeBytes: 0, childClosureBytes: 0};
+  const genuine = {format: BOUNDED_AUTHOR_PROFILE_FORMAT, bounded: true, binding: boundedAuthorProfileBinding(context),
+    budgets: {diagnostics: budget, scratch: budget, workspace: budget}};
+  const run = (boundedProfile: unknown, ctx: unknown = context, bound: unknown = ctx) =>
+    requireMacAuthorCapacity('/w', 'affected-tests', host(16 * GiB), {selection: 'full-fallback', workers: 1, boundedProfile, context: ctx, bound});
+  // Positive control: the same 16 GiB host admits a genuine bounded profile at its 10 GiB minimum.
+  const admitted = run(genuine);
+  assert.equal(admitted.state, 'admitted'); assert.equal(admitted.minimumFreeBytes, MAC_AUTHOR_BOUNDED_MINIMUM_BYTES);
+  const {budgets} = genuine, {childClosureBytes: _dropped, ...uncosted} = budget;
+  const missing = join(dir, 'absent.json');
+  const cases: Array<[string, unknown, unknown?, unknown?]> = [
+    ['omitted', undefined],
+    ['unknown-profile', {...genuine, format: 'rmd-bounded-author-profile-v0'}],
+    ['unknown-profile:unreadable:ENOENT', readAuthorProfile(dir, missing)],
+    ['unbounded-profile', {...genuine, bounded: false}],
+    ['unbounded-profile', {...genuine, budgets: {}}],
+    ['unbounded-profile:scratch', {...genuine, budgets: {...budgets, scratch: uncosted}}],
+    ['unbounded-profile:scratch', {...genuine, budgets: {...budgets, scratch: {...budget, runtimeBytes: -1}}}],
+    ['missing-allocation-evidence:no-context', genuine, null],
+    ['missing-allocation-evidence:none-observed', genuine, {...context, allocations: {}}],
+    ['missing-allocation-evidence:scratch', genuine, {...context, allocations: {...context.allocations,
+      scratch: {state: 'unavailable', reason: 'ENOENT'}}}],
+    ['missing-allocation-evidence:diagnostics:no-budget', {...genuine, budgets: {scratch: budget, workspace: budget}}],
+    ['missing-allocation-evidence:extra:not-observed', {...genuine, budgets: {...budgets, extra: budget}}],
+    ['stale-identity:source', {...genuine, binding: {...genuine.binding, head: 'c'.repeat(40)}}],
+    ['stale-identity:source', {...genuine, binding: {...genuine.binding, tree: 'c'.repeat(40)}}],
+    ['stale-identity:source', genuine, {...context, source: {...context.source, clean: false}}],
+    ['stale-identity:dependency', genuine, {...context, dependency: {...context.dependency, ino: 3}}],
+    ['stale-identity:owner', genuine, {...context, owner: null}],
+    ['stale-identity:owner', genuine, context, {...context, owner: {...context.owner, ownerNonce: 'owner-0'}}],
+    ['stale-identity:allocation:scratch', genuine, context, {...context, allocations: {...context.allocations,
+      scratch: allocation('/scratch', 3)}}],
+  ];
+  for (const [reason, profile, ...rest] of cases) {
+    assert.throws(() => run(profile, ...rest), (error: unknown) => {
+      assert.ok(error instanceof MacAuthorCapacityRefusal, reason);
+      const admission = (error as unknown as {admission: Admission & {boundedProfile: object}}).admission;
+      assert.deepEqual(admission.boundedProfile, {state: 'not-applied', reason}, reason);
+      assert.equal(admission.minimumFreeBytes, MAC_AUTHOR_FREE_RESERVE_BYTES, reason);
+      assert.deepEqual(admission.reasons, ['workspaceFreeBytes:below-existing-20GiB-reserve',
+        'scratchFreeBytes:below-existing-20GiB-reserve'], reason);
+      return true;
+    }, reason);
+  }
+  // Full coverage keeps its own 20 GiB floor: neither a 10 GiB coverage profile nor an author profile lowers it.
+  assert.equal(coverageDiskProfile().profile.minimumFreeBytes, MAC_AUTHOR_FREE_RESERVE_BYTES);
+  mkdirSync(join(dir, 'coverage'));
+  for (const [name, body] of [['ten.json', {minimumFreeBytes: MAC_AUTHOR_BOUNDED_MINIMUM_BYTES, reservedBytes: 0, estimatedPeakBytes: 0}],
+    ['author.json', genuine]] as const) {
+    writeFileSync(join(dir, 'coverage', name), JSON.stringify(body));
+    assert.throws(() => coverageDiskProfile(join(dir, 'coverage', name)), /existing coverage reserve/);
+  }
+  assert.equal(coverageDiskAdmission(['/w'], {minimumFreeBytes: MAC_AUTHOR_BOUNDED_MINIMUM_BYTES, reservedBytes: 0,
+    estimatedPeakBytes: 0}, {statfs: () => ({bavail: 16 * GiB, bsize: 1})}).state, 'unknown');
+});
