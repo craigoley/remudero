@@ -2234,6 +2234,8 @@ type VerdictArmCtx = {
   // `deps.arm` below.
   isDraft?: boolean;
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T11163: the review's fresh read of its own head, handed to the default arm as {@link ArmDeps.readChecksGreenReviewed}. */
+  readChecksGreenReviewed?: (prUrl: string, headSha: string) => boolean | Promise<boolean>;
 };
 
 /** The injectable effector and ledger read of a review arm, parameterised by what the effector returns. Named
@@ -2340,8 +2342,14 @@ export async function armIfVerdictPermitsAsync(
 ): Promise<ArmOutcome | "skipped"> {
   const gate = verdictArmGate(verdict, ctx, deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)));
   if (gate === "skipped") return "skipped";
-  const arm = deps.arm ?? ((prUrl: string, taskId: string) => armAutoMergeDetailedAsync(prUrl, taskId));
+  const arm = deps.arm ?? ((prUrl: string, taskId: string) => armAutoMergeDetailedAsync(prUrl, taskId, verdictArmDeps(ctx)));
   return logVerdictArmResult(ctx, gate.reason, await arm(ctx.prUrl, ctx.taskId));
+}
+
+/** W1-T11163 — the review arm's production deps, plus the context's head read when it carries one. */
+export function verdictArmDeps(ctx: Pick<VerdictArmCtx, "readChecksGreenReviewed">, base: () => ArmDeps<true> = realArmDepsAsync): ArmDeps<true> {
+  const read = ctx.readChecksGreenReviewed;
+  return read === undefined ? base() : { ...base(), readChecksGreenReviewed: read };
 }
 
 /**

@@ -4,8 +4,8 @@
 // later pass. The review's arm now reads the head's required checks itself when GitHub still says blocked.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { armAutoMergeDetailedAsync, type ArmDeps } from "#src/lib/arm-auto-merge.js";
-import { readChecksGreenReviewedAtHead, reviewVerdictArm } from "#src/cli/commands/review.js";
+import { armAutoMergeDetailedAsync, verdictArmDeps, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import { readChecksGreenReviewedAtHead } from "#src/cli/commands/review.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";
@@ -133,15 +133,20 @@ test("W1-T11163 criterion 2: the head read is green only when every required che
     "an unreadable required list never manufactures a green");
 });
 
-test("W1-T11163 criterion 3: the review's own arm asks its head through the fresh read and merges a blocked plan PR", async () => {
-  const gh = blockedPlanPr();
-  const asked: Array<[string, string, string]> = [];
-  const arm = reviewVerdictArm(OWNER, REPO, () => gh.seams as unknown as ArmDeps<true>, async (owner, repo, headSha) => {
-    asked.push([owner, repo, headSha]);
+test("W1-T11163 criterion 3: the review arm's default deps carry its context's head read, and only when it has one", async () => {
+  const remote = blockedPlanPr();
+  const asked: Array<[string, string]> = [];
+  const deps = verdictArmDeps({ readChecksGreenReviewed: async (prUrl: string, headSha: string) => {
+    asked.push([prUrl, headSha]);
     return true;
-  });
-  const result = await arm(PR_URL, TASK);
+  } }, () => remote.seams as unknown as ArmDeps<true>);
+  const result = await armAutoMergeDetailedAsync(PR_URL, TASK, deps);
   assert.equal(result.outcome, "direct-merged");
-  assert.deepEqual(gh.calls, ["mergeDirect"]);
-  assert.deepEqual(asked, [[OWNER, REPO, HEAD]]);
+  assert.deepEqual(remote.calls, ["mergeDirect"]);
+  assert.deepEqual(asked, [[PR_URL, HEAD]]);
+
+  const bare = blockedPlanPr();
+  const without = verdictArmDeps({}, () => bare.seams as unknown as ArmDeps<true>);
+  assert.equal(without.readChecksGreenReviewed, undefined, "a context without the read leaves today's arm unchanged");
+  assert.equal((await armAutoMergeDetailedAsync(PR_URL, TASK, without)).outcome, "plan-pr-held");
 });

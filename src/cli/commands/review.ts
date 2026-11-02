@@ -9,7 +9,7 @@ import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { disarmOutcomeWithdrawn, disarmAutoMerge, armAutoMergeDetailedAsync, armIfVerdictPermitsAsync, realArmDepsAsync, type ArmAttemptResult, type ArmDeps, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
+import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
 import { SPECIALIST_TOOLS } from "../../lib/specialist-panel.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, reviewerHealthRowFields, reviewerShadowStep } from "../../lib/reviewer-health.js";
@@ -398,18 +398,6 @@ export async function readChecksGreenReviewedAtHead(
   if (required.kind !== "contexts") return false;
   const rollup = await rollupForAsync(owner, repo, headSha, readJson);
   return checksStateFromRollup(rollup, required.contexts) === "green" && reviewStateFromRollup(rollup) === "success";
-}
-
-/** W1-T11163 — the review's own arm: the production arm, able to read its head's checks when GitHub still says `blocked`. */
-export function reviewVerdictArm(
-  owner: string,
-  repo: string,
-  armDeps: () => ArmDeps<true> = realArmDepsAsync,
-  readGreen: typeof readChecksGreenReviewedAtHead = readChecksGreenReviewedAtHead,
-): (prUrl: string, taskId: string) => Promise<ArmAttemptResult> {
-  return (prUrl, taskId) => armAutoMergeDetailedAsync(prUrl, taskId, {
-    ...armDeps(), readChecksGreenReviewed: (_url: string, headSha: string) => readGreen(owner, repo, headSha),
-  });
 }
 
 export async function runReview(host: ReviewCommandHost, args: {
@@ -1351,9 +1339,10 @@ export async function runReview(host: ReviewCommandHost, args: {
   // that landed after this verdict. No `posted.posted` guard is needed: that branch already returned.
   reappendLostReviewPosted({ ledgerPath: args.ledgerPath, runId: args.runId, headSha, decisionDigest, prUrl,
     row: reviewPostedRow, log, say });
-  const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
+  const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log,
+    readChecksGreenReviewed: (_url: string, head: string) => readChecksGreenReviewedAtHead(owner, repo, head) };
   // W1-T9549: AWAITED. The daemon runs this review (`trackInFlightReview`), so the arm's gh and git leave its loop free.
-  await armIfVerdictPermitsAsync(verdict, armCtx, { arm: args.arm ?? reviewVerdictArm(owner, repo) });
+  await armIfVerdictPermitsAsync(verdict, armCtx, { arm: args.arm });
   // Record after both authoritative posting and auto-merge eligibility. The recorder
   // swallows telemetry write failures; replay returns above before reaching this call.
   recordReviewFindings(findingCapture, { taskId: task.id, prUrl, headSha, decisionDigest,
