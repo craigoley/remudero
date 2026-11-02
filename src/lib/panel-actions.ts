@@ -830,6 +830,7 @@ interface EscalationReplyInput {
   expectedRevision?: string;
   intentId?: string;
   startConversation?: true;
+  recommendationResponse?: "accept" | "decline";
 }
 
 function validateEscalationReply(body: unknown): { error: string } | EscalationReplyInput {
@@ -842,6 +843,7 @@ function validateEscalationReply(body: unknown): { error: string } | EscalationR
   if (body.text.length > 4000) return { error: "text must be 4000 characters or fewer" };
   const bound = body.issueUrl !== undefined || body.expectedRevision !== undefined || body.intentId !== undefined;
   if (body.startConversation !== undefined && (body.startConversation !== true || !bound)) return { error: "starting a conversation requires a bound reply" };
+  if (body.recommendationResponse !== undefined && (!bound || body.recommendationResponse !== "accept" && body.recommendationResponse !== "decline")) return { error: "a recommendation answer requires a bound accept or decline reply" };
   if (bound && (typeof body.issueUrl !== "string" || body.issueUrl.length > 512
     || typeof body.expectedRevision !== "string" || !/^[a-f0-9]{64}$/.test(body.expectedRevision)
     || typeof body.intentId !== "string" || !/^[A-Za-z0-9._:-]{8,128}$/.test(body.intentId))) {
@@ -854,6 +856,7 @@ function validateEscalationReply(body: unknown): { error: string } | EscalationR
     prRef: body.prRef as string | undefined,
     text: body.text,
     ...(body.startConversation === true ? { startConversation: true as const } : {}),
+    ...(body.recommendationResponse ? { recommendationResponse: body.recommendationResponse as "accept" | "decline" } : {}),
     ...(bound ? { issueUrl: body.issueUrl as string, expectedRevision: body.expectedRevision as string, intentId: body.intentId as string } : {}),
   };
 }
@@ -906,7 +909,7 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         if (prior) {
           const binding = prior.extra?.escalation;
           if (prior.body !== input.text || binding?.issueUrl !== input.issueUrl
-            || binding?.revision !== input.expectedRevision) return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to a different answer or source. Your draft was not sent." });
+            || binding?.revision !== input.expectedRevision || binding?.recommendationResponse !== input.recommendationResponse) return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to a different answer or source. Your draft was not sent." });
           return void sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, duplicate: true,
             saved: { intentId: input.intentId, seq: prior.seq, text: prior.body }, inputDelivery: "unverified", work: "not_observed" });
         }
@@ -914,7 +917,8 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         if (!current || current.state !== "served") return void sendJson(res, 503, { error: "source_unavailable", detail: "The current escalation could not be verified. Your draft was not sent." });
         if (!(current.conversation.canReply || input.startConversation && current.conversation.canStartConversation)
           || current.conversation.threadId !== threadId
-          || current.conversation.revision !== input.expectedRevision) {
+          || current.conversation.revision !== input.expectedRevision
+          || input.recommendationResponse && current.conversation.recommendationReplies?.[input.recommendationResponse] !== input.text) {
           return void sendJson(res, 409, { error: "source_changed", detail: "This conversation changed. Read its current version before sending your saved draft." });
         }
         if (input.startConversation && current.conversation.canStartConversation && current.conversation.initialMessage) {
@@ -922,7 +926,8 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         }
       }
       const saved = input.intentId
-        ? appendThreadReplyOnce(identity, input.text, input.intentId, { threadStorePath: deps.threadStorePath }, { escalation: { issueUrl: input.issueUrl!, revision: input.expectedRevision! } }, opening)
+        ? appendThreadReplyOnce(identity, input.text, input.intentId, { threadStorePath: deps.threadStorePath }, { escalation: { issueUrl: input.issueUrl!, revision: input.expectedRevision!,
+          ...(input.recommendationResponse ? { recommendationResponse: input.recommendationResponse } : {}) } }, opening)
         : undefined;
       if (!saved) appendThreadMessage(identity, "reply", input.text, { threadStorePath: deps.threadStorePath });
       if (saved?.kind === "conflict") return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to different text. Your draft was not sent." });
@@ -965,6 +970,7 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         interpretation: interpretation.status,
         flows_to: "plan/questions.ndjson",
         recorded_to_question_store: recordedToQuestionStore,
+        ...(input.recommendationResponse ? { recommendation_response: input.recommendationResponse } : {}),
         ...(staged.queued ? { landing: "queued" } : { landing_error: staged.error }),
       });
       sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry, interpretation, ...(staged.queued ? { landing: "queued" } : {}),

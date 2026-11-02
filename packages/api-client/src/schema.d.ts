@@ -6514,6 +6514,11 @@ export interface components {
       canStartConversation: boolean;
       /** Verified original source text copied only when the operator explicitly starts this conversation. Earlier GitHub comments are not included. */
       initialMessage?: string;
+      /** Native acceptance or decline text for recording an operator answer through the bound reply route. These are input, never task approval or repair execution. */
+      recommendationReplies?: {
+        accept?: string;
+        decline: string;
+      };
       replyUnavailableReason?: string;
       details: string;
     };
@@ -6530,6 +6535,8 @@ export interface components {
     EscalationReplyRequest: {
       /** Opt in to recording the verified original issue body and first answer in the native store. Requires the current canStartConversation capability and all reply binding fields. */
       startConversation?: true;
+      /** Record acceptance or decline as the exact currently advertised recommendation reply. This records an answer and grants no task approval or execution. */
+      recommendationResponse?: "accept" | "decline";
       taskId: string;
       class: string;
       cause?: string;

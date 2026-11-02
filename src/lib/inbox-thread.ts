@@ -92,7 +92,7 @@ export interface ThreadMessageExtra {
   operator?: string;
   replyId?: string;
   /** Immutable source binding of a native escalation reply intent. */
-  escalation?: { issueUrl: string; revision: string };
+  escalation?: { issueUrl: string; revision: string; recommendationResponse?: "accept" | "decline" };
   /** A verified issue body copied when an operator starts a native conversation. */
   sourceImport?: { issueUrl: string; revision: string };
   input?: InboxInputReference;

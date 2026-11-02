@@ -243,6 +243,29 @@ async function withReplyService(f: ReturnType<typeof fixture>, run: (base: strin
   finally { server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
 }
 
+test("native Accept and Decline record the exact recommendation answer without approving work", async t => {
+  for (const kind of ["accept", "decline"] as const) {
+    const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+    const source = await f.read(URL); assert.equal(source.state, "served"); if (source.state !== "served") return;
+    const text = kind === "accept" ? "I accept this recommendation: Investigate the failed stage and repair the problem." : "I decline this recommendation. Please suggest another approach.";
+    assert.equal(source.conversation.recommendationReplies?.[kind], text);
+    await withReplyService(f, async base => {
+      const body = { ...source.conversation.identity, text, issueUrl: URL, expectedRevision: source.conversation.revision, intentId: `recommendation-${kind}-01`, recommendationResponse: kind };
+      const post = (value: unknown = body) => fetch(`${base}/v1/escalation/reply`, { method: "POST", headers: { authorization: "Bearer fixture-write", "content-type": "application/json" }, body: JSON.stringify(value) });
+      assert.equal((await post({ ...body, recommendationResponse: "approve" })).status, 400);
+      assert.equal((await post({ ...body, text: "Different direction" })).status, 409);
+      const reply = await post(); assert.equal(reply.status, 200);
+      const receipt = await reply.json() as { saved: { text: string }; work: string };
+      assert.equal(receipt.saved.text, text); assert.equal(receipt.work, "not_observed");
+      const duplicate = await post(); assert.equal(duplicate.status, 200); assert.equal((await duplicate.json() as { duplicate: boolean }).duplicate, true);
+      assert.equal((await post({ ...body, recommendationResponse: undefined })).status, 409);
+      const result = await f.read(URL); assert.equal(result.state, "served"); if (result.state !== "served") return;
+      assert.equal(result.conversation.attention, "waiting_for_agent"); assert.equal(result.conversation.recommendationReplies, undefined);
+      assert.equal(result.conversation.messages.length, 2); assert.equal(result.conversation.messages.at(-1)?.text, text);
+    });
+  }
+});
+
 test("an agent clarification after a saved reply stays on the same conversation and needs input", async t => {
   const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
   const detail = await f.read(URL); assert.equal(detail.state, "served"); if (detail.state !== "served") return;

@@ -15122,6 +15122,13 @@ components:
         canReply: {type: boolean}
         canStartConversation: {type: boolean, description: True only for a current native source with positively observed absent history and unambiguous native identity. Starting is an explicit bound write; reads never create messages.}
         initialMessage: {type: string, description: Verified original source text copied only when the operator explicitly starts this conversation. Earlier GitHub comments are not included.}
+        recommendationReplies:
+          type: object
+          description: Native acceptance or decline text for recording an operator answer through the bound reply route. These are input, never task approval or repair execution.
+          required: [decline]
+          properties:
+            accept: {type: string, maxLength: 4000}
+            decline: {type: string, maxLength: 4000}
         replyUnavailableReason: {type: string}
         details: {type: string}
 
@@ -15156,6 +15163,10 @@ components:
           type: boolean
           enum: [true]
           description: Opt in to recording the verified original issue body and first answer in the native store. Requires the current canStartConversation capability and all reply binding fields.
+        recommendationResponse:
+          type: string
+          enum: [accept, decline]
+          description: Record acceptance or decline as the exact currently advertised recommendation reply. This records an answer and grants no task approval or execution.
         taskId:
           type: string
         class:

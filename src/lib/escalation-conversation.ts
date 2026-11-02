@@ -43,6 +43,7 @@ export interface EscalationConversation {
   canReply: boolean;
   canStartConversation: boolean;
   initialMessage?: string;
+  recommendationReplies?: { accept?: string; decline: string };
   replyUnavailableReason?: string;
   details: string;
 }
@@ -237,13 +238,19 @@ export function createEscalationConversationReader(opts: {
       && Boolean(opts.threadStorePath && existsSync(opts.threadStorePath))
       && !/^## Decision Summary\r?$/m.test(source.body);
     const sourceRevision = digest([source.html_url, source.body, source.title, source.updated_at, source.state]);
+    const acceptedText = parsed.recommendation ? `I accept this recommendation: ${parsed.recommendation}` : undefined;
+    const recommendationReplies = (canReply && attention === "needs_input" || canStartConversation) && !messages?.some(message => message.from === "operator") && acceptedText ? {
+      ...(acceptedText.length <= 4000 ? { accept: acceptedText } : {}),
+      decline: "I decline this recommendation. Please suggest another approach.",
+    } : undefined;
     return { state: "served", conversation: {
       version: 1, issueUrl, repository: location.repository, identity, threadId,
-      revision: digest([sourceRevision, threadId, messages ?? history, attention, canStartConversation]), headline: parsed.headline,
+      revision: digest([sourceRevision, threadId, messages ?? history, attention, canStartConversation, recommendationReplies ?? null]), headline: parsed.headline,
       whatHappened: parsed.detail, recommendation: parsed.recommendation, options: parsed.options,
       source: { state: stale ? "stale" : "current", observedAt: evidence.observedAt, updatedAt: source.updated_at, revision: sourceRevision },
       history, attention, messages: messages ?? [], canReply, canStartConversation,
       ...(canStartConversation ? { initialMessage: `${parsed.headline}\n\n${parsed.detail}` } : {}),
+      ...(recommendationReplies ? { recommendationReplies } : {}),
       ...(!canReply && !canStartConversation ? { replyUnavailableReason: stale ? "The saved source is stale. Refresh before replying."
         : source.state === "closed" ? "This escalation is closed. Earlier messages remain readable."
           : "The complete saved discussion could not be verified. No reply destination is confirmed." } : {}),
