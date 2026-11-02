@@ -617,6 +617,9 @@ export interface ArmDeps<A extends boolean = false> {
    *  checks green and review success at this head. A mergeable plan PR GitHub reads `blocked` then
    *  takes the direct path, as a `clean` one does, instead of waiting on a state that never settles. */
   checksGreenReviewed?: true;
+  /** W1-T11163 — OPTIONAL. Read when a mergeable plan PR reads `blocked` without {@link checksGreenReviewed}: are this
+   *  head's required checks green and its review success, read fresh? `true` takes that direct path; `false` or a throw holds. */
+  readChecksGreenReviewed?: (prUrl: string, headSha: string) => MaybeAsync<boolean, A>;
   /** W1-T1280 — OPTIONAL. Blocks the calling thread for `ms` between the bounded re-reads
    *  {@link readMergeFacts} above drives. */
   sleepSync?: (ms: number) => void;
@@ -1563,7 +1566,7 @@ export function attemptArmAsync(
 function* attemptArmSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "checksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "checksGreenReviewed" | "readChecksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
@@ -1857,7 +1860,7 @@ function planPrUnknownElapsedMs(rows: Array<Record<string, unknown>>, prUrl: str
 function* attemptPlanPrMergeSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say"> & DirectMergePreflightDeps &
-    Partial<Pick<ArmDeps<true>, "checksGreenReviewed">>,
+    Partial<Pick<ArmDeps<true>, "checksGreenReviewed" | "readChecksGreenReviewed">>,
   planTouch: "touched" | "unreadable",
   priorHeadSha?: string,
 ): Steps<ArmAttemptResult> {
@@ -1879,9 +1882,22 @@ function* attemptPlanPrMergeSteps(
     }
   }
   const unknown = error === undefined && planPrMergeabilityUnknown(facts);
-  // W1-T6595: the sweep reached here having SEEN checks green and review success, so `blocked` on a
-  // mergeable head is not "checks pending". #10141 sat ~45 min on it while a review merged it at once.
-  const greenBlocked = deps.checksGreenReviewed === true && facts.mergeable === "MERGEABLE" && facts.mergeableState === "blocked";
+  // W1-T6595: the sweep SAW checks green and review success, so `blocked` is not "checks pending" (#10141 sat ~45 min).
+  // W1-T11163: a review that just posted success reads `blocked` before GitHub recomputes it, so it asks the head.
+  const mergeableBlocked = error === undefined && facts.mergeable === "MERGEABLE" && facts.mergeableState === "blocked";
+  let greenBlocked = deps.checksGreenReviewed === true && mergeableBlocked;
+  const readChecksGreenReviewed = deps.readChecksGreenReviewed;
+  if (!greenBlocked && mergeableBlocked && priorHeadSha && readChecksGreenReviewed) {
+    try {
+      greenBlocked = (yield* step(() => readChecksGreenReviewed(prUrl, priorHeadSha))) === true;
+    } catch (e) {
+      error = `required checks at ${priorHeadSha.slice(0, 7)} unreadable: ${String((e as Error)?.message ?? e)}`;
+    }
+    if (greenBlocked) {
+      deps.say(`automerge.plan_pr_checks_green_at_head (W1-T11163): head=${priorHeadSha} required checks green and review success, ` +
+        `read fresh while GitHub still read blocked: ${prUrl}`);
+    }
+  }
   if (error === undefined && !unknown && (facts.mergeableState === "clean" || facts.mergeableState === "behind" ||
     facts.mergeableState === "unstable" || facts.mergeableState === "has_hooks" || greenBlocked)) {
     const fresh = facts;
