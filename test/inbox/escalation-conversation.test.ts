@@ -194,6 +194,10 @@ test("oversized or ambiguous saved discussions remain explicitly partial", async
   writeFileSync(f.store, Array.from({ length: 101 }, (_, i) => JSON.stringify({ ...opening, seq: i + 1 })).join("\n") + "\n");
   const partial = await f.read(URL); assert.equal(partial.state, "served"); if (partial.state !== "served") return;
   assert.equal(partial.conversation.history, "partial"); assert.equal(partial.conversation.canReply, false);
+  writeFileSync(f.store, JSON.stringify({ ...opening, ts: Number.MAX_SAFE_INTEGER }) + "\n");
+  const invalidDate = await f.read(URL); assert.equal(invalidDate.state, "served"); if (invalidDate.state !== "served") return;
+  assert.equal(invalidDate.conversation.history, "partial"); assert.equal(invalidDate.conversation.canReply, false);
+  assert.deepEqual(invalidDate.conversation.messages, []);
   writeFileSync(f.store, JSON.stringify(opening) + "\n" + JSON.stringify({ ...opening, threadId: opening.threadId.replace("15520", "999") }) + "\n");
   const ambiguous = await f.read(URL); assert.equal(ambiguous.state, "served"); if (ambiguous.state !== "served") return;
   assert.equal(ambiguous.conversation.history, "partial"); assert.equal(ambiguous.conversation.canReply, false);

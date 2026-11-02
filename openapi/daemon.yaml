@@ -15116,7 +15116,7 @@ components:
               seq: {type: integer}
               from: {type: string, enum: [operator, daemon]}
               text: {type: string}
-              ts: {type: integer}
+              ts: {type: integer, minimum: -8640000000000000, maximum: 8640000000000000}
               intentId: {type: string}
               sourceImported: {type: boolean, enum: [true]}
         canReply: {type: boolean}

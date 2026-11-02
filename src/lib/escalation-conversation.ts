@@ -132,6 +132,7 @@ function boundedMessages(messages: ThreadMessage[]): EscalationConversation["mes
   if (messages.length > MAX_HISTORY_MESSAGES || Buffer.byteLength(JSON.stringify(messages)) > MAX_HISTORY_BYTES
     || new Set(messages.map(m => m.seq)).size !== messages.length
     || messages.some(m => !Number.isSafeInteger(m.seq) || m.seq < 1 || !Number.isSafeInteger(m.ts)
+      || Math.abs(m.ts) > 8_640_000_000_000_000
       || typeof m.body !== "string" || (m.role !== "reply" && m.role !== "escalation"))) return undefined;
   return messages.map(m => ({ seq: m.seq, from: m.role === "reply" ? "operator" : "daemon", text: m.body, ts: m.ts,
     ...(typeof m.extra?.replyId === "string" ? { intentId: m.extra.replyId } : {}),
