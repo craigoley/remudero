@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { evaluateRiskJudgeDisposition } from "../src/lib/risk-judge-eval.js";
-import { evaluateRiskJudgeDispositionCommand } from "../src/run-task.js";
+import { evaluateRiskJudgeDisposition } from "#src/lib/risk-judge-eval.js";
+import { evaluateRiskJudgeDispositionCommand } from "#src/run-task.js";
 
 const CORPUS = join(process.cwd(), "test", "fixtures", "risk-judge-dispositions");
 

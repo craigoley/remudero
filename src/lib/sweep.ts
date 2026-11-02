@@ -1,4 +1,5 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
+import { decideLoopOutcome } from "./loop-decision.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
@@ -618,6 +619,27 @@ export function stalledStageEscalationSummary(reason: string): string {
   return reason
     .replace(/^(PR stage stalled: .+?) for \d+ minutes \((?:BACKSTOP \d+|owner: none)\); since [^;]*;/, "$1;")
     .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
+}
+
+/** The PR's oldest open stage-stall question, whatever its head, blocker or contract, viewed at the
+ *  episode's head with no contract line so the gateway's own task/PR/cause match appends to it. */
+function openStallQuestionForPr(open: OpenIssue[], pr: { prNumber: number; prUrl: string; headSha: string },
+  key: { class: EscalationClass; taskId: string; cause: EscalationCause }): { view: OpenIssue; stored: OpenIssue } | undefined {
+  const prefix = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — `;
+  const probe = { ...key, summary: `PR ${pr.prUrl}`, detail: "" };
+  const asked = open.filter(issue => stalledStageIssueIdentity(issue)?.startsWith(prefix) === true &&
+    matchDuplicateEscalation(probe, [issue]) !== undefined).sort((a, b) => a.number - b.number)[0];
+  if (!asked) return undefined;
+  const body = (stallIssueBodyAtHead(asked.body, pr.headSha) ?? asked.body ?? "").replace(/^\*\*Contract:\*\*.*\n/m, "");
+  return { view: { ...asked, body }, stored: asked };
+}
+
+/** The stored body of a PR's one stall issue with its `**Head:**` line moved to `headSha`, or `undefined` when the
+ *  line already names that head or the body has none. The sweep writes it back after appending a new head, because
+ *  the issue-revalidation garden closes a stall whose stored head the PR has moved past (#16079). */
+export function stallIssueBodyAtHead(body: string | undefined, headSha: string): string | undefined {
+  if (body === undefined || escalationHeadSha(body) === undefined || escalationHeadSha(body) === headSha) return undefined;
+  return body.replace(/^\*\*Head:\*\*.*$/m, `**Head:** ${headSha}`);
 }
 
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
@@ -3649,15 +3671,42 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const cls: EscalationClass = reason.startsWith("PR stage stalled:") || isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
       const stallIdentity = reason.startsWith("PR stage stalled:") ? stalledStageEscalationIdentity(reason) : undefined;
       const issues = issuesImpl ?? ghIssueGatewayAsync(owner, repo);
-      // All stalled stages share cause `stage-stall`; narrow by blocker before the gateway's
-      // existing PR/head matching. Keep older heads visible to the gateway's supersession cleanup.
+      const cause = question.cause ?? escalationCause(pr.mergeState === "dirty", isBlockedCi(pr));
+      // Operator ruling 2026-11-01: one open stage-stall question per PR. An open one for this task and PR,
+      // at any head or blocker, takes the episode as a comment (the gateway's duplicate append); otherwise
+      // narrow by blocker and keep older heads visible to the gateway's supersession cleanup.
+      // The PR's one stall issue as GitHub stores it, when this episode is offered to it.
+      let keptStall: OpenIssue | undefined;
       const escalationIssues: AsyncIssueGateway = stallIdentity !== undefined && issues.listOpen
-        ? { ...issues, listOpen: async (label) => (await issues.listOpen!(label)).filter(issue => {
-          const head = escalationHeadSha(issue.body);
-          return (head !== undefined && head !== pr.headSha) || stalledStageIssueIdentity(issue) === stallIdentity;
-        }) }
+        ? { ...issues, listOpen: async (label) => {
+          const open = await issues.listOpen!(label);
+          const kept = openStallQuestionForPr(open, pr, { class: cls, taskId: escalationTaskIdFor(pr), cause });
+          keptStall = kept?.stored;
+          return kept ? [kept.view] : open.filter(issue => {
+            const head = escalationHeadSha(issue.body);
+            return (head !== undefined && head !== pr.headSha) || stalledStageIssueIdentity(issue) === stallIdentity;
+          });
+        } }
         : issues;
-      const file = async (context: string): Promise<void> => { await escalateAsync(
+      // Once the episode landed on that issue, its stored `**Head:**` line moves to this head. Left on the first head,
+      // the issue-revalidation garden reads the PR's push as "head moved" and closes the one question while the PR is
+      // still stalled. A failed edit is ledgered and never fails the escalation the append already recorded.
+      const refreshStoredHead = async (filedUrl: string): Promise<void> => {
+        const stored = keptStall;
+        if (stored === undefined || filedUrl !== stored.url || !issues.editBody) return;
+        const body = stallIssueBodyAtHead(stored.body, pr.headSha);
+        if (body === undefined) return;
+        const fromHead = escalationHeadSha(stored.body);
+        try {
+          await issues.editBody(stored.url, body);
+          log("escalation.stall_head_refreshed", { pr_number: pr.prNumber, issue_url: stored.url,
+            from_head: fromHead, head_sha: pr.headSha });
+        } catch (error) {
+          log("escalation.stall_head_refresh_failed", { pr_number: pr.prNumber, issue_url: stored.url,
+            head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
+        }
+      };
+      const file = async (context: string): Promise<void> => { const filedUrl = await escalateAsync(
         {
           class: cls,
           // See {@link escalationTaskIdFor} — pure and separately tested, so the mint that makes
@@ -3676,7 +3725,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           ...(reason === "review failing with no actionable unmet criteria (contradictory) — escalating"
             ? { headDedup: "independent" as const }
             : {}),
-          cause: question.cause ?? escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
+          cause,
           ...contractRevisionFor(pr),
           summary: `PR ${pr.prUrl} needs a clarification — ${stallIdentity ?? stalledStageEscalationSummary(reason)}`,
           detail:
@@ -3686,7 +3735,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           recommendation: question.resolutions[0].label,
         },
         { issues: escalationIssues, ledgerPath, runId },
-      ); };
+      ); await refreshStoredHead(filedUrl); };
       if (pr.mergeState !== "dirty") return file("");
       return readMainCommit().then((main) => file(conflictEscalationContext(pr, main?.sha)));
     },
@@ -19436,6 +19485,11 @@ export async function runSweep(
     return decided.mode;
   };
   const quietContradictoryRows = new Set<number>();
+  const loopDecisions = new Map<number, unknown>();
+  for (const row of ledgerLines) {
+    if (row.step === "sweep.disposed" && typeof row.pr_number === "number" && row.loop_decision !== undefined)
+      loopDecisions.set(row.pr_number, row.loop_decision);
+  }
   // W1-T7734: entries acting on a view read DURING this pass, and when each read happened.
   const rederivedIndices = new Set<number>();
   const freshReadAtMs = new Map<number, number>();
@@ -19604,6 +19658,7 @@ export async function runSweep(
         step: "sweep.disposed",
         pr_number: pr.prNumber,
         pr_url: pr.prUrl,
+        ...(loopDecisions.has(pr.prNumber) ? { loop_decision: loopDecisions.get(pr.prNumber) } : {}),
         disposition,
         ...blockerRow,
         acted,
@@ -19695,6 +19750,22 @@ export async function runSweep(
     // fell through to the checks-none rules meant for a genuinely mergeable-but-quiet head.
     let { pr, inherited: inheritedMergeState } = withInheritedMergeState(openPrs[prIndex], ledgerLines);
     noteHeadObservation(pr.prNumber, pr.headSha, passClockMs());
+    const loopDecision = loopDecisions.has(pr.prNumber) ? undefined : decideLoopOutcome({
+      taskId: pr.taskId, prNumber: pr.prNumber, prUrl: pr.prUrl, headSha: pr.headSha,
+      reviewInputDigest: pr.reviewInputDigest,
+      reviewState: pr.reviewState, checksGreen: pr.checksState === "green", mergeClean: pr.mergeState === "clean",
+      changedFiles: pr.changedFiles,
+      pushThroughFollowUp: /(?:^|\n)\s*push-through-follow-up:\s*\S+/i.test(pr.body ?? ""),
+      ledger: ledgerLines,
+    });
+    if (loopDecision && !deps.dryRun) {
+      const receipt = { ts: clockFromMillisFn(() => now).iso(), step: "loop.decision", run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+        pr_number: pr.prNumber, head_sha: pr.headSha, shadow: true, ...loopDecision };
+      appendLine(deps.ledgerPath, receipt);
+      // sweep.disposed is retained by rotation; carry the shadow receipt without a new retention rule.
+      loopDecisions.set(pr.prNumber, receipt);
+      if (!ledgerLines.includes(receipt)) ledgerLines.push(receipt);
+    }
     const priorGardenClose = ledgerLines.findLast(row => row.step === "sweep.disposed" &&
       row.pr_number === pr.prNumber && row.disposition === "stale" && row.acted === true &&
       typeof row.garden_record_refusal === "string");

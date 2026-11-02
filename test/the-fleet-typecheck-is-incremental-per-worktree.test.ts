@@ -12,9 +12,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { typecheckStep, type PreflightSpawn } from "../src/lib/commit-message.js";
-import { mergedHeadTypechecks, mergedTypecheckArgv, type TypecheckSpawn } from "../src/lib/merge-probe.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { typecheckStep, type PreflightSpawn } from "#src/lib/commit-message.js";
+import { mergedHeadTypechecks, mergedTypecheckArgv, type TypecheckSpawn } from "#src/lib/merge-probe.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   canonicalBuildInfo,
   gitDirOf,
@@ -23,9 +23,9 @@ import {
   seedBuildInfo,
   TYPECHECK_BUILDINFO_NAME,
   typecheckArgs,
-} from "../src/lib/typecheck-buildinfo.js";
-import { openWeightIncrementalTypecheck, OPENWEIGHT_CHECKS } from "../src/lib/worker-provider.js";
-import { gitRepo } from "./helpers/git-repo.js";
+} from "#src/lib/typecheck-buildinfo.js";
+import { openWeightIncrementalTypecheck, OPENWEIGHT_CHECKS } from "#src/lib/worker-provider.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TS_VERSION = (JSON.parse(readFileSync(createRequire(import.meta.url).resolve("typescript/package.json"), "utf8")) as { version: string }).version;

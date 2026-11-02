@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertWorktreeBaseCurrent, worktreeAdd } from "../src/lib/worker.js";
+import { assertWorktreeBaseCurrent, worktreeAdd } from "#src/lib/worker.js";
 
 // W1-T405 design note (iii): when the remote head cannot be read -- an unreachable forge, a
 // transport error -- dispatch must PROCEED WITH A WARNING, never refuse. Refusing on an

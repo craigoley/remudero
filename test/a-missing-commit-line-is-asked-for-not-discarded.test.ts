@@ -19,11 +19,11 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { COMMIT_LINE_RESUME_PROMPT, commitLineResume, resumeForMissingCommitLine } from "../src/run-task.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { COMMIT_LINE_RESUME_PROMPT, commitLineResume, resumeForMissingCommitLine } from "#src/run-task.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 // The SHARED builder — see test/fixture-copy-census.test.ts, which refuses one more hand-rolled
 // `git init` copy of this exact fixture.
-import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const MISSING_LINE_REASON = "no anchored COMMIT_MESSAGE line in the report";
 

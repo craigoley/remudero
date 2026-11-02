@@ -5,19 +5,19 @@ import { createRequire } from "node:module";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Config } from "../src/lib/config.js";
-import type { Mount } from "../src/lib/mounts.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { withTempDir } from "../src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { withTempDir } from "#src/lib/tmp.js";
 import { test } from "node:test";
-import type { Task } from "../src/lib/plan.js";
+import type { Task } from "#src/lib/plan.js";
 import {
   renderDiagnosePrompt,
   renderFixPrompt,
   renderImplementPrompt,
   renderPrerequisitePrPrompt,
   renderReconPrompt,
-} from "../src/lib/prompt-render.js";
+} from "#src/lib/prompt-render.js";
 import {
   buildPrerequisitePrDispatchArgs,
   prerequisitePrAdmissionRefusal,
@@ -27,7 +27,7 @@ import {
   renderImplementPrompt as compatRenderImplementPrompt,
   renderPrerequisitePrPrompt as compatRenderPrerequisitePrPrompt,
   renderReconPrompt as compatRenderReconPrompt,
-} from "./helpers/run-task-test.js";
+} from "#test/helpers/run-task-test.js";
 
 const TASK: Task = {
   id: "W1-T2886X",

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 // @ts-ignore the executable .mjs module has no declaration file.
-import * as precheck from "../scripts/census-precheck.mjs";
+import * as precheck from "#scripts/census-precheck.mjs";
 // @ts-ignore the executable .mjs module has no declaration file.
-import * as shapes from "../scripts/lib/git-spawn-shapes.mjs";
+import * as shapes from "#scripts/lib/git-spawn-shapes.mjs";
 
 const SKILL = "test/rules/every-applies-to-skill-is-selectable-and-bounded.test.ts";
 const CENSUS = "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts";

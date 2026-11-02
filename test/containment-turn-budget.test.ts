@@ -18,9 +18,9 @@ import {
   probeTurnBudget,
   type ContainmentEvidence,
   type ProbeExecResult,
-} from "../src/lib/containment.js";
-import type { Config } from "../src/lib/config.js";
-import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+} from "#src/lib/containment.js";
+import type { Config } from "#src/lib/config.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 
 const containmentSrc = readFileSync(
   fileURLToPath(new URL("../src/lib/containment.ts", import.meta.url)),

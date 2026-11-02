@@ -25,9 +25,9 @@ import { join } from "node:path";
 import { describe, it, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { logWorktreeReapBootSurvey } from "../src/run-task.js";
-import { runLockPath, writeRunLock, type RunLockInfo } from "../src/lib/worker.js";
-import type { Config } from "../src/lib/config.js";
+import { logWorktreeReapBootSurvey } from "#src/run-task.js";
+import { runLockPath, writeRunLock, type RunLockInfo } from "#src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
 
@@ -129,7 +129,7 @@ describe("the boot rung closes pruneStaleRuns' three coverage holes (behavioral,
   });
 
   it("pruneStaleRuns (the OTHER debris-reclaim step) does NOT see the git-invisible directory — proving the hole is real, not merely asserted", async () => {
-    const { pruneStaleRuns } = await import("../src/lib/worker.js");
+    const { pruneStaleRuns } = await import("#src/lib/worker.js");
     const f = fixtureConfig();
     try {
       const invisible = join(f.worktreesRoot, "run-W1-T111-invisible");

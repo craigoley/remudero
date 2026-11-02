@@ -17,7 +17,7 @@
     - test/serve-generation.test.ts
     - test/serve-standby.test.ts
   status: queued
-  dispatch_hold: true
+  dispatch_hold: false
   attempts: 0
   rationale: >-
     OBSERVED: the ordinary serving handoff to gateway prerequisite source 78edca82 aborted

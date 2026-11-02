@@ -50,8 +50,8 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { buildBaseProofDir, type BaseProofDir } from "../src/run-task.js";
-import { execWhitelistedProof, execWhitelistedProofAsync, judgeCriterion, judgeReviewAsync, parseWhitelistedProof } from "../src/lib/review.js";
+import { buildBaseProofDir, type BaseProofDir } from "#src/run-task.js";
+import { execWhitelistedProof, execWhitelistedProofAsync, judgeCriterion, judgeReviewAsync, parseWhitelistedProof } from "#src/lib/review.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -313,7 +313,7 @@ test("a base that cannot link a named export the PR adds grades the proof discri
   }
 });
 
-const loadMissingExport = () => import("../src/lib/proof-missing-export.js");
+const loadMissingExport = () => import("#src/lib/proof-missing-export.js");
 
 test("a named import missing at both the base and the head never earns a missing-export discrimination", async () => {
   const missingExport = await loadMissingExport();

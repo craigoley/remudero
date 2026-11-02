@@ -4,11 +4,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { runPreflightCoverage as runPreflightCoverageEngine, type PreflightCoverageDeps } from "../src/lib/ci-parity.js";
-import { FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
-import { preflightCommand } from "../src/run-task.js";
-import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
+import type { PreflightSpawn } from "#src/lib/commit-message.js";
+import { runPreflightCoverage as runPreflightCoverageEngine, type PreflightCoverageDeps } from "#src/lib/ci-parity.js";
+import { FAST_GATE_STEPS, runPreflightFast } from "#src/lib/ci-parity.js";
+import { preflightCommand } from "#src/run-task.js";
+import { coverageParitySpawnResult } from "#test/helpers/coverage-parity-spawn.js";
 import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 
 // ── W1-T1074: `rmd preflight --coverage` — diff-coverage, at author-time, on its OWN base ────

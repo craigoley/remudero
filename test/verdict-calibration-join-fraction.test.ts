@@ -32,8 +32,8 @@ import {
   mineVerdictRows,
   verdictCalibrationReport,
   type VerdictRow,
-} from "../src/lib/verdict-calibration.js";
-import { armAndLogOutcome } from "../src/run-task.js";
+} from "#src/lib/verdict-calibration.js";
+import { armAndLogOutcome } from "#src/run-task.js";
 
 function tmpStateDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

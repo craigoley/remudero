@@ -11,10 +11,10 @@ import { operatorReleasePin } from "#src/lib/operator-release.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { verifyHumanCadence } from "../src/lib/measurement-cadence.js";
-import { RELEASE_LEDGER_STEP, releasedTaskIds } from "../src/lib/plan.js";
-import type { RiskJudgeVerdict } from "../src/lib/risk-judge.js";
-import { approveParkedTask, routeVerifyHumanBacklog } from "../src/run-task.js";
+import { verifyHumanCadence } from "#src/lib/measurement-cadence.js";
+import { RELEASE_LEDGER_STEP, releasedTaskIds } from "#src/lib/plan.js";
+import type { RiskJudgeVerdict } from "#src/lib/risk-judge.js";
+import { approveParkedTask, routeVerifyHumanBacklog } from "#src/run-task.js";
 import {
   VERIFY_HUMAN_RELEASE_ESCALATED_STEP,
   VERIFY_HUMAN_RELEASE_UNAVAILABLE_STEP,
@@ -25,8 +25,8 @@ import {
   type ShardUnderJudgement,
   type VerifyHumanReleaseOutcome,
   type VerifyHumanVerdict,
-} from "../src/lib/verify-human-judge.js";
-import { releaseAutomatedShard, type MachineReleaseProvenance } from "../src/lib/verify-human-release.js";
+} from "#src/lib/verify-human-judge.js";
+import { releaseAutomatedShard, type MachineReleaseProvenance } from "#src/lib/verify-human-release.js";
 
 const SHARD: ShardUnderJudgement = {
   id: "W1-T9101",
@@ -341,8 +341,8 @@ test("PRODUCTION WIRING writes a real ratify.approved row the dispatcher reads, 
   const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const { productionVerifyHumanRelease } = await import("../src/run-task.js");
-  const { RMD_TMP_PREFIX } = await import("../src/lib/tmp.js");
+  const { productionVerifyHumanRelease } = await import("#src/run-task.js");
+  const { RMD_TMP_PREFIX } = await import("#src/lib/tmp.js");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}vh-release-`));
   try {
     const ledgerPath = join(dir, "ledger.ndjson");
@@ -369,8 +369,8 @@ test("PRODUCTION WIRING, REAL JUDGE CONSTRUCTION: this repo's mounts resolve and
   const { tmpdir } = await import("node:os");
   const { dirname, join } = await import("node:path");
   const { fileURLToPath } = await import("node:url");
-  const { RMD_TMP_PREFIX } = await import("../src/lib/tmp.js");
-  const { productionVerifyHumanRelease } = await import("../src/run-task.js");
+  const { RMD_TMP_PREFIX } = await import("#src/lib/tmp.js");
+  const { productionVerifyHumanRelease } = await import("#src/run-task.js");
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}vh-release-real-`));
   let spawned = 0;

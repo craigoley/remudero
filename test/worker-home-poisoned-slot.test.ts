@@ -4,10 +4,10 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { workerHomeDir, type Config } from "../src/lib/config.js";
-import { lostWorkerHomeGrants, materializeWorkerHome, perRunWorkerHomeDir, playwrightCacheRelPath } from "../src/lib/worker-home.js";
-import { readUsageSnapshot } from "../src/run-task.js";
-import { collectWorkerResult, workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
+import { workerHomeDir, type Config } from "#src/lib/config.js";
+import { lostWorkerHomeGrants, materializeWorkerHome, perRunWorkerHomeDir, playwrightCacheRelPath } from "#src/lib/worker-home.js";
+import { readUsageSnapshot } from "#src/run-task.js";
+import { collectWorkerResult, workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 
 /** A minimal healthy WorkerResult — every field the projection reads, nothing lost. */
 function baseResult(): WorkerResult {

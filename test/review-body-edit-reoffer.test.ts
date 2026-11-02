@@ -3,8 +3,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildOpenPrViews, reviewAttemptsForInput } from "../src/run-task.js";
-import { reviewInputDigest } from "../src/lib/review.js";
+import { buildOpenPrViews, reviewAttemptsForInput } from "#src/run-task.js";
+import { reviewInputDigest } from "#src/lib/review.js";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
@@ -12,8 +12,8 @@ import {
   runSweep,
   type OpenPrView,
   type SweepDeps,
-} from "./helpers/sweep-test.js";
-import { appendLedger } from "../src/lib/ledger.js";
+} from "#test/helpers/sweep-test.js";
+import { appendLedger } from "#src/lib/ledger.js";
 
 /**
  * W1-T2299 — "A CORRECTED PR BODY CANNOT REACH THE REVIEWER THAT JUDGED THE OLD ONE": the

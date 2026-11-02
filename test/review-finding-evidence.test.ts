@@ -4,11 +4,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { deriveVerifiedReviewFindingEvidence, readReviewFindingEvidence, MAX_FINDING_EVIDENCE_RECEIPTS, type FindingEvidenceInput } from "../src/lib/review-finding-evidence.js";
-import { deriveReviewFindingOutcomes } from "../src/lib/review-finding-outcomes.js";
-import { buildFieldTrialsFlowSnapshot, buildFieldTrialsRelease, fieldTrialsCommand, projectFlowRow, type FieldTrialsSource } from "../src/lib/field-trials-flow.js";
-import { emptyRepoStore } from "../src/lib/field-trials-github.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { deriveVerifiedReviewFindingEvidence, readReviewFindingEvidence, MAX_FINDING_EVIDENCE_RECEIPTS, type FindingEvidenceInput } from "#src/lib/review-finding-evidence.js";
+import { deriveReviewFindingOutcomes } from "#src/lib/review-finding-outcomes.js";
+import { buildFieldTrialsFlowSnapshot, buildFieldTrialsRelease, fieldTrialsCommand, projectFlowRow, type FieldTrialsSource } from "#src/lib/field-trials-flow.js";
+import { emptyRepoStore } from "#src/lib/field-trials-github.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const at = "2026-10-01T00:00:00.000Z";
 const beforeAt = "2026-09-30T01:00:00.000Z";

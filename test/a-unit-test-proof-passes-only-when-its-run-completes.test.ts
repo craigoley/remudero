@@ -19,7 +19,7 @@ import {
   type AsyncProofSpawner,
   type ProofSpawner,
   type WhitelistedProof,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 const dir = mkdtempSync(join(tmpdir(), "rmd-proof-judge-"));
 after(() => rmSync(dir, { recursive: true, force: true }));

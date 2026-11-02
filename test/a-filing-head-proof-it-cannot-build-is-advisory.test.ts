@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { FILING_FORWARD_ADVISORY, judgeReview, type WhitelistedProof } from "../src/lib/review.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { FILING_FORWARD_ADVISORY, judgeReview, type WhitelistedProof } from "#src/lib/review.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /**
  * 2026-09-29 operator ruling: the reviewer refuses what is risky or broken, and passes the rest with a recorded

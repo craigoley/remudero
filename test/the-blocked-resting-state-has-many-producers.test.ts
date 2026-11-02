@@ -15,7 +15,7 @@ import {
   type GatePostureDeclaration,
   type GatePostureFs,
   type GatePostureTree,
-} from "../src/lib/gate-posture.js";
+} from "#src/lib/gate-posture.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 

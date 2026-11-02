@@ -14,9 +14,9 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { maskLiterals, stripComments } from "../src/lib/test-impact-map.js";
+import { maskLiterals, stripComments } from "#src/lib/test-impact-map.js";
 import { readAffectedSuitesInput } from "#src/lib/affected-suites.js";
-import { widenedGitSites } from "./every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js";
+import { widenedGitSites } from "#test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const conservative = { conservative: true };
@@ -210,7 +210,7 @@ test("legacy output equals the committed base over every physical tracked code i
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, "test-impact-map.ts");
   writeFileSync(path, original);
-  const baseline: typeof import("../src/lib/test-impact-map.js") = await import(pathToFileURL(path).href);
+  const baseline: typeof import("#src/lib/test-impact-map.js") = await import(pathToFileURL(path).href);
   const inputs = readAffectedSuitesInput(REPO, []).files;
   const paths = [...inputs.keys()].sort();
   assert.ok(paths.length > 4000, `positive corpus control: ${paths.length}`);

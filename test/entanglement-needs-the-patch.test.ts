@@ -23,7 +23,7 @@ import {
   changedLineIsExecutable,
   detectInstrumentEntanglement,
   srcChangeIsExecutable,
-} from "../src/lib/review.js";
+} from "#src/lib/review.js";
 
 const WORKFLOW = ".github/workflows/ci.yml";
 

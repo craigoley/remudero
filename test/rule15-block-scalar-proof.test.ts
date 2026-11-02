@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { checkSatisfiedByGuard, criterionFieldTampered, judgeReview } from "../src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { checkSatisfiedByGuard, criterionFieldTampered, judgeReview } from "#src/lib/review.js";
 
 /**
  * W1-T2909 / docs/audits/recon-2026-09-05.md R-16 — falsifier named by the task record:

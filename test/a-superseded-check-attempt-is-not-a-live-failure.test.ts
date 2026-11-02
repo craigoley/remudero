@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { fetchCiFailures, type CiAnnotationFetch, type CiJobLogFetch } from "../src/run-task.js";
+import { fetchCiFailures, type CiAnnotationFetch, type CiJobLogFetch } from "#src/run-task.js";
 
 /**
  * W1-T3363 — a repair reads ONE job's log and cannot see that a LATER run superseded it.

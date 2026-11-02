@@ -35,19 +35,28 @@ async function loadCiGateRequired() {
   return {
     required: JSON.parse(env.REQUIRED) as string[],
     ignore: JSON.parse(env.IGNORE) as string[],
+    advisory: JSON.parse(env.ADVISORY) as string[],
+    rationale: env.GATE_RATIONALE ?? "",
   };
 }
 
-// ── Claim 1: the PR-time OSV scan is in the AWAITED REQUIRED set, not racing it ─────────────
+// ── Claim 1: the PR-time OSV scan is never silently unawaited ───────────────────────────────
+//
+// It is either in the AWAITED REQUIRED set, or it was demoted on the record: named in ADVISORY AND
+// in a reviewed GATE_RATIONALE (the W1-T4116 gate gardener's demotion: 0 refusals in 115 runs).
+// What this refuses is the silent middle — absent from REQUIRED with no recorded reason, which is
+// how a red osv-scan would race the merge unnoticed.
 
-test("scanner-gate-config: ci-gate REQUIRED lists the PR-time OSV scan's actual check-run name, so a CVE cannot merge by racing an unawaited check", async () => {
-  const { required } = await loadCiGateRequired();
+test("scanner-gate-config: the PR-time OSV scan is either awaited in ci-gate REQUIRED or demoted on the record (ADVISORY plus a GATE_RATIONALE naming it), never silently unawaited", async () => {
+  const { required, advisory, rationale } = await loadCiGateRequired();
+  const name = "scan-pr / osv-scan";
+  if (required.includes(name)) return;
   assert.ok(
-    required.includes("scan-pr / osv-scan"),
-    `ci-gate REQUIRED is ${JSON.stringify(required)} — missing "scan-pr / osv-scan" ` +
-      `(osv-scanner-pr.yml's preserved check-run name). Without it, ci-gate never waits for or fails on this check, ` +
-      `so a real OSV finding can turn it red and still merge.`,
+    advisory.includes(name),
+    `ci-gate REQUIRED is ${JSON.stringify(required)} — missing "${name}" and it is not ADVISORY either ` +
+      `(osv-scanner-pr.yml's preserved check-run name), so a real OSV finding can turn it red and still merge unrecorded.`,
   );
+  assert.ok(rationale.includes(name), `"${name}" left REQUIRED but GATE_RATIONALE does not name it: ${JSON.stringify(rationale)}`);
 });
 
 test("scanner-gate-config: osv-scanner-pr.yml keeps fail-on-vuln: true in the blocking comparison (the check ci-gate awaits must actually fail on a new CVE)", async () => {

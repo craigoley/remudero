@@ -4,9 +4,9 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { makeTempDir } from "../src/lib/tmp.js";
+import { makeTempDir } from "#src/lib/tmp.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
-import { ANCHOR_SHAPES, ANCHOR_WINDOW, FIXTURES, census, classifyRecord, findCitations, formatReport, isAnchored, loadCorpus, measurePrecision } from "../scripts/citation-anchor-census.mjs";
+import { ANCHOR_SHAPES, ANCHOR_WINDOW, FIXTURES, census, classifyRecord, findCitations, formatReport, isAnchored, loadCorpus, measurePrecision } from "#scripts/citation-anchor-census.mjs";
 
 // ── W1-T2649: CITATION-ANCHOR CENSUS ─────────────────────────────────────────────────────────
 //

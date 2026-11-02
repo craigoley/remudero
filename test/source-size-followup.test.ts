@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { PreflightSummary } from "../src/lib/ci-parity.js";
+import type { PreflightSummary } from "#src/lib/ci-parity.js";
 import {
   SOURCE_SIZE_FOLLOWUP_FILED_STEP,
   SOURCE_SIZE_FOLLOWUP_POLICY_VERSION,
@@ -10,7 +10,7 @@ import {
   consumeSourceSizeFollowup,
   sourceSizeHotspotSignature,
   type MaterialSourceSizeHotspot,
-} from "../src/lib/source-size-followup.js";
+} from "#src/lib/source-size-followup.js";
 
 const HEAD = "b".repeat(40);
 const BASE = "a".repeat(40);
