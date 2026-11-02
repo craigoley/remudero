@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { main as censusMain } from "#scripts/census-precheck.mjs";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Mocked = { mock: { method: (...a: never[]) => { mock: { calls: { arguments: unknown[] }[] } } } };
 
@@ -22,7 +21,10 @@ function censusFixture(head: "clock" | "clean") {
   const repo = gitRepo({ kind: "census-counts-first", seedCommit: false });
   mkdirSync(join(repo.dir, "src/lib"), { recursive: true });
   mkdirSync(join(repo.dir, "test"), { recursive: true });
-  writeFileSync(join(repo.dir, "src/lib/rule-suites.ts"), readFileSync(join(REPO_ROOT, "src/lib/rule-suites.ts")));
+  writeFileSync(join(repo.dir, "src/lib/rule-suites.ts"), [
+    "export const CENSUS_POPULATION = [];", "export const RETAINED_RULE_SUITES = [];",
+    "export const RULE_SUITE_NAME_RE = /census|ratchet|baseline/;", 'export const RULE_SUITE_DIR = "test/rules/";',
+  ].join("\n") + "\n");
   writeFileSync(join(repo.dir, "src/lib/leaf.ts"), "export const leaf = 1;\n");
   writeFileSync(join(repo.dir, "test/leaf.test.ts"), "import { test } from 'node:test';\ntest('leaf', () => {});\n");
   repo.git("add", "."); repo.git("commit", "-q", "-m", "base");
