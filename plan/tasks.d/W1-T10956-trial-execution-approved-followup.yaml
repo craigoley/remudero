@@ -58,7 +58,11 @@
     Retain the integrated source scope's existing full isolated Linux, owning-SF/added-line
     coverage, fresh head/base, hosted/security/native review and ordinary publication/merge
     requirements. Filing neither supplies a missing qualification route nor resets or transfers any
-    old head-bound allowance.
+    old head-bound allowance. Normal trusted exact-head SOURCE CI may supply the full isolated
+    Linux suite and owning-SF coverage evidence when its real receipts are complete; this does
+    not require a duplicate manual Azure full-suite invocation. Retain every required proof and
+    identify a specific evidence gap before adding a targeted run. Keep runtime-version
+    provenance explicit; a Node24 result is not a Node22 test result.
   acceptance:
     - claim: attempt metrics join actual execution and measured identity without substituting router
         selection for provider evidence
