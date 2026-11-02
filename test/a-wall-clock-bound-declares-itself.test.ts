@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HELPER = "test/helpers/wall-clock-bound.js";
