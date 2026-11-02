@@ -4,7 +4,7 @@
   depends_on: []
   type: implement
   verify: human
-  risk: high  # Rule 19 span: widened to run-task, test-tier-manifest by a scope amendment for #15602
+  risk: high # Rule 19 span: widened to run-task, test-tier-manifest by a scope amendment for #15602
   band_meaning: span
   priority: 1.04
   status: queued
@@ -15,6 +15,7 @@
     - src/run-task.ts
     - test/worker/run-task/fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts
     - "scripts/test-tier-manifest.json"
+    - "src/cli/commands/fix.ts"
   acceptance:
     - claim: "commit-refused:the task declares no files, so there is no surface to stage no longer needs an operator hand fix"
       proof: "grep: test(\"W1-T10722: fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage clears without a person\" in test/worker/run-task/fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts"
@@ -30,11 +31,3 @@
     - PR #6905: 780.59 PR-hours — the task declares no files, so there is no surface to stage
     Previous remedy W1-T7699: src/run-task.ts, test/fix-lane-commit-refused-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts; did not fall: share of PR-hours 27.8% (1262.8768180555555/4537.912736388929) before, 27.4% (1262.8768180555555/4601.953433611104) after, over 10.5 day(s) each side. Take a structurally different remedy.
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
-  risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.88
-    reasons:
-      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The record requests a structurally different remedy but supplies no proposed mechanism or per-PR root-cause diagnosis; the reported blocker recurrence and PR-hours do not establish which repair is justified.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for test declaration text, rather than demonstrating successful repair behavior. The finding therefore cannot be verified from what is shown, meeting the explicit escalation condition."
-    judged_at: "2026-10-30T04:34:14.533Z"
-    pin: "db3efffbd5c0d8eec05da16694cbd12fa9f9afa8c22dcf8b2a120d63cb3e7b42"
